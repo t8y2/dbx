@@ -328,7 +328,14 @@ pub async fn object_source(
         )
         .await?,
     )?;
-    Ok(ObjectSource { name: name.to_string(), object_type: object_type.clone(), schema: None, source, editable: None })
+    Ok(ObjectSource {
+        name: name.to_string(),
+        object_type: object_type.clone(),
+        schema: None,
+        source,
+        editable: None,
+        routine_parameters: None,
+    })
 }
 
 pub async fn execute_query(client: &TursoClient, sql: &str) -> Result<QueryResult, String> {
@@ -364,6 +371,7 @@ pub async fn execute_query_with_max_rows(
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -387,6 +395,7 @@ pub async fn execute_query_with_max_rows(
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -407,6 +416,7 @@ pub async fn execute_query_with_max_rows(
             affected_rows: affected,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -589,6 +599,7 @@ fn query_result_from_turso_result(
         affected_rows: 0,
         execution_time_ms,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated,
         session_id: None,
         has_more: false,

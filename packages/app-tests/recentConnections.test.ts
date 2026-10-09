@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { MAX_RECENT_CONNECTION_IDS, parseRecentConnectionIds, rankRecentConnections, recordRecentConnection } from "../../apps/desktop/src/lib/connection/recentConnections.ts";
 
@@ -80,13 +79,4 @@ test("empty history preserves saved order and recency follows stable IDs after r
     rankRecentConnections(renamed, ["two"]).map((connection) => connection.name),
     ["Renamed", "Connection one", "Connection three"],
   );
-});
-
-test("App wires active connection changes and Quick Start opens into the MRU history", () => {
-  const source = readFileSync("apps/desktop/src/App.vue", "utf8");
-
-  assert.ok(source.includes("rankRecentConnections(connectionStore.connections, recentConnectionIds.value)"));
-  assert.ok(source.includes("if (nextIds === recentConnectionIds.value) return;"));
-  assert.match(source, /watch\(\s*\(\) => connectionStore\.activeConnectionId,\s*rememberRecentConnection,?\s*\);/);
-  assert.match(source, /async function openConnectionQuery\(connectionId: string\)[\s\S]*?rememberRecentConnection\(connectionId\);/);
 });

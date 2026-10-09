@@ -88,6 +88,25 @@ pub async fn mongo_list_collections_core(
     crate::document_ops::list_collections_core(state, connection_id, database).await
 }
 
+pub async fn ensure_collection_exists_for_query(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+) -> Result<(), String> {
+    match mongo_list_collections_core(state, connection_id, database).await {
+        Ok(collections) => {
+            if !collections.iter().any(|c| c.name == collection) {
+                return Err(format!("Collection '{}' does not exist in database '{}'", collection, database));
+            }
+        }
+        Err(e) => {
+            log::warn!("Could not list collections to verify existence of '{}': {}", collection, e);
+        }
+    }
+    Ok(())
+}
+
 pub async fn mongo_create_database_core(state: &AppState, connection_id: &str, database: &str) -> Result<(), String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
@@ -232,15 +251,12 @@ pub async fn mongo_server_version_core(
     }
 }
 
-pub async fn mongo_run_command_core(
-    state: &AppState,
-    connection_id: &str,
+pub(crate) async fn mongo_run_command_with_existing_pool(
+    pool: &PoolKind,
     database: &str,
     command_json: &str,
 ) -> Result<MongoDocumentResult, String> {
-    ensure_document_pool(state, connection_id).await?;
-    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    match pool {
         PoolKind::MongoDb(client) => mongo_driver::run_command(client, database, command_json).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -259,6 +275,17 @@ pub async fn mongo_run_command_core(
         }
         _ => Err("Not a MongoDB connection".to_string()),
     }
+}
+
+pub async fn mongo_run_command_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    command_json: &str,
+) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    mongo_run_command_with_existing_pool(&pool, database, command_json).await
 }
 
 pub async fn mongo_show_databases_core(state: &AppState, connection_id: &str) -> Result<MongoDocumentResult, String> {
@@ -298,7 +325,7 @@ pub async fn mongo_find_documents_core(
     sort: Option<&str>,
     collation: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
-    crate::document_ops::find_documents_core(
+    let result = crate::document_ops::find_documents_core(
         state,
         connection_id,
         database,
@@ -312,7 +339,13 @@ pub async fn mongo_find_documents_core(
         None,
         false,
     )
-    .await
+    .await?;
+
+    if result.documents.is_empty() {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
+    }
+
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -330,7 +363,7 @@ async fn mongo_find_documents_without_total_core(
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let result = match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::find_documents_without_total(
                 client, database, collection, skip, limit, filter, projection, sort, collation,
@@ -356,7 +389,12 @@ async fn mongo_find_documents_without_total_core(
             client.mongo_find_documents(params).await
         }
         _ => Err("Not a MongoDB connection".to_string()),
+    }?;
+
+    if result.documents.is_empty() {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
     }
+    Ok(result)
 }
 
 pub async fn mongo_find_one_core(
@@ -370,7 +408,7 @@ pub async fn mongo_find_one_core(
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let result = match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::find_one(client, database, collection, filter, projection, options).await
         }
@@ -387,7 +425,12 @@ pub async fn mongo_find_one_core(
                 .await
         }
         _ => Err("Not a MongoDB connection".to_string()),
+    }?;
+
+    if result.documents.is_empty() {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
     }
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -444,7 +487,7 @@ pub async fn mongo_count_documents_core(
     let accurate = mode != Some("legacy");
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let total = match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::count_documents(client, database, collection, filter, accurate).await
         }
@@ -474,7 +517,12 @@ pub async fn mongo_count_documents_core(
             }
         }
         _ => Err("Not a MongoDB connection".to_string()),
+    }?;
+
+    if total == 0 {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
     }
+    Ok(total)
 }
 
 /// Read MongoDB documents as relaxed Extended JSON for MongoDB transfer paths.
@@ -492,7 +540,7 @@ pub async fn mongo_find_documents_extended_json_core(
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let result = match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::find_documents_extended_json(
                 client, database, collection, skip, limit, filter, projection, sort, None,
@@ -521,7 +569,12 @@ pub async fn mongo_find_documents_extended_json_core(
             }
         }
         _ => Err("Not a MongoDB connection".to_string()),
+    }?;
+
+    if result.documents.is_empty() {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
     }
+    Ok(result)
 }
 
 pub(crate) fn is_unknown_agent_method_error(error: &str, method: &str) -> bool {
@@ -547,7 +600,7 @@ pub async fn mongo_aggregate_documents_core(
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let result = match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::aggregate_documents(client, database, collection, pipeline_json, max_rows, options_json).await
         }
@@ -570,7 +623,12 @@ pub async fn mongo_aggregate_documents_core(
             }
         }
         _ => Err("Not a MongoDB connection".to_string()),
+    }?;
+
+    if result.documents.is_empty() {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
     }
+    Ok(result)
 }
 
 pub async fn mongo_distinct_core(
@@ -583,7 +641,7 @@ pub async fn mongo_distinct_core(
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let result = match &pool {
         PoolKind::MongoDb(client) => mongo_driver::distinct(client, database, collection, field, filter).await,
         PoolKind::Agent(client) => {
             let command = mongo_driver::distinct_command(collection, field, filter)?;
@@ -591,7 +649,12 @@ pub async fn mongo_distinct_core(
             mongo_driver::distinct_response_result(response)
         }
         _ => Err("Not a MongoDB connection".to_string()),
+    }?;
+
+    if result.documents.is_empty() {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
     }
+    Ok(result)
 }
 
 /// Read every index of a collection with its full MongoDB option set.
@@ -1375,6 +1438,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>, affecte
         affected_rows,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -1628,8 +1692,6 @@ mod tests {
     use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
     #[cfg(unix)]
     use crate::models::connection::ConnectionConfig;
-    #[cfg(unix)]
-    use crate::storage::Storage;
 
     #[cfg(unix)]
     async fn legacy_mongo_state(
@@ -1787,7 +1849,7 @@ for line in sys.stdin:
         .await
         .unwrap();
         client.try_optional_handshake("test").await.unwrap();
-        let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": "legacy",

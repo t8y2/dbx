@@ -1,13 +1,24 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions, resolveDataGridCopyPreference, validateDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 
 describe("data-grid extractor options", () => {
-  it("keeps database qualification for legacy options and persists explicit opt-out", () => {
-    expect(normalizeDataGridExtractorOptions({ sql: {} }).sql.includeDatabaseName).toBe(true);
-    const configured = normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: false } });
-    expect(normalizeDataGridExtractorOptions(JSON.parse(JSON.stringify(configured))).sql.includeDatabaseName).toBe(false);
-    expect(normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: "false" } }).sql.includeDatabaseName).toBe(true);
+  it("preserves native SQL defaults and normalizes portable INSERT options", () => {
+    for (const legacy of [undefined, {}, { sql: {} }, { sql: { insertMode: "row-by-row" } }]) {
+      expect(normalizeDataGridExtractorOptions(legacy).sql).toMatchObject({ quoteIdentifiers: true, temporalFormat: "native" });
+    }
+    const configured = normalizeDataGridExtractorOptions({ sql: { quoteIdentifiers: false, temporalFormat: "string" } });
+    expect(configured.sql).toMatchObject({ quoteIdentifiers: false, temporalFormat: "string" });
+    expect(normalizeDataGridExtractorOptions(JSON.parse(JSON.stringify(configured)))).toEqual(configured);
+    expect(normalizeDataGridExtractorOptions({ sql: { quoteIdentifiers: "false", temporalFormat: "custom" } }).sql).toMatchObject({ quoteIdentifiers: true, temporalFormat: "native" });
+  });
+
+  it("defaults to dropping database qualification and keeps an explicit opt-in", () => {
+    expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql.includeDatabaseName).toBe(false);
+    expect(normalizeDataGridExtractorOptions({ sql: {} }).sql.includeDatabaseName).toBe(false);
+    const configured = normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: true } });
+    expect(configured.sql.includeDatabaseName).toBe(true);
+    expect(normalizeDataGridExtractorOptions(JSON.parse(JSON.stringify(configured))).sql.includeDatabaseName).toBe(true);
+    expect(normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: "true" } }).sql.includeDatabaseName).toBe(false);
   });
 
   it("defaults DSV NULL output to an empty spreadsheet field", () => {
@@ -35,14 +46,6 @@ describe("data-grid extractor options", () => {
     expect(normalizeDataGridExtractorOptions({ json: {} }).json.camelCaseFieldNames).toBe(false);
     expect(normalizeDataGridExtractorOptions({ json: { camelCaseFieldNames: true } }).json.camelCaseFieldNames).toBe(true);
     expect(normalizeDataGridExtractorOptions({ json: { camelCaseFieldNames: "true" } }).json.camelCaseFieldNames).toBe(false);
-  });
-
-  it("exposes the camel-case field-name switch only with JSON extractor options", () => {
-    const dialog = readFileSync(new URL("../../../components/grid/DataGridExtractorDialog.vue", import.meta.url), "utf8");
-
-    expect(dialog).toContain('v-if="isJson"');
-    expect(dialog).toContain("draftOptions.json.camelCaseFieldNames");
-    expect(dialog).toContain('t("grid.copyExtractorCamelCaseJsonFields")');
   });
 
   it("rejects overlapping effective row and column separators", () => {

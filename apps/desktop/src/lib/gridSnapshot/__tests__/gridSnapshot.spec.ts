@@ -114,4 +114,16 @@ describe("grid snapshot rendering", () => {
     expect(regular).not.toContain("integer");
     expect(regular).not.toContain("Primary key");
   });
+
+  it("supports disabling striped row backgrounds", () => {
+    const source = {
+      columns: ["id"],
+      rows: [[1], [2]],
+    };
+    const defaultHtml = renderGridSnapshotHtml(source, { appearance: "light" });
+    expect(defaultHtml).toContain("background:rgb(240, 240, 240)");
+
+    const unstripedHtml = renderGridSnapshotHtml(source, { appearance: "light", stripedRows: false });
+    expect(unstripedHtml).not.toContain("background:rgb(240, 240, 240)");
+  });
 });

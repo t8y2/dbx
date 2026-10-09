@@ -162,6 +162,20 @@ describe("query editor SQL string mouse selection", () => {
     expect(selection && doc.slice(selection.main.from, selection.main.to)).toBe("%%");
   });
 
+  it("returns null when the caller opted into plain word selection", () => {
+    const doc = "EXEC sp_executesql N'SELECT * FROM my_table WHERE a = 1';";
+    const state = EditorState.create({ doc });
+    const view = fakeView(state).view;
+    const insideString = eventAt(doc.indexOf("my_table"));
+    const outsideString = eventAt(doc.indexOf("sp_executesql"));
+
+    expect(createQueryEditorStringMouseSelection(view, insideString)).not.toBeNull();
+    expect(createQueryEditorStringMouseSelection(view, insideString, { selectStringContent: false })).toBeNull();
+    expect(createQueryEditorStringMouseSelection(view, outsideString, { selectStringContent: false })).toBeNull();
+    // Explicitly asking for the historical behaviour keeps working.
+    expect(createQueryEditorStringMouseSelection(view, insideString, { selectStringContent: true })).not.toBeNull();
+  });
+
   it("trimSqlStringWildcardBoundaries shrinks past boundary wildcards only", () => {
     const doc = "%a_b%";
     expect(trimSqlStringWildcardBoundaries(doc, { from: 0, to: doc.length })).toEqual({ from: 1, to: 4 });

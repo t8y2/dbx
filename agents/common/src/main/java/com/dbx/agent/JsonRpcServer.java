@@ -89,6 +89,26 @@ public final class JsonRpcServer {
     }
 
     Object dispatchForRuntime(String method, JsonObject params) throws Exception {
+        boolean timedQuery = agent.supportsQueryTiming()
+            && (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)
+                || AgentProtocol.METHOD_EXECUTE_QUERY_PAGE.equals(method)
+                || AgentProtocol.METHOD_FETCH_QUERY_PAGE.equals(method));
+        try (QueryTiming timing = timedQuery ? QueryTiming.begin() : null) {
+            Object result = dispatchWithConnection(method, params);
+            // Capture after connection return/reset, which runs in the finally
+            // block below. Driver-only snapshots omit that lifecycle work.
+            if (timing != null) {
+                if (result instanceof QueryResult) {
+                    ((QueryResult) result).setQuery_timings_ms(timing.finish());
+                } else if (result instanceof QueryPageResult) {
+                    ((QueryPageResult) result).setQuery_timings_ms(timing.finish());
+                }
+            }
+            return result;
+        }
+    }
+
+    private Object dispatchWithConnection(String method, JsonObject params) throws Exception {
         return AgentExecutionContext.withJdbcExecutor(jdbcExecutor, () -> {
             AbstractJdbcAgent jdbcAgent = pooledJdbcAgent();
             if (AgentProtocol.METHOD_VALIDATE_CONNECTION.equals(method)
@@ -98,7 +118,12 @@ public final class JsonRpcServer {
             }
             boolean manageConnection = jdbcAgent != null && requiresConnectedConnection(method);
             if (manageConnection) {
-                jdbcAgent.beginPooledRequest();
+                long acquireStarted = System.nanoTime();
+                try {
+                    jdbcAgent.beginPooledRequest();
+                } finally {
+                    QueryTiming.record("pool_acquire", acquireStarted);
+                }
             }
             boolean succeeded = false;
             try {
@@ -107,14 +132,19 @@ public final class JsonRpcServer {
                 return result;
             } finally {
                 if (manageConnection) {
-                    jdbcAgent.finishPooledRequest(
-                        jdbcExecutor,
-                        succeeded,
-                        requiresSessionAffinity(method, params),
-                        evictAfterRequest(method),
-                        endsSessionAffinity(method),
-                        preservesSchemaContext()
-                    );
+                    long releaseStarted = System.nanoTime();
+                    try {
+                        jdbcAgent.finishPooledRequest(
+                            jdbcExecutor,
+                            succeeded,
+                            requiresSessionAffinity(method, params),
+                            evictAfterRequest(method),
+                            endsSessionAffinity(method),
+                            preservesSchemaContext()
+                        );
+                    } finally {
+                        QueryTiming.record("pool_release", releaseStarted);
+                    }
                 }
             }
         });
@@ -258,15 +288,14 @@ public final class JsonRpcServer {
             return agent.listSubpartitions(params.get("schema").getAsString(), params.get("table").getAsString());
         }
         if (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)) {
-            return agent.executeQuery(
-                params.get("sql").getAsString(),
-                stringOrNull(params, "schema"),
-                new ExecuteQueryOptions(
-                    intOrDefault(params, "maxRows", JdbcExecutor.DEFAULT_MAX_ROWS),
-                    intOrNull(params, "fetchSize"),
-                    intOrDefault(params, "timeoutSecs", 0)
-                )
-            );
+            ExecuteQueryOptions options = new ExecuteQueryOptions(
+                intOrDefault(params, "maxRows", JdbcExecutor.DEFAULT_MAX_ROWS),
+                intOrNull(params, "fetchSize"), intOrDefault(params, "timeoutSecs", 0),
+                booleanOrDefault(params, "deferLobs", false));
+            if (params.has("returnAllResults") && params.get("returnAllResults").getAsBoolean()) {
+                return agent.executeQueryResults(params.get("sql").getAsString(), stringOrNull(params, "schema"), options);
+            }
+            return agent.executeQuery(params.get("sql").getAsString(), stringOrNull(params, "schema"), options);
         }
         if (AgentProtocol.METHOD_EXECUTE_QUERY_PAGE.equals(method)) {
             return agent.executeQueryPage(
@@ -276,7 +305,8 @@ public final class JsonRpcServer {
                     intOrDefault(params, "pageSize", 100),
                     intOrNull(params, "fetchSize"),
                     intOrDefault(params, "maxRows", JdbcExecutor.DEFAULT_MAX_ROWS),
-                    intOrDefault(params, "timeoutSecs", 0)
+                    intOrDefault(params, "timeoutSecs", 0),
+                    booleanOrDefault(params, "deferLobs", false)
                 )
             );
         }
@@ -297,7 +327,8 @@ public final class JsonRpcServer {
                     intOrDefault(params, "pageSize", 100),
                     intOrNull(params, "fetchSize"),
                     intOrDefault(params, "maxRows", JdbcExecutor.DEFAULT_MAX_ROWS),
-                    intOrDefault(params, "timeoutSecs", 0)
+                    intOrDefault(params, "timeoutSecs", 0),
+                    booleanOrDefault(params, "deferLobs", false)
                 )
             );
         }
@@ -377,6 +408,7 @@ public final class JsonRpcServer {
     }
 
     private void ensureLiveConnection(String method) {
+        if (!agent.permitsAutomaticReconnect()) return;
         if (lastConnectParams == null || !shouldValidateConnection(method)) {
             return;
         }
@@ -524,6 +556,11 @@ public final class JsonRpcServer {
             return null;
         }
         return element.getAsInt();
+    }
+
+    private static boolean booleanOrDefault(JsonObject object, String key, boolean defaultValue) {
+        JsonElement element = object.get(key);
+        return element == null || element instanceof JsonNull ? defaultValue : element.getAsBoolean();
     }
 
     private MetadataListConstraints metadataListConstraints(JsonObject params) {

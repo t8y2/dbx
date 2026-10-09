@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { analyzeNacosYaml, nacosYamlDiagnosticMessageKey, translateNacosYamlDiagnostic, type NacosYamlDiagnostic } from "../../apps/desktop/src/lib/nacos/nacosYamlDiagnostics.ts";
-import { nacosConfigDiagnosticSeverity, nacosConfigValidationBlocksPublish, validateNacosConfigContent } from "../../apps/desktop/src/lib/nacos/nacosConfigValidation.ts";
+import { nacosConfigDiagnosticSeverity, nacosConfigValidationHasErrors, validateNacosConfigContent } from "../../apps/desktop/src/lib/nacos/nacosConfigValidation.ts";
 import en from "../../apps/desktop/src/i18n/locales/en.ts";
 
 /** The exact text a marker underlines, so placement is asserted and not just line numbers. */
@@ -107,7 +107,7 @@ test("duplicate keys are still found in a later document", () => {
   assert.equal(analyzeNacosYaml(source)[0]!.line, 4);
 });
 
-test("parser warnings are downgraded so they cannot block publishing", () => {
+test("parser warnings retain warning severity", () => {
   const source = "a: !unknownTag bar\n";
   const diagnostics = analyzeNacosYaml(source);
 
@@ -115,7 +115,7 @@ test("parser warnings are downgraded so they cannot block publishing", () => {
   assert.equal(diagnostics[0]!.code, "parserWarning");
   assert.equal(diagnostics[0]!.severity, "warning");
   assert.equal(diagnostics[0]!.params.reason, "Unresolved tag: !unknownTag");
-  assert.equal(nacosConfigValidationBlocksPublish(validateNacosConfigContent(source, "yaml")), false);
+  assert.equal(nacosConfigValidationHasErrors(validateNacosConfigContent(source, "yaml")), false);
 });
 
 test("one broken construct collapses into the widest marker instead of stacking", () => {
@@ -159,12 +159,12 @@ test("diagnostics outside YAML formats never reach the linter", () => {
   );
 });
 
-test("only error severity blocks publishing", () => {
-  assert.equal(nacosConfigValidationBlocksPublish([]), false);
-  assert.equal(nacosConfigValidationBlocksPublish([{ message: "warn", line: 1, column: 1, from: 0, to: 1, severity: "warning" }]), false);
-  assert.equal(nacosConfigValidationBlocksPublish([{ message: "err", line: 1, column: 1, from: 0, to: 1 }]), true);
+test("only error severity is classified as an error", () => {
+  assert.equal(nacosConfigValidationHasErrors([]), false);
+  assert.equal(nacosConfigValidationHasErrors([{ message: "warn", line: 1, column: 1, from: 0, to: 1, severity: "warning" }]), false);
+  assert.equal(nacosConfigValidationHasErrors([{ message: "err", line: 1, column: 1, from: 0, to: 1 }]), true);
   assert.equal(
-    nacosConfigValidationBlocksPublish([
+    nacosConfigValidationHasErrors([
       { message: "warn", line: 1, column: 1, from: 0, to: 1, severity: "warning" },
       { message: "err", line: 1, column: 1, from: 0, to: 1 },
     ]),

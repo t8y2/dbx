@@ -1343,6 +1343,44 @@ test("uses the full Unicode prefix as the replacement range without result reuse
   assert.equal(getSqlCompletionResultValidFor(sql, sql.length), undefined);
 });
 
+test("keeps FROM tables when the select list is separated from FROM by a blank line (#10196)", () => {
+  const sql = "SELECT id, name\n\nFROM users";
+  const cursor = "SELECT id, name".length;
+  const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["users"],
+  );
+  assert.equal(context.suggestColumns, true);
+  assert.equal(shouldAutoOpenSqlCompletion(sql, cursor, { databaseType: "mysql" }), true);
+});
+
+test("keeps column hints while typing a select-list prefix before a blank-line FROM (#10196)", () => {
+  const sql = "SELECT id, na\n\nFROM users";
+  const cursor = sql.indexOf("na") + 2;
+  const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+  assert.equal(context.suggestColumns, true);
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["users"],
+  );
+  assert.equal(shouldAutoOpenSqlCompletion(sql, cursor, { databaseType: "mysql" }), true);
+});
+
+test("select-list column context still works without a blank line before FROM", () => {
+  const sql = "SELECT id, name\nFROM users";
+  const cursor = "SELECT id, name".length;
+  const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+  assert.equal(context.suggestColumns, true);
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["users"],
+  );
+});
+
 test("ranks prefix matches above substring matches for table names", () => {
   const sql = "select * from user";
   const items = buildSqlCompletionItems(sql, sql.length, {
@@ -2017,11 +2055,80 @@ test("suggests SQL Server data types in CREATE TABLE column definitions", () => 
   const items = buildSqlCompletionItems(sql, sql.length, {
     tables,
     columnsByTable,
+    databaseType: "sqlserver",
   });
 
   assert.ok(items.some((item) => item.type === "keyword" && item.label === "INT"));
   assert.ok(items.some((item) => item.type === "keyword" && item.label === "BIGINT"));
   assert.ok(items.some((item) => item.type === "keyword" && item.label === "NVARCHAR"));
+  assert.ok(items.some((item) => item.type === "keyword" && item.label === "UNIQUEIDENTIFIER"));
+  const intItem = items.find((item) => item.label === "INT");
+  assert.equal(intItem?.detail, "data type");
+  assert.equal(items[0]?.detail, "data type");
+});
+
+test("prioritizes UNIQUEIDENTIFIER above UNION and UPDATE and suppresses external columns in SQL Server temp table (#8300)", () => {
+  const customColumns = new Map<string, SqlCompletionColumn[]>([
+    [
+      "dbo.Bills",
+      [
+        { name: "UpdateDate", table: "Bills", schema: "dbo", dataType: "datetime" },
+        { name: "UserId", table: "Bills", schema: "dbo", dataType: "int" },
+      ],
+    ],
+  ]);
+  const sql = "SELECT * FROM dbo.Bills\nCREATE TABLE #Tables (\n  Id U";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "Bills", schema: "dbo", type: "table" }],
+    columnsByTable: customColumns,
+    databaseType: "sqlserver",
+  });
+
+  // Should NOT suggest columns from other tables when defining column types
+  assert.equal(items.some((item) => item.label === "UpdateDate"), false);
+
+  // UNIQUEIDENTIFIER must rank above UNION and UPDATE
+  const uniqueIdIdx = items.findIndex((item) => item.label === "UNIQUEIDENTIFIER");
+  const unionIdx = items.findIndex((item) => item.label === "UNION");
+  const updateIdx = items.findIndex((item) => item.label === "UPDATE");
+
+  assert.ok(uniqueIdIdx >= 0, "UNIQUEIDENTIFIER should be suggested");
+  assert.equal(items[uniqueIdIdx]?.detail, "data type");
+  if (unionIdx >= 0) {
+    assert.ok(uniqueIdIdx < unionIdx, "UNIQUEIDENTIFIER should rank before UNION");
+  }
+  if (updateIdx >= 0) {
+    assert.ok(uniqueIdIdx < updateIdx, "UNIQUEIDENTIFIER should rank before UPDATE");
+  }
+});
+
+test("suggests data types in ALTER TABLE ADD and ALTER COLUMN definitions", () => {
+  const addSql = "ALTER TABLE dbo.jobs ADD col ";
+  const addItems = buildSqlCompletionItems(addSql, addSql.length, {
+    databaseType: "sqlserver",
+    tables,
+    columnsByTable,
+  });
+  assert.ok(addItems.some((item) => item.label === "INT" && item.detail === "data type"));
+
+  const alterSql = "ALTER TABLE dbo.jobs ALTER COLUMN col ";
+  const alterItems = buildSqlCompletionItems(alterSql, alterSql.length, {
+    databaseType: "sqlserver",
+    tables,
+    columnsByTable,
+  });
+  assert.ok(alterItems.some((item) => item.label === "NVARCHAR" && item.detail === "data type"));
+});
+
+test("auto-opens completion on space after column name in CREATE TABLE", () => {
+  const sql = "CREATE TABLE #Tables (\n  Id ";
+  assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length, { databaseType: "sqlserver" }), true);
+
+  const regularTableSql = "CREATE TABLE jobs (\n  Id ";
+  assert.equal(shouldAutoOpenSqlCompletion(regularTableSql, regularTableSql.length), true);
+
+  const afterTypeSql = "CREATE TABLE #Tables (\n  Id INT ";
+  assert.equal(shouldAutoOpenSqlCompletion(afterTypeSql, afterTypeSql.length, { databaseType: "sqlserver" }), false);
 });
 
 test("does not auto-open completion after structural punctuation", () => {
@@ -2091,6 +2198,24 @@ test("auto-opens column completion immediately after condition context whitespac
   ]) {
     assert.equal(shouldAutoOpenSqlCompletion(sql, cursor), true, sql);
   }
+});
+
+test("auto-opens column completion after SELECT and UPDATE column-list keywords", () => {
+  const cases = [
+    { sql: "SELECT  FROM public.users", cursor: "SELECT ".length },
+    { sql: "UPDATE public.users SET  WHERE id = 1", cursor: "UPDATE public.users SET ".length },
+  ];
+
+  for (const { sql, cursor } of cases) {
+    assert.equal(shouldAutoOpenSqlCompletion(sql, cursor), true, sql);
+    const items = buildSqlCompletionItems(sql, cursor, { tables, columnsByTable });
+    assert.ok(
+      items.some((item) => item.type === "column" && item.label === "id"),
+      sql,
+    );
+  }
+
+  assert.equal(shouldAutoOpenSqlCompletion("SELECT ", "SELECT ".length), false);
 });
 
 test("does not auto-open column completion immediately after comparison operators", () => {
@@ -2818,6 +2943,43 @@ test("prioritizes current Oracle schema tables and safely qualifies other schema
   assert.deepEqual(
     matches.map((item) => item.apply),
     ["DEPT_DICT", "COMM.DEPT_DICT", "SYS.DEPT_DICT"],
+  );
+});
+
+test("prioritizes current OceanBase Oracle schema tables and safely qualifies other schemas", () => {
+  const sql = "select * from orders";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "ORDERS", schema: "STAGING", type: "table", applyName: "STAGING.ORDERS", boost: 0 },
+      { name: "ORDERS", schema: "DWD", type: "table", applyName: "ORDERS", boost: 2400 },
+    ],
+    columnsByTable,
+    databaseType: "oceanbase-oracle",
+    currentSchema: "DWD",
+  });
+  const matches = items.filter((item) => item.label === "ORDERS");
+
+  assert.deepEqual(
+    matches.map((item) => item.apply),
+    ["ORDERS", "STAGING.ORDERS"],
+  );
+});
+
+test("qualifies OceanBase Oracle tables outside the current schema without applyName", () => {
+  const sql = "select * from orders";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "ORDERS", schema: "STAGING", type: "table", boost: 0 },
+      { name: "ORDERS", schema: "DWD", type: "table", boost: 2400 },
+    ],
+    columnsByTable,
+    databaseType: "oceanbase-oracle",
+    currentSchema: "DWD",
+  });
+
+  assert.deepEqual(
+    items.filter((item) => item.label === "ORDERS").map((item) => item.apply),
+    ["ORDERS", "STAGING.ORDERS"],
   );
 });
 

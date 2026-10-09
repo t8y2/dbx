@@ -30,6 +30,17 @@ export interface SelectionSummary {
   average: number | null;
 }
 
+export interface SelectionSummaryOptions {
+  /**
+   * Resolves a cell to the number it contributes to SUM/AVG. Defaults to plain
+   * numbers and numeric text. Grids whose cells hold typed scalar literals (the
+   * MongoDB collection grid keeps `NumberLong("7")` / `{"$numberDecimal":"-1.5"}`
+   * as text) pass their own resolver, otherwise every wrapped value — negatives
+   * included — is silently dropped from the total.
+   */
+  numericValue?: (value: GridCellValue) => number | undefined;
+}
+
 export function parseClipboardTable(text: string): string[][] {
   const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n$/, "");
   if (!normalized) return [[""]];
@@ -105,17 +116,27 @@ export function extractColumnsSelection(columns: readonly string[], rows: readon
   };
 }
 
-export function summarizeSelection(selection: SelectionData): SelectionSummary {
+/** Plain numbers and numeric text; booleans, null and everything else never take part. */
+export function plainSelectionNumericValue(value: GridCellValue): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const numeric = Number(trimmed);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+export function summarizeSelection(selection: SelectionData, options: SelectionSummaryOptions = {}): SelectionSummary {
+  const numericValue = options.numericValue ?? plainSelectionNumericValue;
   let numericCount = 0;
   let sum = 0;
 
   for (const row of selection.rows) {
     for (const value of row) {
-      const numericValue = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : Number.NaN;
-      if (Number.isFinite(numericValue)) {
-        numericCount += 1;
-        sum += numericValue;
-      }
+      const resolved = numericValue(value);
+      if (resolved === undefined || !Number.isFinite(resolved)) continue;
+      numericCount += 1;
+      sum += resolved;
     }
   }
 

@@ -153,6 +153,18 @@ pub async fn mq_list_topics_core(
     adapter.list_topics(&ns, opts).await
 }
 
+pub async fn mq_list_topics_page_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    opts: ListTopicsOpts,
+    pagination: MqListPageRequest,
+) -> Result<MqListPage<TopicInfo>, String> {
+    pagination.validate()?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.list_topics_page(&ns, opts, pagination).await
+}
+
 pub async fn mq_create_topic_core(
     state: &AppState,
     conn_id: &str,
@@ -204,6 +216,17 @@ pub async fn mq_list_exchanges_core(
 ) -> Result<Vec<MqExchangeInfo>, String> {
     let adapter = get_adapter(state, conn_id).await?;
     adapter.list_exchanges(&ns).await
+}
+
+pub async fn mq_list_exchanges_page_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    pagination: MqListPageRequest,
+) -> Result<MqListPage<MqExchangeInfo>, String> {
+    pagination.validate()?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.list_exchanges_page(&ns, pagination).await
 }
 
 pub async fn mq_create_exchange_core(
@@ -894,11 +917,12 @@ async fn ensure_connection_writable(state: &AppState, conn_id: &str, operation: 
 mod tests {
     use super::*;
     use crate::models::connection::{ConnectionConfig, DatabaseType};
-    use crate::storage::Storage;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn mq_connection(read_only: bool) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "readonly-mq".to_string(),
             name: "Read only MQ".to_string(),
@@ -918,6 +942,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -944,6 +969,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -987,7 +1013,8 @@ mod tests {
             SystemTime::now().duration_since(UNIX_EPOCH).expect("system time should be after UNIX epoch").as_nanos();
         let dir = std::env::temp_dir().join(format!("dbx-mq-service-test-{stamp}"));
         std::fs::create_dir_all(&dir).expect("failed to create test directory");
-        let storage = Storage::open(&dir.join("storage.db")).await.expect("failed to open test storage");
+        let storage =
+            crate::persistence::test_storage::open(&dir.join("storage.db")).await.expect("failed to open test storage");
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         state.configs.write().await.insert(config.id.clone(), config);
         (state, dir)

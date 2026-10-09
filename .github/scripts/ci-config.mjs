@@ -1,6 +1,13 @@
 export const rustGroups = {
-  foundation: ["dbx-types", "dbx-platform", "dbx-sql", "dbx-formats", "dbx-ai-provider", "dbx-plugin-runtime"],
-  drivers: ["dbx-drivers", "dbx-sqlite-worker"],
+  foundation: [
+    "dbx-types", "dbx-platform", "dbx-sql-core", "dbx-sql-dialect", "dbx-sql-data", "dbx-sql-schema", "dbx-sql",
+    "dbx-formats", "dbx-ai-provider", "dbx-plugin-runtime",
+  ],
+  drivers: [
+    "dbx-driver-support", "dbx-driver-agent", "dbx-driver-elasticsearch", "dbx-driver-mongodb",
+    "dbx-driver-mysql", "dbx-driver-postgres", "dbx-driver-redis", "dbx-driver-sqlserver", "dbx-drivers",
+    "dbx-sqlite-worker",
+  ],
   application: ["dbx", "dbx-core", "dbx-web", "dbx-cli", "dbx-mcp"],
 };
 
@@ -14,6 +21,7 @@ export const goAgents = [
   { driver: "hive-go", binary: "hive", race: false },
   { driver: "vastbase-go", binary: "vastbase", race: false },
   { driver: "neo4j-go", binary: "neo4j", race: false },
+  { driver: "nebula-go", binary: "nebula", race: false },
   { driver: "iotdb", binary: "iotdb", race: false },
 ];
 

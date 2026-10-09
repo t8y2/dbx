@@ -15,14 +15,14 @@ use crate::csv_export::format_csv;
 #[cfg(test)]
 use crate::csv_export::format_tsv_rows;
 use crate::csv_export::{
-    format_csv_with_quote_mode, format_tsv, push_table_csv_row, push_table_csv_row_with_quote_mode, push_tsv_row,
-    CsvQuoteMode,
+    csv_null_literal, format_csv_with_options, format_tsv, push_table_csv_row, push_table_csv_row_with_options,
+    push_tsv_row, CsvQuoteMode,
 };
 use crate::data_grid_sql::extra_is_auto_generated;
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
-    build_export_insert_statements_excluding, is_export_cancelled, is_internal_export_column,
-    BuildExportInsertStatementsOptions, SqlInsertMode,
+    build_export_insert_statements_excluding_with_dialect, is_export_cancelled, is_internal_export_column,
+    BuildExportInsertStatementsOptions, SqlExportProjection, SqlInsertDialect, SqlInsertMode,
 };
 use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::models::connection::DatabaseType;
@@ -33,7 +33,7 @@ use crate::transfer::{
     count_sql_with_where_and_identifier_quote, execute_read_on_pool, execute_read_on_pool_with_max_rows,
     keyset_pagination_sql_with_identifier_quote, pagination_sql_with_filter_order_and_identifier_quote,
 };
-use crate::types::QueryResult;
+use crate::types::{is_opaque_aggregate_state_type, QueryResult};
 use crate::xlsx_export::{finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options};
 
 const DEFAULT_BATCH_SIZE: usize = 10_000;
@@ -84,9 +84,17 @@ pub struct TableExportRequest {
     #[serde(default)]
     pub insert_mode: SqlInsertMode,
     #[serde(default)]
+    pub insert_dialect: SqlInsertDialect,
+    #[serde(default)]
     pub csv_quote_mode: CsvQuoteMode,
+    /// CSV 里 NULL 写成什么。默认 `\N`；空字符串表示关闭该字面量，
+    /// 退回「NULL 写成空字段」的旧行为（此时 NULL 与空字符串在文件里无法区分）。
+    #[serde(default = "dbx_formats::csv_export::default_csv_null_literal")]
+    pub null_literal: String,
     #[serde(default)]
     pub columns: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_columns: Option<Vec<crate::types::SqlExportColumnSelection>>,
     #[serde(default)]
     pub column_types: Option<Vec<Option<String>>>,
     /// Column EXTRA metadata for `columns`, supplied by the data grid. SQL
@@ -124,6 +132,11 @@ pub struct TableExportRequest {
     /// file. Ignored for every other format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_max_mb: Option<u32>,
+    /// SQL 导出时省略 INSERT 目标的库/模式限定。前端按「生成 SQL 时包含数据库名」设置与
+    /// 引擎规则（`dropsSchemaQualifier`：MySQL/PG 等可省略，SQL Server/Presto/Trino 必须
+    /// 保留）解析后传入；仅影响生成的 INSERT 目标，读取/游标 SQL 不受影响（issue #10771）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omit_database_qualifier: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -160,13 +173,14 @@ fn write_table_text_row<W: Write>(
     row: &[Value],
     buffer: &mut String,
     csv_quote_mode: CsvQuoteMode,
+    null_literal: Option<&str>,
 ) -> Result<(), String> {
     buffer.clear();
     buffer.push('\n');
     if csv {
-        push_table_csv_row_with_quote_mode(buffer, row, csv_quote_mode);
+        push_table_csv_row_with_options(buffer, row, csv_quote_mode, null_literal);
     } else {
-        push_tsv_row(buffer, row);
+        push_tsv_row(buffer, row, null_literal);
     }
     file.write_all(buffer.as_bytes()).map_err(|error| format!("Failed to write export rows: {error}"))
 }
@@ -177,14 +191,15 @@ fn write_table_text_rows<W: Write>(
     rows: &[Vec<Value>],
     buffer: &mut String,
     csv_quote_mode: CsvQuoteMode,
+    null_literal: Option<&str>,
 ) -> Result<(), String> {
     buffer.clear();
     for row in rows {
         buffer.push('\n');
         if csv {
-            push_table_csv_row_with_quote_mode(buffer, row, csv_quote_mode);
+            push_table_csv_row_with_options(buffer, row, csv_quote_mode, null_literal);
         } else {
-            push_tsv_row(buffer, row);
+            push_tsv_row(buffer, row, null_literal);
         }
     }
     file.write_all(buffer.as_bytes()).map_err(|error| format!("Failed to write export rows: {error}"))
@@ -231,8 +246,24 @@ fn resolve_requested_export_columns(
     (resolved_columns, resolved_column_types, resolved_primary_keys)
 }
 
-fn requested_mysql_sql_export_needs_column_metadata(database_type: DatabaseType, format: &str) -> bool {
-    database_type == DatabaseType::Mysql && format.eq_ignore_ascii_case("sql")
+/// A data-grid SQL export must resolve column metadata from the table when the
+/// result-set types cannot drive the INSERT-omission rules: MySQL (generated
+/// column extras) and SQL Server (TDS reports `rowversion` as `varbinary`,
+/// never as `timestamp`).
+fn requested_sql_export_needs_column_metadata(database_type: DatabaseType, format: &str) -> bool {
+    matches!(database_type, DatabaseType::Mysql | DatabaseType::SqlServer) && format.eq_ignore_ascii_case("sql")
+}
+
+fn ensure_sql_insert_export_types_supported(format: &str, column_types: &[Option<String>]) -> Result<(), String> {
+    if format.eq_ignore_ascii_case("sql")
+        && column_types.iter().flatten().any(|column_type| is_opaque_aggregate_state_type(column_type))
+    {
+        return Err(
+            "SQL INSERT export does not support Doris aggregate-state columns; use CSV, JSON, TXT, or XLSX to export their canonical hex representation"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Column EXTRA values supplied by the data grid, filtered and aligned exactly
@@ -253,7 +284,14 @@ fn resolve_requested_column_extras_by_position(
         .collect()
 }
 
+/// Resolve the column types used by a SQL export. The data grid supplies the
+/// types it read from the result set; SQL Server reports `timestamp`/
+/// `rowversion` there as `varbinary`/`binary` (TDS), so the INSERT-omission
+/// rules would never see it. SQL Server therefore prefers the table metadata
+/// (sys.columns) types; other engines keep the result-set types for literal
+/// formatting and only fall back to metadata for missing entries.
 fn resolve_requested_export_column_types(
+    database_type: DatabaseType,
     requested_columns: &[String],
     requested_column_types: &[Option<String>],
     table_columns: &[crate::db::ColumnInfo],
@@ -263,14 +301,18 @@ fn resolve_requested_export_column_types(
         .iter()
         .enumerate()
         .map(|(index, requested)| {
-            requested_column_types
+            let requested_type = requested_column_types
                 .get(index)
                 .cloned()
                 .flatten()
-                .filter(|column_type| !column_type.trim().is_empty())
-                .or_else(|| {
-                    table_columns_by_name.get(&requested.to_ascii_lowercase()).map(|column| column.data_type.clone())
-                })
+                .filter(|column_type| !column_type.trim().is_empty());
+            let metadata_type =
+                table_columns_by_name.get(&requested.to_ascii_lowercase()).map(|column| column.data_type.clone());
+            if database_type == DatabaseType::SqlServer {
+                metadata_type.filter(|column_type| !column_type.trim().is_empty()).or(requested_type)
+            } else {
+                requested_type.or(metadata_type)
+            }
         })
         .collect()
 }
@@ -663,7 +705,13 @@ async fn execute_table_export_count(
     cancel_token: CancellationToken,
 ) -> Result<QueryResult, String> {
     if table_export_cursor_kind(state, pool_key).await != Some(TableExportCursorKind::ExternalDriver) {
-        return execute_read_on_pool(state, pool_key, sql).await;
+        // execute_read_on_pool 不接受取消令牌；用 select! 让导出在取消时不必等待大表
+        // COUNT(*) 跑完（否则点“停止”在 COUNT 阶段毫无反应）。取消时返回 Err，调用方
+        // 会将其视作 total_rows=None 并继续，由后续 is_export_cancelled 收尾为已取消。
+        return tokio::select! {
+            result = execute_read_on_pool(state, pool_key, sql) => result,
+            _ = cancel_token.cancelled() => Err("table export count cancelled".to_string()),
+        };
     }
 
     let timeout_secs = table_export_query_timeout_secs(state, pool_key).await;
@@ -716,6 +764,7 @@ async fn fetch_table_export_batch(
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -1045,12 +1094,27 @@ enum TableExportSqlWriter {
     SplitZip(Box<crate::export_split_zip::SplitZipExportWriter>),
 }
 
+impl TableExportSqlWriter {
+    fn write_sql_unit(&mut self, unit: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Plain(writer) => writer.write_all(unit),
+            Self::SplitZip(writer) => writer.write_sql_unit(unit),
+        }
+    }
+}
+
 impl Write for TableExportSqlWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         match self {
             Self::Plain(writer) => writer.write(buffer),
             Self::SplitZip(writer) => writer.write(buffer),
         }
+    }
+
+    fn write_fmt(&mut self, fmt: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+        let mut unit = String::new();
+        std::fmt::write(&mut unit, fmt).map_err(|_| std::io::Error::other("Failed to format SQL export unit"))?;
+        self.write_sql_unit(unit.as_bytes())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -1067,6 +1131,32 @@ impl TableExportSqlWriter {
             Self::Plain(mut writer) => writer.flush().map_err(|error| format!("Failed to flush export file: {error}")),
             Self::SplitZip(writer) => writer.finish(source_file_name),
         }
+    }
+}
+
+fn write_sql_export_statements(
+    file: &mut impl Write,
+    statements: Vec<String>,
+    wrote_statements: &mut bool,
+) -> Result<(), String> {
+    for statement in statements {
+        if *wrote_statements {
+            file.write_all(b"\n").map_err(|e| format!("Failed to write SQL: {e}"))?;
+        }
+        file.write_all(statement.as_bytes()).map_err(|e| format!("Failed to write SQL: {e}"))?;
+        *wrote_statements = true;
+    }
+    Ok(())
+}
+
+/// SQL 导出 INSERT 目标的 schema 参数：`omitDatabaseQualifier`（前端已按「生成 SQL 时
+/// 包含数据库名」设置与引擎规则解析）为 true 时省略库/模式限定，其余情况保持原行为
+/// （issue #10771）。读取/游标 SQL 仍使用完整限定名。
+fn export_insert_target_schema(request: &TableExportRequest) -> Option<String> {
+    if request.omit_database_qualifier == Some(true) {
+        None
+    } else {
+        request.schema.clone()
     }
 }
 
@@ -1111,7 +1201,12 @@ async fn try_export_native_table_stream(
                 std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?,
             );
             file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
-            let header = format_csv_with_quote_mode(col_names, &[], request.csv_quote_mode);
+            let header = format_csv_with_options(
+                col_names,
+                &[],
+                request.csv_quote_mode,
+                csv_null_literal(&request.null_literal),
+            );
             let header = header.strip_suffix('\n').unwrap_or(&header);
             file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
             let mut row_buffer = String::new();
@@ -1130,7 +1225,14 @@ async fn try_export_native_table_stream(
                         column_types,
                         request.date_time_format.as_deref(),
                     );
-                    write_table_text_row(&mut file, true, formatted.as_ref(), &mut row_buffer, request.csv_quote_mode)?;
+                    write_table_text_row(
+                        &mut file,
+                        true,
+                        formatted.as_ref(),
+                        &mut row_buffer,
+                        request.csv_quote_mode,
+                        csv_null_literal(&request.null_literal),
+                    )?;
                     rows_exported += 1;
                     if rows_exported.is_multiple_of(progress_interval) {
                         on_progress(TableExportProgress {
@@ -1180,6 +1282,7 @@ async fn try_export_native_table_stream(
                         formatted.as_ref(),
                         &mut row_buffer,
                         request.csv_quote_mode,
+                        csv_null_literal(&request.null_literal),
                     )?;
                     rows_exported += 1;
                     if rows_exported.is_multiple_of(progress_interval) {
@@ -1361,6 +1464,7 @@ async fn try_export_native_table_stream(
         }
         "sql" => {
             let mut file = create_table_export_sql_writer(request)?;
+            let projection = SqlExportProjection::resolve(col_names, request.selected_columns.as_deref())?;
             let mut pending_rows: Vec<Vec<Value>> = Vec::new();
             let mut wrote_statements = false;
             let mut flush_pending =
@@ -1368,11 +1472,11 @@ async fn try_export_native_table_stream(
                     if pending_rows.is_empty() {
                         return Ok(());
                     }
-                    let statements = build_export_insert_statements_excluding(
-                        BuildExportInsertStatementsOptions {
+                    let statements = build_export_insert_statements_excluding_with_dialect(
+                        projection.project_insert_options(BuildExportInsertStatementsOptions {
                             database_type: Some(*db_type),
                             identifier_quote: request.identifier_quote.clone(),
-                            schema: request.schema.clone(),
+                            schema: export_insert_target_schema(request),
                             table_name: Some(request.table_name.clone()),
                             qualified_table_name: None,
                             columns: col_names.to_vec(),
@@ -1382,17 +1486,12 @@ async fn try_export_native_table_stream(
                             spatial_values: Vec::new(),
                             rows: std::mem::take(pending_rows),
                             batch_size: Some(request.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
-                        },
+                            preserve_original_language: false,
+                        }),
                         &sql_export_excluded_columns(request, primary_keys, col_names, column_extras),
+                        request.insert_dialect,
                     )?;
-                    if !statements.is_empty() {
-                        if wrote_statements {
-                            file.write_all(b"\n").map_err(|e| format!("Failed to write SQL: {e}"))?;
-                        }
-                        file.write_all(statements.join("\n").as_bytes())
-                            .map_err(|e| format!("Failed to write SQL: {e}"))?;
-                        wrote_statements = true;
-                    }
+                    write_sql_export_statements(file, statements, &mut wrote_statements)?;
                     Ok(())
                 };
             let result = stream_native_table_rows(
@@ -1549,30 +1648,29 @@ async fn export_table_data_core_inner(
             request.column_types.as_deref(),
             request.primary_keys.as_deref(),
         );
-        let (column_types, column_extras) =
-            if requested_mysql_sql_export_needs_column_metadata(db_type, &request.format) {
-                let table_columns = crate::schema::get_columns_core(
-                    state,
-                    &request.connection_id,
-                    &request.database,
-                    request.schema.as_deref().unwrap_or(""),
-                    &request.table_name,
-                )
-                .await?;
-                (
-                    resolve_requested_export_column_types(&col_names, &requested_column_types, &table_columns),
-                    resolve_requested_export_column_extras(&col_names, &table_columns),
-                )
-            } else {
-                (
-                    requested_column_types,
-                    resolve_requested_column_extras_by_position(
-                        db_type,
-                        requested_columns,
-                        request.column_extras.as_deref(),
-                    ),
-                )
-            };
+        let (column_types, column_extras) = if requested_sql_export_needs_column_metadata(db_type, &request.format) {
+            let table_columns = crate::schema::get_columns_core(
+                state,
+                &request.connection_id,
+                &request.database,
+                request.schema.as_deref().unwrap_or(""),
+                &request.table_name,
+            )
+            .await?;
+            (
+                resolve_requested_export_column_types(db_type, &col_names, &requested_column_types, &table_columns),
+                resolve_requested_export_column_extras(&col_names, &table_columns),
+            )
+        } else {
+            (
+                requested_column_types,
+                resolve_requested_column_extras_by_position(
+                    db_type,
+                    requested_columns,
+                    request.column_extras.as_deref(),
+                ),
+            )
+        };
         (col_names, column_types, column_extras, primary_keys)
     } else {
         let columns = crate::schema::get_columns_core(
@@ -1590,8 +1688,17 @@ async fn export_table_data_core_inner(
         (col_names, column_types, column_extras, primary_keys)
     };
 
+    let sql_projection = if request.format.eq_ignore_ascii_case("sql") {
+        Some(SqlExportProjection::resolve(&col_names, request.selected_columns.as_deref())?)
+    } else {
+        None
+    };
+
     if col_names.is_empty() {
         return Err("No columns found for table".to_string());
+    }
+    if let Some(projection) = &sql_projection {
+        ensure_sql_insert_export_types_supported(&request.format, &projection.project(&column_types))?;
     }
     let query_col_names = table_export_query_columns(request, &sql_context, &col_names)?;
 
@@ -1752,8 +1859,12 @@ async fn export_table_data_core_inner(
 
                 if is_first_batch {
                     // First batch: write header + rows via format_csv
-                    let csv_content =
-                        format_csv_with_quote_mode(&col_names, formatted_rows.as_ref(), request.csv_quote_mode);
+                    let csv_content = format_csv_with_options(
+                        &col_names,
+                        formatted_rows.as_ref(),
+                        request.csv_quote_mode,
+                        csv_null_literal(&request.null_literal),
+                    );
                     file.write_all(csv_content.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
                     is_first_batch = false;
                 } else {
@@ -1764,6 +1875,7 @@ async fn export_table_data_core_inner(
                         formatted_rows.as_ref(),
                         &mut text_buffer,
                         request.csv_quote_mode,
+                        csv_null_literal(&request.null_literal),
                     )?;
                 }
 
@@ -1852,6 +1964,7 @@ async fn export_table_data_core_inner(
                         formatted_rows.as_ref(),
                         &mut text_buffer,
                         request.csv_quote_mode,
+                        csv_null_literal(&request.null_literal),
                     )?;
                     is_first_batch = false;
                 } else {
@@ -1861,6 +1974,7 @@ async fn export_table_data_core_inner(
                         formatted_rows.as_ref(),
                         &mut text_buffer,
                         request.csv_quote_mode,
+                        csv_null_literal(&request.null_literal),
                     )?;
                 }
 
@@ -2173,6 +2287,7 @@ async fn export_table_data_core_inner(
         }
         "sql" => {
             let mut wrote_statements = false;
+            let projection = sql_projection.as_ref().ok_or_else(|| "Missing SQL export projection".to_string())?;
 
             loop {
                 if is_export_cancelled(&request.export_id).await {
@@ -2216,11 +2331,11 @@ async fn export_table_data_core_inner(
                     break;
                 }
 
-                let statements = build_export_insert_statements_excluding(
-                    BuildExportInsertStatementsOptions {
+                let statements = build_export_insert_statements_excluding_with_dialect(
+                    projection.project_insert_options(BuildExportInsertStatementsOptions {
                         database_type: Some(db_type),
                         identifier_quote: request.identifier_quote.clone(),
-                        schema: request.schema.clone(),
+                        schema: export_insert_target_schema(request),
                         table_name: Some(request.table_name.clone()),
                         qualified_table_name: None,
                         columns: col_names.clone(),
@@ -2230,17 +2345,12 @@ async fn export_table_data_core_inner(
                         spatial_values: result.spatial_values.clone(),
                         rows: result.rows.clone(),
                         batch_size: Some(request.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
-                    },
+                        preserve_original_language: false,
+                    }),
                     &sql_export_excluded_columns(request, &primary_keys, &col_names, &column_extras),
+                    request.insert_dialect,
                 )?;
-                if !statements.is_empty() {
-                    if wrote_statements {
-                        file.write_all(b"\n").map_err(|e| format!("Failed to write SQL: {e}"))?;
-                    }
-                    file.write_all(statements.join("\n").as_bytes())
-                        .map_err(|e| format!("Failed to write SQL: {e}"))?;
-                    wrote_statements = true;
-                }
+                write_sql_export_statements(&mut file, statements, &mut wrote_statements)?;
 
                 rows_exported += row_count as u64;
                 if use_keyset {
@@ -2299,7 +2409,6 @@ mod tests {
     use crate::plugins::{
         InstalledPlugin, PluginDriverManifest, PluginDriverSession, PluginManifest, PluginRuntimeEnv,
     };
-    use crate::storage::Storage;
     use crate::xlsx_export::{build_xlsx_workbook, XlsxWorksheetData};
     use serde_json::json;
     use std::io::Read;
@@ -2307,8 +2416,41 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn table_export_request_defaults_to_batch_insert_mode() {
-        let request: TableExportRequest = serde_json::from_value(json!({
+    fn split_zip_sql_export_writes_batch_statements_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("export.zip");
+        let statement = format!("INSERT INTO t VALUES ('{}');", "x".repeat(700 * 1024));
+        let mut writer = crate::export_split_zip::SplitZipExportWriter::create(
+            &zip_path,
+            crate::export_split_zip::MIN_SPLIT_PART_MAX_MB,
+            "table",
+            "sql",
+        )
+        .unwrap();
+        let mut wrote_statements = false;
+
+        write_sql_export_statements(&mut writer, vec![statement.clone(), statement.clone()], &mut wrote_statements)
+            .unwrap();
+        writer.finish("table.sql").unwrap();
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(zip_path).unwrap()).unwrap();
+        let mut sql_parts = Vec::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            if entry.name().ends_with(".sql") {
+                let mut contents = String::new();
+                entry.read_to_string(&mut contents).unwrap();
+                sql_parts.push(contents);
+            }
+        }
+
+        assert_eq!(sql_parts, vec![format!("{statement}\n"), statement]);
+        assert!(sql_parts.iter().all(|part| part.len() <= 1024 * 1024));
+    }
+
+    #[test]
+    fn table_export_request_defaults_to_source_dialect_and_batch_insert_mode() {
+        let mut payload = json!({
             "exportId": "export-1",
             "connectionId": "conn-1",
             "database": "db",
@@ -2316,10 +2458,28 @@ mod tests {
             "tableName": "users",
             "filePath": "users.sql",
             "format": "sql"
-        }))
-        .expect("deserialize table export request");
+        });
+        let request: TableExportRequest =
+            serde_json::from_value(payload.clone()).expect("deserialize table export request");
 
         assert_eq!(request.insert_mode, SqlInsertMode::Batch);
+        assert_eq!(request.insert_dialect, SqlInsertDialect::Source);
+
+        payload["insertDialect"] = json!("standard");
+        let request: TableExportRequest =
+            serde_json::from_value(payload).expect("deserialize Standard SQL table export request");
+        assert_eq!(request.insert_dialect, SqlInsertDialect::Standard);
+        assert_eq!(serde_json::to_value(request).unwrap()["insertDialect"], json!("standard"));
+    }
+
+    #[test]
+    fn sql_insert_export_rejects_opaque_aggregate_states_only() {
+        let types = vec![Some("int".to_string()), Some("agg_state<group_concat(text)>".to_string())];
+        assert!(ensure_sql_insert_export_types_supported("sql", &types)
+            .unwrap_err()
+            .contains("does not support Doris aggregate-state"));
+        assert!(ensure_sql_insert_export_types_supported("csv", &types).is_ok());
+        assert!(ensure_sql_insert_export_types_supported("sql", &[Some("varbinary(32)".to_string())]).is_ok());
     }
 
     #[cfg(unix)]
@@ -2389,7 +2549,7 @@ mod tests {
             "query_timeout_secs": 30
         }))
         .unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert(config.id.clone(), config.clone());
         let export_id = format!("export-{}", uuid::Uuid::new_v4());
@@ -2415,7 +2575,9 @@ mod tests {
             file_path: output.to_string_lossy().into_owned(),
             format: "csv".to_string(),
             insert_mode: Default::default(),
+            insert_dialect: Default::default(),
             columns: Some(vec!["id".to_string(), "name".to_string()]),
+            selected_columns: None,
             column_types: Some(vec![Some("INTEGER".to_string()), Some("VARCHAR".to_string())]),
             column_extras: None,
             primary_keys: Some(vec!["id".to_string()]),
@@ -2427,10 +2589,12 @@ mod tests {
             row_limit,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
             split_max_mb: None,
+            omit_database_qualifier: None,
         };
 
         ExternalDriverExportFixture { state, request, calls, output, dir }
@@ -2565,7 +2729,7 @@ mod tests {
             "query_timeout_secs": 30
         }))
         .unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert(config.id.clone(), config);
         let export_id = format!("export-{}", uuid::Uuid::new_v4());
@@ -2580,9 +2744,12 @@ mod tests {
             file_path: output.to_string_lossy().into_owned(),
             format: "csv".to_string(),
             insert_mode: Default::default(),
+            insert_dialect: Default::default(),
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             exclude_primary_keys: false,
             columns: None,
+            selected_columns: None,
             column_types: None,
             column_extras: None,
             primary_keys: None,
@@ -2596,6 +2763,7 @@ mod tests {
             column_comments: None,
             auto_filter: None,
             split_max_mb: None,
+            omit_database_qualifier: None,
         };
 
         export_table_data_core(&state, &request, |_| {}).await.unwrap();
@@ -2679,7 +2847,7 @@ mod tests {
         let mut output = Vec::new();
         let mut buffer = String::new();
 
-        write_table_text_row(&mut output, true, &row, &mut buffer, CsvQuoteMode::All).expect("write csv row");
+        write_table_text_row(&mut output, true, &row, &mut buffer, CsvQuoteMode::All, None).expect("write csv row");
         assert_eq!(String::from_utf8(output).expect("utf8 csv"), "\n\"\",\"\",\"line\n\"\"two\"\"\"");
     }
 
@@ -2748,7 +2916,9 @@ mod tests {
             file_path: "device2.csv".to_string(),
             format: "csv".to_string(),
             insert_mode: Default::default(),
+            insert_dialect: Default::default(),
             columns: None,
+            selected_columns: None,
             column_types: None,
             column_extras: None,
             primary_keys: None,
@@ -2760,10 +2930,12 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
             split_max_mb: None,
+            omit_database_qualifier: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec!["Time".to_string(), "root.test.device2.temperature".to_string()];
@@ -2790,6 +2962,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!(1_700_000_000_000_i64), json!(21.5)]],
             numeric_column_right_align: false,
+            auto_filter: None,
         })
         .unwrap();
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
@@ -2809,7 +2982,9 @@ mod tests {
             file_path: "device2.csv".to_string(),
             format: "csv".to_string(),
             insert_mode: Default::default(),
+            insert_dialect: Default::default(),
             columns: None,
+            selected_columns: None,
             column_types: None,
             column_extras: None,
             primary_keys: None,
@@ -2821,10 +2996,12 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
             split_max_mb: None,
+            omit_database_qualifier: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec!["tImE".to_string(), "temperature".to_string()];
@@ -2848,7 +3025,9 @@ mod tests {
             file_path: "device2.csv".to_string(),
             format: "csv".to_string(),
             insert_mode: Default::default(),
+            insert_dialect: Default::default(),
             columns: None,
+            selected_columns: None,
             column_types: None,
             column_extras: None,
             primary_keys: None,
@@ -2860,10 +3039,12 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
             split_max_mb: None,
+            omit_database_qualifier: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let error = table_export_query_columns(&request, &context, &["TIME".to_string()]).unwrap_err();
@@ -2882,7 +3063,9 @@ mod tests {
             file_path: "device2.csv".to_string(),
             format: "csv".to_string(),
             insert_mode: Default::default(),
+            insert_dialect: Default::default(),
             columns: None,
+            selected_columns: None,
             column_types: None,
             column_extras: None,
             primary_keys: None,
@@ -2894,10 +3077,12 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
             split_max_mb: None,
+            omit_database_qualifier: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec![
@@ -2924,7 +3109,9 @@ mod tests {
             file_path: "samples.csv".to_string(),
             format: "csv".to_string(),
             insert_mode: Default::default(),
+            insert_dialect: Default::default(),
             columns: None,
+            selected_columns: None,
             column_types: None,
             column_extras: None,
             primary_keys: None,
@@ -2936,10 +3123,12 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
             split_max_mb: None,
+            omit_database_qualifier: None,
         };
         let columns = vec!["Time".to_string(), "value".to_string()];
 
@@ -2978,7 +3167,9 @@ mod tests {
             file_path: "events.csv".to_string(),
             format: "csv".to_string(),
             insert_mode: Default::default(),
+            insert_dialect: Default::default(),
             columns: None,
+            selected_columns: None,
             column_types: None,
             column_extras: None,
             primary_keys: None,
@@ -2990,10 +3181,12 @@ mod tests {
             row_limit: Some(1000),
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
             split_max_mb: None,
+            omit_database_qualifier: None,
         };
         let context = table_export_sql_context(DatabaseType::Oracle, None, request.schema.as_deref());
 
@@ -3026,7 +3219,9 @@ mod tests {
             file_path: "orders.txt".to_string(),
             format: "txt".to_string(),
             insert_mode: Default::default(),
+            insert_dialect: Default::default(),
             columns: None,
+            selected_columns: None,
             column_types: None,
             column_extras: None,
             primary_keys: None,
@@ -3038,10 +3233,12 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
             split_max_mb: None,
+            omit_database_qualifier: None,
         };
         let columns = vec!["id".to_string(), "payload".to_string()];
         let primary_keys = vec!["id".to_string()];
@@ -3102,7 +3299,9 @@ mod tests {
             file_path: "order.csv".to_string(),
             format: "csv".to_string(),
             insert_mode: Default::default(),
+            insert_dialect: Default::default(),
             columns: None,
+            selected_columns: None,
             column_types: None,
             column_extras: None,
             primary_keys: None,
@@ -3114,10 +3313,12 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
             split_max_mb: None,
+            omit_database_qualifier: None,
         };
         let columns = vec!["id".to_string(), "DisplayName".to_string()];
         let primary_keys = vec!["id".to_string()];
@@ -3160,7 +3361,9 @@ mod tests {
             file_path: "spatial_data.sql".to_string(),
             format: "sql".to_string(),
             insert_mode: Default::default(),
+            insert_dialect: Default::default(),
             columns: None,
+            selected_columns: None,
             column_types: None,
             column_extras: None,
             primary_keys: None,
@@ -3172,10 +3375,12 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
             split_max_mb: None,
+            omit_database_qualifier: None,
         };
         let columns = vec!["id".to_string(), "geom".to_string(), "name".to_string()];
         let column_types = vec![Some("int".to_string()), Some("geometry".to_string()), Some("varchar".to_string())];
@@ -3220,7 +3425,9 @@ mod tests {
             file_path: "users.sql".to_string(),
             format: "sql".to_string(),
             insert_mode: Default::default(),
+            insert_dialect: Default::default(),
             columns: None,
+            selected_columns: None,
             column_types: None,
             column_extras: None,
             primary_keys: None,
@@ -3232,10 +3439,12 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
             split_max_mb: None,
+            omit_database_qualifier: None,
         };
         let context = table_export_sql_context(DatabaseType::Oracle, None, request.schema.as_deref());
         let sql = table_cursor_sql(&request, &context, &columns, &[], &primary_keys);
@@ -3254,9 +3463,114 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
         assert_eq!(statements, vec!["INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');"]);
+    }
+
+    #[test]
+    fn export_insert_target_schema_respects_omit_database_qualifier() {
+        let mut request = TableExportRequest {
+            export_id: "export-1".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "warehouse".to_string(),
+            schema: Some("warehouse".to_string()),
+            identifier_quote: None,
+            table_name: "events".to_string(),
+            file_path: "events.sql".to_string(),
+            format: "sql".to_string(),
+            insert_mode: Default::default(),
+            insert_dialect: Default::default(),
+            csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
+            columns: None,
+            selected_columns: None,
+            column_types: None,
+            column_extras: None,
+            primary_keys: None,
+            exclude_primary_keys: false,
+            where_input: None,
+            order_by: None,
+            skip_count: true,
+            batch_size: Some(100),
+            row_limit: None,
+            date_time_format: None,
+            numeric_column_right_align: false,
+            column_comments: None,
+            auto_filter: None,
+            split_max_mb: None,
+            omit_database_qualifier: None,
+        };
+
+        // Default / explicit false: keep the existing qualified target.
+        assert_eq!(export_insert_target_schema(&request), Some("warehouse".to_string()));
+        request.omit_database_qualifier = Some(false);
+        assert_eq!(export_insert_target_schema(&request), Some("warehouse".to_string()));
+        // Opt-in: the INSERT target drops the database/schema qualifier.
+        request.omit_database_qualifier = Some(true);
+        assert_eq!(export_insert_target_schema(&request), None);
+    }
+
+    #[test]
+    fn mysql_sql_export_omits_database_qualifier_for_the_insert_target() {
+        // Mirrors the SQL-writer options build for the "sql" format (issue #10771): the read
+        // keeps the qualified name while the INSERT target follows omitDatabaseQualifier.
+        let mut request = TableExportRequest {
+            export_id: "export-1".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "warehouse".to_string(),
+            schema: Some("warehouse".to_string()),
+            identifier_quote: None,
+            table_name: "events".to_string(),
+            file_path: "events.sql".to_string(),
+            format: "sql".to_string(),
+            insert_mode: Default::default(),
+            insert_dialect: Default::default(),
+            csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
+            columns: None,
+            selected_columns: None,
+            column_types: None,
+            column_extras: None,
+            primary_keys: None,
+            exclude_primary_keys: false,
+            where_input: None,
+            order_by: None,
+            skip_count: true,
+            batch_size: Some(100),
+            row_limit: None,
+            date_time_format: None,
+            numeric_column_right_align: false,
+            column_comments: None,
+            auto_filter: None,
+            split_max_mb: None,
+            omit_database_qualifier: Some(true),
+        };
+
+        let build = |request: &TableExportRequest| {
+            build_export_insert_statements(BuildExportInsertStatementsOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: request.identifier_quote.clone(),
+                schema: export_insert_target_schema(request),
+                table_name: Some(request.table_name.clone()),
+                qualified_table_name: None,
+                columns: vec!["id".to_string()],
+                column_types: vec![Some("int".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(1)]],
+                batch_size: Some(100),
+                preserve_original_language: false,
+            })
+            .unwrap()
+        };
+
+        assert_eq!(build(&request), vec!["INSERT INTO `events` (`id`) VALUES (1);"]);
+
+        request.omit_database_qualifier = None;
+        assert_eq!(build(&request), vec!["INSERT INTO `warehouse`.`events` (`id`) VALUES (1);"]);
     }
 
     #[test]
@@ -3272,7 +3586,7 @@ mod tests {
     }
 
     #[test]
-    fn requested_mysql_sql_export_resolves_column_metadata_only_for_sql() {
+    fn requested_sql_exports_resolve_column_metadata_for_mysql_and_sqlserver() {
         let table_columns = vec![
             crate::db::ColumnInfo {
                 name: "ID".to_string(),
@@ -3289,13 +3603,16 @@ mod tests {
         ];
         let requested_columns = vec!["virtual_total".to_string(), "id".to_string(), "missing".to_string()];
 
-        assert!(requested_mysql_sql_export_needs_column_metadata(DatabaseType::Mysql, "SQL"));
+        assert!(requested_sql_export_needs_column_metadata(DatabaseType::Mysql, "SQL"));
+        assert!(requested_sql_export_needs_column_metadata(DatabaseType::SqlServer, "sql"));
         for format in ["csv", "json", "xlsx"] {
-            assert!(!requested_mysql_sql_export_needs_column_metadata(DatabaseType::Mysql, format));
+            assert!(!requested_sql_export_needs_column_metadata(DatabaseType::Mysql, format));
         }
-        assert!(!requested_mysql_sql_export_needs_column_metadata(DatabaseType::Postgres, "sql"));
+        assert!(!requested_sql_export_needs_column_metadata(DatabaseType::Postgres, "sql"));
+        assert!(!requested_sql_export_needs_column_metadata(DatabaseType::SqlServer, "csv"));
         assert_eq!(
             resolve_requested_export_column_types(
+                DatabaseType::Mysql,
                 &requested_columns,
                 &[Some("".to_string()), Some("bigint".to_string())],
                 &table_columns,
@@ -3305,6 +3622,38 @@ mod tests {
         assert_eq!(
             resolve_requested_export_column_extras(&requested_columns, &table_columns),
             vec![Some("VIRTUAL GENERATED".to_string()), Some("auto_increment".to_string()), None]
+        );
+
+        // SQL Server: result-set types report `rowversion` as `varbinary`, so the
+        // table metadata types must win — this is what makes the `timestamp` /
+        // `computed` omission rules hit on grid SQL exports.
+        let sqlserver_columns = vec![
+            crate::db::ColumnInfo { name: "id".to_string(), data_type: "int".to_string(), ..Default::default() },
+            crate::db::ColumnInfo {
+                name: "row_version".to_string(),
+                data_type: "timestamp".to_string(),
+                ..Default::default()
+            },
+            crate::db::ColumnInfo {
+                name: "total".to_string(),
+                data_type: "int".to_string(),
+                extra: Some("computed".to_string()),
+                ..Default::default()
+            },
+        ];
+        let sqlserver_requested = vec!["id".to_string(), "row_version".to_string(), "total".to_string()];
+        assert_eq!(
+            resolve_requested_export_column_types(
+                DatabaseType::SqlServer,
+                &sqlserver_requested,
+                &[Some("int4".to_string()), Some("varbinary".to_string()), Some("int4".to_string())],
+                &sqlserver_columns,
+            ),
+            vec![Some("int".to_string()), Some("timestamp".to_string()), Some("int".to_string())]
+        );
+        assert_eq!(
+            resolve_requested_export_column_extras(&sqlserver_requested, &sqlserver_columns),
+            vec![None, None, Some("computed".to_string())]
         );
     }
 
@@ -3394,7 +3743,7 @@ mod tests {
                     .enable_all()
                     .build()
                     .expect("build table export plain SQL test runtime")
-                    .block_on(run_external_driver_sql_export_without_split_writes_plain_sql());
+                    .block_on(run_external_driver_sql_export_without_split_writes_plain_sql(false));
             })
             .expect("spawn table export plain SQL test thread");
         if let Err(panic) = handle.join() {
@@ -3403,7 +3752,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    async fn run_external_driver_sql_export_without_split_writes_plain_sql() {
+    async fn run_external_driver_sql_export_without_split_writes_plain_sql(select_name: bool) {
         let fixture = external_driver_export_fixture(
             r#"  case "$line" in
     *'"method":"executeQueryPage"'*)
@@ -3420,6 +3769,13 @@ mod tests {
         let mut request = fixture.request.clone();
         request.format = "sql".to_string();
         request.file_path = output.to_string_lossy().into_owned();
+        if select_name {
+            request.selected_columns = Some(vec![crate::types::SqlExportColumnSelection {
+                source_index: 1,
+                name: "name".into(),
+                name_occurrence: 0,
+            }]);
+        }
 
         let terminal = Arc::new(std::sync::Mutex::new(None::<ExportStatus>));
         let captured = terminal.clone();
@@ -3434,6 +3790,10 @@ mod tests {
         assert_eq!(sql.matches("INSERT INTO").count(), 1, "both rows should be exported: {sql}");
         assert!(sql.contains("Ada"));
         assert!(sql.contains("Grace"));
+        if select_name {
+            assert!(sql.contains("(name) VALUES"), "{sql}");
+            assert!(!sql.contains("(id,"), "{sql}");
+        }
         assert!(sql.ends_with(";\n"));
         // Without `split_max_mb` the fallback arm must keep producing a plain
         // SQL file, not a zip archive.
@@ -3457,7 +3817,7 @@ mod tests {
                     .enable_all()
                     .build()
                     .expect("build table export split SQL test runtime")
-                    .block_on(run_external_driver_sql_export_honors_split_max_mb_into_zip_parts());
+                    .block_on(run_external_driver_sql_export_honors_split_max_mb_into_zip_parts(false));
             })
             .expect("spawn table export split SQL test thread");
         if let Err(panic) = handle.join() {
@@ -3466,7 +3826,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    async fn run_external_driver_sql_export_honors_split_max_mb_into_zip_parts() {
+    async fn run_external_driver_sql_export_honors_split_max_mb_into_zip_parts(select_name: bool) {
         // Two cursor pages: 200 wide rows (~1.2MB of INSERT statements) then a
         // short 100-row page. The first page alone must exceed the 1MB part
         // threshold, forcing the second page into a new zip part, and every
@@ -3501,6 +3861,13 @@ esac"#,
         request.format = "sql".to_string();
         request.file_path = zip_path.to_string_lossy().into_owned();
         request.split_max_mb = Some(crate::export_split_zip::MIN_SPLIT_PART_MAX_MB);
+        if select_name {
+            request.selected_columns = Some(vec![crate::types::SqlExportColumnSelection {
+                source_index: 1,
+                name: "name".into(),
+                name_occurrence: 0,
+            }]);
+        }
 
         let terminal = Arc::new(std::sync::Mutex::new(None::<ExportStatus>));
         let captured = terminal.clone();
@@ -3561,7 +3928,13 @@ esac"#,
         // All 300 rows must be present across the parts: every row value is
         // `(n, 'xxxx…')`, so one `, '` occurrence per row.
         let combined: String = sql_parts.iter().map(|(_, contents)| contents.as_str()).collect();
-        assert_eq!(combined.matches(", '").count(), 300);
+        if select_name {
+            assert!(combined.contains("(name) VALUES"));
+            assert!(!combined.contains("(id,"));
+            assert_eq!(combined.matches("('x").count(), 300);
+        } else {
+            assert_eq!(combined.matches(", '").count(), 300);
+        }
 
         let manifest = manifest.expect("split export must contain a manifest");
         assert_eq!(manifest["totalParts"].as_u64().unwrap() as usize, sql_parts.len());
@@ -3569,6 +3942,24 @@ esac"#,
         assert!(matches!(*terminal.lock().unwrap(), Some(ExportStatus::Done)));
 
         cleanup_external_driver_export_fixture(fixture);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_driver_sql_export_selected_columns_preserve_cursor_pages_and_zip_parts() {
+        let handle = std::thread::Builder::new()
+            .name("table-export-selected-columns".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+                    run_external_driver_sql_export_without_split_writes_plain_sql(true).await;
+                    run_external_driver_sql_export_honors_split_max_mb_into_zip_parts(true).await;
+                });
+            })
+            .unwrap();
+        if let Err(panic) = handle.join() {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[cfg(unix)]
@@ -3826,6 +4217,7 @@ esac"#,
                 vec![json!(3), Value::Null, json!(0)],
             ],
             numeric_column_right_align: false,
+            auto_filter: None,
         };
         let workbook = build_xlsx_workbook(&data).expect("XLSX build should succeed");
 

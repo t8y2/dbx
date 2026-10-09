@@ -14,8 +14,10 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mongodb.MongoBulkWriteException;
+import com.mongodb.MongoCommandException;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.ServerAddress;
+import com.mongodb.connection.ClusterConnectionMode;
 import com.mongodb.bulk.BulkWriteError;
 import com.mongodb.bulk.BulkWriteResult;
 import com.mongodb.bulk.WriteConcernError;
@@ -1519,6 +1521,118 @@ class MongoAgentTest {
         assertEquals("admin", MongoAgent.authenticationDatabase(connection));
     }
 
+    // ─── Direct connection: configureBuilder directConnection parsing ───
+
+    @Test
+    void configureBuilderWithDirectConnectionTrueSetsSingleModeAndKeepsReplicaSetName() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?replicaSet=cardetail&directConnection=true&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.SINGLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void configureBuilderWithCaseInsensitiveDirectConnectionSetsSingleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?replicaSet=cardetail&DirectConnection=TRUE&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.SINGLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void configureBuilderWithReplicaSetWithoutDirectConnectionDefaultsToMultipleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?replicaSet=cardetail&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.MULTIPLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void configureBuilderWithDirectConnectionFalseAndReplicaSetLeavesMultipleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?directConnection=false&replicaSet=cardetail&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.MULTIPLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void configureBuilderSingleHostNoOptionsRemainsUnchanged() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty("connection_string", "mongodb://127.0.0.1:27017");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.SINGLE, settings.getClusterSettings().getMode());
+    }
+
+    @Test
+    void configureBuilderTwoHostsWithDirectConnectionTrueRemainsMultipleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://127.0.0.1:27017,127.0.0.1:27018/?replicaSet=cardetail&directConnection=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.MULTIPLE, settings.getClusterSettings().getMode());
+    }
+
+    @Test
+    void configureBuilderWithPercentEncodedDirectConnectionSetsSingleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?replicaSet=cardetail&%64irect%43onnection=%74rue&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.SINGLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void hasDirectConnectionTrueHandlesVariousQueryFormats() {
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=true"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?DirectConnection=TRUE"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directconnection=true&other=1"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?other=1&directConnection=true"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=false&directConnection=true"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=true#fragment"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?%64irect%43onnection=%74rue"));
+
+        assertFalse(MongoAgent.hasDirectConnectionTrue(null));
+        assertFalse(MongoAgent.hasDirectConnectionTrue(""));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017?"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?replicaSet=rs"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=false"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=1"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection="));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=true&directConnection=false"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/#fragment?directConnection=true"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://directConnection=true@127.0.0.1:27017/db"));
+    }
+
     // ─── TLS: configureBuilder JSON parsing ───
 
     @Test
@@ -2399,6 +2513,176 @@ class MongoAgentTest {
                 }
                 throw new UnsupportedOperationException(method.getName());
             }
+        );
+    }
+
+    @Test
+    void listDatabasesFallsBackToTheDatabasesTheAccountIsAuthorizedFor() {
+        List<String> calls = new ArrayList<>();
+        Document connectionStatus = new Document("ok", 1.0)
+            .append("authInfo", new Document("authenticatedUserRoles", List.of(
+                new Document("role", "readWrite").append("db", "shopdb")))
+                .append("authenticatedUserPrivileges", List.of(
+                    new Document("resource", new Document("db", "shopdb").append("collection", ""))
+                        .append("actions", List.of("find", "insert")),
+                    new Document("resource",
+                        new Document("db", "shopdb").append("collection", "system.js"))
+                        .append("actions", List.of("find")),
+                    new Document("resource", new Document("db", "reports").append("collection", ""))
+                        .append("actions", List.of("find")))));
+
+        MongoDatabase admin = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("runCommand".equals(method.getName())) {
+                    calls.add("connectionStatus");
+                    return connectionStatus;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoClient client = (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("listDatabaseNames".equals(method.getName())) {
+                    throw mongoCommandError(
+                        13,
+                        "Unauthorized",
+                        "not authorized on admin to execute command { listDatabases: 1, nameOnly: true }"
+                    );
+                }
+                if ("getDatabase".equals(method.getName())) {
+                    calls.add("getDatabase:" + args[0]);
+                    return admin;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"list_databases\",\"params\":{}}", client);
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertFalse(json.has("error"), json.toString());
+        JsonArray databases = json.getAsJsonArray("result");
+        assertEquals(2, databases.size());
+        assertEquals("reports", databases.get(0).getAsJsonObject().get("name").getAsString());
+        assertEquals("shopdb", databases.get(1).getAsJsonObject().get("name").getAsString());
+        assertEquals(List.of("getDatabase:admin", "connectionStatus"), calls);
+    }
+
+    @Test
+    void listDatabasesKeepsTheUnauthorizedErrorWhenNoAuthorizedDatabaseIsKnown() {
+        List<String> calls = new ArrayList<>();
+        MongoDatabase admin = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("runCommand".equals(method.getName())) {
+                    calls.add("connectionStatus");
+                    return new Document("ok", 1.0).append("authInfo", new Document());
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoClient client = (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("listDatabaseNames".equals(method.getName())) {
+                    throw mongoCommandError(
+                        13,
+                        "Unauthorized",
+                        "not authorized on admin to execute command { listDatabases: 1, nameOnly: true }"
+                    );
+                }
+                if ("getDatabase".equals(method.getName())) {
+                    return admin;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"list_databases\",\"params\":{}}", client);
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertTrue(json.getAsJsonObject("error").get("message").getAsString()
+            .contains("error 13 (Unauthorized)"), json.toString());
+        assertEquals(List.of("connectionStatus"), calls);
+    }
+
+    @Test
+    void listDatabasesDoesNotProbePrivilegesForUnrelatedFailures() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("listDatabaseNames".equals(method.getName())) {
+                    throw mongoCommandError(11600, "InterruptedAtShutdown", "operation was interrupted");
+                }
+                calls.add(method.getName());
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"list_databases\",\"params\":{}}", client);
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertTrue(json.getAsJsonObject("error").get("message").getAsString()
+            .contains("error 11600"), json.toString());
+        assertEquals(List.of(), calls);
+    }
+
+    @Test
+    void authorizedDatabaseNamesComeFromTheAccountsOwnPrivileges() {
+        Document status = new Document("authInfo", new Document("authenticatedUserPrivileges", List.of(
+            new Document("resource", new Document("db", "shopdb").append("collection", ""))
+                .append("actions", List.of("find")),
+            new Document("resource", new Document("db", "shopdb").append("collection", "orders"))
+                .append("actions", List.of("find")),
+            new Document("resource", new Document("db", "admin").append("collection", "system.users"))
+                .append("actions", List.of("find")),
+            new Document("resource", new Document("db", "").append("collection", ""))
+                .append("actions", List.of("find")),
+            new Document("resource", new Document("cluster", true))
+                .append("actions", List.of("listDatabases")),
+            new Document("resource", "not-a-resource"),
+            "not-a-privilege")));
+        assertEquals(List.of("admin", "shopdb"), MongoAgent.databaseNamesFromConnectionStatus(status));
+
+        assertEquals(List.of(), MongoAgent.databaseNamesFromConnectionStatus(new Document()));
+        assertEquals(List.of(), MongoAgent.databaseNamesFromConnectionStatus(null));
+    }
+
+    @Test
+    void listDatabasesAuthorizationFailureDetectionFollowsTheCauseChain() {
+        assertTrue(MongoAgent.isListDatabasesAuthorizationFailure(
+            new RuntimeException(
+                "wrapped",
+                mongoCommandError(13, "Unauthorized", "not authorized on admin")
+            )
+        ));
+        assertTrue(MongoAgent.isListDatabasesAuthorizationFailure(
+            mongoCommandError(0, "Unauthorized", "not authorized")
+        ));
+        assertFalse(MongoAgent.isListDatabasesAuthorizationFailure(
+            mongoCommandError(11600, "InterruptedAtShutdown", "operation was interrupted")
+        ));
+        assertFalse(MongoAgent.isListDatabasesAuthorizationFailure(
+            new IllegalStateException("Not connected")
+        ));
+    }
+
+    private static MongoCommandException mongoCommandError(int code, String codeName, String message) {
+        return new MongoCommandException(
+            BsonDocument.parse("{\"ok\": 0, \"errmsg\": \"" + message + "\", \"code\": " + code
+                + ", \"codeName\": \"" + codeName + "\"}"),
+            new ServerAddress("192.168.80.146", 27017)
         );
     }
 

@@ -279,6 +279,42 @@ test("keeps the hint for a projection whose alias names a different column", () 
   );
 });
 
+test("does not split nested to_date arguments into extra SELECT projections", () => {
+  // ASCII parentheses: commas inside to_date(to_char(...), 'fmt') stay nested.
+  const ascii = [
+    "INSERT INTO t_demo (occur_date, company_no, company_name, dep_id, market_code)",
+    "SELECT",
+    "  to_date(to_char(a.l_date), 'YYYYMMDD') as occur_date,",
+    "  '01694' as company_no,",
+    "  'Acme Corp' as company_name,",
+    "  d.dept_code as dep_id,",
+    "  a.market_code",
+    "FROM dual a, dual d",
+  ].join("\n");
+  assert.deepEqual(
+    parseInsertValueHints(ascii).map((hint) => ({ column: hint.column, text: ascii.slice(hint.from).split(/[\s,]/u, 1)[0] })),
+    [{ column: "market_code", text: "a.market_code" }],
+  );
+
+  // Fullwidth outer parentheses (common IME typo) must not treat the format-string comma as a
+  // top-level projection separator — that shifted every later hint by one.
+  const fullwidth = [
+    "INSERT INTO t_demo (occur_date, company_no, company_name, dep_id, market_code)",
+    "SELECT",
+    "  to_date\uFF08to_char(a.l_date), 'YYYYMMDD'\uFF09 as occur_date,",
+    "  '01694' as company_no,",
+    "  'Acme Corp' as company_name,",
+    "  d.dept_code as dep_id,",
+    "  a.market_code",
+    "FROM dual a, dual d",
+  ].join("\n");
+  assert.equal(parseInsertValuesClauses(fullwidth)[0]?.rows[0]?.length, 5);
+  assert.deepEqual(
+    parseInsertValueHints(fullwidth).map((hint) => ({ column: hint.column, text: fullwidth.slice(hint.from).split(/[\s,]/u, 1)[0] })),
+    [{ column: "market_code", text: "a.market_code" }],
+  );
+});
+
 test("caps INSERT ... SELECT hints to the smaller target or projection count", () => {
   assert.deepEqual(
     parseInsertValueHints("INSERT INTO t (a, b) SELECT x, y, z FROM source").map((hint) => hint.column),

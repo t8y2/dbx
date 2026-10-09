@@ -340,8 +340,8 @@ test("result run items expose ordered labels and active state", () => {
   });
 
   assert.deepEqual(resultRunItems(tab), [
-    { id: "run-1", title: "Run 1", sequence: 1, active: false, pinned: true },
-    { id: "run-2", title: "Run 2", sequence: 2, active: true, pinned: false },
+    { id: "run-1", title: "", sequence: 1, active: false, pinned: true, sourceLabel: undefined },
+    { id: "run-2", title: "", sequence: 2, active: true, pinned: false, sourceLabel: undefined },
   ]);
   assert.equal(activeResultRun(tab)?.id, "run-2");
   assert.deepEqual(

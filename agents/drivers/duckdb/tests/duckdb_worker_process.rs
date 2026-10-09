@@ -351,6 +351,7 @@ async fn worker_process_exits_when_stdin_closes_during_active_query() {
                 sql: "SELECT sum(sin(i::DOUBLE) * cos(i::DOUBLE / 3.0)) FROM range(100000000000) AS t(i)".to_string(),
                 database: None,
                 max_rows: Some(10),
+                preserve_insertion_order: false,
             },
         )
         .expect("execute request"),
@@ -508,10 +509,14 @@ async fn worker_shutdown_checkpoints_and_removes_wal() {
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(&wal_path);
 
-    let client =
-        DuckDbWorkerClient::open_with_executable(executable.clone(), db_path.to_string_lossy().to_string(), Vec::new(), None)
-            .await
-            .expect("worker process connects");
+    let client = DuckDbWorkerClient::open_with_executable(
+        executable.clone(),
+        db_path.to_string_lossy().to_string(),
+        Vec::new(),
+        None,
+    )
+    .await
+    .expect("worker process connects");
     client
         .execute(
             None,

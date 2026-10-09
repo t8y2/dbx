@@ -424,9 +424,11 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            cargo zigbuild --release -p dbx-cli --no-default-features --target "${{ matrix.target }}.2.31"
+            cargo zigbuild --release -p dbx-cli --no-default-features --features dbx-mcp/os-keyring --target "${{ matrix.target }}.2.31"
           else
-            cargo build --release -p dbx-cli --no-default-features --target "${{ matrix.target }}"
+            # Same keychain rationale as the MCP native legs; the feature is
+            # forwarded through the dbx-mcp dependency.
+            cargo build --release -p dbx-cli --no-default-features --features dbx-mcp/os-keyring --target "${{ matrix.target }}"
           fi
 
       - name: Stage platform package
@@ -451,7 +453,22 @@ jobs:
             echo "${{ matrix.package-name }}@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+          # npm can accept a publish but leave the version stuck in a staged
+          # (invisible, blocks republication) state; the only recovery is
+          # to drop the staged version and publish again.
+          publish_log="${RUNNER_TEMP}/npm-publish.log"
+          if ! npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance 2>&1 | tee "$publish_log"; then
+            if ! grep -q "previously staged version" "$publish_log"; then
+              exit 1
+            fi
+            if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+              echo "${{ matrix.package-name }}@${VERSION} became visible despite the error; continuing."
+              exit 0
+            fi
+            echo "::warning::npm holds ${{ matrix.package-name }}@${VERSION} in a staged (invisible) state; dropping it and retrying."
+            npm unpublish "${{ matrix.package-name }}@${VERSION}" --force
+            npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+          fi
 
   publish-cli:
     name: Publish @dbx-app/cli
@@ -660,18 +677,14 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            cargo zigbuild --release -p dbx-mcp --target "${{ matrix.target }}.2.31"
+            # Pure-Rust (zbus) Secret Service backend: no C libdbus, so the
+            # zigbuild legs can read desktop-provisioned keys too.
+            cargo zigbuild --release -p dbx-mcp --features os-keyring --target "${{ matrix.target }}.2.31"
           else
-            cargo build --release -p dbx-mcp --target "${{ matrix.target }}"
-          fi
-
-      - name: Stage platform package
-        shell: bash
-        run: |
-          mkdir -p "packages/${{ matrix.package-dir }}/bin"
-          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
-          if [[ "${{ runner.os }}" != "Windows" ]]; then
-            chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+            # Native macOS/Windows builds read the OS keychain key that DBX
+            # Desktop provisions during the data security upgrade, so the MCP
+            # works against desktop-migrated profiles without env overrides.
+            cargo build --release -p dbx-mcp --features os-keyring --target "${{ matrix.target }}"
           fi
 
       - uses: actions/setup-node@v6
@@ -679,17 +692,83 @@ jobs:
           node-version: 22.13.0
           registry-url: https://registry.npmjs.org
 
+      - name: Sign macOS MCP binary
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node .github/scripts/sign-mcp-macos.mjs sign "target/${{ matrix.target }}/release/${{ matrix.binary }}"
+
+      - name: Stage platform package
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          mkdir -p "packages/${{ matrix.package-dir }}/bin"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+          fi
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            cmp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+            node .github/scripts/sign-mcp-macos.mjs verify "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+          fi
+
       - name: Publish platform package
         shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          set -euo pipefail
+          # npm can accept a publish but leave the version stuck in a staged
+          # (invisible, blocks republication) state; the only recovery is
+          # to drop the staged version and publish again.
+          npm_publish_with_staged_recovery() {
+            local publish_log="${RUNNER_TEMP}/npm-publish.log"
+            if ! npm publish "$@" --access public --provenance 2>&1 | tee "$publish_log"; then
+              if ! grep -q "previously staged version" "$publish_log"; then
+                return 1
+              fi
+              if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+                echo "${{ matrix.package-name }}@${VERSION} became visible despite the error; continuing."
+                return 0
+              fi
+              echo "::warning::npm holds ${{ matrix.package-name }}@${VERSION} in a staged (invisible) state; dropping it and retrying."
+              npm unpublish "${{ matrix.package-name }}@${VERSION}" --force
+              npm publish "$@" --access public --provenance
+              return
+            fi
+          }
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            work_dir="$(mktemp -d)"
+            trap 'rm -rf "$work_dir"' EXIT
+            package_ref="./packages/${{ matrix.package-dir }}"
+            exists=false
+            if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+              package_ref="${{ matrix.package-name }}@${VERSION}"
+              exists=true
+            fi
+            npm pack "$package_ref" --ignore-scripts --pack-destination "$work_dir" --json > "$work_dir/pack.json"
+            tarball="$work_dir/$(node -p 'require(process.argv[1])[0].filename' "$work_dir/pack.json")"
+            tar -xzf "$tarball" -C "$work_dir"
+            node .github/scripts/sign-mcp-macos.mjs verify "$work_dir/package/bin/${{ matrix.binary }}"
+            if [ "$exists" = true ]; then
+              echo "${{ matrix.package-name }}@${VERSION} already exists with a verified MCP identity; skipping."
+              exit 0
+            fi
+            cmp "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}" "$work_dir/package/bin/${{ matrix.binary }}"
+            npm_publish_with_staged_recovery "$tarball" --ignore-scripts
+            exit 0
+          fi
           if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
             echo "${{ matrix.package-name }}@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+          npm_publish_with_staged_recovery "./packages/${{ matrix.package-dir }}"
 
       - name: Show sccache stats
         if: always()
@@ -757,7 +836,7 @@ jobs:
 
   publish-mcp-github-release:
     name: Publish MCP GitHub Release assets
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     needs: [prepare, publish-mcp-server]
     steps:
       - uses: actions/checkout@v5
@@ -773,6 +852,7 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
@@ -787,7 +867,17 @@ jobs:
             mkdir -p "${work_dir}/archive"
             cp "${work_dir}/package/bin/dbx-mcp" "${work_dir}/archive/dbx-mcp"
             chmod +x "${work_dir}/archive/dbx-mcp"
+            if [[ "$package_name" == @dbx-app/mcp-darwin-* ]]; then
+              node .github/scripts/sign-mcp-macos.mjs verify "${work_dir}/archive/dbx-mcp"
+            fi
             tar -C "${work_dir}/archive" -czf "release-assets/${asset_name}.tar.gz" dbx-mcp
+            mkdir "${work_dir}/unpacked"
+            tar -xzf "release-assets/${asset_name}.tar.gz" -C "${work_dir}/unpacked"
+            cmp "${work_dir}/package/bin/dbx-mcp" "${work_dir}/unpacked/dbx-mcp"
+            if [[ "$package_name" == @dbx-app/mcp-darwin-* ]]; then
+              node .github/scripts/sign-mcp-macos.mjs verify "${work_dir}/unpacked/dbx-mcp"
+            fi
+            rm -rf "$work_dir"
           }
 
           pack_windows() {
@@ -809,7 +899,7 @@ jobs:
 
           (
             cd release-assets
-            sha256sum *.tar.gz *.zip > SHA256SUMS
+            shasum -a 256 *.tar.gz *.zip > SHA256SUMS
           )
 
       - name: Attest native release archives
@@ -924,8 +1014,19 @@ jobs:
   publish-homebrew-formula:
     name: Publish Homebrew formula
     runs-on: ubuntu-latest
-    needs: [prepare, publish-cli-github-release]
+    needs: [prepare, publish-cli-github-release, publish-mcp-github-release]
     steps:
+      - uses: actions/checkout@v5
+
+      - name: Download MCP release checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          mkdir -p release-assets
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern SHA256SUMS --dir release-assets --clobber
+
       - name: Download native CLI archives and compute SHA256
         id: cli-hash
         env:
@@ -1038,14 +1139,17 @@ jobs:
           sed -i "s/__SHA_LINUX_ARM64__/${SHA_LINUX_ARM64}/g" Formula/dbx-cli.rb
           sed -i "s/__SHA_LINUX_X64__/${SHA_LINUX_X64}/g" Formula/dbx-cli.rb
 
+          node "$GITHUB_WORKSPACE/.github/scripts/render-mcp-formula.mjs" \
+            "${CLI_VERSION}" "$GITHUB_WORKSPACE/release-assets/SHA256SUMS" Formula/dbx-mcp.rb
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/dbx-cli.rb
+          git add Formula/dbx-cli.rb Formula/dbx-mcp.rb
 
           if git diff --cached --quiet; then
             echo "CLI Homebrew formula is already up to date."
           else
-            git commit -m "dbx-cli ${CLI_VERSION}"
+            git commit -m "dbx-cli and dbx-mcp ${CLI_VERSION}"
             git push
             echo "::notice::CLI Homebrew formula updated to ${CLI_VERSION}"
           fi

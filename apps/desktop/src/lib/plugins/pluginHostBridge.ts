@@ -1,18 +1,75 @@
+import { PLUGIN_AI_TASKS } from "./pluginAiCompletion";
+import type { PluginAiProvider, PluginAiModel, PluginAiGenerateRequest, PluginAiStreamRequest, PluginAiStreamChunkEvent, PluginAiTask } from "./pluginAiCompletion";
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
 import { MAX_PLUGIN_PLAN_SQL_CHARS, MAX_PLUGIN_PLAN_TIMEOUT_MS, PLUGIN_PLAN_PERMISSION, type PluginPlanCapabilities, type PluginPlanRequest, type PluginPlanResult } from "@/types/pluginPlan";
 import { createPluginAiConversation, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
+import { isValidPluginAiRecommendationTemplate, resolvePluginAiRecommendationUpdate, type PluginAiRecommendationContext, type PluginAiRecommendationUpdate } from "@/lib/plugins/pluginAiRecommendations";
+import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
+import { MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS, PLUGIN_SCHEMA_METADATA_CAPABILITY, PLUGIN_SCHEMA_METADATA_PERMISSION, type PluginTableContext, type PluginTableMetadata } from "@/types/pluginSchemaMetadata";
+import { MAX_PLUGIN_DATA_MAX_ROWS, MAX_PLUGIN_DATA_NAME_CHARS, MAX_PLUGIN_DATA_SQL_CHARS, MAX_PLUGIN_DATA_TIMEOUT_MS, PLUGIN_DATA_ACCESS_NOT_GRANTED, PLUGIN_DATA_CAPABILITY, PLUGIN_DATA_READ_PERMISSION, type PluginDataQueryRequest, type PluginDataQueryResult } from "@/types/pluginData";
+import { floatingWindowLabel } from "@/lib/app/windowContext";
+import { parseFloatingWindowRequest, type FloatingRect, type OpenFloatingWindowRequest, type OpenFloatingWindowResult } from "@/lib/plugins/pluginFloatingWindow";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
 const BRIDGE_VERSION = 1;
 const MAX_BRIDGE_PAYLOAD_BYTES = 2 * 1024 * 1024;
 const MAX_BRIDGE_BINARY_BYTES = 8 * 1024 * 1024;
+const MAX_CLIPBOARD_IMAGE_BASE64_BYTES = 24 * 1024 * 1024;
 // Distinct from the sidecar binary cap: saved files go straight from the
 // plugin iframe to disk and never traverse plugin frames.
 const MAX_BRIDGE_SAVE_BYTES = 512 * 1024 * 1024;
 // Mirrors MAX_PLUGIN_PLAN_NAME_CHARS in crates/dbx-core/src/query/plugin_plan.rs.
 const MAX_PLUGIN_PLAN_IDENTIFIER_CHARS = 256;
+/**
+ * In-flight `host.queryData` calls per bridge. Plugin queries share the
+ * connection pool with the user's own tabs, so a runaway plugin must not be
+ * able to occupy it.
+ */
+export const MAX_CONCURRENT_PLUGIN_DATA_QUERIES = 4;
+
+// Clipboard reads are the one permission that hands environment data (the
+// system clipboard) to plugin code with no user interaction on each call, so
+// beyond the manifest permission gate the bridge adds: a per-session consent
+// prompt before the first read, a bounded audit trail, and a read-rate cap.
+// A plugin that trips the cap waits rather than being able to silently poll.
+export const PLUGIN_CLIPBOARD_READ_MIN_INTERVAL_MS = 1_000;
+export const PLUGIN_CLIPBOARD_AUDIT_CAPACITY = 200;
+
+export interface PluginClipboardAuditEntry {
+  at: number;
+  /** Request outcome: granted (content returned), denied (user or no consent surface). */
+  outcome: "granted" | "denied" | "rate-limited";
+  /** Returned payload size (text code units or decoded image bytes); content is never stored. */
+  length: number;
+}
+
+export interface PluginClipboardReadGateState {
+  /** Consent for the current bridge lifetime; null = never asked. */
+  consented: boolean | null;
+  lastReadAt: number;
+  audit: PluginClipboardAuditEntry[];
+}
+
+export function createClipboardReadGate(): PluginClipboardReadGateState {
+  return { consented: null, lastReadAt: 0, audit: [] };
+}
+
+/**
+ * Rate gate: at most one read per PLUGIN_CLIPBOARD_READ_MIN_INTERVAL_MS.
+ * Returns true when the read may proceed; a denied (rate-limited) read is
+ * recorded by the caller.
+ */
+export function clipboardReadGateAllows(state: PluginClipboardReadGateState, now: number): boolean {
+  return state.lastReadAt <= 0 || now - state.lastReadAt >= PLUGIN_CLIPBOARD_READ_MIN_INTERVAL_MS;
+}
+
+export function recordClipboardRead(state: PluginClipboardReadGateState, now: number, outcome: PluginClipboardAuditEntry["outcome"], length: number): void {
+  if (outcome !== "rate-limited") state.lastReadAt = now;
+  state.audit.push({ at: now, outcome, length });
+  if (state.audit.length > PLUGIN_CLIPBOARD_AUDIT_CAPACITY) state.audit.splice(0, state.audit.length - PLUGIN_CLIPBOARD_AUDIT_CAPACITY);
+}
 
 /** Structured editor appearance: SQL editor settings that have no CSS-token
  * carrier (font size is a number, the syntax theme an id). Font families are
@@ -39,6 +96,13 @@ export interface PluginWorkbenchContext {
   [key: string]: unknown;
 }
 
+export interface PluginClipboardImage {
+  contentType: "image/png";
+  dataBase64: string;
+  width: number;
+  height: number;
+}
+
 export interface PluginSaveFileRequest {
   fileName?: string;
   contentType?: string;
@@ -59,6 +123,8 @@ export interface PluginFileHandleMeta {
   name: string;
   size: number;
   contentType: string;
+  /** Only for files expanded out of a dropped folder: '/'-separated path relative to the dropped folder root, so the plugin can rebuild the dragged tree. */
+  relativePath?: string;
 }
 
 export interface PluginPickFilesOptions {
@@ -93,11 +159,44 @@ export interface PluginHostBridgeApi {
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
   readAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload>;
+  listAiProviders?(): Promise<PluginAiProvider[]>;
+  discoverAiModels?(configId: string): Promise<PluginAiModel[]>;
+  listAiModels?(): Promise<PluginAiModel[]>;
+  /** Must obtain trusted host consent for every send; never return provider errors or credentials. */
+  generateAiText?(pluginName: string, input: PluginAiGenerateRequest): Promise<string>;
+  /**
+   * E1 incremental generation: chunks ride `host.ai.generationChunk` events
+   * scoped to the request's requestId (the same pattern as
+   * `host.download.progress`); the promise resolves with the full text once
+   * the stream completes. Must go through the same host consent as the plain
+   * call.
+   */
+  generateAiTextStream?(pluginName: string, request: PluginAiStreamRequest, onChunk: (chunk: PluginAiStreamChunkEvent) => void): Promise<string>;
+  /** Cancels one active streamed generation of THIS bridge by requestId. */
+  cancelAiGeneration?(requestId: string): Promise<boolean>;
   openAiConversation?(request: AiPluginConversationRequest): Promise<void>;
-  openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }): Promise<void> | void;
+  setAiRecommendations?(update: PluginAiRecommendationHostUpdate): void;
+  openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean; target?: "tab" }): Promise<void> | void;
+  /**
+   * §4/§5 command execution asked from a plugin webview: the same registry
+   * path as menu execution — enablement (§5.4), §4.1 singleton reuse,
+   * host-authored context — scoped to the calling plugin's own declared
+   * commands. The optional context merges over the command-declared context
+   * (caller wins; reserved identity fields are host-owned) and feeds
+   * `instance_key` `{{path}}` placeholders, so per-connection instances are
+   * one `logs:{{connectionId}}` declaration away. Resolves `{ error }` for
+   * expected business outcomes; only bridge or permission failures reject.
+   */
+  executeCommand?(pluginId: string, commandId: string, context?: Record<string, unknown>): Promise<{ error?: string } | null | void> | { error?: string } | null | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
   reopenConnection?(pluginId: string, connectionId: string): Promise<void>;
+  /**
+   * PR-A4 generic extension point: a read-only, secret-free connection list scoped to the calling plugin's own
+   * connection-providers, so plugins can implement their own connection switching inside panels/workbenches and
+   * their own business (the host stays unaware of the purpose).
+   */
+  listConnections?(pluginId: string): Array<{ id: string; name: string; providerId: string; connectionType?: string; readOnly: boolean }>;
   /**
    * Estimated plan capability metadata for one connection. Requires the plugin
    * to declare `host.plans:read`. The host only reads the stored connection
@@ -109,13 +208,72 @@ export interface PluginHostBridgeApi {
    * generates and owns the EXPLAIN statement; the plugin cannot pass one.
    */
   explainPlan?(request: PluginPlanRequest): Promise<PluginPlanResult>;
+  /** Read-only table schema metadata over an already-open Host connection. */
+  getTableMetadata?(context: PluginTableContext): Promise<PluginTableMetadata>;
+  /**
+   * One read-only SQL statement on a connection the user granted to the
+   * plugin (`host.data:read`). The backend re-checks the permission, the
+   * grant, the open connection, and the read-only statement gate.
+   */
+  queryData?(pluginId: string, request: PluginDataQueryRequest): Promise<PluginDataQueryResult>;
+  /** Whether the user already granted `pluginId` data access to `connectionId`. */
+  hasDataGrant?(pluginId: string, connectionId: string): Promise<boolean>;
+  /**
+   * Asks the user whether `pluginId` may read `connectionId`. Resolves true to
+   * allow; the bridge then persists the grant through `grantDataAccess`. A
+   * host without a consent surface must omit it so the bridge denies.
+   */
+  confirmDataAccess?(pluginId: string, pluginName: string, connectionId: string): Promise<boolean> | boolean;
+  /** Persists the grant the user just allowed. */
+  grantDataAccess?(pluginId: string, connectionId: string): Promise<void>;
   closeTab?(): Promise<void> | void;
+  /**
+   * Floating plugin windows (the §8.3 "window" surface): a frameless,
+   * always-on-top desktop widget outside the main shell. Desktop hosts only — a
+   * host without it omits these so `capabilities.floating` stays false and the
+   * plugin can fall back to an in-shell surface (tab or dock).
+   *
+   * Geometry is host-owned end to end: the plugin asks to open/close its window
+   * and reports drag intent, while positions, work-area snapping, and DPI
+   * conversion stay here. A drag is driven by the native cursor position rather
+   * than plugin-supplied coordinates, which would be relative to a viewport that
+   * is itself moving.
+   */
+  openFloatingWindow?(request: OpenFloatingWindowRequest): Promise<OpenFloatingWindowResult>;
+  /** Closes floating windows by host label; callers derive labels from their own manifest, never from plugin input. */
+  closeFloatingWindows?(labels: string[]): Promise<void>;
+  /** Hands the calling floating window's movement to the OS drag loop. */
+  beginFloatingDrag?(): Promise<void>;
+  /** Ends a drag, snapping the window onto the work-area edges it landed near. Resolves the final physical rect. */
+  endFloatingDrag?(snap: boolean): Promise<FloatingRect | null>;
+  /** Resizes the calling floating window (logical pixels). */
+  setFloatingSize?(width: number, height: number): Promise<void>;
   /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
   saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
   downloadFile?(pluginId: string, request: PluginDownloadRequest, onProgress: (progress: unknown) => void): Promise<PluginSaveFileResult | null>;
   cancelDownload?(pluginId: string, downloadId: string): Promise<void>;
   /** Write text to the system clipboard on behalf of the sandboxed plugin iframe. */
   copyText?(pluginId: string, text: string): Promise<void>;
+  /**
+   * Read the system clipboard on behalf of the sandboxed plugin iframe.
+   * Requires the plugin to declare `host.clipboard:read`: unlike writes, a
+   * read hands arbitrary user data (passwords, tokens) to plugin code with no
+   * further user interaction, so it is permission-gated.
+   */
+  clipboardRead?(pluginId: string): Promise<string>;
+  /** Read and PNG-encode the current clipboard image. Shares the clipboard-read permission and consent gate. */
+  clipboardReadImage?(pluginId: string): Promise<PluginClipboardImage>;
+  /**
+   * Session consent prompt for the first clipboard read of a bridge lifetime.
+   * Resolves true to allow (and remember for the workbench session), false to
+   * deny (the read request rejects). Optional on hosts without a dialog
+   * surface; a host that cannot ask must not silently allow.
+   */
+  confirmClipboardRead?(pluginId: string, pluginName: string): Promise<boolean> | boolean;
+  /** Register a short-lived, plugin-scoped custom-protocol media source. */
+  openMedia?(pluginId: string, method: string, params: Record<string, unknown>): Promise<string>;
+  /** Revoke a media source token previously returned by openMedia. */
+  closeMedia?(pluginId: string, token: string): Promise<void>;
   /** Native open dialog; resolves opened read handles (null selection → empty list). */
   pickFiles?(pluginId: string, options: PluginPickFilesOptions): Promise<PluginFileHandleMeta[]>;
   /** Stream a chunk from an opened read handle. */
@@ -128,10 +286,21 @@ export interface PluginHostBridgeApi {
   finishFileSave?(pluginId: string, handleId: string): Promise<void>;
   /** Close any file handle, discarding unsaved state. */
   closeFileHandle?(pluginId: string, handleId: string): Promise<void>;
+  /** Whether this host receives OS file drops on the plugin's behalf (desktop only). */
+  receiveOsDrops?: boolean;
   /** Persistent per-plugin key-value storage for sandboxed UIs; resolves null when the key is unset. */
   storageGet?(pluginId: string, key: string): Promise<unknown>;
   storageSet?(pluginId: string, key: string, value: unknown): Promise<void>;
   storageDelete?(pluginId: string, key: string): Promise<void>;
+}
+
+export interface PluginAiRecommendationHostUpdate {
+  pluginId: string;
+  pluginName: string;
+  contributionId: string;
+  workbenchId: string;
+  context: PluginAiRecommendationContext;
+  items: readonly PluginAiRecommendation[];
 }
 
 interface PluginRequestMessage {
@@ -147,9 +316,30 @@ interface PluginRequestMessage {
 
 export class PluginHostBridge {
   private downloads = new Set<string>();
+  private mediaTokens = new Set<string>();
   private context: PluginWorkbenchContext;
   private locale: string;
   private theme?: PluginBridgeTheme;
+  /** Consent + audit + rate state for clipboard reads; lives for the bridge lifetime. */
+  private clipboardReadGate = createClipboardReadGate();
+  /**
+   * Data-access answers for this bridge lifetime, per connection. A denial is
+   * remembered so a plugin cannot re-prompt in a loop; an iframe reload builds
+   * a new bridge and may ask again. Grants live in the backend; this only
+   * spares a lookup per query.
+   */
+  private dataAccess = new Map<string, "granted" | "denied">();
+  /** One consent prompt per connection at a time; concurrent queries share it. */
+  private pendingDataAccess = new Map<string, Promise<void>>();
+  private inFlightDataQueries = 0;
+  private runtimeAiRecommendations: PluginAiRecommendationUpdate | null | undefined;
+  /** Active streamed AI generations of this bridge, by plugin-supplied requestId. */
+  private activeAiStreams = new Set<string>();
+
+  /** Bounded audit trail of this session's clipboard read attempts (oldest first). */
+  get clipboardAudit(): readonly PluginClipboardAuditEntry[] {
+    return this.clipboardReadGate.audit;
+  }
 
   /** Invoked once before each iframe load generation sends its init message. */
   onReinit?: () => Promise<void> | void;
@@ -166,6 +356,7 @@ export class PluginHostBridge {
     this.context = snapshotPluginWorkbenchContext(context);
     this.locale = locale;
     this.theme = theme ? clonePluginData(theme) : undefined;
+    this.publishAiRecommendations();
   }
 
   handleWindowMessage(event: MessageEvent): boolean {
@@ -173,7 +364,16 @@ export class PluginHostBridge {
     if (!target || event.source !== target || !isRecord(event.data)) return false;
     if (event.data.source !== PLUGIN_MESSAGE_SOURCE || event.data.version !== BRIDGE_VERSION) return false;
     if (event.data.type === "ready") {
+      // Feature flags the SDK advertises at boot; unknown flags are ignored so
+      // host/plugin can evolve independently.
+      this.advertisedFeatures = new Set(Array.isArray(event.data.features) ? event.data.features.filter((feature): feature is string => typeof feature === "string") : []);
       void this.handleReady();
+      return true;
+    }
+    if (event.data.type === "workbench/close-ack") {
+      // Two-phase close handshake (§8.3): the plugin released its workbench scope.
+      this.pendingCloseAck?.();
+      this.pendingCloseAck = undefined;
       return true;
     }
     if (event.data.type === "shortcut" && event.data.shortcut === "closeTab") {
@@ -197,6 +397,8 @@ export class PluginHostBridge {
     if ((this.initSignals.load && this.initSignals.ready) || (signal === "load" && this.initSignals.load)) {
       for (const downloadId of this.downloads) void this.api.cancelDownload?.(this.plugin.manifest.id, downloadId).catch(() => undefined);
       this.downloads.clear();
+      for (const token of this.mediaTokens) void this.api.closeMedia?.(this.plugin.manifest.id, token).catch(() => undefined);
+      this.mediaTokens.clear();
       this.initGeneration += 1;
       this.initSignals = { load: false, ready: false };
       this.initStarted = false;
@@ -227,12 +429,52 @@ export class PluginHostBridge {
     this.disposed = true;
     for (const downloadId of this.downloads) void this.api.cancelDownload?.(this.plugin.manifest.id, downloadId).catch(() => undefined);
     this.downloads.clear();
+    // Best-effort: a torn-down workbench must not keep a provider stream
+    // running with nobody to receive its chunks.
+    for (const requestId of this.activeAiStreams) void this.api.cancelAiGeneration?.(requestId).catch(() => undefined);
+    this.activeAiStreams.clear();
+    for (const token of this.mediaTokens) void this.api.closeMedia?.(this.plugin.manifest.id, token).catch(() => undefined);
+    this.mediaTokens.clear();
+    this.publishAiRecommendations({ context: {}, items: [] });
   }
 
   private disposed = false;
   private initGeneration = 0;
   private initSignals = { load: false, ready: false };
   private initStarted = false;
+  private advertisedFeatures = new Set<string>();
+  private pendingCloseAck?: () => void;
+
+  /**
+   * §8.3/§7.4 two-phase workbench close: give the plugin a chance to release
+   * its workbench scope (PTY sessions, subscriptions, temporary state) before
+   * the webview is torn down. Resolves true when the plugin acked; false when
+   * the handshake is unsupported (legacy SDK advertises no "workbench.close"
+   * feature) or the ack did not arrive inside the deadline. Either way the
+   * caller proceeds with teardown.
+   */
+  requestWorkbenchClose(timeoutMs = 400): Promise<boolean> {
+    if (this.disposed || !this.targetWindow()) return Promise.resolve(false);
+    const supported = this.advertisedFeatures.has("workbench.close");
+    if (!supported) {
+      // Legacy SDK: the message is inert, so do not stall the close on it.
+      this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "workbench/close", workbenchId: "" });
+      return Promise.resolve(false);
+    }
+    const workbenchId = typeof this.context.workbenchId === "string" ? this.context.workbenchId : "";
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (acked: boolean) => {
+        if (settled) return;
+        settled = true;
+        this.pendingCloseAck = undefined;
+        resolve(acked);
+      };
+      this.pendingCloseAck = () => settle(true);
+      this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "workbench/close", workbenchId });
+      setTimeout(() => settle(false), timeoutMs);
+    });
+  }
 
   private postInit(): void {
     this.post({
@@ -249,8 +491,35 @@ export class PluginHostBridge {
       capabilities: {
         downloadFile: !!this.api.downloadFile,
         planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan,
+        [PLUGIN_SCHEMA_METADATA_CAPABILITY]: !!this.api.getTableMetadata,
+        [PLUGIN_DATA_CAPABILITY]: !!this.api.queryData && !!this.api.hasDataGrant && !!this.api.confirmDataAccess && !!this.api.grantDataAccess,
         storage: !!this.api.storageGet && !!this.api.storageSet && !!this.api.storageDelete,
         ai: !!this.api.openAiConversation,
+        aiModelDiscovery: !!this.api.listAiProviders && !!this.api.discoverAiModels,
+        aiCompletion: !!this.api.listAiModels && !!this.api.generateAiText,
+        // Streaming generation goes together with per-request cancellation;
+        // advertising both or neither keeps the capability honest.
+        aiCompletionStream: !!this.api.generateAiTextStream && !!this.api.cancelAiGeneration,
+        aiRecommendations: !!this.api.openAiConversation && !!this.api.setAiRecommendations,
+        // Additive with the same "absence means unsupported" contract: an older
+        // host omits these, and a web host has neither.
+        clipboardWrite: !!this.api.copyText,
+        clipboardRead: !!this.api.clipboardRead,
+        clipboardImageRead: !!this.api.clipboardReadImage,
+        mediaUrl: !!this.api.openMedia && !!this.api.closeMedia,
+        // Floating desktop widget windows: advertised only when the host can both
+        // open a window and drive its geometry, so a plugin sees one honest flag.
+        floating: !!this.api.openFloatingWindow && !!this.api.beginFloatingDrag && !!this.api.endFloatingDrag,
+        // The namespace exists on both hosts, but what it can DO differs:
+        // portable plugins gate on these flags instead of probing calls.
+        fileTransfer: {
+          pick: !!this.api.pickFiles,
+          beginSave: !!this.api.beginFileSave && !!this.api.writeFileChunk && !!this.api.finishFileSave,
+          read: !!this.api.readFileChunk,
+          // OS drops (and their folder expansion) are desktop-only.
+          drop: !!this.api.receiveOsDrops,
+          folderExpansion: !!this.api.receiveOsDrops,
+        },
       },
       context: snapshotPluginWorkbenchContext(this.context),
     });
@@ -263,7 +532,40 @@ export class PluginHostBridge {
    */
   updateContext(context: PluginWorkbenchContext): void {
     this.context = snapshotPluginWorkbenchContext(context);
+    this.runtimeAiRecommendations = undefined;
+    this.publishAiRecommendations();
     this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "context", context: snapshotPluginWorkbenchContext(this.context) });
+  }
+
+  private publishAiRecommendations(override?: PluginAiRecommendationUpdate): void {
+    if (!this.hasPermission("host.ai") || !this.api.openAiConversation || !this.api.setAiRecommendations) return;
+    const workbenchId = typeof this.context.workbenchId === "string" ? this.context.workbenchId : "";
+    const contribution = this.contribution.type === "workbench" ? this.contribution : undefined;
+    const defaults = contribution?.ai?.recommendations;
+    const runtime = override ?? this.runtimeAiRecommendations;
+    // Runtime updates usually contain only the resource-specific fields used by
+    // placeholders. Keep host-owned routing fields authoritative so clicking a
+    // recommendation remains bound to this workbench's connection even when the
+    // plugin does not repeat connectionId in every update.
+    const runtimeContext = runtime
+      ? snapshotPluginWorkbenchContext({
+          ...runtime.context,
+          ...(this.context.connectionId === undefined ? {} : { connectionId: this.context.connectionId }),
+          ...(this.context.database === undefined ? {} : { database: this.context.database }),
+          ...(this.context.schema === undefined ? {} : { schema: this.context.schema }),
+          ...(this.context.workbenchId === undefined ? {} : { workbenchId: this.context.workbenchId }),
+        })
+      : this.context;
+    const effectiveRuntime = runtime === null ? { context: {}, items: [] } : runtime ? { ...runtime, context: runtimeContext } : undefined;
+    const items = resolvePluginAiRecommendationUpdate(defaults, effectiveRuntime, this.context);
+    this.api.setAiRecommendations({
+      pluginId: this.plugin.manifest.id,
+      pluginName: this.plugin.manifest.name,
+      contributionId: this.contribution.id,
+      workbenchId,
+      context: runtime ? runtimeContext : this.context,
+      items,
+    });
   }
 
   /** Notify the plugin UI about a locale change without a reload. */
@@ -297,8 +599,8 @@ export class PluginHostBridge {
   }
 
   /** Hand the plugin already-opened handles for files dropped onto its workbench. */
-  forwardFileDrop(files: PluginFileHandleMeta[]): void {
-    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "filedrop", files });
+  forwardFileDrop(files: PluginFileHandleMeta[], drop?: { dropId?: string; truncated?: boolean }): void {
+    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "filedrop", files, dropId: drop?.dropId, truncated: drop?.truncated === true });
   }
 
   private async handleRequest(request: PluginRequestMessage, target: Window): Promise<void> {
@@ -334,11 +636,93 @@ export class PluginHostBridge {
       return null;
     }
     if (method === "host.getContext") return snapshotPluginWorkbenchContext(this.context);
+    if (method === "host.ai.listProviders") {
+      this.requirePermission("host.ai");
+      if (!this.api.listAiProviders) throw new Error("AI provider selection is unavailable");
+      return (await this.api.listAiProviders()).map((p) => ({ configId: p.configId, name: p.name }));
+    }
+    if (method === "host.ai.discoverModels") {
+      this.requirePermission("host.ai");
+      if (!this.api.discoverAiModels) throw new Error("AI model discovery is unavailable");
+      const input = requireRecord(params, "AI model discovery");
+      if (typeof input.configId !== "string" || !input.configId.trim() || input.configId.length > 256) throw new Error("Invalid AI configId");
+      return (await this.api.discoverAiModels(input.configId)).map((m) => ({ configId: m.configId, name: m.name, model: m.model, isDefault: !!m.isDefault }));
+    }
+    if (method === "host.ai.listModels") {
+      this.requirePermission("host.ai");
+      if (!this.api.listAiModels) throw new Error("DBX AI model selection is unavailable");
+      // Whitelist response fields even if an adapter accidentally returns config objects.
+      return (await this.api.listAiModels()).map((m) => ({ configId: m.configId, name: m.name, model: m.model, isDefault: !!m.isDefault }));
+    }
+    if (method === "host.ai.generateText") {
+      this.requirePermission("host.ai");
+      if (!this.api.generateAiText) throw new Error("DBX AI text generation is unavailable");
+      const input = requireRecord(params, "AI generation request");
+      for (const key of ["configId", "model", "prompt"] as const) {
+        if (typeof input[key] !== "string" || !input[key].trim() || input[key].length > (key === "prompt" ? 100000 : 256)) throw new Error("Invalid AI " + key);
+      }
+      // Task presets are a closed host-owned enum: a plugin picks a template,
+      // it never writes system text. Unknown values fail loudly.
+      const task = input.task === undefined || input.task === null ? undefined : requirePluginAiTask(input.task);
+      return this.api.generateAiText(this.plugin.manifest.name, { configId: input.configId as string, model: input.model as string, prompt: input.prompt as string, ...(task === undefined ? {} : { task }) });
+    }
+    if (method === "host.ai.generateTextStream") {
+      this.requirePermission("host.ai");
+      // Same conjunction the aiCompletionStream capability advertises: a host
+      // that cannot cancel does not stream.
+      if (!this.api.generateAiTextStream || !this.api.cancelAiGeneration) throw new Error("DBX AI text generation streaming is unavailable");
+      const input = requireRecord(params, "AI generation request");
+      for (const key of ["configId", "model", "prompt"] as const) {
+        if (typeof input[key] !== "string" || !input[key].trim() || input[key].length > (key === "prompt" ? 100000 : 256)) throw new Error("Invalid AI " + key);
+      }
+      const requestId = requireProtocolName(input.requestId, "AI requestId");
+      if (this.activeAiStreams.has(requestId)) throw new Error("Duplicate AI requestId");
+      const task = input.task === undefined || input.task === null ? undefined : requirePluginAiTask(input.task);
+      this.activeAiStreams.add(requestId);
+      try {
+        // Same event channel as host.download.progress: incremental chunks are
+        // delivered as host.ai.generationChunk events that plugins filter by
+        // requestId; the call itself resolves with the full text.
+        return await this.api.generateAiTextStream(this.plugin.manifest.name, { configId: input.configId as string, model: input.model as string, prompt: input.prompt as string, requestId, ...(task === undefined ? {} : { task }) }, (chunk) => {
+          if (!this.activeAiStreams.has(requestId)) return;
+          this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "event", method: "host.ai.generationChunk", params: { requestId, delta: chunk.delta, done: chunk.done === true } });
+        });
+      } finally {
+        this.activeAiStreams.delete(requestId);
+      }
+    }
+    if (method === "host.ai.cancelGeneration") {
+      const input = requireRecord(params, "AI cancel request");
+      const requestId = requireProtocolName(input.requestId, "AI requestId");
+      // Scoped like host.cancelDownload: a workbench may only cancel the
+      // streams it started. Unknown or finished ids answer { cancelled: false }.
+      if (!this.activeAiStreams.has(requestId) || !this.api.cancelAiGeneration) return { cancelled: false };
+      const cancelled = (await this.api.cancelAiGeneration(requestId)) === true;
+      // A confirmed cancel also stops chunk forwarding immediately; the
+      // stream's own settle path becomes a no-op delete.
+      if (cancelled) this.activeAiStreams.delete(requestId);
+      return { cancelled };
+    }
     if (method === "host.ai.openConversation") {
       this.requirePermission("host.ai");
       if (!this.api.openAiConversation) throw new Error("DBX AI conversation panel is unavailable");
       const request = createPluginAiConversation(this.plugin.manifest, params);
       await this.api.openAiConversation(request);
+      return null;
+    }
+    if (method === "host.ai.setRecommendations") {
+      this.requirePermission("host.ai");
+      if (!this.api.openAiConversation || !this.api.setAiRecommendations) throw new Error("DBX AI recommendations are unavailable");
+      const update = requirePluginAiRecommendationUpdate(params);
+      this.runtimeAiRecommendations = update;
+      this.publishAiRecommendations();
+      return null;
+    }
+    if (method === "host.ai.clearRecommendations") {
+      this.requirePermission("host.ai");
+      if (!this.api.openAiConversation || !this.api.setAiRecommendations) throw new Error("DBX AI recommendations are unavailable");
+      this.runtimeAiRecommendations = { context: {}, items: [] };
+      this.publishAiRecommendations();
       return null;
     }
     if (method === "backend.invoke") {
@@ -364,6 +748,21 @@ export class PluginHostBridge {
       await this.api.sendBinary(this.plugin.manifest.id, channel, requireBase64(input.dataBase64));
       return null;
     }
+    if (method === "host.mediaOpen") {
+      if (!this.api.openMedia || !this.api.closeMedia) throw new Error("Host media URLs are unavailable");
+      const input = requireRecord(params, "media params");
+      const backendMethod = requireProtocolName(input.method, "media backend method");
+      const backendParams = requireRecord(input.params, "media backend params");
+      const token = await this.api.openMedia(this.plugin.manifest.id, backendMethod, backendParams);
+      this.mediaTokens.add(token);
+      return { token };
+    }
+    if (method === "host.mediaClose") {
+      const input = requireRecord(params, "media close params");
+      const token = requireProtocolName(input.token, "media token");
+      if (this.mediaTokens.delete(token)) await this.api.closeMedia?.(this.plugin.manifest.id, token);
+      return null;
+    }
     if (method === "ui.readAsset") {
       const input = requireRecord(params, "ui.readAsset params");
       return this.api.readAsset(this.plugin.manifest.id, requireSafeAssetPath(input.path));
@@ -372,14 +771,29 @@ export class PluginHostBridge {
       this.requirePermission("host.workbench");
       if (!this.api.openWorkbench) throw new Error("Host workbench navigation is unavailable");
       const input = requireRecord(params, "host.openWorkbench params");
-      await this.api.openWorkbench(this.plugin.manifest.id, requireProtocolName(input.contributionId, "workbench contribution"), isRecord(input.context) ? input.context : undefined, { forceNew: input.forceNew === true });
+      // `target: "tab"` lets a dock-hosted webview ask for a main-workbench
+      // tab instead of another dock entry (e.g. the SSH dock's "open session
+      // in tab" button). Surfaces that ignore it keep the old behavior, so
+      // older handlers stay compatible.
+      await this.api.openWorkbench(this.plugin.manifest.id, requireProtocolName(input.contributionId, "workbench contribution"), isRecord(input.context) ? input.context : undefined, { forceNew: input.forceNew === true, target: input.target === "tab" ? "tab" : undefined });
       return null;
+    }
+    if (method === "host.executeCommand") {
+      this.requirePermission("host.workbench");
+      if (!this.api.executeCommand) throw new Error("Host command execution is unavailable");
+      const input = requireRecord(params, "host.executeCommand params");
+      return (await this.api.executeCommand(this.plugin.manifest.id, requireProtocolName(input.commandId, "command id"), isRecord(input.context) ? input.context : undefined)) ?? {};
     }
     if (method === "host.reopenConnection") {
       if (!this.api.reopenConnection) throw new Error("Connection reopen is unavailable");
       const input = requireRecord(params, "host.reopenConnection params");
       await this.api.reopenConnection(this.plugin.manifest.id, requireProtocolName(input.connectionId, "connectionId"));
       return { ok: true };
+    }
+    if (method === "host.listConnections") {
+      this.requirePermission("host.workbench");
+      if (!this.api.listConnections) throw new Error("Connection enumeration is unavailable on this host");
+      return this.api.listConnections(this.plugin.manifest.id);
     }
     if (method === "host.openFilesystem") {
       this.requirePermission("host.filesystem");
@@ -398,6 +812,31 @@ export class PluginHostBridge {
       this.requirePermission(PLUGIN_PLAN_PERMISSION);
       if (!this.api.explainPlan) throw new Error("Host plan API is unavailable");
       return this.api.explainPlan(requirePluginPlanRequest(requireRecord(params, "host.explainPlan params")));
+    }
+    if (method === "host.getTableMetadata") {
+      this.requirePermission(PLUGIN_SCHEMA_METADATA_PERMISSION);
+      if (!this.api.getTableMetadata) throw new Error("Host schema metadata API is unavailable");
+      return this.api.getTableMetadata(requirePluginTableContext(requireRecord(params, "host.getTableMetadata params")));
+    }
+    if (method === "host.queryData") {
+      this.requirePermission(PLUGIN_DATA_READ_PERMISSION);
+      if (!this.api.queryData) throw new Error("Host data API is unavailable");
+      const request = requirePluginDataQueryRequest(requireRecord(params, "host.queryData params"));
+      await this.ensureDataAccess(request.connectionId);
+      if (this.inFlightDataQueries >= MAX_CONCURRENT_PLUGIN_DATA_QUERIES) {
+        throw new Error(`At most ${MAX_CONCURRENT_PLUGIN_DATA_QUERIES} data queries may run at once; wait for one to finish`);
+      }
+      this.inFlightDataQueries += 1;
+      try {
+        return await this.api.queryData(this.plugin.manifest.id, request);
+      } catch (error) {
+        // The grant was revoked while this workbench stayed open: forget the
+        // cached answer so the next query asks the user again.
+        if ((error instanceof Error ? error.message : String(error)).includes(PLUGIN_DATA_ACCESS_NOT_GRANTED)) this.dataAccess.delete(request.connectionId);
+        throw error;
+      } finally {
+        this.inFlightDataQueries -= 1;
+      }
     }
     if (method === "host.saveFile") {
       const input = isRecord(params) ? params : {};
@@ -422,6 +861,32 @@ export class PluginHostBridge {
       if (!this.api.copyText) throw new Error("Host clipboard is unavailable");
       await this.api.copyText(this.plugin.manifest.id, input.text);
       return { success: true };
+    }
+    if (method === "host.clipboardRead") {
+      // Reads are the sensitive half of the clipboard surface: the payload is
+      // user data heading into plugin code, so the manifest must declare
+      // `host.clipboard:read` (writes stay on ungated host.copy).
+      this.requirePermission("host.clipboard:read");
+      if (!this.api.clipboardRead) throw new Error("Host clipboard read is unavailable");
+      const now = await this.requireClipboardRead();
+      const text = await this.api.clipboardRead(this.plugin.manifest.id);
+      if (typeof text !== "string") throw new Error("Host clipboard read returned a non-string value");
+      const clamped = text.length > MAX_BRIDGE_PAYLOAD_BYTES ? text.slice(0, MAX_BRIDGE_PAYLOAD_BYTES) : text;
+      recordClipboardRead(this.clipboardReadGate, now, "granted", clamped.length);
+      return { text: clamped };
+    }
+    if (method === "host.clipboardReadImage") {
+      this.requirePermission("host.clipboard:read");
+      if (!this.api.clipboardReadImage) throw new Error("Host clipboard image read is unavailable");
+      const now = await this.requireClipboardRead();
+      const image = await this.api.clipboardReadImage(this.plugin.manifest.id);
+      if (image.contentType !== "image/png" || !Number.isSafeInteger(image.width) || image.width <= 0 || !Number.isSafeInteger(image.height) || image.height <= 0) {
+        throw new Error("Host clipboard image returned invalid metadata");
+      }
+      const dataBase64 = requireBase64(image.dataBase64);
+      if (dataBase64.length > MAX_CLIPBOARD_IMAGE_BASE64_BYTES) throw new Error("Clipboard image exceeds the 18 MiB upload limit");
+      recordClipboardRead(this.clipboardReadGate, now, "granted", Math.floor(dataBase64.length * 0.75));
+      return { ...image, dataBase64 };
     }
     if (method === "host.pickFiles") {
       // Same trust level as host.saveFile: the bytes only flow after the user
@@ -494,11 +959,102 @@ export class PluginHostBridge {
       await this.api.storageDelete(this.plugin.manifest.id, requireStorageKey(input.key));
       return null;
     }
+    if (method === "host.openFloating") {
+      // A floating window is a workbench surface in its own right, so it shares
+      // the workbench permission gate instead of introducing a new one.
+      this.requirePermission("host.workbench");
+      if (!this.api.openFloatingWindow) throw new Error("Floating plugin windows require the desktop host");
+      const request = parseFloatingWindowRequest(this.plugin.manifest.id, requireRecord(params, "host.openFloating params"));
+      if (!this.ownWorkbenchContributionIds().has(request.contributionId)) throw new Error("Unknown workbench contribution");
+      return this.api.openFloatingWindow(request);
+    }
+    if (method === "host.closeFloating") {
+      if (!this.api.closeFloatingWindows) throw new Error("Floating plugin windows require the desktop host");
+      const input = isRecord(params) ? params : {};
+      const contributionId = optionalTrimmedString(input.contributionId);
+      const own = this.ownWorkbenchContributionIds();
+      if (contributionId && !own.has(contributionId)) throw new Error("Unknown workbench contribution");
+      // Without an explicit contribution every floating window of this plugin
+      // closes; labels are host-derived, so a plugin can never reach another
+      // plugin's window (or the main shell) through this path.
+      const contributionIds = contributionId ? [contributionId] : [...own];
+      await this.api.closeFloatingWindows(contributionIds.map((id) => floatingWindowLabel(this.plugin.manifest.id, id)));
+      return null;
+    }
+    if (method === "host.beginFloatingDrag") {
+      if (!this.api.beginFloatingDrag) throw new Error("Floating plugin windows require the desktop host");
+      await this.api.beginFloatingDrag();
+      return null;
+    }
+    if (method === "host.endFloatingDrag") {
+      if (!this.api.endFloatingDrag) throw new Error("Floating plugin windows require the desktop host");
+      const input = isRecord(params) ? params : {};
+      return (await this.api.endFloatingDrag(input.snap !== false)) ?? null;
+    }
+    if (method === "host.setFloatingSize") {
+      if (!this.api.setFloatingSize) throw new Error("Floating plugin windows require the desktop host");
+      const input = requireRecord(params, "host.setFloatingSize params");
+      const width = requireFloatingDimension(input.width, "width");
+      const height = requireFloatingDimension(input.height, "height");
+      await this.api.setFloatingSize(width, height);
+      return null;
+    }
     throw new Error(`Unsupported plugin host method '${method}'`);
+  }
+
+  /** The plugin's own declared workbench contributions — the only ones it may host in a floating window. */
+  private ownWorkbenchContributionIds(): Set<string> {
+    return new Set((this.plugin.manifest.contributions || []).filter((candidate) => candidate.type === "workbench").map((candidate) => candidate.id));
+  }
+
+  private async requireClipboardRead(): Promise<number> {
+    const now = Date.now();
+    if (!clipboardReadGateAllows(this.clipboardReadGate, now)) {
+      recordClipboardRead(this.clipboardReadGate, now, "rate-limited", 0);
+      throw new Error("Clipboard read rate limit exceeded; retry in a moment");
+    }
+    if (this.clipboardReadGate.consented === null) {
+      const answer = this.api.confirmClipboardRead ? await this.api.confirmClipboardRead(this.plugin.manifest.id, this.plugin.manifest.name) : false;
+      this.clipboardReadGate.consented = answer === true;
+      if (!this.clipboardReadGate.consented) {
+        recordClipboardRead(this.clipboardReadGate, now, "denied", 0);
+        throw new Error("Clipboard read was denied for this plugin session");
+      }
+    }
+    return now;
   }
 
   private requirePermission(permission: string): void {
     if (!this.hasPermission(permission)) throw new Error(`Plugin has not declared permission '${permission}'`);
+  }
+
+  /** Resolves once the user allowed this plugin to read `connectionId`; rejects on denial. */
+  private async ensureDataAccess(connectionId: string): Promise<void> {
+    const known = this.dataAccess.get(connectionId);
+    if (known === "granted") return;
+    if (known === "denied") throw new Error("Data access to this connection was denied for this plugin session");
+    let pending = this.pendingDataAccess.get(connectionId);
+    if (!pending) {
+      pending = this.requestDataAccess(connectionId).finally(() => this.pendingDataAccess.delete(connectionId));
+      this.pendingDataAccess.set(connectionId, pending);
+    }
+    await pending;
+  }
+
+  private async requestDataAccess(connectionId: string): Promise<void> {
+    const pluginId = this.plugin.manifest.id;
+    if (this.api.hasDataGrant && (await this.api.hasDataGrant(pluginId, connectionId))) {
+      this.dataAccess.set(connectionId, "granted");
+      return;
+    }
+    // A host that cannot ask denies; it never grants silently.
+    const allowed = this.api.confirmDataAccess && this.api.grantDataAccess ? (await this.api.confirmDataAccess(pluginId, this.plugin.manifest.name, connectionId)) === true : false;
+    if (!allowed || !this.api.grantDataAccess) {
+      this.dataAccess.set(connectionId, "denied");
+      throw new Error("Data access to this connection was denied");
+    }
+    await this.api.grantDataAccess(pluginId, connectionId);
+    this.dataAccess.set(connectionId, "granted");
   }
 
   private hasPermission(permission: string): boolean {
@@ -533,23 +1089,32 @@ export function pluginNetworkOrigins(permissions: readonly string[] | undefined)
 
 export interface PluginSandboxOptions {
   /**
-   * Base URL under which the workbench document may fetch further plugin UI
-   * assets (code-split chunks, fonts) — `dbx-plugin://localhost/<id>/assets/`
-   * on native custom schemes, `http(s)://dbx-plugin.localhost/<id>/assets/`
-   * where WebView2 maps the scheme to an http subdomain. Injected as the
-   * document `<base>` and allowed in the resource CSP directives. Omit on
-   * hosts without the plugin asset protocol (the web host).
+   * Base URL for plugin UI resources resolved relative to the srcdoc document
+   * (for example, inlined CSS `url()` references) — `dbx-plugin://localhost/<id>/`
+   * on native custom schemes, `http(s)://dbx-plugin.localhost/<id>/` where
+   * WebView2 maps the scheme to an http subdomain. Injected as the document
+   * `<base>` and allowed in resource CSP directives. External module imports
+   * resolve from their own preserved URLs. Omit on hosts without the plugin
+   * asset protocol (the web host).
    */
   baseUrl?: string;
+  /**
+   * Adds `'unsafe-eval'` to `script-src`. WebGL graphics engines codegen their
+   * uniform sync with `new Function` and refuse to initialize without it, so
+   * the user grants this per plugin (see `pluginGraphicsEngine.ts`). Off by
+   * default: the sandbox stays eval-free for every other plugin.
+   */
+  allowUnsafeEval?: boolean;
 }
 
 export function pluginSandboxDocument(html: string, permissions?: readonly string[], theme?: PluginBridgeTheme, options?: PluginSandboxOptions): string {
   const networkOrigins = pluginNetworkOrigins(permissions);
   const connectSrc = networkOrigins.length > 0 ? `connect-src ${networkOrigins.join(" ")};` : "connect-src 'none';";
   const assetSource = pluginAssetCspSource(options?.baseUrl);
-  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:${assetSource}; style-src 'unsafe-inline' blob:; img-src data: blob:${assetSource}; font-src data: blob:${assetSource}; ${connectSrc} media-src data: blob:${assetSource};">`;
-  // <base> must precede every relative URL the document resolves (inlined CSS
-  // url(), dynamic import specifiers), so it leads the injection.
+  const scriptSrc = options?.allowUnsafeEval ? "script-src 'unsafe-inline' 'unsafe-eval'" : "script-src 'unsafe-inline'";
+  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; ${scriptSrc} blob:${assetSource}; style-src 'unsafe-inline' blob:; img-src data: blob:${assetSource}; font-src data: blob:${assetSource}; ${connectSrc} media-src data: blob:${assetSource};">`;
+  // <base> must precede relative URLs resolved from the srcdoc itself (such as
+  // inlined CSS url() references), so it leads the injection.
   const base = options?.baseUrl && assetSource ? `<base href="${escapeHtmlAttribute(options.baseUrl)}">` : "";
   const sdk = `<script>${pluginSdkSource(theme)}</script>`;
   const uiKit = `<style>${pluginUiKitCss()}</style>`;
@@ -686,8 +1251,9 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     .replace(/\u2029/g, "\\u2029");
   return `(() => {
     const pending = new Map();
-    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set() };
+    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set() };
     let sequence = 0;
+    let contributionId;
     let context;
     let locale = 'en';
     let theme;
@@ -789,6 +1355,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     };
     window.dbxPlugin = Object.freeze({
       ready,
+      get contributionId() { return contributionId; },
       get context() { return context; },
       get locale() { return locale; },
       get theme() { return theme; },
@@ -796,7 +1363,22 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       downloadFile: (options) => request('host.downloadFile', options),
       cancelDownload: (downloadId) => request('host.cancelDownload', { downloadId }),
       request,
-      ai: Object.freeze({ openConversation: (options) => request('host.ai.openConversation', options) }),
+      ai: Object.freeze({
+        listProviders: () => request('host.ai.listProviders'),
+        discoverModels: (configId) => request('host.ai.discoverModels', {configId}),
+        listModels: () => request('host.ai.listModels'),
+        generateText: (options) => request('host.ai.generateText', options),
+        // E1 streaming: chunk events arrive as host.ai.generationChunk, filter
+        // them by options.requestId via onEvent; the promise resolves with the
+        // full text when the stream finishes. Gate on capabilities.aiCompletionStream.
+        generateTextStream: (options) => request('host.ai.generateTextStream', options),
+        // Cancels one active streamed generation by its requestId; resolves
+        // { cancelled: boolean } and only ever touches this workbench's streams.
+        cancelGeneration: (requestId) => request('host.ai.cancelGeneration', { requestId }),
+        openConversation: (options) => request('host.ai.openConversation', options),
+        setRecommendations: (update) => request('host.ai.setRecommendations', update),
+        clearRecommendations: () => request('host.ai.clearRecommendations'),
+      }),
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
       stream,
       notify: (method, params) => request('backend.notify', { method, params }),
@@ -810,13 +1392,50 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         const asset = await request('ui.readAsset', { path });
         return URL.createObjectURL(new Blob([decode(asset.dataBase64)], { type: asset.contentType }));
       },
-      openWorkbench: (contributionId, childContext, options) => request('host.openWorkbench', { contributionId, context: childContext, forceNew: !!(options && options.forceNew) }),
+      openWorkbench: (contributionId, childContext, options) => request('host.openWorkbench', { contributionId, context: childContext, forceNew: !!(options && options.forceNew), target: options && options.target === "tab" ? "tab" : undefined }),
+      // Closes whatever surface hosts this plugin UI — a workbench tab, a dock
+      // entry, or this plugin's floating window. Same path as the Ctrl+W
+      // shortcut, so a plugin can offer its own close/minimize affordance.
+      closeWorkbench: () => parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'shortcut', shortcut: 'closeTab' }, '*'),
+      // Floating desktop widget windows (the "window" surface): a frameless,
+      // always-on-top window that stays visible over other applications. Gate on
+      // capabilities.floating — a web host, or a desktop host without window
+      // support, omits it and the plugin should fall back to tab or dock.
+      //
+      // Dragging is split by design: the plugin decides WHEN a drag starts
+      // (thresholds, which element is a grip) and the host owns the movement —
+      // beginDrag hands the window to the OS move loop, and the host snaps it
+      // onto the work-area edges and remembers the spot once the loop goes
+      // quiet. Per-move coordinates are deliberately not part of the protocol:
+      // once the window follows the pointer, the webview's pointer capture is
+      // cancelled and the move stream dies mid-drag.
+      floating: Object.freeze({
+        open: (options) => request('host.openFloating', options || {}),
+        close: (contributionId) => request('host.closeFloating', { contributionId }),
+        beginDrag: () => request('host.beginFloatingDrag'),
+        endDrag: (options) => request('host.endFloatingDrag', options || {}),
+        setSize: (width, height) => request('host.setFloatingSize', { width, height }),
+      }),
+      // §4/§5 command execution from a webview — the same registry path a menu
+      // placement takes (enablement, §4.1 reuse, host-authored context),
+      // scoped to the plugin's own declared commands. The optional context
+      // merges over the command context and scopes instance_key placeholders
+      // (e.g. one panel per connection). Resolves { error } for expected
+      // business outcomes so callers can surface a notice without try/catch.
+      // NOTE: this block is the sandbox bootstrap template source — comments
+      // here must not contain backticks or dollar-brace interpolation.
+      executeCommand: (commandId, context) => request('host.executeCommand', { commandId, context }),
       openFilesystem: (providerId, childContext) => request('host.openFilesystem', { providerId, context: childContext }),
       reopenConnection: (connectionId) => request('host.reopenConnection', { connectionId }),
       // Estimated plans only: mode must be sent explicitly so a plugin states
       // its intent, and the host refuses anything other than "estimated".
       getPlanCapabilities: (connectionId) => request('host.getPlanCapabilities', { connectionId }),
       explainPlan: (planRequest) => request('host.explainPlan', planRequest),
+      // Read-only metadata; the host enforces the permission and open-session gate.
+      getTableMetadata: (tableContext) => request('host.getTableMetadata', tableContext),
+      // One read-only statement on a connection the user granted to this
+      // plugin (host.data:read); the first query per connection asks the user.
+      queryData: (dataRequest) => request('host.queryData', dataRequest),
       saveFile: (options = {}, data) => {
         if (data === undefined) return request('host.saveFile', options);
         if (typeof data === 'string') return request('host.saveFile', { ...(options || {}), dataBase64: data });
@@ -824,6 +1443,27 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return request('host.saveFile', options, { transfer: bytes });
       },
       copy: (text) => request('host.copy', { text }),
+      // System clipboard surface: writeText rides the ungated host.copy path,
+      // readText is served by host.clipboardRead and requires the plugin to
+      // declare the host.clipboard:read permission (the bridge rejects
+      // otherwise, and capabilities.clipboardRead advertises support).
+      clipboard: Object.freeze({
+        writeText: (text) => request('host.copy', { text }),
+        readText: async () => {
+          const result = await request('host.clipboardRead');
+          return (result && typeof result === 'object' && typeof result.text === 'string') ? result.text : '';
+        },
+        readImage: async () => request('host.clipboardReadImage'),
+      }),
+      media: Object.freeze({
+        open: async (method, params) => {
+          const result = await request('host.mediaOpen', { method, params });
+          const token = result && typeof result === 'object' && typeof result.token === 'string' ? result.token : '';
+          if (!token) throw new Error('Host returned an invalid media token');
+          return { token, url: new URL('__media/' + encodeURIComponent(token), document.baseURI).href };
+        },
+        close: (token) => request('host.mediaClose', { token }),
+      }),
       // Persistent per-plugin key-value state; gate on capabilities.storage
       // (older hosts omit it) and declare the host.storage permission.
       storage: Object.freeze({
@@ -839,8 +1479,11 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
           if (typeof data === 'string') return request('host.writeFileChunk', { handleId, offset, dataBase64: data });
           // A Uint8Array can be a view into a larger buffer — transferring
           // .buffer blindly would send bytes outside the view. Copy the
-          // visible range into a standalone buffer first.
-          const bytes = data instanceof ArrayBuffer ? data : new Uint8Array(data instanceof Uint8Array ? data.slice().buffer : new Uint8Array(data).buffer);
+          // visible range into a standalone ArrayBuffer first: the transfer
+          // list only accepts ArrayBuffer/MessagePort (a Uint8Array view is
+          // rejected by the engine with "Value at index 0 does not have a
+          // transferable type", which failed every fileTransfer.write).
+          const bytes = data instanceof ArrayBuffer ? data : (data instanceof Uint8Array ? data.slice().buffer : new Uint8Array(data).buffer);
           return request('host.writeFileChunk', { handleId, offset }, { transfer: bytes });
         },
         finish: (handleId) => request('host.finishFileSave', { handleId }),
@@ -852,6 +1495,13 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
       onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },
       onInit: (listener) => { listeners.init.add(listener); if (context !== undefined) listener(context); return () => listeners.init.delete(listener); },
+      // §8.3 workbench/close handshake: the host sends workbench/close before
+      // tearing the webview down; the plugin releases its workbench scope (PTY
+      // sessions, subscriptions) in the listeners and the SDK acks once every
+      // listener has settled. The host bounds the wait on its side.
+      workbench: Object.freeze({
+        onClose: (listener) => { listeners.close.add(listener); return () => listeners.close.delete(listener); },
+      }),
       decodeBase64: decode,
       encodeBase64: encode,
     });
@@ -864,6 +1514,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         pending.delete(message.id);
         if (message.error) handler.reject(new Error(message.error)); else handler.resolve(message.result);
       } else if (message.type === 'init') {
+        contributionId = message.contributionId;
         capabilities = message.capabilities || {};
         context = message.context;
         locale = typeof message.locale === 'string' ? message.locale : 'en';
@@ -892,12 +1543,21 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         document.dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: payload }));
       } else if (message.type === 'filedrop') {
         const files = Array.isArray(message.files) ? message.files : [];
-        listeners.filedrop.forEach((listener) => listener(files));
-        document.dispatchEvent(new CustomEvent('dbx-plugin-filedrop', { detail: files }));
+        // The drop metadata rides as a second listener argument so existing
+        // single-parameter listeners keep working unchanged.
+        const drop = { dropId: typeof message.dropId === 'string' ? message.dropId : undefined, truncated: message.truncated === true };
+        listeners.filedrop.forEach((listener) => listener(files, drop));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-filedrop', { detail: { files, drop } }));
       } else if (message.type === 'dragstate') {
         const active = message.active === true;
         listeners.dragstate.forEach((listener) => listener(active));
         document.dispatchEvent(new CustomEvent('dbx-plugin-dragstate', { detail: active }));
+      } else if (message.type === 'workbench/close') {
+        const notifyClose = (listener) => Promise.resolve().then(listener).catch(() => undefined);
+        Promise.allSettled([...listeners.close].map(notifyClose)).finally(() => {
+          const workbenchId = context && typeof context.workbenchId === 'string' ? context.workbenchId : '';
+          parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'workbench/close-ack', workbenchId }, '*');
+        });
       }
     });
     addEventListener('keydown', (event) => {
@@ -907,7 +1567,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       event.stopPropagation();
       parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'shortcut', shortcut: 'closeTab' }, '*');
     }, true);
-    parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'ready' }, '*');
+    parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'ready', features: ['workbench.close'] }, '*');
   })();`;
 }
 
@@ -918,6 +1578,12 @@ function validRequestMessage(value: Record<string, unknown>): value is Record<st
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (!isRecord(value)) throw new Error(`${label} must be an object`);
   return value;
+}
+
+/** A host-owned AI task preset (E3): the enum is closed, so unknown values fail here. */
+function requirePluginAiTask(value: unknown): PluginAiTask {
+  if (typeof value !== "string" || !PLUGIN_AI_TASKS.includes(value as PluginAiTask)) throw new Error("Invalid AI task");
+  return value as PluginAiTask;
 }
 
 function requireProtocolName(value: unknown, label: string): string {
@@ -945,6 +1611,34 @@ function optionalPluginPlanScope(value: unknown, label: string): string | undefi
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string") throw new Error(`${label} must be a string`);
   return value.trim() ? requirePluginPlanIdentifier(value, label) : undefined;
+}
+
+function requirePluginTableContext(input: Record<string, unknown>): PluginTableContext {
+  const context: PluginTableContext = {
+    connectionId: requirePluginSchemaMetadataIdentifier(input.connectionId, "connectionId"),
+    table: requirePluginSchemaMetadataIdentifier(input.table, "table"),
+  };
+  const database = optionalPluginSchemaMetadataIdentifier(input.database, "database");
+  const schema = optionalPluginSchemaMetadataIdentifier(input.schema, "schema");
+  if (database !== undefined) context.database = database;
+  if (schema !== undefined) context.schema = schema;
+  return context;
+}
+
+function requirePluginSchemaMetadataIdentifier(value: unknown, label: string): string {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  const identifier = value.trim();
+  if (!identifier) throw new Error(`${label} must not be empty`);
+  if (Array.from(identifier).length > MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS) {
+    throw new Error(`${label} must be at most ${MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS} characters`);
+  }
+  return identifier;
+}
+
+function optionalPluginSchemaMetadataIdentifier(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  return value.trim() ? requirePluginSchemaMetadataIdentifier(value, label) : undefined;
 }
 
 /**
@@ -977,6 +1671,42 @@ function requirePluginPlanRequest(input: Record<string, unknown>): PluginPlanReq
   return request;
 }
 
+/**
+ * Validates one `host.queryData` request: a connection reference, optional
+ * scope, one SQL text, and optional bounds. The backend re-checks every bound
+ * and owns the read-only decision; this only refuses malformed input early.
+ */
+function requirePluginDataQueryRequest(input: Record<string, unknown>): PluginDataQueryRequest {
+  if (typeof input.sql !== "string") throw new Error("host.queryData requires sql");
+  const sql = input.sql.trim();
+  if (!sql) throw new Error("host.queryData requires a non-empty sql");
+  if (sql.length > MAX_PLUGIN_DATA_SQL_CHARS) throw new Error(`sql must be at most ${MAX_PLUGIN_DATA_SQL_CHARS} characters`);
+  const request: PluginDataQueryRequest = { connectionId: requirePluginDataName(input.connectionId, "connectionId"), sql };
+  for (const key of ["database", "schema"] as const) {
+    const value = input[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "string") throw new Error(`${key} must be a string`);
+    if (value.trim()) request[key] = requirePluginDataName(value, key);
+  }
+  if (input.maxRows !== undefined && input.maxRows !== null) {
+    if (typeof input.maxRows !== "number" || !Number.isFinite(input.maxRows)) throw new Error("maxRows must be a number");
+    request.maxRows = Math.min(MAX_PLUGIN_DATA_MAX_ROWS, Math.max(1, Math.floor(input.maxRows)));
+  }
+  if (input.timeoutMs !== undefined && input.timeoutMs !== null) {
+    if (typeof input.timeoutMs !== "number" || !Number.isFinite(input.timeoutMs)) throw new Error("timeoutMs must be a number");
+    request.timeoutMs = Math.min(MAX_PLUGIN_DATA_TIMEOUT_MS, Math.max(1, Math.round(input.timeoutMs)));
+  }
+  return request;
+}
+
+function requirePluginDataName(value: unknown, label: string): string {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  const name = value.trim();
+  if (!name) throw new Error(`${label} must not be empty`);
+  if (Array.from(name).length > MAX_PLUGIN_DATA_NAME_CHARS) throw new Error(`${label} must be at most ${MAX_PLUGIN_DATA_NAME_CHARS} characters`);
+  return name;
+}
+
 /** Pre-clamps to the host ceiling; the backend additionally clamps to the connection's own timeout. */
 function clampPluginPlanTimeout(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("timeoutMs must be a number");
@@ -986,6 +1716,29 @@ function clampPluginPlanTimeout(value: unknown): number {
 function requireHandleId(value: unknown): string {
   if (typeof value !== "string" || !value || value.length > 128) throw new Error("handleId is invalid");
   return value;
+}
+
+function requirePluginAiRecommendationUpdate(value: unknown): PluginAiRecommendationUpdate {
+  const input = requireRecord(value, "AI recommendation update");
+  if (!isRecord(input.context)) throw new Error("AI recommendation context must be an object");
+  if (!Array.isArray(input.items)) throw new Error("AI recommendation items must be an array");
+  if (input.items.length > 5) throw new Error("At most 5 AI recommendations may be registered");
+  const context = snapshotPluginWorkbenchContext(input.context) as PluginAiRecommendationContext;
+  const items = input.items.map((candidate, index) => {
+    if (!isRecord(candidate)) throw new Error(`AI recommendation ${index} must be an object`);
+    if (typeof candidate.id !== "string" || !candidate.id.trim()) throw new Error(`AI recommendation ${index} requires id`);
+    if (typeof candidate.label !== "string" || !candidate.label.trim() || candidate.label.length > 200) throw new Error(`AI recommendation ${index} label is invalid`);
+    if (typeof candidate.prompt !== "string" || !candidate.prompt.trim() || candidate.prompt.length > 32000) throw new Error(`AI recommendation ${index} prompt is invalid`);
+    if (!isValidPluginAiRecommendationTemplate(candidate.label) || !isValidPluginAiRecommendationTemplate(candidate.prompt)) throw new Error(`AI recommendation ${index} contains an invalid placeholder`);
+    if (candidate.order !== undefined && (typeof candidate.order !== "number" || !Number.isFinite(candidate.order))) throw new Error(`AI recommendation ${index} order is invalid`);
+    return {
+      id: candidate.id.trim(),
+      label: candidate.label.trim(),
+      prompt: candidate.prompt.trim(),
+      ...(candidate.order === undefined ? {} : { order: candidate.order }),
+    };
+  });
+  return { context, items };
 }
 
 function requireOffset(value: unknown): number {
@@ -1003,6 +1756,12 @@ function requireStorageKey(value: unknown): string {
   if (typeof value !== "string" || !value || value.length > MAX_PLUGIN_STORAGE_KEY_CHARS || /[\u0000-\u001f]/.test(value)) {
     throw new Error("storage key is invalid");
   }
+  return value;
+}
+
+/** A floating window dimension in logical pixels; the host clamps it to its own bounds. */
+function requireFloatingDimension(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error(`${label} must be a positive number`);
   return value;
 }
 

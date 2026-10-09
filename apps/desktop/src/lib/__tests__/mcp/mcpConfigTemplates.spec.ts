@@ -1,7 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpDeepSeekHarnessConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpQoderConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, buildMcpWorkBuddyConfig, mcpWebBackendUrl } from "@/lib/mcp/mcpConfigTemplates";
+import {
+  buildMcpCherryStudioConfig,
+  buildMcpCodexConfig,
+  buildMcpDeepSeekHarnessConfig,
+  buildMcpJsonConfig,
+  buildMcpOpenCodeConfig,
+  buildMcpPiConfig,
+  buildMcpQoderConfig,
+  buildMcpTraeConfig,
+  buildMcpVsCodeConfig,
+  buildMcpWorkBuddyConfig,
+  mcpWebBackendUrl,
+  preferMcpNativeLaunch,
+} from "@/lib/mcp/mcpConfigTemplates";
 
 describe("MCP config templates", () => {
+  it.each(["/Users/DBX User/.dbx/bin/dbx-mcp", "/home/dbx/.dbx/bin/dbx-mcp", "C:\\Users\\DBX User\\.dbx\\bin\\dbx-mcp.exe"])("prefers native launch for every client: %s", (binary) => {
+    const shim = { command: "node", args: ["/old/shim.js"], env: { DBX_DATA_DIR: "/custom/data" } };
+    const native = preferMcpNativeLaunch(shim, binary);
+    expect(native).toEqual({ command: binary, env: shim.env });
+    for (const builder of [buildMcpJsonConfig, buildMcpTraeConfig, buildMcpQoderConfig, buildMcpVsCodeConfig, buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpDeepSeekHarnessConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpWorkBuddyConfig]) {
+      const result = builder(native);
+      expect(result).toContain(JSON.stringify(binary));
+      expect(result).toContain("DBX_DATA_DIR");
+      expect(result).not.toContain("shim.js");
+    }
+    expect(preferMcpNativeLaunch(shim)).toBe(shim);
+    expect(preferMcpNativeLaunch(shim, "")).toBe(shim);
+    expect(preferMcpNativeLaunch()).toBeUndefined();
+  });
+
   it("builds the standard mcpServers JSON used by Claude, Cursor, TRAE, and Windsurf", () => {
     const config = JSON.parse(buildMcpJsonConfig());
 

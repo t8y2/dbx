@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 
 export const SITE_URL = "https://dbxio.com";
 export const SITE_NAME = "DBX";
-export const DEFAULT_DESCRIPTION = "DBX is a free, open-source database client for MySQL, PostgreSQL, SQLite, Redis and 90+ data systems, with SQL editing, AI assistance and Docker self-hosting.";
-export const DEFAULT_OG_IMAGE = "https://dl.dbxio.com/assets/readme-hero-20260820.png";
+export const DEFAULT_DESCRIPTION = "DBX is a free, open-source database client for MySQL, PostgreSQL, SQLite, Redis and 100+ data systems, with SQL editing, AI assistance and Docker self-hosting.";
+export const DEFAULT_OG_IMAGE = "https://dl.dbxio.com/assets/readme-hero-20260925.png";
 
 const LOCALE_MAP: Record<string, string> = {
   en: "en_US",

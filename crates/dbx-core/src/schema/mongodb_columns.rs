@@ -3,12 +3,23 @@ use std::collections::{BTreeMap, BTreeSet};
 use mongodb::bson::Bson;
 use serde_json::{json, Value};
 
-use crate::connection::AppState;
+use crate::connection::{AppState, PoolKind};
 use crate::db::mongo_driver::MongoDocumentResult;
 use crate::db::ColumnInfo;
 
 const SAMPLE_SIZE: usize = 100;
 const MAX_FIELDS: usize = 512;
+
+fn sample_command(collection: &str) -> Value {
+    json!({
+        "find": collection,
+        "filter": {},
+        "limit": SAMPLE_SIZE,
+        "batchSize": SAMPLE_SIZE,
+        "singleBatch": true,
+        "maxTimeMS": 5000,
+    })
+}
 
 pub(super) async fn get_columns(
     state: &AppState,
@@ -16,15 +27,24 @@ pub(super) async fn get_columns(
     database: &str,
     collection: &str,
 ) -> Result<Vec<ColumnInfo>, String> {
-    let command = json!({
-        "find": collection,
-        "filter": {},
-        "limit": SAMPLE_SIZE,
-        "batchSize": SAMPLE_SIZE,
-        "singleBatch": true,
-        "maxTimeMS": 5000,
-    });
-    let result = crate::mongo_ops::mongo_run_command_core(state, connection_id, database, &command.to_string()).await?;
+    let result = crate::mongo_ops::mongo_run_command_core(
+        state,
+        connection_id,
+        database,
+        &sample_command(collection).to_string(),
+    )
+    .await?;
+    columns_from_sample(&result)
+}
+
+pub(super) async fn get_columns_from_existing_pool(
+    pool: &PoolKind,
+    database: &str,
+    collection: &str,
+) -> Result<Vec<ColumnInfo>, String> {
+    let result =
+        crate::mongo_ops::mongo_run_command_with_existing_pool(pool, database, &sample_command(collection).to_string())
+            .await?;
     columns_from_sample(&result)
 }
 
@@ -68,6 +88,7 @@ fn columns_from_sample(result: &MongoDocumentResult) -> Result<Vec<ColumnInfo>, 
             enum_values: None,
             character_set: None,
             collation: None,
+            metadata_capabilities: None,
         })
         .collect())
 }

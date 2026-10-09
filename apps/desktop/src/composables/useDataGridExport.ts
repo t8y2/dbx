@@ -2,10 +2,13 @@ import { computed, type ComputedRef, type Ref, createApp } from "vue";
 import { useI18n } from "vue-i18n";
 import { useDataGridExtractor } from "@/composables/useDataGridExtractor";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { promptExportSavePath } from "@/lib/export/exportPath";
 import { saveTextFile, sanitizeExportBaseName, compactLocalTimestamp } from "@/lib/export/saveTextFile";
+import { notifyExportComplete } from "@/lib/export/exportReveal";
+import { dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import * as api from "@/lib/backend/api";
 import { type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
-import type { DataGridExtractRequest, DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridCopyExtractorId, type DataGridExtractRequest, type DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { useToast } from "@/composables/useToast";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { clipboardCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
@@ -15,11 +18,13 @@ import { clipboardLineEndings, copyToClipboard } from "@/lib/common/clipboard";
 import { clearDataGridClipboardCopy, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
 import { buildDataGridCopyInsertStatement, type DataGridCopyInsertMode, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { formatSqlInsert, formatTsv } from "@/lib/export/exportFormats";
-import { showSqlInsertModeDialog, type SqlExportOptions, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import { showSqlInsertModeDialog, type SqlExportColumnSelection, type SqlExportOptions, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import { resolveSqlExportColumnIndexes, sqlExportColumnChoices } from "@/lib/export/sqlExportColumns";
 import { summarizeExportRows } from "@/lib/export/exportDiagnostics";
 import { appendDebugLog, appendNativeProcessMemoryLog, getBrowserMemorySnapshot, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { uuid } from "@/lib/common/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import { expandNestedJsonStringsForCopy } from "@/lib/common/jsonCopyValue";
 import { buildMongoCopyDocumentFromOriginal, buildMongoCopyInsertDocument, buildMongoCopyUpdateDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { formatMongoShellText } from "@/lib/mongo/mongoFormatter";
@@ -28,7 +33,7 @@ import type { DatabaseType, QueryResult } from "@/types/database";
 import type { QueryResultExportRequest } from "@/lib/backend/api";
 import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { buildXlsxSqlWorksheet } from "@/lib/export/xlsxSqlSheet";
-import { forceCsvTextForTemporalColumns, formatTemporalRowsForExport } from "@/lib/dataGrid/columnFormatter";
+import { formatTemporalRowsForExport } from "@/lib/dataGrid/columnFormatter";
 import { translateBackendError } from "@/i18n/backend-errors";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import i18n from "@/i18n";
@@ -52,6 +57,23 @@ const FORMAT_META: Record<string, { ext: string; label: string }> = {
   sql: { ext: "sql", label: "SQL" },
   txt: { ext: "txt", label: "Text" },
 };
+
+export interface DataGridExportTarget {
+  rowIds?: number[];
+  columnIndexes?: number[];
+}
+
+export type ExportTargetParam = number[] | DataGridExportTarget;
+
+export function normalizeExportTarget(target?: ExportTargetParam, columnIndexesParam?: number[]): { rowIds?: number[]; columnIndexes?: number[] } {
+  if (Array.isArray(target)) {
+    return { rowIds: target, columnIndexes: columnIndexesParam };
+  }
+  return {
+    rowIds: target?.rowIds,
+    columnIndexes: columnIndexesParam ?? target?.columnIndexes,
+  };
+}
 
 interface RowItem {
   id: number;
@@ -80,9 +102,12 @@ export interface UseDataGridExportOptions {
   extractorOptions?: ComputedRef<DataGridExtractorOptions>;
   sql: ComputedRef<string | undefined>;
   exportSql?: ComputedRef<string | undefined>;
+  pageSql?: ComputedRef<string | undefined>;
   tableMeta: ComputedRef<DataGridTableMeta | undefined>;
-  /** Editor setting "Include database name in generated SQL" — passed through to SQL extractors. */
+  /** Editor setting "Include database name in generated SQL" — passed through to SQL extractors and INSERT exports. */
   includeDatabaseName?: ComputedRef<boolean>;
+  /** True only when query metadata resolves exactly one source table as the INSERT target. */
+  hasUniqueQueryInsertTarget?: ComputedRef<boolean>;
   copyInsertTargetLabel?: ComputedRef<string | undefined>;
   mongoUpdateTarget?: ComputedRef<MongoCopyUpdateTarget | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
@@ -122,6 +147,7 @@ export interface UseDataGridExportOptions {
     format: "csv" | "xlsx" | "json" | "txt" | "sql";
     includeSqlSheet?: boolean;
     exportTableName?: string;
+    exportSchema?: string;
     exportColumnTypes?: Array<string | null | undefined>;
     exportColumnExtras?: Array<string | null | undefined>;
     insertMode?: SqlInsertMode;
@@ -186,7 +212,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     extractorOptions: extractorOptionsOption,
     sql,
     exportSql: resultExportSql,
+    pageSql: resultPageSql,
     tableMeta,
+    hasUniqueQueryInsertTarget,
     copyInsertTargetLabel,
     sourceColumns,
     columnComments: columnCommentsOption,
@@ -339,10 +367,15 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  function normalizeCompleteLocalResult(result: QueryResult): { columns: string[]; columnTypes: string[]; columnComments: Array<string | undefined>; rows: CellValue[][]; mongoCopyDocuments?: unknown[] } {
+  function normalizeCompleteLocalResult(
+    result: QueryResult,
+    targetCols?: readonly string[],
+    sourceIndexesParam?: readonly number[],
+  ): { columns: string[]; columnTypes: string[]; columnComments: Array<string | undefined>; rows: CellValue[][]; mongoCopyDocuments?: unknown[]; spatialColumns?: QueryResult["spatial_columns"]; spatialValues?: QueryResult["spatial_values"] } {
     const editorSettings = useSettingsStore().editorSettings;
-    if (databaseType.value === "mongodb") {
-      const projected = projectResultColumns(result, columns.value);
+    const isSubset = targetCols !== undefined && (targetCols.length !== result.columns.length || !targetCols.every((col, i) => col === result.columns[i]));
+    if (databaseType.value === "mongodb" || isSubset) {
+      const projected = projectResultColumns(result, targetCols ?? columns.value, sourceIndexesParam);
       const rows = editorSettings.exportRowLimitEnabled ? projected.rows.slice(0, editorSettings.exportRowLimit) : projected.rows;
       return {
         columns: projected.columns,
@@ -350,6 +383,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         columnComments: commentsForExportColumns(projected.columns),
         rows,
         mongoCopyDocuments: result.mongo_copy_documents?.slice(0, rows.length),
+        spatialColumns: projected.spatialColumns,
+        spatialValues: projected.spatialValues?.slice(0, rows.length),
       };
     }
 
@@ -357,6 +392,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const exportedColumnIndexes = result.columns.map((_, index) => index).filter((index) => !hiddenColumnIndexes.has(index));
     const hasHiddenColumns = exportedColumnIndexes.length !== result.columns.length;
     const rows = editorSettings.exportRowLimitEnabled ? result.rows.slice(0, editorSettings.exportRowLimit) : result.rows;
+    const targetIndexBySource = new Map(exportedColumnIndexes.map((sourceIndex, index) => [sourceIndex, index]));
 
     // Internal key columns are query-only metadata. Keep every user column,
     // including columns hidden manually in the grid, while preserving alignment.
@@ -366,6 +402,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       columnComments: hasHiddenColumns ? exportedColumnIndexes.map((index) => allXlsxColumnComments.value[index]) : [...allXlsxColumnComments.value],
       rows: hasHiddenColumns ? rows.map((row) => exportedColumnIndexes.map((index) => row[index])) : rows,
       mongoCopyDocuments: result.mongo_copy_documents?.slice(0, rows.length),
+      spatialColumns: result.spatial_columns?.flatMap((column) => {
+        const columnIndex = targetIndexBySource.get(column.column_index);
+        return columnIndex === undefined ? [] : [{ ...column, column_index: columnIndex }];
+      }),
+      spatialValues: result.spatial_values?.slice(0, rows.length).map((row) => exportedColumnIndexes.map((index) => row[index] ?? null)),
     };
   }
 
@@ -382,6 +423,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   function projectResultColumns(
     result: QueryResult,
     targetColumns: readonly string[],
+    sourceIndexesParam?: readonly number[],
   ): {
     columns: string[];
     columnTypes: string[];
@@ -389,7 +431,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     spatialColumns?: QueryResult["spatial_columns"];
     spatialValues?: QueryResult["spatial_values"];
   } {
-    const sourceIndexes = targetColumns.map((column) => result.columns.indexOf(column));
+    // Name lookup resolves duplicate column names (e.g. SELECT a.id, b.id) to
+    // the first occurrence; prefer the caller's explicit source indexes.
+    const sourceIndexes = sourceIndexesParam?.length === targetColumns.length ? sourceIndexesParam.map((index) => (index >= 0 && index < result.columns.length ? index : -1)) : targetColumns.map((column) => result.columns.indexOf(column));
     const targetIndexBySource = new Map<number, number>();
     sourceIndexes.forEach((sourceIndex, targetIndex) => {
       if (sourceIndex >= 0) targetIndexBySource.set(sourceIndex, targetIndex);
@@ -406,25 +450,29 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     };
   }
 
-  function mongoLocalRowsForJson(items: RowItem[]): CellValue[][] {
+  function mongoLocalRowsForJson(items: RowItem[], targetCols: readonly string[] = columns.value): CellValue[][] {
     return items.map((item) => {
       const document = rowToJsonObject(item);
-      return columns.value.map((column) => (document[column] as CellValue) ?? null);
+      return targetCols.map((column) => (document[column] as CellValue) ?? null);
     });
   }
 
-  function externalizeRows(rows: CellValue[][]): CellValue[][] {
+  function externalizeRows(rows: CellValue[][], columnIndexes?: number[]): CellValue[][] {
+    if (columnIndexes) {
+      return rows.map((row) => columnIndexes.map((colIdx) => (options.externalCellValue ? options.externalCellValue(row[colIdx], colIdx) : row[colIdx])));
+    }
     if (!options.externalCellValue) return rows;
     return rows.map((row) => row.map((value, columnIndex) => options.externalCellValue!(value, columnIndex)));
   }
 
   async function resultToExport(
-    rowIds?: number[],
+    target?: ExportTargetParam,
     onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void,
     useFullExport = true,
     formatDateTime = true,
     headerMode: XlsxHeaderMode = "name",
     preserveMongoExtendedJson = false,
+    columnIndexesParam?: number[],
   ): Promise<{
     columns: string[];
     columnTypes: string[];
@@ -433,10 +481,20 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     spatialValues?: QueryResult["spatial_values"];
     rows: CellValue[][];
   }> {
+    const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
+    const hasColumnSubset = columnIndexes !== undefined;
+    const validColumnIndexes = hasColumnSubset ? columnIndexes.filter((index) => index >= 0 && index < columns.value.length) : columns.value.map((_, index) => index);
+    const targetColumns = validColumnIndexes.map((index) => columns.value[index]!);
+    const targetColumnTypes = (columnTypes.value ?? []).length === columns.value.length ? validColumnIndexes.map((index) => columnTypes.value?.[index] ?? "") : targetColumns.map(() => "");
+    const visibleSourceIndexes = visibleColumnIndexesOption?.value;
+    // Explicit source indexes are only meaningful when the grid maps visible
+    // columns to result positions; otherwise keep name-based resolution.
+    const projectionSourceIndexes = visibleSourceIndexes ? validColumnIndexes.map((targetIdx) => visibleSourceIndexes[targetIdx] ?? targetIdx) : undefined;
+
     if (useFullExport && rowIds === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
       const result = await fullExportResult(onProgress);
       if (result) {
-        const projected = databaseType.value === "mongodb" ? projectResultColumns(result, columns.value) : undefined;
+        const projected = databaseType.value === "mongodb" || hasColumnSubset ? projectResultColumns(result, targetColumns, projectionSourceIndexes) : undefined;
         const exportedColumns = projected?.columns ?? result.columns;
         const exportedColumnTypes = projected?.columnTypes ?? result.column_types ?? [];
         const exportedRows = projected?.rows ?? result.rows;
@@ -465,7 +523,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     // client-side filters/search and unsaved edits, which would silently
     // change what the export contains.
     if (useFullExport && rowIds === undefined && hasCompleteLocalResult?.value && completeLocalResult?.value) {
-      const normalized = normalizeCompleteLocalResult(completeLocalResult.value);
+      const normalized = hasColumnSubset || databaseType.value === "mongodb" ? normalizeCompleteLocalResult(completeLocalResult.value, targetColumns, projectionSourceIndexes) : normalizeCompleteLocalResult(completeLocalResult.value);
       const columnComments = buildXlsxHeaderOverrides(normalized.columns, normalized.columnComments, headerMode);
       return {
         ...applyGlobalDateTimeExportFormat(
@@ -473,27 +531,44 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           formatDateTime && !preserveMongoExtendedJson,
         ),
         columnComments,
-        spatialColumns: completeLocalResult.value.spatial_columns,
-        spatialValues: completeLocalResult.value.spatial_values,
+        spatialColumns: normalized.spatialColumns,
+        spatialValues: normalized.spatialValues,
       };
     }
-    const commentHeader = buildXlsxHeaderOverrides(columns.value, visibleXlsxColumnComments.value, headerMode);
+    const targetComments = commentsForExportColumns(targetColumns, false);
+    const commentHeader = buildXlsxHeaderOverrides(targetColumns, targetComments, headerMode);
     const exportItems = await resolveVisibleRowValues(rowsToExport(rowIds));
     const visibleIndexes = visibleColumnIndexesOption?.value ?? columns.value.map((_, index) => index);
-    const spatialColumns = spatialColumnsOption?.value?.map((column) => ({ column_index: visibleIndexes.indexOf(column.column_index), srid: column.srid })).filter((column) => column.column_index >= 0);
+    const targetSourceIndexes = validColumnIndexes.map((targetIdx) => visibleIndexes[targetIdx] ?? targetIdx);
+    const targetIndexBySource = new Map<number, number>();
+    targetSourceIndexes.forEach((sourceIdx, targetIdx) => {
+      targetIndexBySource.set(sourceIdx, targetIdx);
+    });
+    const spatialColumns = spatialColumnsOption?.value?.flatMap((column) => {
+      const targetIndex = targetIndexBySource.get(column.column_index);
+      return targetIndex === undefined ? [] : [{ column_index: targetIndex, srid: column.srid }];
+    });
     const spatialValues = spatialValuesOption?.value;
+    const mappedSpatialValues = spatialValues?.length ? exportItems.map((item) => targetSourceIndexes.map((sourceIdx) => spatialValues[item.sourceIndex ?? -1]?.[sourceIdx] ?? null)) : undefined;
+
     return {
       ...applyGlobalDateTimeExportFormat(
         {
-          columns: columns.value,
-          columnTypes: (columnTypes.value ?? []).map((type) => type ?? ""),
-          rows: preserveMongoExtendedJson && databaseType.value === "mongodb" ? mongoLocalRowsForJson(exportItems) : externalizeRows(exportItems.map((item) => item.data)),
+          columns: targetColumns,
+          columnTypes: targetColumnTypes,
+          rows:
+            preserveMongoExtendedJson && databaseType.value === "mongodb"
+              ? mongoLocalRowsForJson(exportItems, targetColumns)
+              : externalizeRows(
+                  exportItems.map((item) => item.data),
+                  validColumnIndexes,
+                ),
         },
         formatDateTime && !preserveMongoExtendedJson,
       ),
       columnComments: commentHeader,
       ...(spatialColumns?.length ? { spatialColumns } : {}),
-      ...(spatialValues?.length ? { spatialValues: exportItems.map((item) => visibleIndexes.map((index) => spatialValues[item.sourceIndex ?? -1]?.[index] ?? null)) } : {}),
+      ...(mappedSpatialValues?.length ? { spatialValues: mappedSpatialValues } : {}),
     };
   }
 
@@ -509,8 +584,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return resultExportSql?.value || sql.value;
   }
 
-  async function writeXlsxResult(outputPath: string, result: { columns: string[]; columnTypes: string[]; columnComments?: (string | null)[]; rows: CellValue[][] }, includeSqlSheet: boolean, autoFilter: boolean) {
-    const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet([{ sql: currentExportSql() || "" }]) : undefined;
+  function currentPageExportSql(): string | undefined {
+    return resultPageSql?.value || currentExportSql();
+  }
+
+  async function writeXlsxResult(outputPath: string, result: { columns: string[]; columnTypes: string[]; columnComments?: (string | null)[]; rows: CellValue[][] }, includeSqlSheet: boolean, autoFilter: boolean, sqlOverride?: string) {
+    const effectiveSql = sqlOverride ?? currentExportSql();
+    const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet([{ sql: effectiveSql || "" }]) : undefined;
     const rightAlign = useSettingsStore().editorSettings.numericColumnRightAlign;
     // The rows are already rendered with the global export pattern, but the
     // workbook still needs the pattern itself so its numFmt matches; without it
@@ -532,7 +612,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           numericColumnRightAlign: rightAlign,
           autoFilter,
         },
-        { ...sqlWorksheet, autoFilter },
+        { ...sqlWorksheet, autoFilter: false },
       ],
       autoFilter,
       dateTimeFormat,
@@ -764,7 +844,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  const { copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor } = useDataGridExtractor({
+  const { extractWithExtractor, copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor } = useDataGridExtractor({
     columns,
     displayItems,
     allColumns,
@@ -808,6 +888,15 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   // --- Export functions ---
+  function notifyExportSuccess(outputPath?: string | null) {
+    notifyExportComplete({
+      filePath: outputPath,
+      message: t("grid.exported"),
+      openFolderLabel: t("exportProgress.openFolder"),
+      toast,
+    });
+  }
+
   async function runExclusiveExport(action: () => Promise<void>) {
     const finish = tryStartExclusiveActivation(exportGuard);
     if (!finish) return;
@@ -818,11 +907,34 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
   }
 
-  async function exportCsv(rowIds?: number[]) {
+  async function exportWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = extractorOptionsOption?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): Promise<boolean> {
+    let exported = false;
+    await runExclusiveExport(async () => {
+      if (!canCopyWithExtractor(extractor, extractorOptions)) return;
+      try {
+        const extraction = await extractWithExtractor(extractor, extractorOptions);
+        if (!extraction) return;
+        const extension = extraction.result.fileExtension.replace(/^\.+/, "") || "txt";
+        const baseName = `${exportFileBaseName?.value || tableMeta.value?.tableName || "export"}_selected`;
+        const saved = await saveTextFile(extraction.result.text, exportFileName(baseName, extension, { preferFallback: true }), extension.toUpperCase(), extension, {
+          operation: `selection-extractor-${extractor}`,
+        });
+        if (!saved) return;
+        notifyExportSuccess(typeof saved === "string" ? saved : undefined);
+        exported = true;
+      } catch (e: any) {
+        toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
+      }
+    });
+    return exported;
+  }
+
+  async function exportCsv(target?: ExportTargetParam, columnIndexesParam?: number[]) {
+    const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     await runExclusiveExport(async () => {
       try {
-        if (await exportQueryResultViaBackend("csv", rowIds)) return;
-        if (await exportFullTableDataViaBackend("csv", rowIds)) return;
+        if (await exportQueryResultViaBackend("csv", rowIds, false, "name", true, undefined, false, columnIndexes)) return;
+        if (await exportFullTableDataViaBackend("csv", rowIds, "name", true, undefined, false, columnIndexes)) return;
 
         const needsFullExport = rowIds === undefined && !!fullExportResult && !hasCompleteLocalResult?.value;
         if (needsFullExport && exportProgressDialog && exportProgressState) {
@@ -840,7 +952,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           };
           exportProgressDialog.value = true;
         }
-        const result = await resultToExport(rowIds, (info) => {
+        const result = await resultToExport({ rowIds, columnIndexes }, (info) => {
           if (needsFullExport && exportProgressState && exportProgressState.value.status === "Running") {
             // Guard against the COUNT estimate being too low: if the real
             // fetched count exceeds it, bump totalRows so the progress bar
@@ -853,13 +965,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             };
           }
         });
-        // Hand the raw rows straight to the Rust command. Formatting (NULL→"",
-        // bool/number→text, etc.) happens there on a spawn_blocking thread, so
-        // we avoid mapping every cell synchronously on the UI thread. Temporal
-        // columns are the one exception: force-text them here (see
-        // forceCsvTextForTemporalColumns) so WPS/Excel-style CSV import can't
-        // re-guess and truncate/reformat a date-looking string.
-        const rows = forceCsvTextForTemporalColumns(result.rows, result.columnTypes);
+        // Let the Rust command format and write the raw values off the UI thread.
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
@@ -870,18 +976,18 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         }
         let outputPath = exportFileName("export", "csv");
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
+          const path = await promptExportSavePath({
+            defaultFileName: outputPath,
             filters: [{ name: "CSV", extensions: ["csv"] }],
+            preferredPath: useSettingsStore().editorSettings.preferredExportPath,
           });
           if (!path) {
             if (exportProgressDialog) exportProgressDialog.value = false;
             return;
           }
-          outputPath = path as string;
+          outputPath = path;
         }
-        await api.exportQueryResultCsv(outputPath, result.columns, rows, useSettingsStore().editorSettings.csvQuoteMode);
+        await api.exportQueryResultCsv(outputPath, result.columns, result.rows, useSettingsStore().editorSettings.csvQuoteMode, csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode));
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
@@ -892,7 +998,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             finishedAt: Date.now(),
           };
         }
-        toast(t("grid.exported"));
+        notifyExportSuccess(outputPath);
       } catch (e: any) {
         if (exportProgressState) {
           exportProgressState.value = {
@@ -906,212 +1012,225 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  async function exportCurrentPageCsv() {
+  async function exportCurrentPageCsv(columnIndexes?: number[]) {
     await runExclusiveExport(async () => {
       try {
         let outputPath = exportFileName("export-page", "csv", { page: true });
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
+          const path = await promptExportSavePath({
+            defaultFileName: outputPath,
             filters: [{ name: "CSV", extensions: ["csv"] }],
+            preferredPath: useSettingsStore().editorSettings.preferredExportPath,
           });
           if (!path) return;
-          outputPath = path as string;
+          outputPath = path;
         }
-        const result = await resultToExport(undefined, undefined, false);
-        const rows = forceCsvTextForTemporalColumns(result.rows, result.columnTypes);
-        await api.exportQueryResultCsv(outputPath, result.columns, rows, useSettingsStore().editorSettings.csvQuoteMode);
-        toast(t("grid.exported"));
+        const result = await resultToExport({ columnIndexes }, undefined, false);
+        await api.exportQueryResultCsv(outputPath, result.columns, result.rows, useSettingsStore().editorSettings.csvQuoteMode, csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode));
+        notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
     });
   }
 
-  async function exportJson(rowIds?: number[]) {
+  async function exportJson(target?: ExportTargetParam, columnIndexesParam?: number[]) {
+    const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     await runExclusiveExport(async () => {
       try {
-        if (await exportFullTableDataViaBackend("json", rowIds)) return;
-        if (await exportQueryResultViaBackend("json", rowIds)) return;
+        if (await exportFullTableDataViaBackend("json", rowIds, "name", true, undefined, false, columnIndexes)) return;
+        if (await exportQueryResultViaBackend("json", rowIds, false, "name", true, undefined, false, columnIndexes)) return;
 
         let outputPath = exportFileName("export", "json");
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
+          const path = await promptExportSavePath({
+            defaultFileName: outputPath,
             filters: [{ name: "JSON", extensions: ["json"] }],
+            preferredPath: useSettingsStore().editorSettings.preferredExportPath,
           });
           if (!path) return;
-          outputPath = path as string;
+          outputPath = path;
         }
-        const result = await resultToExport(rowIds, undefined, true, true, "name", true);
+        const result = await resultToExport({ rowIds, columnIndexes }, undefined, true, true, "name", true);
         await api.exportQueryResultJson(outputPath, result.columns, result.rows);
-        toast(t("grid.exported"));
+        notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
     });
   }
 
-  async function exportCurrentPageJson() {
+  async function exportCurrentPageJson(columnIndexes?: number[]) {
     await runExclusiveExport(async () => {
       try {
         let outputPath = exportFileName("export-page", "json", { page: true });
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
+          const path = await promptExportSavePath({
+            defaultFileName: outputPath,
             filters: [{ name: "JSON", extensions: ["json"] }],
+            preferredPath: useSettingsStore().editorSettings.preferredExportPath,
           });
           if (!path) return;
-          outputPath = path as string;
+          outputPath = path;
         }
-        const result = await resultToExport(undefined, undefined, false, true, "name", true);
+        const result = await resultToExport({ columnIndexes }, undefined, false, true, "name", true);
         await api.exportQueryResultJson(outputPath, result.columns, result.rows);
-        toast(t("grid.exported"));
+        notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
     });
   }
 
-  async function exportMarkdown(rowIds?: number[]) {
+  async function exportMarkdown(target?: ExportTargetParam, columnIndexesParam?: number[]) {
+    const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     await runExclusiveExport(async () => {
       try {
-        if (await exportFullTableDataViaBackend("markdown", rowIds)) return;
+        if (await exportFullTableDataViaBackend("markdown", rowIds, "name", true, undefined, false, columnIndexes)) return;
 
         let outputPath = exportFileName("export", "md");
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
+          const path = await promptExportSavePath({
+            defaultFileName: outputPath,
             filters: [{ name: "Markdown", extensions: ["md"] }],
+            preferredPath: useSettingsStore().editorSettings.preferredExportPath,
           });
           if (!path) return;
-          outputPath = path as string;
+          outputPath = path;
         }
-        const result = await resultToExport(rowIds);
+        const result = await resultToExport({ rowIds, columnIndexes });
         await api.exportQueryResultMarkdown(outputPath, result.columns, result.rows);
-        toast(t("grid.exported"));
+        notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
     });
   }
 
-  async function exportCurrentPageMarkdown() {
+  async function exportCurrentPageMarkdown(columnIndexes?: number[]) {
     await runExclusiveExport(async () => {
       try {
         let outputPath = exportFileName("export-page", "md", { page: true });
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
+          const path = await promptExportSavePath({
+            defaultFileName: outputPath,
             filters: [{ name: "Markdown", extensions: ["md"] }],
+            preferredPath: useSettingsStore().editorSettings.preferredExportPath,
           });
           if (!path) return;
-          outputPath = path as string;
+          outputPath = path;
         }
-        const result = await resultToExport(undefined, undefined, false);
+        const result = await resultToExport({ columnIndexes }, undefined, false);
         await api.exportQueryResultMarkdown(outputPath, result.columns, result.rows);
-        toast(t("grid.exported"));
+        notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
     });
   }
 
-  async function exportTxt(rowIds?: number[]) {
+  async function exportTxt(target?: ExportTargetParam, columnIndexesParam?: number[]) {
+    const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     await runExclusiveExport(async () => {
       try {
-        if (await exportQueryResultViaBackend("txt", rowIds)) return;
-        if (await exportFullTableDataViaBackend("txt", rowIds)) return;
-        const result = await resultToExport(rowIds);
+        if (await exportQueryResultViaBackend("txt", rowIds, false, "name", true, undefined, false, columnIndexes)) return;
+        if (await exportFullTableDataViaBackend("txt", rowIds, "name", true, undefined, false, columnIndexes)) return;
+        const result = await resultToExport({ rowIds, columnIndexes });
         const content = formatTsv(result.columns, result.rows);
-        await saveTextFile(content, exportFileName(tableMeta.value?.tableName || "export", "txt", { preferFallback: true }), "Text", "txt");
-        toast(t("grid.exported"));
+        const saved = await saveTextFile(content, exportFileName(tableMeta.value?.tableName || "export", "txt", { preferFallback: true }), "Text", "txt");
+        if (!saved) return;
+        notifyExportSuccess(typeof saved === "string" ? saved : undefined);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
     });
   }
 
-  async function exportHtml(rowIds?: number[]) {
+  async function exportHtml(target?: ExportTargetParam, openAfterExport = false, columnIndexesParam?: number[]) {
+    const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     await runExclusiveExport(async () => {
       try {
         let outputPath = exportFileName("export", "html");
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
-            filters: [{ name: "HTML", extensions: ["html"] }],
-          });
-          if (!path) return;
-          outputPath = path as string;
+          if (openAfterExport) outputPath = await api.createQueryResultTempFile("html");
+          else {
+            const path = await promptExportSavePath({
+              defaultFileName: outputPath,
+              filters: [{ name: "HTML", extensions: ["html"] }],
+              preferredPath: useSettingsStore().editorSettings.preferredExportPath,
+            });
+            if (!path) return;
+            outputPath = path;
+          }
         }
-        const result = await resultToExport(rowIds);
+        const result = await resultToExport({ rowIds, columnIndexes });
         await api.exportQueryResultHtml(outputPath, currentExportTitle(), result.columns, result.rows);
-        toast(t("grid.exported"));
+        notifyExportSuccess(openAfterExport ? undefined : outputPath);
+        if (openAfterExport && isTauriRuntime()) await api.openQueryResultTempFile(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
     });
   }
 
-  async function exportCurrentPageHtml() {
+  async function exportCurrentPageHtml(columnIndexes?: number[]) {
     await runExclusiveExport(async () => {
       try {
         let outputPath = exportFileName("export-page", "html", { page: true });
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
+          const path = await promptExportSavePath({
+            defaultFileName: outputPath,
             filters: [{ name: "HTML", extensions: ["html"] }],
+            preferredPath: useSettingsStore().editorSettings.preferredExportPath,
           });
           if (!path) return;
-          outputPath = path as string;
+          outputPath = path;
         }
-        const result = await resultToExport(undefined, undefined, false);
+        const result = await resultToExport({ columnIndexes }, undefined, false);
         await api.exportQueryResultHtml(outputPath, currentExportTitle(), result.columns, result.rows);
-        toast(t("grid.exported"));
+        notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
     });
   }
 
-  async function exportCurrentPageTxt() {
+  async function exportCurrentPageTxt(columnIndexes?: number[]) {
     await runExclusiveExport(async () => {
       try {
-        const result = await resultToExport(undefined, undefined, false);
+        const result = await resultToExport({ columnIndexes }, undefined, false);
         const content = formatTsv(result.columns, result.rows);
-        await saveTextFile(content, exportFileName("export-page", "txt", { page: true }), "Text", "txt");
-        toast(t("grid.exported"));
+        const saved = await saveTextFile(content, exportFileName("export-page", "txt", { page: true }), "Text", "txt");
+        if (!saved) return;
+        notifyExportSuccess(typeof saved === "string" ? saved : undefined);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
     });
   }
 
-  async function exportXlsxResult(rowIds: number[] | undefined, includeSqlSheet: boolean) {
+  async function exportXlsxResult(target?: ExportTargetParam, includeSqlSheet = false, openAfterExport = false, columnIndexesParam?: number[]) {
+    const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     const exportOptions = await showXlsxHeaderDialog();
     if (exportOptions === null) return;
 
     await runExclusiveExport(async () => {
       try {
-        if (await exportQueryResultViaBackend("xlsx", rowIds, includeSqlSheet, exportOptions.headerMode, exportOptions.autoFilter)) return;
-        if (await exportFullTableDataViaBackend("xlsx", rowIds, exportOptions.headerMode, exportOptions.autoFilter)) return;
+        if (await exportQueryResultViaBackend("xlsx", rowIds, includeSqlSheet, exportOptions.headerMode, exportOptions.autoFilter, undefined, openAfterExport, columnIndexes)) return;
+        if (await exportFullTableDataViaBackend("xlsx", rowIds, exportOptions.headerMode, exportOptions.autoFilter, undefined, openAfterExport, columnIndexes)) return;
 
         let outputPath = exportFileName("export", "xlsx");
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
-            filters: [{ name: "Excel", extensions: ["xlsx"] }],
-          });
-          if (!path) return;
-          outputPath = path as string;
+          if (openAfterExport) outputPath = await api.createQueryResultTempFile("xlsx");
+          else {
+            const path = await promptExportSavePath({
+              defaultFileName: outputPath,
+              filters: [{ name: "Excel", extensions: ["xlsx"] }],
+              preferredPath: useSettingsStore().editorSettings.preferredExportPath,
+            });
+            if (!path) return;
+            outputPath = path;
+          }
         }
         const needsFullExport = rowIds === undefined && !!fullExportResult && !hasCompleteLocalResult?.value;
         if (needsFullExport && exportProgressDialog && exportProgressState) {
@@ -1130,7 +1249,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           exportProgressDialog.value = true;
         }
         const result = await resultToExport(
-          rowIds,
+          { rowIds, columnIndexes },
           (info) => {
             if (needsFullExport && exportProgressState && exportProgressState.value.status === "Running") {
               const adjustedTotal = info.totalRows !== null && info.rowsExported > info.totalRows ? info.rowsExported : info.totalRows;
@@ -1163,7 +1282,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             finishedAt: Date.now(),
           };
         }
-        toast(t("grid.exported"));
+        notifyExportSuccess(openAfterExport ? undefined : outputPath);
+        if (openAfterExport && isTauriRuntime()) {
+          await api.openQueryResultTempFile(outputPath);
+        }
       } catch (e: any) {
         if (exportProgressState) {
           exportProgressState.value = {
@@ -1177,15 +1299,23 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  async function exportXlsx(rowIds?: number[]) {
-    await exportXlsxResult(rowIds, false);
+  async function exportXlsx(target?: ExportTargetParam, columnIndexes?: number[]) {
+    await exportXlsxResult(target, false, false, columnIndexes);
   }
 
-  async function exportXlsxWithSql(rowIds?: number[]) {
-    await exportXlsxResult(rowIds, true);
+  async function openXlsx(target?: ExportTargetParam, columnIndexes?: number[]) {
+    await exportXlsxResult(target, false, true, columnIndexes);
   }
 
-  async function exportCurrentPageXlsxResult(includeSqlSheet: boolean) {
+  async function openBrowser(target?: ExportTargetParam, columnIndexes?: number[]) {
+    await exportHtml(target, true, columnIndexes);
+  }
+
+  async function exportXlsxWithSql(target?: ExportTargetParam, columnIndexes?: number[]) {
+    await exportXlsxResult(target, true, false, columnIndexes);
+  }
+
+  async function exportCurrentPageXlsxResult(includeSqlSheet: boolean, columnIndexes?: number[]) {
     const exportOptions = await showXlsxHeaderDialog();
     if (exportOptions === null) return;
 
@@ -1193,49 +1323,49 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       try {
         let outputPath = exportFileName("export-page", "xlsx", { page: true });
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
+          const path = await promptExportSavePath({
+            defaultFileName: outputPath,
             filters: [{ name: "Excel", extensions: ["xlsx"] }],
+            preferredPath: useSettingsStore().editorSettings.preferredExportPath,
           });
           if (!path) return;
-          outputPath = path as string;
+          outputPath = path;
         }
-        const result = await resultToExport(undefined, undefined, false, true, exportOptions.headerMode);
-        await writeXlsxResult(outputPath, result, includeSqlSheet, exportOptions.autoFilter);
-        toast(t("grid.exported"));
+        const result = await resultToExport({ columnIndexes }, undefined, false, true, exportOptions.headerMode);
+        await writeXlsxResult(outputPath, result, includeSqlSheet, exportOptions.autoFilter, currentPageExportSql());
+        notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
     });
   }
 
-  async function exportCurrentPageXlsx() {
-    await exportCurrentPageXlsxResult(false);
+  async function exportCurrentPageXlsx(columnIndexes?: number[]) {
+    await exportCurrentPageXlsxResult(false, columnIndexes);
   }
 
-  async function exportCurrentPageXlsxWithSql() {
-    await exportCurrentPageXlsxResult(true);
+  async function exportCurrentPageXlsxWithSql(columnIndexes?: number[]) {
+    await exportCurrentPageXlsxResult(true, columnIndexes);
   }
 
-  async function exportAllResultsXlsxResult(includeSqlSheet: boolean) {
+  async function exportResultSheetsXlsxResult(sheetsToExport: Array<{ sheetName: string; result: QueryResult; sql?: string }> | undefined, includeSqlSheet: boolean) {
     const exportOptions = await showXlsxHeaderDialog();
     if (exportOptions === null) return;
 
     await runExclusiveExport(async () => {
       try {
-        const sheets = (allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
+        const sheets = (sheetsToExport ?? allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
         if (sheets.length === 0) return;
 
         let outputPath = exportFileName("query-results", "xlsx", { allResults: true });
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
+          const path = await promptExportSavePath({
+            defaultFileName: outputPath,
             filters: [{ name: "Excel", extensions: ["xlsx"] }],
+            preferredPath: useSettingsStore().editorSettings.preferredExportPath,
           });
           if (!path) return;
-          outputPath = path as string;
+          outputPath = path;
         }
 
         const exportPattern = useSettingsStore().editorSettings.globalDateTimeExportFormat;
@@ -1250,8 +1380,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           autoFilter: exportOptions.autoFilter,
         }));
         const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet(sheets.map((sheet) => ({ resultName: sheet.sheetName, sql: sheet.sql || sheet.result.sourceStatement || "" }))) : undefined;
-        await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [...worksheets, { ...sqlWorksheet, autoFilter: exportOptions.autoFilter }] : worksheets, exportOptions.autoFilter, exportPattern || undefined);
-        toast(t("grid.exported"));
+        await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [...worksheets, { ...sqlWorksheet, autoFilter: false }] : worksheets, exportOptions.autoFilter, exportPattern || undefined);
+        notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
@@ -1259,11 +1389,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportAllResultsXlsx() {
-    await exportAllResultsXlsxResult(false);
+    await exportResultSheetsXlsxResult(undefined, false);
   }
 
   async function exportAllResultsXlsxWithSql() {
-    await exportAllResultsXlsxResult(true);
+    await exportResultSheetsXlsxResult(undefined, true);
   }
 
   /**
@@ -1290,17 +1420,31 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return extras.some((extra) => !!extra) ? extras : undefined;
   }
 
+  function sqlInsertTargetMeta(): DataGridTableMeta | undefined {
+    if (context.value === "results" && hasUniqueQueryInsertTarget?.value !== true) return undefined;
+    return tableMeta.value;
+  }
+
+  function sqlInsertTargetSchema(meta: DataGridTableMeta | undefined): string | undefined {
+    if (!meta?.schema || dropsSchemaQualifier(databaseType.value, options.includeDatabaseName?.value, meta.catalog)) return undefined;
+    return meta.schema;
+  }
+
+  function sqlInsertTargetName(meta: DataGridTableMeta | undefined): string {
+    return meta?.tableName || (context.value === "results" ? "query_result" : "table_name");
+  }
+
   /** 供导出请求使用：把“不含主键”设置转换成后端请求字段。 */
   function sqlExportPrimaryKeyOptions(): { excludePrimaryKeys?: boolean; primaryKeys?: string[] } {
     const excludeColumns = sqlExportExcludedColumns();
     return excludeColumns ? { excludePrimaryKeys: true, primaryKeys: excludeColumns } : {};
   }
 
-  async function exportFullTableDataViaBackend(format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt", rowIds?: number[], headerMode: XlsxHeaderMode = "name", autoFilter = true, sqlExportOptions?: SqlExportOptions): Promise<boolean> {
+  async function exportFullTableDataViaBackend(format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt", rowIds?: number[], headerMode: XlsxHeaderMode = "name", autoFilter = true, sqlExportOptions?: SqlExportOptions, openAfterExport = false, columnIndexes?: number[]): Promise<boolean> {
     const meta = tableMeta.value;
     // The backend table exporter currently builds two-part table names. External
     // Doris/StarRocks catalogs need the data-tab paginator's three-part SQL.
-    if (rowIds !== undefined || context.value !== "table-data" || !meta || meta.catalog || !connectionId.value || !database.value) {
+    if (rowIds !== undefined || columnIndexes !== undefined || context.value !== "table-data" || !meta || meta.catalog || !connectionId.value || !database.value) {
       return false;
     }
 
@@ -1309,14 +1453,16 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const extension = splitSqlOutput ? "zip" : (fmt?.ext ?? format);
     const filterName = splitSqlOutput ? "ZIP" : (fmt?.label ?? format.toUpperCase());
     let outputPath = exportFileName(meta.tableName || "export", extension, { preferFallback: true });
-    if (isTauriRuntime()) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const path = await save({
-        defaultPath: outputPath,
+    if (openAfterExport && isTauriRuntime()) {
+      outputPath = await api.createQueryResultTempFile(extension);
+    } else if (isTauriRuntime()) {
+      const path = await promptExportSavePath({
+        defaultFileName: outputPath,
         filters: [{ name: filterName, extensions: [extension] }],
+        preferredPath: useSettingsStore().editorSettings.preferredExportPath,
       });
       if (!path) return true;
-      outputPath = path as string;
+      outputPath = path;
     }
 
     if (exportProgressState) {
@@ -1356,11 +1502,19 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           tableName: meta.tableName,
           filePath: outputPath,
           format,
-          ...(format === "sql" && sqlExportOptions ? { insertMode: sqlExportOptions.insertMode, splitMaxMb: sqlExportOptions.splitMaxMb } : {}),
+          ...(format === "sql" && sqlExportOptions
+            ? {
+                insertMode: sqlExportOptions.insertMode,
+                splitMaxMb: sqlExportOptions.splitMaxMb,
+                selectedColumns: sqlExportOptions.selectedColumns,
+                omitDatabaseQualifier: dropsSchemaQualifier(databaseType.value, options.includeDatabaseName?.value, meta.catalog),
+              }
+            : {}),
           csvQuoteMode: editorSettings.csvQuoteMode,
-          columns: columns.value,
+          nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
+          columns: format === "sql" ? effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!) : columns.value,
           columnTypes: columnTypes.value,
-          ...(format === "sql" ? { columnExtras: sqlExportColumnExtras(columns.value) } : {}),
+          ...(format === "sql" ? { columnExtras: sqlExportColumnExtras(effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!)) } : {}),
           columnComments: format === "xlsx" ? buildXlsxHeaderOverrides(columns.value, visibleXlsxColumnComments.value, headerMode) : undefined,
           primaryKeys: meta.primaryKeys,
           ...sqlExportPrimaryKeyOptions(),
@@ -1389,7 +1543,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         },
       );
       if (progress.status === "Done") {
-        toast(t("grid.exported"));
+        notifyExportSuccess(openAfterExport ? undefined : outputPath);
+        if (openAfterExport && isTauriRuntime()) await api.openQueryResultTempFile(outputPath);
       }
     } finally {
       if (exportCancelHandler) exportCancelHandler.value = null;
@@ -1399,8 +1554,17 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return true;
   }
 
-  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "json" | "txt" | "sql", rowIds?: number[], includeSqlSheet = false, headerMode: XlsxHeaderMode = "name", autoFilter = true, insertMode?: SqlInsertMode): Promise<boolean> {
-    if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) {
+  async function exportQueryResultViaBackend(
+    format: "csv" | "xlsx" | "json" | "txt" | "sql",
+    rowIds?: number[],
+    includeSqlSheet = false,
+    headerMode: XlsxHeaderMode = "name",
+    autoFilter = true,
+    sqlExportOptions?: SqlExportOptions,
+    openAfterExport = false,
+    columnIndexes?: number[],
+  ): Promise<boolean> {
+    if (rowIds !== undefined || columnIndexes !== undefined || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
     if (databaseType.value === "mongodb") return false;
@@ -1413,31 +1577,38 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const filterName = fmt?.label ?? format.toUpperCase();
     let outputPath = exportFileName("query-result", extension);
     if (isTauriRuntime()) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const path = await save({
-        defaultPath: outputPath,
-        filters: [{ name: filterName, extensions: [extension] }],
-      });
-      if (!path) return true;
-      outputPath = path as string;
+      if (openAfterExport) outputPath = await api.createQueryResultTempFile(extension);
+      else {
+        const path = await promptExportSavePath({
+          defaultFileName: outputPath,
+          filters: [{ name: filterName, extensions: [extension] }],
+          preferredPath: useSettingsStore().editorSettings.preferredExportPath,
+        });
+        if (!path) return true;
+        outputPath = path;
+      }
     }
 
     const exportId = uuid();
+    const insertTarget = format === "sql" ? sqlInsertTargetMeta() : undefined;
     const baseRequest = await queryResultExportRequest({
       exportId,
       filePath: outputPath,
       format,
       includeSqlSheet,
-      exportTableName: format === "sql" ? tableMeta.value?.tableName : undefined,
+      exportTableName: insertTarget?.tableName,
+      exportSchema: insertTarget?.tableName ? sqlInsertTargetSchema(insertTarget) : undefined,
       exportColumnTypes: format === "sql" ? allColumnTypes.value?.map((type) => type ?? null) : undefined,
       exportColumnExtras: format === "sql" ? sqlExportColumnExtras(allColumns.value) : undefined,
-      ...(format === "sql" && insertMode ? { insertMode } : {}),
+      ...(format === "sql" && sqlExportOptions ? { insertMode: sqlExportOptions.insertMode } : {}),
     });
     const columnComments = format === "xlsx" ? buildXlsxHeaderOverrides(allColumns.value, allXlsxColumnComments.value, headerMode) : undefined;
     const request = baseRequest
       ? {
           ...baseRequest,
+          ...(format === "sql" ? { selectedColumns: sqlExportOptions?.selectedColumns } : {}),
           csvQuoteMode: useSettingsStore().editorSettings.csvQuoteMode,
+          nullLiteral: csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode),
           ...sqlExportPrimaryKeyOptions(),
           dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined,
           numericColumnRightAlign: useSettingsStore().editorSettings.numericColumnRightAlign ?? true,
@@ -1486,7 +1657,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         tracker.updateTableExportTask(exportId, progress);
       });
       if (terminalProgress.status === "Done") {
-        toast(t("grid.exported"));
+        notifyExportSuccess(openAfterExport ? undefined : outputPath);
+        if (openAfterExport && isTauriRuntime()) {
+          await api.openQueryResultTempFile(outputPath);
+        }
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1515,12 +1689,31 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return true;
   }
 
-  async function exportQueryResultSqlViaBackend(rowIds: number[] | undefined, insertMode: SqlInsertMode): Promise<boolean> {
-    if (!isTauriRuntime()) return false;
-    return exportQueryResultViaBackend("sql", rowIds, false, "name", true, insertMode);
+  async function exportQueryResultSqlViaBackend(rowIds: number[] | undefined, sqlExportOptions: SqlExportOptions, columnIndexes?: number[]): Promise<boolean> {
+    if (!isTauriRuntime() || columnIndexes !== undefined) return false;
+    return exportQueryResultViaBackend("sql", rowIds, false, "name", true, sqlExportOptions, false, columnIndexes);
   }
 
-  async function exportSql(rowIds?: number[]) {
+  function sqlExportChoices(fullResult: boolean, columnSubset?: readonly string[]): SqlExportColumnSelection[] {
+    const names = columnSubset ?? (context.value === "table-data" ? effectiveColumns(sourceColumns.value, columns.value) : fullResult ? allColumns.value : columns.value);
+    const excluded = new Set((sqlExportExcludedColumns() ?? []).map(normalizeColumnName));
+    const types = fullResult && context.value === "results" ? allColumnTypes.value : columnTypes.value;
+    // A subset's sourceIndex is its position within the subset; resolve the
+    // metadata-less type fallback by name against the typed column list.
+    const typeNames = fullResult && context.value === "results" ? allColumns.value : context.value === "table-data" ? effectiveColumns(sourceColumns.value, columns.value) : columns.value;
+    const typeByName = columnSubset ? new Map(typeNames.map((name, index) => [name, types?.[index]])) : undefined;
+    const metadataByName = new Map((tableMeta.value?.columns ?? []).map((column) => [normalizeColumnName(column.name), column]));
+    return sqlExportColumnChoices(names).filter((column) => {
+      if (excluded.has(normalizeColumnName(column.name)) || usesSyntheticRowIdKey(databaseType.value, [column.name])) return false;
+      const metadata = metadataByName.get(normalizeColumnName(column.name));
+      if (databaseType.value === "mysql" && /\b(?:virtual|stored|persistent)\s+generated\b|\bgenerated\s+always\s+as\s*\(/i.test(metadata?.extra ?? "")) return false;
+      const columnType = (metadata?.data_type || (columnSubset ? typeByName?.get(column.name) : types?.[column.sourceIndex]))?.trim().replace(/^"|"$/g, "").toLowerCase();
+      return databaseType.value !== "postgres" || (columnType !== "tsvector" && !columnType?.endsWith(".tsvector"));
+    });
+  }
+
+  async function exportSql(target?: ExportTargetParam, columnIndexesParam?: number[]) {
+    const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     await runExclusiveExport(async () => {
       const exportId = uuid();
       const exportStartedAt = performance.now();
@@ -1546,18 +1739,22 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         },
         true,
       );
-      const selectedSqlExportOptions = (await showSqlInsertModeDialog({ allowSplit: rowIds === undefined && context.value === "table-data" })) as SqlExportOptions | SqlInsertMode | null;
+      const chosenColumns = columnIndexes !== undefined ? columnIndexes.map((i) => columns.value[i]).filter((c): c is string => !!c) : undefined;
+      const selectedSqlExportOptions = (await showSqlInsertModeDialog({
+        allowSplit: rowIds === undefined && columnIndexes === undefined && context.value === "table-data",
+        columns: sqlExportChoices(rowIds === undefined, chosenColumns),
+      })) as SqlExportOptions | SqlInsertMode | null;
       if (selectedSqlExportOptions === null) {
         logExportStage("cancelled", { stage: "insert-mode-dialog" });
         return;
       }
-      const sqlExportOptions = typeof selectedSqlExportOptions === "string" ? { insertMode: selectedSqlExportOptions } : selectedSqlExportOptions;
+      const sqlExportOptions: SqlExportOptions = typeof selectedSqlExportOptions === "string" ? { insertMode: selectedSqlExportOptions } : selectedSqlExportOptions;
       const insertMode = sqlExportOptions.insertMode;
       logExportStage("mode-selected", { insertMode, splitMaxMb: sqlExportOptions.splitMaxMb });
       try {
         // Step 1: table-data context — existing backend table export
         logExportStage("backend-export-start");
-        const handledByBackend = await exportFullTableDataViaBackend("sql", rowIds, "name", true, sqlExportOptions);
+        const handledByBackend = await exportFullTableDataViaBackend("sql", rowIds, "name", true, sqlExportOptions, false, columnIndexes);
         logExportStage("backend-export-finished", { handledByBackend });
         if (handledByBackend) {
           logExportStage("done", { path: "backend" });
@@ -1566,7 +1763,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
         // Step 2: query-result context — NEW backend streaming with background task
         logExportStage("query-backend-export-start");
-        const handledQueryByBackend = await exportQueryResultSqlViaBackend(rowIds, insertMode);
+        const handledQueryByBackend = await exportQueryResultSqlViaBackend(rowIds, sqlExportOptions, columnIndexes);
         logExportStage("query-backend-export-finished", { handledByBackend: handledQueryByBackend });
         if (handledQueryByBackend) {
           logExportStage("done", { path: "query-backend" });
@@ -1574,7 +1771,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         }
 
         // Step 3: fallback — local export (Web and edge-case scenarios)
-        const result = await resultToExport(rowIds, undefined, true, false);
+        const result = await resultToExport({ rowIds, columnIndexes }, undefined, true, false);
         logExportStage(
           "result-ready",
           {
@@ -1586,7 +1783,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         );
 
         logExportStage("row-remap-start");
-        const exportData = sqlInsertExportData(result);
+        const exportData = sqlInsertExportData(result, sqlExportOptions.selectedColumns);
         logExportStage("row-remap-done", {
           columns: exportData.columns.length,
           rows: exportData.rows.length,
@@ -1594,11 +1791,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         });
 
         logExportStage("sql-build-start");
+        const insertTarget = sqlInsertTargetMeta();
         const content = await formatSqlInsert({
           databaseType: databaseType.value,
           identifierQuote: options.identifierQuote?.value,
-          schema: tableMeta.value?.schema,
-          tableName: tableMeta.value?.tableName || "table_name",
+          schema: sqlInsertTargetSchema(insertTarget),
+          tableName: sqlInsertTargetName(insertTarget),
           columns: exportData.columns,
           columnTypes: exportData.columnTypes,
           columnExtras: exportData.columnExtras,
@@ -1616,9 +1814,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           true,
         );
         logExportStage("save-start", { contentChars: content.length }, true);
-        await saveTextFile(content, exportFileName(tableMeta.value?.tableName || "export", "sql", { preferFallback: true }), "SQL", "sql", { exportId, operation: "sql-insert-all" });
+        const saved = await saveTextFile(content, exportFileName(tableMeta.value?.tableName || "export", "sql", { preferFallback: true }), "SQL", "sql", { exportId, operation: "sql-insert-all" });
+        if (!saved) return;
         logExportStage("done", { contentChars: content.length });
-        toast(t("grid.exported"));
+        notifyExportSuccess(typeof saved === "string" ? saved : undefined);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
         logExportStage("error", {
@@ -1629,19 +1828,22 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  async function exportCurrentPageSql() {
+  async function exportCurrentPageSql(columnIndexes?: number[]) {
     await runExclusiveExport(async () => {
-      const selectedSqlExportOptions = (await showSqlInsertModeDialog()) as SqlExportOptions | SqlInsertMode | null;
+      const chosenColumns = columnIndexes !== undefined ? columnIndexes.map((i) => columns.value[i]).filter((c): c is string => !!c) : undefined;
+      const selectedSqlExportOptions = (await showSqlInsertModeDialog({ columns: sqlExportChoices(false, chosenColumns) })) as SqlExportOptions | SqlInsertMode | null;
       if (selectedSqlExportOptions === null) return;
-      const insertMode = typeof selectedSqlExportOptions === "string" ? selectedSqlExportOptions : selectedSqlExportOptions.insertMode;
+      const sqlExportOptions: SqlExportOptions = typeof selectedSqlExportOptions === "string" ? { insertMode: selectedSqlExportOptions } : selectedSqlExportOptions;
+      const insertMode = sqlExportOptions.insertMode;
       try {
-        const result = await resultToExport(undefined, undefined, false, false);
-        const exportData = sqlInsertExportData(result);
+        const result = await resultToExport({ columnIndexes }, undefined, false, false);
+        const exportData = sqlInsertExportData(result, sqlExportOptions.selectedColumns);
+        const insertTarget = sqlInsertTargetMeta();
         const content = await formatSqlInsert({
           databaseType: databaseType.value,
           identifierQuote: options.identifierQuote?.value,
-          schema: tableMeta.value?.schema,
-          tableName: tableMeta.value?.tableName || "table_name",
+          schema: sqlInsertTargetSchema(insertTarget),
+          tableName: sqlInsertTargetName(insertTarget),
           columns: exportData.columns,
           columnTypes: exportData.columnTypes,
           columnExtras: exportData.columnExtras,
@@ -1651,8 +1853,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           insertMode,
           excludeColumns: sqlExportExcludedColumns(),
         });
-        await saveTextFile(content, exportFileName("export-page", "sql", { page: true }), "SQL", "sql");
-        toast(t("grid.exported"));
+        const saved = await saveTextFile(content, exportFileName("export-page", "sql", { page: true }), "SQL", "sql");
+        if (!saved) return;
+        notifyExportSuccess(typeof saved === "string" ? saved : undefined);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
@@ -1664,19 +1867,29 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     await copyText(sql.value);
   }
 
-  function sqlInsertExportData(result: { columns: string[]; rows: CellValue[][]; spatialColumns?: QueryResult["spatial_columns"]; spatialValues?: QueryResult["spatial_values"] }): {
+  function sqlInsertExportData(
+    result: { columns: string[]; columnTypes?: Array<string | undefined>; rows: CellValue[][]; spatialColumns?: QueryResult["spatial_columns"]; spatialValues?: QueryResult["spatial_values"] },
+    selectedColumns?: SqlExportColumnSelection[],
+  ): {
     columns: string[];
-    columnTypes?: Array<string | undefined>;
+    columnTypes?: Array<string | null | undefined>;
     columnExtras?: Array<string | null>;
     spatialColumns?: QueryResult["spatial_columns"];
     spatialValues?: QueryResult["spatial_values"];
     rows: CellValue[][];
   } {
-    const exportColumns = context.value === "table-data" && tableMeta.value ? effectiveColumns(sourceColumns.value, result.columns) : result.columns;
-    const columnIndexes = exportColumns.map((column, index) => ({ column, index })).filter((item): item is { column: string; index: number } => !!item.column);
-    const exportColumnTypes = columnTypes.value?.length === result.columns.length ? columnTypes.value : undefined;
+    const matchesVisibleColumns = result.columns.length === columns.value.length && result.columns.every((column, index) => column === columns.value[index]);
+    const exportColumns = context.value === "table-data" && tableMeta.value && matchesVisibleColumns ? effectiveColumns(sourceColumns.value, result.columns) : result.columns;
+    const columnIndexes = resolveSqlExportColumnIndexes(exportColumns, selectedColumns)
+      .map((index) => ({ column: exportColumns[index], index }))
+      .filter((item): item is { column: string; index: number } => !!item.column);
+    const exportColumnTypes = matchesVisibleColumns && columnTypes.value?.length === result.columns.length ? columnTypes.value : result.columnTypes?.length === result.columns.length ? result.columnTypes : undefined;
     const metaColumns = tableMeta.value?.columns;
     const exportColumnExtras = metaColumns?.length ? exportColumns.map((column) => (column ? (metaColumns.find((meta) => normalizeColumnName(meta.name) === normalizeColumnName(column))?.extra ?? null) : null)) : undefined;
+    // SQL Server 的结果集列类型来自 TDS：rowversion 会报成 varbinary/binary，据此无法识别不可插入列；
+    // 表元数据（sys.columns）里才是 "timestamp"。与数据库级导出链同口径，SQL Server 的 INSERT 载荷
+    // 优先用表元数据类型、缺元数据时回退结果集类型（其它引擎维持结果集类型优先）。
+    const metadataTypeByColumn = databaseType.value === "sqlserver" && metaColumns?.length ? new Map(metaColumns.map((meta) => [normalizeColumnName(meta.name), meta.data_type])) : undefined;
     const indexBySource = new Map(columnIndexes.map((item, index) => [item.index, index]));
     const spatialColumns = result.spatialColumns?.flatMap((column) => {
       const columnIndex = indexBySource.get(column.column_index);
@@ -1684,7 +1897,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
     return {
       columns: columnIndexes.map((item) => item.column),
-      columnTypes: exportColumnTypes ? columnIndexes.map((item) => exportColumnTypes[item.index]) : undefined,
+      columnTypes:
+        exportColumnTypes || metadataTypeByColumn
+          ? columnIndexes.map((item) => {
+              const metadataType = metadataTypeByColumn?.get(normalizeColumnName(item.column))?.trim();
+              return metadataType || exportColumnTypes?.[item.index] || null;
+            })
+          : undefined,
       columnExtras: exportColumnExtras?.some((extra) => !!extra) ? columnIndexes.map((item) => exportColumnExtras[item.index] ?? null) : undefined,
       ...(spatialColumns?.length ? { spatialColumns } : {}),
       ...(result.spatialValues?.length ? { spatialValues: result.spatialValues.map((row) => columnIndexes.map((item) => row[item.index] ?? null)) } : {}),
@@ -1709,6 +1928,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     previewWithExtractor,
     previewWithPreference,
     canCopyWithExtractor,
+    exportWithExtractor,
     exportCsv,
     exportCurrentPageCsv,
     exportJson,
@@ -1720,11 +1940,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     exportTxt,
     exportCurrentPageTxt,
     exportXlsx,
+    openXlsx,
+    openBrowser,
     exportXlsxWithSql,
     exportCurrentPageXlsx,
     exportCurrentPageXlsxWithSql,
     exportAllResultsXlsx,
     exportAllResultsXlsxWithSql,
+    exportResultSheetsXlsx: (sheets: Array<{ sheetName: string; result: QueryResult; sql?: string }>) => exportResultSheetsXlsxResult(sheets, false),
     exportSql,
     exportCurrentPageSql,
     copySql,
@@ -1786,9 +2009,14 @@ function isCopyInsertOmittedColumn(databaseType: DatabaseType | undefined, colum
   const columnInfo = tableMeta?.columns?.find((item) => normalizeColumnName(item.name) === normalizeColumnName(column));
   const normalizedType = columnInfo?.data_type.trim().replace(/^"|"$/g, "").toLowerCase();
   if (databaseType === "postgres" && (normalizedType === "tsvector" || normalizedType?.endsWith(".tsvector"))) return true;
+  // SQL Server 的 timestamp/rowversion 是服务端计数器（TDS 上即 binary(8)），永远不能显式插入；
+  // 与 tsvector 同款无条件剔除（镜像 data_grid_sql 的 is_grid_insert_omitted_column）。
+  const baseType = normalizedType?.split("(")[0]?.trim();
+  if (databaseType === "sqlserver" && (baseType === "timestamp" || baseType === "rowversion")) return true;
   const extra = columnInfo?.extra?.toLowerCase() ?? "";
   const isAutoGenerated = isAutoGeneratedColumn(column, tableMeta);
-  const isComputed = extra.includes("generated always as") && !extra.includes("identity");
+  // SQL Server 计算列的 extra 是裸字符串 "computed"（sys.columns），与其它方言的 generated 关键字同样受「跳过计算列」开关控制。
+  const isComputed = (extra.includes("generated always as") || (databaseType === "sqlserver" && extra.trim() === "computed")) && !extra.includes("identity");
   const isPrimaryKey = (tableMeta?.primaryKeys ?? []).some((key) => normalizeColumnName(key) === normalizeColumnName(column));
   return ((extractorOptions?.sql.skipGeneratedColumns ?? true) && isAutoGenerated && !isPrimaryKey) || ((extractorOptions?.sql.skipComputedColumns ?? true) && isComputed);
 }

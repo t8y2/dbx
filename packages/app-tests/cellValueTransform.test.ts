@@ -85,6 +85,11 @@ test("xml rejects malformed markup", () => {
   assert.deepEqual(transformCellValue("<a></b>", { kind: "xml" }), { ok: false, error: "invalid" });
 });
 
+test("html preview preserves source markup for rendering", () => {
+  const source = '<article><h1>Hello</h1><p class="lead">World</p></article>';
+  assert.deepEqual(transformCellValue(source, { kind: "html" }), { ok: true, text: source });
+});
+
 test("base64 round-trips CJK text and emoji", () => {
   const encoded = transformCellValue("你好😀", { kind: "base64Encode" });
   assert.deepEqual(encoded, { ok: true, text: "5L2g5aW98J+YgA==" });

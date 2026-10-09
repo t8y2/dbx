@@ -5,7 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use dbx_core::mq::token::{sign_pulsar_token, token_fingerprint};
 use dbx_core::mq::{MqTokenIssueRequest, MqTokenRecord, MqTokenSigningAlgorithm, MqTokenSigningConfig};
-use dbx_core::storage::Storage;
 
 #[test]
 fn hs256_token_contains_pulsar_subject_and_expiry() {
@@ -45,7 +44,7 @@ fn token_signing_requires_configured_key() {
 
 #[tokio::test]
 async fn token_records_are_saved_without_token_plaintext() {
-    let storage = Storage::open(&temp_db_path("mq-token-records")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&temp_db_path("mq-token-records")).await.unwrap();
     let record = MqTokenRecord {
         id: "rec-1".to_string(),
         connection_id: "conn-1".to_string(),

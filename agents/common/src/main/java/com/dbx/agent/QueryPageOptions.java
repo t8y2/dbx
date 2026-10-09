@@ -7,20 +7,26 @@ public final class QueryPageOptions {
     private Integer fetchSize;
     private int maxRows;
     private int timeoutSecs;
+    private boolean deferLobs;
 
     public QueryPageOptions() {
-        this(100, null, JdbcExecutor.DEFAULT_MAX_ROWS, 0);
+        this(100, null, JdbcExecutor.DEFAULT_MAX_ROWS, 0, false);
     }
 
     public QueryPageOptions(int pageSize, Integer fetchSize, int maxRows) {
-        this(pageSize, fetchSize, maxRows, 0);
+        this(pageSize, fetchSize, maxRows, 0, false);
     }
 
     public QueryPageOptions(int pageSize, Integer fetchSize, int maxRows, int timeoutSecs) {
+        this(pageSize, fetchSize, maxRows, timeoutSecs, false);
+    }
+
+    public QueryPageOptions(int pageSize, Integer fetchSize, int maxRows, int timeoutSecs, boolean deferLobs) {
         this.pageSize = pageSize;
         this.fetchSize = fetchSize;
         this.maxRows = maxRows;
         this.timeoutSecs = timeoutSecs;
+        this.deferLobs = deferLobs;
     }
 
     public int getPageSize() {
@@ -39,6 +45,10 @@ public final class QueryPageOptions {
         return timeoutSecs;
     }
 
+    public boolean getDeferLobs() {
+        return deferLobs;
+    }
+
     public void setPageSize(int pageSize) {
         this.pageSize = pageSize;
     }
@@ -55,6 +65,10 @@ public final class QueryPageOptions {
         this.timeoutSecs = timeoutSecs;
     }
 
+    public void setDeferLobs(boolean deferLobs) {
+        this.deferLobs = deferLobs;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -63,12 +77,13 @@ public final class QueryPageOptions {
         return pageSize == that.pageSize
             && maxRows == that.maxRows
             && timeoutSecs == that.timeoutSecs
+            && deferLobs == that.deferLobs
             && Objects.equals(fetchSize, that.fetchSize);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(pageSize, fetchSize, maxRows, timeoutSecs);
+        return Objects.hash(pageSize, fetchSize, maxRows, timeoutSecs, deferLobs);
     }
 
     @Override
@@ -77,6 +92,7 @@ public final class QueryPageOptions {
             + ", fetchSize=" + fetchSize
             + ", maxRows=" + maxRows
             + ", timeoutSecs=" + timeoutSecs
+            + ", deferLobs=" + deferLobs
             + ")";
     }
 }

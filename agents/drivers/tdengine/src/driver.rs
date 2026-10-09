@@ -158,9 +158,9 @@ impl TdengineDriver {
             return Ok(Vec::new());
         }
         let database = effective_database(database, &self.current_database)?.to_string();
-        if constraints.limit > 0 && constraints.filter.trim().is_empty() {
-            return self.list_tables_page(&database, constraints.offset, constraints.limit, token).await;
-        }
+        // `SHOW <db>.TABLES` / `SHOW <db>.STABLES` are unordered, so a server-side page
+        // offset can skip or repeat rows between two requests. Always read the full
+        // (sorted, cached) list and slice it locally instead.
         let tables = self.all_tables(&database, token).await?;
         Ok(filter_tables(tables, &constraints))
     }
@@ -522,42 +522,6 @@ impl TdengineDriver {
         Ok(tables)
     }
 
-    async fn list_tables_page(
-        &self,
-        database: &str,
-        offset: usize,
-        limit: usize,
-        token: &CancellationToken,
-    ) -> Result<Vec<TableInfo>> {
-        let (mut stables, scanned) = self
-            .query_tables_page(
-                &format!("SHOW {}STABLES", quote_qualified_prefix(database)),
-                "STABLE",
-                false,
-                offset,
-                limit,
-                token,
-            )
-            .await?;
-        if stables.len() >= limit {
-            return Ok(stables);
-        }
-        let table_offset = offset.saturating_sub(scanned);
-        let (tables, _) = self
-            .query_tables_page(
-                &format!("SHOW {}TABLES", quote_qualified_prefix(database)),
-                "TABLE",
-                true,
-                table_offset,
-                limit - stables.len(),
-                token,
-            )
-            .await?;
-        stables.extend(tables);
-        self.enrich_table_parents(database, &mut stables, token).await?;
-        Ok(stables)
-    }
-
     async fn enrich_table_parents(
         &self,
         database: &str,
@@ -601,33 +565,6 @@ impl TdengineDriver {
     ) -> Result<Vec<TableInfo>> {
         let rows = self.query_rows(sql, token, 0).await?;
         Ok(rows.into_iter().filter_map(|row| table_from_show_row(row, table_type, includes_stable_name)).collect())
-    }
-
-    async fn query_tables_page(
-        &self,
-        sql: &str,
-        table_type: &str,
-        includes_stable_name: bool,
-        offset: usize,
-        limit: usize,
-        token: &CancellationToken,
-    ) -> Result<(Vec<TableInfo>, usize)> {
-        let mut cursor = self.start_cursor(sql, offset.saturating_add(limit), token, 0).await?;
-        let mut scanned = 0usize;
-        let mut result = Vec::with_capacity(limit);
-        while result.len() < limit {
-            let Some(row) = cursor.next_row(token, 0).await? else {
-                break;
-            };
-            scanned += 1;
-            if scanned <= offset {
-                continue;
-            }
-            if let Some(table) = table_from_show_row(row, table_type, includes_stable_name) {
-                result.push(table);
-            }
-        }
-        Ok((result, scanned))
     }
 
     async fn get_create_sql(

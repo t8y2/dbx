@@ -1,8 +1,6 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { createApp, defineComponent, h, markRaw, nextTick, type App, type PropType } from "vue";
+import { createApp, defineComponent, h, KeepAlive, markRaw, nextTick, shallowRef, type App, type PropType } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -10,6 +8,37 @@ import type { QueryResult } from "@/types/database";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import { buildMongoUpdateDocument } from "@/lib/mongo/mongoDocumentValues";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { readTextFromClipboard } from "@/lib/common/clipboard";
+import { useToast } from "@/composables/useToast";
+
+vi.mock("@/lib/common/clipboard", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/common/clipboard")>()),
+  readTextFromClipboard: vi.fn(),
+}));
+
+// DataGrid.vue imports RecycleScroller directly (no global registration),
+// so the module itself must be stubbed for deterministic row rendering.
+vi.mock("vue-virtual-scroller", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    RecycleScroller: defineComponent({
+      props: {
+        items: {
+          type: Array as PropType<unknown[]>,
+          default: () => [],
+        },
+      },
+      setup(props, { attrs, slots }) {
+        return () =>
+          h(
+            "div",
+            attrs,
+            props.items.map((item) => slots.default?.({ item })),
+          );
+      },
+    }),
+  };
+});
 
 vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/composables/useDataGridColumnResize")>();
@@ -66,6 +95,8 @@ interface MountGridOptions {
   readonlyColumnIndexes?: number[];
   databaseType?: "dameng" | "mongodb";
   customSaveHandler?: CustomSaveHandler;
+  editable?: boolean;
+  allowInsertRows?: boolean;
 }
 
 function mountGrid(options: MountGridOptions = {}) {
@@ -73,7 +104,8 @@ function mountGrid(options: MountGridOptions = {}) {
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
   settingsStore.updateEditorSettings({ dataGridRenderMode: "canvas", dataGridHideNullColumns: options.hideNullColumns ?? false, dataGridQuickEntry: options.quickEntry ?? false });
-  const gridResult = markRaw(options.result ?? defaultResult());
+  const resultRef = shallowRef(markRaw(options.result ?? defaultResult()));
+  const visibleRef = shallowRef(true);
 
   const host = document.createElement("div");
   document.body.append(host);
@@ -85,25 +117,31 @@ function mountGrid(options: MountGridOptions = {}) {
           { delayDuration: 0 },
           {
             default: () =>
-              h(DataGrid, {
-                result: gridResult,
-                databaseType: options.databaseType ?? "dameng",
-                context: "table-data",
-                editable: true,
-                customSaveHandler: options.customSaveHandler,
-                readonlyColumnIndexes: options.readonlyColumnIndexes,
-                tableMeta: {
-                  tableName: "paste_target",
-                  columns: gridResult.columns.map((name, index) => ({
-                    name,
-                    data_type: index === 0 ? "int" : "varchar",
-                    is_nullable: index !== 0,
-                    column_default: null,
-                    is_primary_key: index === 0,
-                    extra: null,
-                  })),
-                  primaryKeys: ["c0"],
-                },
+              h(KeepAlive, null, {
+                default: () =>
+                  visibleRef.value
+                    ? h(DataGrid, {
+                        result: resultRef.value,
+                        databaseType: options.databaseType ?? "dameng",
+                        context: "table-data",
+                        editable: options.editable ?? true,
+                        allowInsertRows: options.allowInsertRows,
+                        customSaveHandler: options.customSaveHandler,
+                        readonlyColumnIndexes: options.readonlyColumnIndexes,
+                        tableMeta: {
+                          tableName: "paste_target",
+                          columns: resultRef.value.columns.map((name, index) => ({
+                            name,
+                            data_type: index === 0 ? "int" : "varchar",
+                            is_nullable: index !== 0,
+                            column_default: null,
+                            is_primary_key: index === 0,
+                            extra: null,
+                          })),
+                          primaryKeys: ["c0"],
+                        },
+                      })
+                    : null,
               }),
           },
         );
@@ -117,7 +155,7 @@ function mountGrid(options: MountGridOptions = {}) {
   settingsStore.updateEditorSettings({ dataGridRenderMode: "dom" });
   const mounted = { app, host };
   mountedApps.push(mounted);
-  return mounted;
+  return { ...mounted, resultRef, visibleRef };
 }
 
 async function settle() {
@@ -189,9 +227,188 @@ afterEach(() => {
     app.unmount();
     host.remove();
   }
+  vi.mocked(readTextFromClipboard).mockReset();
+});
+
+async function pasteAsNewRows(host: HTMLElement) {
+  const trigger = [...host.querySelectorAll<HTMLElement>("[aria-haspopup='menu']")].find((button) => button.getAttribute("aria-label") === i18n.global.t("grid.addRow"));
+  if (!trigger) throw new Error("Add row menu trigger not found");
+  trigger.click();
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await settle();
+  const item = [...document.querySelectorAll<HTMLElement>("[role='menuitem']")].find((item) => item.textContent?.trim() === i18n.global.t("grid.pasteAsNewRows"));
+  if (!item) throw new Error("Paste as new rows menu item not found");
+  item.click();
+  await settle();
+}
+
+describe("DataGrid paste as new rows", () => {
+  it("drops a clipboard read that finishes after deactivation and reactivation", async () => {
+    const { host, visibleRef } = mountGrid();
+    await settle();
+    let finishRead!: (text: string) => void;
+    vi.mocked(readTextFromClipboard).mockReturnValue(
+      new Promise((resolve) => {
+        finishRead = resolve;
+      }),
+    );
+    await pasteAsNewRows(host);
+    visibleRef.value = false;
+    await settle();
+    visibleRef.value = true;
+    await settle();
+    finishRead("2\tignored\tAda\tLovelace");
+    await settle();
+    expect(pendingRows(host)).toHaveLength(0);
+  });
+
+  it("bounds a single SQL line with excessive logical rows and leaves no drafts", async () => {
+    const columns = Array.from({ length: 1000 }, (_, i) => `c${i}`);
+    const { host } = mountGrid({ result: { ...defaultResult(), columns, rows: [[1, ...Array(999).fill(null)]] }, hideNullColumns: true });
+    await settle();
+    vi.mocked(readTextFromClipboard).mockResolvedValue(`INSERT INTO t VALUES ${"(1),".repeat(1000)}(1)`);
+    await pasteAsNewRows(host);
+    await vi.waitFor(() => expect(document.querySelector("[data-grid-row-preparation]")).toBeNull(), { timeout: 5000, interval: 10 });
+    expect(pendingRows(host)).toHaveLength(0);
+    await vi.waitFor(() => expect(useToast().message.value).toBe(i18n.global.t("grid.insertRowsClipboardTooLarge")), { interval: 1 });
+  });
+
+  it("allows a narrow overwrite paste in a wide table beyond the pending insertion row limit", async () => {
+    const columns = Array.from({ length: 2000 }, (_, i) => `c${i}`);
+    const rows = Array.from({ length: 600 }, (_, i) => [i, ...Array(1999).fill(null)]);
+    const save = vi.fn<CustomSaveHandler["save"]>().mockResolvedValue();
+    const { host } = mountGrid({ result: { ...defaultResult(), columns, rows }, hideNullColumns: true, customSaveHandler: { canInsert: true, save } });
+    await settle();
+    await selectColumnHeader(host, 0);
+    await paste(host, Array.from({ length: 600 }, (_, i) => String(i + 1000)).join("\n"));
+    host.querySelector<HTMLElement>("[data-toolbar-action='save']")!.click();
+    await settle();
+    expect(save).toHaveBeenCalledOnce();
+    expect(save.mock.calls[0]![0].newRows).toHaveLength(0);
+    expect(save.mock.calls[0]![0].dirtyRows.size).toBe(600);
+  });
+
+  it("inserts clipboard rows from the toolbar without preallocated blank rows or a selection", async () => {
+    const { host } = mountGrid({ hideNullColumns: true });
+    await settle();
+    vi.mocked(readTextFromClipboard).mockResolvedValue("2\tAda\tLovelace\n3\tGrace\tHopper");
+
+    await pasteAsNewRows(host);
+
+    expect(readTextFromClipboard).toHaveBeenCalledOnce();
+    expect(displayRows(host)).toHaveLength(3);
+    expect(visibleCellTexts(displayRows(host)[0]!)).toEqual(["1", "seed-2", "seed-3"]);
+    expect(pendingRows(host).map(visibleCellTexts)).toEqual([
+      ["2", "Ada", "Lovelace"],
+      ["3", "Grace", "Hopper"],
+    ]);
+  });
+
+  it("drops a delayed clipboard read when the result is replaced", async () => {
+    const { host, resultRef } = mountGrid();
+    await settle();
+    let finishRead!: (text: string) => void;
+    vi.mocked(readTextFromClipboard).mockReturnValue(
+      new Promise((resolve) => {
+        finishRead = resolve;
+      }),
+    );
+    await pasteAsNewRows(host);
+    resultRef.value = markRaw({ ...defaultResult(), rows: [[99, null, "replacement", "result"]] });
+    await settle();
+
+    finishRead("2\tignored\tAda\tLovelace");
+    await settle();
+
+    expect(displayRows(host)).toHaveLength(1);
+    expect(pendingRows(host)).toHaveLength(0);
+    expect(visibleCellTexts(displayRows(host)[0]!)[0]).toBe("99");
+  });
+
+  it("passes pasted drafts through the existing save handler without modifying existing rows", async () => {
+    const save = vi.fn<CustomSaveHandler["save"]>().mockResolvedValue();
+    const { host } = mountGrid({ customSaveHandler: { canInsert: true, save } });
+    await settle();
+    vi.mocked(readTextFromClipboard).mockResolvedValue("2\tkeep\tAda\tLovelace");
+    await pasteAsNewRows(host);
+    host.querySelector<HTMLElement>("[data-toolbar-action='save']")!.click();
+    await settle();
+
+    expect(save).toHaveBeenCalledOnce();
+    expect(save.mock.calls[0]![0].newRows).toEqual([[2, "keep", "Ada", "Lovelace"]]);
+    expect(save.mock.calls[0]![0].dirtyRows.size).toBe(0);
+    expect(save.mock.calls[0]![0].rows).toEqual(defaultResult().rows);
+  });
+
+  it.each(["empty", "unavailable"])("leaves no placeholder rows when the clipboard is %s", async (clipboardState) => {
+    const { host } = mountGrid();
+    await settle();
+    if (clipboardState === "empty") vi.mocked(readTextFromClipboard).mockResolvedValue("");
+    else vi.mocked(readTextFromClipboard).mockRejectedValue(new Error("Clipboard access denied"));
+
+    await pasteAsNewRows(host);
+
+    expect(pendingRows(host)).toHaveLength(0);
+    expect(displayRows(host)).toHaveLength(1);
+  });
+
+  it.each([{ editable: false }, { allowInsertRows: false }])("hides insertion actions when unsupported: %j", async (options) => {
+    const { host } = mountGrid(options);
+    await settle();
+
+    expect(host.querySelector("[data-toolbar-action='addRow']")).toBeNull();
+    expect(readTextFromClipboard).not.toHaveBeenCalled();
+  });
 });
 
 describe("DataGrid multi-row paste from a blank cell", () => {
+  it("shows cancellable progress for a large paste and leaves the blank row unchanged", async () => {
+    const { host } = mountGrid();
+    await settle();
+    await addBlankRow(host);
+    await selectCell(visibleCells(pendingRows(host)[0]!)[0]!);
+    await paste(host, Array.from({ length: 5000 }, (_, index) => `${index + 2}\tExcel`).join("\n"));
+
+    const progress = document.querySelector<HTMLElement>("[data-grid-row-preparation] [role='progressbar']");
+    expect(progress).not.toBeNull();
+    await vi.waitFor(() => expect(Number(progress!.getAttribute("aria-valuenow"))).toBeGreaterThan(0), { interval: 1 });
+    document.querySelector<HTMLButtonElement>("[data-grid-row-preparation] button")!.click();
+    await vi.waitFor(() => expect(document.querySelector("[data-grid-row-preparation]")).toBeNull(), { interval: 1 });
+    expect(pendingRows(host)).toHaveLength(1);
+    expect(visibleCellTexts(pendingRows(host)[0]!)).toEqual(["NULL", "NULL", "NULL", "NULL"]);
+  });
+
+  it("drops a large paste when its result is replaced during preparation", async () => {
+    const { host, resultRef } = mountGrid();
+    await settle();
+    await addBlankRow(host);
+    await selectCell(visibleCells(pendingRows(host)[0]!)[0]!);
+    await paste(host, Array.from({ length: 5000 }, (_, index) => `${index + 2}\tExcel`).join("\n"));
+    expect(document.querySelector("[data-grid-row-preparation]")).not.toBeNull();
+    resultRef.value = markRaw({ ...defaultResult(), rows: [[99, null, "replacement", "result"]] });
+    await vi.waitFor(() => expect(document.querySelector("[data-grid-row-preparation]")).toBeNull(), { interval: 1 });
+    expect(pendingRows(host)).toHaveLength(0);
+    expect(visibleCellTexts(displayRows(host)[0]!)[0]).toBe("99");
+  });
+
+  it("expands one blank new row to hold all 50 Excel rows and saves every row", async () => {
+    const save = vi.fn<CustomSaveHandler["save"]>().mockResolvedValue();
+    const { host } = mountGrid({ customSaveHandler: { canInsert: true, save } });
+    await settle();
+    await addBlankRow(host);
+    await selectCell(visibleCells(pendingRows(host)[0]!)[0]!);
+    await paste(host, Array.from({ length: 50 }, (_, index) => `${index + 2}\tExcel ${index + 1}`).join("\r\n"));
+
+    expect(pendingRows(host)).toHaveLength(50);
+    expect(visibleCellTexts(pendingRows(host).at(-1)!).slice(0, 2)).toEqual(["51", "Excel 50"]);
+    host.querySelector<HTMLElement>("[data-toolbar-action='save']")!.click();
+    await settle();
+    expect(save.mock.calls[0]![0].newRows).toHaveLength(50);
+    expect(save.mock.calls[0]![0].newRows.at(-1)).toEqual([51, "Excel 50", null, null]);
+    expect(save.mock.calls[0]![0].dirtyRows.size).toBe(0);
+  });
+
   it("expands beyond pre-added blank rows when pasted rows exceed them", async () => {
     const { host } = mountGrid();
     await settle();
@@ -376,7 +593,7 @@ describe("DataGrid multi-row paste from a blank cell", () => {
     expect(visibleCellTexts(rows[0]!)[2]).toBe("first");
   });
 
-  it("does not append from a multi-cell range", async () => {
+  it("expands a multi-cell range on a blank new row without losing clipboard rows", async () => {
     const { host } = mountGrid();
     await settle();
     await addBlankRow(host);
@@ -388,8 +605,9 @@ describe("DataGrid multi-row paste from a blank cell", () => {
     await paste(host, "a\tb\nc\td");
 
     const rows = pendingRows(host);
-    expect(rows).toHaveLength(1);
+    expect(rows).toHaveLength(2);
     expect(visibleCellTexts(rows[0]!).slice(1, 3)).toEqual(["a", "b"]);
+    expect(visibleCellTexts(rows[1]!).slice(1, 3)).toEqual(["c", "d"]);
   });
 
   it("does not append from a column selection", async () => {
@@ -493,16 +711,45 @@ describe("DataGrid multi-row paste from a blank cell", () => {
 
     expect(updates).toEqual([{ $set: { status: "{plain text" } }, { $set: { status: "{plain text" } }]);
   });
+});
 
-  it("routes DOM and canvas cell gestures through the same selection preparation", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGrid.vue"), "utf8");
-    const domGesture = source.slice(source.indexOf('@mousedown="\n                          prepareDataCellMouseDown'), source.indexOf('@mouseenter="onCellMouseenter'));
-    const canvasGesture = source.slice(source.indexOf("function onCanvasMouseDown"), source.indexOf("function onCanvasContext"));
+describe("DataGrid INSERT statement paste into blank new rows", () => {
+  it("fills a blank new row from a pasted INSERT statement aligned by column names", async () => {
+    const { host } = mountGrid();
+    await settle();
+    await addBlankRow(host);
 
-    expect(domGesture).toContain("prepareDataCellMouseDown(item, col.actualColIdx);");
-    expect(domGesture).toContain("handleDataCellMousedown(item.displayIndex, col.visibleColIdx, item.id, $event);");
-    expect(canvasGesture).toContain("prepareDataCellMouseDown(item, actualColIdx)");
-    expect(canvasGesture).toContain("handleDataCellMousedown(item.displayIndex, hit.visibleColIdx, item.id, event)");
-    expect(source).toContain("columnIndexes: visibleColumnIndexes.value.slice(range.startCol)");
+    const blankRows = pendingRows(host);
+    expect(blankRows).toHaveLength(1);
+    // Row-number selection marks the blank new row as the append target, so
+    // the INSERT values are aligned by column names instead of positions.
+    await selectRowNumber(blankRows[0]!);
+    // Column names in a scrambled order: c0 is the first visible column but
+    // receives 42 through name alignment, not position.
+    await paste(host, "INSERT INTO paste_target (c2, c0, hidden) VALUES ('from-insert', 42, 'h-val')");
+
+    const rows = pendingRows(host);
+    expect(rows).toHaveLength(1);
+    const cells = visibleCellTexts(rows[0]!);
+    expect(cells[0]).toBe("42");
+    expect(cells[1]).toBe("h-val");
+    expect(cells[2]).toBe("from-insert");
+  });
+
+  it("appends one row per statement when pasting multiple INSERT statements", async () => {
+    const { host } = mountGrid();
+    await settle();
+    await addBlankRow(host);
+
+    const blankRows = pendingRows(host);
+    await selectCell(visibleCells(blankRows[0]!)[0]!);
+    await paste(host, "INSERT INTO paste_target (c0, c2) VALUES (1, 'a');\nINSERT INTO paste_target (c0, c2) VALUES (2, 'b');");
+
+    const rows = pendingRows(host);
+    expect(rows).toHaveLength(2);
+    expect(visibleCellTexts(rows[0]!)[0]).toBe("1");
+    expect(visibleCellTexts(rows[0]!)[2]).toBe("a");
+    expect(visibleCellTexts(rows[1]!)[0]).toBe("2");
+    expect(visibleCellTexts(rows[1]!)[2]).toBe("b");
   });
 });

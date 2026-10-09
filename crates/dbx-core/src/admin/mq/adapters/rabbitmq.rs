@@ -186,6 +186,33 @@ impl MessageQueueAdmin for RabbitMqAdmin {
         Ok(topics.into_iter().map(|topic| topic_info_from_agent_value(&topic)).collect())
     }
 
+    async fn list_topics_page(
+        &self,
+        ns: &NamespaceRef,
+        _opts: ListTopicsOpts,
+        pagination: MqListPageRequest,
+    ) -> Result<MqListPage<TopicInfo>, String> {
+        let params = with_virtual_host(rabbitmq_page_params(&pagination), &ns.namespace);
+        let result: serde_json::Value = self.call("mq_list_topics", params).await?;
+        let topics = result
+            .get("topics")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|topic| topic_info_from_agent_value(&topic))
+            .collect::<Vec<_>>();
+
+        if let Some(metadata) = agent_page_metadata(&result, &pagination) {
+            return Ok(metadata.with_items(topics));
+        }
+
+        // Older installed agents ignore the optional page fields and return
+        // the legacy full-list envelope. Keep that wire combination working
+        // and bound what crosses the command boundary after it arrives.
+        Ok(paginate_topic_infos(topics, &pagination))
+    }
+
     async fn create_topic(&self, topic: &TopicRef, _partitions: Option<u32>) -> Result<(), String> {
         require_specific_vhost(&topic.namespace)?;
         let params = with_virtual_host(
@@ -235,6 +262,32 @@ impl MessageQueueAdmin for RabbitMqAdmin {
                     .map_err(|err| format!("Invalid exchange entry from agent: {err}"))
             })
             .collect()
+    }
+
+    async fn list_exchanges_page(
+        &self,
+        ns: &NamespaceRef,
+        pagination: MqListPageRequest,
+    ) -> Result<MqListPage<MqExchangeInfo>, String> {
+        let params = with_virtual_host(rabbitmq_page_params(&pagination), &ns.namespace);
+        let result: serde_json::Value = self.call("mq_list_exchanges", params).await?;
+        let exchanges = result
+            .get("exchanges")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|exchange| {
+                serde_json::from_value(map_item_namespace(exchange))
+                    .map_err(|err| format!("Invalid exchange entry from agent: {err}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if let Some(metadata) = agent_page_metadata(&result, &pagination) {
+            return Ok(metadata.with_items(exchanges));
+        }
+
+        Ok(paginate_exchange_infos(exchanges, &pagination))
     }
 
     async fn create_exchange(
@@ -678,6 +731,119 @@ impl MessageQueueAdmin for RabbitMqAdmin {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+struct AgentPageMetadata {
+    page: u32,
+    page_size: u32,
+    total_count: u64,
+    has_more: bool,
+}
+
+impl AgentPageMetadata {
+    fn with_items<T>(self, items: Vec<T>) -> MqListPage<T> {
+        MqListPage {
+            items,
+            page: self.page,
+            page_size: self.page_size,
+            total_count: self.total_count,
+            has_more: self.has_more,
+        }
+    }
+}
+
+fn rabbitmq_page_params(pagination: &MqListPageRequest) -> serde_json::Value {
+    let sort = match pagination.sort {
+        MqListSort::Name => "name",
+        MqListSort::MessagesReady => "messages_ready",
+    };
+    let mut params = serde_json::json!({
+        "page": pagination.page,
+        "page_size": pagination.page_size,
+        "sort": sort,
+        "sort_reverse": pagination.sort_descending,
+    });
+    if let Some(search) = pagination.search.as_deref().map(str::trim).filter(|search| !search.is_empty()) {
+        params["search"] = serde_json::json!(search);
+    }
+    params
+}
+
+fn agent_page_metadata(result: &serde_json::Value, request: &MqListPageRequest) -> Option<AgentPageMetadata> {
+    // `totalCount` distinguishes the new bounded agent envelope from the
+    // legacy `{topics:[...]}` / `{exchanges:[...]}` response.
+    let total_count = result.get("totalCount")?.as_u64()?;
+    let page = result
+        .get("page")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(request.page);
+    let page_size = result
+        .get("pageSize")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(request.page_size);
+    let has_more = result
+        .get("hasMore")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or_else(|| u64::from(page).saturating_mul(u64::from(page_size)) < total_count);
+    Some(AgentPageMetadata { page, page_size, total_count, has_more })
+}
+
+fn paginate_topic_infos(mut topics: Vec<TopicInfo>, request: &MqListPageRequest) -> MqListPage<TopicInfo> {
+    let search = request.search.as_deref().map(str::trim).unwrap_or_default().to_lowercase();
+    if !search.is_empty() {
+        topics.retain(|topic| {
+            topic.name.to_lowercase().contains(&search) || topic.short_name.to_lowercase().contains(&search)
+        });
+    }
+    topics.sort_by(|left, right| {
+        let primary = match request.sort {
+            MqListSort::Name => left.name.cmp(&right.name),
+            MqListSort::MessagesReady => left
+                .messages_ready
+                .or(left.message_count)
+                .unwrap_or_default()
+                .cmp(&right.messages_ready.or(right.message_count).unwrap_or_default()),
+        };
+        let primary = if request.sort_descending { primary.reverse() } else { primary };
+        primary.then_with(|| left.short_name.cmp(&right.short_name))
+    });
+    paginate_items(topics, request)
+}
+
+fn paginate_exchange_infos(
+    mut exchanges: Vec<MqExchangeInfo>,
+    request: &MqListPageRequest,
+) -> MqListPage<MqExchangeInfo> {
+    let search = request.search.as_deref().map(str::trim).unwrap_or_default().to_lowercase();
+    if !search.is_empty() {
+        exchanges.retain(|exchange| {
+            let display_name = if exchange.name.is_empty() { "(AMQP default)" } else { &exchange.name };
+            display_name.to_lowercase().contains(&search)
+        });
+    }
+    exchanges.sort_by(|left, right| {
+        let ordering = left.name.cmp(&right.name);
+        if request.sort_descending {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    });
+    paginate_items(exchanges, request)
+}
+
+fn paginate_items<T>(items: Vec<T>, request: &MqListPageRequest) -> MqListPage<T> {
+    let total_count = items.len() as u64;
+    let start = u64::from(request.page.saturating_sub(1)).saturating_mul(u64::from(request.page_size));
+    let page_items = if start >= total_count {
+        Vec::new()
+    } else {
+        items.into_iter().skip(start as usize).take(request.page_size as usize).collect()
+    };
+    let has_more = start.saturating_add(page_items.len() as u64) < total_count;
+    MqListPage { items: page_items, page: request.page, page_size: request.page_size, total_count, has_more }
+}
 
 /// Topic refs use flat queue names for RabbitMQ: the queue name is the short
 /// topic name, the tenant is ignored. The namespace maps to a virtual host
@@ -1687,6 +1853,61 @@ mod tests {
         let params = with_virtual_host(serde_json::json!({ "name": "q1" }), "*");
         assert_eq!(params.get("all_vhosts").and_then(|v| v.as_bool()), Some(true));
         assert!(params.get("virtual_host").is_none(), "all-vhosts listing must not scope to a vhost");
+    }
+
+    #[test]
+    fn rabbitmq_page_params_map_search_and_message_sort_for_the_agent() {
+        let params = rabbitmq_page_params(&MqListPageRequest {
+            page: 3,
+            page_size: 200,
+            search: Some("orders".to_string()),
+            sort: MqListSort::MessagesReady,
+            sort_descending: true,
+        });
+
+        assert_eq!(params.get("page").and_then(|value| value.as_u64()), Some(3));
+        assert_eq!(params.get("page_size").and_then(|value| value.as_u64()), Some(200));
+        assert_eq!(params.get("search").and_then(|value| value.as_str()), Some("orders"));
+        assert_eq!(params.get("sort").and_then(|value| value.as_str()), Some("messages_ready"));
+        assert_eq!(params.get("sort_reverse").and_then(|value| value.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn legacy_agent_topic_result_is_filtered_sorted_and_bounded_locally() {
+        let topics = vec![
+            TopicInfo {
+                name: "orders-low".to_string(),
+                short_name: "orders-low".to_string(),
+                messages_ready: Some(2),
+                ..TopicInfo::default()
+            },
+            TopicInfo {
+                name: "unrelated".to_string(),
+                short_name: "unrelated".to_string(),
+                messages_ready: Some(99),
+                ..TopicInfo::default()
+            },
+            TopicInfo {
+                name: "orders-high".to_string(),
+                short_name: "orders-high".to_string(),
+                messages_ready: Some(8),
+                ..TopicInfo::default()
+            },
+        ];
+        let page = paginate_topic_infos(
+            topics,
+            &MqListPageRequest {
+                page: 1,
+                page_size: 1,
+                search: Some("orders".to_string()),
+                sort: MqListSort::MessagesReady,
+                sort_descending: true,
+            },
+        );
+
+        assert_eq!(page.total_count, 2);
+        assert!(page.has_more);
+        assert_eq!(page.items[0].name, "orders-high");
     }
 
     #[test]

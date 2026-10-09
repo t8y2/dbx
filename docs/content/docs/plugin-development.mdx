@@ -13,6 +13,24 @@ DBX plugins are independently installed `.dbxp` packages that can contribute con
   **Marketplace listing pull requests go to [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store), not `t8y2/dbx`.** A plugin's feature code normally remains in its author's source repository. Open a PR against [`t8y2/dbx`](https://github.com/t8y2/dbx) only when changing the DBX host, SDK, CLI, protocol, schemas, documentation, or official examples.
 </Callout>
 
+## Plugin Shortcuts
+
+Manage shortcuts in **Plugin Center → Settings → Global settings**. They are enabled by default at the top right. Choose the top or bottom of either side, below the connection tree, or a floating strip before Update. The floating strip shows 3 icons by default, configurable from 0 to 10; remaining entries appear in a dropdown, one icon and name per row. Limited space moves additional entries into the dropdown.
+
+Below the connection tree, **Plugin settings** sits at the top right of the **Plugins** header. Other positions include it as a fixed entry at the end by default. It opens the Plugin Center settings page directly and cannot be reordered. When the floating toolbar overflows, this entry is last in its dropdown. Disable **Show plugin settings shortcut** in global settings to hide it; you can enable it again from Plugin Center → Settings. When no plugin shortcuts are visible, the entire shortcut area, including the settings entry, is hidden and takes up no layout space.
+
+Each function has its own draggable icon. Visibility switches apply to a whole plugin. All positions share the saved order. Hiding or uninstalling a plugin retains its recorded positions, so the same entries return to those positions; unrecorded entries follow saved entries. Entry identity consists of the plugin ID, entry kind, and function ID. Changing these IDs creates a new entry.
+
+Drag previews follow the cursor and adjust their direction and position near window edges. Right-docked shortcuts prefer the left side of the cursor; long names are truncated to the available width.
+
+Choose **Beside Plugin Center (dropdown)** to show all shortcuts as icon-and-name rows in the menu beside the Plugin Center button. Rows support drag sorting; the floating toolbar icon count does not apply here.
+
+Below the connection tree, shortcuts form a single-column list with an icon on the left and a name on the right, using the tree’s row style and font size. Automatic height fits one entry per row up to five rows, with vertical scrolling for remaining entries. Drag the divider to save a custom height; double-click it to restore automatic height. Escape, window blur, or releasing outside the sorting area cancels sorting. Failed saves show an error and roll back.
+
+Shortcuts honor declared `appToolbar` visibility and command enablement. Standalone plugins also expose existing workbenches, preferring a matching command when available. Legacy plugins without commands can expose filesystem entries. Connection plugins only expose explicitly declared global commands; the host does not invent workbench entries without connection context. Incompatible plugins are excluded.
+
+Position affects icons only: content retains its existing `panel/tab` presentation. Hiding shortcuts, changing position, or hiding a plugin does not close running sessions. A panel shortcut toggles only the matching selected command panel and restores that same instance. No Manifest or backend protocol changes are required. Legacy `left/right` preferences migrate to the top of the corresponding side.
+
 ## Which Repository Receives the Change
 
 | Change | Destination | Official DBX PR? |
@@ -89,7 +107,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 | `engines` | Yes | Compatibility declaration; it must contain `host_api`. |
 | `permissions` | No | Minimal capability set, described below. |
 | `entrypoints` | No | UI and native-sidecar entrypoints. |
-| `contributions` | No | Connection, workbench, filesystem, connection-menu, and result-view declarations. |
+| `contributions` | No | Connection, workbench, filesystem, connection-menu, result-view, command/menu, and MCP tool-surface declarations. |
 | `localizations` | No | Locale-specific names, descriptions, fields, and action labels. |
 
 ### Engines, Permissions, and Entrypoints
@@ -103,7 +121,10 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
     "host.filesystem",
     "host.binary",
     "host.plans:read",
+    "host.schema:read",
     "host.storage",
+    "host.clipboard:read",
+    "host.data:read",
     "host.network:https://s3.example.com:443"
   ],
   "entrypoints": {
@@ -120,8 +141,11 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 - `engines.dbx` is an optional DBX version range; `engines.host_api` is required.
 - `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, and `host.filesystem` enables filesystem entrypoints.
 - `host.plans:read` allows reading estimated execution plans for DBX's own connections (see [Estimated Execution Plans](#estimated-execution-plans)). It is read-only: it never grants SQL execution, writes, DDL, or actual plans, and it is the only plan scope that exists.
+- `host.schema:read` allows `host.getTableMetadata` to read narrow table schema metadata from an already-open connection; it grants no arbitrary SQL, writes, or implicit reconnect (see [Table Schema Metadata](#table-schema-metadata)).
 - `host.storage` gives the workbench UI a persistent key-value store scoped to this plugin (see [Persistent UI State](#persistent-ui-state)). Values never leave the plugin's own data directory.
-- `host.ai` lets the plugin open a conversation with a data snapshot in the built-in DBX AI panel, using its model selector, history, follow-up messages, cancellation and export. Older DBX builds reject the unknown permission at install time, so plugins that must install everywhere should treat `host.ai` as optional.
+- `host.ai` lets a plugin use the global DBX AI panel for Ask snapshot conversations, optional Agent conversations backed by live plugin tools, and workbench-specific quick-question recommendations. Older DBX builds reject the unknown permission at install time, so plugins that must install everywhere should treat `host.ai` as optional and check `capabilities.ai` / `capabilities.aiRecommendations` at runtime.
+- `host.clipboard:read` allows reading the system clipboard from the workbench UI (see [System Clipboard](#system-clipboard)). Clipboard writes need no permission; reads hand user data (passwords, tokens) to plugin code, so they are gated.
+- `host.data:read` allows `window.dbxPlugin.queryData` to run one read-only SQL statement on a connection the user granted to the plugin (see [Read-only Data Queries](#read-only-data-queries)). Every connection needs the user's consent; it never grants writes, DDL, or reconnects.
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
 - `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
@@ -214,10 +238,10 @@ Action `when` accepts `always`, `create`, or `edit`; `variant` accepts `default`
 | --- | --- | --- |
 | `workbench` | `type`, `id`, `label` | Registers a workbench opened from the sidebar or plugin entry. |
 | `filesystem-provider` | `type`, `id`, `label`, `schemes` | Registers a virtual filesystem; `root_uri` can be `s3://bucket`, with optional `read`, `write`, `delete`, `rename`, and `mkdir` capabilities. |
-| `context-menu` | `type`, `id`, `label`, `menu: "connection"` or `"table"` | Adds an action to a Sidebar Tree connection or table context menu. |
+| `context-menu` | `type`, `id`, `label`, `menu: "connection"` or `"table"`, optional `action` | Adds a backend action or opens a declared Workbench from a Sidebar Tree context menu. |
 | `result-view` | `type`, `id`, `label` | Registers a query or task result view. |
 
-A `menu: "table"` contribution is currently exposed when the user opens a context menu on a concrete table node in the Sidebar Tree. DBX invokes the required backend entrypoint as `contextMenu/<contribution-id>` with the table identity:
+A `menu: "table"` contribution is currently exposed when the user opens a context menu on a concrete table node in the Sidebar Tree. A legacy contribution without `action` invokes the required backend entrypoint as `contextMenu/<contribution-id>` with the table identity:
 
 ```json
 {
@@ -232,9 +256,25 @@ A `menu: "table"` contribution is currently exposed when the user opens a contex
 
 `database` and `schema` are optional and are omitted when unavailable. The context contains no credential, connection string, or raw connection configuration. Object Browser can reuse this identity contract in a later contribution surface, but it is not a table menu surface in this release.
 
+A context-menu contribution can instead declare a host-handled Workbench action:
+
+```json
+{
+  "type": "context-menu",
+  "id": "vendor.example.generate",
+  "label": "Generate test data",
+  "menu": "table",
+  "action": { "type": "open-workbench", "workbench": "vendor.example.main" }
+}
+```
+
+`action.workbench` must reference a `workbench` contribution in the same plugin. The host opens it directly, without invoking the sidecar, and passes the current invocation context as Workbench context. For `menu: "table"`, this is the `TableContext` object above directly (not the backend `{ "table": ... }` envelope); for `menu: "connection"`, it is the existing non-secret connection summary (`id`, `dbType`, `name`, `database`). The host may also provide the standard `connectionId` for tab association. No host, port, username, password, connection string, or raw connection configuration is exposed. Reopening the Workbench refreshes its context with the latest invocation.
+
+Only legacy context-menu contributions without `action` require a backend entrypoint; their `{ "message": "..." }` response continues to show a toast.
+
 Reference contributions by ID: a connection provider's `workbench` must point to a declared workbench and `filesystem_provider` to a declared filesystem provider. A contribution icon takes precedence over the plugin-level icon.
 
-Choose `workbench` for a custom file browser: the plugin owns its list, virtualization, previews, context menus, and split panes. Choose `filesystem_provider` only to use DBX's generic file manager; declaring both defaults to the workbench. `context-menu` invokes `contextMenu/<contribution-id>` on the backend; `result-view` receives a result snapshot in workbench context, and the opened contribution id arrives in the `dbx-plugin-init` payload so one UI entrypoint can serve several workbenches and result views. See the [full contribution protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md) for payloads.
+Choose `workbench` for a custom file browser: the plugin owns its list, virtualization, previews, context menus, and split panes. Choose `filesystem_provider` only to use DBX's generic file manager; declaring both defaults to the workbench. A legacy `context-menu` invokes `contextMenu/<contribution-id>` on the backend, while a declarative `open-workbench` action opens its same-plugin Workbench directly; `result-view` receives a result snapshot in workbench context. The SDK exposes the Host-selected contribution id as `dbxPlugin.contributionId` after initialization, so one UI entrypoint can serve several workbenches and result views. See the [full contribution protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md) for payloads.
 
 ### Filesystem Protocol
 
@@ -281,15 +321,27 @@ Context may contain `null`, booleans, finite numbers, strings, arrays, and plain
 
 Connection provider fields using `binding: "config"` are persisted in `external_config`; fields using `binding: "secret"` are persisted in the Secret Store. Plugin connection configuration keeps `external_config` through create, edit, save, and reconnect flows.
 
+The host also authors three reserved fields on every workbench context: `workbenchId` (a stable host-generated instance id), `restored`, and `surface`. `surface` tells the UI which container it is running in — `"tab"` (the main multi-tab workbench), `"dock"` (the bottom panel), or `"window"` (a floating desktop widget window, see [Floating Windows](#floating-windows)). The same plugin and contribution can be open on several surfaces at once, each with its own context and lifecycle; unknown values should fall back to `"tab"` behavior.
+
 ## Frontend Host API
 
 The UI runs in an isolated iframe. DBX exposes the bridge as `window.dbxPlugin`; do not import DBX Vue/Tauri modules or assume that Node.js, local files, or arbitrary network access are available.
+
+When multiple Workbench or result-view contributions share one UI entrypoint, use the Host-selected identity to route the UI:
+
+```js
+await window.dbxPlugin.ready;
+const contributionId = window.dbxPlugin.contributionId;
+```
+
+`contributionId` is independent of `context`; for example, a Workbench opened from Plugin Center can have an empty `{}` context. The SDK records the identity before resolving `ready`, making it deterministic to read afterward. The legacy `dbx-plugin-init` event still carries the full init payload as a notification, but it is one-shot and must not be the only source of authoritative state.
 
 The following custom `objects/list` and `objects/changed` methods must be implemented by your backend. The asset example assumes the package contains `ui/assets/empty-state.svg`:
 
 ```js
 await window.dbxPlugin.ready;
 
+const contributionId = window.dbxPlugin.contributionId;
 const context = window.dbxPlugin.context;
 const result = await window.dbxPlugin.invoke("objects/list", { prefix: "docs/" }, { timeoutMs: 30000 });
 const off = window.dbxPlugin.onContext((nextContext) => render(nextContext));
@@ -301,6 +353,7 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | API | Purpose |
 | --- | --- |
 | `ready` | Waits for Host initialization; start application logic after `await dbxPlugin.ready`. |
+| `contributionId` | Read-only identity of the contribution opened by the Host; available after `await ready` and independent of `context`. |
 | `context` / `onContext(fn)` | Reads or observes the current workbench context. |
 | `locale` | Reads the current DBX locale; the plugin translates its own UI. |
 | `theme` | Reads `appearance` and DBX design tokens for light/dark support. |
@@ -310,14 +363,22 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `sendBinary(channel, data)` / `onBinary(fn)` | Sends or receives binary data; requires framed transport and `host.binary`. |
 | `readAsset(path)` / `readAssetUrl(path)` | Reads a packaged asset within the plugin resource root. |
 | `openWorkbench(id, context)` | Opens another workbench from this plugin; requires `host.workbench`. |
+| `closeWorkbench()` | Closes the surface hosting this UI — a workbench tab, a dock entry, or this plugin's floating window. It is the same path as the `Ctrl/Cmd+W` shortcut, so a plugin can offer its own close or minimize affordance. |
+| `executeCommand(commandId, context?)` | Executes one of this plugin's own declared commands through the same path as a menu placement — re-checks `enablement`, applies singleton reuse, and follows the declared `presentation` (panel commands dock, tab commands open tabs). `context` merges over the command context and scopes `instance_key` `{{path}}` placeholders, so `instance_key: "logs:{{connectionId}}"` yields one panel instance per connection. Resolves `{ error }` for expected outcomes; requires `host.workbench`. |
 | `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
 | `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
-| `capabilities` | `{ downloadFile, planApi, storage, ai }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
-| `ai.openConversation({ title, prompt, context, send? })` | Opens a new plugin conversation in the built-in AI panel; `send` defaults to `false`, or starts analysis when `true`; requires `host.ai` and is advertised as `capabilities.ai` — gate on it instead of probing, since older hosts omit it. |
+| `getTableMetadata({ connectionId, database?, schema?, table })` | Reads narrow table schema metadata from an already-open connection; requires `host.schema:read`. |
+| `queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` | Runs one read-only SQL statement on a connection the user granted to the plugin; requires `host.data:read`. |
+| `capabilities` | `{ downloadFile, planApi, schemaMetadataApi, dataApi, storage, ai, aiRecommendations, clipboardWrite, clipboardRead, floating }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
+| `ai.openConversation({ title, prompt, context, send?, mode? })` | Opens a new plugin conversation in the built-in AI panel; `send` defaults to `false` and `mode` defaults to `ask`. `mode: "agent"` uses live plugin tools when context includes an open plugin connection; requires `host.ai` and is advertised as `capabilities.ai`. |
+| `ai.setRecommendations({ context, items })` | Replaces the current workbench's default recommendations and refreshes the global AI panel; up to five items are shown and `{{path.to.value}}` placeholders are supported; requires `host.ai` and `capabilities.aiRecommendations`. |
+| `ai.clearRecommendations()` | Clears recommendations for the current workbench; requires `host.ai` and `capabilities.aiRecommendations`. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
 | `storage` | Persistent per-plugin key-value state; requires `host.storage`; see below. |
-| `fileTransfer` | Streams local files and OS drops (desktop only); see below. |
+| `fileTransfer` | Streams local files, downloads, and (desktop) OS drops; see below. |
+| `clipboard` | System clipboard access from the sandbox; see below. |
+| `floating` | Opens and drives a floating desktop widget window (desktop hosts only); see [Floating Windows](#floating-windows). |
 
 Failed calls reject their Promise; show a useful error and offer retry. Host methods, parameters, and results are versioned API surface—do not call undocumented DBX internals.
 
@@ -367,6 +428,127 @@ Gate on capability rather than probing: read `dbxPlugin.capabilities.planApi` fr
 
 The plan API is Host API 1.2. A plugin that cannot work without it declares the floor in its manifest with `"engines": { "host_api": "^1.2" }`. The manifest range is a compatibility floor and `capabilities.planApi` is the runtime check; keep both.
 
+### Table Schema Metadata
+
+A plugin can read narrow schema metadata for one table on a DBX connection that is already open, without owning a driver, connection pool, credential, or SQL string. The request reuses the canonical `PluginTableContext` and contains table identity only:
+
+```json
+{
+  "permissions": ["host.schema:read"]
+}
+```
+
+```js
+if (window.dbxPlugin.capabilities.schemaMetadataApi) {
+  const metadata = await window.dbxPlugin.getTableMetadata({
+    connectionId,
+    database,
+    schema,
+    table: "users"
+  });
+  for (const column of metadata.columns) {
+    renderColumn(column.name, column.dataType, column.nullable);
+  }
+}
+```
+
+`getTableMetadata({ connectionId, database?, schema?, table })` returns:
+
+```json
+{
+  "columns": [
+    {
+      "name": "id",
+      "dataType": "integer",
+      "nullable": false,
+      "precision": 32,
+      "default": "nextval('users_id_seq'::regclass)"
+    }
+  ],
+  "fieldCapabilities": {
+    "length": "supported",
+    "precision": "supported",
+    "scale": "supported",
+    "default": "supported"
+  }
+}
+```
+
+- `columns` contains only `name`, `dataType`, `nullable`, and optional `length`, `precision`, `scale`, and `default`. It never returns comments, keys/indexes, credentials, connection strings, driver objects, or arbitrary SQL results.
+- Optional values remain `null` or are omitted when no value exists; they are never fabricated as `0` or an empty string. `fieldCapabilities` uses `supported`, `unsupported`, and `unknown` to distinguish provider support, an explicitly unavailable field, and missing reliable provenance; plugins must not treat `unknown` as supported.
+- `database` and `schema` are optional and omitted when unavailable; do not use empty strings as public identity. `connectionId` and `table` must be non-empty identity values no longer than 256 characters.
+- This API is read-only. DBX reuses only an already-open Host connection/session; a plugin cannot trigger an implicit reconnect, create a pool, or execute arbitrary SQL. A saved-but-disconnected connection is rejected with `Connection is not open`; a requested database without a matching open session is also rejected instead of being routed to another connection.
+
+This API is part of Host API 1.3. A plugin that cannot work without it should declare `"engines": { "host_api": "^1.3" }` and still read `capabilities.schemaMetadataApi`, because older hosts omit that field. Without `host.schema:read`, the host rejects the request before it reaches the backend.
+
+### Read-only Data Queries
+
+A plugin can run one read-only SQL statement on a DBX connection the user granted to it, without a driver, a pool, a credential, or a connection string. Declare the permission and gate the call on the capability:
+
+```json
+{
+  "engines": { "host_api": "^1.4" },
+  "permissions": ["host.data:read"]
+}
+```
+
+```js
+if (window.dbxPlugin.capabilities.dataApi) {
+  const result = await window.dbxPlugin.queryData({
+    connectionId,
+    database,
+    sql: "SELECT status, count(*) AS total FROM orders GROUP BY status",
+    maxRows: 200
+  });
+  renderChart(result.columns, result.rows);
+}
+```
+
+`queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` returns:
+
+```json
+{
+  "dbType": "postgres",
+  "columns": [{ "name": "status", "dataType": "text" }, { "name": "total", "dataType": "int8" }],
+  "rows": [["paid", 1204], ["refunded", 37]],
+  "truncated": false,
+  "elapsedMs": 12
+}
+```
+
+- **Consent per connection.** The first query for a connection opens a host dialog that names the plugin and the connection. An allow is persisted and listed under the plugin in Plugin Center → Installed, where the user can revoke it at any time; a denial is remembered for the workbench session. A plugin cannot grant itself access.
+- **Read-only, one statement.** The host accepts exactly one statement that DBX's SQL risk classifier rates read-only — the same gate as MCP read-only access and the AI agent. Writes, DDL, `SELECT … FOR UPDATE`, multiple statements, and session database switches such as `USE` are rejected. Pass `database` instead of switching.
+- **Open connections only.** Like the plan and schema metadata APIs, DBX never connects on the plugin's behalf: a saved but closed connection is rejected with `Connection is not open`. Redis, MongoDB, search engines, and other non-SQL connections are not served.
+- **Bounded.** `maxRows` defaults to 500 and is capped at 5000; the serialized rows are capped at 8 MiB; `timeoutMs` is clamped to the connection timeout and a 60-second ceiling. `truncated` is `true` whenever rows were cut.
+- **No credentials.** The response carries columns and rows only. A revoked grant fails with an error that starts with `PLUGIN_DATA_ACCESS_NOT_GRANTED`; the next query asks the user again.
+
+This API is Host API 1.4. Keep both the `engines.host_api` floor and the `capabilities.dataApi` runtime check; web hosts that cannot show a consent dialog deny the request instead of granting it.
+
+### System Clipboard
+
+The plugin sandbox has an opaque origin and no clipboard permission, so `navigator.clipboard` is unavailable there. The host bridges the system clipboard instead:
+
+- `window.dbxPlugin.copy(text)` / `window.dbxPlugin.clipboard.writeText(text)` write to the system clipboard. Both ride the same ungated bridge method: a write has the user's data as its input and is the low-risk half of the surface.
+- `window.dbxPlugin.clipboard.readText()` reads the system clipboard. It requires the `host.clipboard:read` permission — a read hands user data (passwords, tokens) to plugin code with no further user interaction — and is Host API 1.3: declare `"engines": { "host_api": "^1.3" }` if your workbench cannot function without it.
+
+Gate reads on the init capability rather than probing: `capabilities.clipboardRead` (and `capabilities.clipboardWrite` for writes) are absent on older hosts, which makes them falsy. A rejected read (missing permission, web host without native clipboard access) rejects its Promise — degrade gracefully, e.g. fall back to a keyboard-paste path instead of failing the interaction.
+
+```js
+await window.dbxPlugin.ready;
+const canRead = !!window.dbxPlugin.capabilities.clipboardRead;
+const canWrite = !!window.dbxPlugin.capabilities.clipboardWrite;
+
+async function pasteFromClipboard() {
+  if (!canRead) return null;
+  try {
+    return await window.dbxPlugin.clipboard.readText();
+  } catch {
+    // Permission missing or the clipboard read failed: keep the keyboard path.
+    return null;
+  }
+}
+```
+
 ### File Transfer and OS Drops
 
 Desktop hosts stream local files into plugin sandboxes through `window.dbxPlugin.fileTransfer`. Handles are opened only after explicit user consent: a native open/save dialog (`pick` / `beginSave`) or a file dropped from the OS onto this plugin's workbench area (`onDrop`). Transfers are chunked, so multi-gigabyte files never load into memory.
@@ -407,10 +589,10 @@ const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
 | `beginSave({ name, contentType?, size? })` | Native save dialog + write handle; resolves `{ handleId, chunkBytes }`, or `null` when the user cancels. |
 | `write(handleId, offset, data)` | Writes one chunk (transferred binary or base64); resolves `{ written, nextOffset }`. |
 | `finish(handleId)` / `cancel(handleId)` | Flush-closes a write handle / discards any handle. |
-| `onDrop(fn)` | Files dropped onto this workbench arrive as already-opened read handles. |
+| `onDrop(fn)` | Files dropped onto this workbench arrive as read handles. A dropped folder is expanded into the regular files it contains (dotfiles and dot-directories like `.git` are skipped); each expanded file carries `relativePath` — its '/'-separated path starting with the dropped folder's own name (`folder/nested/a.csv`) — so the plugin can rebuild the dragged structure and tell same-named files under different dropped roots apart. Listeners receive `(files, { dropId, truncated })`: `dropId` groups this drop's entries (cancellation and progress bookkeeping), `truncated` is `true` when the 2000-file or 8-depth expansion cap cut the delivery short. |
 | `onDragState(fn)` | Whether an OS drag is currently over this workbench; drive drop overlays with it. |
 
-Desktop only: the whole namespace is `undefined` in the web host, so feature-detect before use. `onDrop` only fires for drops that land inside this plugin's workbench area; drops elsewhere keep the host's own behavior.
+Desktop and web hosts differ in what the namespace can do — gate on the additive `capabilities.fileTransfer` flags (`pick`, `beginSave`, `read`, `drop`, `folderExpansion`) instead of probing calls. On desktop, `pick` / `beginSave` use native dialogs and `onDrop` receives OS drops; dropped entries are opened lazily and streamed in chunks, so very large folders and multi-gigabyte files never exhaust handles or memory, and picking more files than the shared handle registry holds downgrades them to lazily-opened entries instead of dropping any. On the web host, `pick` falls back to a browser file input, `beginSave` buffers in memory and downloads through the browser, `onDrop` / `onDragState` never fire (`drop`/`folderExpansion` are `false` there), and handles carry no `relativePath`. `onDrop` only fires for drops that land inside this plugin's workbench area; drops elsewhere keep the host's own behavior.
 
 ### Persistent UI State
 
@@ -435,20 +617,136 @@ Keys are strings up to 256 characters; values are capped at 256 KiB serialized a
 
 ### Analyse plugin data in DBX AI
 
-Declare `"permissions": ["host.ai"]` in the manifest, then call this from the plugin's analysis action:
+Declare `"permissions": ["host.ai"]` in the manifest. A plugin can open the global AI panel directly, or register quick recommendations for each Workbench. Both paths use DBX's model selector, history, follow-up messages, cancellation and export.
+
+#### Declare default Workbench recommendations
+
+Add optional `ai.recommendations` under a `workbench` contribution. `label` is shown in the global DBX AI panel, `prompt` is sent when the user clicks it, and lower `order` values appear first.
+
+```json
+{
+  "type": "workbench",
+  "id": "com.example.files.main",
+  "label": "Files",
+  "ai": {
+    "recommendations": [
+      {
+        "id": "health",
+        "label": "Check {{resource.name}} health",
+        "prompt": "Analyze the health and risks of {{resource.kind}}/{{resource.name}}",
+        "order": 10
+      }
+    ]
+  }
+}
+```
+
+Placeholders are resolved from the current Workbench context. Object properties and array indexes are supported, such as `{{resource.name}}` and `{{items.0.status}}`. A recommendation with an unresolved placeholder is hidden; paths containing `__proto__`, `prototype`, or `constructor` are rejected. At most five recommendations are displayed.
+
+#### Update recommendations when the resource changes
+
+When the plugin switches pages or resources, it can publish runtime recommendations. Runtime `items` replace the Manifest defaults; an empty array clears the current recommendations. Runtime context usually needs to contain only resource fields. The Host preserves the Workbench's `connectionId`, database, and instance identity so a click remains bound to the correct plugin connection.
+
+```js
+function updateRecommendations(resource) {
+  if (!dbxPlugin.capabilities.aiRecommendations) return;
+
+  return dbxPlugin.ai.setRecommendations({
+    context: { resource },
+    items: [
+      {
+        id: "health",
+        label: `Check ${resource.name} health`,
+        prompt: "Analyze the health and risks of {{resource.kind}}/{{resource.name}}",
+        order: 10,
+      },
+      {
+        id: "events",
+        label: "Review recent events",
+        prompt: "List the important recent events for this resource and suggest next steps",
+        order: 20,
+      },
+    ],
+  });
+}
+
+await dbxPlugin.ai.clearRecommendations();
+```
+
+Recommendations appear in the global DBX AI conversation window, without adding a separate AI entry point inside the plugin page. Clicking one creates a new Agent conversation with the selected text and sends it immediately; the Agent uses tools exposed by the current open plugin connection to retrieve live data. The recommendation list belongs only to the current Workbench context and is not written to conversation history; the selected prompt is saved normally after it is sent.
+
+#### Open an Ask or Agent conversation directly
+
+`ai.openConversation` remains useful for a plugin button or another explicit action. `mode` defaults to `ask`, where the Host copies the plugin's JSON snapshot into the conversation; the snapshot is retained with the conversation and later resource refreshes do not replace it. To use live tools, pass `mode: "agent"` and include the `connectionId` of the current open plugin connection in the context:
 
 ```js
 await dbxPlugin.ai.openConversation({
   title: "Watchlist analysis",
-  prompt: "Compare the supplied quotes and explain risks and missing data.",
-  context: { snapshotId: "watchlist-1", quotes, source, dataTimestamp },
+  prompt: "Compare the current quotes and explain risks and missing data.",
+  context: {
+    connectionId,
+    resource: { kind: "watchlist", name: "primary" },
+    dataTimestamp,
+  },
+  mode: "agent",
   send: true,
 });
 ```
 
-`title` allows 200 characters and `prompt` allows 32000. `context` must be a plain JSON object and is limited to 2 MiB. The host binds the installed plugin identity and copies the snapshot. Quote refreshes or database tab changes do not replace conversation data. The snapshot is stored as conversation data for history restoration and export. Include source, data timestamp, delays and missing fields; AI does not fetch market data itself.
+`title` allows 200 characters and `prompt` allows 32000. `context` must be a plain JSON object and is limited to 2 MiB. An Agent can use only tools exposed by the Host for that plugin connection; the plugin receives no model response or model configuration and gains no database execution capability. Older plugins without recommendations continue to use the existing AI API, and older hosts omit the new capability fields, so disable only the unavailable entry points and keep the rest of the plugin usable.
 
-This method opens the built-in conversation and returns no model response or AI configuration to the plugin. The initial implementation uses text-only Ask through DBX's HTTP providers and Ollama, without database tools or CLI Agents. If no model is configured, the prompt remains an editable draft so the user can select a model and continue.
+### Floating Windows
+
+A floating window is one of your plugin's workbenches hosted in its own frameless, always-on-top desktop window instead of inside the DBX shell — the surface a small always-visible widget wants (a player capsule, a session badge, a quick picker). It stays on top of other applications and can be dragged anywhere on the desktop. Released mid-screen it stays where it landed; released on or past a work-area edge — however hard it was shoved — it snaps flush onto that edge and docks there. Docking never hides the widget the moment it lands: it stays a fully readable capsule, tucks off-screen behind a thin strip about 2.5 seconds after the cursor leaves it, and slides back out while the cursor is over that strip. Reopening a widget that was left docked behaves the same way (capsule first, then tuck); one that was simply summoned is left as a capsule even though its default placement touches an edge. Gate on `capabilities.floating`: the web host has no windows, and neither does a desktop host that cannot manage them.
+
+```js
+if (window.dbxPlugin.capabilities.floating) {
+  // From a tab or dock workbench: open the widget. One window per
+  // (plugin, workbench contribution), so a second call focuses the existing one.
+  const { windowId } = await window.dbxPlugin.floating.open({
+    contributionId: "capsule",
+    title: "Now playing",
+    width: 260,
+    height: 60,
+    context: { queueId: currentQueueId },
+  });
+}
+
+// Inside the widget (context.surface === "window"): drive its own window.
+grip.addEventListener("pointerdown", (event) => {
+  grip.setPointerCapture(event.pointerId);
+  dragging = false;
+});
+grip.addEventListener("pointermove", async (event) => {
+  if (dragging || Math.hypot(event.clientX - downX, event.clientY - downY) < 4) return;
+  dragging = true;
+  // The host takes over: it follows the native cursor and moves the window.
+  await window.dbxPlugin.floating.beginDrag();
+});
+grip.addEventListener("pointerup", async () => {
+  if (!dragging) return;
+  dragging = false;
+  await window.dbxPlugin.floating.endDrag(); // snaps + remembers the position
+});
+```
+
+| API | Purpose |
+| --- | --- |
+| `floating.open(options)` | Opens (or focuses) the floating window for one of this plugin's `workbench` contributions. `options`: `contributionId` (required), `title`, `width`/`height` in logical pixels, `x`/`y` in physical screen pixels, `alwaysOnTop` (default `true`), `skipTaskbar` (default `true`), `resizable` (default `false`), `context`. Resolves `{ windowId, reused }`; requires `host.workbench`. |
+| `floating.close(contributionId?)` | Closes this plugin's floating window — one contribution, or every floating window of this plugin when the id is omitted. Inside a widget, calling it without an argument closes the widget itself. |
+| `floating.beginDrag()` | Hands the window to the host's drag loop. Call it from `pointermove` once your drag threshold trips, while the button is still down. The host reads the native cursor itself from here on, so there is no per-move call to make. |
+| `floating.endDrag({ snap? })` | Ends the drag. With `snap` (default `true`) the host pulls the window flush onto a work-area edge it reached or passed — docking it there, capsule first and tucked behind a thin strip once the cursor has been away — or clamps it fully on screen otherwise, and remembers the position (and the dock) for the next open. Resolves the final rect in physical pixels. Optional in practice: the host also ends a drag on its own once the cursor goes quiet, so a widget that never sees the pointerup cannot leave the window glued to it. |
+| `floating.setSize(width, height)` | Resizes the hosting window in logical pixels; the host clamps to its own bounds. |
+
+The widget decides *when* a drag starts (which element is a grip, how far the pointer must travel first); the host moves the window and owns the snap and the remembered position. There is deliberately no per-move bridge call: the host polls the native cursor, which keeps the widget under the pointer even when the webview is busy, and ends the drag on a quiet cursor if the pointerup never arrives. Geometry calls (`beginDrag`/`endDrag`/`setSize`) only work inside a floating window and reject elsewhere, so a tab can never move a window it is not in.
+
+A few rules make the surface predictable:
+
+- **One window per contribution.** The window id is derived from the plugin and contribution ids, so `floating.open` is idempotent: the second call focuses the window that is already open instead of stacking widgets.
+- **The window is opaque.** The host paints no chrome of its own, so the widget is what the user sees: give your page a background plus rounded corners and it reads as a floating card once the host sizes the window to the content. Per-pixel transparency (a shaped widget with see-through corners) is deliberately not offered — whether a transparent region still receives mouse input differs per platform, and a widget the user is meant to drag has to stay clickable everywhere.
+- **Shell navigation is forwarded.** A floating window has no tab strip, dock, or panels, so `openWorkbench` and `openFilesystem` from it open in the main DBX window, which raises itself. `executeCommand` is not offered there at all: every command action opens a shell surface, so it would resolve successfully and show nothing.
+- **Position survives restarts** per plugin and contribution, and is discarded when it no longer lands on a connected monitor (an unplugged display falls back to the work-area default rather than opening off-screen).
+- **The widget is a full workbench.** It gets the same bridge, permissions, context contract, and sidecar RPC as a tab; `context.surface` is `"window"` and `context.workbenchId` is the window id. It boots its own copy of your UI, so shared state has to travel through your sidecar (or `storage`), not through module memory.
 
 ### Themes, Layout, and Static Assets
 
@@ -493,6 +791,14 @@ Build the UI as packaged static assets, not references to a Vite server or CDN s
 
 The host inlines the entry script into the sandbox document; further `ui/` assets stay addressable at runtime through the `dbx-plugin` scheme — `dbx-plugin://localhost/<plugin-id>/<path-under-ui.root>` (WebView2 maps it to `http://dbx-plugin.localhost/<plugin-id>/…`). The host injects the platform-correct form as the sandbox document's `<base>` and allows it in the resource CSP, so dynamic `import()` of code-split chunks works in packaged plugins — provided the build emits **relative** asset URLs: set `base: "./"` (Vite) or `publicPath: "./"` (webpack) so chunk and CSS asset URLs resolve against the injected base instead of the host origin. Absolute `/assets/…` references cannot carry the plugin id and will 404. The scheme serves files only, confined to each plugin's `ui.root`, and responses are never cached across plugin updates.
 
+#### Inlined stylesheets
+
+The host reads every `<link rel="stylesheet">` that points inside `ui.root` and replaces it with a `<style>` element carrying the same attributes, so a plugin can still address its sheets at runtime (`document.querySelectorAll("style[data-skin-css]")`) and toggle them. One difference matters: `disabled` does not reflect from the content attribute on a `<style>` element the way it does on a `<link>`, and the state cannot survive as an IDL property through the host's re-serialization either. A plugin that ships a disabled stylesheet must re-apply `sheet.disabled = true` itself after load; every other attribute (ids, `data-*` markers, `media`) arrives unchanged.
+
+#### Fullscreen
+
+`requestFullscreen()` inside the sandbox depends on the frame's Permissions-Policy, which the host delegates (`allow="clipboard-write; fullscreen"`). A plugin cannot grant it to itself, so feature-detect `document.fullscreenEnabled` and fall back to an in-page maximized layout when it is `false` — an older host that does not delegate would otherwise reject every fullscreen request.
+
 ## Native Sidecars and RPC
 
 Use a native backend only when the browser sandbox cannot provide the capability, such as S3/SSH protocols, system credentials, long-lived connections, or CPU-heavy work. A Sidecar is not an OS sandbox and runs with the current user's privileges.
@@ -532,6 +838,23 @@ Sidecar rules: reserve stdout for protocol messages and write logs to stderr; co
 Every sidecar starts with `DBX_PLUGIN_DATA_DIR` set to a persistent directory reserved for this plugin (`plugin-data/<id>`, a sibling of the installed package). It survives version upgrades and uninstall, is shared by all of the plugin's sidecar runs, and is the right home for caches, tokens, and databases the backend manages — create it before the first write; the host does not pre-create it. The Go SDK exposes it as `dbxpluginsdk.DataDir()` / `EnsureDataDir()`. Workbench UIs reach a small JSON-backed store inside the same directory through `host.storage` instead of touching these files (see [Persistent UI State](#persistent-ui-state)).
 
 The example can replace the Rust template's `backend/src/main.rs`; keep its Cargo package version equal to the Manifest. Go templates use `dbxpluginsdk.NewServer(metadata, handler).Serve()`. The current Go SDK supports JSONL; the Rust SDK also supports framed transport. Changing a Go Manifest's transport alone does not implement binary framing. See the [Rust SDK](https://github.com/t8y2/dbx/tree/main/plugins/sdk/rust/dbx-plugin-sdk) and [Go SDK](https://github.com/t8y2/dbx/tree/main/plugins/sdk/go/dbx-plugin-sdk) for complete interfaces.
+
+## Tools for the DBX AI Assistant
+
+A plugin with a native backend can expose tools that the built-in DBX AI assistant calls in Agent mode, so a question like "why is the orders API slow?" can combine database tools with your plugin's metrics, logs, or shell access. The sidecar implements two methods:
+
+- `mcp/tools` returns `{ "tools": [{ "name", "description", "inputSchema", "annotations"? }] }` in MCP tool format. DBX passes `{ "connectionId" }` for the connection it is binding, so a plugin may hide write tools on read-only connections.
+- `mcp/call` receives `{ "tool", "arguments", "lifecycle" }` and returns an MCP `CallToolResult` (`{ "content": [{ "type": "text", "text": "..." }], "isError": false }`). `lifecycle` is the same payload as `connection/connect` for the open connection — credentials resolved by the host and the runtime endpoint after SSH or proxy layers — so tools never take secrets as arguments.
+
+What the host adds on top:
+
+- **Opt-in, revocable.** A plugin contributes AI tools only after the user enabled it in Plugin Center (Installed → Built-in AI tools); installing alone never exposes anything. The same panel lists the tools and marks which ones need approval, and switching a plugin off there turns it off for good. A manifest `mcp` contribution with `ai_tools: false` opts a plugin out of this surface even when opted in.
+- **Open connections only.** Tools are offered for the plugin connections the user currently has open. DBX binds the connection itself: it strips `connectionId` / `connectionName` from the schema the model sees and injects the bound `connectionId` into the forwarded arguments when your schema declares it. With several open connections the model picks one through an added `dbx_connection` argument.
+- **Approval by default.** Only tools whose entry sets `"annotations": { "readOnlyHint": true }` run without asking. Every other call pauses the run and shows the exact arguments to the user, who allows it once or denies it; an unanswered request is denied after five minutes. Mark genuinely read-only tools, and keep your own guards (read-only connection flags, two-phase confirmations) — the approval covers model mistakes, not your plugin's own safety rules.
+- **Portable schemas.** Tool names are exposed as `<prefix>__<tool>` (for example `ssh__ssh_exec`), and schemas are reduced to the subset every supported model provider accepts: `type`, `description`, `properties`, `required`, `items`, string `enum`, and numeric/length/item bounds. Keep argument names to letters, digits, and underscores.
+- **Bounded results.** Calls time out after 120 seconds and results are compacted before they reach the model. Start long jobs as background tasks and return a handle instead of blocking.
+
+The built-in agent treats tool output as untrusted data. Return facts, not instructions, and never echo secrets in results.
 
 ## Create a Plugin
 

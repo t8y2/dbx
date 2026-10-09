@@ -255,15 +255,15 @@ test("preserves table actions when context-menu metadata is unavailable", () => 
     database: "app",
     schema: "public",
   });
-  assert.deepEqual(queryContextObjectActions(undefined), ["view-data", "edit-table-structure", "view-ddl"]);
+  assert.deepEqual(queryContextObjectActions(undefined), ["view-data", "peek-table-structure", "edit-table-structure", "view-ddl"]);
 });
 
 test("uses source actions for views and materialized views", () => {
-  const expected = ["view-data", "edit-view", "view-source", "view-ddl"];
+  const expected = ["view-data", "peek-table-structure", "edit-view", "view-source", "view-ddl"];
 
   assert.deepEqual(queryContextObjectActions("view"), expected);
   assert.deepEqual(queryContextObjectActions("materialized_view"), expected);
-  assert.deepEqual(queryContextObjectActions("table"), ["view-data", "edit-table-structure", "view-ddl"]);
+  assert.deepEqual(queryContextObjectActions("table"), ["view-data", "peek-table-structure", "edit-table-structure", "view-ddl"]);
 });
 
 test("falls back to the candidate database and schema when no table is loaded", () => {

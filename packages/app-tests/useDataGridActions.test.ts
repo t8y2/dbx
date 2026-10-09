@@ -172,7 +172,7 @@ test("data reload preserves current page offset instead of resetting to page 1",
   }
 });
 
-test("infinite pagination fetches and appends only the next table segment", async () => {
+test("explicit load-all pagination fetches and appends only the missing table segment", async () => {
   const restoreStorage = installMemoryStorage();
   const originalFetch = globalThis.fetch;
   const { useDataGridActions } = await import("../../apps/desktop/src/composables/useDataGridActions.ts");
@@ -198,7 +198,7 @@ test("infinite pagination fetches and appends only the next table segment", asyn
     const connectionStore = useConnectionStore();
     const queryStore = useQueryStore();
     const settingsStore = useSettingsStore();
-    settingsStore.updateEditorSettings({ infiniteScroll: true, queryResultMaxRowsEnabled: true, queryResultMaxRows: 5000 });
+    settingsStore.updateEditorSettings({ infiniteScroll: false, queryResultMaxRowsEnabled: true, queryResultMaxRows: 5000 });
     connectionStore.addEphemeralConnection(conn("mysql-1"));
     const tabId = queryStore.createTab("mysql-1", "app", "orders", "data");
     queryStore.setTableMeta(tabId, { tableName: "orders", tableType: "TABLE", columns: [], primaryKeys: [] });
@@ -210,7 +210,7 @@ test("infinite pagination fetches and appends only the next table segment", asyn
     tab.resultPageOffset = 0;
 
     const actions = useDataGridActions(computed(() => tab));
-    await actions.onPaginate(tabId, 1, 100);
+    await actions.onPaginate(tabId, 1, 100, undefined, undefined, true);
 
     assert.equal(buildSqlOptions?.offset, 1);
     assert.equal(buildSqlOptions?.limit, 100);
@@ -506,4 +506,64 @@ describe("multi-result preservation after submit", () => {
       restoreStorage();
     }
   });
+
+  test("onPaginate uses MAX_QUERY_RESULT_MAX_ROWS when appendRequested is true", async () => {
+    const restoreStorage = installMemoryStorage();
+    const originalFetch = globalThis.fetch;
+    const { useDataGridActions } = await import("../../apps/desktop/src/composables/useDataGridActions.ts");
+    const { MAX_QUERY_RESULT_MAX_ROWS } = await import("../../apps/desktop/src/lib/dataGrid/queryResultRowLimit.ts");
+
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/connection/check-health") return Response.json(null);
+      if (url.pathname === "/api/query/build-table-select-sql") {
+        return Response.json("SELECT * FROM `orders` LIMIT 100 OFFSET 100");
+      }
+      return new Response(`unexpected ${url.pathname}`, { status: 500 });
+    }) as typeof fetch;
+
+    try {
+      setActivePinia(createPinia());
+      const connectionStore = useConnectionStore();
+      const queryStore = useQueryStore();
+      const settingsStore = useSettingsStore();
+      settingsStore.updateEditorSettings({
+        queryResultMaxRows: 100_000,
+        queryResultMaxRowsEnabled: true,
+      });
+
+      connectionStore.addEphemeralConnection(conn("mysql-1"));
+      const tabId = queryStore.createTab("mysql-1", "app", "orders", "data");
+      queryStore.setTableMeta(tabId, { tableName: "orders", tableType: "TABLE", columns: [], primaryKeys: [] });
+      const tab = queryStore.tabs.find((item) => item.id === tabId);
+      assert.ok(tab);
+      tab.result = {
+        columns: ["id"],
+        rows: Array.from({ length: 100 }, (_, i) => [i + 1]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+      };
+
+      let capturedOptions: any;
+      vi.spyOn(queryStore, "executeTabSql").mockImplementation(async (_tabId, _sql, options) => {
+        capturedOptions = options;
+        return true;
+      });
+
+      const actions = useDataGridActions(computed(() => tab));
+
+      // Normal infinite scroll append
+      settingsStore.updateEditorSettings({ infiniteScroll: true });
+      await actions.onPaginate(tabId, 100, 100, undefined, undefined, false);
+      assert.equal(capturedOptions?.appendResult?.maxRows, 100_000);
+
+      // Explicit load-all append
+      await actions.onPaginate(tabId, 100, 99_900, undefined, undefined, true);
+      assert.equal(capturedOptions?.appendResult?.maxRows, MAX_QUERY_RESULT_MAX_ROWS);
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreStorage();
+    }
+  });
 });
+

@@ -40,11 +40,26 @@ Check the installed version:
 dbx --version
 ```
 
+## Official Agent Skill
+
+The CLI binary includes the official DBX Skill for Codex, Claude Code, and other shell-capable AI agents. Enable it once after installing or upgrading the CLI:
+
+```bash
+dbx agent setup
+dbx agent status
+```
+
+The default destination is `~/.agents/skills/dbx`. `setup` runs entirely offline and can be repeated to upgrade to the version bundled with the CLI. It refuses to replace an unmanaged or locally modified Skill unless `--force` is supplied. Pass `--skills-dir <path>` when an agent reads a different skills root.
+
+The Skill teaches the AI when and how to call the CLI safely. It does not bypass CLI, connection, or database permissions, and people can continue to run every `dbx` command directly.
+
 ## Common Commands
 
 ```bash
 dbx doctor
 dbx capabilities
+dbx agent setup
+dbx agent status --json
 dbx connections list --json
 dbx connections list --format csv
 dbx schema list local --json
@@ -166,6 +181,11 @@ CLI JSON errors use stable codes:
 | `CONNECTION_NOT_FOUND`   | No DBX connection matched the requested name        |
 | `SQL_BLOCKED`            | SQL safety rules blocked execution                  |
 | `DBX_NOT_RUNNING`        | DBX Desktop bridge is unavailable                   |
+| `HOME_NOT_FOUND`         | The default user skills directory cannot be resolved |
+| `SKILL_MODIFIED`         | An unmanaged or locally edited DBX Skill was found  |
+| `SKILL_PATH_UNSAFE`      | A managed Skill path is a symbolic link             |
+| `SKILL_READ_FAILED`      | An installed Skill file could not be read            |
+| `SKILL_WRITE_FAILED`     | The bundled Skill could not be installed             |
 | `ERROR`                  | Unexpected runtime failure                          |
 
 ## Desktop Deep Links

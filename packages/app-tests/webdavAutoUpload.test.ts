@@ -4,7 +4,8 @@ import { createPinia, setActivePinia } from "pinia";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
 import { readWebDavAutoUploadConfig } from "@/lib/webdav/webdavAutoUploadConfig";
 
-const { webdavSyncUploadMock } = vi.hoisted(() => ({
+const { webdavSyncSecretsStatusMock, webdavSyncUploadMock } = vi.hoisted(() => ({
+  webdavSyncSecretsStatusMock: vi.fn(),
   webdavSyncUploadMock: vi.fn(),
 }));
 
@@ -18,6 +19,7 @@ vi.mock("vue", async (importOriginal) => {
 });
 
 vi.mock("@/lib/backend/api", () => ({
+  webdavSyncSecretsStatus: webdavSyncSecretsStatusMock,
   webdavSyncUpload: webdavSyncUploadMock,
 }));
 
@@ -78,6 +80,7 @@ function installWindow() {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  webdavSyncSecretsStatusMock.mockResolvedValue({ enabled: false, hasSavedPassphrase: false });
   webdavSyncUploadMock.mockResolvedValue({ bytes: 42, remotePath: "DBX/sync/snapshot.json" });
   restoreLocalStorage = installLocalStorage();
   restoreWindow = installWindow();
@@ -107,6 +110,25 @@ test("reads normalized WebDAV auto-upload config from localStorage", () => {
     endpoint: "https://dav.example.com/",
     username: "alice",
     remotePath: "DBX/sync/snapshot.json",
+    userAgent: undefined,
+  });
+});
+
+test("reads configured WebDAV user agent for client-restricted gateways", () => {
+  localStorage.setItem("dbx-webdav-endpoint", "https://dav.example.com/");
+  localStorage.setItem("dbx-webdav-user-agent", " Zotero/7.0.15 ");
+  localStorage.setItem("dbx-webdav-auto-upload-enabled", "true");
+  localStorage.setItem("dbx-webdav-auto-upload-interval-minutes", "1");
+
+  const config = readWebDavAutoUploadConfig();
+
+  assert.equal(config.webDavConfig?.userAgent, "Zotero/7.0.15");
+
+  useWebDavAutoUpload();
+
+  return vi.advanceTimersByTimeAsync(60_000).then(() => {
+    assert.equal(webdavSyncUploadMock.mock.calls.length, 1);
+    assert.equal(webdavSyncUploadMock.mock.calls[0][0].userAgent, "Zotero/7.0.15");
   });
 });
 
@@ -124,7 +146,9 @@ test("keeps WebDAV auto-upload running outside the settings dialog", async () =>
     endpoint: "https://dav.example.com/",
     username: undefined,
     remotePath: "DBX/sync/snapshot.json",
+    userAgent: undefined,
   });
+  assert.equal(webdavSyncUploadMock.mock.calls[0][3], false);
 
   localStorage.setItem("dbx-webdav-auto-upload-enabled", "false");
   window.dispatchEvent(new Event("dbx:webdav-auto-upload-config-changed"));

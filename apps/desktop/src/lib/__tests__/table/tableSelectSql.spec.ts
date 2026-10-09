@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { encodeSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
-import { qualifiedTableName, qualifyTableReferencesInSql, quoteTableDataIdentifier, quoteTableIdentifier, quoteTableIdentifierIfNeeded, tableMetaWithoutOptionalDatabaseQualifier } from "@/lib/table/tableSelectSql";
+import { qualifiedTableName, qualifyTableReferencesInSql, quoteTableDataIdentifier, quoteTableIdentifier, quoteTableIdentifierIfNeeded, requiresEagerTableMetadataForDataOpen, tableMetaWithoutOptionalDatabaseQualifier } from "@/lib/table/tableSelectSql";
 
 describe("qualifiedTableName — Doris/StarRocks multi-catalog", () => {
   it("prefixes external catalog for Doris (no schema)", () => {
@@ -239,6 +239,20 @@ describe("tableMetaWithoutOptionalDatabaseQualifier — copy extractors (#9326)"
     expect(tableMetaWithoutOptionalDatabaseQualifier({ schema: "public", tableName: "users" }, "postgres", false)).toEqual({ schema: undefined, tableName: "users" });
   });
 
+  it("covers the copy-SQL dialects reported in #11195", () => {
+    // Dameng exposes schemas as databases; a copied INSERT/UPDATE must still be
+    // able to opt into the schema prefix, so the qualifier only drops when the
+    // extractor option is off.
+    const damengMeta = { schema: "SYSDBA", tableName: "PEOPLE" };
+    expect(tableMetaWithoutOptionalDatabaseQualifier(damengMeta, "dameng", false)).toEqual({ schema: undefined, tableName: "PEOPLE" });
+    expect(tableMetaWithoutOptionalDatabaseQualifier(damengMeta, "dameng", true)).toBe(damengMeta);
+    // MySQL family and ClickHouse address tables as database.table.
+    const clickhouseMeta = { database: "analytics", tableName: "events" };
+    expect(tableMetaWithoutOptionalDatabaseQualifier(clickhouseMeta, "clickhouse", false)).toEqual({ database: undefined, tableName: "events" });
+    expect(tableMetaWithoutOptionalDatabaseQualifier(clickhouseMeta, "clickhouse", true)).toBe(clickhouseMeta);
+    expect(tableMetaWithoutOptionalDatabaseQualifier({ database: "appdb", tableName: "people" }, "goldendb", false)).toEqual({ database: undefined, tableName: "people" });
+  });
+
   it("returns undefined tableMeta unchanged", () => {
     expect(tableMetaWithoutOptionalDatabaseQualifier(undefined, "mysql", false)).toBeUndefined();
   });
@@ -303,6 +317,30 @@ describe("quoteTableIdentifier", () => {
   it("uses BigQuery quoted identifiers and escape sequences", () => {
     expect(quoteTableIdentifier("bigquery", "order")).toBe("`order`");
     expect(quoteTableIdentifier("bigquery", "a`b")).toBe("`a\\`b`");
+  });
+
+  it("never quotes Salesforce SOQL identifiers", () => {
+    // SOQL has no delimited identifiers and reads `"` as a string literal, so the
+    // grid's ORDER BY / filter must send object and field API names bare — the
+    // quoted form the backend used to produce failed with MALFORMED_QUERY.
+    expect(quoteTableIdentifier("salesforce", "Account")).toBe("Account");
+    expect(quoteTableIdentifier("salesforce", "First_Name__c")).toBe("First_Name__c");
+    expect(quoteTableDataIdentifier("salesforce", "Account")).toBe("Account");
+    // An org is a single scope: no schema or database qualifier.
+    expect(qualifiedTableName({ databaseType: "salesforce", schema: "sales", database: "org", tableName: "Account" })).toBe("Account");
+  });
+
+  it("awaits table metadata before building Salesforce data-preview SQL", () => {
+    // Without a column list the backend falls back to `FIELDS(ALL)`, which the org
+    // only accepts with LIMIT 200 or less, so the describe has to land first.
+    expect(requiresEagerTableMetadataForDataOpen("salesforce")).toBe(true);
+    expect(requiresEagerTableMetadataForDataOpen("mysql")).toBe(true);
+    expect(requiresEagerTableMetadataForDataOpen("postgres")).toBe(true);
+    expect(requiresEagerTableMetadataForDataOpen("nebula")).toBe(true);
+    expect(requiresEagerTableMetadataForDataOpen("neo4j")).toBe(true);
+    // Drivers whose preview works from `SELECT *` keep loading metadata lazily.
+    expect(requiresEagerTableMetadataForDataOpen("sqlite")).toBe(false);
+    expect(requiresEagerTableMetadataForDataOpen(undefined)).toBe(false);
   });
 
   it("backtick-quotes Cloud Spanner GoogleSQL identifiers by default", () => {

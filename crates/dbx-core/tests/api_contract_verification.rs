@@ -51,6 +51,7 @@ fn prepare_schema_diff_function_signature() {
         ignore_comments: false,
         cascade_delete: false,
         compare_column_order: false,
+        compare_charset: true,
         ignore_table_name_case: false,
         ignore_column_name_case: false,
         detect_renames: false,
@@ -152,6 +153,7 @@ fn schema_diff_preparation_field_names() {
         ignore_comments: false,
         cascade_delete: false,
         compare_column_order: false,
+        compare_charset: true,
         ignore_table_name_case: false,
         ignore_column_name_case: false,
         detect_renames: false,
@@ -293,6 +295,7 @@ fn column_info_serialization_roundtrip() {
         enum_values: None,
         character_set: None,
         collation: None,
+        metadata_capabilities: None,
     };
     let json = serde_json::to_value(&col).unwrap();
     assert_eq!(json.get("is_unique"), Some(&serde_json::json!(true)));
@@ -340,6 +343,7 @@ fn table_columns_result_serialization_contract() {
             enum_values: None,
             character_set: None,
             collation: None,
+            metadata_capabilities: None,
         }],
         error: Some("partial".to_string()),
     };

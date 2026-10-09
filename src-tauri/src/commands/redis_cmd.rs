@@ -3,7 +3,7 @@ use tauri::State;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::redis_driver::{
-    classify_command, parse_command_argv, RedisCollectionPage, RedisCommandResult, RedisCommandSafety,
+    classify_command, parse_command_argv, RedisBlob, RedisCollectionPage, RedisCommandResult, RedisCommandSafety,
     RedisDatabaseInfo, RedisKeysExpiryResult, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPage,
     RedisStreamPendingPage, RedisValue,
 };
@@ -85,6 +85,16 @@ pub async fn redis_get_value(
     key_raw: String,
 ) -> Result<RedisValue, String> {
     dbx_core::redis_ops::redis_get_value_in_db_core(&state, &connection_id, db, &key_raw).await
+}
+
+#[tauri::command]
+pub async fn redis_get_raw_value(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+) -> Result<RedisBlob, String> {
+    dbx_core::redis_ops::redis_get_raw_value_in_db_core(&state, &connection_id, db, &key_raw).await
 }
 
 #[tauri::command]
@@ -477,6 +487,17 @@ pub async fn redis_delete_keys(
 ) -> Result<u64, String> {
     ensure_connection_writable(&state, &connection_id, "Delete keys").await?;
     dbx_core::redis_ops::redis_delete_keys_in_db_core(&state, &connection_id, db, &key_raws).await
+}
+
+#[tauri::command]
+pub async fn redis_delete_keys_by_pattern(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    pattern: String,
+) -> Result<u64, String> {
+    ensure_connection_writable(&state, &connection_id, "Delete keys").await?;
+    dbx_core::redis_ops::redis_delete_keys_by_pattern_in_db_core(&state, &connection_id, db, &pattern).await
 }
 
 #[tauri::command]

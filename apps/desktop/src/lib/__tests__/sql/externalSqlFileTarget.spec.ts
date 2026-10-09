@@ -1,7 +1,17 @@
 // @vitest-environment happy-dom
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY, MAX_EXTERNAL_SQL_FILE_TARGETS, forgetExternalSqlFileTarget, moveExternalSqlFileTarget, rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import {
+  activeTabExternalSqlFileTarget,
+  EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY,
+  MAX_EXTERNAL_SQL_FILE_TARGETS,
+  forgetExternalSqlFileTarget,
+  moveExternalSqlFileTarget,
+  rememberExternalSqlFileTarget,
+  resolveExternalSqlFileTarget,
+  resolveExternalSqlFileTargetForActiveTab,
+  unassociatedExternalSqlFileTarget,
+} from "@/lib/sql/externalSqlFileTarget";
 
 describe("external SQL file targets", () => {
   beforeEach(() => {
@@ -16,6 +26,65 @@ describe("external SQL file targets", () => {
       database: "sales",
       catalog: "hive",
     });
+  });
+
+  it("prefers a remembered target over the active SQL tab", () => {
+    rememberExternalSqlFileTarget("/work/report.sql", { connectionId: "saved-connection", database: "saved_db", catalog: "saved_catalog", schema: "saved_schema" });
+    const tabs = [{ id: "active-tab", connectionId: "active-connection", database: "active_db", catalog: "active_catalog", schema: "active_schema", mode: "query" as const }];
+
+    expect(
+      resolveExternalSqlFileTargetForActiveTab("/work/report.sql", tabs, "active-tab", (connectionId) => {
+        if (connectionId === "saved-connection" || connectionId === "active-connection") return { db_type: "postgres" };
+        return undefined;
+      }),
+    ).toEqual({
+      connectionId: "saved-connection",
+      database: "saved_db",
+      catalog: "saved_catalog",
+      schema: "saved_schema",
+    });
+  });
+
+  it("uses the active SQL tab context for a previously unassociated file", () => {
+    const tabs = [{ id: "active-tab", connectionId: "active-connection", database: "analytics", catalog: "hive", schema: "reporting", mode: "query" as const }];
+
+    expect(resolveExternalSqlFileTargetForActiveTab("/work/new.sql", tabs, "active-tab", () => ({ db_type: "postgres" }))).toEqual({
+      connectionId: "active-connection",
+      database: "analytics",
+      catalog: "hive",
+      schema: "reporting",
+    });
+  });
+
+  it("reuses the active MongoDB tab context for a script file only when explicitly allowed", () => {
+    const tabs = [{ id: "mongo-tab", connectionId: "mongo-connection", database: "app_db", mode: "query" as const }];
+    const lookup = () => ({ db_type: "mongodb" as const });
+    const target = { connectionId: "mongo-connection", database: "app_db", catalog: undefined, schema: undefined };
+
+    expect(activeTabExternalSqlFileTarget(tabs, "mongo-tab", lookup)).toEqual(unassociatedExternalSqlFileTarget());
+    expect(resolveExternalSqlFileTargetForActiveTab("/work/query.js", tabs, "mongo-tab", lookup)).toEqual(unassociatedExternalSqlFileTarget());
+    expect(activeTabExternalSqlFileTarget(tabs, "mongo-tab", lookup, { allowMongoScripts: true })).toEqual(target);
+    expect(resolveExternalSqlFileTargetForActiveTab("/work/query.js", tabs, "mongo-tab", lookup, { allowMongoScripts: true })).toEqual(target);
+    expect(activeTabExternalSqlFileTarget(tabs, "mongo-tab", () => ({ db_type: "redis" }), { allowMongoScripts: true })).toEqual(unassociatedExternalSqlFileTarget());
+  });
+
+  it("keeps the fallback unassociated without an active tab", () => {
+    const tabs = [{ id: "inactive-tab", connectionId: "sql-connection", database: "analytics", mode: "query" as const }];
+
+    expect(activeTabExternalSqlFileTarget(tabs, null, () => ({ db_type: "postgres" }))).toEqual(unassociatedExternalSqlFileTarget());
+    expect(activeTabExternalSqlFileTarget(tabs, "missing-tab", () => ({ db_type: "postgres" }))).toEqual(unassociatedExternalSqlFileTarget());
+  });
+
+  it.each(["mq", "zookeeper", "plugin", "redis", "mongodb"] as const)("does not reuse a non-SQL %s tab target", (dbType) => {
+    const tabs = [{ id: "active-tab", connectionId: "non-sql-connection", database: "invalid", catalog: "invalid", schema: "invalid", mode: "query" as const }];
+
+    expect(activeTabExternalSqlFileTarget(tabs, "active-tab", () => ({ db_type: dbType }))).toEqual(unassociatedExternalSqlFileTarget());
+  });
+
+  it.each(["plugin-workbench", "plugin-filesystem"] as const)("does not reuse a SQL connection borrowed by a %s tab", (mode) => {
+    const tabs = [{ id: "plugin-tab", connectionId: "sql-connection", database: "invalid", mode }];
+
+    expect(activeTabExternalSqlFileTarget(tabs, "plugin-tab", () => ({ db_type: "postgres" }))).toEqual(unassociatedExternalSqlFileTarget());
   });
 
   it("keeps same-named databases in different catalogs distinct", () => {

@@ -5,6 +5,7 @@ pub use dbx_drivers::runtime_config::{
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::warn;
@@ -21,10 +22,11 @@ use crate::ai::{
 };
 use crate::connection_secrets::{
     plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TLS_SECRET_PREFIX,
-    CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY,
-    MQ_AUTH_SECRET_PREFIX, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX,
-    NACOS_AUTH_PASSWORD_KEY, NACOS_AUTH_SECRET_PREFIX, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
-    PLUGIN_CONNECTION_SECRET_PREFIX,
+    CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQTT_AUTH_PASSWORD_KEY, MQTT_AUTH_SECRET_PREFIX, MQ_AUTH_API_KEY_VALUE_KEY,
+    MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY,
+    MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY, NACOS_AUTH_SECRET_PREFIX,
+    NACOS_RNACOS_CONSOLE_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX, SALESFORCE_AUTH_CLIENT_SECRET_KEY,
+    SALESFORCE_AUTH_PASSWORD_KEY, SALESFORCE_AUTH_REFRESH_TOKEN_KEY, SALESFORCE_AUTH_SECRET_PREFIX,
 };
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{
@@ -32,21 +34,53 @@ use crate::history::{
     HistorySearchRequest, HistorySearchResult, MAX_HISTORY,
 };
 use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig};
+use crate::persistence::secret_codec::{
+    key_file_candidates, SecretCodec, SecretKeyPolicy, SecretKeyResolution, SecretKeySource,
+};
+use crate::persistence::task_history::{
+    RowCountState, TaskEndpointSnapshot, TaskHistoryStorageError, TaskItemKind, TaskItemStatus, TaskLifecycleOwner,
+    TaskRun, TaskRunCursor, TaskRunDetail, TaskRunItem, TaskRunItemsPage, TaskRunItemsQuery, TaskRunListQuery,
+    TaskRunPage, TaskRunStatus, TaskType, TransferObjectSelectionMode, TransferRunContent, TransferRunDetails,
+    TransferRunMode, TransferRunOwnershipPolicy, TransferRunTargetTableNameCase,
+};
 use crate::prompt_template::PromptTemplate;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
+const URL_PARAMS_SECRET_KEY: &str = "url_params";
+const AI_SECRET_NAMESPACE_PREFIX: &str = "ai_config.";
+const TUNNEL_SECRET_NAMESPACE_PREFIX: &str = "tunnel_profile.";
+const CONFIG_SECRET_BLOB_KEY: &str = "config";
+pub(crate) const GLOBAL_SECRET_NAMESPACE: &str = "dbx.global";
 const STORAGE_DB_FILE_NAME: &str = "dbx.db";
+static DATA_MIGRATION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
 const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
+const APP_APPEARANCE_SETTINGS_KEY: &str = "app_appearance";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
+const WEB_MCP_SETTINGS_KEY: &str = "web_mcp_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
 const HISTORY_RETENTION_LIMIT_KEY: &str = "history_retention_limit";
+const MCP_HISTORY_RETENTION_LIMIT_KEY: &str = "mcp_history_retention_limit";
 const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
+/// Plugin ids whose MCP tools the built-in AI agent may call. The opt-in
+/// list is the single source: a plugin contributes AI tools only after the
+/// user enabled it in the Plugin Center.
+const AI_PLUGIN_TOOL_PLUGINS_KEY: &str = "ai_plugin_tool_plugins";
+/// Plugin ids the user explicitly turned off in the Plugin Center; they stay
+/// excluded even if they reappear on the opt-in list, so a revocation
+/// survives restarts and plugin updates.
+const AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY: &str = "ai_plugin_tool_disabled_plugins";
+/// `{ pluginId: [connectionId, ...] }` — connections a plugin may read through
+/// the `host.data:read` Host API. Written only after an explicit user consent.
+const PLUGIN_DATA_GRANTS_KEY: &str = "plugin_data_grants";
+/// Upper bound for one plugin's persisted data grants; consent is per
+/// connection, so a legitimate plugin never approaches it.
+const MAX_PLUGIN_DATA_GRANTS_PER_PLUGIN: usize = 512;
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
 const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
 const SNIPPET_SYNC_IDS_KEY: &str = "snippet_sync_ids";
@@ -55,6 +89,9 @@ const USER_DATA_TABLES: &[&str] = &[
     "connections",
     "connection_secrets",
     "history",
+    "task_runs",
+    "transfer_run_details",
+    "task_run_items",
     "ai_config",
     "ai_provider_configs",
     "ai_conversations",
@@ -169,6 +206,187 @@ pub struct Storage {
     /// Path to the SQLite database file (`dbx.db`). Its parent directory is the
     /// application data dir where dbx-managed state (e.g. `known_hosts`) lives.
     path: PathBuf,
+    /// The owning process chooses the key lifecycle. Desktop keeps the
+    /// platform credential-store default; Web selects the data-dir policy.
+    secret_key_policy: SecretKeyPolicy,
+    /// Standalone CLI/MCP processes may use an existing key but must never
+    /// provision one as a side effect of a write.
+    secret_key_creation_allowed: bool,
+    /// Key material resolved for business reads and writes. Every resolution
+    /// round-trips to the OS credential store, so hydrating N stored secrets
+    /// used to mean N credential-store accesses on the startup path.
+    secret_codec_cache: Arc<Mutex<Option<CachedSecretCodec>>>,
+    /// A failed platform lookup is cached for the startup boundary as well.
+    /// Without this, each consumer can prompt a locked Secret Service again.
+    secret_key_error_cache: Arc<Mutex<Option<CachedSecretKeyError>>>,
+    migration_failure: Arc<Mutex<Option<MigrationFailure>>>,
+}
+
+/// Key material plus the digest of every key file it was resolved from.
+struct CachedSecretCodec {
+    codec: SecretCodec,
+    key_files: Vec<(PathBuf, Option<[u8; 32]>)>,
+}
+
+struct CachedSecretKeyError {
+    error: String,
+    key_files: Vec<(PathBuf, Option<[u8; 32]>)>,
+}
+
+#[derive(Clone)]
+struct MigrationFailure {
+    code: String,
+    backup_path: Option<String>,
+}
+
+const MIGRATION_LOCK_FILE: &str = ".dbx-secret-migration.lock";
+
+pub const SECRET_STORE_MIGRATION_ID: &str = "secret-store-v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationState {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    NotRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationKeyStatus {
+    Ready,
+    WillCreate,
+    Unavailable,
+    Invalid,
+    Mismatch,
+    MissingForCiphertext,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyJsonFileStatus {
+    pub name: String,
+    pub exists: bool,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationPreflight {
+    pub migration_id: String,
+    pub state: MigrationState,
+    pub needs_migration: bool,
+    pub key_provider_available: bool,
+    pub key_status: MigrationKeyStatus,
+    /// Desktop may provision a new local key only for plaintext-only data.
+    /// Headless callers always set this false.
+    pub key_creation_allowed: bool,
+    pub database_plaintext_count: usize,
+    pub connection_count: usize,
+    pub plugin_secret_count: usize,
+    pub ai_secret_count: usize,
+    pub tunnel_secret_count: usize,
+    pub sync_credential_count: usize,
+    pub legacy_json_files: Vec<LegacyJsonFileStatus>,
+    pub backup_required: bool,
+    pub backup_path: Option<String>,
+    pub error_message: Option<String>,
+    pub error_code: Option<String>,
+    pub data_dir: String,
+    pub backup_dir: String,
+    pub key_file_configured: bool,
+    pub key_file_readable: bool,
+    pub persistent_key_configured: bool,
+    pub key_source: String,
+}
+
+impl MigrationPreflight {
+    pub fn is_ready(&self) -> bool {
+        // A brand-new desktop profile has no secrets and may provision its
+        // first key lazily. Strict headless profiles report missing keys as
+        // `needs_migration`, so no additional provider check is needed here.
+        !self.needs_migration && matches!(self.state, MigrationState::Succeeded | MigrationState::NotRequired)
+    }
+}
+
+struct MigrationStateRecord {
+    state: MigrationState,
+    backup_path: Option<String>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+    source_fingerprint: Option<String>,
+    counts_json: String,
+}
+
+impl Default for MigrationStateRecord {
+    fn default() -> Self {
+        Self {
+            state: MigrationState::Pending,
+            backup_path: None,
+            error_code: None,
+            error_message: None,
+            source_fingerprint: None,
+            counts_json: "{}".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationReport {
+    pub migration_id: String,
+    pub state: MigrationState,
+    pub backup_path: Option<String>,
+    pub database_plaintext_count: usize,
+    pub legacy_json_files: Vec<String>,
+    pub verified_secret_count: usize,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
+/// All state needed by a sync restore is committed through one SQLite
+/// transaction.  The sync module deliberately passes plain values here; this
+/// type stays independent from the transport envelope and keeps local secret
+/// re-encryption inside the storage boundary.
+pub(crate) struct SyncImportPlan {
+    pub connections: Vec<ConnectionConfig>,
+    pub merge_connections: bool,
+    pub tunnel_profiles: Option<Vec<TransportLayerConfig>>,
+    pub tunnel_secret_profiles: Option<Vec<TransportLayerConfig>>,
+    pub merge_tunnel_profiles: bool,
+    pub sidebar_layout: Option<serde_json::Value>,
+    pub pinned_tree_node_ids: Option<Vec<String>>,
+    pub saved_sql: SavedSqlLibrary,
+    pub merge_saved_sql: bool,
+    pub desktop_settings: DesktopSettings,
+    pub desktop_settings_keys: Option<Vec<String>>,
+    pub editor_settings: Option<serde_json::Value>,
+    pub merge_editor_settings: bool,
+    pub editor_settings_keys: Option<Vec<String>>,
+    pub connection_secrets: Option<Vec<SyncImportSecret>>,
+    pub connection_secret_ids: Option<Vec<String>>,
+    pub preserve_local_connection_strings: Vec<String>,
+    /// Keep destination plugin credentials when the transport payload
+    /// intentionally omitted plugin secrets.
+    pub preserve_plugin_secrets: bool,
+    pub sync_credentials: Option<Vec<SyncImportCredential>>,
+    pub ai_configs: Option<Vec<AiConfigItem>>,
+    pub merge_ai_configs: bool,
+}
+
+pub(crate) struct SyncImportSecret {
+    pub connection_id: String,
+    pub key: String,
+    pub secret: String,
+}
+
+pub(crate) struct SyncImportCredential {
+    pub account: String,
+    /// JSON representation of an `EncryptedSecretsBlob`, wrapped with the
+    /// destination device secret before it is stored in `connection_secrets`.
+    pub blob: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,8 +454,56 @@ pub struct DesktopSettings {
     pub custom_ai_skill_root_enabled: bool,
     #[serde(default)]
     pub custom_ai_skill_root: Option<String>,
+    /// "Allow the AI to use skills automatically" (prd 09-30 Req 5). When on,
+    /// the built-in AI receives the skill listing even with nothing selected, so
+    /// the model can pick a skill up on its own. Off by default: a listing costs
+    /// prompt tokens on every request, and the user's selection stays the
+    /// explicit gate.
+    #[serde(default)]
+    pub custom_ai_skill_auto_enabled: bool,
     #[serde(default = "default_sidebar_table_page_size")]
     pub sidebar_table_page_size: usize,
+}
+
+/// Appearance preferences are kept separately from device-specific desktop
+/// settings because they are renderer-owned and must be available before the
+/// frontend modules initialize. The optional fields also keep older databases
+/// compatible: an absent value means the frontend may use its legacy storage
+/// fallback and migrate it on first startup.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppAppearanceSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_palette: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_ui_colors: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_ui_colors_dark: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_style: Option<String>,
+}
+
+/// A partial appearance update. Patches are applied in one SQLite transaction
+/// so rapid controls cannot overwrite a value changed by another control.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppAppearanceSettingsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_palette: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_ui_colors: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_ui_colors_dark: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_style: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -318,6 +584,15 @@ pub struct McpConnectionPolicy {
     /// connection default, while a present entry takes priority over it.
     #[serde(default)]
     pub database_policies: Vec<McpDatabasePolicy>,
+    /// Opt-in switch letting an AI agent write to this Salesforce org through
+    /// MCP. Absent on every policy saved before the switch existed, and `false`
+    /// by default: SOQL reads need no permission beyond the execution mode, but
+    /// Salesforce DML has no transaction and no rollback, so an agent may only
+    /// reach it after a person turns this on for the connection and confirms
+    /// each write (`dbx_salesforce_prepare_write` → `dbx_salesforce_apply_write`).
+    /// Forced back to false whenever `read_only` is set.
+    #[serde(default)]
+    pub allow_salesforce_dml: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,6 +635,20 @@ pub struct McpHttpServerSettings {
     pub path: String,
     #[serde(default)]
     pub allow_remote: bool,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+}
+
+/// Configuration for the optional DBX Web MCP endpoint. The bearer token is
+/// deliberately kept out of this JSON and stored through the encrypted secret
+/// store instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebMcpSettings {
+    #[serde(default)]
+    pub enabled: bool,
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
     #[serde(default)]
@@ -493,6 +782,9 @@ impl McpGlobalPolicy {
                     current.allowed_databases = databases;
                     current.database_policies =
                         merge_mcp_database_policies(&current.database_policies, &rule.database_policies);
+                    // Same conjunction as high-risk SQL: every duplicate rule has
+                    // to opt in before an agent may write to the org.
+                    current.allow_salesforce_dml &= rule.allow_salesforce_dml;
                 })
                 .or_insert_with(|| McpConnectionPolicy {
                     connection_id: connection_id.to_string(),
@@ -503,6 +795,7 @@ impl McpGlobalPolicy {
                     database_scope: rule.database_scope,
                     allowed_databases: normalize_mcp_database_names(&rule.allowed_databases),
                     database_policies: normalize_mcp_database_policies(&rule.database_policies),
+                    allow_salesforce_dml: rule.allow_salesforce_dml,
                 });
         }
         let mut connection_policies = policies.into_values().collect::<Vec<_>>();
@@ -510,6 +803,9 @@ impl McpGlobalPolicy {
         for rule in &mut connection_policies {
             if rule.read_only {
                 rule.allow_dangerous_sql = false;
+                // A read-only connection cannot carry a Salesforce write opt-in,
+                // however the saved rules were merged.
+                rule.allow_salesforce_dml = false;
             }
             rule.allowed_databases = normalize_mcp_database_names(&rule.allowed_databases);
             if rule.database_scope != McpDatabaseScope::Selected {
@@ -690,6 +986,7 @@ impl Default for DesktopSettings {
             agent_store_dir: None,
             custom_ai_skill_root_enabled: false,
             custom_ai_skill_root: None,
+            custom_ai_skill_auto_enabled: false,
             sidebar_table_page_size: default_sidebar_table_page_size(),
         }
     }
@@ -712,6 +1009,17 @@ impl DesktopIconTheme {
 }
 
 const SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS data_migrations (
+        migration_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        source_fingerprint TEXT,
+        counts_json TEXT NOT NULL DEFAULT '{}',
+        backup_path TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        started_at TEXT,
+        completed_at TEXT
+    )",
     "CREATE TABLE IF NOT EXISTS connections (
         id TEXT PRIMARY KEY,
         config_json TEXT NOT NULL
@@ -720,6 +1028,7 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         connection_id TEXT NOT NULL,
         key TEXT NOT NULL,
         secret TEXT NOT NULL,
+        secret_enc TEXT,
         PRIMARY KEY (connection_id, key)
     )",
     "CREATE TABLE IF NOT EXISTS history (
@@ -738,7 +1047,68 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         affected_rows INTEGER,
         rollback_sql TEXT,
         details_json TEXT
+        ,source TEXT NOT NULL DEFAULT 'sql'
+        ,mcp_tool_name TEXT
+        ,mcp_request_json TEXT
+        ,mcp_response_json TEXT
+        ,mcp_session_id TEXT
     )",
+    "CREATE TABLE IF NOT EXISTS task_runs (
+        run_id TEXT PRIMARY KEY NOT NULL,
+        task_type TEXT NOT NULL,
+        lifecycle_owner TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        owner_instance_id TEXT NOT NULL,
+        error_code TEXT,
+        safe_error_summary TEXT,
+        history_complete INTEGER NOT NULL DEFAULT 0,
+        source_connection_id TEXT NOT NULL,
+        source_database_type TEXT NOT NULL,
+        source_database TEXT NOT NULL,
+        source_schema TEXT NOT NULL,
+        source_catalog TEXT,
+        target_connection_id TEXT NOT NULL,
+        target_database_type TEXT NOT NULL,
+        target_database TEXT NOT NULL,
+        target_schema TEXT NOT NULL,
+        target_catalog TEXT
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_task_runs_created ON task_runs(created_at DESC, run_id DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_task_runs_type_status_created ON task_runs(task_type, status, created_at DESC, run_id DESC)",
+    "CREATE TABLE IF NOT EXISTS transfer_run_details (
+        run_id TEXT PRIMARY KEY NOT NULL,
+        content TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        batch_size INTEGER NOT NULL,
+        create_table INTEGER NOT NULL,
+        drop_target_before_create INTEGER NOT NULL,
+        target_table_name_case TEXT NOT NULL,
+        quote_target_column_names INTEGER NOT NULL,
+        ownership_policy TEXT NOT NULL,
+        filtered_table_count INTEGER NOT NULL,
+        table_total INTEGER NOT NULL,
+        object_selection_mode TEXT NOT NULL,
+        selected_object_count INTEGER
+    )",
+    "CREATE TABLE IF NOT EXISTS task_run_items (
+        run_id TEXT NOT NULL,
+        item_index INTEGER NOT NULL,
+        item_kind TEXT NOT NULL,
+        source_object TEXT NOT NULL,
+        target_object TEXT NOT NULL,
+        status TEXT NOT NULL,
+        source_row_count INTEGER,
+        moved_row_count INTEGER,
+        target_row_count INTEGER,
+        row_count_state TEXT NOT NULL,
+        has_table_filter INTEGER NOT NULL DEFAULT 0,
+        safe_error_summary TEXT,
+        PRIMARY KEY (run_id, item_index)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_task_run_items_run_status ON task_run_items(run_id, status, item_index)",
     "CREATE TABLE IF NOT EXISTS ai_config (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         config_json TEXT NOT NULL
@@ -755,7 +1125,9 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL DEFAULT '',
         connection_name TEXT NOT NULL DEFAULT '',
+        connection_id TEXT NOT NULL DEFAULT '',
         database TEXT NOT NULL DEFAULT '',
+        schema_name TEXT,
         messages_json TEXT NOT NULL DEFAULT '[]',
         queued_input TEXT,
         plugin_context_json TEXT,
@@ -879,12 +1251,140 @@ const SCHEMA_STATEMENTS: &[&str] = &[
     )",
 ];
 
+fn migration_counts_json(preflight: &MigrationPreflight) -> String {
+    serde_json::json!({
+        "databasePlaintextCount": preflight.database_plaintext_count,
+        "connectionCount": preflight.connection_count,
+        "pluginSecretCount": preflight.plugin_secret_count,
+        "aiSecretCount": preflight.ai_secret_count,
+        "tunnelSecretCount": preflight.tunnel_secret_count,
+        "syncCredentialCount": preflight.sync_credential_count,
+    })
+    .to_string()
+}
+
+fn migration_backup_paths(counts: &serde_json::Value) -> Result<Vec<String>, String> {
+    let Some(value) = counts.get("backupPaths") else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_value::<Vec<String>>(value.clone())
+        .map_err(|_| "Invalid migration backup manifest: backupPaths must be an array".to_string())
+}
+
+fn migration_error_code(error: &str) -> &'static str {
+    if error.contains("MIGRATION_STATE_WRITE_FAILED") {
+        "MIGRATION_STATE_WRITE_FAILED"
+    } else if error.contains("MIGRATION_RESTORE_FAILED") {
+        "MIGRATION_RESTORE_FAILED"
+    } else if error.contains("MIGRATION_INTERRUPTED") {
+        "MIGRATION_INTERRUPTED"
+    } else if error.contains("BACKUP_FAILED") {
+        "BACKUP_FAILED"
+    } else if error.contains("MISSING_MANAGED_KEY") {
+        "MISSING_MANAGED_KEY"
+    } else if error.contains("ENCRYPTED_DATA_KEY_MISSING") {
+        "ENCRYPTED_DATA_KEY_MISSING"
+    } else if error.contains("SECRET_KEY_MISMATCH") {
+        "SECRET_KEY_MISMATCH"
+    } else if error.contains("SECRET_KEY_INVALID") {
+        "SECRET_KEY_INVALID"
+    } else if error.contains("KEY_FILE_UNAVAILABLE") {
+        "KEY_FILE_UNAVAILABLE"
+    } else if error.contains("KEYRING_ACCESS_FAILED") {
+        "KEYRING_ACCESS_FAILED"
+    } else if error.contains("KEYRING_WRITE_FAILED") {
+        "KEYRING_WRITE_FAILED"
+    } else if error.contains("MISSING_EXTERNAL_KEY") || error.contains("MISSING_PERSISTENT_KEY") {
+        "MISSING_EXTERNAL_KEY"
+    } else if error.contains("KEY_PROVIDER_UNAVAILABLE") {
+        "KEY_PROVIDER_UNAVAILABLE"
+    } else if error.contains("JSON") || error.contains("json") {
+        "LEGACY_JSON_INVALID"
+    } else if error.contains("verification") || error.contains("plaintext remains") {
+        "VERIFICATION_FAILED"
+    } else if error.contains("backup") {
+        "BACKUP_FAILED"
+    } else {
+        "MIGRATION_FAILED"
+    }
+}
+
+fn migration_safe_message(code: &str, _error: &str) -> String {
+    match code {
+        "MIGRATION_STATE_WRITE_FAILED" => {
+            "Could not save the migration failure status; keep the backup and retry".to_string()
+        }
+        "MIGRATION_RESTORE_FAILED" => "Could not restore the database backup; keep the backup for recovery".to_string(),
+        "MIGRATION_INTERRUPTED" => "The previous migration was interrupted; keep the backup and retry".to_string(),
+        "MISSING_MANAGED_KEY" => "A managed data-directory secret key is required".to_string(),
+        "ENCRYPTED_DATA_KEY_MISSING" => "The key for existing encrypted data is missing".to_string(),
+        "SECRET_KEY_MISMATCH" => "The configured secret key cannot decrypt existing data".to_string(),
+        "SECRET_KEY_INVALID" => "The configured secret key is invalid".to_string(),
+        "KEY_FILE_UNAVAILABLE" => "The configured secret key file is unavailable".to_string(),
+        "KEYRING_ACCESS_FAILED" => {
+            "The platform credential store refused access to the DBX secret-store key".to_string()
+        }
+        "KEYRING_WRITE_FAILED" => {
+            "DBX could not save the secret-store key in the platform credential store".to_string()
+        }
+        "MISSING_EXTERNAL_KEY" => "An external secret key is required".to_string(),
+        "BACKUP_FAILED" => "Could not create a migration backup".to_string(),
+        "LEGACY_JSON_INVALID" => "A legacy configuration file could not be read".to_string(),
+        "VERIFICATION_FAILED" => "Encrypted data verification failed".to_string(),
+        "KEY_PROVIDER_UNAVAILABLE" => "The local secret provider is unavailable".to_string(),
+        _ => "Data migration failed; your original data was preserved".to_string(),
+    }
+}
+
+const LEGACY_JSON_NAMES: &[&str] = &[
+    "connections.json",
+    "secrets.json",
+    "ai_config.json",
+    "ai_conversations.json",
+    "query_history.json",
+    "sidebar_layout.json",
+];
+
+fn file_digest(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).map_err(|_| "Cannot read migration source file".to_string())?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 impl Storage {
     pub async fn open(db_path: &Path) -> Result<Self, String> {
+        Self::open_with_secret_key_policy(db_path, SecretKeyPolicy::PlatformDefault).await
+    }
+
+    pub async fn open_with_secret_key_policy(db_path: &Path, policy: SecretKeyPolicy) -> Result<Self, String> {
+        let storage = Self::open_unmigrated(db_path).await?.with_secret_key_policy(policy);
+        let preflight = storage.inspect_data_migration().await?;
+        if preflight.needs_migration && !preflight.key_provider_available && !preflight.key_creation_allowed {
+            return Err(preflight.error_code.unwrap_or_else(|| "KEY_PROVIDER_UNAVAILABLE".to_string()));
+        }
+        if preflight.database_plaintext_count > 0 || preflight.sync_credential_count > 0 {
+            let codec = storage.secret_codec(preflight.key_creation_allowed)?;
+            storage.run_database_legacy_migrations(&codec).await?;
+        }
+        Ok(storage)
+    }
+
+    /// Open the database schema without touching legacy plaintext data. The
+    /// desktop and web applications use this entry point so the migration
+    /// wizard can inspect and execute the upgrade visibly.
+    pub async fn open_unmigrated(db_path: &Path) -> Result<Self, String> {
         let path = db_path.to_path_buf();
         let db_path = db_path.to_string_lossy().to_string();
         let db = connect_path_create_if_missing(&db_path).await?;
-        let storage = Self { db, path };
+        let storage = Self {
+            db,
+            path,
+            secret_key_policy: SecretKeyPolicy::PlatformDefault,
+            secret_key_creation_allowed: true,
+            secret_codec_cache: Arc::new(Mutex::new(None)),
+            secret_key_error_cache: Arc::new(Mutex::new(None)),
+            migration_failure: Arc::new(Mutex::new(None)),
+        };
         // Best-effort: switching journal mode is itself a lock-sensitive
         // operation, so a transient failure here (e.g. another process
         // racing to open the same brand-new database file) must never stop
@@ -893,12 +1393,161 @@ impl Storage {
         // depend on the journal-mode switch or the schema pass succeeding.
         restrict_db_file_permissions(&storage.path);
         storage.enable_wal_mode().await;
-        let schema = storage.init_schema().await;
+        let schema = storage.init_schema(false).await;
         // Second pass: the journal sidecars only appear once something has
         // written to the database, and this runs on the failure path too.
         restrict_db_file_permissions(&storage.path);
         schema?;
         Ok(storage)
+    }
+
+    pub fn with_secret_key_policy(mut self, policy: SecretKeyPolicy) -> Self {
+        self.secret_key_policy = policy;
+        self
+    }
+
+    pub fn with_secret_key_creation(mut self, allowed: bool) -> Self {
+        self.secret_key_creation_allowed = allowed;
+        self
+    }
+
+    /// Compatibility builder for callers that require an externally managed key.
+    pub fn require_persistent_key(self) -> Self {
+        self.with_secret_key_policy(SecretKeyPolicy::ExternalOnly)
+    }
+
+    pub fn require_persistent_secret_key(self) -> Self {
+        self.require_persistent_key()
+    }
+
+    fn resolve_secret_key(&self, allow_create: bool) -> Result<SecretKeyResolution, String> {
+        self.resolve_secret_key_with_error_cache(allow_create, true)
+    }
+
+    fn resolve_secret_key_with_error_cache(
+        &self,
+        allow_create: bool,
+        use_cached_error: bool,
+    ) -> Result<SecretKeyResolution, String> {
+        if !allow_create && use_cached_error {
+            let key_files = self.key_file_digests();
+            let mut cache = self.secret_key_error_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(cached) = cache.as_ref() {
+                if cached.key_files == key_files {
+                    return Err(cached.error.clone());
+                }
+                *cache = None;
+            }
+        }
+        let resolved = SecretCodec::resolve(self.secret_key_policy, self.data_dir(), allow_create)?;
+        // A fresh successful resolve supersedes any cached failure recorded
+        // while the platform store was locked or unavailable, so read-only
+        // callers stop serving the stale error once the provider recovers.
+        *self.secret_key_error_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        Ok(resolved)
+    }
+
+    fn cache_secret_key_error(&self, error: &str, key_files: Vec<(PathBuf, Option<[u8; 32]>)>) {
+        *self.secret_key_error_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(CachedSecretKeyError { error: error.to_string(), key_files });
+    }
+
+    /// Resolution cost is dominated by the platform credential store, so the
+    /// codec is cached for the process. Key files are re-digested on every use,
+    /// and migration invalidates the cache, so no caller serves material that
+    /// the provider no longer agrees with. Callers that must observe a key
+    /// change immediately (status probes, migration) use `resolve_secret_key`.
+    fn secret_codec(&self, allow_create: bool) -> Result<SecretCodec, String> {
+        if let Some(cached) = self.cached_secret_codec() {
+            return Ok(cached);
+        }
+        let key_files = self.key_file_digests();
+        let codec = self.resolve_secret_key(allow_create).map(|resolved| resolved.codec)?;
+        // Pair the codec with the pre-resolve digests, and only when the key
+        // files are unchanged across the resolve. A pair taken after resolving
+        // could combine a stale codec with fresh digests, which the use-time
+        // digest check would then never reject.
+        self.cache_secret_codec_if_unchanged(codec, key_files);
+        Ok(codec)
+    }
+
+    fn cached_secret_codec(&self) -> Option<SecretCodec> {
+        let mut cache = self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cached = cache.as_ref()?;
+        let codec = cached.codec;
+        let resolved_key_files = cached.key_files.clone();
+        if resolved_key_files != self.key_file_digests() {
+            // A key file was added, replaced, or removed after resolution.
+            *cache = None;
+            return None;
+        }
+        Some(codec)
+    }
+
+    fn cache_secret_codec(&self, codec: SecretCodec, key_files: Vec<(PathBuf, Option<[u8; 32]>)>) {
+        let entry = CachedSecretCodec { codec, key_files };
+        *self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(entry);
+    }
+
+    fn cache_secret_codec_if_unchanged(&self, codec: SecretCodec, before: Vec<(PathBuf, Option<[u8; 32]>)>) {
+        if self.key_file_digests() == before {
+            self.cache_secret_codec(codec, before);
+        } else {
+            self.invalidate_secret_codec();
+        }
+    }
+
+    fn invalidate_secret_codec(&self) {
+        *self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *self.secret_key_error_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    /// Digest of every file that can supply key material on its own. Comparing
+    /// these on use costs a few small reads instead of a credential-store
+    /// round trip, and still catches a key file replaced outside DBX.
+    fn key_file_digests(&self) -> Vec<(PathBuf, Option<[u8; 32]>)> {
+        use sha2::Digest;
+        key_file_candidates(self.data_dir())
+            .into_iter()
+            .map(|path| {
+                let digest = std::fs::read(&path).ok().map(|contents| sha2::Sha256::digest(contents).into());
+                (path, digest)
+            })
+            .collect()
+    }
+
+    async fn secret_codec_for_write(&self, needs_key: bool) -> Result<SecretCodec, String> {
+        match self.secret_codec(false) {
+            Ok(codec) => Ok(codec),
+            Err(error)
+                if matches!(
+                    error.as_str(),
+                    "MISSING_MANAGED_KEY" | "MISSING_EXTERNAL_KEY" | "KEY_PROVIDER_UNAVAILABLE"
+                ) =>
+            {
+                if !needs_key {
+                    return Ok(SecretCodec::new([0u8; 32]));
+                }
+                if !self.secret_key_creation_allowed {
+                    return Err(error);
+                }
+                let has_ciphertext = self
+                    .with_conn(|conn| {
+                        conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM connection_secrets WHERE secret_enc IS NOT NULL AND secret_enc <> '')",
+                            [],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .map_err(|error| error.to_string())
+                    })
+                    .await?;
+                if has_ciphertext {
+                    return Err("ENCRYPTED_DATA_KEY_MISSING".to_string());
+                }
+                self.secret_codec(true)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Multiple `dbx` processes can end up pointed at the same data directory
@@ -944,21 +1593,867 @@ impl Storage {
         self.path.parent().unwrap_or_else(|| Path::new("."))
     }
 
-    async fn init_schema(&self) -> Result<(), String> {
-        self.db.with_connection(|conn| {
+    /// Hash logical rows so changes still in SQLite's WAL and same-size
+    /// replacement JSON files invalidate the cached migration scan.
+    async fn migration_source_fingerprint(&self) -> Result<String, String> {
+        let mut digest = self
+            .with_conn(|conn| {
+                use sha2::{Digest, Sha256};
+                let mut digest = Sha256::new();
+                for table in [
+                    "connections",
+                    "connection_secrets",
+                    "ai_configs",
+                    "ai_config",
+                    "ai_provider_configs",
+                    "tunnel_profiles",
+                    "app_settings",
+                ] {
+                    digest.update(table.as_bytes());
+                    let mut stmt = conn
+                        .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+                        .map_err(|_| "Cannot inspect migration source")?;
+                    let columns = stmt.column_count();
+                    let mut rows = stmt.query([]).map_err(|_| "Cannot inspect migration source")?;
+                    while let Some(row) = rows.next().map_err(|_| "Cannot inspect migration source")? {
+                        for i in 0..columns {
+                            let value = format!("{:?}", row.get_ref(i).map_err(|_| "Cannot inspect migration source")?);
+                            digest.update((value.len() as u64).to_le_bytes());
+                            digest.update(value.as_bytes());
+                        }
+                    }
+                }
+                Ok(digest)
+            })
+            .await?;
+        use sha2::Digest;
+        for name in LEGACY_JSON_NAMES {
+            digest.update(name.as_bytes());
+            let path = self.data_dir().join(name);
+            if path.exists() {
+                digest.update(file_digest(&path)?.as_bytes());
+            }
+        }
+        Ok(format!("{:x}", digest.finalize()))
+    }
+
+    pub async fn inspect_data_migration(&self) -> Result<MigrationPreflight, String> {
+        self.inspect_data_migration_with_error_cache(true).await
+    }
+
+    /// Repeat the read-only migration probe after an explicit user action.
+    /// Only this call bypasses a cached provider failure; its success or error
+    /// replaces that cache before ordinary startup/background reads resume.
+    pub async fn retry_data_migration_inspection(&self) -> Result<MigrationPreflight, String> {
+        self.inspect_data_migration_with_error_cache(false).await
+    }
+
+    async fn inspect_data_migration_with_error_cache(
+        &self,
+        use_cached_key_error: bool,
+    ) -> Result<MigrationPreflight, String> {
+        let files = self.legacy_json_files().await?;
+        let mut stored = self.load_migration_state().await?;
+        let failure = self.migration_failure.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(failure) = failure {
+            stored.state = MigrationState::Failed;
+            stored.error_message = Some(migration_safe_message(&failure.code, ""));
+            stored.error_code = Some(failure.code);
+            stored.backup_path = failure.backup_path.or(stored.backup_path);
+        } else if stored.state == MigrationState::Running && !self.migration_is_active()? {
+            // A process exit releases the lock. Report interruption without
+            // modifying the database during a status request.
+            stored.state = MigrationState::Failed;
+            stored.error_code = Some("MIGRATION_INTERRUPTED".to_string());
+            stored.error_message = Some(migration_safe_message("MIGRATION_INTERRUPTED", ""));
+        }
+        let current_fingerprint = self.migration_source_fingerprint().await?;
+        let cached_scan: Option<(i64, i64, i64, i64, i64, i64, i64)> =
+            if stored.source_fingerprint.as_deref() == Some(current_fingerprint.as_str()) {
+                serde_json::from_str::<serde_json::Value>(&stored.counts_json).ok().and_then(|value| {
+                    // A state transition may update source_fingerprint without a scan.
+                    // Legacy caches lacking their own fingerprint must be rescanned.
+                    (value["cachedScanFingerprint"].as_str() == Some(current_fingerprint.as_str()))
+                        .then(|| serde_json::from_value(value["cachedScan"].clone()).ok())
+                        .flatten()
+                })
+            } else {
+                None
+            };
+        let (plaintext, encrypted, connections, plugins, ai, tunnels, sync_credentials) = match cached_scan {
+            Some(scan) => scan,
+            None => {
+                self.with_conn(|conn| {
+                    let plaintext: i64 = conn
+                        .query_row("SELECT COUNT(*) FROM connection_secrets WHERE secret <> ''", [], |row| row.get(0))
+                        .map_err(|e| e.to_string())?;
+                    let encrypted: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM connection_secrets WHERE secret_enc IS NOT NULL AND secret_enc <> ''",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let connections: i64 = conn
+                        .query_row("SELECT COUNT(*) FROM connections", [], |row| row.get(0))
+                        .map_err(|e| e.to_string())?;
+                    let plugins: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM connection_secrets WHERE key LIKE 'plugin_connection.%' AND secret <> ''",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let ai = count_ai_secret_rows(conn)?;
+                    let tunnels = count_tunnel_secret_rows(conn)?;
+                    let inline_connections: i64 = {
+                        let mut statement =
+                            conn.prepare("SELECT config_json FROM connections").map_err(|e| e.to_string())?;
+                        let rows = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+                        let mut count = 0;
+                        for row in rows {
+                            let json = row.map_err(|e| e.to_string())?;
+                            // Legacy rows saved by older app versions may carry a db_type the
+                            // current enum no longer knows (e.g. pre-plugin `s3`). load_connections
+                            // skips those at runtime, so they must not brick the migration either.
+                            let config: ConnectionConfig = match serde_json::from_str(&json) {
+                                Ok(config) => config,
+                                Err(error) => {
+                                    warn!("Skipping unreadable saved connection during migration preflight: {error}");
+                                    continue;
+                                }
+                            };
+                            if connection_config_has_inline_secrets(&config) {
+                                count += 1;
+                            }
+                        }
+                        count
+                    };
+                    let sync_credentials: i64 = conn
+                        .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .optional()
+                        .map_err(|e| e.to_string())?
+                        .map(|json| {
+                            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                                .ok()
+                                .map(|settings| {
+                                    ["local_device_secret", "webdav_sync_secrets_passphrase"]
+                                        .iter()
+                                        .filter(|key| settings.get(**key).is_some_and(nonempty_json_value))
+                                        .count()
+                                        + settings
+                                            .get("webdav_passwords")
+                                            .and_then(serde_json::Value::as_object)
+                                            .map_or(0, serde_json::Map::len)
+                                })
+                                .unwrap_or(0) as i64
+                        })
+                        .unwrap_or(0);
+                    Ok((plaintext + inline_connections, encrypted, connections, plugins, ai, tunnels, sync_credentials))
+                })
+                .await?
+            }
+        };
+        // This probe is deliberately read-only. It must not create a keyring
+        // entry, key file, or change permissions while displaying status.
+        let key_files_before = self.key_file_digests();
+        let key_probe = self.resolve_secret_key_with_error_cache(false, use_cached_key_error);
+        if let Err(error) = key_probe.as_ref() {
+            // Keep one startup probe from being repeated by each subsequent
+            // storage read while the desktop keyring is locked or unavailable.
+            self.cache_secret_key_error(error, key_files_before.clone());
+        }
+        let mut key_provider_available = key_probe.is_ok();
+        let database_plaintext_count = (plaintext + ai + tunnels).max(0) as usize;
+        let has_legacy_data =
+            database_plaintext_count > 0 || sync_credentials > 0 || files.iter().any(|file| file.exists);
+        let key_creation_allowed = key_probe
+            .as_ref()
+            .err()
+            .is_some_and(|error| matches!(error.as_str(), "MISSING_MANAGED_KEY" | "KEY_PROVIDER_UNAVAILABLE"))
+            && !matches!(self.secret_key_policy, SecretKeyPolicy::ExternalOnly)
+            && encrypted == 0
+            && (database_plaintext_count > 0 || sync_credentials > 0 || files.iter().any(|file| file.exists));
+        let mut key_error_code = key_probe.as_ref().err().map(|error| migration_error_code(error).to_string());
+        if let Ok(resolved) = key_probe.as_ref() {
+            if encrypted > 0 && self.validate_existing_encrypted_data(resolved.codec).await.is_err() {
+                key_provider_available = false;
+                key_error_code = Some("SECRET_KEY_MISMATCH".to_string());
+            }
+        } else if encrypted > 0
+            && matches!(
+                key_error_code.as_deref(),
+                Some("MISSING_MANAGED_KEY") | Some("MISSING_EXTERNAL_KEY") | Some("KEY_PROVIDER_UNAVAILABLE")
+            )
+        {
+            key_error_code = Some("ENCRYPTED_DATA_KEY_MISSING".to_string());
+        }
+        // External-only profiles require explicit configuration. Managed
+        // profiles may create their key later, but never when ciphertext
+        // already exists without its original key.
+        let missing_required_key =
+            !key_provider_available && matches!(self.secret_key_policy, SecretKeyPolicy::ExternalOnly);
+        let missing_existing_key = encrypted > 0 && !key_provider_available;
+        let fatal_key_error = key_error_code.as_deref().is_some_and(|code| {
+            matches!(
+                code,
+                "SECRET_KEY_INVALID"
+                    | "SECRET_KEY_MISMATCH"
+                    | "KEY_FILE_UNAVAILABLE"
+                    | "KEYRING_ACCESS_FAILED"
+                    | "KEYRING_WRITE_FAILED"
+                    | "MISSING_EXTERNAL_KEY"
+                    | "ENCRYPTED_DATA_KEY_MISSING"
+            )
+        });
+        let key_status = match key_error_code.as_deref() {
+            Some("SECRET_KEY_INVALID") => MigrationKeyStatus::Invalid,
+            Some("SECRET_KEY_MISMATCH") => MigrationKeyStatus::Mismatch,
+            Some("ENCRYPTED_DATA_KEY_MISSING") => MigrationKeyStatus::MissingForCiphertext,
+            Some("KEY_PROVIDER_UNAVAILABLE") | Some("MISSING_MANAGED_KEY") if key_creation_allowed => {
+                MigrationKeyStatus::WillCreate
+            }
+            Some(_) => MigrationKeyStatus::Unavailable,
+            None if key_provider_available => MigrationKeyStatus::Ready,
+            None => MigrationKeyStatus::Unavailable,
+        };
+        let source_changed = stored.source_fingerprint.as_deref().is_some_and(|value| value != current_fingerprint);
+        let state = if matches!(stored.state, MigrationState::Failed | MigrationState::Running) {
+            stored.state.clone()
+        } else if fatal_key_error
+            || missing_required_key
+            || missing_existing_key
+            || (has_legacy_data
+                && (source_changed || matches!(stored.state, MigrationState::Succeeded | MigrationState::NotRequired)))
+        {
+            MigrationState::Pending
+        } else if !has_legacy_data && matches!(stored.state, MigrationState::Pending) {
+            MigrationState::NotRequired
+        } else {
+            stored.state.clone()
+        };
+        let needs_migration = fatal_key_error
+            || missing_required_key
+            || missing_existing_key
+            || matches!(state, MigrationState::Failed | MigrationState::Running)
+            || (has_legacy_data && !matches!(state, MigrationState::Succeeded | MigrationState::NotRequired));
+        let (error_code, error_message) = if let Some(code) = key_error_code.clone() {
+            let message = match code.as_str() {
+                "MISSING_MANAGED_KEY" => {
+                    "A managed data-directory secret key will be created when migration or first secret write starts"
+                }
+                "ENCRYPTED_DATA_KEY_MISSING" => "The key for existing encrypted data is missing",
+                "SECRET_KEY_INVALID" => "The configured secret key is invalid",
+                "SECRET_KEY_MISMATCH" => "The configured secret key cannot decrypt existing data",
+                "KEY_FILE_UNAVAILABLE" => "The configured secret key file is unavailable",
+                "KEYRING_ACCESS_FAILED" => "The platform credential store refused access to the DBX secret-store key",
+                "KEYRING_WRITE_FAILED" => "DBX could not save the secret-store key in the platform credential store",
+                "MISSING_EXTERNAL_KEY" => "An external secret key is required",
+                _ => "The local secret provider is unavailable",
+            };
+            (Some(code), Some(message.to_string()))
+        } else if stored.state == MigrationState::Failed && stored.error_code.is_some() {
+            let code = migration_error_code(stored.error_code.as_deref().unwrap()).to_string();
+            let message = migration_safe_message(&code, "");
+            (Some(code), Some(message))
+        } else if missing_required_key {
+            (Some("MISSING_EXTERNAL_KEY".to_string()), Some("An external secret key is required".to_string()))
+        } else if missing_existing_key {
+            (
+                Some("ENCRYPTED_DATA_KEY_MISSING".to_string()),
+                Some("The key for existing encrypted data is missing".to_string()),
+            )
+        } else {
+            (stored.error_code, stored.error_message)
+        };
+        let key_source = key_probe
+            .as_ref()
+            .map(|resolved| resolved.source.as_str())
+            .unwrap_or(SecretKeySource::Unavailable.as_str())
+            .to_string();
+        // Reuse a successful read during the subsequent migration start. This
+        // keeps the read-only preflight and the first migration write from
+        // prompting the platform credential store twice in one action.
+        if key_provider_available {
+            if let Ok(resolved) = key_probe.as_ref() {
+                self.cache_secret_codec_if_unchanged(resolved.codec, key_files_before);
+            }
+        }
+        let preflight = MigrationPreflight {
+            migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
+            state,
+            needs_migration,
+            key_provider_available,
+            key_status,
+            key_creation_allowed,
+            database_plaintext_count,
+            connection_count: connections.max(0) as usize,
+            plugin_secret_count: plugins.max(0) as usize,
+            ai_secret_count: ai.max(0) as usize,
+            tunnel_secret_count: tunnels.max(0) as usize,
+            sync_credential_count: sync_credentials.max(0) as usize,
+            legacy_json_files: files,
+            backup_required: needs_migration,
+            backup_path: stored.backup_path,
+            error_message,
+            error_code,
+            data_dir: self.data_dir().to_string_lossy().to_string(),
+            backup_dir: self.data_dir().to_string_lossy().to_string(),
+            key_file_configured: std::env::var_os("DBX_SECRET_KEY_FILE").is_some(),
+            key_file_readable: std::env::var("DBX_SECRET_KEY_FILE")
+                .ok()
+                .is_some_and(|path| std::fs::read_to_string(path).is_ok()),
+            persistent_key_configured: key_provider_available,
+            key_source,
+        };
+        Ok(preflight)
+    }
+
+    async fn validate_existing_encrypted_data(&self, codec: SecretCodec) -> Result<(), String> {
+        self.with_conn(move |conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT connection_id, key, secret_enc FROM connection_secrets
+                     WHERE secret_enc IS NOT NULL AND secret_enc <> ''",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                let (connection_id, key, envelope) = row.map_err(|error| error.to_string())?;
+                codec.decrypt(&connection_id, &key, &envelope).map_err(|_| "SECRET_KEY_MISMATCH".to_string())?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    fn migration_is_active(&self) -> Result<bool, String> {
+        let file =
+            match std::fs::OpenOptions::new().read(true).write(true).open(self.data_dir().join(MIGRATION_LOCK_FILE)) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(_) => return Err("MIGRATION_LOCK_UNAVAILABLE".to_string()),
+            };
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Ok(false), // Closing the handle releases the probe lock.
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+            Err(_) => Err("MIGRATION_LOCK_UNAVAILABLE".to_string()),
+        }
+    }
+
+    fn lock_data_migration(&self) -> Result<std::fs::File, String> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(self.data_dir().join(MIGRATION_LOCK_FILE))
+            .map_err(|_| "MIGRATION_LOCK_UNAVAILABLE".to_string())?;
+        fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                "MIGRATION_IN_PROGRESS".to_string()
+            } else {
+                "MIGRATION_LOCK_UNAVAILABLE".to_string()
+            }
+        })?;
+        Ok(file)
+    }
+
+    pub async fn start_data_migration(&self) -> Result<MigrationReport, String> {
+        let _lock = DATA_MIGRATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+        let _file_lock = self.lock_data_migration()?;
+        *self.migration_failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        self.invalidate_secret_codec();
+        let mut backup_path: Option<String> = None;
+        let mut data_started = false;
+        let result = async {
+            let preflight = self.inspect_data_migration().await?;
+            if preflight.is_ready() {
+                return Ok(MigrationReport {
+                    migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
+                    state: preflight.state,
+                    backup_path: preflight.backup_path,
+                    database_plaintext_count: 0,
+                    legacy_json_files: Vec::new(),
+                    verified_secret_count: 0,
+                    error_code: None,
+                    error_message: None,
+                });
+            }
+            if !preflight.key_provider_available && !preflight.key_creation_allowed {
+                return Err(preflight.error_code.unwrap_or_else(|| "KEY_PROVIDER_UNAVAILABLE".to_string()));
+            }
+            self.set_migration_state(
+                MigrationState::Running,
+                None,
+                None,
+                None,
+                Some(&migration_counts_json(&preflight)),
+            )
+            .await?;
+            backup_path = Some(self.create_migration_backup().await.map_err(|_| "BACKUP_FAILED".to_string())?);
+            let backup_path = backup_path.as_deref().unwrap();
+            self.set_migration_state(MigrationState::Running, Some(backup_path), None, None, None).await?;
+            data_started = true;
+            let codec = self.secret_codec(preflight.key_creation_allowed)?;
+            self.run_database_legacy_migrations(&codec).await?;
+            self.migrate_from_json_staged(self.data_dir()).await?;
+            let verified = self.verify_migration().await?;
+            let renamed = self.finalize_legacy_json_files().await?;
+            self.set_migration_state(
+                MigrationState::Succeeded,
+                Some(backup_path),
+                None,
+                None,
+                Some(&{
+                    let mut counts: serde_json::Value =
+                        serde_json::from_str(&migration_counts_json(&preflight)).unwrap();
+                    let mut files = serde_json::Map::new();
+                    for name in &renamed {
+                        let name = format!("{name}.bak");
+                        files.insert(
+                            name.clone(),
+                            serde_json::Value::String(file_digest(&self.data_dir().join(&name))?),
+                        );
+                    }
+                    counts["legacyBakFiles"] = serde_json::Value::Object(files);
+                    counts.to_string()
+                }),
+            )
+            .await?;
+            Ok::<MigrationReport, String>(MigrationReport {
+                migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
+                state: MigrationState::Succeeded,
+                backup_path: Some(backup_path.to_string()),
+                database_plaintext_count: preflight.database_plaintext_count,
+                legacy_json_files: renamed,
+                verified_secret_count: verified,
+                error_code: None,
+                error_message: None,
+            })
+        }
+        .await;
+        match result {
+            Ok(report) => Ok(report),
+            Err(error) => {
+                self.invalidate_secret_codec();
+                let mut code = migration_error_code(&error).to_string();
+                if data_started {
+                    if let Some(path) = backup_path.as_deref() {
+                        if self.restore_database_backup(path).await.is_err() {
+                            code = "MIGRATION_RESTORE_FAILED".to_string();
+                        }
+                    }
+                }
+                if self
+                    .set_migration_state(MigrationState::Failed, backup_path.as_deref(), Some(&code), Some(&code), None)
+                    .await
+                    .is_err()
+                {
+                    code = "MIGRATION_STATE_WRITE_FAILED".to_string();
+                    // A read-only status request must still report the failed
+                    // action if SQLite cannot persist it. After process exit,
+                    // a retained running record is detected via the file lock.
+                    *self.migration_failure.lock().unwrap_or_else(|p| p.into_inner()) =
+                        Some(MigrationFailure { code: code.clone(), backup_path });
+                }
+                if code == "MIGRATION_STATE_WRITE_FAILED" || code == "MIGRATION_RESTORE_FAILED" {
+                    Err(code)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    pub async fn retry_data_migration(&self) -> Result<MigrationReport, String> {
+        self.start_data_migration().await
+    }
+
+    pub async fn cleanup_migration_backups(&self) -> Result<(), String> {
+        let _lock = DATA_MIGRATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+        let record = self.load_migration_state().await?;
+        if record.state != MigrationState::Succeeded {
+            return Err("Migration backups may only be cleaned after success".to_string());
+        }
+        let mut counts: serde_json::Value =
+            serde_json::from_str(&record.counts_json).map_err(|_| "Invalid migration backup manifest")?;
+        let mut paths = migration_backup_paths(&counts)?;
+        if let Some(path) = record.backup_path {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        let root = self.data_dir().canonicalize().map_err(|_| "Cannot access migration backup directory")?;
+        let mut backups = Vec::new();
+        for path in paths {
+            let path = PathBuf::from(path);
+            if !path.exists() {
+                continue;
+            }
+            let candidate = path.canonicalize().map_err(|_| "Invalid migration backup path")?;
+            if candidate.parent() != Some(root.as_path())
+                || !candidate
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .is_some_and(|v| v.starts_with("dbx-secret-migration-"))
+                || path.symlink_metadata().map_err(|_| "Invalid migration backup path")?.file_type().is_symlink()
+            {
+                return Err("Invalid migration backup path".to_string());
+            }
+            backups.push(path);
+        }
+        let mut legacy = Vec::new();
+        if let Some(files) = counts["legacyBakFiles"].as_object() {
+            for (name, expected_hash) in files {
+                if !LEGACY_JSON_NAMES.iter().any(|allowed| name == &format!("{allowed}.bak")) {
+                    return Err("Invalid legacy backup manifest".to_string());
+                }
+                let path = self.data_dir().join(name);
+                if !path.exists() {
+                    continue;
+                }
+                if path.symlink_metadata().map_err(|_| "Cannot inspect legacy backup")?.file_type().is_symlink()
+                    || expected_hash.as_str() != Some(file_digest(&path)?.as_str())
+                {
+                    return Err("Legacy backup changed; manual inspection is required".to_string());
+                }
+                legacy.push(path);
+            }
+        }
+        // Validate every manifest entry before removing any file.
+        for path in legacy {
+            std::fs::remove_file(path).map_err(|_| "Cannot clean legacy backup")?;
+        }
+        for path in backups {
+            std::fs::remove_dir_all(path).map_err(|_| "Cannot clean migration backup")?;
+        }
+        counts["legacyBakFiles"] = serde_json::json!({});
+        counts["backupPaths"] = serde_json::json!([]);
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE data_migrations SET backup_path=NULL, counts_json=?1 WHERE migration_id=?2",
+                params![counts.to_string(), SECRET_STORE_MIGRATION_ID],
+            )
+            .map_err(|_| "Cannot update backup manifest")?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn restore_database_backup(&self, backup_path: &str) -> Result<(), String> {
+        let backup = PathBuf::from(backup_path).join(STORAGE_DB_FILE_NAME);
+        if !backup.is_file() {
+            return Err("migration database backup is missing".to_string());
+        }
+        let live = self.path.clone();
+        self.with_conn(move |_conn| {
+            let source =
+                Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
+            source.backup(DatabaseName::Main, &live, None).map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    async fn legacy_json_files(&self) -> Result<Vec<LegacyJsonFileStatus>, String> {
+        let names = [
+            "connections.json",
+            "secrets.json",
+            "ai_config.json",
+            "ai_conversations.json",
+            "query_history.json",
+            "sidebar_layout.json",
+        ];
+        names
+            .into_iter()
+            .map(|name| {
+                let path = self.data_dir().join(name);
+                let metadata = std::fs::metadata(&path).ok();
+                Ok(LegacyJsonFileStatus {
+                    name: name.to_string(),
+                    exists: metadata.is_some(),
+                    bytes: metadata.map(|m| m.len()).unwrap_or(0),
+                })
+            })
+            .collect()
+    }
+
+    async fn load_migration_state(&self) -> Result<MigrationStateRecord, String> {
+        self.with_conn(|conn| {
+            type MigrationStateRow = (String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+            let row: Option<MigrationStateRow> = conn
+                .query_row(
+                    "SELECT state, backup_path, error_code, error_message, source_fingerprint, counts_json FROM data_migrations WHERE migration_id = ?1",
+                    [SECRET_STORE_MIGRATION_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let Some((state, backup, error_code, error_message, source_fingerprint, counts_json)) = row else {
+                return Ok(MigrationStateRecord::default());
+            };
+            let state = serde_json::from_value(serde_json::Value::String(state)).unwrap_or(MigrationState::Pending);
+            Ok(MigrationStateRecord { state, backup_path: backup, error_code, error_message, source_fingerprint, counts_json: counts_json.unwrap_or_else(|| "{}".to_string()) })
+        })
+        .await
+    }
+
+    async fn set_migration_state(
+        &self,
+        state: MigrationState,
+        backup_path: Option<&str>,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+        counts_json: Option<&str>,
+    ) -> Result<(), String> {
+        let state = serde_json::to_value(state).map_err(|e| e.to_string())?.as_str().unwrap_or("pending").to_string();
+        let backup_path = backup_path.map(ToOwned::to_owned);
+        let error_code = error_code.map(ToOwned::to_owned);
+        let error_message = error_message
+            .map(|value| migration_safe_message(error_code.as_deref().unwrap_or("MIGRATION_FAILED"), value));
+        let previous = self.load_migration_state().await?;
+        let mut counts: serde_json::Value =
+            serde_json::from_str(&previous.counts_json).map_err(|_| "Invalid migration backup manifest".to_string())?;
+        if let Some(update) = counts_json {
+            let update: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(update).map_err(|_| "Invalid migration state update".to_string())?;
+            for (key, value) in update {
+                counts[&key] = value;
+            }
+        }
+        let mut paths = migration_backup_paths(&counts)?;
+        for path in previous.backup_path.iter().chain(backup_path.iter()) {
+            if !paths.contains(path) {
+                paths.push(path.clone());
+            }
+        }
+        counts["backupPaths"] = serde_json::json!(paths);
+        // Never associate pre-migration scan counts with the post-migration source.
+        if let Some(object) = counts.as_object_mut() {
+            object.remove("cachedScan");
+            object.remove("cachedScanFingerprint");
+        }
+        let counts_json = counts.to_string();
+        let backup_path = backup_path.or(previous.backup_path);
+        let source_fingerprint =
+            if state == "failed" { None } else { Some(self.migration_source_fingerprint().await?) };
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO data_migrations (migration_id,state,source_fingerprint,counts_json,backup_path,error_code,error_message,started_at,completed_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,datetime('now'),CASE WHEN ?2 IN ('succeeded','not_required') THEN datetime('now') ELSE NULL END)
+                 ON CONFLICT(migration_id) DO UPDATE SET state=excluded.state, backup_path=excluded.backup_path,
+                 source_fingerprint=excluded.source_fingerprint, counts_json=excluded.counts_json,
+                 error_code=excluded.error_code, error_message=excluded.error_message,
+                 completed_at=excluded.completed_at",
+                params![SECRET_STORE_MIGRATION_ID, state, source_fingerprint, counts_json, backup_path, error_code, error_message],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    async fn create_migration_backup(&self) -> Result<String, String> {
+        let root = self.data_dir().join(format!("dbx-secret-migration-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        restrict_backup_permissions(&root);
+        let result = async {
+            let backup_db = root.join(STORAGE_DB_FILE_NAME);
+            let backup_db_for_sqlite = backup_db.clone();
+            self.with_conn(move |conn| {
+                conn.backup(DatabaseName::Main, &backup_db_for_sqlite, None).map_err(|e| e.to_string())
+            })
+            .await?;
+            for name in [
+                "connections.json",
+                "secrets.json",
+                "ai_config.json",
+                "ai_conversations.json",
+                "query_history.json",
+                "sidebar_layout.json",
+            ] {
+                let source = self.data_dir().join(name);
+                if source.is_file() {
+                    std::fs::copy(&source, root.join(name)).map_err(|e| e.to_string())?;
+                }
+            }
+            for entry in std::fs::read_dir(&root).map_err(|e| e.to_string())?.flatten() {
+                restrict_backup_file_permissions(&entry.path());
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        match result {
+            Ok(()) => Ok(root.to_string_lossy().to_string()),
+            Err(error) => {
+                // A failed backup may already contain a plaintext JSON copy.
+                // Remove the temporary directory before reporting failure so a
+                // retry cannot accumulate an untracked sensitive backup.
+                let _ = std::fs::remove_dir_all(&root);
+                Err(error)
+            }
+        }
+    }
+
+    async fn verify_migration(&self) -> Result<usize, String> {
+        let codec = self.secret_codec(false)?;
+        self.with_conn(move |conn| {
+            let mut statement = conn
+                .prepare("SELECT connection_id,key,secret,secret_enc FROM connection_secrets")
+                .map_err(|e| e.to_string())?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut count = 0;
+            for row in rows {
+                let (namespace, key, legacy, encrypted) = row.map_err(|e| e.to_string())?;
+                if !legacy.is_empty() {
+                    return Err("plaintext secret remains after migration".to_string());
+                }
+                if let Some(encrypted) = encrypted.filter(|value| !value.is_empty()) {
+                    codec.decrypt(&namespace, &key, &encrypted)?;
+                    count += 1;
+                }
+            }
+            let mut configs = conn.prepare("SELECT config_json FROM connections").map_err(|e| e.to_string())?;
+            for row in configs.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())? {
+                let json = row.map_err(|e| e.to_string())?;
+                // Rows skipped by the migrator (unreadable legacy db_type) keep their stored
+                // config_json; only readable rows are verified here.
+                let config: ConnectionConfig = match serde_json::from_str(&json) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        warn!("Skipping unreadable saved connection after migration: {error}");
+                        continue;
+                    }
+                };
+                if connection_config_has_inline_secrets(&config) {
+                    return Err("plaintext connection configuration remains after migration".to_string());
+                }
+            }
+            for (table, query) in [
+                ("ai_configs", "SELECT config_json FROM ai_configs"),
+                ("ai_config", "SELECT config_json FROM ai_config"),
+                ("ai_provider_configs", "SELECT config_json FROM ai_provider_configs"),
+            ] {
+                let mut statement = conn.prepare(query).map_err(|e| e.to_string())?;
+                for row in statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())? {
+                    let json = row.map_err(|e| e.to_string())?;
+                    let config: AiConfig = serde_json::from_str(&json)
+                        .map_err(|e| format!("invalid {table} config after migration: {e}"))?;
+                    let (_sanitized, secrets) = split_ai_config_secrets(&config)?;
+                    if secrets.as_object().is_some_and(|value| !value.is_empty()) {
+                        return Err(format!("plaintext {table} configuration remains after migration"));
+                    }
+                }
+            }
+            let mut statement = conn.prepare("SELECT config_json FROM tunnel_profiles").map_err(|e| e.to_string())?;
+            for row in statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())? {
+                let json = row.map_err(|e| e.to_string())?;
+                let profile: TransportLayerConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+                let mut scrubbed = profile.clone();
+                scrubbed.scrub_secrets();
+                if scrubbed != profile {
+                    return Err("plaintext tunnel configuration remains after migration".to_string());
+                }
+            }
+            Ok(count)
+        })
+        .await
+    }
+
+    async fn finalize_legacy_json_files(&self) -> Result<Vec<String>, String> {
+        for name in LEGACY_JSON_NAMES {
+            if self.data_dir().join(name).is_file() && self.data_dir().join(format!("{name}.bak")).exists() {
+                return Err("legacy backup file already exists".to_string());
+            }
+        }
+        let mut renamed = Vec::new();
+        for name in [
+            "connections.json",
+            "secrets.json",
+            "ai_config.json",
+            "ai_conversations.json",
+            "query_history.json",
+            "sidebar_layout.json",
+        ] {
+            let source = self.data_dir().join(name);
+            if source.is_file() {
+                let target = self.data_dir().join(format!("{name}.bak"));
+                if target.exists() {
+                    return Err("legacy backup file already exists".to_string());
+                }
+                if let Err(error) = std::fs::rename(&source, &target) {
+                    // Restore files already renamed in this pass. The DB
+                    // snapshot is restored by the caller as well.
+                    for previous in &renamed {
+                        let old = self.data_dir().join(previous);
+                        let bak = self.data_dir().join(format!("{previous}.bak"));
+                        let _ = std::fs::rename(bak, old);
+                    }
+                    return Err(error.to_string());
+                }
+                renamed.push(name.to_string());
+            }
+        }
+        Ok(renamed)
+    }
+
+    async fn init_schema(&self, migrate_legacy: bool) -> Result<(), String> {
+        let migration_codec = migrate_legacy.then(|| self.secret_codec(true)).transpose()?;
+        self.db.with_connection(move |conn| {
             for statement in SCHEMA_STATEMENTS {
                 conn.execute(statement, []).map_err(|e| e.to_string())?;
             }
             ensure_history_columns_sync(conn)?;
+            ensure_connection_secret_columns_sync(conn)?;
+            if migrate_legacy {
+                let codec = migration_codec.as_ref().ok_or_else(|| "KEY_PROVIDER_UNAVAILABLE".to_string())?;
+                migrate_legacy_connection_secrets_sync(conn, codec)?;
+                migrate_legacy_connection_config_json_sync(conn, codec)?;
+            }
             ensure_saved_sql_columns_sync(conn)?;
             ensure_tab_runtime_cache_columns_sync(conn)?;
             ensure_schema_cache_columns_sync(conn)?;
             ensure_ai_configs_columns_sync(conn)?;
+            if migrate_legacy {
+                let codec = migration_codec.as_ref().ok_or_else(|| "KEY_PROVIDER_UNAVAILABLE".to_string())?;
+                migrate_legacy_config_secrets_sync(conn, codec)?;
+                migrate_legacy_app_settings_secrets_sync(conn, codec)?;
+            }
             ensure_state_store_columns_sync(conn)?;
             ensure_ai_conversations_columns_sync(conn)?;
             ensure_ai_runs_columns_sync(conn)?;
+            // After the column exists: bind legacy conversations to their
+            // connection when the stored name identifies exactly one (#9902).
+            backfill_ai_conversation_connections(conn)?;
             Ok(())
         })
+    }
+
+    async fn run_database_legacy_migrations(&self, codec: &SecretCodec) -> Result<(), String> {
+        let codec = *codec;
+        self.with_conn(move |conn| {
+            migrate_legacy_connection_secrets_sync(conn, &codec)?;
+            migrate_legacy_connection_config_json_sync(conn, &codec)?;
+            migrate_legacy_config_secrets_sync(conn, &codec)?;
+            migrate_legacy_app_settings_secrets_sync(conn, &codec)
+        })
+        .await
     }
 
     async fn with_conn<T, F>(&self, f: F) -> Result<T, String>
@@ -1034,6 +2529,413 @@ fn ensure_schema_cache_columns_sync(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_connection_secret_columns_sync(conn: &Connection) -> Result<(), String> {
+    let mut columns = HashSet::new();
+    let mut statement = conn.prepare("PRAGMA table_info(connection_secrets)").map_err(|error| error.to_string())?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
+    for row in rows {
+        columns.insert(row.map_err(|error| error.to_string())?);
+    }
+    if !columns.contains("secret_enc") {
+        conn.execute("ALTER TABLE connection_secrets ADD COLUMN secret_enc TEXT", [])
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Upgrade every legacy plaintext secret during database initialization.  The
+/// old lazy-on-read migration left untouched rows readable in `dbx.db`; doing
+/// this as part of schema startup gives upgrades a deterministic at-rest
+/// guarantee while keeping the migration in one SQLite transaction.
+fn migrate_legacy_connection_secrets_sync(conn: &mut Connection, codec: &SecretCodec) -> Result<(), String> {
+    let rows = {
+        let mut statement = conn
+            .prepare("SELECT connection_id, key, secret FROM connection_secrets WHERE secret <> '' AND (secret_enc IS NULL OR secret_enc = '')")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+    };
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+    for (connection_id, key, secret) in rows {
+        let encrypted = codec.encrypt(&connection_id, &key, &secret)?;
+        tx.execute(
+            "UPDATE connection_secrets SET secret = '', secret_enc = ?1 WHERE connection_id = ?2 AND key = ?3",
+            params![encrypted, connection_id, key],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    tx.commit().map_err(|error| error.to_string())
+}
+
+/// Older databases stored the hydrated `ConnectionConfig` directly in
+/// `connections.config_json`. Re-save only rows that still contain inline
+/// credentials so the existing connection persistence path moves every
+/// supported field into encrypted `connection_secrets` in one transaction.
+///
+/// The parsed JSON only carries the fields that were still inline, so every
+/// field an earlier release already externalized reads back as empty here.
+/// Re-saving writes those empty values through `persist_secret_in_tx`, which
+/// turns them into DELETEs: a legacy row with an empty inline `password` next to
+/// an inline `url_params` would silently lose its stored password. Snapshot the
+/// stored secrets first so the re-save can never drop one. Rows are copied
+/// verbatim, and `migrate_legacy_connection_secrets_sync` has already encrypted
+/// every legacy plaintext value before this runs, so the restored rows keep the
+/// at-rest guarantee. `save_password == false` is the one case where losing the
+/// password is intended, so that row is not restored.
+fn migrate_legacy_connection_config_json_sync(conn: &mut Connection, codec: &SecretCodec) -> Result<(), String> {
+    let rows = {
+        let mut statement =
+            conn.prepare("SELECT id, config_json FROM connections").map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        rows
+    };
+    let mut legacy = Vec::new();
+    for (id, json) in rows {
+        let config: ConnectionConfig = match serde_json::from_str(&json) {
+            Ok(config) => config,
+            // load_connections skips unreadable rows at runtime; migration must not
+            // fail on them either. Their inline secrets stay as stored until the
+            // connection is repaired or removed (#10227).
+            Err(error) => {
+                warn!("Skipping unreadable saved connection '{id}' during secret migration: {error}");
+                continue;
+            }
+        };
+        if connection_config_has_inline_secrets(&config) {
+            legacy.push(config);
+        }
+    }
+    if legacy.is_empty() {
+        return Ok(());
+    }
+    let keep_password =
+        legacy.iter().filter(|config| config.save_password).map(|config| config.id.clone()).collect::<HashSet<_>>();
+    let connection_ids = legacy.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
+    let stored_secrets = load_stored_connection_secrets_sync(conn, &connection_ids)?;
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+    for config in legacy {
+        tx.execute("DELETE FROM connections WHERE id = ?1", [&config.id]).map_err(|error| error.to_string())?;
+        persist_connection_in_tx(&tx, codec, &config)?;
+    }
+    for (connection_id, key, secret, secret_enc) in stored_secrets {
+        if key == "password" && !keep_password.contains(&connection_id) {
+            continue;
+        }
+        if connection_secret_in_tx_exists(&tx, &connection_id, &key)? {
+            continue;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret, secret_enc) VALUES (?1, ?2, ?3, ?4)",
+            params![connection_id, key, secret, secret_enc],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    tx.commit().map_err(|error| error.to_string())
+}
+
+type StoredConnectionSecretRow = (String, String, String, Option<String>);
+
+/// Read every non-empty secret row that belongs to `connection_ids` so a
+/// migration re-save can put back anything it would otherwise delete.
+fn load_stored_connection_secrets_sync(
+    conn: &Connection,
+    connection_ids: &HashSet<String>,
+) -> Result<Vec<StoredConnectionSecretRow>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT connection_id, key, secret, secret_enc FROM connection_secrets
+             WHERE secret <> '' OR (secret_enc IS NOT NULL AND secret_enc <> '')",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(rows.into_iter().filter(|(connection_id, ..)| connection_ids.contains(connection_id)).collect())
+}
+
+fn connection_secret_in_tx_exists(
+    tx: &rusqlite::Transaction<'_>,
+    connection_id: &str,
+    key: &str,
+) -> Result<bool, String> {
+    tx.query_row(
+        "SELECT 1 FROM connection_secrets
+         WHERE connection_id = ?1 AND key = ?2 AND (secret <> '' OR (secret_enc IS NOT NULL AND secret_enc <> ''))",
+        params![connection_id, key],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|row| row.is_some())
+    .map_err(|error| error.to_string())
+}
+
+fn connection_config_has_inline_secrets(config: &ConnectionConfig) -> bool {
+    if !config.password.is_empty()
+        || config.url_params.as_deref().is_some_and(|value| !value.is_empty())
+        || config.init_script.as_deref().is_some_and(|value| !value.is_empty())
+        || config.connection_string.as_deref().is_some_and(|value| !value.is_empty())
+        || !config.redis_sentinel_password.is_empty()
+        || config.connection_secrets.values().any(|value| !value.is_empty())
+    {
+        return true;
+    }
+    for layer in &config.transport_layers {
+        match layer {
+            TransportLayerConfig::Ssh(layer) if !layer.password.is_empty() || !layer.key_passphrase.is_empty() => {
+                return true;
+            }
+            TransportLayerConfig::Proxy(layer) if !layer.password.is_empty() => return true,
+            TransportLayerConfig::HttpTunnel(layer) if !layer.token.is_empty() => return true,
+            _ => {}
+        }
+    }
+    let Some(external) = config.external_config.as_ref().and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    let auth_secret = external
+        .get("auth")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|auth| ["token", "password", "value", "clientSecret"].iter().find_map(|key| auth.get(*key)))
+        .is_some_and(nonempty_json_value);
+    let signing_secret = external
+        .get("tokenSigning")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|signing| signing.get("key"))
+        .is_some_and(nonempty_json_value);
+    let nacos_console_secret = external
+        .get("rnacosConsoleAuth")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|auth| auth.get("password"))
+        .is_some_and(nonempty_json_value);
+    let cassandra_secret = external.get("tls").and_then(serde_json::Value::as_object).is_some_and(|tls| {
+        ["truststore_password", "keystore_password"].iter().filter_map(|key| tls.get(*key)).any(nonempty_json_value)
+    });
+    auth_secret || signing_secret || nacos_console_secret || cassandra_secret
+}
+
+fn nonempty_json_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(value) => !value.is_empty(),
+        serde_json::Value::Null => false,
+        _ => true,
+    }
+}
+
+/// Move credentials that older releases kept inline in AI and Tunnel JSON into
+/// the same encrypted secret store used by connections. This runs during
+/// startup so a successful upgrade never leaves a known credential in
+/// `config_json`. Existing encrypted blobs win over stale inline values.
+fn migrate_legacy_config_secrets_sync(conn: &mut Connection, codec: &SecretCodec) -> Result<(), String> {
+    let legacy_ai = {
+        let mut statement =
+            conn.prepare("SELECT id, config_json FROM ai_configs").map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        rows
+    };
+    let legacy_ai_single = {
+        let mut statement =
+            conn.prepare("SELECT config_json FROM ai_config WHERE id = 1").map_err(|error| error.to_string())?;
+        statement.query_row([], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())?
+    };
+    let legacy_ai_providers = {
+        let mut statement =
+            conn.prepare("SELECT provider, config_json FROM ai_provider_configs").map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        rows
+    };
+    let legacy_tunnels = {
+        let mut statement =
+            conn.prepare("SELECT id, config_json FROM tunnel_profiles").map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        rows
+    };
+    if legacy_ai.is_empty() && legacy_ai_single.is_none() && legacy_ai_providers.is_empty() && legacy_tunnels.is_empty()
+    {
+        return Ok(());
+    }
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+
+    for (id, json) in legacy_ai {
+        let config: AiConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let (sanitized, secrets) = split_ai_config_secrets(&config)?;
+        let sanitized_json = serde_json::to_string(&sanitized).map_err(|error| error.to_string())?;
+        tx.execute("UPDATE ai_configs SET config_json = ?1 WHERE id = ?2", params![sanitized_json, id])
+            .map_err(|error| error.to_string())?;
+        migrate_config_blob_in_tx(&tx, codec, &format!("{AI_SECRET_NAMESPACE_PREFIX}{id}"), &secrets)?;
+    }
+    if let Some(json) = legacy_ai_single {
+        let config: AiConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let (sanitized, secrets) = split_ai_config_secrets(&config)?;
+        let sanitized_json = serde_json::to_string(&sanitized).map_err(|error| error.to_string())?;
+        tx.execute("UPDATE ai_config SET config_json = ?1 WHERE id = 1", [sanitized_json])
+            .map_err(|error| error.to_string())?;
+        migrate_config_blob_in_tx(&tx, codec, &format!("{AI_SECRET_NAMESPACE_PREFIX}legacy"), &secrets)?;
+    }
+    for (provider, json) in legacy_ai_providers {
+        let config: AiConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let (sanitized, secrets) = split_ai_config_secrets(&config)?;
+        let sanitized_json = serde_json::to_string(&sanitized).map_err(|error| error.to_string())?;
+        tx.execute(
+            "UPDATE ai_provider_configs SET config_json = ?1 WHERE provider = ?2",
+            params![sanitized_json, provider],
+        )
+        .map_err(|error| error.to_string())?;
+        migrate_config_blob_in_tx(&tx, codec, &format!("{AI_SECRET_NAMESPACE_PREFIX}provider.{provider}"), &secrets)?;
+    }
+    for (id, json) in legacy_tunnels {
+        let profile: TransportLayerConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let mut sanitized = profile.clone();
+        sanitized.scrub_secrets();
+        let sanitized_json = serde_json::to_string(&sanitized).map_err(|error| error.to_string())?;
+        tx.execute("UPDATE tunnel_profiles SET config_json = ?1 WHERE id = ?2", params![sanitized_json, id])
+            .map_err(|error| error.to_string())?;
+        if sanitized != profile {
+            migrate_config_blob_in_tx(
+                &tx,
+                codec,
+                &format!("{TUNNEL_SECRET_NAMESPACE_PREFIX}{id}"),
+                &serde_json::to_value(profile).map_err(|error| error.to_string())?,
+            )?;
+        }
+    }
+    tx.commit().map_err(|error| error.to_string())
+}
+
+fn migrate_config_blob_in_tx(
+    tx: &Transaction<'_>,
+    codec: &SecretCodec,
+    namespace: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let has_value = value.as_object().is_some_and(|object| !object.is_empty());
+    if !has_value {
+        return Ok(());
+    }
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT secret_enc FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+            params![namespace, CONFIG_SECRET_BLOB_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if existing.as_deref().is_some_and(|value| !value.is_empty()) {
+        tx.execute(
+            "UPDATE connection_secrets SET secret = '' WHERE connection_id = ?1 AND key = ?2",
+            params![namespace, CONFIG_SECRET_BLOB_KEY],
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let encrypted = codec.encrypt(namespace, CONFIG_SECRET_BLOB_KEY, &value.to_string())?;
+    tx.execute(
+        "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret, secret_enc) VALUES (?1, ?2, '', ?3)",
+        params![namespace, CONFIG_SECRET_BLOB_KEY, encrypted],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Move credentials that older releases kept in `app_settings.settings_json`
+/// into the encrypted global namespace during database initialization. This
+/// is deliberately eager rather than lazy: after a successful upgrade, a
+/// plain-text settings row must not remain merely because the user has not
+/// opened the sync settings screen yet.
+fn migrate_legacy_app_settings_secrets_sync(conn: &mut Connection, codec: &SecretCodec) -> Result<(), String> {
+    let Some(json) = conn
+        .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let mut settings =
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json).map_err(|error| error.to_string())?;
+    let legacy_device_secret = settings.remove("local_device_secret");
+    let legacy_sync_passphrase = settings.remove("webdav_sync_secrets_passphrase");
+    let legacy_accounts =
+        settings.remove("webdav_passwords").and_then(|value| value.as_object().cloned()).unwrap_or_default();
+    let has_migration =
+        legacy_device_secret.is_some() || legacy_sync_passphrase.is_some() || !legacy_accounts.is_empty();
+    if !has_migration {
+        return Ok(());
+    }
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+    let store_value = |namespace: &str, key: &str, value: &serde_json::Value| -> Result<(), String> {
+        let plaintext = match value {
+            serde_json::Value::String(value) if !value.is_empty() => value.clone(),
+            value if !value.is_null() => value.to_string(),
+            _ => return Ok(()),
+        };
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT secret_enc FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+                params![namespace, key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if existing.as_deref().is_some_and(|value| !value.is_empty()) {
+            return Ok(());
+        }
+        let encrypted = codec.encrypt(namespace, key, &plaintext)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret, secret_enc) VALUES (?1, ?2, '', ?3)",
+            params![namespace, key, encrypted],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    };
+
+    if let Some(value) = legacy_device_secret {
+        store_value(GLOBAL_SECRET_NAMESPACE, "local_device_secret", &value)?;
+    }
+    if let Some(value) = legacy_sync_passphrase {
+        store_value(GLOBAL_SECRET_NAMESPACE, "webdav_sync_secrets_passphrase", &value)?;
+    }
+    for (account, value) in legacy_accounts {
+        store_value(GLOBAL_SECRET_NAMESPACE, &format!("webdav_password.{account}"), &value)?;
+    }
+
+    let updated = serde_json::Value::Object(settings).to_string();
+    tx.execute("UPDATE app_settings SET settings_json = ?1 WHERE id = 1", [updated])
+        .map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())
+}
+
 fn open_read_only_sqlite(path: &Path) -> Result<Connection, String> {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("Failed to open db read-only: {e}"))
@@ -1097,8 +2999,8 @@ fn sqlite_file_set(db_path: &Path) -> [PathBuf; 4] {
 /// Restrict the SQLite files to the sharing model declared by the data
 /// directory itself.
 ///
-/// `connection_secrets` stores connection passwords in plaintext, so the file
-/// mode is what keeps other local accounts out of the credential store on
+/// `connection_secrets` stores authenticated ciphertext, while the file mode
+/// still keeps the local credential store out of reach of other local accounts on
 /// platforms whose per-user data directory is world-traversable: most Linux
 /// desktops create `~/.local/share` as 0755, unlike `~/Library` on macOS.
 ///
@@ -1143,6 +3045,26 @@ fn restrict_db_file_permissions(db_path: &Path) {
 #[cfg(not(unix))]
 fn restrict_db_file_permissions(_db_path: &Path) {}
 
+#[cfg(unix)]
+fn restrict_backup_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(unix)]
+fn restrict_backup_file_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(metadata.permissions().mode() & 0o600));
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_backup_permissions(_path: &Path) {}
+
+#[cfg(not(unix))]
+fn restrict_backup_file_permissions(_path: &Path) {}
+
 fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
     const COLUMNS: &[(&str, &str)] = &[
         ("activity_kind", "TEXT NOT NULL DEFAULT 'query'"),
@@ -1152,6 +3074,11 @@ fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
         ("affected_rows", "INTEGER"),
         ("rollback_sql", "TEXT"),
         ("details_json", "TEXT"),
+        ("source", "TEXT NOT NULL DEFAULT 'sql'"),
+        ("mcp_tool_name", "TEXT"),
+        ("mcp_request_json", "TEXT"),
+        ("mcp_response_json", "TEXT"),
+        ("mcp_session_id", "TEXT"),
     ];
 
     let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('history')").map_err(|e| e.to_string())?;
@@ -1167,6 +3094,19 @@ fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
         }
         conn.execute(&format!("ALTER TABLE history ADD COLUMN {name} {definition}"), []).map_err(|e| e.to_string())?;
     }
+    // Older MCP SQL entries carried their source only in details_json. Guard
+    // malformed legacy JSON so opening the database cannot fail during upgrade.
+    conn.execute(
+        "UPDATE history SET source = 'mcp' WHERE source = 'sql' AND \
+         CASE WHEN json_valid(details_json) THEN json_extract(details_json, '$.source') = 'mcp' ELSE 0 END",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_history_source_time ON history(source, executed_at DESC, id DESC);
+         CREATE INDEX IF NOT EXISTS idx_history_mcp_tool_time ON history(mcp_tool_name, executed_at DESC);",
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1226,9 +3166,84 @@ fn ensure_ai_configs_columns_sync(conn: &Connection) -> Result<(), String> {
 
 /// Adds conversation metadata columns to databases created before these fields.
 fn ensure_ai_conversations_columns_sync(conn: &Connection) -> Result<(), String> {
-    const COLUMNS: &[(&str, &str)] = &[("queued_input", "TEXT"), ("plugin_context_json", "TEXT")];
+    const COLUMNS: &[(&str, &str)] = &[
+        ("queued_input", "TEXT"),
+        ("plugin_context_json", "TEXT"),
+        // Session-scoped connection binding (#9902). Existing rows keep the
+        // empty default and are backfilled from `connection_name` by
+        // [`backfill_ai_conversation_connections`].
+        ("connection_id", "TEXT NOT NULL DEFAULT ''"),
+        ("schema_name", "TEXT"),
+    ];
 
     ensure_table_columns(conn, "ai_conversations", COLUMNS)
+}
+
+/// Backfills `connection_id` for conversations persisted before session-scoped
+/// binding existed (#9902).
+///
+/// `connection_name` is **not unique** (the import dedup key is
+/// name + host + port), so only an unambiguous match may be written back: a name
+/// that resolves to exactly one saved connection is bound, while zero matches
+/// (connection deleted or never saved) and several matches (duplicates) stay
+/// empty and surface as "unbound" in the UI. Guessing here would silently pin a
+/// conversation to the wrong database, which is the defect this column exists to
+/// fix.
+///
+/// Runs on every open but only touches rows that are still empty, so it is
+/// idempotent and picks up connections imported after the last run.
+fn backfill_ai_conversation_connections(conn: &Connection) -> Result<usize, String> {
+    let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, config_json FROM connections").map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (id, json) = row.map_err(|e| e.to_string())?;
+            // Only the display name is needed, and it is exactly what the
+            // frontend persisted into `connection_name`. Reading it straight
+            // from the JSON avoids depending on the full `ConnectionConfig`
+            // deserializer (which also handles legacy shapes) for a migration.
+            let name = serde_json::from_str::<serde_json::Value>(&json)
+                .ok()
+                .and_then(|value| value.get("name").and_then(|name| name.as_str()).map(|name| name.trim().to_string()))
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            by_name.entry(name).or_default().push(id);
+        }
+    }
+
+    let mut stmt = conn
+        .prepare("SELECT id, connection_name FROM ai_conversations WHERE connection_id = ''")
+        .map_err(|e| e.to_string())?;
+    let pending = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(stmt);
+
+    let mut updated = 0usize;
+    for (conversation_id, connection_name) in pending {
+        let candidates = match by_name.get(connection_name.trim()) {
+            Some(candidates) => candidates,
+            None => continue,
+        };
+        if candidates.len() != 1 {
+            continue;
+        }
+        let changed = conn
+            .execute(
+                "UPDATE ai_conversations SET connection_id = ?1 WHERE id = ?2 AND connection_id = ''",
+                params![candidates[0], conversation_id],
+            )
+            .map_err(|e| e.to_string())?;
+        updated += changed;
+    }
+    Ok(updated)
 }
 
 /// Adds the background-run recovery columns (`fifo_category`, `pending_input`,
@@ -1346,6 +3361,21 @@ fn scrub_mq_auth_secrets(config: &mut ConnectionConfig) {
     }
 }
 
+fn scrub_mqtt_auth_secrets(config: &mut ConnectionConfig) {
+    if config.db_type != DatabaseType::Mqtt {
+        return;
+    }
+    let Some(auth) = config.external_config.as_mut().and_then(|external| external.get_mut("auth")) else {
+        return;
+    };
+    let Some(auth) = auth.as_object_mut() else {
+        return;
+    };
+    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("password") {
+        scrub_json_secret(auth, "password");
+    }
+}
+
 fn scrub_mq_token_signing_secret(config: &mut ConnectionConfig) {
     if config.db_type != DatabaseType::MessageQueue {
         return;
@@ -1372,12 +3402,6 @@ fn scrub_nacos_auth_secrets(config: &mut ConnectionConfig) {
     }
 }
 
-fn scrub_plugin_connection_secrets(config: &mut ConnectionConfig) {
-    for secret in config.connection_secrets.values_mut() {
-        secret.clear();
-    }
-}
-
 fn scrub_cassandra_tls_secrets(config: &mut ConnectionConfig) {
     if config.db_type != DatabaseType::Cassandra {
         return;
@@ -1387,6 +3411,18 @@ fn scrub_cassandra_tls_secrets(config: &mut ConnectionConfig) {
     };
     scrub_json_secret(tls, "truststore_password");
     scrub_json_secret(tls, "keystore_password");
+}
+
+fn scrub_salesforce_auth_secrets(config: &mut ConnectionConfig) {
+    if config.db_type != DatabaseType::Salesforce {
+        return;
+    }
+    let Some(auth) = salesforce_auth_object_mut(config.external_config.as_mut()) else {
+        return;
+    };
+    scrub_json_secret(auth, "clientSecret");
+    scrub_json_secret(auth, "refreshToken");
+    scrub_json_secret(auth, "password");
 }
 
 fn delete_secret_prefix_in_tx(
@@ -1460,6 +3496,15 @@ fn history_search_predicate(request: &HistorySearchRequest) -> (String, Vec<Valu
     let mut values = Vec::new();
     append_history_scope_clause(&mut clauses, &mut values, &request.connections, &request.databases);
 
+    if let Some(source) = request.source.as_ref().filter(|value| !value.is_empty()) {
+        clauses.push("source = ?".to_string());
+        values.push(Value::Text(source.clone()));
+    }
+    if let Some(tool) = request.mcp_tool_name.as_ref().filter(|value| !value.is_empty()) {
+        clauses.push("mcp_tool_name = ?".to_string());
+        values.push(Value::Text(tool.clone()));
+    }
+
     if let Some(kind) = request.activity_kind.as_ref().filter(|kind| !kind.is_empty()) {
         clauses.push("activity_kind = ?".to_string());
         values.push(Value::Text(kind.clone()));
@@ -1480,7 +3525,7 @@ fn history_search_predicate(request: &HistorySearchRequest) -> (String, Vec<Valu
     let search_text = request.search_text.trim();
     if !search_text.is_empty() {
         let pattern = format!("%{}%", escape_history_like_pattern(search_text));
-        let fields = ["sql_text", "connection_name", "database", "operation", "target"];
+        let fields = ["sql_text", "connection_name", "database", "operation", "target", "mcp_tool_name"];
         clauses.push(format!(
             "({})",
             fields
@@ -1520,6 +3565,11 @@ fn map_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEntry> {
         affected_rows: row.get(12)?,
         rollback_sql: row.get(13)?,
         details_json: row.get(14)?,
+        source: row.get::<_, String>(15).unwrap_or_else(|_| "sql".to_string()),
+        mcp_tool_name: row.get(16).ok(),
+        mcp_request_json: row.get(17).ok(),
+        mcp_response_json: row.get(18).ok(),
+        mcp_session_id: row.get(19).ok(),
     })
 }
 
@@ -1545,18 +3595,83 @@ fn load_history_retention_limit_from_conn(conn: &Connection) -> Result<u32, Stri
     Ok(history_retention_limit_from_settings(&settings))
 }
 
+fn app_settings_map_from_conn(conn: &Connection) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let current: Option<String> = conn
+        .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match current {
+        Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+            .map_err(|e| format!("invalid app settings JSON: {e}")),
+        None => Ok(serde_json::Map::new()),
+    }
+}
+
+fn load_mcp_history_retention_limit_from_conn(conn: &Connection) -> Result<u32, String> {
+    let settings = app_settings_map_from_conn(conn)?;
+    Ok(settings
+        .get(MCP_HISTORY_RETENTION_LIMIT_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| crate::history::validate_history_retention_limit(*value).is_ok())
+        .unwrap_or(1000))
+}
+
+fn write_app_settings_map(
+    conn: &Connection,
+    settings: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let json = serde_json::to_string(settings).map_err(|e| e.to_string())?;
+    conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [json])
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Reads a JSON string array setting, dropping blanks and duplicates so a
+/// hand-edited or partially written value can never widen a permission list.
+fn normalized_string_list(value: Option<&serde_json::Value>) -> Vec<String> {
+    let mut values: Vec<String> = value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn normalized_setting_id(value: &str, label: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 256 {
+        return Err(format!("A valid {label} is required"));
+    }
+    Ok(trimmed.to_string())
+}
+
 impl Storage {
     pub async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
         let entry = entry.clone();
         self.with_conn(move |conn| {
             let tx =
                 conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
-            let limit = load_history_retention_limit_from_conn(&tx)?;
+            let source = if entry.source.is_empty() { "sql" } else { entry.source.as_str() };
+            let limit = if source == "mcp" {
+                load_mcp_history_retention_limit_from_conn(&tx)?
+            } else {
+                load_history_retention_limit_from_conn(&tx)?
+            };
             tx.execute(
                 "INSERT OR REPLACE INTO history \
                  (id, connection_name, database, sql_text, executed_at, execution_time_ms, success, error, \
-                  activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json, source, mcp_tool_name, mcp_request_json, mcp_response_json, mcp_session_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     entry.id,
                     entry.connection_name,
@@ -1572,16 +3687,17 @@ impl Storage {
                     entry.target,
                     entry.affected_rows,
                     entry.rollback_sql,
-                    entry.details_json
+                    entry.details_json,
+                    source, entry.mcp_tool_name, entry.mcp_request_json, entry.mcp_response_json, entry.mcp_session_id
                 ],
             )
             .map_err(|e| e.to_string())?;
 
             if limit != 0 {
                 tx.execute(
-                    "DELETE FROM history WHERE id NOT IN \
-                     (SELECT id FROM history ORDER BY executed_at DESC, id DESC LIMIT ?1)",
-                    [i64::from(limit)],
+                    "DELETE FROM history WHERE source = ?2 AND id NOT IN \
+                     (SELECT id FROM history WHERE source = ?2 ORDER BY executed_at DESC, id DESC LIMIT ?1)",
+                    rusqlite::params![i64::from(limit), source],
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -1617,6 +3733,11 @@ impl Storage {
                     affected_rows: row.get(12)?,
                     rollback_sql: row.get(13)?,
                     details_json: row.get(14)?,
+                    source: row.get::<_, String>(15).unwrap_or_else(|_| "sql".to_string()),
+                    mcp_tool_name: row.get(16).ok(),
+                    mcp_request_json: row.get(17).ok(),
+                    mcp_response_json: row.get(18).ok(),
+                    mcp_session_id: row.get(19).ok(),
                 })
             };
 
@@ -1624,7 +3745,7 @@ impl Storage {
                 let mut stmt = conn
                     .prepare(
                         "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
-                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
+                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json, source, mcp_tool_name, mcp_request_json, mcp_response_json, mcp_session_id \
                          FROM history WHERE activity_kind = ?1 ORDER BY executed_at DESC LIMIT ?2 OFFSET ?3",
                     )
                     .map_err(|e| e.to_string())?;
@@ -1636,7 +3757,7 @@ impl Storage {
                 let mut stmt = conn
                     .prepare(
                         "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
-                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
+                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json, source, mcp_tool_name, mcp_request_json, mcp_response_json, mcp_session_id \
                          FROM history ORDER BY executed_at DESC LIMIT ?1 OFFSET ?2",
                     )
                     .map_err(|e| e.to_string())?;
@@ -1677,7 +3798,7 @@ impl Storage {
             let limit = if request.limit == 0 { 100 } else { request.limit.clamp(1, 200) };
             let sql = format!(
                 "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
-                 error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
+                 error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json, source, mcp_tool_name, mcp_request_json, mcp_response_json, mcp_session_id \
                  FROM history{page_predicate} ORDER BY executed_at DESC, id DESC LIMIT ?"
             );
             page_values.push(Value::Integer((limit + 1) as i64));
@@ -1743,6 +3864,34 @@ impl Storage {
         self.with_conn(|conn| conn.execute("DELETE FROM history", []).map(|_| ()).map_err(|e| e.to_string())).await
     }
 
+    pub async fn clear_history_by_source(&self, source: &str) -> Result<(), String> {
+        let source = source.trim().to_string();
+        if source.is_empty() {
+            return Err("History source is required".to_string());
+        }
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM history WHERE source = ?1", [source]).map(|_| ()).map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn cleanup_mcp_history_retention(&self) -> Result<u64, String> {
+        self.with_conn(|conn| {
+            let limit = load_mcp_history_retention_limit_from_conn(conn)?;
+            if limit == 0 {
+                return Ok(0);
+            }
+            conn.execute(
+                "DELETE FROM history WHERE source = 'mcp' AND id NOT IN \
+                 (SELECT id FROM history WHERE source = 'mcp' ORDER BY executed_at DESC, id DESC LIMIT ?1)",
+                [i64::from(limit)],
+            )
+            .map(|count| count as u64)
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
     pub async fn delete_history_entry(&self, id: &str) -> Result<(), String> {
         let id = id.to_string();
         self.with_conn(move |conn| {
@@ -1750,6 +3899,475 @@ impl Storage {
         })
         .await
     }
+}
+
+impl Storage {
+    pub async fn create_task_run(
+        &self,
+        run: &TaskRun,
+        details: &TransferRunDetails,
+        items: &[TaskRunItem],
+    ) -> Result<(), TaskHistoryStorageError> {
+        let run = run.clone();
+        let details = details.clone();
+        let items = items.to_vec();
+        let inserted = self
+            .with_conn(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|error| error.to_string())?;
+                let exists = tx
+                    .query_row("SELECT 1 FROM task_runs WHERE run_id = ?1", [&run.run_id], |row| row.get::<_, i64>(0))
+                    .optional()
+                    .map_err(|error| error.to_string())?
+                    .is_some();
+                if exists {
+                    return Ok(false);
+                }
+                tx.execute(
+                    "INSERT INTO task_runs (
+                        run_id, task_type, lifecycle_owner, status, created_at, started_at, finished_at,
+                        owner_instance_id, error_code, safe_error_summary, history_complete,
+                        source_connection_id, source_database_type, source_database, source_schema, source_catalog,
+                        target_connection_id, target_database_type, target_database, target_schema, target_catalog
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                        ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
+                    )",
+                    params![
+                        run.run_id,
+                        run.task_type.as_storage_str(),
+                        run.lifecycle_owner.as_storage_str(),
+                        run.status.as_storage_str(),
+                        run.created_at,
+                        run.started_at,
+                        run.finished_at,
+                        run.owner_instance_id,
+                        run.error_code,
+                        run.safe_error_summary,
+                        run.history_complete,
+                        run.source.connection_id,
+                        run.source.database_type,
+                        run.source.database,
+                        run.source.schema,
+                        run.source.catalog,
+                        run.target.connection_id,
+                        run.target.database_type,
+                        run.target.database,
+                        run.target.schema,
+                        run.target.catalog,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT INTO transfer_run_details (
+                        run_id, content, mode, batch_size, create_table, drop_target_before_create,
+                        target_table_name_case, quote_target_column_names, ownership_policy,
+                        filtered_table_count, table_total, object_selection_mode, selected_object_count
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        details.run_id,
+                        details.content.as_storage_str(),
+                        details.mode.as_storage_str(),
+                        details.batch_size,
+                        details.create_table,
+                        details.drop_target_before_create,
+                        details.target_table_name_case.as_storage_str(),
+                        details.quote_target_column_names,
+                        details.ownership_policy.as_storage_str(),
+                        details.filtered_table_count,
+                        details.table_total,
+                        details.object_selection_mode.as_storage_str(),
+                        details.selected_object_count,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+                for item in items {
+                    insert_task_run_item(&tx, &item)?;
+                }
+                tx.commit().map_err(|error| error.to_string())?;
+                Ok(true)
+            })
+            .await
+            .map_err(|_| TaskHistoryStorageError::StorageUnavailable)?;
+        if inserted {
+            Ok(())
+        } else {
+            Err(TaskHistoryStorageError::RunIdConflict)
+        }
+    }
+
+    pub async fn save_task_run_item(&self, item: &TaskRunItem) -> Result<bool, TaskHistoryStorageError> {
+        let item = item.clone();
+        self.with_conn(move |conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            let run_status = tx
+                .query_row("SELECT status FROM task_runs WHERE run_id = ?1", [&item.run_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?;
+            if run_status.as_deref() != Some("running") {
+                return Ok(false);
+            }
+            let changed = tx
+                .execute(
+                    "INSERT INTO task_run_items (
+                        run_id, item_index, item_kind, source_object, target_object, status,
+                        source_row_count, moved_row_count, target_row_count, row_count_state,
+                        has_table_filter, safe_error_summary
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    ON CONFLICT(run_id, item_index) DO UPDATE SET
+                        item_kind = excluded.item_kind,
+                        source_object = excluded.source_object,
+                        target_object = excluded.target_object,
+                        status = excluded.status,
+                        source_row_count = excluded.source_row_count,
+                        moved_row_count = excluded.moved_row_count,
+                        target_row_count = excluded.target_row_count,
+                        row_count_state = excluded.row_count_state,
+                        has_table_filter = excluded.has_table_filter,
+                        safe_error_summary = excluded.safe_error_summary
+                    WHERE task_run_items.status NOT IN ('succeeded', 'skipped', 'failed', 'cancelled', 'not_started', 'incomplete')",
+                    params![
+                        item.run_id,
+                        item.item_index,
+                        item.item_kind.as_storage_str(),
+                        item.source_object,
+                        item.target_object,
+                        item.status.as_storage_str(),
+                        item.source_row_count,
+                        item.moved_row_count,
+                        item.target_row_count,
+                        item.row_count_state.as_storage_str(),
+                        item.has_table_filter,
+                        item.safe_error_summary,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(changed > 0)
+        })
+        .await
+        .map_err(|_| TaskHistoryStorageError::StorageUnavailable)
+    }
+
+    pub async fn finish_task_run(
+        &self,
+        run_id: &str,
+        status: TaskRunStatus,
+        error_code: Option<&str>,
+        safe_error_summary: Option<&str>,
+        history_complete: bool,
+    ) -> Result<bool, TaskHistoryStorageError> {
+        let run_id = run_id.to_string();
+        let error_code = error_code.map(str::to_string);
+        let safe_error_summary = safe_error_summary.map(str::to_string);
+        self.with_conn(move |conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            let current = tx
+                .query_row("SELECT status FROM task_runs WHERE run_id = ?1", [&run_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?;
+            let Some(current) = current else {
+                return Err("Task run does not exist".to_string());
+            };
+            if current != "running" {
+                return Ok(false);
+            }
+            if !status.is_terminal() {
+                return Err("A task run cannot be finished with a running status".to_string());
+            }
+            let finished_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let changed = tx
+                .execute(
+                    "UPDATE task_runs SET status = ?2, finished_at = ?3, error_code = ?4,
+                     safe_error_summary = ?5, history_complete = ?6 WHERE run_id = ?1 AND status = 'running'",
+                    params![run_id, status.as_storage_str(), finished_at, error_code, safe_error_summary, history_complete],
+                )
+                .map_err(|error| error.to_string())?;
+            if changed == 0 {
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE task_run_items SET status = 'not_started'
+                 WHERE run_id = ?1 AND status = 'pending'",
+                [&run_id],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.execute(
+                "UPDATE task_run_items SET status = 'incomplete',
+                    row_count_state = CASE WHEN row_count_state = 'not_applicable' THEN row_count_state ELSE 'incomplete' END,
+                    safe_error_summary = COALESCE(safe_error_summary, ?2)
+                 WHERE run_id = ?1 AND status = 'running'",
+                params![run_id, "Transfer item did not complete."],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(true)
+        })
+        .await
+        .map_err(|_| TaskHistoryStorageError::StorageUnavailable)
+    }
+
+    pub async fn get_task_run_detail(&self, run_id: &str) -> Result<Option<TaskRunDetail>, TaskHistoryStorageError> {
+        let run_id = run_id.to_string();
+        self.with_conn(move |conn| {
+            let run = conn
+                .query_row(
+                    "SELECT run_id, task_type, lifecycle_owner, status, created_at, started_at, finished_at,
+                        owner_instance_id, error_code, safe_error_summary, history_complete,
+                        source_connection_id, source_database_type, source_database, source_schema, source_catalog,
+                        target_connection_id, target_database_type, target_database, target_schema, target_catalog
+                     FROM task_runs WHERE run_id = ?1",
+                    [&run_id],
+                    map_task_run_row,
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            let Some(run) = run else {
+                return Ok(None);
+            };
+            let transfer = conn
+                .query_row(
+                    "SELECT run_id, content, mode, batch_size, create_table, drop_target_before_create,
+                        target_table_name_case, quote_target_column_names, ownership_policy,
+                        filtered_table_count, table_total, object_selection_mode, selected_object_count
+                     FROM transfer_run_details WHERE run_id = ?1",
+                    [&run_id],
+                    map_transfer_run_details_row,
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            Ok(Some(TaskRunDetail { run, transfer }))
+        })
+        .await
+        .map_err(|_| TaskHistoryStorageError::StorageUnavailable)
+    }
+
+    pub async fn list_task_runs(&self, query: TaskRunListQuery) -> Result<TaskRunPage, TaskHistoryStorageError> {
+        self.with_conn(move |conn| {
+            let limit = query.limit.filter(|limit| *limit > 0).unwrap_or(50).clamp(1, 100);
+            let mut predicates = Vec::new();
+            let mut values = Vec::<Value>::new();
+            if let Some(task_type) = query.task_type {
+                predicates.push("task_type = ?".to_string());
+                values.push(Value::Text(task_type.as_storage_str().to_string()));
+            }
+            if let Some(status) = query.status {
+                predicates.push("status = ?".to_string());
+                values.push(Value::Text(status.as_storage_str().to_string()));
+            }
+            if let Some(cursor) = query.cursor {
+                predicates.push("(created_at < ? OR (created_at = ? AND run_id < ?))".to_string());
+                values.push(Value::Text(cursor.created_at.clone()));
+                values.push(Value::Text(cursor.created_at));
+                values.push(Value::Text(cursor.run_id));
+            }
+            let where_clause =
+                if predicates.is_empty() { String::new() } else { format!(" WHERE {}", predicates.join(" AND ")) };
+            let sql = format!(
+                "SELECT run_id, task_type, lifecycle_owner, status, created_at, started_at, finished_at,
+                    owner_instance_id, error_code, safe_error_summary, history_complete,
+                    source_connection_id, source_database_type, source_database, source_schema, source_catalog,
+                    target_connection_id, target_database_type, target_database, target_schema, target_catalog
+                 FROM task_runs{where_clause} ORDER BY created_at DESC, run_id DESC LIMIT ?"
+            );
+            values.push(Value::Integer((limit + 1) as i64));
+            let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+            let rows =
+                stmt.query_map(params_from_iter(values.iter()), map_task_run_row).map_err(|error| error.to_string())?;
+            let mut items = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            let has_more = items.len() > limit;
+            items.truncate(limit);
+            let next_cursor = if has_more {
+                items.last().map(|run| TaskRunCursor { created_at: run.created_at.clone(), run_id: run.run_id.clone() })
+            } else {
+                None
+            };
+            Ok(TaskRunPage { items, next_cursor })
+        })
+        .await
+        .map_err(|_| TaskHistoryStorageError::StorageUnavailable)
+    }
+
+    pub async fn list_task_run_items(
+        &self,
+        run_id: &str,
+        query: TaskRunItemsQuery,
+    ) -> Result<TaskRunItemsPage, TaskHistoryStorageError> {
+        let run_id = run_id.to_string();
+        self.with_conn(move |conn| {
+            let limit = query.limit.filter(|limit| *limit > 0).unwrap_or(100).clamp(1, 200);
+            let after = query.after_item_index.unwrap_or(-1);
+            let mut stmt = conn
+                .prepare(
+                    "SELECT run_id, item_index, item_kind, source_object, target_object, status,
+                        source_row_count, moved_row_count, target_row_count, row_count_state,
+                        has_table_filter, safe_error_summary
+                     FROM task_run_items WHERE run_id = ?1 AND item_index > ?2
+                     ORDER BY item_index ASC LIMIT ?3",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(params![run_id, after, (limit + 1) as i64], map_task_run_item_row)
+                .map_err(|error| error.to_string())?;
+            let mut items = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            let has_more = items.len() > limit;
+            items.truncate(limit);
+            let next_after_item_index = if has_more { items.last().map(|item| item.item_index) } else { None };
+            Ok(TaskRunItemsPage { items, next_after_item_index })
+        })
+        .await
+        .map_err(|_| TaskHistoryStorageError::StorageUnavailable)
+    }
+
+    pub async fn delete_task_run(&self, run_id: &str) -> Result<bool, TaskHistoryStorageError> {
+        const RUNNING_SENTINEL: &str = "TASK_RUN_STILL_RUNNING";
+        let run_id = run_id.to_string();
+        let result = self
+            .with_conn(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|error| error.to_string())?;
+                let current = tx
+                    .query_row("SELECT status FROM task_runs WHERE run_id = ?1", [&run_id], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .optional()
+                    .map_err(|error| error.to_string())?;
+                let Some(current) = current else {
+                    return Ok(false);
+                };
+                if TaskRunStatus::from_storage(&current).is_none_or(|status| !status.is_terminal()) {
+                    return Err(RUNNING_SENTINEL.to_string());
+                }
+                tx.execute("DELETE FROM task_run_items WHERE run_id = ?1", [&run_id])
+                    .map_err(|error| error.to_string())?;
+                tx.execute("DELETE FROM transfer_run_details WHERE run_id = ?1", [&run_id])
+                    .map_err(|error| error.to_string())?;
+                tx.execute("DELETE FROM task_runs WHERE run_id = ?1", [&run_id]).map_err(|error| error.to_string())?;
+                tx.commit().map_err(|error| error.to_string())?;
+                Ok(true)
+            })
+            .await;
+        match result {
+            Ok(deleted) => Ok(deleted),
+            Err(error) if error == RUNNING_SENTINEL => Err(TaskHistoryStorageError::RunStillRunning),
+            Err(_) => Err(TaskHistoryStorageError::StorageUnavailable),
+        }
+    }
+}
+
+fn insert_task_run_item(tx: &rusqlite::Transaction<'_>, item: &TaskRunItem) -> Result<(), String> {
+    tx.execute(
+        "INSERT INTO task_run_items (
+            run_id, item_index, item_kind, source_object, target_object, status,
+            source_row_count, moved_row_count, target_row_count, row_count_state,
+            has_table_filter, safe_error_summary
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            item.run_id,
+            item.item_index,
+            item.item_kind.as_storage_str(),
+            item.source_object,
+            item.target_object,
+            item.status.as_storage_str(),
+            item.source_row_count,
+            item.moved_row_count,
+            item.target_row_count,
+            item.row_count_state.as_storage_str(),
+            item.has_table_filter,
+            item.safe_error_summary,
+        ],
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+fn map_task_run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRun> {
+    let task_type: String = row.get(1)?;
+    let lifecycle_owner: String = row.get(2)?;
+    let status: String = row.get(3)?;
+    Ok(TaskRun {
+        run_id: row.get(0)?,
+        task_type: TaskType::from_storage(&task_type).ok_or(rusqlite::Error::InvalidQuery)?,
+        lifecycle_owner: TaskLifecycleOwner::from_storage(&lifecycle_owner).ok_or(rusqlite::Error::InvalidQuery)?,
+        status: TaskRunStatus::from_storage(&status).ok_or(rusqlite::Error::InvalidQuery)?,
+        created_at: row.get(4)?,
+        started_at: row.get(5)?,
+        finished_at: row.get(6)?,
+        owner_instance_id: row.get(7)?,
+        error_code: row.get(8)?,
+        safe_error_summary: row.get(9)?,
+        history_complete: row.get(10)?,
+        source: TaskEndpointSnapshot {
+            connection_id: row.get(11)?,
+            database_type: row.get(12)?,
+            database: row.get(13)?,
+            schema: row.get(14)?,
+            catalog: row.get(15)?,
+        },
+        target: TaskEndpointSnapshot {
+            connection_id: row.get(16)?,
+            database_type: row.get(17)?,
+            database: row.get(18)?,
+            schema: row.get(19)?,
+            catalog: row.get(20)?,
+        },
+    })
+}
+
+fn map_transfer_run_details_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferRunDetails> {
+    let content: String = row.get(1)?;
+    let mode: String = row.get(2)?;
+    let table_name_case: String = row.get(6)?;
+    let ownership_policy: String = row.get(8)?;
+    let selection_mode: String = row.get(11)?;
+    Ok(TransferRunDetails {
+        run_id: row.get(0)?,
+        content: TransferRunContent::from_storage(&content).ok_or(rusqlite::Error::InvalidQuery)?,
+        mode: TransferRunMode::from_storage(&mode).ok_or(rusqlite::Error::InvalidQuery)?,
+        batch_size: row.get(3)?,
+        create_table: row.get(4)?,
+        drop_target_before_create: row.get(5)?,
+        target_table_name_case: TransferRunTargetTableNameCase::from_storage(&table_name_case)
+            .ok_or(rusqlite::Error::InvalidQuery)?,
+        quote_target_column_names: row.get(7)?,
+        ownership_policy: TransferRunOwnershipPolicy::from_storage(&ownership_policy)
+            .ok_or(rusqlite::Error::InvalidQuery)?,
+        filtered_table_count: row.get(9)?,
+        table_total: row.get(10)?,
+        object_selection_mode: TransferObjectSelectionMode::from_storage(&selection_mode)
+            .ok_or(rusqlite::Error::InvalidQuery)?,
+        selected_object_count: row.get(12)?,
+    })
+}
+
+fn map_task_run_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRunItem> {
+    let item_kind: String = row.get(2)?;
+    let status: String = row.get(5)?;
+    let row_count_state: String = row.get(9)?;
+    Ok(TaskRunItem {
+        run_id: row.get(0)?,
+        item_index: row.get(1)?,
+        item_kind: TaskItemKind::from_storage(&item_kind).ok_or(rusqlite::Error::InvalidQuery)?,
+        source_object: row.get(3)?,
+        target_object: row.get(4)?,
+        status: TaskItemStatus::from_storage(&status).ok_or(rusqlite::Error::InvalidQuery)?,
+        source_row_count: row.get(6)?,
+        moved_row_count: row.get(7)?,
+        target_row_count: row.get(8)?,
+        row_count_state: RowCountState::from_storage(&row_count_state).ok_or(rusqlite::Error::InvalidQuery)?,
+        has_table_filter: row.get(10)?,
+        safe_error_summary: row.get(11)?,
+    })
 }
 
 // AI Config
@@ -1765,11 +4383,25 @@ fn ai_provider_from_key(provider: &str) -> Result<AiProvider, String> {
 
 impl Storage {
     pub async fn save_ai_config(&self, config: &AiConfig) -> Result<(), String> {
-        let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
+        let (sanitized, secrets) = split_ai_config_secrets(config)?;
+        let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
+        let secrets_json = serde_json::to_string(&secrets).map_err(|e| e.to_string())?;
+        let codec = self.secret_codec_for_write(secrets.as_object().is_some_and(|object| !object.is_empty())).await?;
         self.with_conn(move |conn| {
-            conn.execute("INSERT OR REPLACE INTO ai_config (id, config_json) VALUES (1, ?1)", [json])
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            tx.execute("INSERT OR REPLACE INTO ai_config (id, config_json) VALUES (1, ?1)", [json])
+                .map_err(|e| e.to_string())?;
+            let namespace = format!("{AI_SECRET_NAMESPACE_PREFIX}legacy");
+            if secrets.as_object().is_some_and(|object| !object.is_empty()) {
+                persist_secret_in_tx(&tx, &codec, &namespace, CONFIG_SECRET_BLOB_KEY, &secrets_json)?;
+            } else {
+                tx.execute(
+                    "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+                    params![namespace, CONFIG_SECRET_BLOB_KEY],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())
         })
         .await
     }
@@ -1782,12 +4414,30 @@ impl Storage {
                     .map_err(|e| e.to_string())
             })
             .await?;
-        json.map(|value| serde_json::from_str(&value).map_err(|e| e.to_string())).transpose()
+        let Some(json) = json else {
+            return Ok(None);
+        };
+        let mut config: AiConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        let namespace = format!("{AI_SECRET_NAMESPACE_PREFIX}legacy");
+        if let Some(blob) = self.get_secret(&namespace, CONFIG_SECRET_BLOB_KEY).await? {
+            merge_ai_config_secrets(&mut config, &blob)?;
+        } else {
+            let (_sanitized, secrets) = split_ai_config_secrets(&config)?;
+            if secrets.as_object().is_some_and(|object| !object.is_empty()) {
+                self.set_secret(
+                    &namespace,
+                    CONFIG_SECRET_BLOB_KEY,
+                    &serde_json::to_string(&secrets).map_err(|e| e.to_string())?,
+                )
+                .await?;
+            }
+        }
+        Ok(Some(config))
     }
 
     pub async fn save_ai_provider_config(&self, provider: &str, config: &AiConfig) -> Result<(), String> {
         let parsed_provider = ai_provider_from_key(provider)?;
-        let mut config = config.clone();
+        let (mut config, secrets) = split_ai_config_secrets(config)?;
         let config_provider = ai_provider_key(&config.provider);
         if config_provider != provider {
             warn!(
@@ -1797,20 +4447,34 @@ impl Storage {
             config.provider = parsed_provider;
         }
         let provider = provider.to_string();
+        let secret_provider = provider.clone();
         let json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
+        let secrets_json = serde_json::to_string(&secrets).map_err(|e| e.to_string())?;
+        let codec = self.secret_codec_for_write(secrets.as_object().is_some_and(|object| !object.is_empty())).await?;
         self.with_conn(move |conn| {
-            conn.execute(
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            tx.execute(
                 "INSERT OR REPLACE INTO ai_provider_configs (provider, config_json) VALUES (?1, ?2)",
                 params![provider, json],
             )
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+            let namespace = format!("{AI_SECRET_NAMESPACE_PREFIX}provider.{secret_provider}");
+            if secrets.as_object().is_some_and(|object| !object.is_empty()) {
+                persist_secret_in_tx(&tx, &codec, &namespace, CONFIG_SECRET_BLOB_KEY, &secrets_json)?;
+            } else {
+                tx.execute(
+                    "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+                    params![namespace, CONFIG_SECRET_BLOB_KEY],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())
         })
         .await
     }
 
     pub async fn load_ai_provider_configs(&self) -> Result<HashMap<String, AiConfig>, String> {
-        self.with_conn(|conn| {
+        let mut map = self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare("SELECT provider, config_json FROM ai_provider_configs")
                 .map_err(|e| e.to_string())?;
@@ -1841,15 +4505,43 @@ impl Storage {
             }
             Ok(map)
         })
-        .await
+        .await?;
+        for (provider, config) in &mut map {
+            let namespace = format!("{AI_SECRET_NAMESPACE_PREFIX}provider.{provider}");
+            if let Some(blob) = self.get_secret(&namespace, CONFIG_SECRET_BLOB_KEY).await? {
+                merge_ai_config_secrets(config, &blob)?;
+            } else {
+                let (_sanitized, secrets) = split_ai_config_secrets(config)?;
+                if secrets.as_object().is_some_and(|object| !object.is_empty()) {
+                    self.set_secret(
+                        &namespace,
+                        CONFIG_SECRET_BLOB_KEY,
+                        &serde_json::to_string(&secrets).map_err(|e| e.to_string())?,
+                    )
+                    .await?;
+                }
+            }
+        }
+        Ok(map)
     }
 
     pub async fn save_ai_configs(&self, configs: &[AiConfigItem]) -> Result<(), String> {
-        let configs = configs.to_vec();
+        let mut sanitized_configs = Vec::with_capacity(configs.len());
+        let mut secret_blobs = Vec::with_capacity(configs.len());
+        for item in configs {
+            let (config, secrets) = split_ai_config_secrets(&item.config)?;
+            sanitized_configs.push(AiConfigItem { config, ..item.clone() });
+            secret_blobs.push((item.id.clone(), secrets));
+        }
+        let needs_key =
+            secret_blobs.iter().any(|(_, secrets)| secrets.as_object().is_some_and(|object| !object.is_empty()));
+        let codec = self.secret_codec_for_write(needs_key).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM ai_configs", []).map_err(|e| e.to_string())?;
-            for config in &configs {
+            tx.execute("DELETE FROM connection_secrets WHERE connection_id LIKE 'ai_config.%'", [])
+                .map_err(|e| e.to_string())?;
+            for config in &sanitized_configs {
                 let json = serde_json::to_string(&config.config).map_err(|e| e.to_string())?;
                 let models_json = serde_json::to_string(&config.config.models).map_err(|e| e.to_string())?;
                 tx.execute(
@@ -1861,6 +4553,12 @@ impl Storage {
             // Clear old single-config tables — migration is complete, avoids re-migration on empty ai_configs
             tx.execute("DELETE FROM ai_config", []).map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM ai_provider_configs", []).map_err(|e| e.to_string())?;
+            for (id, secrets) in &secret_blobs {
+                if secrets.as_object().is_some_and(|object| !object.is_empty()) {
+                    let blob = serde_json::to_string(secrets).map_err(|e| e.to_string())?;
+                    persist_secret_in_tx(&tx, &codec, &format!("{AI_SECRET_NAMESPACE_PREFIX}{id}"), CONFIG_SECRET_BLOB_KEY, &blob)?;
+                }
+            }
             tx.commit().map_err(|e| e.to_string())?;
             Ok(())
         })
@@ -1868,49 +4566,71 @@ impl Storage {
     }
 
     pub async fn load_ai_configs(&self) -> Result<Vec<AiConfigItem>, String> {
-        self.with_conn(|conn| {
-            let mut stmt = conn
-                .prepare("SELECT id, name, model, models, config_json, is_default FROM ai_configs")
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, bool>(5)?,
-                    ))
-                })
-                .map_err(|e| e.to_string())?;
-            let mut configs = Vec::new();
-            for row in rows {
-                let (id, name, model_col, models_json_col, json, is_default_col) = row.map_err(|e| e.to_string())?;
-                match serde_json::from_str::<AiConfig>(&json) {
-                    Ok(mut config) => {
-                        // 优先使用列值，如果列值为空则从 config_json 回退读取
-                        if model_col.is_empty() {
-                            // config.model 已经从 json 解析出来了
-                        } else {
-                            config.model = model_col;
+        let mut configs = self
+            .with_conn(|conn| {
+                let mut stmt = conn
+                    .prepare("SELECT id, name, model, models, config_json, is_default FROM ai_configs")
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, bool>(5)?,
+                        ))
+                    })
+                    .map_err(|e| e.to_string())?;
+                let mut configs = Vec::new();
+                for row in rows {
+                    let (id, name, model_col, models_json_col, json, is_default_col) =
+                        row.map_err(|e| e.to_string())?;
+                    match serde_json::from_str::<AiConfig>(&json) {
+                        Ok(mut config) => {
+                            // 优先使用列值，如果列值为空则从 config_json 回退读取
+                            if model_col.is_empty() {
+                                // config.model 已经从 json 解析出来了
+                            } else {
+                                config.model = model_col;
+                            }
+                            if models_json_col.is_empty() || models_json_col == "[]" {
+                                // config.models 已经从 json 解析出来了
+                            } else {
+                                config.models = serde_json::from_str(&models_json_col).unwrap_or_default();
+                            }
+                            let is_default = is_default_col;
+                            configs.push(AiConfigItem { id, name, is_default, config });
                         }
-                        if models_json_col.is_empty() || models_json_col == "[]" {
-                            // config.models 已经从 json 解析出来了
-                        } else {
-                            config.models = serde_json::from_str(&models_json_col).unwrap_or_default();
+                        Err(e) => {
+                            warn!("Failed to deserialize AI config item '{}': {}", id, e);
                         }
-                        let is_default = is_default_col;
-                        configs.push(AiConfigItem { id, name, is_default, config });
-                    }
-                    Err(e) => {
-                        warn!("Failed to deserialize AI config item '{}': {}", id, e);
                     }
                 }
+                Ok(configs)
+            })
+            .await?;
+        for item in &mut configs {
+            let namespace = format!("{AI_SECRET_NAMESPACE_PREFIX}{}", item.id);
+            if let Some(blob) = self.get_secret(&namespace, CONFIG_SECRET_BLOB_KEY).await? {
+                merge_ai_config_secrets(&mut item.config, &blob)?;
+            } else {
+                // Existing databases kept these fields inside config_json.
+                // Hydrate first, then opportunistically move them into the
+                // encrypted store on the next save.
+                let (_sanitized, secrets) = split_ai_config_secrets(&item.config)?;
+                if secrets.as_object().is_some_and(|object| !object.is_empty()) {
+                    self.set_secret(
+                        &namespace,
+                        CONFIG_SECRET_BLOB_KEY,
+                        &serde_json::to_string(&secrets).map_err(|e| e.to_string())?,
+                    )
+                    .await?;
+                }
             }
-            Ok(configs)
-        })
-        .await
+        }
+        Ok(configs)
     }
 
     pub async fn set_default_ai_config(&self, config_id: &str) -> Result<(), String> {
@@ -1927,10 +4647,14 @@ impl Storage {
     }
 
     pub async fn save_ai_config_item(&self, config: &AiConfigItem) -> Result<(), String> {
-        let config = config.clone();
+        let (sanitized_config, secrets) = split_ai_config_secrets(&config.config)?;
+        let config = AiConfigItem { config: sanitized_config, ..config.clone() };
+        let secret_id = config.id.clone();
+        let codec = self.secret_codec_for_write(secrets.as_object().is_some_and(|object| !object.is_empty())).await?;
         self.with_conn(move |conn| {
             let json = serde_json::to_string(&config.config).map_err(|e| e.to_string())?;
             let models_json = serde_json::to_string(&config.config.models).map_err(|e| e.to_string())?;
+            let secrets_json = serde_json::to_string(&secrets).map_err(|e| e.to_string())?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
 
             // 如果设该配置为默认，先清除其他默认，避免与 idx_ai_configs_default 冲突
@@ -1959,6 +4683,17 @@ impl Storage {
                 }
             })?;
 
+            let namespace = format!("{AI_SECRET_NAMESPACE_PREFIX}{secret_id}");
+            if secrets.as_object().is_some_and(|object| !object.is_empty()) {
+                persist_secret_in_tx(&tx, &codec, &namespace, CONFIG_SECRET_BLOB_KEY, &secrets_json)?;
+            } else {
+                tx.execute(
+                    "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+                    params![namespace, CONFIG_SECRET_BLOB_KEY],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+
             tx.commit().map_err(|e| e.to_string())?;
             Ok(())
         })
@@ -1967,18 +4702,25 @@ impl Storage {
 
     pub async fn delete_ai_config(&self, config_id: &str) -> Result<(), String> {
         let config_id = config_id.to_string();
+        let delete_id = config_id.clone();
         self.with_conn(move |conn| {
-            conn.execute("DELETE FROM ai_configs WHERE id = ?1", params![config_id]).map_err(|e| e.to_string())?;
-            Ok(())
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM ai_configs WHERE id = ?1", params![config_id]).map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+                params![format!("{AI_SECRET_NAMESPACE_PREFIX}{delete_id}"), CONFIG_SECRET_BLOB_KEY],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())
         })
         .await
     }
 }
 
 // Tunnel profiles — shared transport-layer configurations managed in
-// Settings and referenced from connections via `profile_id`. Secrets stay
-// inline in `config_json`; that matches the plaintext-at-rest posture of
-// `connection_secrets` in the same database file.
+// Settings and referenced from connections via `profile_id`. Public profile
+// metadata is stored in `config_json`; credentials are kept in the encrypted
+// Secret Store and hydrated only when a profile is loaded.
 
 impl Storage {
     pub async fn load_tunnel_profiles(&self) -> Result<Vec<TransportLayerConfig>, String> {
@@ -1999,6 +4741,27 @@ impl Storage {
                 Err(e) => warn!("Failed to deserialize tunnel profile: {}", e),
             }
         }
+        for profile in &mut profiles {
+            let namespace = format!("{TUNNEL_SECRET_NAMESPACE_PREFIX}{}", profile.id());
+            if let Some(blob) = self.get_secret(&namespace, CONFIG_SECRET_BLOB_KEY).await? {
+                let stored: TransportLayerConfig = serde_json::from_str(&blob).map_err(|e| e.to_string())?;
+                merge_missing_tunnel_profile_secrets(profile, &stored);
+            } else {
+                // Migrate legacy inline tunnel credentials on first read.
+                let mut scrubbed = profile.clone();
+                scrubbed.scrub_secrets();
+                if serde_json::to_value(&scrubbed).map_err(|e| e.to_string())?
+                    != serde_json::to_value(&*profile).map_err(|e| e.to_string())?
+                {
+                    self.set_secret(
+                        &namespace,
+                        CONFIG_SECRET_BLOB_KEY,
+                        &serde_json::to_string(&*profile).map_err(|e| e.to_string())?,
+                    )
+                    .await?;
+                }
+            }
+        }
         Ok(profiles)
     }
 
@@ -2008,17 +4771,43 @@ impl Storage {
                 return Err("Tunnel profile id must not be empty".to_string());
             }
         }
-        let profiles = profiles.to_vec();
+        let mut sanitized_profiles = Vec::with_capacity(profiles.len());
+        let mut secret_blobs = Vec::with_capacity(profiles.len());
+        for profile in profiles {
+            let mut sanitized = profile.clone();
+            sanitized.scrub_secrets();
+            sanitized_profiles.push(sanitized);
+            secret_blobs.push((profile.id().to_string(), profile.clone()));
+        }
+        let needs_key =
+            sanitized_profiles.iter().zip(&secret_blobs).any(|(sanitized, (_, profile))| sanitized != profile);
+        let codec = self.secret_codec_for_write(needs_key).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM tunnel_profiles", []).map_err(|e| e.to_string())?;
-            for profile in &profiles {
+            tx.execute("DELETE FROM connection_secrets WHERE connection_id LIKE 'tunnel_profile.%'", [])
+                .map_err(|e| e.to_string())?;
+            for profile in &sanitized_profiles {
                 let json = serde_json::to_string(profile).map_err(|e| e.to_string())?;
                 tx.execute(
                     "INSERT INTO tunnel_profiles (id, config_json) VALUES (?1, ?2)",
                     params![profile.id(), json],
                 )
                 .map_err(|e| e.to_string())?;
+            }
+            for (id, profile) in &secret_blobs {
+                let mut scrubbed = profile.clone();
+                scrubbed.scrub_secrets();
+                if scrubbed != *profile {
+                    let blob = serde_json::to_string(profile).map_err(|e| e.to_string())?;
+                    persist_secret_in_tx(
+                        &tx,
+                        &codec,
+                        &format!("{TUNNEL_SECRET_NAMESPACE_PREFIX}{id}"),
+                        CONFIG_SECRET_BLOB_KEY,
+                        &blob,
+                    )?;
+                }
             }
             tx.commit().map_err(|e| e.to_string())
         })
@@ -2073,6 +4862,99 @@ fn merge_missing_tunnel_profile_secrets(profile: &mut TransportLayerConfig, prev
     }
 }
 
+fn split_ai_config_secrets(config: &AiConfig) -> Result<(AiConfig, serde_json::Value), String> {
+    let mut value = serde_json::to_value(config).map_err(|e| e.to_string())?;
+    let Some(object) = value.as_object_mut() else {
+        return Err("AI config must serialize to an object".to_string());
+    };
+    let mut secrets = serde_json::Map::new();
+    for field in [
+        "apiKey",
+        "customHeaders",
+        "proxyUrl",
+        "codexCliEnv",
+        "claudeCodeCliEnv",
+        "piAgentCliEnv",
+        "opencodeCliEnv",
+        "cursorCliEnv",
+        "grokCliEnv",
+        "codebuddyCliEnv",
+        "qoderCliEnv",
+    ] {
+        if let Some(value) = object.remove(field) {
+            let keep = match &value {
+                serde_json::Value::String(value) => !value.is_empty(),
+                serde_json::Value::Object(value) => !value.is_empty(),
+                _ => !value.is_null(),
+            };
+            if keep {
+                secrets.insert(field.to_string(), value);
+            }
+        }
+    }
+    let sanitized = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    Ok((sanitized, serde_json::Value::Object(secrets)))
+}
+
+fn count_ai_secret_rows(conn: &Connection) -> Result<i64, String> {
+    let mut count = 0;
+    for (table, query) in [
+        ("ai_configs", "SELECT id, config_json FROM ai_configs"),
+        ("ai_config", "SELECT id, config_json FROM ai_config"),
+        ("ai_provider_configs", "SELECT provider, config_json FROM ai_provider_configs"),
+    ] {
+        let mut statement = conn.prepare(query).map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, rusqlite::types::Value>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (id, json) = row.map_err(|e| e.to_string())?;
+            let id = format!("{id:?}");
+            let config: AiConfig = serde_json::from_str(&json).map_err(|e| format!("invalid {table} row {id}: {e}"))?;
+            let (_, secrets) = split_ai_config_secrets(&config)?;
+            if secrets.as_object().is_some_and(|value| !value.is_empty()) {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
+fn count_tunnel_secret_rows(conn: &Connection) -> Result<i64, String> {
+    let mut statement = conn.prepare("SELECT id, config_json FROM tunnel_profiles").map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    let mut count = 0;
+    for row in rows {
+        let (id, json) = row.map_err(|e| e.to_string())?;
+        let profile: TransportLayerConfig =
+            serde_json::from_str(&json).map_err(|e| format!("invalid tunnel profile {id}: {e}"))?;
+        let mut scrubbed = profile.clone();
+        scrubbed.scrub_secrets();
+        if scrubbed != profile {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn merge_ai_config_secrets(config: &mut AiConfig, blob: &str) -> Result<(), String> {
+    let secret_value: serde_json::Value = serde_json::from_str(blob).map_err(|e| e.to_string())?;
+    let mut value = serde_json::to_value(&*config).map_err(|e| e.to_string())?;
+    let Some(target) = value.as_object_mut() else {
+        return Err("AI config must serialize to an object".to_string());
+    };
+    let Some(source) = secret_value.as_object() else {
+        return Err("AI secret payload must be an object".to_string());
+    };
+    for (key, value) in source {
+        target.insert(key.clone(), value.clone());
+    }
+    *config = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // App Settings
 
 impl Storage {
@@ -2105,8 +4987,17 @@ impl Storage {
                 .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
                 .optional()
                 .map_err(|e| e.to_string())?;
-            let dedicated_keys =
-                [MCP_GLOBAL_POLICY_KEY, MAX_RETRIES_KEY, SQL_FILE_UPLOAD_MAX_MB_KEY, HISTORY_RETENTION_LIMIT_KEY];
+            let dedicated_keys = [
+                APP_APPEARANCE_SETTINGS_KEY,
+                MCP_GLOBAL_POLICY_KEY,
+                WEB_MCP_SETTINGS_KEY,
+                MAX_RETRIES_KEY,
+                SQL_FILE_UPLOAD_MAX_MB_KEY,
+                HISTORY_RETENTION_LIMIT_KEY,
+                AI_PLUGIN_TOOL_PLUGINS_KEY,
+                PLUGIN_DATA_GRANTS_KEY,
+                MCP_HISTORY_RETENTION_LIMIT_KEY,
+            ];
             for key in dedicated_keys {
                 settings.remove(key);
             }
@@ -2216,6 +5107,125 @@ impl Storage {
         .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))
     }
 
+    /// Plugin ids whose MCP tools the built-in AI agent may call. Empty until
+    /// the user enables a plugin in the Plugin Center.
+    pub async fn load_ai_plugin_tool_plugin_ids(&self) -> Result<Vec<String>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(normalized_string_list(settings.get(AI_PLUGIN_TOOL_PLUGINS_KEY)))
+    }
+
+    /// Plugin ids the user explicitly turned off for the built-in AI agent.
+    /// Only records explicit revocations; combined with the enabled list and
+    /// the manifest `mcp` declarations it yields the effective AI tool set.
+    pub async fn load_ai_plugin_tool_disabled_plugin_ids(&self) -> Result<Vec<String>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(normalized_string_list(settings.get(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY)))
+    }
+
+    /// Enables or disables built-in AI access to one plugin's tools and returns
+    /// the updated list. The read-modify-write runs inside one connection
+    /// closure so concurrent settings saves cannot drop the change. Disabling
+    /// also records the opt-out so a detection-enabled plugin (the default)
+    /// stays off across restarts and plugin updates.
+    pub async fn set_ai_plugin_tool_plugin_enabled(
+        &self,
+        plugin_id: &str,
+        enabled: bool,
+    ) -> Result<Vec<String>, String> {
+        let plugin_id = normalized_setting_id(plugin_id, "plugin id")?;
+        self.with_conn(move |conn| {
+            let mut settings = app_settings_map_from_conn(conn)?;
+            let mut plugin_ids = normalized_string_list(settings.get(AI_PLUGIN_TOOL_PLUGINS_KEY));
+            plugin_ids.retain(|candidate| candidate != &plugin_id);
+            if enabled {
+                plugin_ids.push(plugin_id.clone());
+                plugin_ids.sort();
+                // Re-enable after an explicit opt-out of a manifest-declared plugin.
+                let mut disabled = normalized_string_list(settings.get(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY));
+                disabled.retain(|candidate| candidate != &plugin_id);
+                settings.insert(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY.to_string(), serde_json::json!(disabled));
+            } else {
+                let mut disabled = normalized_string_list(settings.get(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY));
+                if !disabled.contains(&plugin_id) {
+                    disabled.push(plugin_id.clone());
+                    disabled.sort();
+                }
+                settings.insert(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY.to_string(), serde_json::json!(disabled));
+            }
+            settings.insert(AI_PLUGIN_TOOL_PLUGINS_KEY.to_string(), serde_json::json!(plugin_ids));
+            write_app_settings_map(conn, &settings)?;
+            Ok(plugin_ids)
+        })
+        .await
+    }
+
+    /// Connections the plugin may read through `host.data:read`.
+    pub async fn load_plugin_data_grants(&self, plugin_id: &str) -> Result<Vec<String>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(normalized_string_list(settings.get(PLUGIN_DATA_GRANTS_KEY).and_then(|grants| grants.get(plugin_id.trim()))))
+    }
+
+    /// Records or revokes the user's consent for one plugin to read one
+    /// connection and returns the plugin's updated grant list.
+    pub async fn set_plugin_data_grant(
+        &self,
+        plugin_id: &str,
+        connection_id: &str,
+        granted: bool,
+    ) -> Result<Vec<String>, String> {
+        let plugin_id = normalized_setting_id(plugin_id, "plugin id")?;
+        let connection_id = normalized_setting_id(connection_id, "connection id")?;
+        self.with_conn(move |conn| {
+            let mut settings = app_settings_map_from_conn(conn)?;
+            let mut all_grants = match settings.remove(PLUGIN_DATA_GRANTS_KEY) {
+                Some(serde_json::Value::Object(grants)) => grants,
+                _ => serde_json::Map::new(),
+            };
+            let mut connection_ids = normalized_string_list(all_grants.get(&plugin_id));
+            connection_ids.retain(|candidate| candidate != &connection_id);
+            if granted {
+                if connection_ids.len() >= MAX_PLUGIN_DATA_GRANTS_PER_PLUGIN {
+                    return Err(format!(
+                        "A plugin can hold at most {MAX_PLUGIN_DATA_GRANTS_PER_PLUGIN} data access grants"
+                    ));
+                }
+                connection_ids.push(connection_id);
+                connection_ids.sort();
+            }
+            if connection_ids.is_empty() {
+                all_grants.remove(&plugin_id);
+            } else {
+                all_grants.insert(plugin_id, serde_json::json!(connection_ids));
+            }
+            if !all_grants.is_empty() {
+                settings.insert(PLUGIN_DATA_GRANTS_KEY.to_string(), serde_json::Value::Object(all_grants));
+            }
+            write_app_settings_map(conn, &settings)?;
+            Ok(connection_ids)
+        })
+        .await
+    }
+
+    /// Drops everything the user granted to a plugin (AI tool access and data
+    /// grants). Called after uninstall so a reinstall starts without consent.
+    pub async fn forget_plugin_permissions(&self, plugin_id: &str) -> Result<(), String> {
+        let plugin_id = normalized_setting_id(plugin_id, "plugin id")?;
+        self.with_conn(move |conn| {
+            let mut settings = app_settings_map_from_conn(conn)?;
+            let mut plugin_ids = normalized_string_list(settings.get(AI_PLUGIN_TOOL_PLUGINS_KEY));
+            plugin_ids.retain(|candidate| candidate != &plugin_id);
+            settings.insert(AI_PLUGIN_TOOL_PLUGINS_KEY.to_string(), serde_json::json!(plugin_ids));
+            let mut disabled = normalized_string_list(settings.get(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY));
+            disabled.retain(|candidate| candidate != &plugin_id);
+            settings.insert(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY.to_string(), serde_json::json!(disabled));
+            if let Some(serde_json::Value::Object(grants)) = settings.get_mut(PLUGIN_DATA_GRANTS_KEY) {
+                grants.remove(&plugin_id);
+            }
+            write_app_settings_map(conn, &settings)
+        })
+        .await
+    }
+
     pub async fn load_mcp_http_server_settings(&self) -> Result<McpHttpServerSettings, String> {
         let settings = self.load_app_settings_json().await?;
         match settings.get(MCP_HTTP_SERVER_SETTINGS_KEY) {
@@ -2230,6 +5240,63 @@ impl Storage {
         let value = serde_json::to_value(settings).map_err(|error| error.to_string())?;
         app_settings.insert(MCP_HTTP_SERVER_SETTINGS_KEY.to_string(), value);
         self.save_app_settings_json(&app_settings).await
+    }
+
+    pub async fn load_web_mcp_settings(&self) -> Result<WebMcpSettings, String> {
+        let settings = self.load_app_settings_json().await?;
+        match settings.get(WEB_MCP_SETTINGS_KEY) {
+            Some(value) => {
+                serde_json::from_value(value.clone()).map_err(|error| format!("invalid Web MCP settings: {error}"))
+            }
+            None => Ok(WebMcpSettings::default()),
+        }
+    }
+
+    pub async fn save_web_mcp_credentials(&self, settings: &WebMcpSettings, token: Option<&str>) -> Result<(), String> {
+        let token = token.unwrap_or_default().to_string();
+        let codec = self.secret_codec_for_write(!token.is_empty()).await?;
+        let value = serde_json::to_value(settings).map_err(|error| error.to_string())?;
+        self.with_conn(move |conn| {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            let mut app_settings = app_settings_map_from_conn(&tx)?;
+            app_settings.insert(WEB_MCP_SETTINGS_KEY.to_string(), value);
+            persist_secret_in_tx(&tx, &codec, GLOBAL_SECRET_NAMESPACE, "web_mcp_token", &token)?;
+            write_app_settings_map(&tx, &app_settings)?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_app_appearance_settings(&self) -> Result<AppAppearanceSettings, String> {
+        let settings = self.load_app_settings_json().await?;
+        match settings.get(APP_APPEARANCE_SETTINGS_KEY) {
+            Some(value) if !value.is_null() => serde_json::from_value(value.clone())
+                .map_err(|error| format!("invalid app appearance settings: {error}")),
+            _ => Ok(AppAppearanceSettings::default()),
+        }
+    }
+
+    pub async fn update_app_appearance_settings(&self, patch: &AppAppearanceSettingsPatch) -> Result<(), String> {
+        let patch = serde_json::to_value(patch).map_err(|error| error.to_string())?;
+        let patch = patch.as_object().cloned().ok_or_else(|| "app appearance patch must be an object".to_string())?;
+        self.with_conn(move |conn| {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            let mut settings = app_settings_map_from_conn(&tx)?;
+            let mut appearance = match settings.remove(APP_APPEARANCE_SETTINGS_KEY) {
+                Some(value) if !value.is_null() => {
+                    serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(value)
+                        .map_err(|error| format!("invalid app appearance settings: {error}"))?
+                }
+                _ => serde_json::Map::new(),
+            };
+            appearance.extend(patch);
+            settings.insert(APP_APPEARANCE_SETTINGS_KEY.to_string(), serde_json::Value::Object(appearance));
+            write_app_settings_map(&tx, &settings)?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+        .await
     }
 
     pub async fn save_desktop_settings(&self, desktop_settings: &DesktopSettings) -> Result<(), String> {
@@ -2310,6 +5377,10 @@ impl Storage {
             }
         }
         settings.insert(
+            "custom_ai_skill_auto_enabled".to_string(),
+            serde_json::Value::Bool(desktop_settings.custom_ai_skill_auto_enabled),
+        );
+        settings.insert(
             "sidebar_table_page_size".to_string(),
             serde_json::Value::Number(serde_json::Number::from(desktop_settings.sidebar_table_page_size)),
         );
@@ -2387,6 +5458,10 @@ impl Storage {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
+            custom_ai_skill_auto_enabled: settings
+                .get("custom_ai_skill_auto_enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or_else(|| DesktopSettings::default().custom_ai_skill_auto_enabled),
             sidebar_table_page_size: settings
                 .get("sidebar_table_page_size")
                 .and_then(|value| value.as_u64())
@@ -2515,43 +5590,102 @@ impl Storage {
 
     pub async fn load_or_create_local_device_secret(&self) -> Result<String, String> {
         let mut settings = self.load_app_settings_json().await?;
-        if let Some(secret) = settings.get("local_device_secret").and_then(|value| value.as_str()) {
+        if let Some(secret) = self.get_secret(GLOBAL_SECRET_NAMESPACE, "local_device_secret").await? {
+            return Ok(secret);
+        }
+        if let Some(secret) = settings.get("local_device_secret").and_then(|value| value.as_str()).map(str::to_string) {
             if !secret.is_empty() {
-                return Ok(secret.to_string());
+                self.set_secret(GLOBAL_SECRET_NAMESPACE, "local_device_secret", &secret).await?;
+                settings.remove("local_device_secret");
+                self.save_app_settings_json(&settings).await?;
+                return Ok(secret);
             }
         }
         let secret = Uuid::new_v4().to_string();
-        settings.insert("local_device_secret".to_string(), serde_json::Value::String(secret.clone()));
-        self.save_app_settings_json(&settings).await?;
+        self.set_secret(GLOBAL_SECRET_NAMESPACE, "local_device_secret", &secret).await?;
         Ok(secret)
     }
 
     pub async fn save_webdav_password_blob(&self, account: &str, blob: &serde_json::Value) -> Result<(), String> {
-        let mut settings = self.load_app_settings_json().await?;
-        let mut credentials =
-            settings.remove("webdav_passwords").and_then(|value| value.as_object().cloned()).unwrap_or_default();
-        credentials.insert(account.to_string(), blob.clone());
-        settings.insert("webdav_passwords".to_string(), serde_json::Value::Object(credentials));
-        self.save_app_settings_json(&settings).await
+        self.set_secret(
+            GLOBAL_SECRET_NAMESPACE,
+            &format!("webdav_password.{account}"),
+            &serde_json::to_string(blob).map_err(|e| e.to_string())?,
+        )
+        .await
     }
 
     pub async fn load_webdav_password_blob(&self, account: &str) -> Result<Option<serde_json::Value>, String> {
-        let settings = self.load_app_settings_json().await?;
-        Ok(settings
+        if let Some(blob) = self.get_secret(GLOBAL_SECRET_NAMESPACE, &format!("webdav_password.{account}")).await? {
+            return serde_json::from_str(&blob).map(Some).map_err(|e| e.to_string());
+        }
+        let mut settings = self.load_app_settings_json().await?;
+        let legacy = settings
             .get("webdav_passwords")
             .and_then(|value| value.as_object())
             .and_then(|credentials| credentials.get(account))
-            .cloned())
+            .cloned();
+        if let Some(blob) = &legacy {
+            self.save_webdav_password_blob(account, blob).await?;
+            if let Some(credentials) = settings.get_mut("webdav_passwords").and_then(|value| value.as_object_mut()) {
+                credentials.remove(account);
+            }
+            self.save_app_settings_json(&settings).await?;
+        }
+        Ok(legacy)
+    }
+
+    /// List locally stored WebDAV/snippet credential account names so the
+    /// sync transport can explicitly re-encrypt them for another device.
+    pub async fn load_webdav_password_accounts(&self) -> Result<Vec<String>, String> {
+        const PREFIX: &str = "webdav_password.";
+        let mut accounts = self
+            .with_conn(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT key FROM connection_secrets WHERE connection_id = ?1 AND key LIKE ?2")
+                    .map_err(|error| error.to_string())?;
+                let rows = statement
+                    .query_map(params![GLOBAL_SECRET_NAMESPACE, format!("{PREFIX}%")], |row| row.get::<_, String>(0))
+                    .map_err(|error| error.to_string())?;
+                let mut accounts = Vec::new();
+                for row in rows {
+                    let key = row.map_err(|error| error.to_string())?;
+                    if let Some(account) = key.strip_prefix(PREFIX).filter(|account| !account.is_empty()) {
+                        accounts.push(account.to_string());
+                    }
+                }
+                accounts.sort();
+                accounts.dedup();
+                Ok(accounts)
+            })
+            .await?;
+
+        // Upgrade legacy app-settings credentials even when the caller is
+        // building a snapshot directly (without first making a WebDAV or
+        // snippet request that would otherwise trigger lazy migration).
+        let legacy_accounts = self
+            .load_app_settings_json()
+            .await?
+            .get("webdav_passwords")
+            .and_then(serde_json::Value::as_object)
+            .map(|credentials| credentials.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for account in legacy_accounts {
+            if self.load_webdav_password_blob(&account).await?.is_some() {
+                accounts.push(account);
+            }
+        }
+        accounts.sort();
+        accounts.dedup();
+        Ok(accounts)
     }
 
     pub async fn delete_webdav_password_blob(&self, account: &str) -> Result<(), String> {
+        self.delete_secret(GLOBAL_SECRET_NAMESPACE, &format!("webdav_password.{account}")).await?;
         let mut settings = self.load_app_settings_json().await?;
-        let Some(mut credentials) = settings.remove("webdav_passwords").and_then(|value| value.as_object().cloned())
-        else {
-            return Ok(());
-        };
-        credentials.remove(account);
-        settings.insert("webdav_passwords".to_string(), serde_json::Value::Object(credentials));
+        if let Some(credentials) = settings.get_mut("webdav_passwords").and_then(|value| value.as_object_mut()) {
+            credentials.remove(account);
+        }
         self.save_app_settings_json(&settings).await
     }
 
@@ -2563,7 +5697,12 @@ impl Storage {
         let mut settings = self.load_app_settings_json().await?;
         settings.insert("webdav_sync_secrets_enabled".to_string(), serde_json::Value::Bool(enabled));
         if let Some(blob) = blob {
-            settings.insert("webdav_sync_secrets_passphrase".to_string(), blob.clone());
+            self.set_secret(
+                GLOBAL_SECRET_NAMESPACE,
+                "webdav_sync_secrets_passphrase",
+                &serde_json::to_string(blob).map_err(|e| e.to_string())?,
+            )
+            .await?;
         }
         self.save_app_settings_json(&settings).await
     }
@@ -2574,12 +5713,25 @@ impl Storage {
     }
 
     pub async fn load_webdav_sync_secrets_passphrase_blob(&self) -> Result<Option<serde_json::Value>, String> {
-        let settings = self.load_app_settings_json().await?;
-        Ok(settings.get("webdav_sync_secrets_passphrase").cloned())
+        if let Some(blob) = self.get_secret(GLOBAL_SECRET_NAMESPACE, "webdav_sync_secrets_passphrase").await? {
+            return serde_json::from_str(&blob).map(Some).map_err(|e| e.to_string());
+        }
+        let mut settings = self.load_app_settings_json().await?;
+        let legacy = settings.remove("webdav_sync_secrets_passphrase");
+        if let Some(blob) = &legacy {
+            self.save_webdav_sync_secrets_preference(
+                settings.get("webdav_sync_secrets_enabled").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                Some(blob),
+            )
+            .await?;
+            self.save_app_settings_json(&settings).await?;
+        }
+        Ok(legacy)
     }
 
     pub async fn delete_webdav_sync_secrets_passphrase_blob(&self) -> Result<(), String> {
         let mut settings = self.load_app_settings_json().await?;
+        self.delete_secret(GLOBAL_SECRET_NAMESPACE, "webdav_sync_secrets_passphrase").await?;
         settings.remove("webdav_sync_secrets_passphrase");
         self.save_app_settings_json(&settings).await
     }
@@ -2713,6 +5865,33 @@ impl Storage {
 
     pub async fn load_history_retention_limit(&self) -> Result<u32, String> {
         self.with_conn(|conn| load_history_retention_limit_from_conn(conn)).await
+    }
+
+    pub async fn load_mcp_history_retention_limit(&self) -> Result<u32, String> {
+        self.with_conn(|conn| load_mcp_history_retention_limit_from_conn(conn)).await
+    }
+
+    pub async fn save_mcp_history_retention_limit(&self, limit: u32) -> Result<(), String> {
+        crate::history::validate_history_retention_limit(limit)?;
+        self.with_conn(move |conn| {
+            let current: Option<String> = conn
+                .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let mut settings = match current {
+                Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                    .map_err(|e| format!("invalid app settings JSON: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            settings.insert(MCP_HISTORY_RETENTION_LIMIT_KEY.to_string(), serde_json::Value::from(limit));
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                [serde_json::Value::Object(settings).to_string()],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn save_history_retention_limit(&self, limit: u32) -> Result<(), String> {
@@ -2883,12 +6062,14 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations \
-                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                    title = excluded.title, \
                    connection_name = excluded.connection_name, \
+                   connection_id = excluded.connection_id, \
                    database = excluded.database, \
+                   schema_name = excluded.schema_name, \
                    messages_json = excluded.messages_json, \
                    queued_input = excluded.queued_input, \
                    created_at = excluded.created_at, \
@@ -2897,7 +6078,9 @@ impl Storage {
                     conv.id,
                     conv.title,
                     conv.connection_name,
+                    conv.connection_id,
                     conv.database,
+                    conv.schema,
                     messages_json,
                     conv.queued_input,
                     conv.created_at,
@@ -2917,7 +6100,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json \
+                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json, connection_id, schema_name \
                      FROM ai_conversations ORDER BY updated_at DESC",
                 )
                 .map_err(|e| e.to_string())?;
@@ -2936,6 +6119,8 @@ impl Storage {
                         created_at: row.get(6)?,
                         updated_at: row.get(7)?,
                         plugin_context: row.get::<_, Option<String>>(8)?.map(|json| serde_json::from_str(&json)).transpose().map_err(map_from_sql_err)?,
+                        connection_id: row.get(9)?,
+                        schema: row.get(10)?,
                     })
                 })
                 .map_err(|e| e.to_string())?;
@@ -3002,12 +6187,14 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations
-                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                    title = excluded.title,
                    connection_name = excluded.connection_name,
+                   connection_id = excluded.connection_id,
                    database = excluded.database,
+                   schema_name = excluded.schema_name,
                    messages_json = excluded.messages_json,
                    queued_input = excluded.queued_input,
                    created_at = excluded.created_at,
@@ -3016,7 +6203,9 @@ impl Storage {
                     conv.id,
                     conv.title,
                     conv.connection_name,
+                    conv.connection_id,
                     conv.database,
+                    conv.schema,
                     messages_json,
                     conv.queued_input,
                     conv.created_at,
@@ -3290,19 +6479,26 @@ fn ensure_mcp_connection_change_allowed_in_tx(
 fn sanitized_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
     let mut sanitized = config.clone().canonicalized();
     sanitized.password = String::new();
+    sanitized.url_params = None;
     scrub_transport_layer_secrets(&mut sanitized);
     sanitized.redis_sentinel_password = String::new();
     sanitized.connection_string = None;
     sanitized.init_script = None;
     scrub_mq_auth_secrets(&mut sanitized);
+    scrub_mqtt_auth_secrets(&mut sanitized);
     scrub_mq_token_signing_secret(&mut sanitized);
     scrub_nacos_auth_secrets(&mut sanitized);
     scrub_cassandra_tls_secrets(&mut sanitized);
+    scrub_salesforce_auth_secrets(&mut sanitized);
     sanitized.connection_secrets.clear();
     sanitized
 }
 
-fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionConfig) -> Result<(), String> {
+fn persist_connection_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    codec: &SecretCodec,
+    config: &ConnectionConfig,
+) -> Result<(), String> {
     let config = config.clone().canonicalized();
     let config_id = config.id.clone();
     let sanitized = sanitized_connection_config(&config);
@@ -3312,20 +6508,27 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
         .map_err(|e| e.to_string())?;
 
     if config.save_password {
-        persist_secret_in_tx(tx, &config.id, "password", &config.password)?;
+        persist_secret_in_tx(tx, codec, &config.id, "password", &config.password)?;
     } else {
         // "Don't save password": write an empty value, which persist_secret_in_tx
         // turns into a DELETE — the password secret is never persisted (and any
         // previously stored secret is removed on this save).
-        persist_secret_in_tx(tx, &config.id, "password", "")?;
+        persist_secret_in_tx(tx, codec, &config.id, "password", "")?;
     }
     delete_secret_prefix_in_tx(tx, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
     for (index, layer) in config.transport_layers.iter().enumerate() {
         match layer {
             TransportLayerConfig::Ssh(ssh) => {
-                persist_secret_in_tx(tx, &config.id, &transport_layer_ssh_password_key(index, layer), &ssh.password)?;
                 persist_secret_in_tx(
                     tx,
+                    codec,
+                    &config.id,
+                    &transport_layer_ssh_password_key(index, layer),
+                    &ssh.password,
+                )?;
+                persist_secret_in_tx(
+                    tx,
+                    codec,
                     &config.id,
                     &transport_layer_ssh_key_passphrase_key(index, layer),
                     &ssh.key_passphrase,
@@ -3334,6 +6537,7 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
             TransportLayerConfig::Proxy(proxy) => {
                 persist_secret_in_tx(
                     tx,
+                    codec,
                     &config.id,
                     &transport_layer_proxy_password_key(index, layer),
                     &proxy.password,
@@ -3342,6 +6546,7 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
             TransportLayerConfig::HttpTunnel(http) => {
                 persist_secret_in_tx(
                     tx,
+                    codec,
                     &config.id,
                     &transport_layer_http_tunnel_token_key(index, layer),
                     &http.token,
@@ -3349,13 +6554,18 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
             }
         }
     }
-    persist_secret_in_tx(tx, &config.id, "redis_sentinel_password", &config.redis_sentinel_password)?;
-    persist_secret_in_tx(tx, &config.id, "ssh_password", "")?;
-    persist_secret_in_tx(tx, &config.id, "ssh_key_passphrase", "")?;
-    persist_secret_in_tx(tx, &config.id, "proxy_password", "")?;
+    persist_secret_in_tx(tx, codec, &config.id, "redis_sentinel_password", &config.redis_sentinel_password)?;
+    if let Some(url_params) = &config.url_params {
+        persist_secret_in_tx(tx, codec, &config.id, URL_PARAMS_SECRET_KEY, url_params)?;
+    } else {
+        persist_secret_in_tx(tx, codec, &config.id, URL_PARAMS_SECRET_KEY, "")?;
+    }
+    persist_secret_in_tx(tx, codec, &config.id, "ssh_password", "")?;
+    persist_secret_in_tx(tx, codec, &config.id, "ssh_key_passphrase", "")?;
+    persist_secret_in_tx(tx, codec, &config.id, "proxy_password", "")?;
     delete_secret_prefix_in_tx(tx, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
     if let Some(cs) = &config.connection_string {
-        persist_secret_in_tx(tx, &config.id, "connection_string", cs)?;
+        persist_secret_in_tx(tx, codec, &config.id, "connection_string", cs)?;
     } else {
         tx.execute(
             "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
@@ -3364,7 +6574,7 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
         .map_err(|e| e.to_string())?;
     }
     if let Some(script) = &config.init_script {
-        persist_secret_in_tx(tx, &config.id, "init_script", script)?;
+        persist_secret_in_tx(tx, codec, &config.id, "init_script", script)?;
     } else {
         tx.execute(
             "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
@@ -3372,14 +6582,16 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
         )
         .map_err(|e| e.to_string())?;
     }
-    persist_mq_auth_secrets_in_tx(tx, &config)?;
-    persist_mq_token_signing_secret_in_tx(tx, &config)?;
-    persist_nacos_auth_secrets_in_tx(tx, &config)?;
-    persist_cassandra_tls_secrets_in_tx(tx, &config)?;
+    persist_mq_auth_secrets_in_tx(tx, codec, &config)?;
+    persist_mqtt_auth_secrets_in_tx(tx, codec, &config)?;
+    persist_mq_token_signing_secret_in_tx(tx, codec, &config)?;
+    persist_nacos_auth_secrets_in_tx(tx, codec, &config)?;
+    persist_cassandra_tls_secrets_in_tx(tx, codec, &config)?;
+    persist_salesforce_auth_secrets_in_tx(tx, codec, &config)?;
     delete_secret_prefix_in_tx(tx, &config.id, PLUGIN_CONNECTION_SECRET_PREFIX)?;
     for (key, secret) in &config.connection_secrets {
         if !key.is_empty() {
-            persist_secret_in_tx(tx, &config.id, &format!("{PLUGIN_CONNECTION_SECRET_PREFIX}{key}"), secret)?;
+            persist_secret_in_tx(tx, codec, &config.id, &format!("{PLUGIN_CONNECTION_SECRET_PREFIX}{key}"), secret)?;
         }
     }
     Ok(())
@@ -3390,18 +6602,28 @@ async fn load_plugin_connection_secrets(
     connection_id: &str,
 ) -> Result<HashMap<String, String>, String> {
     let connection_id = connection_id.to_string();
+    let secret_storage = storage.clone();
     storage
         .with_conn(move |conn| {
             let like = format!("{PLUGIN_CONNECTION_SECRET_PREFIX}%");
             let mut statement = conn
-                .prepare("SELECT key, secret FROM connection_secrets WHERE connection_id = ?1 AND key LIKE ?2")
+                .prepare(
+                    "SELECT key, secret, secret_enc FROM connection_secrets WHERE connection_id = ?1 AND key LIKE ?2",
+                )
                 .map_err(|error| error.to_string())?;
             let rows = statement
-                .query_map(params![connection_id, like], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .query_map(params![connection_id, like], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+                })
                 .map_err(|error| error.to_string())?;
             let mut secrets = HashMap::new();
             for row in rows {
-                let (key, secret) = row.map_err(|error| error.to_string())?;
+                let (key, secret, encrypted) = row.map_err(|error| error.to_string())?;
+                let secret = encrypted
+                    .filter(|value| !value.is_empty())
+                    .map(|value| secret_storage.secret_codec(false)?.decrypt(&connection_id, &key, &value))
+                    .transpose()?
+                    .unwrap_or(secret);
                 if let Some(key) = key.strip_prefix(PLUGIN_CONNECTION_SECRET_PREFIX) {
                     secrets.insert(key.to_string(), secret);
                 }
@@ -3503,10 +6725,23 @@ fn delete_unreferenced_connection_secrets_in_tx(
     retained_ids: &[String],
 ) -> Result<(), String> {
     if retained_ids.is_empty() {
-        tx.execute("DELETE FROM connection_secrets", []).map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM connection_secrets
+             WHERE connection_id NOT LIKE 'ai_config.%'
+               AND connection_id NOT LIKE 'tunnel_profile.%'
+               AND connection_id != 'dbx.global'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
     } else {
         let placeholders = vec!["?"; retained_ids.len()].join(",");
-        let sql = format!("DELETE FROM connection_secrets WHERE connection_id NOT IN ({placeholders})");
+        let sql = format!(
+            "DELETE FROM connection_secrets
+             WHERE connection_id NOT IN ({placeholders})
+               AND connection_id NOT LIKE 'ai_config.%'
+               AND connection_id NOT LIKE 'tunnel_profile.%'
+               AND connection_id != 'dbx.global'"
+        );
         let ids = retained_ids.iter().map(|id| id as &dyn ToSql);
         tx.execute(&sql, params_from_iter(ids)).map_err(|e| e.to_string())?;
     }
@@ -3514,11 +6749,115 @@ fn delete_unreferenced_connection_secrets_in_tx(
 }
 
 impl Storage {
+    pub(crate) async fn apply_sync_import_transaction(&self, plan: SyncImportPlan) -> Result<(), String> {
+        let needs_key =
+            plan.connections.iter().any(|config| config.url_params.as_deref().is_some_and(|value| !value.is_empty()))
+                || plan
+                    .connection_secrets
+                    .as_ref()
+                    .is_some_and(|secrets| secrets.iter().any(|secret| !secret.secret.is_empty()))
+                || plan.sync_credentials.as_ref().is_some_and(|credentials| !credentials.is_empty())
+                || plan.tunnel_secret_profiles.is_some()
+                || plan.ai_configs.is_some();
+        let codec = self.secret_codec_for_write(needs_key).await?;
+        self.with_conn(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+
+            apply_sync_connections_in_tx(&tx, &codec, &plan.connections, plan.merge_connections)?;
+            if let Some(profiles) = &plan.tunnel_profiles {
+                apply_sync_tunnel_profiles_in_tx(
+                    &tx,
+                    &codec,
+                    profiles,
+                    plan.tunnel_secret_profiles.as_deref(),
+                    plan.merge_tunnel_profiles,
+                )?;
+            }
+            if let Some(layout) = &plan.sidebar_layout {
+                let json = serde_json::to_string(layout).map_err(|e| e.to_string())?;
+                tx.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [json])
+                    .map_err(|e| e.to_string())?;
+            }
+            if let Some(pinned_tree_node_ids) = &plan.pinned_tree_node_ids {
+                let pinned = serde_json::to_string(pinned_tree_node_ids).map_err(|e| e.to_string())?;
+                update_app_settings_key_in_tx(
+                    &tx,
+                    "pinned_tree_node_ids",
+                    serde_json::from_str(&pinned).map_err(|e| e.to_string())?,
+                )?;
+            }
+            apply_saved_sql_in_tx(&tx, &plan.saved_sql, plan.merge_saved_sql)?;
+            apply_desktop_settings_in_tx(&tx, &plan.desktop_settings, plan.desktop_settings_keys.as_deref())?;
+            if let Some(editor_settings) = &plan.editor_settings {
+                let mut value = editor_settings.clone();
+                if plan.merge_editor_settings {
+                    let current = tx
+                        .query_row(
+                            "SELECT value_json FROM app_state WHERE key = ?1",
+                            [APP_STATE_EDITOR_SETTINGS_KEY],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()
+                        .map_err(|e| e.to_string())?
+                        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    value = merge_json_object_fields(current, value, plan.editor_settings_keys.as_deref());
+                }
+                let value = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO app_state (key, value_json) VALUES (?1, ?2)",
+                    params![APP_STATE_EDITOR_SETTINGS_KEY, value],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            if let Some(ai_configs) = &plan.ai_configs {
+                apply_ai_configs_in_tx(&tx, &codec, ai_configs, plan.merge_ai_configs)?;
+            }
+            if let Some(secrets) = &plan.connection_secrets {
+                clear_sync_connection_secrets_in_tx(
+                    &tx,
+                    plan.connection_secret_ids.as_deref().unwrap_or(&[]),
+                    &plan.preserve_local_connection_strings,
+                    plan.preserve_plugin_secrets,
+                )?;
+                for secret in secrets {
+                    if secret.secret.is_empty() {
+                        continue;
+                    }
+                    persist_secret_in_tx(&tx, &codec, &secret.connection_id, &secret.key, &secret.secret)?;
+                }
+            }
+            if let Some(credentials) = &plan.sync_credentials {
+                tx.execute(
+                    "DELETE FROM connection_secrets
+                     WHERE connection_id = ?1 AND key LIKE 'webdav_password.%'",
+                    [GLOBAL_SECRET_NAMESPACE],
+                )
+                .map_err(|e| e.to_string())?;
+                for credential in credentials {
+                    if credential.account.trim().is_empty() {
+                        return Err("Synced credential account must not be empty".to_string());
+                    }
+                    persist_secret_in_tx(
+                        &tx,
+                        &codec,
+                        GLOBAL_SECRET_NAMESPACE,
+                        &format!("webdav_password.{}", credential.account),
+                        &credential.blob,
+                    )?;
+                }
+            }
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
+
     pub async fn save_connection_metadata_preserving_secrets(
         &self,
         configs: &[ConnectionConfig],
     ) -> Result<(), String> {
         let configs = configs.to_vec();
+        let codec = self.secret_codec_for_write(false).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
@@ -3531,19 +6870,22 @@ impl Storage {
                     // Metadata-only imports/sync preserve existing secrets by default.
                     // This preference is an exception: retaining the old password would
                     // make a no-save connection silently authenticate without prompting.
-                    persist_secret_in_tx(&tx, &config.id, "password", "")?;
+                    persist_secret_in_tx(&tx, &codec, &config.id, "password", "")?;
                     delete_secret_prefix_in_tx(&tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
                 }
                 let mut sanitized = config;
                 sanitized.password = String::new();
+                sanitized.url_params = None;
                 scrub_transport_layer_secrets(&mut sanitized);
                 sanitized.redis_sentinel_password = String::new();
                 sanitized.connection_string = None;
                 sanitized.init_script = None;
                 scrub_mq_auth_secrets(&mut sanitized);
+                scrub_mqtt_auth_secrets(&mut sanitized);
                 scrub_mq_token_signing_secret(&mut sanitized);
                 scrub_nacos_auth_secrets(&mut sanitized);
                 scrub_cassandra_tls_secrets(&mut sanitized);
+                scrub_salesforce_auth_secrets(&mut sanitized);
                 sanitized.connection_secrets.clear();
                 let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
 
@@ -3559,20 +6901,47 @@ impl Storage {
         .await
     }
 
+    /// Insert or update exactly the given connections and leave every other saved
+    /// connection untouched.
+    ///
+    /// Multi-client deployments (the Web/Docker build serves several people from
+    /// one storage) must not replace the whole table: a client that saves a list
+    /// it loaded earlier would otherwise silently delete connections another
+    /// client created in the meantime. Removing a connection therefore has to go
+    /// through [`Storage::delete_connections`] with explicit ids.
     pub async fn save_connections(&self, configs: &[ConnectionConfig]) -> Result<(), String> {
         let configs = configs.to_vec();
+        let needs_key = configs.iter().any(connection_config_has_inline_secrets);
+        let codec = self.secret_codec_for_write(needs_key).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
-            let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
-            let mut retained_ids = preserve_unreadable_connections_for_replacement(&tx, &replacement_ids)?;
-
             for config in &configs {
-                persist_connection_in_tx(&tx, config)?;
+                // `persist_connection_in_tx` uses a plain INSERT, so an update of
+                // an already saved connection has to drop the old row first.
+                tx.execute("DELETE FROM connections WHERE id = ?1", [&config.id]).map_err(|e| e.to_string())?;
+                persist_connection_in_tx(&tx, &codec, config)?;
             }
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
 
-            retained_ids.extend(configs.iter().map(|config| config.id.clone()));
-            delete_unreferenced_connection_secrets_in_tx(&tx, &retained_ids)?;
-
+    /// Delete the given saved connections together with their stored secrets.
+    ///
+    /// This is the only removal path for saved connections; ids that no longer
+    /// exist are ignored so a stale client cannot fail the save.
+    pub async fn delete_connections(&self, ids: &[String]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let ids = ids.to_vec();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            for id in &ids {
+                tx.execute("DELETE FROM connections WHERE id = ?1", [id]).map_err(|e| e.to_string())?;
+                tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [id])
+                    .map_err(|e| e.to_string())?;
+            }
             tx.commit().map_err(|e| e.to_string())
         })
         .await
@@ -3580,10 +6949,11 @@ impl Storage {
 
     pub async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         let config = config.canonicalized();
+        let codec = self.secret_codec_for_write(connection_config_has_inline_secrets(&config)).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             ensure_mcp_connection_change_allowed_in_tx(&tx, None)?;
-            persist_connection_in_tx(&tx, &config)?;
+            persist_connection_in_tx(&tx, &codec, &config)?;
             tx.commit().map_err(|e| e.to_string())?;
             Ok(config)
         })
@@ -3600,6 +6970,7 @@ impl Storage {
         let copy_id = copy_id.to_string();
         let copied_id = copy_id.clone();
         let copy_name = copy_name.to_string();
+        let codec = self.secret_codec(false)?;
         self.with_conn(move |conn| {
             let tx =
                 conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
@@ -3629,12 +7000,33 @@ impl Storage {
             let copy_json = serde_json::to_string(&copy).map_err(|error| error.to_string())?;
             tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![copy_id, copy_json])
                 .map_err(|error| error.to_string())?;
-            tx.execute(
-                "INSERT INTO connection_secrets (connection_id, key, secret) \
-                 SELECT ?1, key, secret FROM connection_secrets WHERE connection_id = ?2",
-                params![copy.id, source_id],
-            )
-            .map_err(|error| error.to_string())?;
+            let source_secrets = {
+                let mut statement = tx
+                    .prepare("SELECT key, secret, secret_enc FROM connection_secrets WHERE connection_id = ?1")
+                    .map_err(|error| error.to_string())?;
+                let rows = statement
+                    .query_map([&source_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+                    })
+                    .map_err(|error| error.to_string())?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+            };
+            for (key, legacy, encrypted) in source_secrets {
+                let plaintext = encrypted
+                    .filter(|value| !value.is_empty())
+                    .map(|value| codec.decrypt(&source_id, &key, &value))
+                    .transpose()?
+                    .unwrap_or(legacy);
+                if plaintext.is_empty() {
+                    continue;
+                }
+                let rewrapped = codec.encrypt(&copy.id, &key, &plaintext)?;
+                tx.execute(
+                    "INSERT INTO connection_secrets (connection_id, key, secret, secret_enc) VALUES (?1, ?2, '', ?3)",
+                    params![copy.id, key, rewrapped],
+                )
+                .map_err(|error| error.to_string())?;
+            }
             copy_sidebar_layout_entry_in_tx(&tx, &source_id, &copy.id)?;
             tx.commit().map_err(|error| error.to_string())?;
             Ok(copy)
@@ -3678,7 +7070,9 @@ impl Storage {
                 .optional()
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
-            let mut config: ConnectionConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            let mut config = sanitized_connection_config(
+                &serde_json::from_str::<ConnectionConfig>(&json).map_err(|error| error.to_string())?,
+            );
             config.database_info = database_info;
             let json = serde_json::to_string(&config).map_err(|error| error.to_string())?;
             conn.execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![json, connection_id])
@@ -3736,7 +7130,9 @@ impl Storage {
                 .optional()
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
-            let mut config: ConnectionConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            let mut config = sanitized_connection_config(
+                &serde_json::from_str::<ConnectionConfig>(&json).map_err(|error| error.to_string())?,
+            );
             let mut external_config = config.external_config.take().unwrap_or_else(|| serde_json::json!({}));
             let Some(external_object) = external_config.as_object_mut() else {
                 return Err("MQTT external_config 必须是 JSON 对象".to_string());
@@ -3818,6 +7214,32 @@ impl Storage {
         .await
     }
 
+    /// Counts the stored `connections` rows without decrypting secrets or
+    /// running the data-security upgrade. Diagnostics use it to report the
+    /// table state truthfully even when the store cannot be fully opened (for
+    /// example a headless CLI that cannot read the OS keychain key), so a
+    /// failed open is never misreported as a missing table. `None` means the
+    /// opened schema has no `connections` table at all.
+    pub async fn stored_connection_count(&self) -> Result<Option<u64>, String> {
+        self.with_conn(|conn| {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'connections')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !exists {
+                return Ok(None);
+            }
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM connections", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            Ok(Some(count.max(0) as u64))
+        })
+        .await
+    }
+
     pub async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
         let rows: Vec<(String, String)> = self
             .with_conn(|conn| {
@@ -3839,6 +7261,7 @@ impl Storage {
                 }
             };
             config.password = self.get_secret(&id, "password").await?.unwrap_or_default();
+            config.url_params = self.get_secret(&id, URL_PARAMS_SECRET_KEY).await?.or(config.url_params);
             for index in 0..config.transport_layers.len() {
                 let layer_for_key = config.transport_layers[index].clone();
                 match &mut config.transport_layers[index] {
@@ -3898,9 +7321,11 @@ impl Storage {
                 config.connection_secrets = stored_plugin_secrets;
             }
             let needs_mq_auth_rewrite = self.hydrate_mq_auth_secrets(&id, &mut config).await?;
+            let needs_mqtt_auth_rewrite = self.hydrate_mqtt_auth_secret(&id, &mut config).await?;
             let needs_mq_token_signing_rewrite = self.hydrate_mq_token_signing_secret(&id, &mut config).await?;
             let needs_nacos_auth_rewrite = self.hydrate_nacos_auth_secret(&id, &mut config).await?;
             let needs_cassandra_tls_rewrite = self.hydrate_cassandra_tls_secrets(&id, &mut config).await?;
+            let needs_salesforce_auth_rewrite = self.hydrate_salesforce_auth_secrets(&id, &mut config).await?;
             let mut needs_plugin_secret_rewrite = false;
             let plugin_secret_keys = config.connection_secrets.keys().cloned().collect::<Vec<_>>();
             for key in plugin_secret_keys {
@@ -3916,17 +7341,18 @@ impl Storage {
                 }
             }
             let needs_external_secret_rewrite = needs_mq_auth_rewrite
+                || needs_mqtt_auth_rewrite
                 || needs_mq_token_signing_rewrite
                 || needs_nacos_auth_rewrite
                 || needs_cassandra_tls_rewrite
+                || needs_salesforce_auth_rewrite
                 || needs_plugin_secret_rewrite;
             if needs_external_secret_rewrite {
-                let mut sanitized = config.clone().canonicalized();
-                scrub_mq_auth_secrets(&mut sanitized);
-                scrub_mq_token_signing_secret(&mut sanitized);
-                scrub_nacos_auth_secrets(&mut sanitized);
-                scrub_cassandra_tls_secrets(&mut sanitized);
-                scrub_plugin_connection_secrets(&mut sanitized);
+                // `config` is hydrated above, so always use the canonical
+                // full scrubber before persisting it again. Otherwise a
+                // plugin-secret rewrite could write the decrypted password,
+                // SSH credentials, or connection string back to config_json.
+                let sanitized = sanitized_connection_config(&config);
                 let sanitized_json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
                 let update_id = id.clone();
                 self.with_conn(move |conn| {
@@ -3971,6 +7397,26 @@ impl Storage {
         };
 
         Ok(needs_rewrite)
+    }
+
+    async fn hydrate_mqtt_auth_secret(
+        &self,
+        connection_id: &str,
+        config: &mut ConnectionConfig,
+    ) -> Result<bool, String> {
+        if config.db_type != DatabaseType::Mqtt {
+            return Ok(false);
+        }
+        let Some(auth) = config.external_config.as_mut().and_then(|external| external.get_mut("auth")) else {
+            return Ok(false);
+        };
+        let Some(auth) = auth.as_object_mut() else {
+            return Ok(false);
+        };
+        if auth.get("kind").and_then(serde_json::Value::as_str) != Some("password") {
+            return Ok(false);
+        }
+        hydrate_mq_json_secret(self, connection_id, MQTT_AUTH_PASSWORD_KEY, auth, "password").await
     }
 
     async fn hydrate_mq_token_signing_secret(
@@ -4056,6 +7502,28 @@ impl Storage {
             hydrate_mq_json_secret(self, connection_id, CASSANDRA_KEYSTORE_PASSWORD_KEY, tls, "keystore_password")
                 .await?;
         Ok(truststore_rewrite || keystore_rewrite)
+    }
+
+    async fn hydrate_salesforce_auth_secrets(
+        &self,
+        connection_id: &str,
+        config: &mut ConnectionConfig,
+    ) -> Result<bool, String> {
+        if config.db_type != DatabaseType::Salesforce {
+            return Ok(false);
+        }
+        let Some(auth) = salesforce_auth_object_mut(config.external_config.as_mut()) else {
+            return Ok(false);
+        };
+        let client_secret_rewrite =
+            hydrate_mq_json_secret(self, connection_id, SALESFORCE_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret")
+                .await?;
+        let refresh_token_rewrite =
+            hydrate_mq_json_secret(self, connection_id, SALESFORCE_AUTH_REFRESH_TOKEN_KEY, auth, "refreshToken")
+                .await?;
+        let password_rewrite =
+            hydrate_mq_json_secret(self, connection_id, SALESFORCE_AUTH_PASSWORD_KEY, auth, "password").await?;
+        Ok(client_secret_rewrite || refresh_token_rewrite || password_rewrite)
     }
 }
 
@@ -4416,26 +7884,56 @@ impl Storage {
     pub async fn get_secret(&self, connection_id: &str, key: &str) -> Result<Option<String>, String> {
         let connection_id = connection_id.to_string();
         let key = key.to_string();
-        self.with_conn(move |conn| {
-            conn.query_row(
-                "SELECT secret FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
-                params![connection_id, key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())
-        })
-        .await
+        let result = self
+            .with_conn({
+                let connection_id = connection_id.clone();
+                let key = key.clone();
+                move |conn| {
+                    conn.query_row(
+                        "SELECT secret, secret_enc FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+                        params![connection_id, key],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())
+                }
+            })
+            .await?;
+        let Some((legacy, encrypted)) = result else {
+            return Ok(None);
+        };
+        if let Some(encrypted) = encrypted.filter(|value| !value.is_empty()) {
+            return self.secret_codec(false)?.decrypt(&connection_id, &key, &encrypted).map(Some);
+        }
+        if !legacy.is_empty() {
+            // Read old plaintext rows during migration and opportunistically
+            // rewrite them in the new envelope format.
+            self.set_secret(&connection_id, &key, &legacy).await?;
+            return Ok(Some(legacy));
+        }
+        Ok(None)
     }
 
     pub async fn set_secret(&self, connection_id: &str, key: &str, secret: &str) -> Result<(), String> {
         let connection_id = connection_id.to_string();
         let key = key.to_string();
         let secret = secret.to_string();
+        let codec = if secret.is_empty() { None } else { Some(self.secret_codec_for_write(true).await?) };
         self.with_conn(move |conn| {
+            if secret.is_empty() {
+                conn.execute(
+                    "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+                    params![connection_id, key],
+                ).map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+            let encrypted = codec
+                .as_ref()
+                .ok_or_else(|| "KEY_PROVIDER_UNAVAILABLE".to_string())?
+                .encrypt(&connection_id, &key, &secret)?;
             conn.execute(
-                "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)",
-                params![connection_id, key, secret],
+                "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret, secret_enc) VALUES (?, ?, '', ?)",
+                params![connection_id, key, encrypted],
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -5102,82 +8600,100 @@ impl Storage {
 
 impl Storage {
     pub async fn migrate_from_json(&self, data_dir: &Path) -> Result<(), String> {
-        self.migrate_connections_json(data_dir).await?;
-        self.migrate_secrets_json(data_dir).await?;
-        self.migrate_history_json(data_dir).await?;
-        self.migrate_ai_config_json(data_dir).await?;
-        self.migrate_ai_conversations_json(data_dir).await?;
-        self.migrate_sidebar_layout_json(data_dir).await?;
+        self.migrate_from_json_with_finalize(data_dir, true).await
+    }
+
+    async fn migrate_from_json_staged(&self, data_dir: &Path) -> Result<(), String> {
+        self.migrate_from_json_with_finalize(data_dir, false).await
+    }
+
+    async fn migrate_from_json_with_finalize(&self, data_dir: &Path, finalize: bool) -> Result<(), String> {
+        self.migrate_connections_json(data_dir, finalize).await?;
+        self.migrate_secrets_json(data_dir, finalize).await?;
+        self.migrate_history_json(data_dir, finalize).await?;
+        self.migrate_ai_config_json(data_dir, finalize).await?;
+        self.migrate_ai_conversations_json(data_dir, finalize).await?;
+        self.migrate_sidebar_layout_json(data_dir, finalize).await?;
         Ok(())
     }
 
-    async fn migrate_connections_json(&self, data_dir: &Path) -> Result<(), String> {
+    async fn migrate_connections_json(&self, data_dir: &Path, finalize: bool) -> Result<(), String> {
         let path = data_dir.join("connections.json");
         if tokio::fs::metadata(&path).await.is_err() {
             return Ok(());
         }
         let json = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
-        let configs: Vec<ConnectionConfig> = serde_json::from_str(&json).unwrap_or_default();
-        for config in &configs {
-            let config_json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-            let id = config.id.clone();
-            self.with_conn(move |conn| {
-                conn.execute(
-                    "INSERT OR IGNORE INTO connections (id, config_json) VALUES (?1, ?2)",
-                    params![id, config_json],
-                )
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-            })
-            .await?;
+        let configs: Vec<ConnectionConfig> = serde_json::from_str(&json)
+            .map_err(|error| format!("Failed to parse legacy connections.json; original file was kept: {error}"))?;
+        // Route legacy hydrated configs through the same sanitized/encrypted
+        // persistence path as normal saves.  Inserting the old JSON directly
+        // would briefly reintroduce plaintext credentials into dbx.db.
+        let codec = self.secret_codec_for_write(true).await?;
+        self.with_conn(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            for config in &configs {
+                let exists: bool = tx
+                    .query_row("SELECT EXISTS(SELECT 1 FROM connections WHERE id = ?1)", [&config.id], |row| row.get(0))
+                    .map_err(|e| e.to_string())?;
+                if !exists {
+                    persist_connection_in_tx(&tx, &codec, config)?;
+                }
+            }
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await?;
+        if finalize {
+            tokio::fs::rename(&path, data_dir.join("connections.json.bak")).await.map_err(|e| e.to_string())?;
         }
-        let _ = tokio::fs::rename(&path, data_dir.join("connections.json.bak")).await;
         Ok(())
     }
 
-    async fn migrate_secrets_json(&self, data_dir: &Path) -> Result<(), String> {
+    async fn migrate_secrets_json(&self, data_dir: &Path, finalize: bool) -> Result<(), String> {
         let path = data_dir.join("secrets.json");
         if tokio::fs::metadata(&path).await.is_err() {
             return Ok(());
         }
         let json = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
-        let secrets: HashMap<String, String> = serde_json::from_str(&json).unwrap_or_default();
+        let secrets: HashMap<String, String> = serde_json::from_str(&json)
+            .map_err(|error| format!("Failed to parse legacy secrets.json; original file was kept: {error}"))?;
         for (key, secret) in &secrets {
             let parts: Vec<&str> = key.splitn(3, ':').collect();
             if parts.len() == 3 && parts[0] == "connection" {
                 let connection_id = parts[1].to_string();
                 let field = parts[2].to_string();
                 let secret = secret.clone();
-                self.with_conn(move |conn| {
-                    conn.execute(
-                        "INSERT OR IGNORE INTO connection_secrets (connection_id, key, secret) VALUES (?1, ?2, ?3)",
-                        params![connection_id, field, secret],
-                    )
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-                })
-                .await?;
+                // Legacy JSON files contain plaintext values.  Route them
+                // through the same encrypted writer used by normal saves;
+                // never copy the old value directly into SQLite.
+                if self.get_secret(&connection_id, &field).await?.is_none() {
+                    self.set_secret(&connection_id, &field, &secret).await?;
+                }
             }
         }
-        let _ = tokio::fs::rename(&path, data_dir.join("secrets.json.bak")).await;
+        if finalize {
+            tokio::fs::rename(&path, data_dir.join("secrets.json.bak")).await.map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
-    async fn migrate_history_json(&self, data_dir: &Path) -> Result<(), String> {
+    async fn migrate_history_json(&self, data_dir: &Path, finalize: bool) -> Result<(), String> {
         let path = data_dir.join("query_history.json");
         if tokio::fs::metadata(&path).await.is_err() {
             return Ok(());
         }
         let json = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
-        let entries: Vec<HistoryEntry> = serde_json::from_str(&json).unwrap_or_default();
+        let entries: Vec<HistoryEntry> = serde_json::from_str(&json)
+            .map_err(|error| format!("Failed to parse legacy query_history.json; original file was kept: {error}"))?;
         for entry in &entries {
             self.save_history_entry(entry).await?;
         }
-        let _ = tokio::fs::rename(&path, data_dir.join("query_history.json.bak")).await;
+        if finalize {
+            tokio::fs::rename(&path, data_dir.join("query_history.json.bak")).await.map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
-    async fn migrate_ai_config_json(&self, data_dir: &Path) -> Result<(), String> {
+    async fn migrate_ai_config_json(&self, data_dir: &Path, finalize: bool) -> Result<(), String> {
         let path = data_dir.join("ai_config.json");
         if tokio::fs::metadata(&path).await.is_err() {
             return Ok(());
@@ -5189,41 +8705,46 @@ impl Storage {
             })
             .await?;
         if count == 0 {
-            self.with_conn(move |conn| {
-                conn.execute("INSERT OR IGNORE INTO ai_config (id, config_json) VALUES (1, ?1)", [json])
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            })
-            .await?;
+            // Parse and save through the split/secrets path instead of copying
+            // the legacy hydrated JSON into the database.
+            let config = serde_json::from_str::<AiConfig>(&json)
+                .map_err(|error| format!("Failed to parse legacy ai_config.json; original file was kept: {error}"))?;
+            self.save_ai_config(&config).await?;
         }
-        let _ = tokio::fs::rename(&path, data_dir.join("ai_config.json.bak")).await;
+        if finalize {
+            tokio::fs::rename(&path, data_dir.join("ai_config.json.bak")).await.map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
-    async fn migrate_ai_conversations_json(&self, data_dir: &Path) -> Result<(), String> {
+    async fn migrate_ai_conversations_json(&self, data_dir: &Path, finalize: bool) -> Result<(), String> {
         let path = data_dir.join("ai_conversations.json");
         if tokio::fs::metadata(&path).await.is_err() {
             return Ok(());
         }
         let json = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
-        let conversations: Vec<AiConversation> = serde_json::from_str(&json).unwrap_or_default();
+        let conversations: Vec<AiConversation> = serde_json::from_str(&json).map_err(|error| {
+            format!("Failed to parse legacy ai_conversations.json; original file was kept: {error}")
+        })?;
         for conv in &conversations {
             let conv = conv.clone();
             let messages_json = serde_json::to_string(&conv.messages).map_err(|e| e.to_string())?;
             self.with_conn(move |conn| {
                 conn.execute(
                     "INSERT OR IGNORE INTO ai_conversations \
-                     (id, title, connection_name, database, messages_json, created_at, updated_at, plugin_context_json) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                     (id, title, connection_name, connection_id, database, schema_name, messages_json, created_at, updated_at, plugin_context_json) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         conv.id,
                         conv.title,
                         conv.connection_name,
+                        conv.connection_id,
                         conv.database,
+                        conv.schema,
                         messages_json,
                         conv.created_at,
                         conv.updated_at,
-                    conv.plugin_context.map(|value| value.to_string())
+                        conv.plugin_context.map(|value| value.to_string())
                     ],
                 )
                 .map(|_| ())
@@ -5231,16 +8752,24 @@ impl Storage {
             })
             .await?;
         }
-        let _ = tokio::fs::rename(&path, data_dir.join("ai_conversations.json.bak")).await;
+        // Rows just imported predate the binding column (or carry a binding from
+        // a newer JSON export); bind the ones the stored name identifies
+        // unambiguously now, since `init_schema` already ran its pass (#9902).
+        self.with_conn(|conn| backfill_ai_conversation_connections(conn).map(|_| ())).await?;
+        if finalize {
+            tokio::fs::rename(&path, data_dir.join("ai_conversations.json.bak")).await.map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
-    async fn migrate_sidebar_layout_json(&self, data_dir: &Path) -> Result<(), String> {
+    async fn migrate_sidebar_layout_json(&self, data_dir: &Path, finalize: bool) -> Result<(), String> {
         let path = data_dir.join("sidebar_layout.json");
         if tokio::fs::metadata(&path).await.is_err() {
             return Ok(());
         }
         let json = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
+        serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("Failed to parse legacy sidebar_layout.json; original file was kept: {error}"))?;
         let count: i64 = self
             .with_conn(|conn| {
                 conn.query_row("SELECT COUNT(*) FROM sidebar_layout", [], |row| row.get(0)).map_err(|e| e.to_string())
@@ -5254,13 +8783,16 @@ impl Storage {
             })
             .await?;
         }
-        let _ = tokio::fs::rename(&path, data_dir.join("sidebar_layout.json.bak")).await;
+        if finalize {
+            tokio::fs::rename(&path, data_dir.join("sidebar_layout.json.bak")).await.map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 }
 
 fn persist_secret_in_tx(
     tx: &rusqlite::Transaction<'_>,
+    codec: &SecretCodec,
     connection_id: &str,
     key: &str,
     secret: &str,
@@ -5269,16 +8801,429 @@ fn persist_secret_in_tx(
         tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2", params![connection_id, key])
             .map_err(|e| e.to_string())?;
     } else {
+        let encrypted = codec.encrypt(connection_id, key, secret)?;
         tx.execute(
-            "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)",
-            params![connection_id, key, secret],
+            "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret, secret_enc) VALUES (?, ?, '', ?)",
+            params![connection_id, key, encrypted],
         )
         .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
-fn persist_mq_auth_secrets_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionConfig) -> Result<(), String> {
+fn apply_sync_connections_in_tx(
+    tx: &Transaction<'_>,
+    codec: &SecretCodec,
+    configs: &[ConnectionConfig],
+    merge_existing: bool,
+) -> Result<(), String> {
+    let mut retained_ids = if merge_existing {
+        Vec::new()
+    } else {
+        let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
+        preserve_unreadable_connections_for_replacement(tx, &replacement_ids)?
+    };
+    for config in configs {
+        let config = config.canonicalized();
+        if !config.save_password && !merge_existing {
+            persist_secret_in_tx(tx, codec, &config.id, "password", "")?;
+            delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
+        }
+        if let Some(url_params) = &config.url_params {
+            if !connection_secret_in_tx_exists(tx, &config.id, URL_PARAMS_SECRET_KEY)? {
+                persist_secret_in_tx(tx, codec, &config.id, URL_PARAMS_SECRET_KEY, url_params)?;
+            }
+        }
+        let sanitized = sanitized_connection_config(&config);
+        let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
+        tx.execute("INSERT OR REPLACE INTO connections (id, config_json) VALUES (?1, ?2)", params![config.id, json])
+            .map_err(|e| e.to_string())?;
+    }
+    retained_ids.extend(configs.iter().map(|config| config.id.clone()));
+    if merge_existing {
+        Ok(())
+    } else {
+        delete_unreferenced_connection_secrets_in_tx(tx, &retained_ids)
+    }
+}
+
+fn clear_sync_connection_secrets_in_tx(
+    tx: &Transaction<'_>,
+    connection_ids: &[String],
+    preserve_connection_strings: &[String],
+    preserve_plugin_secrets: bool,
+) -> Result<(), String> {
+    let preserve_connection_strings = preserve_connection_strings.iter().map(String::as_str).collect::<HashSet<_>>();
+    for connection_id in connection_ids {
+        let preserve_connection_string = preserve_connection_strings.contains(connection_id.as_str());
+        if preserve_plugin_secrets && preserve_connection_string {
+            tx.execute(
+                "DELETE FROM connection_secrets
+                 WHERE connection_id = ?1
+                   AND key NOT LIKE 'plugin_connection.%'
+                   AND key <> 'connection_string'",
+                [connection_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else if preserve_plugin_secrets {
+            tx.execute(
+                "DELETE FROM connection_secrets
+                 WHERE connection_id = ?1
+                   AND key NOT LIKE 'plugin_connection.%'",
+                [connection_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else if preserve_connection_string {
+            tx.execute(
+                "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key <> 'connection_string'",
+                [connection_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [connection_id])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_sync_tunnel_profiles_in_tx(
+    tx: &Transaction<'_>,
+    codec: &SecretCodec,
+    profiles: &[TransportLayerConfig],
+    secret_profiles: Option<&[TransportLayerConfig]>,
+    merge_existing: bool,
+) -> Result<(), String> {
+    let mut existing = HashMap::<String, TransportLayerConfig>::new();
+    let mut statement = tx.prepare("SELECT id, config_json FROM tunnel_profiles").map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (id, json) = row.map_err(|e| e.to_string())?;
+        let mut profile: TransportLayerConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        let namespace = format!("{TUNNEL_SECRET_NAMESPACE_PREFIX}{id}");
+        if let Some(blob) = get_secret_in_tx(tx, codec, &namespace, CONFIG_SECRET_BLOB_KEY)? {
+            let stored: TransportLayerConfig = serde_json::from_str(&blob).map_err(|e| e.to_string())?;
+            merge_missing_tunnel_profile_secrets(&mut profile, &stored);
+        }
+        existing.insert(id, profile);
+    }
+    drop(statement);
+
+    let mut full_by_id = HashMap::new();
+    if let Some(secret_profiles) = secret_profiles {
+        for profile in secret_profiles {
+            full_by_id.insert(profile.id().to_string(), profile.clone());
+        }
+    }
+    let mut effective = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        let (mut profile, has_synced_secrets) = match full_by_id.remove(profile.id()) {
+            Some(profile) => (profile, true),
+            None => (profile.clone(), false),
+        };
+        if let Some(previous) = existing.get(profile.id()) {
+            preserve_tunnel_profile_local_paths(&mut profile, previous);
+        }
+        if !has_synced_secrets {
+            if let Some(previous) = existing.get(profile.id()) {
+                merge_missing_tunnel_profile_secrets(&mut profile, previous);
+            }
+        }
+        effective.push(profile);
+    }
+
+    if !merge_existing {
+        tx.execute("DELETE FROM tunnel_profiles", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM connection_secrets WHERE connection_id LIKE 'tunnel_profile.%'", [])
+            .map_err(|e| e.to_string())?;
+    }
+    for profile in effective {
+        if merge_existing {
+            tx.execute(
+                "DELETE FROM connection_secrets WHERE connection_id = ?1",
+                [format!("{TUNNEL_SECRET_NAMESPACE_PREFIX}{}", profile.id())],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let mut sanitized = profile.clone();
+        sanitized.scrub_secrets();
+        let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO tunnel_profiles (id, config_json) VALUES (?1, ?2) \
+             ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json",
+            params![profile.id(), json],
+        )
+        .map_err(|e| e.to_string())?;
+        if sanitized != profile {
+            persist_secret_in_tx(
+                tx,
+                codec,
+                &format!("{TUNNEL_SECRET_NAMESPACE_PREFIX}{}", profile.id()),
+                CONFIG_SECRET_BLOB_KEY,
+                &serde_json::to_string(&profile).map_err(|e| e.to_string())?,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn preserve_tunnel_profile_local_paths(remote: &mut TransportLayerConfig, local: &TransportLayerConfig) {
+    if let (TransportLayerConfig::Ssh(remote), TransportLayerConfig::Ssh(local)) = (remote, local) {
+        if remote.key_path.is_empty() {
+            remote.key_path.clone_from(&local.key_path);
+        }
+        if remote.ssh_agent_sock_path.is_empty() {
+            remote.ssh_agent_sock_path.clone_from(&local.ssh_agent_sock_path);
+        }
+    }
+}
+
+fn apply_ai_configs_in_tx(
+    tx: &Transaction<'_>,
+    codec: &SecretCodec,
+    configs: &[AiConfigItem],
+    merge_existing: bool,
+) -> Result<(), String> {
+    let existing_configs = {
+        let mut statement = tx.prepare("SELECT id, config_json FROM ai_configs").map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let mut existing = HashMap::with_capacity(rows.len());
+        for (id, json) in rows {
+            let config: AiConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            existing.insert(id, config);
+        }
+        existing
+    };
+    if !merge_existing {
+        tx.execute("DELETE FROM ai_configs", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM ai_config", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM ai_provider_configs", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM connection_secrets WHERE connection_id LIKE 'ai_config.%'", [])
+            .map_err(|e| e.to_string())?;
+    }
+    for item in configs {
+        if merge_existing {
+            tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [format!("ai_config.{}", item.id)])
+                .map_err(|e| e.to_string())?;
+            if item.is_default {
+                tx.execute("UPDATE ai_configs SET is_default = 0", []).map_err(|e| e.to_string())?;
+            }
+        }
+        let mut config = item.config.clone();
+        clear_ai_config_device_paths(&mut config);
+        let local = existing_configs.get(&item.id).or_else(|| {
+            let mut matching_provider =
+                existing_configs.values().filter(|local| local.provider.as_str() == config.provider.as_str());
+            let candidate = matching_provider.next()?;
+            matching_provider.next().is_none().then_some(candidate)
+        });
+        if let Some(local) = local {
+            preserve_ai_config_device_paths(&mut config, local);
+        }
+        let (sanitized, secrets) = split_ai_config_secrets(&config)?;
+        let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
+        let models_json = serde_json::to_string(&sanitized.models).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT OR REPLACE INTO ai_configs (id, name, model, models, config_json, is_default) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![item.id, item.name, sanitized.model, models_json, json, item.is_default as i32],
+        )
+        .map_err(|e| e.to_string())?;
+        if secrets.as_object().is_some_and(|object| !object.is_empty()) {
+            persist_secret_in_tx(
+                tx,
+                codec,
+                &format!("{AI_SECRET_NAMESPACE_PREFIX}{}", item.id),
+                CONFIG_SECRET_BLOB_KEY,
+                &serde_json::to_string(&secrets).map_err(|e| e.to_string())?,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn clear_ai_config_device_paths(config: &mut AiConfig) {
+    config.codex_cli_path = None;
+    config.claude_code_cli_path = None;
+    config.pi_agent_cli_path = None;
+    config.opencode_cli_path = None;
+    config.cursor_cli_path = None;
+    config.grok_cli_path = None;
+    config.codebuddy_cli_path = None;
+    config.qoder_cli_path = None;
+}
+
+fn preserve_ai_config_device_paths(remote: &mut AiConfig, local: &AiConfig) {
+    match (&remote.provider, &local.provider) {
+        (AiProvider::CodexCli, AiProvider::CodexCli) => remote.codex_cli_path.clone_from(&local.codex_cli_path),
+        (AiProvider::ClaudeCodeCli, AiProvider::ClaudeCodeCli) => {
+            remote.claude_code_cli_path.clone_from(&local.claude_code_cli_path)
+        }
+        (AiProvider::PiAgentCli, AiProvider::PiAgentCli) => {
+            remote.pi_agent_cli_path.clone_from(&local.pi_agent_cli_path)
+        }
+        (AiProvider::OpenCodeCli, AiProvider::OpenCodeCli) => {
+            remote.opencode_cli_path.clone_from(&local.opencode_cli_path)
+        }
+        (AiProvider::CursorCli, AiProvider::CursorCli) => remote.cursor_cli_path.clone_from(&local.cursor_cli_path),
+        (AiProvider::GrokCli, AiProvider::GrokCli) => remote.grok_cli_path.clone_from(&local.grok_cli_path),
+        (AiProvider::CodeBuddyCli, AiProvider::CodeBuddyCli) => {
+            remote.codebuddy_cli_path.clone_from(&local.codebuddy_cli_path)
+        }
+        (AiProvider::QoderCli, AiProvider::QoderCli) => remote.qoder_cli_path.clone_from(&local.qoder_cli_path),
+        _ => {}
+    }
+}
+
+fn update_app_settings_key_in_tx(tx: &Transaction<'_>, key: &str, value: serde_json::Value) -> Result<(), String> {
+    let current: Option<String> = tx
+        .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let mut settings = current
+        .map(|json| {
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json).map_err(|e| e.to_string())
+        })
+        .transpose()?
+        .unwrap_or_default();
+    settings.insert(key.to_string(), value);
+    tx.execute(
+        "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+        [serde_json::Value::Object(settings).to_string()],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+fn merge_json_object_fields(
+    local: serde_json::Value,
+    remote: serde_json::Value,
+    selected_keys: Option<&[String]>,
+) -> serde_json::Value {
+    let Some(remote) = remote.as_object() else { return remote };
+    let mut merged = local.as_object().cloned().unwrap_or_default();
+    for (key, value) in remote {
+        if selected_keys.is_some_and(|keys| !keys.iter().any(|selected| selected == key)) {
+            continue;
+        }
+        merged.insert(key.clone(), value.clone());
+    }
+    serde_json::Value::Object(merged)
+}
+
+fn apply_desktop_settings_in_tx(
+    tx: &Transaction<'_>,
+    settings: &DesktopSettings,
+    selected_keys: Option<&[String]>,
+) -> Result<(), String> {
+    let mut values = serde_json::Map::new();
+    values.insert("show_tray_icon".to_string(), serde_json::Value::Bool(settings.show_tray_icon));
+    values.insert("icon_theme".to_string(), serde_json::to_value(settings.icon_theme).map_err(|e| e.to_string())?);
+    values.insert("quit_on_close".to_string(), serde_json::Value::Bool(settings.quit_on_close));
+    values.insert("close_action_prompted".to_string(), serde_json::Value::Bool(settings.close_action_prompted));
+    values.insert("debug_logging_enabled".to_string(), serde_json::Value::Bool(settings.debug_logging_enabled));
+    values.insert(
+        "metadata_cache_max_memory_mb".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(normalize_metadata_cache_max_memory_mb(
+            settings.metadata_cache_max_memory_mb,
+        ))),
+    );
+    values.insert(
+        "duckdb_worker_process_isolation".to_string(),
+        serde_json::Value::Bool(settings.duckdb_worker_process_isolation),
+    );
+    values.insert(
+        "duckdb_worker_max_processes".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(normalize_duckdb_worker_max_processes(
+            settings.duckdb_worker_max_processes,
+        ))),
+    );
+    values.insert(
+        "sidebar_table_page_size".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(settings.sidebar_table_page_size)),
+    );
+    let optional_dirs = [
+        ("saved_sql_sync_dir", settings.saved_sql_sync_dir.as_ref()),
+        ("driver_store_dir", settings.driver_store_dir.as_ref()),
+        ("plugin_store_dir", settings.plugin_store_dir.as_ref()),
+        ("agent_store_dir", settings.agent_store_dir.as_ref()),
+    ];
+    for (key, value) in optional_dirs {
+        if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+            values.insert(key.to_string(), serde_json::Value::String(value.clone()));
+        } else {
+            values.insert(key.to_string(), serde_json::Value::Null);
+        }
+    }
+    let current: Option<String> = tx
+        .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let mut merged = current
+        .map(|json| {
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json).map_err(|e| e.to_string())
+        })
+        .transpose()?
+        .unwrap_or_default();
+    for (key, value) in values {
+        if selected_keys.is_some_and(|keys| !keys.iter().any(|selected| selected == &key)) {
+            continue;
+        }
+        merged.insert(key, value);
+    }
+    tx.execute(
+        "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+        [serde_json::Value::Object(merged).to_string()],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+fn apply_saved_sql_in_tx(tx: &Transaction<'_>, library: &SavedSqlLibrary, merge_existing: bool) -> Result<(), String> {
+    let mut folder_ids = HashSet::with_capacity(library.folders.len());
+    for folder in &library.folders {
+        if !folder_ids.insert(folder.id.as_str()) {
+            return Err(format!("duplicate saved SQL folder id: {}", folder.id));
+        }
+    }
+    let mut file_ids = HashSet::with_capacity(library.files.len());
+    for file in &library.files {
+        if !file_ids.insert(file.id.as_str()) {
+            return Err(format!("duplicate saved SQL file id: {}", file.id));
+        }
+    }
+
+    if !merge_existing {
+        tx.execute("DELETE FROM saved_sql_files", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM saved_sql_folders", []).map_err(|e| e.to_string())?;
+    }
+    for folder in &library.folders {
+        tx.execute(
+            "INSERT OR REPLACE INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![folder.id, folder.connection_id, folder.parent_folder_id, folder.name, folder.order_index, folder.created_at, folder.updated_at],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    for file in &library.files {
+        tx.execute(
+            "INSERT OR REPLACE INTO saved_sql_files (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![file.id, file.connection_id, file.folder_id, file.name, file.database, file.catalog, file.schema, file.sql, file.order_index, file.open_count, file.opened_at, file.created_at, file.updated_at],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn persist_mq_auth_secrets_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    codec: &SecretCodec,
+    config: &ConnectionConfig,
+) -> Result<(), String> {
     if config.db_type != DatabaseType::MessageQueue {
         delete_secret_prefix_in_tx(tx, &config.id, MQ_AUTH_SECRET_PREFIX)?;
         return Ok(());
@@ -5291,13 +9236,13 @@ fn persist_mq_auth_secrets_in_tx(tx: &rusqlite::Transaction<'_>, config: &Connec
 
     match mq_auth_kind(auth) {
         Some("none") => delete_secret_prefix_in_tx(tx, &config.id, MQ_AUTH_SECRET_PREFIX)?,
-        Some("token") => replace_mq_auth_secret_in_tx(tx, &config.id, MQ_AUTH_TOKEN_KEY, auth, "token")?,
-        Some("basic") => replace_mq_auth_secret_in_tx(tx, &config.id, MQ_AUTH_PASSWORD_KEY, auth, "password")?,
+        Some("token") => replace_mq_auth_secret_in_tx(tx, codec, &config.id, MQ_AUTH_TOKEN_KEY, auth, "token")?,
+        Some("basic") => replace_mq_auth_secret_in_tx(tx, codec, &config.id, MQ_AUTH_PASSWORD_KEY, auth, "password")?,
         Some(kind) if is_api_key_auth_kind(kind) => {
-            replace_mq_auth_secret_in_tx(tx, &config.id, MQ_AUTH_API_KEY_VALUE_KEY, auth, "value")?
+            replace_mq_auth_secret_in_tx(tx, codec, &config.id, MQ_AUTH_API_KEY_VALUE_KEY, auth, "value")?
         }
         Some("oauth2") => {
-            replace_mq_auth_secret_in_tx(tx, &config.id, MQ_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret")?
+            replace_mq_auth_secret_in_tx(tx, codec, &config.id, MQ_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret")?
         }
         _ => delete_secret_prefix_in_tx(tx, &config.id, MQ_AUTH_SECRET_PREFIX)?,
     }
@@ -5305,37 +9250,83 @@ fn persist_mq_auth_secrets_in_tx(tx: &rusqlite::Transaction<'_>, config: &Connec
     Ok(())
 }
 
+fn persist_mqtt_auth_secrets_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    codec: &SecretCodec,
+    config: &ConnectionConfig,
+) -> Result<(), String> {
+    if config.db_type != DatabaseType::Mqtt {
+        delete_secret_prefix_in_tx(tx, &config.id, MQTT_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    }
+    let Some(auth) = config.external_config.as_ref().and_then(|external| external.get("auth")) else {
+        delete_secret_prefix_in_tx(tx, &config.id, MQTT_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    };
+    let Some(auth) = auth.as_object() else {
+        delete_secret_prefix_in_tx(tx, &config.id, MQTT_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    };
+    if auth.get("kind").and_then(serde_json::Value::as_str) != Some("password") {
+        delete_secret_prefix_in_tx(tx, &config.id, MQTT_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    }
+    let current = auth.get("password").and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty());
+    let existing =
+        if current.is_none() { get_secret_in_tx(tx, codec, &config.id, MQTT_AUTH_PASSWORD_KEY)? } else { None };
+    delete_secret_prefix_in_tx(tx, &config.id, MQTT_AUTH_SECRET_PREFIX)?;
+    if let Some(secret) = current.or(existing.as_deref()) {
+        persist_secret_in_tx(tx, codec, &config.id, MQTT_AUTH_PASSWORD_KEY, secret)?;
+    }
+    Ok(())
+}
+
 fn replace_mq_auth_secret_in_tx(
     tx: &rusqlite::Transaction<'_>,
+    codec: &SecretCodec,
     connection_id: &str,
     key: &str,
     auth: &serde_json::Map<String, serde_json::Value>,
     field: &str,
 ) -> Result<(), String> {
     let current = auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty());
-    let existing = if current.is_none() { get_secret_in_tx(tx, connection_id, key)? } else { None };
+    let existing = if current.is_none() { get_secret_in_tx(tx, codec, connection_id, key)? } else { None };
     delete_secret_prefix_in_tx(tx, connection_id, MQ_AUTH_SECRET_PREFIX)?;
     match current {
-        Some(secret) => persist_secret_in_tx(tx, connection_id, key, secret),
+        Some(secret) => persist_secret_in_tx(tx, codec, connection_id, key, secret),
         None => match existing {
-            Some(secret) => persist_secret_in_tx(tx, connection_id, key, &secret),
+            Some(secret) => persist_secret_in_tx(tx, codec, connection_id, key, &secret),
             None => Ok(()),
         },
     }
 }
 
-fn get_secret_in_tx(tx: &rusqlite::Transaction<'_>, connection_id: &str, key: &str) -> Result<Option<String>, String> {
-    tx.query_row(
-        "SELECT secret FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
-        params![connection_id, key],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(|e| e.to_string())
+fn get_secret_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    codec: &SecretCodec,
+    connection_id: &str,
+    key: &str,
+) -> Result<Option<String>, String> {
+    let row = tx
+        .query_row(
+            "SELECT secret, secret_enc FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+            params![connection_id, key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((legacy, encrypted)) = row else {
+        return Ok(None);
+    };
+    if let Some(encrypted) = encrypted.filter(|value| !value.is_empty()) {
+        return codec.decrypt(connection_id, key, &encrypted).map(Some);
+    }
+    Ok((!legacy.is_empty()).then_some(legacy))
 }
 
 fn persist_mq_token_signing_secret_in_tx(
     tx: &rusqlite::Transaction<'_>,
+    codec: &SecretCodec,
     config: &ConnectionConfig,
 ) -> Result<(), String> {
     if config.db_type != DatabaseType::MessageQueue {
@@ -5348,10 +9339,14 @@ fn persist_mq_token_signing_secret_in_tx(
         return Ok(());
     };
 
-    persist_json_secret_if_present_in_tx(tx, &config.id, MQ_TOKEN_SIGNING_KEY, signing, "key")
+    persist_json_secret_if_present_in_tx(tx, codec, &config.id, MQ_TOKEN_SIGNING_KEY, signing, "key")
 }
 
-fn persist_nacos_auth_secrets_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionConfig) -> Result<(), String> {
+fn persist_nacos_auth_secrets_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    codec: &SecretCodec,
+    config: &ConnectionConfig,
+) -> Result<(), String> {
     if config.db_type != DatabaseType::Nacos || !config.save_password {
         delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
         return Ok(());
@@ -5368,21 +9363,21 @@ fn persist_nacos_auth_secrets_in_tx(tx: &rusqlite::Transaction<'_>, config: &Con
         .and_then(|auth| auth.get("password").and_then(serde_json::Value::as_str))
         .filter(|secret| !secret.is_empty());
     let existing_primary = if primary.is_none() && primary_auth.is_some() {
-        get_secret_in_tx(tx, &config.id, NACOS_AUTH_PASSWORD_KEY)?
+        get_secret_in_tx(tx, codec, &config.id, NACOS_AUTH_PASSWORD_KEY)?
     } else {
         None
     };
     let existing_console = if console.is_none() && console_auth.is_some() {
-        get_secret_in_tx(tx, &config.id, NACOS_RNACOS_CONSOLE_PASSWORD_KEY)?
+        get_secret_in_tx(tx, codec, &config.id, NACOS_RNACOS_CONSOLE_PASSWORD_KEY)?
     } else {
         None
     };
     delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
     if let Some(secret) = primary.or(existing_primary.as_deref()) {
-        persist_secret_in_tx(tx, &config.id, NACOS_AUTH_PASSWORD_KEY, secret)?;
+        persist_secret_in_tx(tx, codec, &config.id, NACOS_AUTH_PASSWORD_KEY, secret)?;
     }
     if let Some(secret) = console.or(existing_console.as_deref()) {
-        persist_secret_in_tx(tx, &config.id, NACOS_RNACOS_CONSOLE_PASSWORD_KEY, secret)?;
+        persist_secret_in_tx(tx, codec, &config.id, NACOS_RNACOS_CONSOLE_PASSWORD_KEY, secret)?;
     }
 
     Ok(())
@@ -5390,6 +9385,7 @@ fn persist_nacos_auth_secrets_in_tx(tx: &rusqlite::Transaction<'_>, config: &Con
 
 fn persist_cassandra_tls_secrets_in_tx(
     tx: &rusqlite::Transaction<'_>,
+    codec: &SecretCodec,
     config: &ConnectionConfig,
 ) -> Result<(), String> {
     if config.db_type != DatabaseType::Cassandra {
@@ -5402,27 +9398,84 @@ fn persist_cassandra_tls_secrets_in_tx(
     };
     persist_secret_in_tx(
         tx,
+        codec,
         &config.id,
         CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
         tls.get("truststore_password").and_then(serde_json::Value::as_str).unwrap_or(""),
     )?;
     persist_secret_in_tx(
         tx,
+        codec,
         &config.id,
         CASSANDRA_KEYSTORE_PASSWORD_KEY,
         tls.get("keystore_password").and_then(serde_json::Value::as_str).unwrap_or(""),
     )
 }
 
+fn persist_salesforce_auth_secrets_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    codec: &SecretCodec,
+    config: &ConnectionConfig,
+) -> Result<(), String> {
+    if config.db_type != DatabaseType::Salesforce {
+        delete_secret_prefix_in_tx(tx, &config.id, SALESFORCE_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    }
+    let Some(auth) = salesforce_auth_object(config.external_config.as_ref()) else {
+        delete_secret_prefix_in_tx(tx, &config.id, SALESFORCE_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    };
+    replace_salesforce_auth_secret_in_tx(
+        tx,
+        codec,
+        &config.id,
+        SALESFORCE_AUTH_CLIENT_SECRET_KEY,
+        auth,
+        "clientSecret",
+    )?;
+    replace_salesforce_auth_secret_in_tx(
+        tx,
+        codec,
+        &config.id,
+        SALESFORCE_AUTH_REFRESH_TOKEN_KEY,
+        auth,
+        "refreshToken",
+    )?;
+    replace_salesforce_auth_secret_in_tx(tx, codec, &config.id, SALESFORCE_AUTH_PASSWORD_KEY, auth, "password")?;
+    Ok(())
+}
+
+fn replace_salesforce_auth_secret_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    codec: &SecretCodec,
+    connection_id: &str,
+    key: &str,
+    auth: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<(), String> {
+    let current = auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty());
+    let existing = if current.is_none() { get_secret_in_tx(tx, codec, connection_id, key)? } else { None };
+    tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2", params![connection_id, key])
+        .map_err(|e| e.to_string())?;
+    match current {
+        Some(secret) => persist_secret_in_tx(tx, codec, connection_id, key, secret),
+        None => match existing {
+            Some(secret) => persist_secret_in_tx(tx, codec, connection_id, key, &secret),
+            None => Ok(()),
+        },
+    }
+}
+
 fn persist_json_secret_if_present_in_tx(
     tx: &rusqlite::Transaction<'_>,
+    codec: &SecretCodec,
     connection_id: &str,
     key: &str,
     auth: &serde_json::Map<String, serde_json::Value>,
     field: &str,
 ) -> Result<(), String> {
     if let Some(secret) = auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty()) {
-        persist_secret_in_tx(tx, connection_id, key, secret)?;
+        persist_secret_in_tx(tx, codec, connection_id, key, secret)?;
     }
     Ok(())
 }
@@ -5485,6 +9538,16 @@ fn cassandra_tls_object_mut(
     value?.get_mut("tls")?.as_object_mut()
 }
 
+fn salesforce_auth_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    value?.get("auth")?.as_object()
+}
+
+fn salesforce_auth_object_mut(
+    value: Option<&mut serde_json::Value>,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    value?.get_mut("auth")?.as_object_mut()
+}
+
 fn nacos_auth_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
     value?.get("auth")?.as_object()
 }
@@ -5535,8 +9598,9 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
-        McpGlobalPolicyState, Storage, KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION, MCP_GLOBAL_POLICY_KEY,
+        maybe_import_user_data_db, AppAppearanceSettingsPatch, DataDbImportResult, DesktopIconTheme, DesktopSettings,
+        McpGlobalPolicy, McpGlobalPolicyState, Storage, SyncImportPlan, KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION,
+        MCP_GLOBAL_POLICY_KEY,
     };
     use crate::ai::{
         AiActiveModelSelection, AiAssistantMode, AiChatMessage, AiChatSelectionState, AiConversation,
@@ -5545,21 +9609,550 @@ mod tests {
     use crate::connection_secrets::NACOS_RNACOS_CONSOLE_PASSWORD_KEY;
     use crate::connection_secrets::{
         plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
-        MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
+        MQTT_AUTH_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
         PLUGIN_CONNECTION_SECRET_PREFIX,
     };
     use crate::history::{HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest};
     use crate::models::connection::{
-        ConnectionConfig, DatabaseConnectionInfo, DatabaseType, SshTunnelConfig, TransportLayerConfig,
+        ConnectionConfig, DatabaseConnectionInfo, DatabaseType, HttpTunnelConfig, SshTunnelConfig, TransportLayerConfig,
     };
-    use crate::saved_sql::SavedSqlFile;
+    use crate::persistence::secret_codec::{managed_key_path, SecretCodec, SecretKeyPolicy};
+    use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
     use rusqlite::{Connection, TransactionBehavior};
     use std::collections::BTreeMap;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    #[tokio::test]
+    async fn migration_scan_cache_recovers_legacy_success_with_stale_counts() {
+        let dir = temp_data_dir("migration-stale-cache");
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.join("dbx.db")).await.unwrap();
+        storage.set_migration_state(super::MigrationState::Succeeded, None, None, None, None).await.unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE data_migrations SET counts_json=?1",
+                    [r#"{"cachedScan":[75,0,65,15,2,0,5],"backupPaths":[]}"#],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let status = storage.inspect_data_migration().await.unwrap();
+        assert_eq!(status.state, super::MigrationState::Succeeded);
+        assert!(!status.needs_migration);
+        assert_eq!(status.database_plaintext_count, 0);
+        let again = storage.inspect_data_migration().await.unwrap();
+        assert!(!again.needs_migration);
+        assert_eq!(again.database_plaintext_count, 0);
+    }
+
+    #[tokio::test]
+    async fn migration_preflight_is_read_only() {
+        let dir = temp_data_dir("migration-cache-transition");
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.join("dbx.db")).await.unwrap();
+        storage.inspect_data_migration().await.unwrap();
+        let before = storage.load_migration_state().await.unwrap();
+        assert_eq!(before.state, super::MigrationState::Pending);
+        let before: serde_json::Value = serde_json::from_str(&before.counts_json).unwrap();
+        assert!(before.get("cachedScanFingerprint").is_none());
+        assert!(before.get("cachedScan").is_none());
+        let rows = storage
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM data_migrations", [], |row| row.get::<_, i64>(0))
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+        storage.set_migration_state(super::MigrationState::Succeeded, None, None, None, None).await.unwrap();
+        let after = storage.load_migration_state().await.unwrap();
+        let after: serde_json::Value = serde_json::from_str(&after.counts_json).unwrap();
+        assert!(after.get("cachedScan").is_none());
+        assert!(after.get("cachedScanFingerprint").is_none());
+        assert!(!storage.inspect_data_migration().await.unwrap().needs_migration);
+    }
+
+    #[tokio::test]
+    async fn migration_tolerates_unreadable_legacy_connection_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db")).await.unwrap();
+        storage
+            .with_conn(|conn| {
+                // A readable row carrying an inline password must keep counting…
+                let readable = serde_json::json!({
+                    "id": "conn-readable",
+                    "name": "Readable",
+                    "db_type": "mysql",
+                    "host": "127.0.0.1",
+                    "port": 3306,
+                    "username": "root",
+                    "password": "secret-password",
+                    "database": null
+                });
+                conn.execute(
+                    "INSERT INTO connections (id, config_json) VALUES ('conn-readable', ?1)",
+                    [readable.to_string()],
+                )
+                .unwrap();
+                // …while a pre-plugin row saved with a db_type the current enum no
+                // longer knows (legacy built-in s3) must not brick the scan (#10227).
+                let legacy = serde_json::json!({
+                    "id": "conn-legacy-s3",
+                    "name": "Legacy S3",
+                    "db_type": "s3",
+                    "host": "127.0.0.1",
+                    "port": 9000,
+                    "username": "minio",
+                    "password": "secret-s3",
+                    "database": null
+                });
+                conn.execute(
+                    "INSERT INTO connections (id, config_json) VALUES ('conn-legacy-s3', ?1)",
+                    [legacy.to_string()],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let preflight = storage.inspect_data_migration().await.unwrap();
+        assert_eq!(preflight.database_plaintext_count, 1);
+
+        storage.start_data_migration().await.unwrap();
+
+        // The unreadable row is preserved untouched; the readable row had its
+        // inline password moved into the encrypted secret store.
+        let (legacy_json, readable_json) = storage
+            .with_conn(|conn| {
+                let legacy: String = conn
+                    .query_row("SELECT config_json FROM connections WHERE id = 'conn-legacy-s3'", [], |row| row.get(0))
+                    .map_err(|e| e.to_string())?;
+                let readable: String = conn
+                    .query_row("SELECT config_json FROM connections WHERE id = 'conn-readable'", [], |row| row.get(0))
+                    .map_err(|e| e.to_string())?;
+                Ok((legacy, readable))
+            })
+            .await
+            .unwrap();
+        assert!(legacy_json.contains("\"s3\""), "legacy row must be preserved verbatim: {legacy_json}");
+        assert!(!readable_json.contains("secret-password"), "readable row must be scrubbed: {readable_json}");
+        let stored = storage.get_secret("conn-readable", "password").await.unwrap().unwrap_or_default();
+        assert_eq!(stored, "secret-password");
+    }
+
     fn temp_db_path(name: &str) -> std::path::PathBuf {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         std::env::temp_dir().join(format!("dbx-storage-{name}-{}-{stamp}.db", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn managed_data_dir_key_is_created_only_when_plaintext_migration_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let database_path = dir.path().join("dbx.db");
+        let storage = crate::persistence::test_storage::open_unmigrated(&database_path)
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO connection_secrets (connection_id, key, secret, secret_enc) VALUES ('legacy', 'password', 'old-secret', NULL)",
+                    [],
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let key_path = managed_key_path(dir.path());
+        let status = storage.inspect_data_migration().await.unwrap();
+        assert!(status.needs_migration);
+        assert!(status.key_creation_allowed);
+        assert_eq!(status.error_code.as_deref(), Some("MISSING_MANAGED_KEY"));
+        assert!(!key_path.exists());
+
+        storage.start_data_migration().await.unwrap();
+        assert!(key_path.is_file());
+        let row = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT secret, secret_enc FROM connection_secrets WHERE connection_id = 'legacy' AND key = 'password'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert!(row.0.is_empty());
+        assert!(row.1.starts_with("dbxenc1."));
+
+        drop(storage);
+        let reopened = crate::persistence::test_storage::open_unmigrated(&database_path)
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        assert_eq!(reopened.get_secret("legacy", "password").await.unwrap().as_deref(), Some("old-secret"));
+    }
+
+    #[tokio::test]
+    async fn secret_migration_write_failure_rolls_back_all_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&directory.path().join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO connection_secrets (connection_id, key, secret) VALUES
+                     ('first', 'password', 'first-secret'), ('second', 'password', 'second-secret');
+                     CREATE TRIGGER reject_second_encryption BEFORE UPDATE ON connection_secrets
+                     WHEN (SELECT COUNT(*) FROM connection_secrets WHERE secret_enc IS NOT NULL) > 0
+                     BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+                )
+                .map_err(|error| error.to_string())?;
+                let codec = super::SecretCodec::new([7u8; 32]);
+                let error = super::migrate_legacy_connection_secrets_sync(conn, &codec).unwrap_err();
+                assert!(error.contains("injected write failure"));
+                let unchanged: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM connection_secrets WHERE secret <> '' AND secret_enc IS NULL",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(unchanged, 2);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn secret_migration_late_failure_restores_backup_and_retries_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("dbx.db");
+        let storage = crate::persistence::test_storage::open_unmigrated(&database_path)
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO connection_secrets (connection_id, key, secret) VALUES ('legacy', 'password', 'old-secret')",
+                    [],
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        let legacy_path = directory.path().join("connections.json");
+        std::fs::write(&legacy_path, "invalid json").unwrap();
+        assert!(storage.start_data_migration().await.unwrap_err().contains("connections.json"));
+        assert_eq!(std::fs::read_to_string(&legacy_path).unwrap(), "invalid json");
+        assert!(!directory.path().join("connections.json.bak").exists());
+        let record = storage.load_migration_state().await.unwrap();
+        assert_eq!(record.state, super::MigrationState::Failed);
+        assert!(std::path::Path::new(record.backup_path.as_ref().unwrap()).join("dbx.db").is_file());
+        storage
+            .with_conn(|conn| {
+                let row: (String, Option<String>) = conn
+                    .query_row(
+                        "SELECT secret, secret_enc FROM connection_secrets WHERE connection_id = 'legacy'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(row, ("old-secret".to_string(), None));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(storage.cleanup_migration_backups().await.is_err());
+        drop(storage);
+
+        std::fs::write(&legacy_path, "[]").unwrap();
+        let reopened = crate::persistence::test_storage::open_unmigrated(&database_path)
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        reopened.retry_data_migration().await.unwrap();
+        assert_eq!(reopened.get_secret("legacy", "password").await.unwrap().as_deref(), Some("old-secret"));
+        assert!(!legacy_path.exists());
+        assert!(directory.path().join("connections.json.bak").exists());
+        assert!(reopened.inspect_data_migration().await.unwrap().is_ready());
+    }
+
+    #[tokio::test]
+    async fn secret_migration_running_state_resumes_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("dbx.db");
+        let storage = crate::persistence::test_storage::open_unmigrated(&database_path)
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        storage.set_secret("legacy", "password", "secret").await.unwrap();
+        let backup = storage.create_migration_backup().await.unwrap();
+        storage.set_migration_state(super::MigrationState::Running, Some(&backup), None, None, None).await.unwrap();
+        drop(storage);
+        let reopened = crate::persistence::test_storage::open_unmigrated(&database_path)
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        let status = reopened.inspect_data_migration().await.unwrap();
+        assert_eq!(status.state, super::MigrationState::Failed);
+        assert_eq!(status.error_code.as_deref(), Some("MIGRATION_INTERRUPTED"));
+        assert!(!status.is_ready());
+        reopened.retry_data_migration().await.unwrap();
+        assert!(reopened.inspect_data_migration().await.unwrap().is_ready());
+        assert_eq!(reopened.get_secret("legacy", "password").await.unwrap().as_deref(), Some("secret"));
+    }
+
+    /// Reads through the same codec path business reads use, so a cached codec
+    /// has to produce the right plaintext for the assertion to hold.
+    fn open_with_resolved_codec(storage: &Storage, envelope: &str) -> Result<String, String> {
+        storage.secret_codec(false)?.decrypt("connection", "password", envelope)
+    }
+
+    #[tokio::test]
+    async fn resolved_secret_codec_is_cached_until_a_key_file_changes() {
+        // Hydrating stored secrets used to re-resolve key material per secret,
+        // which on the desktop means one OS credential-store round trip per
+        // secret on the startup path.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_unmigrated(&dir.path().join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        let key_path = managed_key_path(dir.path());
+        std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+        std::fs::write(&key_path, "ab".repeat(32)).unwrap();
+        let file_codec = storage.secret_codec(false).unwrap();
+        let envelope = file_codec.encrypt("connection", "password", "secret").unwrap();
+
+        storage.cache_secret_codec(SecretCodec::new([7u8; 32]), storage.key_file_digests());
+        // Business reads answer from the cached codec instead of re-reading the
+        // key file, so an envelope sealed with the file key stays shut.
+        assert_eq!(open_with_resolved_codec(&storage, &envelope), Err("secret decryption failed".to_string()));
+
+        // Replacing the key file drops the cached codec, so the next read uses
+        // the material the provider now reports.
+        std::fs::write(&key_path, "cd".repeat(32)).unwrap();
+        assert!(storage.cached_secret_codec().is_none());
+        assert_eq!(open_with_resolved_codec(&storage, &envelope), Err("secret decryption failed".to_string()));
+
+        // Restoring the original material restores the working codec.
+        std::fs::write(&key_path, "ab".repeat(32)).unwrap();
+        assert_eq!(open_with_resolved_codec(&storage, &envelope).as_deref(), Ok("secret"));
+    }
+
+    /// Seeds the read-only error cache the way the startup status probe does
+    /// after a failed platform lookup. The sentinel string cannot be produced
+    /// by a real resolve, so observing it proves the cached error was served
+    /// without consulting the provider again.
+    fn cache_locked_keyring_error(storage: &Storage) {
+        let digests = storage.key_file_digests();
+        storage.cache_secret_key_error("CACHED_KEYRING_LOCKED", digests);
+    }
+
+    async fn storage_with_managed_key(directory: &std::path::Path) -> Storage {
+        let key_path = managed_key_path(directory);
+        std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+        std::fs::write(&key_path, "ab".repeat(32)).unwrap();
+        Storage::open_unmigrated(&directory.join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir)
+    }
+
+    #[tokio::test]
+    async fn cached_secret_key_error_is_served_to_read_only_resolves() {
+        // One failed startup probe must not be repeated by every subsequent
+        // read-only consumer while the desktop keyring stays locked.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage_with_managed_key(dir.path()).await;
+        cache_locked_keyring_error(&storage);
+        assert_eq!(storage.resolve_secret_key(false).err().unwrap(), "CACHED_KEYRING_LOCKED");
+        assert_eq!(storage.secret_codec(false).err().unwrap(), "CACHED_KEYRING_LOCKED");
+
+        // A key file change invalidates the cached error, so the next
+        // read-only resolve consults the provider again.
+        std::fs::write(managed_key_path(dir.path()), "cd".repeat(32)).unwrap();
+        assert!(storage.secret_codec(false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn successful_resolve_clears_cached_secret_key_error() {
+        // Once any resolve succeeds against a recovered provider, the stale
+        // cached failure must be retired instead of outliving the recovery.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage_with_managed_key(dir.path()).await;
+        cache_locked_keyring_error(&storage);
+        assert_eq!(storage.resolve_secret_key(false).err().unwrap(), "CACHED_KEYRING_LOCKED");
+        // A create-allowed resolve bypasses the read-only guard; its success
+        // drops the cached error for later read-only callers.
+        assert!(storage.resolve_secret_key(true).is_ok());
+        assert!(storage.resolve_secret_key(false).is_ok());
+        assert!(storage.secret_codec(false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn explicit_status_retry_bypasses_cached_error_and_keeps_the_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage_with_managed_key(dir.path()).await;
+        let cached_error = "KEYRING_ACCESS_FAILED: cached locked keyring";
+        storage.cache_secret_key_error(cached_error, storage.key_file_digests());
+
+        let cached = storage.inspect_data_migration().await.unwrap();
+        assert_eq!(cached.error_code.as_deref(), Some("KEYRING_ACCESS_FAILED"));
+        assert_eq!(storage.resolve_secret_key(false).err().unwrap(), cached_error);
+
+        let retried = storage.retry_data_migration_inspection().await.unwrap();
+        assert!(retried.key_provider_available);
+        assert_eq!(retried.key_status, super::MigrationKeyStatus::Ready);
+        assert_eq!(retried.key_source, "managed_data_dir");
+        assert!(storage.resolve_secret_key(false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_status_retry_replaces_the_cached_provider_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage_with_managed_key(dir.path()).await;
+        std::fs::write(managed_key_path(dir.path()), "\n").unwrap();
+        let cached_error = "KEYRING_ACCESS_FAILED: cached locked keyring";
+        storage.cache_secret_key_error(cached_error, storage.key_file_digests());
+
+        assert_eq!(storage.resolve_secret_key(false).err().unwrap(), cached_error);
+        let retried = storage.retry_data_migration_inspection().await.unwrap();
+        assert_eq!(retried.error_code.as_deref(), Some("SECRET_KEY_INVALID"));
+        assert_eq!(storage.resolve_secret_key(false).err().unwrap(), "SECRET_KEY_INVALID");
+    }
+
+    #[tokio::test]
+    async fn start_data_migration_invalidates_cached_secret_key_error() {
+        // Migration must re-probe the live provider instead of trusting a
+        // stale failure cached at startup.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage_with_managed_key(dir.path()).await;
+        cache_locked_keyring_error(&storage);
+        assert_eq!(storage.resolve_secret_key(false).err().unwrap(), "CACHED_KEYRING_LOCKED");
+        storage.start_data_migration().await.unwrap();
+        assert!(storage.secret_codec(false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn secret_migration_rejects_wrong_or_invalid_managed_keys_without_replacing_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&directory.path().join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        storage.set_secret("connection", "password", "secret").await.unwrap();
+        let key_path = managed_key_path(directory.path());
+        let original = std::fs::read(&key_path).unwrap();
+        for (material, expected) in [("00".repeat(32), "SECRET_KEY_MISMATCH"), ("\n".to_string(), "SECRET_KEY_INVALID")]
+        {
+            std::fs::write(&key_path, &material).unwrap();
+            let status = storage.inspect_data_migration().await.unwrap();
+            assert!(!status.is_ready());
+            assert!(!status.key_creation_allowed);
+            assert_eq!(status.error_code.as_deref(), Some(expected));
+            assert!(storage.get_secret("connection", "password").await.is_err());
+            assert_eq!(storage.start_data_migration().await.unwrap_err(), expected);
+            assert_eq!(std::fs::read_to_string(&key_path).unwrap(), material);
+        }
+        std::fs::write(&key_path, original).unwrap();
+        assert_eq!(storage.get_secret("connection", "password").await.unwrap().as_deref(), Some("secret"));
+    }
+
+    #[tokio::test]
+    async fn missing_managed_key_for_existing_ciphertext_never_creates_a_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let database_path = dir.path().join("dbx.db");
+        let storage = crate::persistence::test_storage::open_unmigrated(&database_path)
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        storage.set_secret("connection", "password", "secret").await.unwrap();
+        let key_path = managed_key_path(dir.path());
+        std::fs::remove_file(&key_path).unwrap();
+
+        let status = storage.inspect_data_migration().await.unwrap();
+        assert!(status.needs_migration);
+        assert!(!status.key_creation_allowed);
+        assert_eq!(status.error_code.as_deref(), Some("ENCRYPTED_DATA_KEY_MISSING"));
+        assert!(!key_path.exists());
+        assert_eq!(storage.start_data_migration().await.unwrap_err(), "ENCRYPTED_DATA_KEY_MISSING");
+        assert!(!key_path.exists());
+    }
+
+    #[tokio::test]
+    async fn secret_write_after_managed_key_loss_never_creates_a_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&directory.path().join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        storage.set_secret("existing", "password", "original-secret").await.unwrap();
+        let key_path = managed_key_path(directory.path());
+        let original_key = std::fs::read(&key_path).unwrap();
+        std::fs::remove_file(&key_path).unwrap();
+
+        assert_eq!(
+            storage.set_secret("new", "password", "new-secret").await.unwrap_err(),
+            "ENCRYPTED_DATA_KEY_MISSING"
+        );
+        assert!(!key_path.exists());
+        assert_eq!(storage.get_secret("new", "password").await.unwrap(), None);
+
+        std::fs::write(&key_path, original_key).unwrap();
+        assert_eq!(storage.get_secret("existing", "password").await.unwrap().as_deref(), Some("original-secret"));
+        storage.set_secret("new", "password", "new-secret").await.unwrap();
+        assert_eq!(storage.get_secret("new", "password").await.unwrap().as_deref(), Some("new-secret"));
+    }
+
+    #[tokio::test]
+    async fn connection_write_after_managed_key_loss_preserves_existing_ciphertext() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&directory.path().join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        let original = plain_connection("existing", "original-secret");
+        storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
+        let key_path = managed_key_path(directory.path());
+        let original_key = std::fs::read(&key_path).unwrap();
+        std::fs::remove_file(&key_path).unwrap();
+
+        let replacement = plain_connection("replacement", "new-secret");
+        assert_eq!(storage.save_connections(&[replacement]).await.unwrap_err(), "ENCRYPTED_DATA_KEY_MISSING");
+        assert!(!key_path.exists());
+
+        std::fs::write(&key_path, original_key).unwrap();
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, original.id);
+        assert_eq!(loaded[0].password, "original-secret");
+    }
+
+    #[tokio::test]
+    async fn disabled_secret_key_creation_does_not_provision_on_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let database_path = dir.path().join("dbx.db");
+        let storage = crate::persistence::test_storage::open_unmigrated(&database_path)
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir)
+            .with_secret_key_creation(false);
+
+        assert_eq!(storage.set_secret("connection", "password", "secret").await.unwrap_err(), "MISSING_MANAGED_KEY");
+        assert!(!managed_key_path(dir.path()).exists());
     }
 
     /// Data directory with an explicit mode. The process temp directory is
@@ -5578,7 +10171,7 @@ mod tests {
     #[tokio::test]
     async fn delete_table_vgroups_for_connection_scopes_by_prefix() {
         let path = temp_db_path("vgroup-delete");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let layout = serde_json::json!({ "version": 1, "groups": [], "order": [] });
         // 真实 scope_key 形如 `{connectionId}\u{0}{linkedServer}\u{0}{catalog}\u{0}{database}\u{0}{schema}`。
@@ -5621,7 +10214,7 @@ mod tests {
 
         let dir = temp_data_dir_with_mode("permission-single-user", 0o755);
         let path = dir.join("dbx.db");
-        drop(Storage::open(&path).await.unwrap());
+        drop(crate::persistence::test_storage::open(&path).await.unwrap());
 
         // Stand in for an installation created before this hardening existed,
         // including a rollback journal left behind by an interrupted write.
@@ -5631,7 +10224,7 @@ mod tests {
             std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
 
-        drop(Storage::open(&path).await.unwrap());
+        drop(crate::persistence::test_storage::open(&path).await.unwrap());
 
         for name in ["dbx.db", "dbx.db-journal", "dbx.db-wal", "dbx.db-shm"] {
             let Some(mode) = file_mode(&dir.join(name)) else { continue };
@@ -5652,7 +10245,7 @@ mod tests {
         // data directory.
         let dir = temp_data_dir_with_mode("permission-group-shared", 0o770);
         let path = dir.join("dbx.db");
-        drop(Storage::open(&path).await.unwrap());
+        drop(crate::persistence::test_storage::open(&path).await.unwrap());
 
         let journal = dir.join("dbx.db-journal");
         std::fs::write(&journal, b"").unwrap();
@@ -5660,7 +10253,7 @@ mod tests {
             std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o664)).unwrap();
         }
 
-        drop(Storage::open(&path).await.unwrap());
+        drop(crate::persistence::test_storage::open(&path).await.unwrap());
 
         for name in ["dbx.db", "dbx.db-journal"] {
             let Some(mode) = file_mode(&dir.join(name)) else { continue };
@@ -5678,13 +10271,13 @@ mod tests {
 
         let dir = temp_data_dir_with_mode("permission-init-failure", 0o755);
         let path = dir.join("dbx.db");
-        drop(Storage::open(&path).await.unwrap());
+        drop(crate::persistence::test_storage::open(&path).await.unwrap());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         // A read-only directory keeps the database file itself writable while
         // denying the journal SQLite needs, so the schema pass fails.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let result = Storage::open(&path).await;
+        let result = crate::persistence::test_storage::open(&path).await;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(result.is_err(), "expected schema initialization to fail on a read-only directory");
@@ -5724,6 +10317,11 @@ mod tests {
             affected_rows: None,
             rollback_sql: None,
             details_json: None,
+            source: "sql".to_string(),
+            mcp_tool_name: None,
+            mcp_request_json: None,
+            mcp_response_json: None,
+            mcp_session_id: None,
         }
     }
 
@@ -5733,7 +10331,9 @@ mod tests {
             id: id.to_string(),
             title: id.to_string(),
             connection_name: "local".to_string(),
+            connection_id: "local".to_string(),
             database: "db".to_string(),
+            schema: None,
             messages: vec![AiChatMessage {
                 role: "user".to_string(),
                 content: id.to_string(),
@@ -5742,6 +10342,9 @@ mod tests {
                 kind: None,
                 failed: None,
                 covered_messages: None,
+                source_binding: None,
+                selections_omitted: None,
+                loaded_skill_ids: None,
             }],
             queued_input: None,
             created_at: updated_at.to_string(),
@@ -5770,7 +10373,7 @@ mod tests {
     #[tokio::test]
     async fn ai_conversation_soft_cap_never_evicts_protected_runs() {
         let path = temp_db_path("ai-conversation-soft-cap");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let protected = ai_conversation("protected", "0000");
         let protected_run = ai_run("protected-run", "protected", AiRunStatus::Running, "0000");
@@ -5792,7 +10395,7 @@ mod tests {
     #[tokio::test]
     async fn ai_conversation_soft_cap_allows_more_than_fifty_protected_runs() {
         let path = temp_db_path("ai-conversation-protected-overflow");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         for index in 0..51 {
             let id = format!("protected-{index}");
@@ -5817,7 +10420,7 @@ mod tests {
     #[tokio::test]
     async fn ai_conversation_soft_cap_protects_pending_recoverable_runs() {
         let path = temp_db_path("ai-conversation-pending-recoverable-protection");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         // A recovered pending-input run (PRD §7 line 93) must be protected like
         // any other non-terminal run: its draft is not lost to pruning.
@@ -5841,7 +10444,7 @@ mod tests {
     #[tokio::test]
     async fn ai_run_roundtrips_fifo_category_and_pending_input() {
         let path = temp_db_path("ai-run-fifo-category-roundtrip");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let conversation = ai_conversation("fifo-conv", "0000");
         let mut run = ai_run("fifo-run", "fifo-conv", AiRunStatus::Queued, "0000");
@@ -5873,7 +10476,7 @@ mod tests {
     #[tokio::test]
     async fn saving_a_conversation_keeps_its_background_runs() {
         let path = temp_db_path("ai-conversation-upsert-keeps-runs");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         // `ai_runs` declares an ON DELETE CASCADE relationship. Exercise the
         // snapshot path with enforcement enabled so an accidental REPLACE
         // (delete + insert) cannot silently erase an active run on restart.
@@ -5908,7 +10511,7 @@ mod tests {
         // conversation (keeping the newest few, which drive the row status
         // badge after restart) and never touches recovery-relevant runs.
         let path = temp_db_path("ai-terminal-runs-capped");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         // A non-terminal run must always survive - it is the recovery payload.
         let conversation = ai_conversation("cap-conv", "0000");
@@ -5952,7 +10555,7 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut loaded = storage.load_ai_conversations().await.unwrap();
         assert_eq!(loaded[0].title, "SQL conversation");
         assert!(loaded[0].plugin_context.is_none());
@@ -5965,7 +10568,7 @@ mod tests {
     #[tokio::test]
     async fn ai_conversation_retains_plugin_snapshot_without_a_database() {
         let path = temp_db_path("ai-plugin-conversation");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut conversation = ai_conversation("market-analysis", "0000");
         conversation.database.clear();
         let snapshot = serde_json::json!({
@@ -5996,7 +10599,7 @@ mod tests {
     #[tokio::test]
     async fn ai_conversation_roundtrips_queued_input() {
         let path = temp_db_path("ai-conversation-queued-input-roundtrip");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let mut conversation = ai_conversation("queued-conv", "0000");
         conversation.queued_input = Some("run this after the current task".to_string());
@@ -6016,6 +10619,173 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// Legacy `ai_conversations` table (no `connection_id` / `schema_name`), plus
+    /// a `connections` table whose rows the backfill matches against.
+    fn create_legacy_conversation_db(path: &std::path::Path, conversations: &str, connections: &str) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE ai_conversations (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', connection_name TEXT NOT NULL DEFAULT '',
+                database TEXT NOT NULL DEFAULT '', messages_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE connections (id TEXT PRIMARY KEY, config_json TEXT NOT NULL);
+            {connections}
+            {conversations}"
+        ))
+        .unwrap();
+        drop(conn);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_roundtrips_connection_binding() {
+        let path = temp_db_path("ai-conversation-binding-roundtrip");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        let mut conversation = ai_conversation("bound-conv", "0000");
+        conversation.connection_id = "conn-prod".to_string();
+        conversation.schema = Some("public".to_string());
+        conversation.messages[0].source_binding = Some(crate::ai::AiChatSourceBinding {
+            connection_id: "conn-original".to_string(),
+            database: "db-original".to_string(),
+            schema: Some("legacy".to_string()),
+        });
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(loaded[0].connection_id, "conn-prod");
+        assert_eq!(loaded[0].schema.as_deref(), Some("public"));
+        let source = loaded[0].messages[0].source_binding.as_ref().unwrap();
+        assert_eq!(source.connection_id, "conn-original");
+        assert_eq!(source.database, "db-original");
+        assert_eq!(source.schema.as_deref(), Some("legacy"));
+        let legacy: AiChatMessage = serde_json::from_str(r#"{"role":"assistant","content":"old reply"}"#).unwrap();
+        assert!(legacy.source_binding.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    // #10058: a turn that carried a context selection keeps only a footprint in
+    // storage — the selection text is session-only. The record must round-trip
+    // that boolean, and a record written before the field existed must load.
+    #[tokio::test]
+    async fn ai_conversation_roundtrips_selection_omitted_footprint() {
+        let path = temp_db_path("ai-conversation-selection-footprint");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        let mut conversation = ai_conversation("selection-conv", "0000");
+        conversation.messages[0].selections_omitted = Some(true);
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(loaded[0].messages[0].selections_omitted, Some(true));
+        // No selection text is stored alongside it, only the flag.
+        assert!(loaded[0].messages[0].mentions.is_none());
+
+        let legacy: AiChatMessage = serde_json::from_str(r#"{"role":"user","content":"old turn"}"#).unwrap();
+        assert!(legacy.selections_omitted.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    // prd 09-30 Req 13: a conversation keeps the FACT that skills were loaded so
+    // the panel can light its chips after a restart. The body itself is
+    // deliberately not part of the record — see the field comment in
+    // `dbx-ai-provider`. This pins both halves: the ids round-trip, and a record
+    // written before the field existed still loads.
+    #[tokio::test]
+    async fn ai_conversation_roundtrips_loaded_skill_ids() {
+        let path = temp_db_path("ai-conversation-loaded-skills");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        let mut conversation = ai_conversation("skills-conv", "0000");
+        conversation.messages[0].loaded_skill_ids = Some(vec!["d-abc".to_string(), "c-def".to_string()]);
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(
+            loaded[0].messages[0].loaded_skill_ids.as_deref(),
+            Some(["d-abc".to_string(), "c-def".to_string()].as_slice())
+        );
+        // No body: the stored message is exactly the id list.
+        let stored = serde_json::to_value(&loaded[0].messages[0]).unwrap();
+        assert!(stored.get("loadedSkillIds").and_then(|value| value.as_array()).is_some());
+        assert!(stored.get("toolCalls").is_none());
+
+        let legacy: AiChatMessage = serde_json::from_str(r#"{"role":"assistant","content":"old turn"}"#).unwrap();
+        assert!(legacy.loaded_skill_ids.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_upgrades_legacy_schema_and_binds_a_unique_connection() {
+        let path = temp_db_path("ai-conversation-legacy-binding");
+        create_legacy_conversation_db(
+            &path,
+            "INSERT INTO ai_conversations (id, title, connection_name) VALUES ('prod', 'Prod chat', 'Prod MySQL');
+             INSERT INTO ai_conversations (id, title, connection_name) VALUES ('orphan', 'Orphan chat', 'Deleted Conn');",
+            "INSERT INTO connections (id, config_json) VALUES ('c-prod', '{\"id\":\"c-prod\",\"name\":\"Prod MySQL\",\"db_type\":\"mysql\",\"host\":\"127.0.0.1\",\"port\":3306,\"username\":\"u\",\"password\":\"p\",\"database\":null}');",
+        );
+
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let conversation = |id: &str| loaded.iter().find(|item| item.id == id).unwrap();
+
+        // Exactly one saved connection carries the stored name: bind it.
+        assert_eq!(conversation("prod").connection_id, "c-prod");
+        // Nothing carries that name; a guess would silently point at the wrong
+        // database, so the conversation stays unbound for the UI to resolve.
+        assert!(conversation("orphan").connection_id.is_empty());
+        assert!(conversation("orphan").schema.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_backfill_skips_ambiguous_connection_names() {
+        let path = temp_db_path("ai-conversation-binding-ambiguous");
+        create_legacy_conversation_db(
+            &path,
+            "INSERT INTO ai_conversations (id, title, connection_name) VALUES ('dup', 'Dup chat', 'Shared Name');
+             INSERT INTO ai_conversations (id, title, connection_name) VALUES ('nameless', 'Nameless chat', '');",
+            "INSERT INTO connections (id, config_json) VALUES ('c1', '{\"id\":\"c1\",\"name\":\"Shared Name\",\"db_type\":\"mysql\",\"host\":\"127.0.0.1\",\"port\":3306,\"username\":\"u\",\"password\":\"p\",\"database\":null}');
+             INSERT INTO connections (id, config_json) VALUES ('c2', '{\"id\":\"c2\",\"name\":\"Shared Name\",\"db_type\":\"mysql\",\"host\":\"127.0.0.1\",\"port\":3306,\"username\":\"u\",\"password\":\"p\",\"database\":null}');",
+        );
+
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        for conversation in storage.load_ai_conversations().await.unwrap() {
+            // Two connections share the name (names are not unique), and an empty
+            // name identifies nothing: neither may be auto-bound.
+            assert!(conversation.connection_id.is_empty(), "{} must stay unbound", conversation.id);
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_backfill_never_overwrites_an_existing_binding() {
+        let path = temp_db_path("ai-conversation-binding-idempotent");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let mut conversation = ai_conversation("pinned", "0000");
+        conversation.connection_id = "conn-a".to_string();
+        storage.save_ai_conversation(&conversation).await.unwrap();
+        drop(storage);
+
+        // A connection matching the stored name appears *after* the binding was
+        // written; re-running the backfill must leave the explicit binding alone.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("INSERT INTO connections (id, config_json) VALUES ('conn-later', '{\"id\":\"conn-later\",\"name\":\"local\",\"db_type\":\"mysql\",\"host\":\"127.0.0.1\",\"port\":3306,\"username\":\"u\",\"password\":\"p\",\"database\":null}')", [])
+            .unwrap();
+        drop(conn);
+
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(loaded[0].connection_id, "conn-a");
+
+        let _ = std::fs::remove_file(path);
+    }
+
     // Seed a backlog efficiently, then exercise the production write path that
     // applies retention. Settings must affect every caller of that path.
     async fn seed_history_backlog(storage: &Storage, count: usize) {
@@ -6031,11 +10801,126 @@ mod tests {
         }).await.unwrap();
     }
 
+    async fn seed_mixed_history(storage: &Storage) {
+        seed_history_backlog(storage, 1001).await;
+        storage.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO history (id, connection_name, database, sql_text, executed_at, execution_time_ms, success, source)
+                 SELECT 'mcp-' || id, connection_name, database, sql_text, executed_at, execution_time_ms, success, 'mcp' FROM history WHERE source = 'sql'",
+                [],
+            ).map(|_| ()).map_err(|e| e.to_string())
+        }).await.unwrap();
+    }
+
+    async fn source_count(storage: &Storage, source: &str) -> usize {
+        storage
+            .search_history_entries(HistorySearchRequest { source: Some(source.to_string()), ..Default::default() })
+            .await
+            .unwrap()
+            .total as usize
+    }
+
+    async fn write_source_history(storage: &Storage, source: &str) {
+        let mut entry =
+            history_entry(&format!("new-{source}"), "conn", "Main", "app", "select 2", "2026-07-19T00:00:00Z", true);
+        entry.source = source.to_string();
+        storage.save_history_entry(&entry).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_retention_sources_are_independent_and_unlimited() {
+        for (sql_limit, mcp_limit, sql_expected, mcp_expected) in [
+            (200, 1000, 200, 1000),
+            (1000, 200, 1000, 200),
+            (0, 200, 1002, 200),
+            (200, 0, 200, 1002),
+            (0, 0, 1002, 1002),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+            seed_mixed_history(&storage).await;
+            storage.save_history_retention_limit(sql_limit).await.unwrap();
+            storage.save_mcp_history_retention_limit(mcp_limit).await.unwrap();
+            assert_eq!(source_count(&storage, "sql").await, 1001);
+            assert_eq!(source_count(&storage, "mcp").await, 1001);
+            write_source_history(&storage, "mcp").await;
+            assert_eq!(source_count(&storage, "mcp").await, mcp_expected);
+            assert_eq!(source_count(&storage, "sql").await, 1001);
+            write_source_history(&storage, "sql").await;
+            assert_eq!(source_count(&storage, "sql").await, sql_expected);
+            assert_eq!(source_count(&storage, "mcp").await, mcp_expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn history_retention_mcp_defaults_and_preserves_saved_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dbx.db");
+        let storage = Storage::open(&path).await.unwrap();
+        assert_eq!(storage.load_mcp_history_retention_limit().await.unwrap(), 1000);
+        seed_mixed_history(&storage).await;
+        write_source_history(&storage, "mcp").await;
+        assert_eq!(source_count(&storage, "mcp").await, 1000);
+        assert_eq!(source_count(&storage, "sql").await, 1001);
+        let stale = storage.load_app_settings_json().await.unwrap();
+        storage.save_mcp_history_retention_limit(200).await.unwrap();
+        storage.save_app_settings_json(&stale).await.unwrap();
+        assert_eq!(storage.load_mcp_history_retention_limit().await.unwrap(), 200);
+        assert_eq!(source_count(&storage, "mcp").await, 1000);
+        write_source_history(&storage, "sql").await;
+        assert_eq!(source_count(&storage, "mcp").await, 1000);
+        write_source_history(&storage, "mcp").await;
+        assert_eq!(source_count(&storage, "mcp").await, 200);
+        assert!(storage.save_mcp_history_retention_limit(1).await.is_err());
+        drop(storage);
+        let reopened = Storage::open(&path).await.unwrap();
+        assert_eq!(reopened.load_mcp_history_retention_limit().await.unwrap(), 200);
+    }
+
+    #[tokio::test]
+    async fn history_retention_legacy_migration_recovers_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dbx.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE history (id TEXT PRIMARY KEY, connection_name TEXT NOT NULL,
+                 database TEXT NOT NULL, sql_text TEXT NOT NULL, executed_at TEXT NOT NULL,
+                 execution_time_ms INTEGER NOT NULL, success INTEGER NOT NULL, error TEXT, details_json TEXT);
+                 INSERT INTO history VALUES ('sql', 'Main', 'app', 'select 1', '2026-07-18', 1, 1, NULL, NULL);
+                 INSERT INTO history VALUES ('mcp', 'Main', 'app', 'select 2', '2026-07-18', 1, 1, NULL, '{\"source\":\"mcp\"}');
+                 INSERT INTO history VALUES ('invalid', 'Main', 'app', 'select 3', '2026-07-18', 1, 1, NULL, 'invalid json');"
+            ).unwrap();
+        }
+        for _ in 0..2 {
+            let storage = Storage::open(&path).await.unwrap();
+            assert_eq!(source_count(&storage, "sql").await, 2);
+            assert_eq!(source_count(&storage, "mcp").await, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn history_source_clear_and_mcp_cleanup_are_isolated() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+        seed_mixed_history(&storage).await;
+        storage.save_mcp_history_retention_limit(200).await.unwrap();
+
+        assert_eq!(storage.cleanup_mcp_history_retention().await.unwrap(), 801);
+        assert_eq!(source_count(&storage, "mcp").await, 200);
+        assert_eq!(source_count(&storage, "sql").await, 1001);
+
+        storage.clear_history_by_source("mcp").await.unwrap();
+        assert_eq!(source_count(&storage, "mcp").await, 0);
+        assert_eq!(source_count(&storage, "sql").await, 1001);
+        assert!(storage.clear_history_by_source(" ").await.is_err());
+    }
+
     #[tokio::test]
     async fn history_retention_uses_persisted_limit_on_the_next_write() {
         for (limit, expected) in [(200, 200), (5000, 1002), (10000, 1002), (0, 1002)] {
             let dir = tempfile::tempdir().unwrap();
-            let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+            let storage = crate::persistence::test_storage::open(&dir.path().join("dbx.db")).await.unwrap();
             seed_history_backlog(&storage, 1001).await;
             storage
                 .with_conn(move |conn| {
@@ -6076,7 +10961,7 @@ mod tests {
     async fn history_retention_defaults_validates_and_survives_stale_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dbx.db");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         assert_eq!(storage.load_history_retention_limit().await.unwrap(), 1000);
         let stale = storage.load_app_settings_json().await.unwrap();
         for limit in [200, 1000, 5000, 10000, 0] {
@@ -6090,14 +10975,14 @@ mod tests {
         storage.save_app_settings_json(&stale).await.unwrap();
         assert_eq!(storage.load_history_retention_limit().await.unwrap(), 0);
         drop(storage);
-        let reopened = Storage::open(&path).await.unwrap();
+        let reopened = crate::persistence::test_storage::open(&path).await.unwrap();
         assert_eq!(reopened.load_history_retention_limit().await.unwrap(), 0);
     }
 
     #[tokio::test]
     async fn history_retention_invalid_persisted_values_use_default() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("dbx.db")).await.unwrap();
         for value in [
             serde_json::json!(-1),
             serde_json::json!(1),
@@ -6137,7 +11022,7 @@ mod tests {
     #[tokio::test]
     async fn history_retention_setting_changes_do_not_prune_until_next_write() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("dbx.db")).await.unwrap();
         storage.save_history_retention_limit(0).await.unwrap();
         seed_history_backlog(&storage, 1001).await;
         storage.save_history_retention_limit(200).await.unwrap();
@@ -6160,7 +11045,7 @@ mod tests {
     #[tokio::test]
     async fn history_search_filters_connection_database_and_legacy_entries() {
         let path = temp_db_path("history-search-scope");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let entries = [
             history_entry("1", "conn-a", "Primary", "sales", "select 1", "2026-07-18T01:00:00Z", true),
             history_entry("2", "conn-b", "Replica", "sales", "select 2", "2026-07-18T02:00:00Z", true),
@@ -6212,7 +11097,7 @@ mod tests {
     #[tokio::test]
     async fn history_search_combines_whole_connections_with_narrowed_database_scopes() {
         let path = temp_db_path("history-search-hierarchical-scope");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let entries = [
             history_entry("a-sales", "conn-a", "Primary", "sales", "select 1", "2026-07-18T01:00:00Z", true),
             history_entry("a-archive", "conn-a", "Primary", "archive", "select 2", "2026-07-18T02:00:00Z", true),
@@ -6257,7 +11142,7 @@ mod tests {
     #[tokio::test]
     async fn history_search_combines_text_status_and_time_filters() {
         let path = temp_db_path("history-search-fields");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let entries = [
             history_entry("1", "conn", "Main", "app", "select 100% from orders", "2026-07-17T23:59:59Z", false),
             history_entry("2", "conn", "Main", "app", "select 1000 from orders", "2026-07-18T12:00:00Z", false),
@@ -6298,7 +11183,7 @@ mod tests {
     #[tokio::test]
     async fn history_search_cursor_is_stable_for_equal_timestamps() {
         let path = temp_db_path("history-search-cursor");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         for id in ["a", "b", "c"] {
             storage
                 .save_history_entry(&history_entry(id, "conn", "Main", "app", "select 1", "2026-07-18T12:00:00Z", true))
@@ -6335,6 +11220,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
             profile_id: String::new(),
         })
     }
@@ -6342,7 +11228,7 @@ mod tests {
     #[tokio::test]
     async fn tunnel_profiles_roundtrip_and_preserve_secrets() {
         let path = temp_db_path("tunnel-profiles");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let profile = ssh_profile("profile-1", "s3cret");
         storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();
@@ -6368,9 +11254,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tunnel_profile_secret_fields_are_not_written_to_config_json() {
+        let path = temp_db_path("tunnel-secret-at-rest");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let profile = TransportLayerConfig::HttpTunnel(HttpTunnelConfig {
+            id: "http-secret".to_string(),
+            name: "HTTP".to_string(),
+            enabled: true,
+            url: "https://bastion.example.com".to_string(),
+            token: "tunnel-token".to_string(),
+            connect_timeout_secs: 5,
+            profile_id: String::new(),
+        });
+        storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();
+        let raw = storage
+            .with_conn(|conn| {
+                conn.query_row("SELECT config_json FROM tunnel_profiles WHERE id = 'http-secret'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert!(!raw.contains("tunnel-token"));
+        let encrypted = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT secret_enc FROM connection_secrets WHERE connection_id = 'tunnel_profile.http-secret' AND key = 'config'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert!(encrypted.is_some_and(|value| value.starts_with("dbxenc1.")));
+        assert_eq!(storage.load_tunnel_profiles().await.unwrap(), vec![profile]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn tunnel_profiles_reject_empty_ids() {
         let path = temp_db_path("tunnel-profiles-empty-id");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let profile = ssh_profile("", "secret");
         assert!(storage.save_tunnel_profiles(&[profile]).await.is_err());
@@ -6412,7 +11338,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_cassandra_tls_passwords_to_secret_table_and_restores_them() {
         let path = temp_db_path("cassandra-tls-secrets");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage.save_connections(&[cassandra_connection("cassandra")]).await.unwrap();
 
@@ -6446,7 +11372,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_does_not_persist_password_when_save_password_false() {
         let path = temp_db_path("save-password-false");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let mut config = plain_connection("no-save", "hunter2");
         config.save_password = false;
@@ -6470,8 +11396,8 @@ mod tests {
         // the same inter-connection SQLite file locking that separate OS
         // processes would hit.
         let path = temp_db_path("concurrent-save-connections");
-        let storage_a = std::sync::Arc::new(Storage::open(&path).await.unwrap());
-        let storage_b = std::sync::Arc::new(Storage::open(&path).await.unwrap());
+        let storage_a = std::sync::Arc::new(crate::persistence::test_storage::open(&path).await.unwrap());
+        let storage_b = std::sync::Arc::new(crate::persistence::test_storage::open(&path).await.unwrap());
 
         let mut tasks = Vec::new();
         for i in 0..20 {
@@ -6490,7 +11416,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_persists_password_when_save_password_true() {
         let path = temp_db_path("save-password-true");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let config = plain_connection("save-yes", "hunter2");
         storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
@@ -6504,9 +11430,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plugin_secret_reads_require_a_key_only_for_ciphertext() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        assert!(storage.secret_codec(false).is_err());
+        assert!(super::load_plugin_connection_secrets(&storage, "conn").await.unwrap().is_empty());
+        let codec = super::SecretCodec::new([7; 32]);
+        let key = format!("{PLUGIN_CONNECTION_SECRET_PREFIX}token");
+        let encrypted = codec.encrypt("conn", &key, "secret").unwrap();
+        storage
+            .with_conn(move |conn| {
+                conn.execute(
+                "INSERT INTO connection_secrets (connection_id, key, secret, secret_enc) VALUES ('conn', ?1, '', ?2)",
+                rusqlite::params![key, encrypted],
+            ).map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(super::load_plugin_connection_secrets(&storage, "conn").await.is_err());
+    }
+
+    #[tokio::test]
     async fn save_connections_moves_plugin_secrets_to_secret_table_and_clears_removed_values() {
         let path = temp_db_path("plugin-secrets");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = plain_connection("plugin", "");
         config.db_type = DatabaseType::Plugin;
         config.plugin_id = Some("example.plugin".to_string());
@@ -6541,7 +11492,7 @@ mod tests {
     #[tokio::test]
     async fn switching_save_password_off_removes_stored_password() {
         let path = temp_db_path("save-password-switch-off");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let mut config = plain_connection("switch", "hunter2");
         storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
@@ -6559,6 +11510,8 @@ mod tests {
 
     fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: "Pulsar".to_string(),
@@ -6578,6 +11531,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -6604,6 +11558,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -6633,6 +11588,8 @@ mod tests {
 
     fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: "Nacos".to_string(),
@@ -6652,6 +11609,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -6678,6 +11636,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -6762,7 +11721,7 @@ mod tests {
 
     async fn create_data_dir_with_connection(name: &str, connection_id: &str, token: &str) -> std::path::PathBuf {
         let data_dir = temp_data_dir(name);
-        let storage = Storage::open(&data_dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&data_dir.join("dbx.db")).await.unwrap();
         storage.save_connections(&[mq_connection(connection_id, token)]).await.unwrap();
         drop(storage);
         data_dir
@@ -6772,11 +11731,13 @@ mod tests {
     async fn import_user_data_db_copies_source_when_target_is_missing() {
         let source_dir = create_data_dir_with_connection("import-source", "source-connection", "source-token").await;
         let target_dir = temp_data_dir("import-target");
+        std::fs::create_dir_all(managed_key_path(&target_dir).parent().unwrap()).unwrap();
+        std::fs::copy(managed_key_path(&source_dir), managed_key_path(&target_dir)).unwrap();
 
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 
         assert_eq!(result, DataDbImportResult::Imported);
-        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         let connections = storage.load_connections().await.unwrap();
         assert_eq!(connections.len(), 1);
         assert_eq!(connections[0].id, "source-connection");
@@ -6793,7 +11754,7 @@ mod tests {
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 
         assert_eq!(result, DataDbImportResult::SkippedTargetHasData);
-        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         let connections = storage.load_connections().await.unwrap();
         assert_eq!(connections.len(), 1);
         assert_eq!(connections[0].id, "target-connection");
@@ -6803,7 +11764,7 @@ mod tests {
     #[tokio::test]
     async fn import_user_data_db_recognizes_settings_and_snippets_as_user_data() {
         let source_dir = temp_data_dir("import-settings-only-source");
-        let source_storage = Storage::open(&source_dir.join("dbx.db")).await.unwrap();
+        let source_storage = crate::persistence::test_storage::open(&source_dir.join("dbx.db")).await.unwrap();
         source_storage
             .save_desktop_settings(&DesktopSettings { debug_logging_enabled: true, ..DesktopSettings::default() })
             .await
@@ -6820,7 +11781,7 @@ mod tests {
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 
         assert_eq!(result, DataDbImportResult::Imported);
-        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         assert!(storage.load_desktop_settings().await.unwrap().debug_logging_enabled);
         assert_eq!(storage.load_editor_settings().await.unwrap().unwrap()["snippets"][0]["body"], "SELECT 42");
     }
@@ -6830,7 +11791,7 @@ mod tests {
         let source_dir =
             create_data_dir_with_connection("import-source-settings-target", "source-connection", "source-token").await;
         let target_dir = temp_data_dir("import-target-settings-only");
-        let target_storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let target_storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         target_storage
             .save_editor_settings(&serde_json::json!({
                 "snippets": [{ "id": "target", "prefix": "tgt", "body": "SELECT 7" }]
@@ -6842,7 +11803,7 @@ mod tests {
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 
         assert_eq!(result, DataDbImportResult::SkippedTargetHasData);
-        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         assert_eq!(storage.load_editor_settings().await.unwrap().unwrap()["snippets"][0]["body"], "SELECT 7");
     }
 
@@ -6851,12 +11812,17 @@ mod tests {
         let source_dir =
             create_data_dir_with_connection("import-source-empty-target", "source-connection", "source-token").await;
         let target_dir = temp_data_dir("import-empty-target");
-        let _target_storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        std::fs::create_dir_all(managed_key_path(&target_dir).parent().unwrap()).unwrap();
+        std::fs::copy(managed_key_path(&source_dir), managed_key_path(&target_dir)).unwrap();
+        // 打开一次以创建空目标库；导入前必须释放，否则 Windows 上目标文件被占用、
+        // 替换会失败（与相邻用例一致）。
+        let target_storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        drop(target_storage);
 
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 
         assert_eq!(result, DataDbImportResult::Imported);
-        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         let connections = storage.load_connections().await.unwrap();
         assert_eq!(connections.len(), 1);
         assert_eq!(connections[0].id, "source-connection");
@@ -6865,7 +11831,7 @@ mod tests {
     #[tokio::test]
     async fn import_user_data_db_skips_empty_source_schema() {
         let source_dir = temp_data_dir("import-empty-source");
-        let source_storage = Storage::open(&source_dir.join("dbx.db")).await.unwrap();
+        let source_storage = crate::persistence::test_storage::open(&source_dir.join("dbx.db")).await.unwrap();
         drop(source_storage);
         let target_dir = temp_data_dir("import-empty-source-target");
 
@@ -6891,7 +11857,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_preserves_database_info() {
         let path = temp_db_path("database-info");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = mq_connection("database-info", "mq-secret");
         config.database_info = Some(DatabaseConnectionInfo {
             product_name: Some("MySQL".to_string()),
@@ -6923,7 +11889,7 @@ mod tests {
     #[tokio::test]
     async fn save_connection_mqtt_saved_topics_updates_only_target_and_preserves_secrets() {
         let path = temp_db_path("mqtt-saved-topics");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let target = mq_connection("target", "target-secret");
         let untouched = mq_connection("untouched", "untouched-secret");
         storage.save_connections(&[target.clone(), untouched.clone()]).await.unwrap();
@@ -6950,7 +11916,7 @@ mod tests {
     #[tokio::test]
     async fn save_connection_mqtt_saved_topics_rejects_non_object_external_config() {
         let path = temp_db_path("mqtt-saved-topics-invalid");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut target = mq_connection("target", "target-secret");
         target.external_config = Some(serde_json::json!("invalid"));
         storage.save_connections(std::slice::from_ref(&target)).await.unwrap();
@@ -6963,7 +11929,7 @@ mod tests {
     #[tokio::test]
     async fn save_connection_driver_profile_updates_only_the_target_metadata() {
         let path = temp_db_path("connection-driver-profile");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let target = mq_connection("target", "target-secret");
         let untouched = mq_connection("untouched", "untouched-secret");
         storage.save_connections(&[target.clone(), untouched.clone()]).await.unwrap();
@@ -7002,7 +11968,7 @@ mod tests {
     #[tokio::test]
     async fn save_connection_database_updates_only_the_target_and_preserves_secrets() {
         let path = temp_db_path("connection-database");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let target = mq_connection("target", "target-secret");
         let untouched = mq_connection("untouched", "untouched-secret");
         storage.save_connections(&[target.clone(), untouched.clone()]).await.unwrap();
@@ -7022,7 +11988,7 @@ mod tests {
     #[tokio::test]
     async fn save_connection_driver_profile_rejects_a_stale_connection_config() {
         let path = temp_db_path("connection-driver-profile-stale");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let original = mq_connection("target", "target-secret");
         storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
 
@@ -7049,7 +12015,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_mq_auth_token_to_secret_table_and_restores_it() {
         let path = temp_db_path("mq-token-secrets");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage.save_connections(&[mq_connection("pulsar", "mq-token-secret")]).await.unwrap();
 
@@ -7067,7 +12033,7 @@ mod tests {
     #[tokio::test]
     async fn unreadable_saved_connections_do_not_block_loading_or_get_deleted_by_list_saves() {
         let path = temp_db_path("unreadable-connection-preservation");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut known = mq_connection("known", "known-secret");
         storage.save_connections(std::slice::from_ref(&known)).await.unwrap();
 
@@ -7105,7 +12071,14 @@ mod tests {
         assert_eq!(raw_connection_json(&storage, "future").await, future_json);
         assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
 
+        // Saving a list no longer replaces the whole table: an empty save is a no-op, so
+        // rows the caller never saw (like the unreadable "future" row) survive it.
         storage.save_connections(&[]).await.unwrap();
+        assert_eq!(storage.load_connections().await.unwrap().len(), 1);
+        assert_eq!(raw_connection_json(&storage, "future").await, future_json);
+
+        // Deleting a connection is explicit now, and still only touches the given ids.
+        storage.delete_connections(&["known".to_string()]).await.unwrap();
         assert!(storage.load_connections().await.unwrap().is_empty());
         assert_eq!(raw_connection_json(&storage, "future").await, future_json);
         assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
@@ -7116,7 +12089,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_plugin_secrets_to_secret_table_and_restores_them() {
         let path = temp_db_path("plugin-connection-secret");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = mq_connection("plugin-connection", "");
         config.name = "Hello plugin".to_string();
         config.db_type = DatabaseType::Plugin;
@@ -7149,7 +12122,7 @@ mod tests {
     #[tokio::test]
     async fn load_connections_preserves_opaque_null_plugin_secrets() {
         let path = temp_db_path("plugin-null-secret");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = mq_connection("plugin-connection", "");
         config.name = "SSH plugin".to_string();
         config.db_type = DatabaseType::Plugin;
@@ -7192,7 +12165,7 @@ mod tests {
         storage.save_connections(&loaded).await.unwrap();
         assert_eq!(storage.load_connections().await.unwrap()[0].connection_secrets, *secrets);
         drop(storage);
-        let reopened = Storage::open(&path).await.unwrap();
+        let reopened = crate::persistence::test_storage::open(&path).await.unwrap();
         assert_eq!(reopened.load_connections().await.unwrap()[0].connection_secrets, *secrets);
 
         let _ = std::fs::remove_file(path);
@@ -7201,7 +12174,7 @@ mod tests {
     #[tokio::test]
     async fn metadata_save_scrubs_mq_auth_token_and_preserves_existing_secret() {
         let path = temp_db_path("mq-token-metadata");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let original = mq_connection("pulsar", "existing-token");
         storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
@@ -7227,7 +12200,7 @@ mod tests {
     #[tokio::test]
     async fn load_connections_migrates_legacy_mq_auth_token_out_of_config_json() {
         let path = temp_db_path("mq-token-legacy-migration");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         insert_raw_connection(&storage, &mq_connection("pulsar", "legacy-token")).await;
 
         let loaded = storage.load_connections().await.unwrap();
@@ -7243,7 +12216,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_deletes_stale_mq_auth_secrets_when_kind_changes() {
         let path = temp_db_path("mq-auth-kind-change");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage.save_connections(&[mq_connection("pulsar", "old-token")]).await.unwrap();
         let mut config = mq_connection("pulsar", "");
         config.external_config = Some(serde_json::json!({
@@ -7265,7 +12238,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_mq_token_signing_key_to_secret_table_and_restores_it() {
         let path = temp_db_path("mq-token-signing-secret");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = mq_connection("pulsar", "");
         config.external_config = Some(serde_json::json!({
             "systemKind": "pulsar",
@@ -7295,7 +12268,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_nacos_auth_password_to_secret_table_and_restores_it() {
         let path = temp_db_path("nacos-auth-secret");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage.save_connections(&[nacos_connection("nacos", "nacos-secret")]).await.unwrap();
 
@@ -7316,7 +12289,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_separate_rnacos_console_password_to_secret_table() {
         let path = temp_db_path("rnacos-console-auth-secret");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = nacos_connection("rnacos", "");
         config.external_config = Some(serde_json::json!({
             "implementation": "rnacos",
@@ -7349,7 +12322,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_does_not_persist_nacos_passwords_when_save_password_is_false() {
         let path = temp_db_path("nacos-auth-no-save");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = nacos_connection_with_console_auth("nacos", "primary-secret", "console-secret");
         config.save_password = false;
 
@@ -7365,7 +12338,7 @@ mod tests {
     #[tokio::test]
     async fn switching_nacos_password_saving_off_removes_all_stored_auth_secrets() {
         let path = temp_db_path("nacos-auth-disable-save");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = nacos_connection_with_console_auth("nacos", "primary-secret", "console-secret");
         storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
         assert!(storage.get_secret("nacos", NACOS_AUTH_PASSWORD_KEY).await.unwrap().is_some());
@@ -7381,7 +12354,7 @@ mod tests {
     #[tokio::test]
     async fn metadata_sync_removes_nacos_auth_secrets_when_password_saving_is_disabled() {
         let path = temp_db_path("nacos-auth-no-save-metadata-sync");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = nacos_connection_with_console_auth("nacos", "primary-secret", "console-secret");
         storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
 
@@ -7398,7 +12371,7 @@ mod tests {
     #[tokio::test]
     async fn load_connections_cleans_legacy_nacos_passwords_when_saving_is_disabled() {
         let path = temp_db_path("nacos-auth-no-save-legacy-cleanup");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = nacos_connection_with_console_auth("nacos", "legacy-primary-secret", "legacy-console-secret");
         config.save_password = false;
         insert_raw_connection(&storage, &config).await;
@@ -7419,7 +12392,7 @@ mod tests {
     #[tokio::test]
     async fn load_connections_migrates_legacy_nacos_auth_password_out_of_config_json() {
         let path = temp_db_path("nacos-auth-legacy-migration");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         insert_raw_connection(&storage, &nacos_connection("nacos", "legacy-nacos-secret")).await;
 
         let loaded = storage.load_connections().await.unwrap();
@@ -7438,15 +12411,57 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_default_to_background_enabled() {
         let path = temp_db_path("desktop-settings-default");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(storage.load_desktop_settings().await.unwrap(), DesktopSettings::default());
     }
 
     #[tokio::test]
+    async fn app_appearance_settings_patch_roundtrips_and_survives_desktop_saves() {
+        let path = temp_db_path("app-appearance-settings");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        storage
+            .update_app_appearance_settings(&AppAppearanceSettingsPatch {
+                locale: Some("zh-CN".to_string()),
+                theme_mode: Some("dark".to_string()),
+                theme_palette: Some("cobalt".to_string()),
+                custom_ui_colors: Some(serde_json::json!({ "background": "#123456" })),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage.load_app_appearance_settings().await.unwrap(),
+            super::AppAppearanceSettings {
+                locale: Some("zh-CN".to_string()),
+                theme_mode: Some("dark".to_string()),
+                theme_palette: Some("cobalt".to_string()),
+                custom_ui_colors: Some(serde_json::json!({ "background": "#123456" })),
+                ..Default::default()
+            }
+        );
+
+        storage.save_desktop_settings(&DesktopSettings::default()).await.unwrap();
+        assert_eq!(storage.load_app_appearance_settings().await.unwrap().theme_palette.as_deref(), Some("cobalt"));
+
+        storage
+            .update_app_appearance_settings(&AppAppearanceSettingsPatch {
+                corner_style: Some("small".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let updated = storage.load_app_appearance_settings().await.unwrap();
+        assert_eq!(updated.locale.as_deref(), Some("zh-CN"));
+        assert_eq!(updated.corner_style.as_deref(), Some("small"));
+    }
+
+    #[tokio::test]
     async fn mcp_global_policy_defaults_unconfigured_and_roundtrips_atomically() {
         let path = temp_db_path("mcp-global-policy");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(
             storage.load_mcp_global_policy().await.unwrap(),
@@ -7504,7 +12519,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_global_policy_fails_closed_on_malformed_settings() {
         let path = temp_db_path("mcp-global-policy-malformed");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage
             .with_conn(|conn| {
                 conn.execute(
@@ -7524,7 +12539,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_app_settings_cannot_be_silently_replaced_by_an_unrelated_save() {
         let path = temp_db_path("mcp-global-policy-invalid-settings-shape");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage
             .with_conn(|conn| {
                 conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", ["[]"])
@@ -7551,7 +12566,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_global_policy_defaults_dangerous_sql_to_disabled_for_existing_settings() {
         let path = temp_db_path("mcp-global-policy-existing");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage
             .with_conn(|conn| {
                 conn.execute(
@@ -7573,7 +12588,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_connection_mutations_are_atomic_and_recheck_policy() {
         let path = temp_db_path("mcp-connection-mutation-guard");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let kept = mq_connection("kept", "kept-token");
         let removed = mq_connection("removed", "removed-token");
         storage.save_connections(&[kept.clone(), removed.clone()]).await.unwrap();
@@ -7619,7 +12634,9 @@ mod tests {
 
         // Non-MCP callers remain governed by the ordinary DBX UI permissions.
         storage.save_connections(std::slice::from_ref(&kept)).await.unwrap();
-        assert_eq!(storage.load_connections().await.unwrap()[0].id, kept.id);
+        let after_plain_save = storage.load_connections().await.unwrap();
+        assert_eq!(after_plain_save.len(), 3);
+        assert!(after_plain_save.iter().any(|config| config.id == kept.id));
 
         let _ = std::fs::remove_file(path);
     }
@@ -7627,7 +12644,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_fall_back_to_legacy_background_preference() {
         let path = temp_db_path("desktop-settings-legacy-background");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut settings = serde_json::Map::new();
         settings.insert("run_in_background".to_string(), serde_json::Value::Bool(false));
         storage.save_app_settings_json(&settings).await.unwrap();
@@ -7649,7 +12666,7 @@ mod tests {
     #[tokio::test]
     async fn schema_cache_prunes_expired_rows_on_write_without_maintaining_during_reads() {
         let path = temp_db_path("schema-cache-ttl-prune");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage
             .save_schema_cache(
                 "object-ddl:v1:conn-a:db:public:old::TABLE:",
@@ -7701,7 +12718,7 @@ mod tests {
     #[tokio::test]
     async fn schema_cache_budget_covers_multiple_connections_objects_and_facets() {
         let path = temp_db_path("schema-cache-capacity");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let policy = super::SchemaCachePolicy {
             max_total_bytes: 1_100,
             max_connection_bytes: 700,
@@ -7743,7 +12760,7 @@ mod tests {
     #[tokio::test]
     async fn schema_cache_lru_keeps_recently_accessed_entries() {
         let path = temp_db_path("schema-cache-lru");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let policy = super::SchemaCachePolicy {
             max_total_bytes: i64::MAX,
             max_connection_bytes: i64::MAX,
@@ -7781,7 +12798,7 @@ mod tests {
         const ENTRY_COUNT: usize = 50_000;
         const SAMPLE_COUNT: usize = 40;
         let path = temp_db_path("schema-cache-50k-read-performance");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage
             .with_conn(|conn| {
                 let transaction = conn
@@ -7839,7 +12856,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_preserve_existing_password_hash() {
         let path = temp_db_path("desktop-settings-preserve-password");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage.save_password_hash("hash-1").await.unwrap();
         storage
@@ -7858,6 +12875,7 @@ mod tests {
                 agent_store_dir: Some("/tmp/dbx-agents".to_string()),
                 custom_ai_skill_root_enabled: DesktopSettings::default().custom_ai_skill_root_enabled,
                 custom_ai_skill_root: None,
+                custom_ai_skill_auto_enabled: DesktopSettings::default().custom_ai_skill_auto_enabled,
                 sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
             })
             .await
@@ -7881,6 +12899,7 @@ mod tests {
                 agent_store_dir: Some("/tmp/dbx-agents".to_string()),
                 custom_ai_skill_root_enabled: DesktopSettings::default().custom_ai_skill_root_enabled,
                 custom_ai_skill_root: None,
+                custom_ai_skill_auto_enabled: DesktopSettings::default().custom_ai_skill_auto_enabled,
                 sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
             }
         );
@@ -7889,7 +12908,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_roundtrip_custom_ai_skill_root() {
         let path = temp_db_path("desktop-settings-custom-ai-skill-root");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage
             .save_desktop_settings(&DesktopSettings {
@@ -7926,10 +12945,46 @@ mod tests {
         assert_eq!(raw.get("custom_ai_skill_root"), None);
     }
 
+    /// Req 5's toggle defaults off, so a database written before it existed (the
+    /// key absent) must load as off rather than as "unset means on".
+    #[tokio::test]
+    async fn desktop_settings_roundtrip_custom_ai_skill_auto_enabled() {
+        let path = temp_db_path("desktop-settings-custom-ai-skill-auto");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        assert!(!storage.load_desktop_settings().await.unwrap().custom_ai_skill_auto_enabled);
+
+        storage
+            .save_desktop_settings(&DesktopSettings {
+                custom_ai_skill_auto_enabled: true,
+                ..DesktopSettings::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(storage.load_desktop_settings().await.unwrap().custom_ai_skill_auto_enabled);
+        let raw = storage.load_app_settings_json().await.unwrap();
+        assert_eq!(raw.get("custom_ai_skill_auto_enabled").and_then(|value| value.as_bool()), Some(true));
+
+        storage
+            .save_desktop_settings(&DesktopSettings {
+                custom_ai_skill_auto_enabled: false,
+                ..DesktopSettings::default()
+            })
+            .await
+            .unwrap();
+        assert!(!storage.load_desktop_settings().await.unwrap().custom_ai_skill_auto_enabled);
+
+        // An explicit `false` is written through (not removed), which is what
+        // keeps a synced record distinguishable from "never configured".
+        let raw = storage.load_app_settings_json().await.unwrap();
+        assert_eq!(raw.get("custom_ai_skill_auto_enabled").and_then(|value| value.as_bool()), Some(false));
+    }
+
     #[tokio::test]
     async fn desktop_settings_save_removes_legacy_background_preference() {
         let path = temp_db_path("desktop-settings-remove-legacy-background");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut settings = serde_json::Map::new();
         settings.insert("run_in_background".to_string(), serde_json::Value::Bool(false));
         storage.save_app_settings_json(&settings).await.unwrap();
@@ -7956,7 +13011,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_persist_sidebar_table_page_size() {
         let path = temp_db_path("desktop-settings-sidebar-page-size");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage
             .save_desktop_settings(&DesktopSettings { sidebar_table_page_size: 1234, ..DesktopSettings::default() })
@@ -7969,7 +13024,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_persist_duckdb_worker_max_processes() {
         let path = temp_db_path("desktop-settings-duckdb-worker-max-processes");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage
             .save_desktop_settings(&DesktopSettings { duckdb_worker_max_processes: 8, ..DesktopSettings::default() })
@@ -7982,7 +13037,7 @@ mod tests {
     #[tokio::test]
     async fn max_agent_turns_defaults_and_persists_clamped() {
         let path = temp_db_path("max-agent-turns");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(storage.load_max_agent_turns().await.unwrap(), crate::agent_loop::DEFAULT_MAX_AGENT_TURNS);
 
@@ -7999,7 +13054,7 @@ mod tests {
     #[tokio::test]
     async fn max_retries_defaults_and_persists_clamped() {
         let path = temp_db_path("max-retries");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(storage.load_max_retries().await.unwrap(), crate::ai::DEFAULT_MAX_RETRIES);
 
@@ -8015,9 +13070,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plugin_ai_tools_and_data_grants_persist_and_survive_legacy_settings_saves() {
+        let path = temp_db_path("plugin-permissions");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        assert!(storage.load_ai_plugin_tool_plugin_ids().await.unwrap().is_empty());
+        assert!(storage.load_plugin_data_grants("io.dbx.chart").await.unwrap().is_empty());
+
+        assert_eq!(storage.set_ai_plugin_tool_plugin_enabled("io.dbx.ssh", true).await.unwrap(), ["io.dbx.ssh"]);
+        storage.set_ai_plugin_tool_plugin_enabled("io.dbx.kafka", true).await.unwrap();
+        storage.set_ai_plugin_tool_plugin_enabled("io.dbx.ssh", true).await.unwrap();
+        assert_eq!(storage.load_ai_plugin_tool_plugin_ids().await.unwrap(), ["io.dbx.kafka", "io.dbx.ssh"]);
+
+        storage.set_plugin_data_grant("io.dbx.chart", "conn-b", true).await.unwrap();
+        assert_eq!(storage.set_plugin_data_grant("io.dbx.chart", "conn-a", true).await.unwrap(), ["conn-a", "conn-b"]);
+        storage.set_plugin_data_grant("io.dbx.other", "conn-a", true).await.unwrap();
+
+        // A settings writer that rebuilds the whole JSON map must not drop the
+        // dedicated permission keys.
+        storage.save_password_hash("hash").await.unwrap();
+        storage.save_app_settings_json(&serde_json::Map::new()).await.unwrap();
+        assert_eq!(storage.load_ai_plugin_tool_plugin_ids().await.unwrap(), ["io.dbx.kafka", "io.dbx.ssh"]);
+        assert_eq!(storage.load_plugin_data_grants("io.dbx.chart").await.unwrap(), ["conn-a", "conn-b"]);
+
+        assert_eq!(storage.set_plugin_data_grant("io.dbx.chart", "conn-b", false).await.unwrap(), ["conn-a"]);
+        assert_eq!(storage.set_ai_plugin_tool_plugin_enabled("io.dbx.kafka", false).await.unwrap(), ["io.dbx.ssh"]);
+        // Disabling records an explicit opt-out (manifest-declared plugins are
+        // enabled by default, so the opt-out must persist separately).
+        assert_eq!(storage.load_ai_plugin_tool_disabled_plugin_ids().await.unwrap(), ["io.dbx.kafka"]);
+        assert!(storage.set_plugin_data_grant("io.dbx.chart", " ", true).await.is_err());
+
+        storage.set_ai_plugin_tool_plugin_enabled("io.dbx.chart", true).await.unwrap();
+        storage.forget_plugin_permissions("io.dbx.chart").await.unwrap();
+        assert_eq!(storage.load_ai_plugin_tool_plugin_ids().await.unwrap(), ["io.dbx.ssh"]);
+        assert!(storage.load_plugin_data_grants("io.dbx.chart").await.unwrap().is_empty());
+        assert_eq!(storage.load_plugin_data_grants("io.dbx.other").await.unwrap(), ["conn-a"]);
+        // Re-enabling clears the recorded opt-out again.
+        storage.set_ai_plugin_tool_plugin_enabled("io.dbx.kafka", true).await.unwrap();
+        assert_eq!(storage.load_ai_plugin_tool_plugin_ids().await.unwrap(), ["io.dbx.kafka", "io.dbx.ssh"]);
+        assert!(storage.load_ai_plugin_tool_disabled_plugin_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn max_retries_survives_stale_app_settings_save() {
         let path = temp_db_path("max-retries-stale-save");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let stale_settings = storage.load_app_settings_json().await.unwrap();
 
         storage.save_max_retries(7).await.unwrap();
@@ -8029,7 +13125,7 @@ mod tests {
     #[tokio::test]
     async fn sql_file_upload_max_mb_defaults_and_persists_clamped() {
         let path = temp_db_path("sql-file-upload-max-mb");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(
             storage.load_sql_file_upload_max_mb().await.unwrap(),
@@ -8050,7 +13146,7 @@ mod tests {
     #[tokio::test]
     async fn sql_file_upload_max_mb_survives_stale_app_settings_save() {
         let path = temp_db_path("sql-file-upload-max-mb-stale-save");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let stale_settings = storage.load_app_settings_json().await.unwrap();
 
         storage.save_sql_file_upload_max_mb(256).await.unwrap();
@@ -8062,7 +13158,7 @@ mod tests {
     #[tokio::test]
     async fn password_hash_preserves_existing_desktop_settings() {
         let path = temp_db_path("password-preserve-desktop-settings");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage
             .save_desktop_settings(&DesktopSettings {
@@ -8088,7 +13184,7 @@ mod tests {
     #[tokio::test]
     async fn pinned_tree_node_ids_default_to_empty() {
         let path = temp_db_path("pinned-tree-default");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(storage.load_pinned_tree_node_ids().await.unwrap(), Vec::<String>::new());
     }
@@ -8096,7 +13192,7 @@ mod tests {
     #[tokio::test]
     async fn pinned_tree_node_ids_roundtrip_and_preserve_password_hash() {
         let path = temp_db_path("pinned-tree-roundtrip");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage.save_password_hash("hash-3").await.unwrap();
         storage.save_pinned_tree_node_ids(&["conn-1".to_string(), "conn-1:db:main".to_string()]).await.unwrap();
@@ -8111,7 +13207,7 @@ mod tests {
     #[tokio::test]
     async fn app_state_roundtrips_without_polluting_app_settings() {
         let path = temp_db_path("app-state-roundtrip");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage.save_password_hash("hash-4").await.unwrap();
         storage
@@ -8185,7 +13281,7 @@ mod tests {
     #[tokio::test]
     async fn ai_chat_selection_roundtrips_in_local_app_state() {
         let path = temp_db_path("ai-chat-selection");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let selection = AiChatSelectionState {
             version: 1,
             active: Some(AiActiveModelSelection { config_id: "config-1".to_string(), model_id: "model-1".to_string() }),
@@ -8212,7 +13308,7 @@ mod tests {
     #[tokio::test]
     async fn ai_chat_selection_loads_legacy_payload_without_template_defaults() {
         let path = temp_db_path("ai-chat-selection-legacy");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let legacy = serde_json::json!({
             "version": 1,
             "active": { "configId": "config-1", "modelId": "model-1" },
@@ -8243,7 +13339,7 @@ mod tests {
     #[tokio::test]
     async fn tab_runtime_cache_roundtrips_binary_payloads() {
         let path = temp_db_path("tab-runtime-cache");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage
             .save_tab_runtime_cache("tab:1:result", vec![1, 2, 3, 4], 10, 3, Some("connection-1".to_string()))
@@ -8267,7 +13363,7 @@ mod tests {
     #[tokio::test]
     async fn tab_runtime_cache_pruning_retains_live_entries_and_enforces_byte_budget() {
         let path = temp_db_path("tab-runtime-cache-prune");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         for (key, size) in [("live", 6usize), ("old", 5), ("new", 4)] {
             storage.save_tab_runtime_cache(key, vec![1; size], 1, 1, Some("connection-1".to_string())).await.unwrap();
         }
@@ -8293,7 +13389,7 @@ mod tests {
     #[tokio::test]
     async fn tab_runtime_cache_pruning_respects_orphan_grace_period() {
         let path = temp_db_path("tab-runtime-cache-orphan-grace");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage.save_tab_runtime_cache("fresh", vec![1], 1, 1, None).await.unwrap();
         storage.save_tab_runtime_cache("crash-leftover", vec![2], 1, 1, None).await.unwrap();
         storage
@@ -8328,7 +13424,7 @@ mod tests {
                 .unwrap();
         }
 
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let entry = storage.load_tab_runtime_cache("legacy").await.unwrap().unwrap();
 
         assert_eq!(entry.payload, vec![1, 2]);
@@ -8365,7 +13461,7 @@ mod tests {
                 .unwrap();
         }
 
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let loaded = storage.load_saved_sql_file("legacy-sql").await.unwrap().unwrap();
 
         assert_eq!(loaded.database, "sales");
@@ -8375,7 +13471,7 @@ mod tests {
     #[tokio::test]
     async fn saved_sql_summary_omits_sql_text_and_loads_file_on_demand() {
         let path = temp_db_path("saved-sql-summary");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let file = SavedSqlFile {
             id: "sql-1".to_string(),
             connection_id: "conn-1".to_string(),
@@ -8416,7 +13512,7 @@ mod tests {
     #[tokio::test]
     async fn saved_sql_metadata_update_preserves_unloaded_sql_text() {
         let path = temp_db_path("saved-sql-preserve-unloaded-text");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut file = SavedSqlFile {
             id: "sql-1".to_string(),
             connection_id: "conn-1".to_string(),
@@ -8481,7 +13577,7 @@ mod tests {
                 .unwrap();
         }
 
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let legacy = storage.load_saved_sql_file("legacy").await.unwrap().unwrap();
         assert_eq!(legacy.catalog, None);
 
@@ -8504,7 +13600,7 @@ mod tests {
         storage.save_saved_sql_file(&external).await.unwrap();
         drop(storage);
 
-        let reopened = Storage::open(&path).await.unwrap();
+        let reopened = crate::persistence::test_storage::open(&path).await.unwrap();
         assert_eq!(reopened.load_saved_sql_file("legacy").await.unwrap().unwrap().catalog, None);
         assert_eq!(
             reopened.load_saved_sql_file("external").await.unwrap().unwrap().catalog.as_deref(),
@@ -8564,7 +13660,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_save_load_roundtrip() {
         let db = temp_db_path("ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("test-config", true);
         cfg.config.provider = AiProvider::ClaudeCodeCli;
@@ -8595,9 +13691,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_ai_and_tunnel_inline_secrets_are_migrated_on_reopen() {
+        let db = temp_db_path("legacy-config-secret-migration");
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
+
+        let mut ai = make_ai_config("legacy", true);
+        storage.save_ai_config_item(&ai).await.unwrap();
+        ai.config.api_key = "legacy-ai-key".to_string();
+        let ai_json = serde_json::to_string(&ai.config).unwrap();
+        let tunnel = ssh_profile("legacy-tunnel", "legacy-tunnel-password");
+        storage.save_tunnel_profiles(std::slice::from_ref(&tunnel)).await.unwrap();
+        let tunnel_json = serde_json::to_string(&tunnel).unwrap();
+        storage
+            .with_conn(move |conn| {
+                conn.execute("UPDATE ai_configs SET config_json = ?1 WHERE id = 'cfg-legacy'", [&ai_json])
+                    .map_err(|error| error.to_string())?;
+                conn.execute("DELETE FROM connection_secrets WHERE connection_id = 'ai_config.cfg-legacy'", [])
+                    .map_err(|error| error.to_string())?;
+                conn.execute("UPDATE tunnel_profiles SET config_json = ?1 WHERE id = 'legacy-tunnel'", [&tunnel_json])
+                    .map_err(|error| error.to_string())?;
+                conn.execute("DELETE FROM connection_secrets WHERE connection_id = 'tunnel_profile.legacy-tunnel'", [])
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        drop(storage);
+
+        let reopened = crate::persistence::test_storage::open(&db).await.unwrap();
+        let raw_ai = reopened
+            .with_conn(|conn| {
+                conn.query_row("SELECT config_json FROM ai_configs WHERE id = 'cfg-legacy'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        let raw_tunnel = reopened
+            .with_conn(|conn| {
+                conn.query_row("SELECT config_json FROM tunnel_profiles WHERE id = 'legacy-tunnel'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert!(!raw_ai.contains("legacy-ai-key"));
+        assert!(!raw_tunnel.contains("legacy-tunnel-password"));
+        assert_eq!(reopened.load_ai_configs().await.unwrap()[0].config.api_key, "legacy-ai-key");
+        assert_eq!(reopened.load_tunnel_profiles().await.unwrap(), vec![tunnel]);
+        let encrypted = reopened
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM connection_secrets WHERE secret_enc LIKE 'dbxenc1.%' AND secret = ''",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert!(encrypted >= 2);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
     async fn opencode_cli_ai_config_roundtrip() {
         let db = temp_db_path("opencode-cli-ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("opencode-cli", true);
         cfg.config.provider = AiProvider::OpenCodeCli;
@@ -8624,7 +13786,7 @@ mod tests {
     #[tokio::test]
     async fn cursor_cli_ai_config_roundtrip() {
         let db = temp_db_path("cursor-cli-ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("cursor-cli", true);
         cfg.config.provider = AiProvider::CursorCli;
@@ -8651,7 +13813,7 @@ mod tests {
     #[tokio::test]
     async fn grok_cli_ai_config_roundtrip() {
         let db = temp_db_path("grok-cli-ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("grok-cli", true);
         cfg.config.provider = AiProvider::GrokCli;
@@ -8675,7 +13837,7 @@ mod tests {
     #[tokio::test]
     async fn codebuddy_cli_ai_config_roundtrip() {
         let db = temp_db_path("codebuddy-cli-ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("codebuddy-cli", true);
         cfg.config.provider = AiProvider::CodeBuddyCli;
@@ -8702,7 +13864,7 @@ mod tests {
     #[tokio::test]
     async fn anthropic_compatible_ai_config_roundtrip() {
         let db = temp_db_path("anthropic-compatible-ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("anthropic-compatible", true);
         cfg.config.provider = AiProvider::AnthropicCompatible;
@@ -8728,7 +13890,7 @@ mod tests {
     #[tokio::test]
     async fn minimax_ai_config_roundtrip() {
         let db = temp_db_path("minimax-ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("minimax", true);
         cfg.config.provider = AiProvider::MiniMax;
@@ -8752,7 +13914,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_only_one_default() {
         let db = temp_db_path("ai-one-default");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let cfg1 = make_ai_config("config-a", true);
         let cfg2 = make_ai_config("config-b", true);
@@ -8772,7 +13934,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_update_existing_to_default() {
         let db = temp_db_path("ai-update-default");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let cfg1 = make_ai_config("config-a", true);
         let cfg2 = make_ai_config("config-b", false);
@@ -8795,7 +13957,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_duplicate_name_error() {
         let db = temp_db_path("ai-dup-name");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let cfg1 = make_ai_config("same-name", false);
         storage.save_ai_config_item(&cfg1).await.unwrap();
@@ -8812,7 +13974,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_set_default_switches() {
         let db = temp_db_path("ai-set-default");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let cfg1 = make_ai_config("first", true);
         let cfg2 = make_ai_config("second", false);
@@ -8834,7 +13996,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_delete_default_no_cascade() {
         let db = temp_db_path("ai-delete-default");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let cfg1 = make_ai_config("default-one", true);
         let cfg2 = make_ai_config("other", false);
@@ -8855,7 +14017,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_save_configs_batch() {
         let db = temp_db_path("ai-batch");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let configs =
             vec![make_ai_config("batch-a", true), make_ai_config("batch-b", false), make_ai_config("batch-c", false)];
@@ -8868,9 +14030,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ai_config_secret_fields_are_not_written_to_config_json() {
+        let db = temp_db_path("ai-secret-at-rest");
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
+        let config = make_ai_config("secret-config", true);
+        storage.save_ai_configs(std::slice::from_ref(&config)).await.unwrap();
+        let raw = storage
+            .with_conn(|conn| {
+                conn.query_row("SELECT config_json FROM ai_configs WHERE id = 'cfg-secret-config'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert!(!raw.contains("sk-test"));
+        let encrypted = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT secret_enc FROM connection_secrets WHERE connection_id = 'ai_config.cfg-secret-config' AND key = 'config'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert!(encrypted.is_some_and(|value| value.starts_with("dbxenc1.")));
+        assert_eq!(storage.load_ai_configs().await.unwrap()[0].config.api_key, "sk-test");
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
     async fn ai_config_save_configs_clears_old_tables() {
         let db = temp_db_path("ai-clear-old");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         // Pre-populate old tables as if migration hasn't run yet
         storage.save_ai_config(&make_ai_config("legacy-active", false).config).await.unwrap();
@@ -8898,7 +14092,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_new_creates_timestamps() {
         let db = temp_db_path("pt-save-new");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let result = storage.save_prompt_template("t1", "Production Rules", "SELECT 1").await.unwrap();
 
@@ -8921,7 +14115,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_update_preserves_created_at() {
         let db = temp_db_path("pt-save-update");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let first = storage.save_prompt_template("t1", "Original Name", "Original content").await.unwrap();
         // Ensure some time passes so updated_at changes
@@ -8946,7 +14140,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_rejects_blank_name() {
         let db = temp_db_path("pt-name-blank");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let err = storage.save_prompt_template("t1", "", "content").await.unwrap_err();
         assert!(err.contains("cannot be empty"), "expected 'cannot be empty', got: {err}");
@@ -8960,7 +14154,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_rejects_long_name() {
         let db = temp_db_path("pt-name-long");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let long_name = "a".repeat(51);
         let err = storage.save_prompt_template("t1", &long_name, "content").await.unwrap_err();
@@ -8972,7 +14166,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_accepts_multi_byte_characters_within_char_limit() {
         let db = temp_db_path("pt-multibyte-name");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         // 25 Chinese characters = 75 bytes but only 25 chars — should be allowed under 50 char limit
         let name25 = "数".repeat(25); // 25 chars, 75 bytes
@@ -8994,7 +14188,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_rejects_long_content() {
         let db = temp_db_path("pt-content-long");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let long_content = "a".repeat(8001);
         let err = storage.save_prompt_template("t1", "Valid Name", &long_content).await.unwrap_err();
@@ -9006,7 +14200,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_rejects_duplicate_name_case_insensitive() {
         let db = temp_db_path("pt-dup-name");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         storage.save_prompt_template("t1", "Production Rules", "content 1").await.unwrap();
 
@@ -9025,7 +14219,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_rejects_duplicate_name_unicode_case_folding() {
         let db = temp_db_path("pt-dup-unicode");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         // SQLite LOWER() is ASCII-only (U+00C4 'Ä' → no change), but Rust
         // str::to_lowercase() does full Unicode case folding (Ä → ä).
@@ -9036,7 +14230,7 @@ mod tests {
 
         // Reverse: lower-case first, upper-case second.
         let db = temp_db_path("pt-dup-unicode-2");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         storage.save_prompt_template("t1", "ä规则", "content-lower").await.unwrap();
         let err = storage.save_prompt_template("t2", "Ä规则", "content-upper").await.unwrap_err();
         assert!(err.contains("duplicate"), "expected 'duplicate', got: {err}");
@@ -9047,7 +14241,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_load_order_is_stable() {
         let db = temp_db_path("pt-load-order");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         // Insert in reverse order of created_at by sleeping between inserts
         storage.save_prompt_template("a", "Template A", "a").await.unwrap();
@@ -9081,7 +14275,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_delete_unknown_id_errors() {
         let db = temp_db_path("pt-delete-unknown");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let err = storage.delete_prompt_template("nonexistent").await.unwrap_err();
         assert!(err.contains("not found"), "expected 'not found', got: {err}");
@@ -9092,7 +14286,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_delete_existing_removes() {
         let db = temp_db_path("pt-delete-existing");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         storage.save_prompt_template("t1", "Template", "content").await.unwrap();
         assert_eq!(storage.load_prompt_templates().await.unwrap().len(), 1);
@@ -9108,7 +14302,7 @@ mod tests {
     #[tokio::test]
     async fn global_instructions_set_get_roundtrip() {
         let db = temp_db_path("gi-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let instructions = "Amounts are in cents. Always filter by date range.";
         storage.save_ai_global_custom_instructions(instructions).await.unwrap();
@@ -9122,7 +14316,7 @@ mod tests {
     #[tokio::test]
     async fn global_instructions_defaults_to_empty() {
         let db = temp_db_path("gi-default");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let loaded = storage.load_ai_global_custom_instructions().await.unwrap();
         assert_eq!(loaded, "");
@@ -9133,7 +14327,7 @@ mod tests {
     #[tokio::test]
     async fn global_instructions_rejects_too_long() {
         let db = temp_db_path("gi-too-long");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let long = "a".repeat(8001);
         let err = storage.save_ai_global_custom_instructions(&long).await.unwrap_err();
@@ -9145,7 +14339,7 @@ mod tests {
     #[tokio::test]
     async fn global_instructions_empty_string_clears() {
         let db = temp_db_path("gi-clear");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         storage.save_ai_global_custom_instructions("Some instructions").await.unwrap();
         assert_eq!(storage.load_ai_global_custom_instructions().await.unwrap(), "Some instructions");
@@ -9160,7 +14354,7 @@ mod tests {
     #[tokio::test]
     async fn global_instructions_whitespace_only_trims() {
         let db = temp_db_path("gi-whitespace");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         storage.save_ai_global_custom_instructions("   \n  \t  ").await.unwrap();
         let loaded = storage.load_ai_global_custom_instructions().await.unwrap();
@@ -9172,11 +14366,11 @@ mod tests {
     #[tokio::test]
     async fn pending_snippet_cleanup_survives_restart_and_clears_only_when_matched() {
         let db = temp_db_path("snippet-cleanup-restart");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         storage.save_snippet_migration_state("github", "replacement-id", "legacy-id", "content-hash").await.unwrap();
         drop(storage);
 
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         let state = storage.load_snippet_sync_state("github").await.unwrap();
         assert_eq!(state.snippet_id.as_deref(), Some("replacement-id"));
         let pending = state.pending_cleanup.unwrap();
@@ -9191,5 +14385,525 @@ mod tests {
         assert!(storage.load_snippet_sync_state("github").await.unwrap().pending_cleanup.is_none());
 
         std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn connection_secrets_are_encrypted_at_rest_and_legacy_rows_migrate() {
+        let db = temp_db_path("secret-store-at-rest");
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
+        let mut url_config = plain_connection("url-params", "url-password");
+        url_config.url_params = Some("applicationName=dbx&PASSWORD=url-password&sslmode=require".to_string());
+        storage.save_connections(std::slice::from_ref(&url_config)).await.unwrap();
+        let raw_url_config = raw_connection_json(&storage, "url-params").await;
+        assert!(!raw_url_config.contains("url-password"));
+        assert_eq!(
+            storage.load_connections().await.unwrap()[0].url_params.as_deref(),
+            Some("applicationName=dbx&PASSWORD=url-password&sslmode=require")
+        );
+        let url_secret = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT secret, secret_enc FROM connection_secrets WHERE connection_id = 'url-params' AND key = 'url_params'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert!(url_secret.0.is_empty());
+        assert!(url_secret.1.as_deref().is_some_and(|value| value.starts_with("dbxenc1.")));
+        storage.set_secret("connection-1", "password", "super-secret").await.unwrap();
+        assert_eq!(storage.get_secret("connection-1", "password").await.unwrap().as_deref(), Some("super-secret"));
+        let row = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT secret, secret_enc FROM connection_secrets WHERE connection_id = 'connection-1' AND key = 'password'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert!(row.0.is_empty());
+        assert!(row.1.as_deref().is_some_and(|value| value.starts_with("dbxenc1.")));
+
+        // An old plaintext row remains readable and is rewritten on access.
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret, secret_enc) VALUES ('legacy', 'password', 'old-secret', NULL)",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert_eq!(storage.get_secret("legacy", "password").await.unwrap().as_deref(), Some("old-secret"));
+        let migrated = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT secret, secret_enc FROM connection_secrets WHERE connection_id = 'legacy' AND key = 'password'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert!(migrated.0.is_empty());
+        assert!(migrated.1.as_deref().is_some_and(|value| value.starts_with("dbxenc1.")));
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn legacy_connection_config_migration_keeps_externalized_password() {
+        // Regression: re-saving a legacy inline config wrote the config's empty
+        // `password` field straight back into `connection_secrets`, which the
+        // persistence path turns into a DELETE. A connection whose password
+        // already lived in the secret store therefore lost it on upgrade.
+        let id = "legacy-inline-url-params";
+        let db = temp_db_path("legacy-connection-config-keeps-password");
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
+        let mut config = plain_connection(id, "saved-password");
+        config.url_params = Some("authSource=dbx_test".to_string());
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        // Restore the shape an older release persisted: `url_params` is still
+        // inline in config_json while the password only exists as a secret.
+        let mut inline = config.clone();
+        inline.password = String::new();
+        let inline_json = serde_json::to_string(&inline).unwrap();
+        storage
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE connections SET config_json = ?1 WHERE id = ?2",
+                    rusqlite::params![inline_json, id],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        drop(storage);
+
+        let reopened = crate::persistence::test_storage::open(&db).await.unwrap();
+        let raw = raw_connection_json(&reopened, id).await;
+        assert!(!raw.contains("authSource=dbx_test"));
+        assert_eq!(reopened.get_secret(id, "password").await.unwrap().as_deref(), Some("saved-password"));
+        let loaded = reopened.load_connections().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].password, "saved-password");
+        assert_eq!(loaded[0].url_params.as_deref(), Some("authSource=dbx_test"));
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn legacy_connection_config_migration_still_drops_password_when_not_saved() {
+        let id = "legacy-inline-url-params-unsaved";
+        let db = temp_db_path("legacy-connection-config-drops-unsaved-password");
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
+        let mut config = plain_connection(id, "saved-password");
+        config.url_params = Some("authSource=dbx_test".to_string());
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        let mut inline = config.clone();
+        inline.password = String::new();
+        inline.save_password = false;
+        let inline_json = serde_json::to_string(&inline).unwrap();
+        storage
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE connections SET config_json = ?1 WHERE id = ?2",
+                    rusqlite::params![inline_json, id],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        drop(storage);
+
+        // "Don't save password" must keep winning: the restore path must not
+        // resurrect a credential this connection is configured not to keep.
+        let reopened = crate::persistence::test_storage::open(&db).await.unwrap();
+        assert!(reopened.get_secret(id, "password").await.unwrap().is_none());
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn mqtt_password_is_encrypted_at_rest_and_hydrated_on_load() {
+        let path = temp_db_path("mqtt-password-secret");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let mut config = plain_connection("mqtt-password", "");
+        config.db_type = DatabaseType::Mqtt;
+        config.external_config = Some(serde_json::json!({
+            "auth": { "kind": "password", "username": "mqtt-user", "password": "mqtt-secret" }
+        }));
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        let raw = raw_connection_json(&storage, "mqtt-password").await;
+        assert!(!raw.contains("mqtt-secret"));
+        assert!(storage
+            .get_secret("mqtt-password", MQTT_AUTH_PASSWORD_KEY)
+            .await
+            .unwrap()
+            .is_some_and(|secret| secret == "mqtt-secret"));
+        assert_eq!(storage.load_connections().await.unwrap()[0], config);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn legacy_plaintext_secrets_are_migrated_during_reopen() {
+        let db = temp_db_path("secret-store-startup-migration");
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret, secret_enc) VALUES ('legacy-startup', 'password', 'old-secret', NULL)",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        drop(storage);
+
+        let reopened = crate::persistence::test_storage::open(&db).await.unwrap();
+        let row = reopened
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT secret, secret_enc FROM connection_secrets WHERE connection_id = 'legacy-startup' AND key = 'password'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert!(row.0.is_empty());
+        assert!(row.1.as_deref().is_some_and(|value| value.starts_with("dbxenc1.")));
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn legacy_sync_credentials_are_migrated_from_app_settings_on_reopen() {
+        let db = temp_db_path("legacy-app-settings-secrets");
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                    [serde_json::json!({
+                        "local_device_secret": "legacy-device-secret",
+                        "webdav_sync_secrets_passphrase": "legacy-sync-passphrase",
+                        "webdav_passwords": {"webdav:https://example.test": {"ciphertext": "legacy-blob"}}
+                    })
+                    .to_string()],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        drop(storage);
+
+        let reopened = crate::persistence::test_storage::open(&db).await.unwrap();
+        let settings = reopened.load_app_settings_json().await.unwrap();
+        assert!(!settings.contains_key("local_device_secret"));
+        assert!(!settings.contains_key("webdav_sync_secrets_passphrase"));
+        assert!(!settings.contains_key("webdav_passwords"));
+        assert_eq!(
+            reopened.get_secret(super::GLOBAL_SECRET_NAMESPACE, "local_device_secret").await.unwrap().as_deref(),
+            Some("legacy-device-secret")
+        );
+        assert_eq!(
+            reopened
+                .get_secret(super::GLOBAL_SECRET_NAMESPACE, "webdav_sync_secrets_passphrase")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("legacy-sync-passphrase")
+        );
+        assert_eq!(
+            reopened
+                .get_secret(super::GLOBAL_SECRET_NAMESPACE, "webdav_password.webdav:https://example.test")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"ciphertext":"legacy-blob"}"#)
+        );
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn legacy_inline_connection_secrets_are_migrated_during_reopen() {
+        let db = temp_db_path("inline-secret-startup-migration");
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
+        insert_raw_connection(&storage, &plain_connection("legacy-inline", "old-inline-secret")).await;
+        drop(storage);
+
+        let reopened = crate::persistence::test_storage::open(&db).await.unwrap();
+        let raw = raw_connection_json(&reopened, "legacy-inline").await;
+        assert!(!raw.contains("old-inline-secret"));
+        assert_eq!(reopened.load_connections().await.unwrap()[0].password, "old-inline-secret");
+        let row = reopened
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT secret, secret_enc FROM connection_secrets WHERE connection_id = 'legacy-inline' AND key = 'password'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        assert!(row.0.is_empty());
+        assert!(row.1.as_deref().is_some_and(|value| value.starts_with("dbxenc1.")));
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn sync_import_transaction_rolls_back_metadata_when_later_write_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = directory.path().join("dbx.db");
+        let storage = crate::persistence::test_storage::open_unmigrated(&db)
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        storage.save_connections(&[plain_connection("existing", "old-secret")]).await.unwrap();
+        let settings = storage.load_desktop_settings().await.unwrap();
+        let mut incoming = plain_connection("incoming", "new-secret");
+        incoming.url_params = Some("applicationName=dbx&sslmode=require".to_string());
+        let plan = SyncImportPlan {
+            connections: vec![incoming],
+            merge_connections: false,
+            tunnel_profiles: Some(Vec::new()),
+            tunnel_secret_profiles: None,
+            merge_tunnel_profiles: false,
+            sidebar_layout: None,
+            pinned_tree_node_ids: Some(Vec::new()),
+            saved_sql: SavedSqlLibrary {
+                folders: vec![
+                    SavedSqlFolder {
+                        id: "duplicate-folder".to_string(),
+                        connection_id: "incoming".to_string(),
+                        parent_folder_id: None,
+                        name: "one".to_string(),
+                        order_index: 0,
+                        created_at: String::new(),
+                        updated_at: String::new(),
+                    },
+                    SavedSqlFolder {
+                        id: "duplicate-folder".to_string(),
+                        connection_id: "incoming".to_string(),
+                        parent_folder_id: None,
+                        name: "two".to_string(),
+                        order_index: 1,
+                        created_at: String::new(),
+                        updated_at: String::new(),
+                    },
+                ],
+                files: Vec::new(),
+            },
+            merge_saved_sql: false,
+            desktop_settings: settings,
+            desktop_settings_keys: None,
+            editor_settings: None,
+            merge_editor_settings: false,
+            editor_settings_keys: None,
+            connection_secrets: None,
+            connection_secret_ids: None,
+            preserve_local_connection_strings: Vec::new(),
+            preserve_plugin_secrets: false,
+            sync_credentials: None,
+            ai_configs: None,
+            merge_ai_configs: false,
+        };
+        assert!(storage.apply_sync_import_transaction(plan).await.is_err());
+        let connections = storage.load_connections().await.unwrap();
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].id, "existing");
+        assert_eq!(storage.get_secret("existing", "password").await.unwrap().as_deref(), Some("old-secret"));
+        assert_eq!(storage.get_secret("incoming", "url_params").await.unwrap(), None);
+    }
+
+    #[test]
+    fn migration_backup_manifest_rejects_invalid_paths() {
+        let invalid = serde_json::json!({"backupPaths": "not-a-list"});
+        assert!(super::migration_backup_paths(&invalid).is_err());
+        let valid = serde_json::json!({"backupPaths": ["/tmp/dbx-secret-migration-a"]});
+        assert_eq!(super::migration_backup_paths(&valid).unwrap(), vec!["/tmp/dbx-secret-migration-a"]);
+    }
+
+    #[test]
+    fn migration_errors_preserve_keyring_failure_classification() {
+        assert_eq!(super::migration_error_code("KEYRING_ACCESS_FAILED: item denied"), "KEYRING_ACCESS_FAILED");
+        assert_eq!(super::migration_error_code("KEYRING_WRITE_FAILED: item denied"), "KEYRING_WRITE_FAILED");
+        assert_eq!(
+            super::migration_safe_message("KEYRING_ACCESS_FAILED", "ignored"),
+            "The platform credential store refused access to the DBX secret-store key"
+        );
+    }
+
+    #[tokio::test]
+    async fn stored_connection_count_reads_the_table_without_loading_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db")).await.unwrap();
+        assert_eq!(storage.stored_connection_count().await.unwrap(), Some(0));
+
+        storage
+            .with_conn(|conn| {
+                conn.execute("INSERT INTO connections (id, config_json) VALUES ('a', '{}'), ('b', '{}')", [])
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(storage.stored_connection_count().await.unwrap(), Some(2));
+
+        // `None` is what lets `dbx doctor` tell a missing table apart from a
+        // table it could not load.
+        storage
+            .with_conn(|conn| {
+                conn.execute("DROP TABLE connections", []).map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(storage.stored_connection_count().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn task_run_storage_is_idempotent_paginated_and_deletes_only_terminal_runs() {
+        use crate::persistence::task_history::{
+            RowCountState, TaskEndpointSnapshot, TaskHistoryStorageError, TaskItemKind, TaskItemStatus,
+            TaskLifecycleOwner, TaskRun, TaskRunItem, TaskRunItemsQuery, TaskRunListQuery, TaskRunStatus, TaskType,
+            TransferObjectSelectionMode, TransferRunContent, TransferRunDetails, TransferRunMode,
+            TransferRunOwnershipPolicy, TransferRunTargetTableNameCase,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dbx.db");
+        let storage = crate::persistence::test_storage::open_unmigrated(&path).await.unwrap();
+        let run = TaskRun {
+            run_id: "history-storage-run".to_string(),
+            task_type: TaskType::Transfer,
+            lifecycle_owner: TaskLifecycleOwner::Web,
+            status: TaskRunStatus::Running,
+            created_at: "2025-01-01T00:00:00.000Z".to_string(),
+            started_at: "2025-01-01T00:00:00.000Z".to_string(),
+            finished_at: None,
+            owner_instance_id: "test-instance".to_string(),
+            error_code: None,
+            safe_error_summary: None,
+            history_complete: false,
+            source: TaskEndpointSnapshot {
+                connection_id: "source-id".to_string(),
+                database_type: "sqlite".to_string(),
+                database: "source-db".to_string(),
+                schema: "main".to_string(),
+                catalog: None,
+            },
+            target: TaskEndpointSnapshot {
+                connection_id: "target-id".to_string(),
+                database_type: "sqlite".to_string(),
+                database: "target-db".to_string(),
+                schema: "main".to_string(),
+                catalog: None,
+            },
+        };
+        let details = TransferRunDetails {
+            run_id: run.run_id.clone(),
+            content: TransferRunContent::DataOnly,
+            mode: TransferRunMode::Append,
+            batch_size: 500,
+            create_table: false,
+            drop_target_before_create: false,
+            target_table_name_case: TransferRunTargetTableNameCase::Preserve,
+            quote_target_column_names: true,
+            ownership_policy: TransferRunOwnershipPolicy::Preserve,
+            filtered_table_count: 0,
+            table_total: 1,
+            object_selection_mode: TransferObjectSelectionMode::Explicit,
+            selected_object_count: Some(0),
+        };
+        let item = TaskRunItem {
+            run_id: run.run_id.clone(),
+            item_index: 0,
+            item_kind: TaskItemKind::Table,
+            source_object: "orders".to_string(),
+            target_object: "orders".to_string(),
+            status: TaskItemStatus::Pending,
+            source_row_count: None,
+            moved_row_count: None,
+            target_row_count: None,
+            row_count_state: RowCountState::Unknown,
+            has_table_filter: false,
+            safe_error_summary: None,
+        };
+
+        storage.create_task_run(&run, &details, std::slice::from_ref(&item)).await.unwrap();
+        assert_eq!(
+            storage.create_task_run(&run, &details, std::slice::from_ref(&item)).await,
+            Err(TaskHistoryStorageError::RunIdConflict)
+        );
+        assert_eq!(storage.delete_task_run(&run.run_id).await, Err(TaskHistoryStorageError::RunStillRunning));
+
+        let completed_item = TaskRunItem {
+            status: TaskItemStatus::Succeeded,
+            source_row_count: Some(0),
+            moved_row_count: Some(0),
+            row_count_state: RowCountState::Known,
+            ..item
+        };
+        assert!(storage.save_task_run_item(&completed_item).await.unwrap());
+        assert!(storage.finish_task_run(&run.run_id, TaskRunStatus::Succeeded, None, None, true).await.unwrap());
+        assert!(!storage
+            .finish_task_run(&run.run_id, TaskRunStatus::Failed, Some("late"), Some("late"), true)
+            .await
+            .unwrap());
+
+        let older_run = TaskRun {
+            run_id: "history-storage-run-older".to_string(),
+            created_at: "2024-12-31T00:00:00.000Z".to_string(),
+            started_at: "2024-12-31T00:00:00.000Z".to_string(),
+            ..run.clone()
+        };
+        let older_details = TransferRunDetails { run_id: older_run.run_id.clone(), ..details.clone() };
+        storage.create_task_run(&older_run, &older_details, &[]).await.unwrap();
+        assert!(storage.finish_task_run(&older_run.run_id, TaskRunStatus::Succeeded, None, None, true).await.unwrap());
+
+        let page = storage.list_task_runs(TaskRunListQuery { limit: Some(1), ..Default::default() }).await.unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].run_id, run.run_id);
+        let cursor = page.next_cursor.clone().expect("older run must be available on the next page");
+        let next_page = storage
+            .list_task_runs(TaskRunListQuery { limit: Some(1), cursor: Some(cursor), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(next_page.items.len(), 1);
+        assert_eq!(next_page.items[0].run_id, older_run.run_id);
+        assert!(next_page.next_cursor.is_none());
+        let item_page = storage
+            .list_task_run_items(&run.run_id, TaskRunItemsQuery { limit: Some(1), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(item_page.items[0].source_row_count, Some(0));
+        assert_eq!(item_page.items[0].moved_row_count, Some(0));
+        assert_eq!(item_page.items[0].target_row_count, None);
+
+        drop(storage);
+        let reopened = crate::persistence::test_storage::open_unmigrated(&path).await.unwrap();
+        let detail = reopened.get_task_run_detail(&run.run_id).await.unwrap().unwrap();
+        assert_eq!(detail.run.status, TaskRunStatus::Succeeded);
+        assert!(detail.run.history_complete);
+        assert_eq!(detail.transfer.unwrap().selected_object_count, Some(0));
+        assert!(reopened.delete_task_run(&run.run_id).await.unwrap());
+        assert!(reopened.get_task_run_detail(&run.run_id).await.unwrap().is_none());
     }
 }

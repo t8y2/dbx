@@ -6,13 +6,16 @@ use futures::FutureExt;
 use serde_json::json;
 use tokio::sync::Notify;
 
-use crate::agent_events::{AgentEvent, ToolCall, ToolDefinition, ToolResult};
+use crate::agent_events::{AgentEvent, ToolApprovalOutcome, ToolCall, ToolDefinition, ToolResult};
 use crate::agent_tools;
 use crate::ai::{self, AiCompletionRequest, AiConfig, AiMessage, AiProvider, AiStreamChunk, AiTaskContract};
 use crate::ai_cli_agent::CliAgentCommandSpec;
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
+use crate::plugin_tools::{self, PluginToolSet, PreparedPluginToolCall};
+use crate::skill_tools;
 use crate::token_usage::TokenUsage;
+use crate::tool_approval::{self, ToolApprovalWait};
 
 /// Default number of agent loop turns to prevent infinite loops.
 /// Users can raise the limit in Settings → AI; it is clamped to
@@ -48,6 +51,17 @@ fn chunk_to_events(chunk: &AiStreamChunk) -> Vec<AgentEvent> {
     }
     if let Some(ref reasoning) = chunk.reasoning_delta {
         events.push(AgentEvent::ReasoningDelta { delta: reasoning.clone() });
+    }
+    // Providers spell the same condition differently — OpenAI `length`, Anthropic
+    // `max_tokens`, Gemini `MAX_TOKENS`, the Responses API `max_output_tokens` — so
+    // compare case-insensitively: a provider wired up later must not silently miss
+    // the notice over a capital letter.
+    if let Some(reason) = chunk
+        .finish_reason
+        .as_deref()
+        .filter(|reason| matches!(reason.to_ascii_lowercase().as_str(), "length" | "max_tokens" | "max_output_tokens"))
+    {
+        events.push(AgentEvent::OutputTruncated { finish_reason: reason.to_string() });
     }
     events
 }
@@ -88,6 +102,18 @@ pub struct AgentLoopContext {
     /// Stable per-conversation key forwarded to providers that support prompt
     /// caching (OpenAI Responses API). `None` disables the field entirely.
     pub prompt_cache_key: Option<String>,
+    /// Client AI session id. Plugin tool calls that need the user's approval
+    /// are routed to the client through it; without one they are refused.
+    pub session_id: Option<String>,
+    /// Runtime that owns plugin sidecar sessions. The web server runs each
+    /// agent loop on a runtime of its own, so plugin calls are spawned here.
+    pub host_runtime: Option<tokio::runtime::Handle>,
+    /// True when this request's prompt carries a skill listing (`use_skill` /
+    /// `read_skill_file` ship only with it). Tool schemas are re-sent with every
+    /// request, so registering the skill tools unconditionally would charge every
+    /// skill-free run for tools that have nothing to resolve, and would put them
+    /// in front of a model with no listing to look at (ADR Decision 10).
+    pub allow_skills: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +156,58 @@ async fn provider_function_calling_support(config: &AiConfig) -> FunctionCalling
 /// injected into the system prompt.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
+    config: &AiConfig,
+    system_prompt: &str,
+    messages: &[AiMessage],
+    agent_ctx: &AgentLoopContext,
+    on_event: impl Fn(AgentEvent) + Send + Sync + Clone + 'static,
+    cancelled: &Notify,
+    max_tokens: Option<u32>,
+    task_contract: Option<&AiTaskContract>,
+    is_agent_mode: bool,
+) -> Result<String, String> {
+    run_agent_loop_inner(
+        config,
+        system_prompt,
+        messages,
+        agent_ctx,
+        on_event,
+        cancelled,
+        max_tokens,
+        task_contract,
+        is_agent_mode,
+    )
+    .boxed()
+    .await
+}
+
+/// The built-in provider's tool table for one run.
+///
+/// The skill tools are APPENDED here rather than registered in
+/// `read_only_tools` / `all_tools`, so those two keep their exact output for
+/// every skill-free request — the listing gate is the only thing that can widen
+/// this table (ADR Decision 10). Ask and agent mode both get them: the gate is
+/// the listing, not the mode, because reading a skill is read-only by
+/// construction.
+fn run_tools(
+    db_type: DatabaseType,
+    sql_permissions: &agent_tools::AgentSqlPermissions,
+    is_agent_mode: bool,
+    allow_skills: bool,
+) -> Vec<ToolDefinition> {
+    let mut tools = if is_agent_mode {
+        agent_tools::all_tools(db_type, sql_permissions.clone())
+    } else {
+        agent_tools::read_only_tools(db_type)
+    };
+    if allow_skills {
+        tools.extend(skill_tools::tool_definitions());
+    }
+    tools
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_loop_inner(
     config: &AiConfig,
     system_prompt: &str,
     messages: &[AiMessage],
@@ -254,11 +332,20 @@ pub async fn run_agent_loop(
         .await;
     }
     let mut sql_permissions = agent_ctx.sql_permissions.clone();
-    let tools = if is_agent_mode {
-        agent_tools::all_tools(agent_ctx.db_type, sql_permissions.clone())
+    let mut tools = run_tools(agent_ctx.db_type, &sql_permissions, is_agent_mode, agent_ctx.allow_skills);
+    // Plugin tools join agent runs only; ask mode keeps its database-only
+    // read tools.
+    let plugin_tool_set = if is_agent_mode {
+        let bound_plugin_connection =
+            (agent_ctx.db_type == DatabaseType::Plugin).then_some(agent_ctx.connection_id.as_str());
+        plugin_tools::discover_plugin_tools(&agent_ctx.state, agent_ctx.host_runtime.as_ref(), bound_plugin_connection)
+            .await
     } else {
-        agent_tools::read_only_tools(agent_ctx.db_type)
+        PluginToolSet::default()
     };
+    tools.extend(plugin_tool_set.definitions());
+    let plugin_system_prompt = plugin_tool_set.prompt_section().map(|section| format!("{system_prompt}\n\n{section}"));
+    let system_prompt = plugin_system_prompt.as_deref().unwrap_or(system_prompt);
     let task_contract = task_contract.cloned();
     let mut conversation_messages: Vec<AiMessage> = messages.to_vec();
     let mut final_text = String::new();
@@ -515,17 +602,49 @@ pub async fn run_agent_loop(
             });
         }
 
+        // Plugin tool calls are validated first; a call not declared read-only
+        // runs only after the user approved it. Nothing has executed yet, so a
+        // cancellation here stops the run without side effects.
+        let mut plugin_calls = match gate_plugin_tool_calls(
+            &plugin_tool_set,
+            &collected_tool_calls,
+            agent_ctx,
+            &on_event,
+            cancelled,
+        )
+        .await
+        {
+            Some(plugin_calls) => plugin_calls,
+            None => {
+                for tc in &collected_tool_calls {
+                    on_event(AgentEvent::ToolCallEnd {
+                        tool_call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        result: json!({ "content": "Cancelled before the tool ran." }),
+                        is_error: true,
+                    });
+                }
+                final_text = accumulated_text;
+                loop_exit = LoopExit::Cancelled;
+                break;
+            }
+        };
+
         // Execute tool calls: parallel for read tools, sequential for execute_query
         let state2 = Arc::clone(&agent_ctx.state);
         let conn2 = agent_ctx.connection_id.clone();
         let db2 = agent_ctx.database.clone();
+        // The run's database scope travels with every tool call so a tool that
+        // can address a namespace (Redis logical databases) cannot step outside
+        // the databases this conversation is bound to or the user selected.
+        let scope2 = agent_ctx.selected_databases.clone();
         let schema2 = agent_ctx.schema.clone();
         let db_type = agent_ctx.db_type;
         let parallel_sql_permissions = sql_permissions.clone();
 
         // Split by index into parallel and sequential groups using tool metadata
         let tool_parallel_map: std::collections::HashMap<&str, bool> =
-            tools.iter().map(|t| (t.name, t.parallel_ok)).collect();
+            tools.iter().map(|t| (t.name.as_ref(), t.parallel_ok)).collect();
         let (parallel_indices, sequential_indices): (Vec<usize>, Vec<usize>) = (0..collected_tool_calls.len())
             .partition(|&i| *tool_parallel_map.get(collected_tool_calls[i].name.as_str()).unwrap_or(&false));
 
@@ -537,40 +656,58 @@ pub async fn run_agent_loop(
         };
 
         // Run parallel group
-        let parallel_futures: Vec<_> =
-            parallel_indices
-                .iter()
-                .map(|&i| {
-                    let tc = make_tc(&collected_tool_calls[i]);
-                    let state = Arc::clone(&state2);
-                    let conn = conn2.clone();
-                    let db = db2.clone();
-                    let schema = schema2.clone();
-                    let perms = parallel_sql_permissions.clone();
-                    async move {
-                        agent_tools::execute_tool(&tc, &state, &conn, &db, schema.as_deref(), &db_type, perms).await
-                    }
-                })
-                .collect();
+        let parallel_futures: Vec<_> = parallel_indices
+            .iter()
+            .map(|&i| {
+                let tc = make_tc(&collected_tool_calls[i]);
+                let state = Arc::clone(&state2);
+                let conn = conn2.clone();
+                let db = db2.clone();
+                let scope = scope2.clone();
+                let schema = schema2.clone();
+                let perms = parallel_sql_permissions.clone();
+                async move {
+                    agent_tools::execute_tool_scoped(
+                        &tc,
+                        &state,
+                        &conn,
+                        &db,
+                        &scope,
+                        schema.as_deref(),
+                        &db_type,
+                        perms,
+                    )
+                    .await
+                }
+            })
+            .collect();
         let parallel_results = join_all(parallel_futures).await;
 
         // Run sequential group one-by-one
         let mut sequential_results = Vec::with_capacity(sequential_indices.len());
         for &i in &sequential_indices {
             let tc = make_tc(&collected_tool_calls[i]);
-            let execution_permissions = sequential_tool_permissions(&tc, db_type, &mut sql_permissions);
-            sequential_results.push(
-                agent_tools::execute_tool(
-                    &tc,
-                    &state2,
-                    &conn2,
-                    &db2,
-                    schema2.as_deref(),
-                    &db_type,
-                    execution_permissions,
-                )
-                .await,
-            );
+            let result = match plugin_calls.remove(&i) {
+                Some(Ok(prepared)) => {
+                    plugin_tools::execute_plugin_tool(&state2, agent_ctx.host_runtime.as_ref(), &tc, &prepared).await
+                }
+                Some(Err(not_executed)) => not_executed,
+                None => {
+                    let execution_permissions = sequential_tool_permissions(&tc, db_type, &mut sql_permissions);
+                    agent_tools::execute_tool_scoped(
+                        &tc,
+                        &state2,
+                        &conn2,
+                        &db2,
+                        &scope2,
+                        schema2.as_deref(),
+                        &db_type,
+                        execution_permissions,
+                    )
+                    .await
+                }
+            };
+            sequential_results.push(result);
         }
 
         // Merge results back into original order
@@ -1068,7 +1205,7 @@ fn estimate_tool_schema_tokens(tools: &[ToolDefinition]) -> u32 {
         .map(|tool| {
             let schema_tokens =
                 serde_json::to_string(&tool.parameters).map(|schema| estimate_text_tokens(&schema)).unwrap_or_default();
-            estimate_text_tokens(tool.name) + estimate_text_tokens(tool.description) + schema_tokens + 16
+            estimate_text_tokens(&tool.name) + estimate_text_tokens(&tool.description) + schema_tokens + 16
         })
         .sum()
 }
@@ -1263,6 +1400,98 @@ fn write_attempt_response(sql: &str, targets_production: bool) -> WriteAttemptRe
     }
 }
 
+const PLUGIN_TOOL_DECLINED: &str =
+    "The user declined this tool call, so it did not run. Do not retry it; continue without it.";
+const PLUGIN_TOOL_APPROVAL_TIMED_OUT: &str =
+    "Nobody approved this tool call in time, so it did not run. Do not retry it; tell the user what you intended to run.";
+const PLUGIN_TOOL_APPROVAL_UNAVAILABLE: &str =
+    "This tool may change state and needs the user's approval, which this session cannot ask for. It did not run.";
+
+/// Per-call outcome of the plugin tool gate: run the prepared call, or reply
+/// with the ready result explaining why it did not run.
+type PluginCallGate = std::collections::HashMap<usize, Result<PreparedPluginToolCall, ToolResult>>;
+
+/// Validates this turn's plugin tool calls and asks the user to approve every
+/// call that is not declared read-only, one at a time in call order. Returns
+/// `None` when the run was cancelled while an approval was pending.
+async fn gate_plugin_tool_calls<F>(
+    plugin_tool_set: &PluginToolSet,
+    tool_calls: &[ToolCall],
+    agent_ctx: &AgentLoopContext,
+    on_event: &F,
+    cancelled: &Notify,
+) -> Option<PluginCallGate>
+where
+    F: Fn(AgentEvent) + Sync,
+{
+    let mut gate = PluginCallGate::new();
+    if plugin_tool_set.is_empty() {
+        return Some(gate);
+    }
+    for (index, tool_call) in tool_calls.iter().enumerate() {
+        let Some(prepared) = plugin_tool_set.prepare_call(tool_call) else {
+            continue;
+        };
+        let outcome = match prepared {
+            Err(error) => Err(plugin_tools::not_executed_result(tool_call, error)),
+            Ok(prepared) if prepared.read_only => Ok(prepared),
+            Ok(prepared) => match agent_ctx.session_id.as_deref() {
+                None => Err(plugin_tools::not_executed_result(tool_call, PLUGIN_TOOL_APPROVAL_UNAVAILABLE)),
+                Some(session_id) => match request_tool_approval(session_id, tool_call, &prepared, on_event, cancelled)
+                    .await
+                {
+                    ToolApprovalWait::Approved => Ok(prepared),
+                    ToolApprovalWait::Denied => Err(plugin_tools::not_executed_result(tool_call, PLUGIN_TOOL_DECLINED)),
+                    ToolApprovalWait::TimedOut => {
+                        Err(plugin_tools::not_executed_result(tool_call, PLUGIN_TOOL_APPROVAL_TIMED_OUT))
+                    }
+                    ToolApprovalWait::Cancelled => return None,
+                },
+            },
+        };
+        gate.insert(index, outcome);
+    }
+    Some(gate)
+}
+
+async fn request_tool_approval<F>(
+    session_id: &str,
+    tool_call: &ToolCall,
+    prepared: &PreparedPluginToolCall,
+    on_event: &F,
+    cancelled: &Notify,
+) -> ToolApprovalWait
+where
+    F: Fn(AgentEvent) + Sync,
+{
+    let approval = tool_approval::register_tool_approval(session_id);
+    let approval_id = approval.id().to_string();
+    on_event(AgentEvent::ToolApprovalRequired {
+        approval_id: approval_id.clone(),
+        tool_call_id: tool_call.id.clone(),
+        tool_name: tool_call.name.clone(),
+        plugin_id: prepared.plugin_id.clone(),
+        plugin_name: prepared.plugin_name.clone(),
+        plugin_tool: prepared.plugin_tool.clone(),
+        connection_id: prepared.connection_id.clone(),
+        connection_name: prepared.connection_name.clone(),
+        args: prepared.arguments.clone(),
+        timeout_secs: tool_approval::TOOL_APPROVAL_TIMEOUT.as_secs(),
+    });
+    let wait = approval.wait(tool_approval::TOOL_APPROVAL_TIMEOUT, cancelled).await;
+    on_event(AgentEvent::ToolApprovalResolved {
+        approval_id,
+        tool_call_id: tool_call.id.clone(),
+        outcome: match wait {
+            ToolApprovalWait::Approved => ToolApprovalOutcome::Approved,
+            ToolApprovalWait::Denied => ToolApprovalOutcome::Denied,
+            ToolApprovalWait::TimedOut => ToolApprovalOutcome::TimedOut,
+            ToolApprovalWait::Cancelled => ToolApprovalOutcome::Cancelled,
+        },
+    });
+    wait
+}
+
 fn sequential_tool_permissions(
     tool_call: &ToolCall,
     db_type: DatabaseType,
@@ -1316,6 +1545,17 @@ Use this result to continue the original user task. Do not summarize this tool r
 }
 
 fn compact_tool_result_for_context(tool_name: &str, content: &str) -> String {
+    // Both skill tools bound their own output — a page plus a cursor — so this
+    // compactor has nothing to save here and everything to lose: it keeps only the
+    // head and the tail, and for an instructions file the middle it drops is the
+    // part that says what to do. `use_skill` needs this as much as the file reader
+    // does: its answer is a body page plus a file listing, which can still cross the
+    // budget, and compacting it would throw away the middle of the page the paging
+    // exists to deliver.
+    if matches!(tool_name, skill_tools::USE_SKILL_TOOL | skill_tools::READ_SKILL_FILE_TOOL) {
+        return content.to_string();
+    }
+
     if content.chars().count() <= MAX_TOOL_RESULT_CONTEXT_CHARS {
         return content.to_string();
     }
@@ -1489,6 +1729,158 @@ fn summarize_message_content(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plugin_tool_set() -> PluginToolSet {
+        PluginToolSet::from_listings_for_tests(
+            &[("io.dbx.kafka", "Kafka Studio")],
+            vec![(
+                plugin_tools::OpenPluginConnection {
+                    connection_id: "k1".to_string(),
+                    connection_name: "prod-kafka".to_string(),
+                    plugin_id: "io.dbx.kafka".to_string(),
+                },
+                json!({ "tools": [
+                    { "name": "kafka_topics_list", "annotations": { "readOnlyHint": true }, "inputSchema": { "type": "object", "properties": {} } },
+                    { "name": "kafka_topics_delete", "inputSchema": { "type": "object", "properties": { "topics": { "type": "array", "items": { "type": "string" } } } } }
+                ] }),
+            )],
+        )
+    }
+
+    fn plugin_tool_call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: json!({ "topics": ["orders"] }),
+            provider_payload: None,
+        }
+    }
+
+    async fn gate_context(session_id: Option<&str>) -> (tempfile::TempDir, AgentLoopContext) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let ctx = AgentLoopContext {
+            state: Arc::new(AppState::new(storage)),
+            connection_id: "db".to_string(),
+            database: String::new(),
+            selected_databases: Vec::new(),
+            schema: None,
+            db_type: DatabaseType::Postgres,
+            cli_mcp_server_command: None,
+            sql_permissions: agent_tools::AgentSqlPermissions::default(),
+            max_agent_turns: DEFAULT_MAX_AGENT_TURNS,
+            prompt_cache_key: None,
+            session_id: session_id.map(str::to_string),
+            host_runtime: None,
+            allow_skills: false,
+        };
+        (temp_dir, ctx)
+    }
+
+    #[tokio::test]
+    async fn plugin_tool_gate_runs_read_only_calls_and_asks_before_the_rest() {
+        let (_dir, ctx) = gate_context(Some("session-gate")).await;
+        let set = plugin_tool_set();
+        let calls = vec![
+            plugin_tool_call("c1", "kafka__kafka_topics_list"),
+            plugin_tool_call("c2", "kafka__kafka_topics_delete"),
+            plugin_tool_call("c3", "list_tables"),
+        ];
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded = events.clone();
+        // The "user" approves as soon as the question appears.
+        let on_event = move |event: AgentEvent| {
+            if let AgentEvent::ToolApprovalRequired { approval_id, .. } = &event {
+                assert!(tool_approval::resolve_tool_approval("session-gate", approval_id, true));
+            }
+            recorded.lock().unwrap().push(event);
+        };
+        let gate = gate_plugin_tool_calls(&set, &calls, &ctx, &on_event, &Notify::new()).await.unwrap();
+
+        assert!(gate[&0].as_ref().is_ok_and(|prepared| prepared.read_only));
+        let approved = gate[&1].as_ref().unwrap();
+        assert_eq!(approved.connection_id, "k1");
+        assert_eq!(approved.arguments, json!({ "topics": ["orders"] }));
+        assert!(!gate.contains_key(&2), "database tools bypass the plugin gate");
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2, "only the non-read-only call asks: {events:?}");
+        assert!(
+            matches!(&events[0], AgentEvent::ToolApprovalRequired { tool_call_id, plugin_tool, .. } if tool_call_id == "c2" && plugin_tool == "kafka_topics_delete")
+        );
+        assert!(matches!(&events[1], AgentEvent::ToolApprovalResolved { outcome: ToolApprovalOutcome::Approved, .. }));
+    }
+
+    #[tokio::test]
+    async fn plugin_tool_gate_refuses_declined_and_unaskable_calls_and_stops_on_cancel() {
+        let set = plugin_tool_set();
+        let calls = vec![plugin_tool_call("c1", "kafka__kafka_topics_delete")];
+
+        let (_dir, ctx) = gate_context(Some("session-deny")).await;
+        let deny = |event: AgentEvent| {
+            if let AgentEvent::ToolApprovalRequired { approval_id, .. } = &event {
+                tool_approval::resolve_tool_approval("session-deny", approval_id, false);
+            }
+        };
+        let gate = gate_plugin_tool_calls(&set, &calls, &ctx, &deny, &Notify::new()).await.unwrap();
+        let declined = gate[&0].as_ref().unwrap_err();
+        assert!(declined.is_error);
+        assert_eq!(declined.content, PLUGIN_TOOL_DECLINED);
+
+        // No client session: nobody can be asked, so the call never runs.
+        let (_dir, headless) = gate_context(None).await;
+        let gate = gate_plugin_tool_calls(&set, &calls, &headless, &|_event| {}, &Notify::new()).await.unwrap();
+        assert_eq!(gate[&0].as_ref().unwrap_err().content, PLUGIN_TOOL_APPROVAL_UNAVAILABLE);
+
+        let (_dir, ctx) = gate_context(Some("session-cancel")).await;
+        let cancelled = Notify::new();
+        cancelled.notify_one();
+        assert!(gate_plugin_tool_calls(&set, &calls, &ctx, &|_event| {}, &cancelled).await.is_none());
+    }
+
+    /// Full tool identity, not just names: two tables differing in a description
+    /// or a schema are not "the same tools".
+    fn describe(tools: &[ToolDefinition]) -> Vec<String> {
+        tools
+            .iter()
+            .map(|tool| {
+                format!(
+                    "{}|{}|{}|{}|{}",
+                    tool.name, tool.description, tool.parameters, tool.read_only, tool.parallel_ok
+                )
+            })
+            .collect()
+    }
+
+    /// ADR Decision 10: the skill tools ship with the listing, in both modes, and
+    /// a request without one gets exactly the tool table it got before they
+    /// existed.
+    #[test]
+    fn skill_tools_ship_only_with_a_skill_listing() {
+        let permissions = agent_tools::AgentSqlPermissions::default();
+        for is_agent_mode in [false, true] {
+            let plain = run_tools(DatabaseType::Postgres, &permissions, is_agent_mode, false);
+            let unchanged = if is_agent_mode {
+                agent_tools::all_tools(DatabaseType::Postgres, permissions.clone())
+            } else {
+                agent_tools::read_only_tools(DatabaseType::Postgres)
+            };
+            assert_eq!(describe(&plain), describe(&unchanged), "a skill-free request must keep its old tool table");
+
+            let with_skills = run_tools(DatabaseType::Postgres, &permissions, is_agent_mode, true);
+            let listed = describe(&with_skills);
+            assert_eq!(
+                listed.len(),
+                plain.len() + 2,
+                "both skill tools must be appended in agent_mode={is_agent_mode}"
+            );
+            let names: Vec<&str> = with_skills.iter().map(|tool| tool.name.as_ref()).collect();
+            assert!(names.contains(&skill_tools::USE_SKILL_TOOL), "{names:?}");
+            assert!(names.contains(&skill_tools::READ_SKILL_FILE_TOOL), "{names:?}");
+            // Appending must not disturb the tools that were already there.
+            assert_eq!(&listed[..plain.len()], &describe(&plain)[..]);
+        }
+    }
 
     #[test]
     fn compaction_prompt_preserves_attachment_trust_boundary() {
@@ -1809,6 +2201,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: "hello".to_string(),
             reasoning_delta: None,
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);
@@ -1822,6 +2215,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: String::new(),
             reasoning_delta: Some("thinking...".to_string()),
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);
@@ -1835,6 +2229,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: "answer".to_string(),
             reasoning_delta: Some("thinking...".to_string()),
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);
@@ -1845,10 +2240,28 @@ mod tests {
 
     #[test]
     fn chunk_to_events_returns_empty_for_empty_chunk() {
-        let chunk =
-            AiStreamChunk { session_id: "test".to_string(), delta: String::new(), reasoning_delta: None, done: false };
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: String::new(),
+            reasoning_delta: None,
+            finish_reason: None,
+            done: false,
+        };
         let events = chunk_to_events(&chunk);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn chunk_to_events_surfaces_output_limit_truncation() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: String::new(),
+            reasoning_delta: None,
+            finish_reason: Some("length".to_string()),
+            done: true,
+        };
+        let events = chunk_to_events(&chunk);
+        assert!(matches!(&events[0], AgentEvent::OutputTruncated { finish_reason } if finish_reason == "length"));
     }
 
     #[test]
@@ -1857,6 +2270,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: String::new(),
             reasoning_delta: Some("reasoning".to_string()),
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);
@@ -1870,6 +2284,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: "text only".to_string(),
             reasoning_delta: None,
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);

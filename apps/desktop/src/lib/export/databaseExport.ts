@@ -4,6 +4,7 @@ import { buildTableSelectSql } from "@/lib/table/tableSelectSql.ts";
 import { uuid } from "@/lib/common/utils.ts";
 import { SINGLE_DATABASE_TYPES } from "@/lib/database/databaseCapabilitySets";
 import { isXuguSyntheticScope } from "@/lib/sidebar/xuguPublicSynonyms";
+import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
 
 export const DATABASE_EXPORT_ROW_LIMIT = 10_000;
 export const DATABASE_EXPORT_PAGE_SIZE = 500;
@@ -31,6 +32,7 @@ export interface BuildDatabaseSqlExportOptions {
   tables: ExportedTableSql[];
   rowLimitPerTable?: number;
   insertBatchSize?: number;
+  insertDialect?: SqlInsertDialect;
   connectionId?: string;
   database?: string;
   schema?: string;
@@ -50,6 +52,10 @@ export interface BuildExportInsertStatementsOptions {
   /** 生成 INSERT 时需要排除的列名（例如导出时不带主键），忽略大小写匹配。 */
   excludeColumns?: string[];
   batchSize?: number;
+}
+
+export interface BuildExportSqlInsertOptions extends BuildExportInsertStatementsOptions {
+  insertDialect?: SqlInsertDialect;
 }
 
 export interface BuildExportPageSqlOptions {

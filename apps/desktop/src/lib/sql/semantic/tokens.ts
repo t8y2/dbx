@@ -232,11 +232,14 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
       continue;
     }
 
-    if ("(),.;*".includes(ch)) {
-      if (ch === ")") depth = Math.max(0, depth - 1);
-      tokens.push(token("punctuation", ch, start, start + 1, depth));
-      if (ch === "(") depth += 1;
-      index += 1;
+    // Fullwidth （） (U+FF08/U+FF09) are common IME typos in Chinese locales; treat them like
+    // ASCII () for nesting depth so commas inside to_date（…, …） stay nested and do not split
+    // INSERT ... SELECT projections (insert value column hints).
+    if ("(),.;*".includes(ch) || ch === "\uFF08" || ch === "\uFF09") {
+      if (ch === ")" || ch === "\uFF09") depth = Math.max(0, depth - 1);
+      tokens.push(token("punctuation", ch, start, start + ch.length, depth));
+      if (ch === "(" || ch === "\uFF08") depth += 1;
+      index += ch.length;
       continue;
     }
 

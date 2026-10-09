@@ -44,6 +44,7 @@ function preparationFor(table: string) {
     targetRowCount: 0,
     sourceTruncated: false,
     targetTruncated: false,
+    rowBudget: 100_000,
   };
 }
 
@@ -224,6 +225,30 @@ test("keeps the configured per-table match columns after cloning the session con
   // The session must not share the caller's arrays.
   input.keyColumnsByTable.users?.push("name");
   assert.deepEqual(session.config.keyColumnsByTable, { users: ["user_id", "email"] });
+});
+
+test("carries the row budget and truncation flags from the backend into the table result", async () => {
+  apiMock.prepareDataCompareFromTables.mockImplementation((options: { targetTable: string }) => Promise.resolve({ ...preparationFor(options.targetTable), sourceRowCount: 4_000_000, sourceTruncated: true, targetTruncated: true, rowBudget: 100_000 }));
+
+  const session = await runSession(baseConfig({ selectedSourceTables: ["users"], targetTable: "users" }), [{ sourceTable: "users", targetTable: "users" }]);
+
+  assert.equal(session.batchResults[0]?.rowBudget, 100_000);
+  assert.equal(session.batchResults[0]?.sourceTruncated, true);
+  assert.equal(session.batchResults[0]?.targetTruncated, true);
+});
+
+test("keeps a truncated missing-target table on the same row budget", async () => {
+  apiMock.prepareDataCompareMissingTarget.mockResolvedValue({
+    ...preparationFor("users"),
+    sourceRowCount: 8_000_000,
+    sourceTruncated: true,
+    rowBudget: 100_000,
+  });
+
+  const session = await runSession(baseConfig({ selectedSourceTables: ["users"], targetTable: "users", targetTables: ["orders"] }), [{ sourceTable: "users", targetTable: "users" }]);
+
+  assert.equal(session.batchResults[0]?.rowBudget, 100_000);
+  assert.equal(session.batchResults[0]?.sourceTruncated, true);
 });
 
 test("normalizes a per-table match-column map", () => {

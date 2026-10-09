@@ -1,12 +1,17 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Duration, time::Instant};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolResponse, CallToolResult, ContentBlock, ErrorData, Implementation, ListResourceTemplatesResult,
+        ListResourcesResult, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+        ResourceContents, ResourceTemplate, ServerCapabilities, ServerConfig,
+    },
     schemars, tool, tool_handler, tool_router, ServerHandler,
 };
 use serde::Deserialize;
 use serde_json::json;
+use url::Url;
 use uuid::Uuid;
 
 use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
@@ -17,21 +22,37 @@ use dbx_core::{
     agent_tools::{
         format_query_result_as_text, normalize_sql_for_confirmation, QueryCellWindow, MAX_EXECUTE_QUERY_ROWS,
     },
+    connection::SalesforceCurrentUser,
     database_manifest,
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
+    db::salesforce_driver::parse_salesforce_statement,
     history::HistoryEntry,
+    mcp_policy::connection_allows_salesforce_dml,
     models::connection::ConnectionConfig,
     models::connection::DatabaseType,
     production_safety::{
         is_production_database, mongo_pipeline_targets_production_database, sql_references_disallowed_database,
         targets_production_database,
     },
-    query_execution_sql::is_write_sql_for_database,
+    query_execution_sql::{classify_salesforce_statement_risk, is_write_sql_for_database, SalesforceStatementRisk},
     sql_risk::{
         classify_sql_risk_for_database, is_dangerous_sql_for_database, mcp_sql_has_forbidden_database_switch, SqlRisk,
     },
     storage::{McpDatabaseScope, McpGlobalPolicy},
 };
+
+const CONNECTIONS_RESOURCE_URI: &str = "dbx://connections";
+const DATABASES_RESOURCE_TEMPLATE: &str = "dbx://connections/{connection_id}/databases";
+const TABLES_RESOURCE_TEMPLATE: &str = "dbx://connections/{connection_id}/tables{?database,schema}";
+const TABLE_SCHEMA_RESOURCE_TEMPLATE: &str = "dbx://connections/{connection_id}/table-schema{?database,schema,table}";
+
+#[derive(Debug, PartialEq, Eq)]
+enum DbxResourceRequest {
+    Connections,
+    Databases { connection_id: String },
+    Tables { connection_id: String, database: Option<String>, schema: Option<String> },
+    TableSchema { connection_id: String, database: Option<String>, schema: Option<String>, table: String },
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListConnectionsRequest {}
@@ -40,6 +61,34 @@ pub struct ListConnectionsRequest {}
 pub struct ListDatabasesRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PluginListRequest {
+    #[schemars(description = "Optional case-insensitive keyword matched against plugin ids and names")]
+    #[schemars(extend("type" = "string"))]
+    pub filter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PluginToolsRequest {
+    #[schemars(description = "Unique ID of the plugin, as returned by dbx_plugin_list")]
+    pub plugin_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PluginCallRequest {
+    #[schemars(description = "Unique ID of the plugin, as returned by dbx_plugin_list")]
+    pub plugin_id: String,
+    #[schemars(description = "Tool name exactly as listed by dbx_plugin_tools")]
+    pub tool: String,
+    #[schemars(description = "Tool arguments object, matching the tool schema returned by dbx_plugin_tools")]
+    pub arguments: Option<serde_json::Value>,
+    #[schemars(
+        description = "Optional DBX connection to run the tool on when the plugin has several allowed connections"
+    )]
+    #[schemars(extend("type" = "string"))]
+    pub dbx_connection: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -369,12 +418,313 @@ pub struct ExecuteBatchQueryRequest {
     pub use_transaction: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SalesforceIdentityRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SalesforcePrepareWriteRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(
+        description = "Database name. Salesforce has no databases, so omit this unless DBX MCP settings scope the connection."
+    )]
+    #[schemars(extend("type" = "string"))]
+    pub database: Option<String>,
+    #[schemars(description = "Write operation: \"insert\", \"update\" or \"delete\". One record per call.")]
+    pub op: String,
+    #[schemars(
+        description = "Salesforce object API name, e.g. \"Account\", \"Contact\" or a custom object such as \"Invoice__c\"."
+    )]
+    pub object: String,
+    #[schemars(
+        description = "Record Id of the row to change. Required for update and delete; omit for insert, where Salesforce assigns it."
+    )]
+    #[schemars(extend("type" = "string"))]
+    pub id: Option<String>,
+    #[schemars(
+        description = "Field API name to value map, e.g. {\"Name\": \"Acme\", \"AnnualRevenue\": 1200}. Required and non-empty for insert and update; omit for delete. Never include \"Id\"."
+    )]
+    #[schemars(extend("type" = "object"))]
+    pub fields: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SalesforceApplyWriteRequest {
+    #[schemars(
+        description = "The confirm_token returned by dbx_salesforce_prepare_write. Single-use, and valid only for the exact write that was summarized."
+    )]
+    pub confirm_token: String,
+}
+
+/// How long a prepared Salesforce write stays applicable. Long enough for an
+/// agent to show the summary and for a human to answer, short enough that a
+/// token left in a transcript cannot be replayed much later against a changed
+/// org.
+pub(crate) const SALESFORCE_WRITE_CONFIRM_TTL: Duration = Duration::from_secs(300);
+/// Ceiling on simultaneously pending confirmations. Prepared writes live in
+/// process memory, so an agent that prepares in a loop must not be able to grow
+/// the map without bound.
+const SALESFORCE_WRITE_PENDING_LIMIT: usize = 64;
+/// Field rows shown in a confirmation summary before it collapses the rest into
+/// a count. The full statement is still in `structured_content`.
+const SALESFORCE_SUMMARY_MAX_FIELDS: usize = 40;
+/// Characters of one field value shown in the summary.
+const SALESFORCE_SUMMARY_MAX_VALUE_CHARS: usize = 200;
+/// Header the Salesforce driver routes to its REST DML endpoints. Mirrors
+/// `dbx-sql`'s grid save builder; the driver matches it case-insensitively.
+const SALESFORCE_DML_HEADER: &str = "DBX SALESFORCE DML";
+
+/// One write prepared by `dbx_salesforce_prepare_write` and waiting for its
+/// `dbx_salesforce_apply_write` call.
+///
+/// Salesforce has no transactions and no rollback, so this confirmation step is
+/// the only place a write can still be stopped. The statement text is captured
+/// here verbatim and re-sent verbatim: what the summary showed the user is
+/// exactly what the org receives, and an agent cannot widen it in between.
+#[derive(Debug, Clone)]
+struct PendingSalesforceWrite {
+    connection_id: String,
+    database: String,
+    statement: String,
+    created_at: Instant,
+}
+
+#[derive(Debug)]
+pub(crate) struct PendingSalesforceWrites {
+    ttl: Duration,
+    entries: tokio::sync::Mutex<HashMap<String, PendingSalesforceWrite>>,
+}
+
+impl PendingSalesforceWrites {
+    pub(crate) fn new(ttl: Duration) -> Arc<Self> {
+        Arc::new(Self { ttl, entries: tokio::sync::Mutex::new(HashMap::new()) })
+    }
+
+    fn ttl_secs(&self) -> u64 {
+        self.ttl.as_secs()
+    }
+
+    fn is_expired(&self, pending: &PendingSalesforceWrite) -> bool {
+        pending.created_at.elapsed() >= self.ttl
+    }
+
+    /// Store a prepared write under its token, dropping expired entries first
+    /// and then the oldest ones until the cap has room.
+    async fn insert(&self, token: String, pending: PendingSalesforceWrite) {
+        let mut entries = self.entries.lock().await;
+        entries.retain(|_, entry| !self.is_expired(entry));
+        while entries.len() >= SALESFORCE_WRITE_PENDING_LIMIT {
+            let Some(oldest) = entries.iter().min_by_key(|(_, entry)| entry.created_at).map(|(token, _)| token.clone())
+            else {
+                break;
+            };
+            entries.remove(&oldest);
+        }
+        entries.insert(token, pending);
+    }
+
+    /// Consume a token. Single-use by design: a failed apply, a retry, or a
+    /// second call with the same token all have to go back through prepare, so
+    /// every write that reaches Salesforce was summarized again first.
+    async fn take(&self, token: &str) -> Option<PendingSalesforceWrite> {
+        let entry = self.entries.lock().await.remove(token.trim())?;
+        (!self.is_expired(&entry)).then_some(entry)
+    }
+}
+
+// One context per dispatched request; legacy SQL helpers enrich it instead of
+// writing duplicate rows. Direct internal calls retain their existing behavior.
+tokio::task_local! {
+    static CALL_HISTORY: std::sync::Mutex<HistoryEntry>;
+}
+
+struct CallHistoryGuard {
+    backend: Arc<dyn DbxBackend>,
+    fallback: Option<HistoryEntry>,
+    started: Instant,
+}
+
+impl Drop for CallHistoryGuard {
+    fn drop(&mut self) {
+        if let Some(mut entry) = self.fallback.take() {
+            entry.execution_time_ms = self.started.elapsed().as_millis();
+            entry.error = Some("MCP request cancelled or interrupted".into());
+            let backend = self.backend.clone();
+            // rmcp may drop the handler future on cancellation. Persist outside
+            // that future so the interruption still has an audit record.
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    if let Err(error) = backend.save_history_entry(&entry).await {
+                        log::warn!("failed to save interrupted MCP history: {error}");
+                    }
+                });
+            }
+        }
+    }
+}
+
+fn history_request(value: &serde_json::Value, depth: usize) -> serde_json::Value {
+    use serde_json::Value;
+    if depth > 8 {
+        return json!("[depth limit]");
+    }
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .take(64)
+                .map(|(key, value)| {
+                    let lower = key.to_ascii_lowercase();
+                    let secret = [
+                        "password",
+                        "passwd",
+                        "secret",
+                        "token",
+                        "credential",
+                        "authorization",
+                        "private_key",
+                        "apikey",
+                        "api_key",
+                        "connection_string",
+                        "url",
+                        "dsn",
+                    ]
+                    .iter()
+                    .any(|part| lower.contains(part));
+                    (
+                        key.chars().take(128).collect(),
+                        if secret { json!("[redacted]") } else { history_request(value, depth + 1) },
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(values) => {
+            Value::Array(values.iter().take(16).map(|value| history_request(value, depth + 1)).collect())
+        }
+        Value::String(value) => json!(value.chars().take(1024).collect::<String>()),
+        value => value.clone(),
+    }
+}
+
+fn bounded_history_request(value: &serde_json::Value) -> String {
+    let sanitized = history_request(value, 0).to_string();
+    if sanitized.len() > 16 * 1024 {
+        json!({"truncated": true, "summary": "Request exceeds history size limit"}).to_string()
+    } else {
+        sanitized
+    }
+}
+
+// Response payloads need their own sanitizer: request summaries intentionally
+// shorten strings and arrays, which would silently discard query results.
+fn history_response(value: &serde_json::Value, depth: usize) -> serde_json::Value {
+    use serde_json::Value;
+    if depth > 32 {
+        return json!({"truncated": true, "reason": "depth limit"});
+    }
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| {
+                    let lower = key.to_ascii_lowercase();
+                    let secret = [
+                        "password",
+                        "passwd",
+                        "secret",
+                        "token",
+                        "credential",
+                        "authorization",
+                        "private_key",
+                        "apikey",
+                        "api_key",
+                        "connection_string",
+                        "url",
+                        "dsn",
+                    ]
+                    .iter()
+                    .any(|part| lower.contains(part));
+                    let binary = key == "data"
+                        && fields
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|kind| kind == "image" || kind == "audio")
+                        || key == "blob";
+                    (
+                        key.clone(),
+                        if secret || binary { json!("[redacted]") } else { history_response(value, depth + 1) },
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.iter().map(|value| history_response(value, depth + 1)).collect()),
+        Value::String(text) => {
+            // MCP text blocks often contain JSON encoded inside a string.
+            // Sanitize that JSON too, while preserving the text-block shape.
+            if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                if parsed.is_object() || parsed.is_array() {
+                    return json!(history_response(&parsed, depth + 1).to_string());
+                }
+            }
+            value.clone()
+        }
+        _ => value.clone(),
+    }
+}
+
+fn bounded_history_response<T: serde::Serialize>(value: &T) -> String {
+    let value = serde_json::to_value(value).unwrap_or_else(|_| json!({"serialization_error": true}));
+    let sanitized = history_response(&value, 0).to_string();
+    if sanitized.len() > 64 * 1024 {
+        // A short preview leaves room for JSON escaping and metadata.
+        json!({"truncated": true, "summary": "Response exceeds 64 KiB history size limit", "original_bytes": sanitized.len(), "preview": sanitized.chars().take(4096).collect::<String>()}).to_string()
+    } else {
+        sanitized
+    }
+}
+
 #[derive(Clone)]
 pub struct DbxMcpServer {
     backend: Arc<dyn DbxBackend>,
     scope: McpScope,
+    plugin_tools_mode: PluginToolsMode,
     sessions: Arc<McpSessionStore>,
+    pending_salesforce_writes: Arc<PendingSalesforceWrites>,
     tool_router: ToolRouter<Self>,
+}
+
+/// How plugin tools appear on the external server (`DBX_MCP_PLUGIN_TOOLS`):
+/// `flat` lists every plugin tool in `tools/list` (default, compatible),
+/// `lazy` exposes only the `dbx_plugin_*` meta tools so schemas enter the
+/// context on demand, `both` advertises both views.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PluginToolsMode {
+    #[default]
+    Flat,
+    Lazy,
+    Both,
+}
+
+impl PluginToolsMode {
+    pub fn from_env() -> Self {
+        match std::env::var("DBX_MCP_PLUGIN_TOOLS").ok().as_deref().map(str::trim) {
+            Some(value) if value.eq_ignore_ascii_case("lazy") => Self::Lazy,
+            Some(value) if value.eq_ignore_ascii_case("both") => Self::Both,
+            Some(value) if value.eq_ignore_ascii_case("flat") => Self::Flat,
+            _ => Self::default(),
+        }
+    }
+
+    pub fn advertise_flat(&self) -> bool {
+        matches!(self, Self::Flat | Self::Both)
+    }
+
+    pub fn advertise_meta(&self) -> bool {
+        matches!(self, Self::Lazy | Self::Both)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -442,6 +792,57 @@ impl DbxMcpServer {
     }
 
     pub fn with_runtime_options(backend: Arc<dyn DbxBackend>, scope: McpScope, web_mode: bool) -> Self {
+        Self::with_plugin_tools_mode(backend, scope, web_mode, PluginToolsMode::from_env())
+    }
+
+    /// Same as [`with_runtime_options`], but pins the plugin-tools mode —
+    /// used by tests so parallel cases cannot observe each other's env.
+    pub fn with_plugin_tools_mode(
+        backend: Arc<dyn DbxBackend>,
+        scope: McpScope,
+        web_mode: bool,
+        plugin_tools_mode: PluginToolsMode,
+    ) -> Self {
+        Self::build(
+            backend,
+            scope,
+            web_mode,
+            plugin_tools_mode,
+            McpSessionStore::new(),
+            PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL),
+        )
+    }
+
+    /// Same as [`with_plugin_tools_mode`], but reuses session and pending-write
+    /// state that outlives this instance.
+    ///
+    /// The Streamable HTTP transport drives a `Stateful` (protocol `< 2026-07-28`)
+    /// conversation through one long-lived service, but it calls the service
+    /// factory **per request** for every other mode: stateless `2026-07-28`
+    /// requests, tool-schema discovery, and session restoration. Tools that hand
+    /// state back to the model — `dbx_open_session` and the transaction tools,
+    /// `dbx_salesforce_prepare_write` and its confirmation — must therefore keep
+    /// that state in `Arc`s owned by the transport, not in the per-instance
+    /// defaults, or the next request would not find its own session.
+    pub(crate) fn with_shared_state(
+        backend: Arc<dyn DbxBackend>,
+        scope: McpScope,
+        web_mode: bool,
+        plugin_tools_mode: PluginToolsMode,
+        sessions: Arc<McpSessionStore>,
+        pending_salesforce_writes: Arc<PendingSalesforceWrites>,
+    ) -> Self {
+        Self::build(backend, scope, web_mode, plugin_tools_mode, sessions, pending_salesforce_writes)
+    }
+
+    fn build(
+        backend: Arc<dyn DbxBackend>,
+        scope: McpScope,
+        web_mode: bool,
+        plugin_tools_mode: PluginToolsMode,
+        sessions: Arc<McpSessionStore>,
+        pending_salesforce_writes: Arc<PendingSalesforceWrites>,
+    ) -> Self {
         // The workspace enables more than one rustls crypto feature through
         // transitive dependencies. Native MCP runs outside the desktop/web
         // startup paths, so select the same provider before any TLS tool call.
@@ -462,7 +863,15 @@ impl DbxMcpServer {
             tool_router.disable_route("dbx_send_message");
             tool_router.disable_route("dbx_peek_messages");
         }
-        Self { backend, scope, sessions: McpSessionStore::new(), tool_router }
+        // In `flat` mode plugin tools are merged directly into tools/list and
+        // the lazy meta tools would only duplicate them; in `lazy`/`both`
+        // they stay enabled so clients can discover on demand.
+        if !plugin_tools_mode.advertise_meta() {
+            tool_router.disable_route("dbx_plugin_list");
+            tool_router.disable_route("dbx_plugin_tools");
+            tool_router.disable_route("dbx_plugin_call");
+        }
+        Self { backend, scope, plugin_tools_mode, sessions, pending_salesforce_writes, tool_router }
     }
 
     fn spawn_session_cleanup(&self, session: McpSession) -> tokio::sync::oneshot::Receiver<SessionCleanupResult> {
@@ -503,7 +912,7 @@ impl DbxMcpServer {
         result_rx
     }
 
-    async fn close_backend_sessions_best_effort(&self, sessions: Vec<McpSession>) {
+    pub(crate) async fn close_backend_sessions_best_effort(&self, sessions: Vec<McpSession>) {
         let cleanups = sessions.into_iter().map(|session| self.spawn_session_cleanup(session)).collect::<Vec<_>>();
         for cleanup in cleanups {
             let _ = cleanup.await;
@@ -548,6 +957,7 @@ impl DbxMcpServer {
     }
     async fn save_mcp_sql_history(
         &self,
+        tool_name: &str,
         connection: &ConnectionConfig,
         database: &str,
         sql: &str,
@@ -572,7 +982,27 @@ impl DbxMcpServer {
             affected_rows,
             rollback_sql: None,
             details_json: Some(r#"{"source":"mcp"}"#.to_string()),
+            source: "mcp".to_string(),
+            mcp_tool_name: Some(tool_name.to_string()),
+            mcp_request_json: None,
+            mcp_response_json: None,
+            mcp_session_id: None,
         };
+        if CALL_HISTORY
+            .try_with(|current| {
+                let mut current = current.lock().unwrap();
+                current.connection_id = entry.connection_id.clone();
+                current.connection_name = entry.connection_name.clone();
+                current.database = entry.database.clone();
+                current.sql = entry.sql.clone();
+                current.activity_kind = entry.activity_kind.clone();
+                current.operation = entry.operation.clone();
+                current.affected_rows = entry.affected_rows;
+            })
+            .is_ok()
+        {
+            return;
+        }
         if let Err(error) = self.backend.save_history_entry(&entry).await {
             log::warn!("failed to save MCP SQL history for connection {}: {error}", connection.id);
         }
@@ -582,8 +1012,173 @@ impl DbxMcpServer {
 #[tool_router]
 impl DbxMcpServer {
     #[tool(
+        name = "dbx_plugin_list",
+        description = "List DBX plugins that contribute MCP tools. Returns each plugin's id, name, tool count, and the number of connections available for its tools. Use dbx_plugin_tools with a plugin id to inspect its tools; call them through dbx_plugin_call."
+    )]
+    async fn plugin_list(&self, Parameters(request): Parameters<PluginListRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_plugin_list").await {
+            return error;
+        }
+        let (rows, note) = match self.plugin_tool_catalog().await {
+            Ok(catalog) => catalog,
+            Err(error) => return error,
+        };
+        let filter = request.filter.as_deref().map(str::trim).filter(|value| !value.is_empty());
+        let mut lines = Vec::new();
+        for (plugin_id, plugin_name, tool_count, connection_count) in &rows {
+            let matches = |haystack: &str| -> bool {
+                filter.is_none_or(|needle| haystack.to_ascii_lowercase().contains(&needle.to_ascii_lowercase()))
+            };
+            if filter.is_some() && !matches(plugin_id) && !matches(plugin_name) {
+                continue;
+            }
+            lines.push(format!(
+                "- {plugin_id} · {plugin_name} · {tool_count} tool(s) · {connection_count} allowed connection(s)"
+            ));
+        }
+        if lines.is_empty() {
+            return text(match (filter, &note) {
+                (Some(_), _) => "No DBX plugin matches the filter.".to_string(),
+                (None, Some(note)) => note.clone(),
+                (None, None) => "No DBX plugin contributes MCP tools.".to_string(),
+            });
+        }
+        text(format!(
+            "{} plugin(s) contribute MCP tools:\n{}\n\nInspect tools with dbx_plugin_tools (plugin_id), call them with dbx_plugin_call.{}",
+            lines.len(),
+            lines.join("\n"),
+            note.as_ref().map(|note| format!("\n{note}")).unwrap_or_default()
+        ))
+    }
+
+    #[tool(
+        name = "dbx_plugin_tools",
+        description = "List the MCP tools of one DBX plugin by its plugin id (from dbx_plugin_list). Returns each tool's name, description, arguments schema, read-only hint, and whether a connection must be selected. Call the tool through dbx_plugin_call."
+    )]
+    async fn plugin_tools(&self, Parameters(request): Parameters<PluginToolsRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_plugin_tools").await {
+            return error;
+        }
+        let plugin_id = request.plugin_id.trim();
+        if plugin_id.is_empty() {
+            return tool_error("PLUGIN_ID_REQUIRED", "plugin_id is required; use dbx_plugin_list to find plugin ids.");
+        }
+        let providers = match self.backend.list_plugin_mcp_tools().await {
+            Ok(providers) => providers,
+            Err(error) => return backend_tool_error("DBX_TOOL_ERROR", error),
+        };
+        let entries = crate::plugin_tools::build_catalog(&providers);
+        // Disclose only what the flat surface would advertise: the per-tool
+        // allowlist filters the listing just like `tools/list`, with a count
+        // of hidden tools so the caller knows the view is narrowed.
+        let policy = self.load_policy().await.ok();
+        let (owned, hidden) = {
+            let owned: Vec<&crate::plugin_tools::PluginToolEntry> = entries
+                .iter()
+                .filter(|entry| {
+                    entry.plugin_id == plugin_id
+                        && policy.as_ref().is_none_or(|policy| policy_allows_tool(policy, &entry.exposed_name))
+                })
+                .collect();
+            let total = entries.iter().filter(|entry| entry.plugin_id == plugin_id).count();
+            let hidden = total - owned.len();
+            (owned, hidden)
+        };
+        if owned.is_empty() {
+            // An all-allowlist-hidden plugin and a nonexistent one answer
+            // identically, so this meta tool cannot fingerprint installed
+            // plugin ids. dbx_plugin_list stays the enumeration surface and
+            // only shows what the caller may see.
+            return tool_error(
+                "PLUGIN_NOT_FOUND",
+                format!(
+                    "Plugin \"{plugin_id}\" does not contribute visible MCP tools. It may not exist, may not contribute tools, or every tool may be hidden by the DBX MCP settings. Use dbx_plugin_list to list visible plugins."
+                ),
+            );
+        }
+        let allowed = match self.allowed_plugin_connections_for(plugin_id).await {
+            Ok(allowed) => allowed,
+            Err(error) => return error,
+        };
+        if self.scope.enabled() && allowed.is_empty() {
+            return tool_error(
+                "PLUGIN_OUT_OF_SCOPE",
+                format!("Plugin \"{plugin_id}\" has no connection inside the current DBX MCP session scope."),
+            );
+        }
+        let mut lines = Vec::new();
+        for entry in &owned {
+            let mut line = format!(
+                "### {}\n{}",
+                entry.tool.name,
+                crate::plugin_tools::external_tool_description(&entry.plugin_name, &entry.tool)
+            );
+            if entry.tool.read_only {
+                line.push_str("\nRead-only.");
+            }
+            let schema = crate::plugin_tools::external_tool_parameters(&entry.tool.input_schema, &allowed);
+            line.push_str(&format!("\nArguments schema: {schema}"));
+            if entry.injects_connection_id {
+                line.push_str("\nThe host injects the bound connection's id automatically.");
+            }
+            lines.push(line);
+        }
+        let connection_note = match allowed.len() {
+            0 => "No allowed connection is configured for this plugin; only connection-less tools can run.".to_string(),
+            1 => format!("Tools run on connection {} ({}); you may omit dbx_connection.", allowed[0].0, allowed[0].1),
+            _ => format!(
+                "Pass dbx_connection to choose among: {}",
+                allowed.iter().map(|(id, name)| format!("{id} = {name}")).collect::<Vec<_>>().join("; ")
+            ),
+        };
+        let hidden_note = (hidden > 0)
+            .then(|| format!("\n{} further tool(s) of this plugin are hidden by the DBX MCP tool allowlist.", hidden));
+        text(format!(
+            "{} tool(s) of plugin {plugin_id}:\n\n{}\n\n{connection_note}\nCall through dbx_plugin_call (plugin_id + tool + arguments).{}",
+            owned.len(),
+            lines.join("\n\n"),
+            hidden_note.unwrap_or_default()
+        ))
+    }
+
+    #[tool(
+        name = "dbx_plugin_call",
+        description = "Call one MCP tool of a DBX plugin by plugin id (from dbx_plugin_list) and tool name (from dbx_plugin_tools). The host binds the connection from DBX settings and generates the credentials payload; pass dbx_connection only when dbx_plugin_tools lists several allowed connections."
+    )]
+    async fn plugin_call(&self, Parameters(request): Parameters<PluginCallRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_plugin_call").await {
+            return error;
+        }
+        let plugin_id = request.plugin_id.trim();
+        if plugin_id.is_empty() {
+            return tool_error("PLUGIN_ID_REQUIRED", "plugin_id is required; use dbx_plugin_list to find plugin ids.");
+        }
+        let tool = request.tool.trim();
+        if tool.is_empty() {
+            return tool_error(
+                "TOOL_NAME_REQUIRED",
+                "tool is required; use dbx_plugin_tools to list this plugin's tools.",
+            );
+        }
+        let mut arguments = request.arguments.clone().unwrap_or_else(|| json!({}));
+        if !arguments.is_object() {
+            return tool_error("INVALID_ARGUMENTS", "arguments must be a JSON object.");
+        }
+        if let Some(selector) = request.dbx_connection.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(object) = arguments.as_object_mut() {
+                object.insert(crate::plugin_tools::PLUGIN_CONNECTION_ARGUMENT.to_string(), json!(selector));
+            }
+        }
+        let dispatched = match self.call_plugin_by_id(plugin_id, tool, arguments).await {
+            Ok(result) => result,
+            Err(error) => return error,
+        };
+        self.postprocess_plugin_result(plugin_id, tool, &request.dbx_connection, dispatched).await
+    }
+
+    #[tool(
         name = "dbx_list_connections",
-        description = "List database connections configured in DBX. Returns connection IDs, names, group paths, database types, endpoints, and selected databases."
+        description = "List database connections configured in DBX. Returns connection IDs, names, group paths, database types, endpoints, selected databases, and saved connection notes."
     )]
     async fn list_connections(
         &self,
@@ -784,6 +1379,22 @@ impl DbxMcpServer {
             return tool_error(
                 "REDIS_COMMAND_REQUIRED",
                 "Redis connections do not accept SQL through dbx_execute_query. Use dbx_execute_redis_command.",
+            );
+        }
+        if connection.db_type == DatabaseType::Salesforce
+            && !is_database_discovery_sql(&request.sql)
+            && is_write_sql_for_database(&request.sql, DatabaseType::Salesforce)
+        {
+            // SOQL has no write verbs, so anything the Salesforce classifier reads
+            // as a write here is a `DBX SALESFORCE DML` pseudo-command. Letting it
+            // ride along as a "query" would bypass both the connection's DML opt-in
+            // and the two-step confirmation, and Salesforce cannot roll it back.
+            // `SHOW DATABASES` is the one non-SOQL probe exempted: SOQL rules read
+            // every non-SELECT as opaque, and the discovery path below answers it
+            // with the "one org is one scope" explanation instead.
+            return tool_error(
+                "SALESFORCE_DML_REQUIRES_CONFIRMATION",
+                "Salesforce writes cannot run through dbx_execute_query. Call dbx_salesforce_prepare_write, show its summary to the user, then dbx_salesforce_apply_write with the confirm_token it returns.",
             );
         }
         if sql_requires_batch_execution(&request.sql, connection.db_type) {
@@ -990,6 +1601,7 @@ impl DbxMcpServer {
                         })
                         .unwrap_or_else(|| format_query_result(&execution.result, max_rows as usize));
                     self.save_mcp_sql_history(
+                        "dbx_execute_query",
                         &refreshed.connection,
                         &session.database,
                         &history_sql,
@@ -1003,6 +1615,7 @@ impl DbxMcpServer {
                 }
                 Err(error) => {
                     self.save_mcp_sql_history(
+                        "dbx_execute_query",
                         &refreshed.connection,
                         &session.database,
                         &history_sql,
@@ -1043,7 +1656,17 @@ impl DbxMcpServer {
             self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
         let success = !result.is_error;
         let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
-        self.save_mcp_sql_history(connection, &database, &history_sql, started_at, success, error, None).await;
+        self.save_mcp_sql_history(
+            "dbx_execute_query",
+            connection,
+            &database,
+            &history_sql,
+            started_at,
+            success,
+            error,
+            None,
+        )
+        .await;
         agent_result(result)
     }
 
@@ -1072,6 +1695,12 @@ impl DbxMcpServer {
             Err(error) => return error,
         };
         let connection = &resolved.connection;
+        if connection.db_type == DatabaseType::Salesforce {
+            return tool_error(
+                "DBX_BATCH_UNSUPPORTED",
+                "Salesforce has no batch execution: SOQL is read-only and every write touches exactly one record. Use dbx_execute_query for SOQL, and dbx_salesforce_prepare_write followed by dbx_salesforce_apply_write for a write.",
+            );
+        }
         if matches!(connection.db_type, DatabaseType::Redis | DatabaseType::MongoDb) {
             return tool_error(
                 "DBX_BATCH_UNSUPPORTED",
@@ -1308,6 +1937,7 @@ impl DbxMcpServer {
             }
             let status = owner.status();
             self.save_mcp_sql_history(
+                "dbx_execute_batch",
                 &refreshed.connection,
                 &session.database,
                 sql,
@@ -1388,6 +2018,7 @@ impl DbxMcpServer {
                     results.iter().map(|result| result.result.affected_rows).sum::<u64>().min(i64::MAX as u64) as i64
                 });
                 self.save_mcp_sql_history(
+                    "dbx_execute_batch",
                     connection,
                     &database,
                     sql,
@@ -1406,8 +2037,17 @@ impl DbxMcpServer {
                 tool_result
             }
             Err(error) => {
-                self.save_mcp_sql_history(connection, &database, sql, started_at, false, Some(error.clone()), None)
-                    .await;
+                self.save_mcp_sql_history(
+                    "dbx_execute_batch",
+                    connection,
+                    &database,
+                    sql,
+                    started_at,
+                    false,
+                    Some(error.clone()),
+                    None,
+                )
+                .await;
                 backend_tool_error("DBX_BATCH_EXECUTION_ERROR", error)
             }
         }
@@ -1434,6 +2074,12 @@ impl DbxMcpServer {
             Err(error) => return error,
         };
         let connection = &resolved.connection;
+        if connection.db_type == DatabaseType::Salesforce {
+            return tool_error(
+                "SESSION_UNSUPPORTED",
+                "Salesforce connections are stateless REST calls: there is no session to pin, no USE, and no transaction. Use dbx_execute_query for SOQL, and dbx_salesforce_prepare_write followed by dbx_salesforce_apply_write for a write.",
+            );
+        }
         if matches!(connection.db_type, DatabaseType::Redis | DatabaseType::MongoDb) {
             return tool_error(
                 "SESSION_UNSUPPORTED",
@@ -2220,10 +2866,222 @@ impl DbxMcpServer {
             Err(error) => backend_tool_error("DBX_NOT_RUNNING", error),
         }
     }
+
+    #[tool(
+        name = "dbx_salesforce_current_user",
+        description = "Show the Salesforce identity behind a DBX connection: the connected user, their profile, whether that profile holds \"Modify All Data\" (which bypasses field-level security and record sharing), and the org. Read-only. Call it before preparing a write so the user knows who the change will be attributed to, and to tell a permission failure apart from a bad record Id."
+    )]
+    async fn salesforce_current_user(
+        &self,
+        Parameters(request): Parameters<SalesforceIdentityRequest>,
+    ) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_salesforce_current_user").await {
+            return error;
+        }
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let connection = &resolved.connection;
+        if connection.db_type != DatabaseType::Salesforce {
+            return not_salesforce_error(connection);
+        }
+        match self.backend.salesforce_current_user(connection).await {
+            Ok(identity) => {
+                let mut result = text(format_salesforce_identity_block(connection, Some(&identity)));
+                result.structured_content = Some(salesforce_identity_json(&identity));
+                result
+            }
+            Err(error) => tool_error("SALESFORCE_IDENTITY_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_salesforce_prepare_write",
+        description = "Step 1 of 2 for a Salesforce write: prepare an insert, update or delete of exactly ONE record. Nothing is sent to Salesforce. The call validates the request against DBX MCP policy and returns a human-readable summary plus a single-use confirm_token. Show that summary to the user and wait for their approval, then call dbx_salesforce_apply_write with the token. Salesforce has no transactions, so an applied write cannot be rolled back. Reads never need this: use dbx_execute_query with SOQL."
+    )]
+    async fn salesforce_prepare_write(
+        &self,
+        Parameters(request): Parameters<SalesforcePrepareWriteRequest>,
+    ) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_salesforce_prepare_write").await {
+            return error;
+        }
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let connection = &resolved.connection;
+        if connection.db_type != DatabaseType::Salesforce {
+            return not_salesforce_error(connection);
+        }
+        let database = match self.resolve_database(request.database, &resolved) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        if !connection_allows_salesforce_dml(&resolved.policy, &connection.id) {
+            return tool_error(
+                "SALESFORCE_DML_DISABLED",
+                format!(
+                    "Salesforce writes are disabled for connection \"{}\". The user has to enable the \"Allow DML\" switch for this connection in DBX Settings → MCP, and the connection must not be read-only. Reads are unaffected: use dbx_execute_query with SOQL.",
+                    connection.name
+                ),
+            );
+        }
+        let statement = match build_salesforce_dml_statement(
+            &request.op,
+            &request.object,
+            request.id.as_deref(),
+            request.fields.as_ref(),
+        ) {
+            Ok(statement) => statement,
+            Err(error) => return tool_error("SALESFORCE_DML_INVALID", error),
+        };
+        // The driver is the authority on what a statement means. Refusing here
+        // rather than at apply time means a token is never handed out for a write
+        // the org would reject.
+        if let Err(error) = parse_salesforce_statement(&statement) {
+            return tool_error("SALESFORCE_DML_INVALID", error);
+        }
+        let policy =
+            effective_policy_for_database_with_groups(&resolved.policy, &resolved.group_ids, connection, &database);
+        // The same envelope every other statement passes through: global and
+        // connection read-only rules, the high-risk tier for a write whose scope
+        // the classifier cannot pin down, and the production block. SOQL and the
+        // DML pseudo-command cannot name another database, so the SQL
+        // database-scope guards have nothing to add here.
+        if let Err(error) = validate_sql_policy(connection, &policy, &database, &statement, false) {
+            return error;
+        }
+        // Best effort: a failed identity lookup must not block the confirmation,
+        // it only leaves the "signed in as" line out of the summary.
+        let identity = self.backend.salesforce_current_user(connection).await.ok();
+        let token = format!("sfdml-{}", Uuid::new_v4());
+        let expires_in_secs = self.pending_salesforce_writes.ttl_secs();
+        self.pending_salesforce_writes
+            .insert(
+                token.clone(),
+                PendingSalesforceWrite {
+                    connection_id: connection.id.clone(),
+                    database: database.clone(),
+                    statement: statement.clone(),
+                    created_at: Instant::now(),
+                },
+            )
+            .await;
+        let summary =
+            format_salesforce_write_summary(&statement, connection, identity.as_ref(), &token, expires_in_secs);
+        let mut result = text(summary);
+        result.structured_content = Some(json!({
+            "confirm_token": token,
+            "expires_in_secs": expires_in_secs,
+            "connection_id": connection.id,
+            "statement": statement,
+            "identity": identity.as_ref().map(salesforce_identity_json),
+        }));
+        result
+    }
+
+    #[tool(
+        name = "dbx_salesforce_apply_write",
+        description = "Step 2 of 2 for a Salesforce write: execute exactly the write prepared by dbx_salesforce_prepare_write, identified by its confirm_token. The token is single-use, expires 5 minutes after it was issued, and is bound to that one statement — a changed write needs a new prepare. Call this only after the user has approved the summary they were shown. Returns the Salesforce result, or the org's own per-record error text."
+    )]
+    async fn salesforce_apply_write(
+        &self,
+        Parameters(request): Parameters<SalesforceApplyWriteRequest>,
+    ) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_salesforce_apply_write").await {
+            return error;
+        }
+        let Some(pending) = self.pending_salesforce_writes.take(&request.confirm_token).await else {
+            return tool_error(
+                "CONFIRM_TOKEN_INVALID",
+                format!(
+                    "No pending Salesforce write for confirm_token \"{}\". Tokens are single-use and expire {} seconds after they are issued; call dbx_salesforce_prepare_write again and show the new summary to the user.",
+                    request.confirm_token.trim(),
+                    self.pending_salesforce_writes.ttl_secs()
+                ),
+            );
+        };
+        // Re-read the connection and the whole policy envelope at apply time: the
+        // user may have flipped the connection to read-only, withdrawn the DML
+        // opt-in or narrowed the scope while the summary was on screen.
+        let resolved = match self
+            .resolve_connection(&ConnectionSelector {
+                connection_id: Some(pending.connection_id.clone()),
+                connection_name: None,
+            })
+            .await
+        {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let connection = &resolved.connection;
+        if connection.db_type != DatabaseType::Salesforce {
+            return not_salesforce_error(connection);
+        }
+        if !connection_allows_salesforce_dml(&resolved.policy, &connection.id) {
+            return tool_error(
+                "SALESFORCE_DML_DISABLED",
+                format!(
+                    "Salesforce writes were disabled for connection \"{}\" after this write was prepared. Nothing was sent. Re-enable the \"Allow DML\" switch in DBX Settings → MCP and prepare the write again.",
+                    connection.name
+                ),
+            );
+        }
+        let policy = effective_policy_for_database_with_groups(
+            &resolved.policy,
+            &resolved.group_ids,
+            connection,
+            &pending.database,
+        );
+        let permissions = match validate_sql_policy(connection, &policy, &pending.database, &pending.statement, false) {
+            Ok(permissions) => permissions,
+            Err(error) => return error,
+        };
+        let mut arguments = json!({ "sql": pending.statement, "limit": 1 });
+        if let Some(secs) = resolved.policy.query_timeout_secs {
+            arguments["timeout_secs"] = json!(secs);
+        }
+        let label = salesforce_write_label(&pending.statement);
+        let started_at = Instant::now();
+        let result = self
+            .backend
+            .execute_agent_tool(connection, &pending.database, "execute_query", arguments, permissions)
+            .await;
+        let success = !result.is_error;
+        let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
+        self.save_mcp_sql_history(
+            "dbx_salesforce_apply_write",
+            connection,
+            &pending.database,
+            &pending.statement,
+            started_at,
+            success,
+            error,
+            None,
+        )
+        .await;
+        if !success {
+            return agent_result(result);
+        }
+        text(format!("Salesforce write applied: {label}.\n{}", result.content))
+    }
 }
 
 impl DbxMcpServer {
     async fn list_databases_for_resolved(&self, resolved: &ResolvedConnection) -> CallToolResult {
+        if resolved.connection.db_type == DatabaseType::Salesforce
+            && !matches!(resolved.database_scope, DatabaseScope::None)
+        {
+            // An org has no database layer, so an empty list would read as a
+            // broken connection. Point at the surface that does exist instead.
+            return text(
+                "Salesforce has no databases: the whole org is one scope.\n\
+                 List its objects with dbx_list_tables, then read them with dbx_execute_query using SOQL, e.g. SELECT Id, Name FROM Account LIMIT 10.\n\
+                 Writes go through dbx_salesforce_prepare_write and dbx_salesforce_apply_write.",
+            );
+        }
         match &resolved.database_scope {
             DatabaseScope::None => tool_error(
                 "DATABASE_OUT_OF_SCOPE",
@@ -2321,20 +3179,66 @@ impl DbxMcpServer {
         }
     }
 
+    /// Scoped-session and read-only enforcement shared by both plugin-tool
+    /// call paths, closing the gap between what the flat `tools/list`
+    /// advertises and what the lazy/meta surface executes:
+    /// - under a read-only execution policy, only tools the plugin declares
+    ///   with `readOnlyHint` may run. The hint is the plugin author's claim,
+    ///   so the host defaults to deny for undeclared tools instead of
+    ///   letting an opaque write bypass the mode;
+    /// - with a scope active, only plugins owning at least one in-scope
+    ///   connection stay callable — a connection-less tool of an
+    ///   out-of-scope plugin must not become a side door.
+    #[allow(clippy::result_large_err)]
+    async fn ensure_plugin_tool_policy(
+        &self,
+        entry: &crate::plugin_tools::PluginToolEntry,
+    ) -> Result<(), CallToolResult> {
+        let policy = self.load_policy().await?;
+        if policy.read_only && !entry.tool.read_only {
+            return Err(tool_error(
+                "MCP_READ_ONLY",
+                format!(
+                    "Plugin tool \"{}\" is not declared read-only, but the DBX MCP execution policy is read-only.",
+                    entry.exposed_name
+                ),
+            ));
+        }
+        if self.scope.enabled() {
+            let allowed = self.allowed_plugin_connections().await?;
+            if !allowed.contains_key(&entry.plugin_id) {
+                return Err(tool_error(
+                    "PLUGIN_OUT_OF_SCOPE",
+                    format!(
+                        "Plugin \"{}\" has no connection inside the current DBX MCP session scope.",
+                        entry.plugin_id
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// The advertised `tools/list` view: router-enabled tools narrowed to the
-    /// global policy's tool allowlist. When the policy cannot be loaded every
+    /// global policy's tool allowlist, plus the automatically exposed plugin
+    /// tools (`dbx_<prefix>__<tool>`). When the policy cannot be loaded every
     /// tool call already fails with `MCP_POLICY_UNAVAILABLE`, so fall back to
     /// the plain router view rather than adding a new failure mode here.
-    async fn policy_filtered_tools(&self) -> Vec<rmcp::model::Tool> {
-        match self.load_policy().await {
-            Ok(policy) => self
+    pub async fn policy_filtered_tools(&self) -> Vec<rmcp::model::Tool> {
+        let policy = self.load_policy().await.ok();
+        let mut tools: Vec<rmcp::model::Tool> = match &policy {
+            Some(policy) => self
                 .tool_router
                 .list_all()
                 .into_iter()
-                .filter(|tool| policy_allows_tool(&policy, tool.name.as_ref()))
+                .filter(|tool| policy_allows_tool(policy, tool.name.as_ref()))
                 .collect(),
-            Err(_) => self.tool_router.list_all(),
+            None => self.tool_router.list_all(),
+        };
+        if self.plugin_tools_mode.advertise_flat() {
+            tools.extend(self.plugin_tools_view(policy.as_ref()).await);
         }
+        tools
     }
 
     // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
@@ -2484,14 +3388,470 @@ impl DbxMcpServer {
             _ => Err(tool_error("AMBIGUOUS_CONNECTION", ambiguous_connections(name, &allowed))),
         }
     }
+    /// Saved plugin connections the global MCP policy (and a scoped CLI/AI
+    /// session) allows, grouped per owning plugin. Used both to decorate the
+    /// exposed plugin tools with a connection selector and to bind calls.
+    /// Connections not in the map are unreachable through plugin tools.
+    #[allow(clippy::result_large_err)]
+    async fn allowed_plugin_connections(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, Vec<(String, String)>>, CallToolResult> {
+        let policy = self.load_policy().await?;
+        let group_paths = self
+            .load_group_paths_for_policy(&policy)
+            .await
+            .map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))?;
+        let connections =
+            self.backend.load_connections().await.map_err(|error| tool_error("CONNECTION_LOAD_ERROR", error))?;
+        let mut allowed: std::collections::BTreeMap<String, Vec<(String, String)>> = std::collections::BTreeMap::new();
+        for config in connections {
+            let Some(plugin_id) = config.plugin_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            if self.scope.connection_scope_enabled() && !self.scope.matches(&config) {
+                continue;
+            }
+            if !policy_allows_connection(&policy, group_paths.get(&config.id), &config) {
+                continue;
+            }
+            allowed.entry(plugin_id.to_string()).or_default().push((config.id.clone(), config.name.clone()));
+        }
+        for list in allowed.values_mut() {
+            list.sort();
+        }
+        Ok(allowed)
+    }
+
+    /// The plugin portion of the advertised `tools/list`. Discovery failures
+    /// degrade to an empty view (the static tools keep working); the global
+    /// policy's tool allowlist narrows exposed plugin names exactly like the
+    /// static ones. In a scoped session only plugins with at least one
+    /// in-scope connection are listed, matching the scoped dbx_* behavior.
+    async fn plugin_tools_view(&self, policy: Option<&McpGlobalPolicy>) -> Vec<rmcp::model::Tool> {
+        let providers = match self.backend.list_plugin_mcp_tools().await {
+            Ok(providers) => providers,
+            Err(error) => {
+                log::debug!("[mcp][plugin-tools] no plugin tools on this backend: {error}");
+                return Vec::new();
+            }
+        };
+        let entries = crate::plugin_tools::build_catalog(&providers);
+        // Tool calls fail closed on policy errors anyway; keep the view.
+        let allowed = self.allowed_plugin_connections().await.unwrap_or_default();
+        entries
+            .into_iter()
+            .filter(|entry| policy.is_none_or(|policy| policy_allows_tool(policy, &entry.exposed_name)))
+            .filter(|entry| !self.scope.enabled() || allowed.contains_key(&entry.plugin_id))
+            .map(|entry| {
+                let connections = allowed.get(&entry.plugin_id).cloned().unwrap_or_default();
+                crate::plugin_tools::to_rmcp_tool(&entry, &connections)
+            })
+            .collect()
+    }
+
+    /// Dispatches a plugin-tool call (`dbx_<prefix>__<tool>`): policy check,
+    /// name resolution over a fresh discovery pass, host-side connection
+    /// binding from the policy-allowed set, and lifecycle generation from the
+    /// saved connection in the backend — credentials never reach the caller.
+    #[allow(clippy::result_large_err)]
+    pub async fn call_plugin_tool_dispatch(
+        &self,
+        name: &str,
+        mut arguments: serde_json::Value,
+    ) -> Result<CallToolResult, ErrorData> {
+        if let Err(error) = self.ensure_tool_allowed(name).await {
+            return Ok(error);
+        }
+        let providers = match self.backend.list_plugin_mcp_tools().await {
+            Ok(providers) => providers,
+            Err(error) => return Ok(backend_tool_error("DBX_TOOL_ERROR", error)),
+        };
+        let entry = crate::plugin_tools::build_catalog(&providers).into_iter().find(|entry| entry.exposed_name == name);
+        let Some(entry) = entry else {
+            return Ok(tool_error("TOOL_NOT_FOUND", format!("Plugin tool \"{name}\" is not available.")));
+        };
+        // Same policy stack as the flat surface: allowlist above, then
+        // read-only mode and session scope before the backend is reached.
+        if let Err(error) = self.ensure_plugin_tool_policy(&entry).await {
+            return Ok(error);
+        }
+        let selector = crate::plugin_tools::connection_selector_from(&arguments).map(str::to_string);
+        if let Some(object) = arguments.as_object_mut() {
+            for key in crate::plugin_tools::CONNECTION_SELECTOR_ARGUMENTS {
+                object.remove(*key);
+            }
+        }
+        let allowed = match self.allowed_plugin_connections().await {
+            Ok(allowed) => allowed.get(&entry.plugin_id).cloned().unwrap_or_default(),
+            Err(error) => return Ok(error),
+        };
+        let bound = match crate::plugin_tools::select_connection(&allowed, selector.as_deref()) {
+            Ok(bound) => bound.cloned(),
+            Err(message) => return Ok(tool_error("CONNECTION_NOT_FOUND", message)),
+        };
+        if let Some((connection_id, connection_name)) = &bound {
+            let _ = CALL_HISTORY.try_with(|history| {
+                let mut history = history.lock().unwrap();
+                history.connection_id.clone_from(connection_id);
+                history.connection_name.clone_from(connection_name);
+            });
+        }
+        if entry.injects_connection_id {
+            if let Some((connection_id, _)) = &bound {
+                if let Some(object) = arguments.as_object_mut() {
+                    object.insert("connectionId".to_string(), serde_json::Value::String(connection_id.clone()));
+                }
+            }
+        }
+        match self
+            .backend
+            .call_plugin_mcp_tool(
+                &entry.plugin_id,
+                &entry.tool.name,
+                bound.as_ref().map(|(connection_id, _)| connection_id.as_str()),
+                &arguments,
+            )
+            .await
+        {
+            Ok(value) => Ok(crate::plugin_tools::call_result_to_rmcp(value)),
+            Err(error) => Ok(backend_tool_error("DBX_TOOL_ERROR", error)),
+        }
+    }
+
+    /// Loaded plugin-tool catalog for the meta tools: `(plugin id, name,
+    /// tool count, allowed-connection count)` rows plus an optional note
+    /// when policy filtering hid plugins. Discovery errors degrade to a
+    /// note instead of failing `dbx_plugin_list`.
+    async fn plugin_tool_catalog(
+        &self,
+    ) -> Result<(Vec<(String, String, usize, usize)>, Option<String>), CallToolResult> {
+        let providers = match self.backend.list_plugin_mcp_tools().await {
+            Ok(providers) => providers,
+            Err(error) => {
+                return Ok((Vec::new(), Some(format!("Plugin tools are unavailable: {error}"))));
+            }
+        };
+        // The catalog computes the real (possibly extended) exposed names, so
+        // the allowlist check below uses exactly the names a flat tools/list
+        // would advertise.
+        let entries = crate::plugin_tools::build_catalog(&providers);
+        // Listing degrades on policy errors the same way the flat view does;
+        // `dbx_plugin_tools`/`dbx_plugin_call` still fail closed.
+        let allowed = self.allowed_plugin_connections().await.unwrap_or_default();
+        let policy = self.load_policy().await.ok();
+        let mut grouped: std::collections::BTreeMap<String, (String, usize, bool)> = Default::default();
+        for entry in &entries {
+            let record =
+                grouped.entry(entry.plugin_id.clone()).or_insert_with(|| (entry.plugin_name.clone(), 0, false));
+            record.1 += 1;
+            if policy.as_ref().is_none_or(|policy| policy_allows_tool(policy, &entry.exposed_name)) {
+                record.2 = true;
+            }
+        }
+        let mut rows = Vec::new();
+        let mut hidden = 0usize;
+        for (plugin_id, (plugin_name, tool_count, any_allowed)) in grouped {
+            // Mirror the flat tools/list scoping: with a scope active,
+            // plugins without an in-scope connection are not enumerable
+            // either. They are hidden by scope (not by the allowlist), so
+            // they stay out of the rows and out of the allowlist note too.
+            if self.scope.enabled() && !allowed.contains_key(&plugin_id) {
+                continue;
+            }
+            if any_allowed {
+                let connections = allowed.get(&plugin_id).map_or(0, Vec::len);
+                rows.push((plugin_id, plugin_name, tool_count, connections));
+            } else {
+                hidden += 1;
+            }
+        }
+        let note = (hidden > 0).then(|| format!("{hidden} plugin(s) are hidden by the DBX MCP tool allowlist."));
+        Ok((rows, note))
+    }
+
+    /// Resolves the policy-allowed connections of one plugin for the meta
+    /// tools. Fails closed on policy errors (same as flat calls).
+    async fn allowed_plugin_connections_for(&self, plugin_id: &str) -> Result<Vec<(String, String)>, CallToolResult> {
+        let allowed = self.allowed_plugin_connections().await?;
+        Ok(allowed.get(plugin_id).cloned().unwrap_or_default())
+    }
+
+    /// Shared call core for `dbx_plugin_call`: locates the tool by
+    /// `(plugin_id, tool name)` over a fresh discovery pass, strips
+    /// selector arguments, binds the connection, and forwards to the
+    /// backend. Returns the raw plugin answer for the caller to render.
+    async fn call_plugin_by_id(
+        &self,
+        plugin_id: &str,
+        tool: &str,
+        mut arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, CallToolResult> {
+        let providers = match self.backend.list_plugin_mcp_tools().await {
+            Ok(providers) => providers,
+            Err(error) => return Err(backend_tool_error("DBX_TOOL_ERROR", error)),
+        };
+        let entry = crate::plugin_tools::build_catalog(&providers)
+            .into_iter()
+            .find(|entry| entry.plugin_id == plugin_id && entry.tool.name == tool);
+        let Some(entry) = entry else {
+            return Err(tool_error(
+                "TOOL_NOT_FOUND",
+                format!(
+                    "Plugin \"{plugin_id}\" does not provide a tool named \"{tool}\". Use dbx_plugin_tools to list this plugin's tools."
+                ),
+            ));
+        };
+        // Lazy calls are governed by the same per-tool allowlist as the flat
+        // surface: gate on the exposed name so an allowlist cannot be bypassed
+        // by addressing a tool through its plugin id instead. Read-only mode
+        // and session scope gate the call through the same shared check.
+        self.ensure_tool_allowed(&entry.exposed_name).await?;
+        self.ensure_plugin_tool_policy(&entry).await?;
+        let selector = crate::plugin_tools::connection_selector_from(&arguments).map(str::to_string);
+        if let Some(object) = arguments.as_object_mut() {
+            for key in crate::plugin_tools::CONNECTION_SELECTOR_ARGUMENTS {
+                object.remove(*key);
+            }
+        }
+        let allowed = match self.allowed_plugin_connections().await {
+            Ok(allowed) => allowed.get(plugin_id).cloned().unwrap_or_default(),
+            Err(error) => return Err(error),
+        };
+        let bound = match crate::plugin_tools::select_connection(&allowed, selector.as_deref()) {
+            Ok(bound) => bound.cloned(),
+            Err(message) => return Err(tool_error("CONNECTION_NOT_FOUND", message)),
+        };
+        if let Some((connection_id, connection_name)) = &bound {
+            let _ = CALL_HISTORY.try_with(|history| {
+                let mut history = history.lock().unwrap();
+                history.connection_id.clone_from(connection_id);
+                history.connection_name.clone_from(connection_name);
+            });
+        }
+        if entry.injects_connection_id {
+            if let Some((connection_id, _)) = &bound {
+                if let Some(object) = arguments.as_object_mut() {
+                    object.insert("connectionId".to_string(), serde_json::Value::String(connection_id.clone()));
+                }
+            }
+        }
+        self.backend
+            .call_plugin_mcp_tool(
+                plugin_id,
+                tool,
+                bound.as_ref().map(|(connection_id, _)| connection_id.as_str()),
+                &arguments,
+            )
+            .await
+            .map_err(|error| backend_tool_error("DBX_TOOL_ERROR", error))
+    }
+
+    /// Renders a `dbx_plugin_call` answer: converts the plugin result,
+    /// appends a connection hint when the caller must pick one explicitly.
+    async fn postprocess_plugin_result(
+        &self,
+        plugin_id: &str,
+        tool: &str,
+        requested_selector: &Option<String>,
+        value: serde_json::Value,
+    ) -> CallToolResult {
+        let mut result = crate::plugin_tools::call_result_to_rmcp(value);
+        if requested_selector.is_none() {
+            if let Ok(allowed) = self.allowed_plugin_connections_for(plugin_id).await {
+                if allowed.len() > 1 {
+                    let choices =
+                        allowed.iter().map(|(id, name)| format!("{id} = {name}")).collect::<Vec<_>>().join("; ");
+                    let hint = format!(
+                        "\n[This plugin has several allowed connections; pass dbx_connection to choose: {choices}]"
+                    );
+                    result.content.push(rmcp::model::ContentBlock::text(hint));
+                }
+            }
+        }
+        let _ = (plugin_id, tool);
+        result
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for DbxMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        let started = Instant::now();
+        let args = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
+        let arg = |name: &str| args.get(name).and_then(|value| value.as_str()).unwrap_or_default().to_string();
+        let entry = HistoryEntry {
+            id: Uuid::new_v4().to_string(),
+            connection_id: arg("connection_id"),
+            connection_name: arg("connection_name"),
+            database: arg("database"),
+            sql: arg("sql"),
+            executed_at: chrono::Utc::now().to_rfc3339(),
+            execution_time_ms: 0,
+            success: false,
+            error: None,
+            activity_kind: "mcp".into(),
+            operation: request.name.to_string(),
+            target: arg("table"),
+            affected_rows: None,
+            rollback_sql: None,
+            details_json: Some(r#"{"source":"mcp"}"#.into()),
+            source: "mcp".into(),
+            mcp_tool_name: Some(request.name.to_string()),
+            mcp_request_json: Some(bounded_history_request(&args)),
+            mcp_response_json: None,
+            mcp_session_id: args.get("session_id").and_then(|v| v.as_str()).map(str::to_owned),
+        };
+        let mut guard = CallHistoryGuard { backend: self.backend.clone(), fallback: Some(entry.clone()), started };
+        let tool_name = request.name.to_string();
+        let is_plugin_tool = crate::plugin_tools::is_plugin_tool_name(&tool_name);
+        CALL_HISTORY.scope(std::sync::Mutex::new(entry), async {
+            let cancellation = context.ct.clone();
+            let result: Result<CallToolResponse, rmcp::ErrorData> = if is_plugin_tool {
+                tokio::select! {
+                    result = self.call_plugin_tool_dispatch(&tool_name, args) => result.map(Into::into),
+                    _ = cancellation.cancelled() => Ok(tool_error("REQUEST_CANCELLED", "The MCP request was cancelled.").into()),
+                }
+            } else {
+                let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+                tokio::select! {
+                    result = self.tool_router.call(tcc) => result,
+                    _ = cancellation.cancelled() => Ok(tool_error("REQUEST_CANCELLED", "The MCP request was cancelled.").into()),
+                }
+            };
+            let mut entry = CALL_HISTORY.with(|entry| entry.lock().unwrap().clone());
+            entry.execution_time_ms = started.elapsed().as_millis();
+            entry.success = result.as_ref().is_ok_and(|response| match response {
+                CallToolResponse::Complete(result) => result.is_error != Some(true),
+                // MRTR and task results are never terminal tool failures.
+                _ => true,
+            });
+            // Keep the complete response within a bounded, redacted payload so
+            // the history detail view can be used for troubleshooting without
+            // allowing a large result to grow the local database indefinitely.
+            // Only a completed call has a concrete payload to archive; interim
+            // MRTR or task results carry a handle the client resolves later.
+            entry.mcp_response_json = Some(match &result {
+                Ok(CallToolResponse::Complete(result)) => bounded_history_response(result),
+                Ok(response) => format!("{response:?}"),
+                Err(error) => bounded_history_response(error),
+            });
+            if !entry.success {
+                entry.error = Some(if cancellation.is_cancelled() { "MCP request cancelled" } else { "MCP tool call failed (see response summary)" }.into());
+            }
+            // Persist in a separate task so cancellation during the write cannot
+            // lose the record or schedule a second write from the drop guard.
+            guard.fallback = None;
+            let backend = self.backend.clone();
+            let write = tokio::spawn(async move {
+                if let Err(error) = backend.save_history_entry(&entry).await {
+                    log::warn!("failed to save MCP call history: {error}");
+                }
+            });
+            let _ = write.await;
+            result
+        }).await
+    }
+
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
             .with_server_info(Implementation::new("dbx", env!("CARGO_PKG_VERSION")))
             .with_instructions("Use DBX connections to inspect schemas and query databases safely.")
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        let tools = self.policy_filtered_tools().await;
+        let resources = tools
+            .iter()
+            .any(|tool| tool.name.as_ref() == "dbx_list_connections")
+            .then(|| {
+                Resource::new(CONNECTIONS_RESOURCE_URI, "dbx_connections")
+                    .with_title("DBX connections")
+                    .with_description(
+                        "Database connections visible to the current DBX MCP scope, including saved notes",
+                    )
+                    .with_mime_type("text/markdown")
+            })
+            .into_iter()
+            .collect();
+        Ok(ListResourcesResult::with_all_items(resources))
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        let tools = self.policy_filtered_tools().await;
+        let has_tool = |name: &str| tools.iter().any(|tool| tool.name.as_ref() == name);
+        let mut resource_templates = Vec::new();
+        if has_tool("dbx_list_databases") {
+            resource_templates.push(
+                ResourceTemplate::new(DATABASES_RESOURCE_TEMPLATE, "dbx_connection_databases")
+                    .with_title("DBX connection databases")
+                    .with_description("Databases visible through a DBX connection")
+                    .with_mime_type("text/markdown"),
+            );
+        }
+        if has_tool("dbx_list_tables") {
+            resource_templates.push(
+                ResourceTemplate::new(TABLES_RESOURCE_TEMPLATE, "dbx_connection_tables")
+                    .with_title("DBX connection tables")
+                    .with_description("Tables and views visible through a DBX connection and optional database/schema")
+                    .with_mime_type("text/markdown"),
+            );
+        }
+        if has_tool("dbx_describe_table") {
+            resource_templates.push(
+                ResourceTemplate::new(TABLE_SCHEMA_RESOURCE_TEMPLATE, "dbx_table_schema")
+                    .with_title("DBX table schema")
+                    .with_description("Column definitions for a table visible through a DBX connection")
+                    .with_mime_type("text/markdown"),
+            );
+        }
+        Ok(ListResourceTemplatesResult::with_all_items(resource_templates))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let uri = request.uri;
+        let result = match parse_dbx_resource_uri(&uri)? {
+            DbxResourceRequest::Connections => self.list_connections(Parameters(ListConnectionsRequest {})).await,
+            DbxResourceRequest::Databases { connection_id } => {
+                self.list_databases(Parameters(ListDatabasesRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection_id), connection_name: None },
+                }))
+                .await
+            }
+            DbxResourceRequest::Tables { connection_id, database, schema } => {
+                self.list_tables(Parameters(ListTablesRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection_id), connection_name: None },
+                    database,
+                    schema,
+                }))
+                .await
+            }
+            DbxResourceRequest::TableSchema { connection_id, database, schema, table } => {
+                self.describe_table(Parameters(DescribeTableRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection_id), connection_name: None },
+                    table,
+                    database,
+                    schema,
+                }))
+                .await
+            }
+        };
+        resource_result_from_tool(uri, result).map(Into::into)
     }
 
     /// Hide tools the global policy disallows from the advertised list, the
@@ -2506,8 +3866,104 @@ impl ServerHandler for DbxMcpServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
-        Ok(rmcp::model::ListToolsResult { tools: self.policy_filtered_tools().await, meta: None, next_cursor: None })
+        Ok(rmcp::model::ListToolsResult::with_all_items(self.policy_filtered_tools().await))
     }
+}
+
+fn parse_dbx_resource_uri(uri: &str) -> Result<DbxResourceRequest, ErrorData> {
+    let parsed = Url::parse(uri).map_err(|_| ErrorData::invalid_params("Invalid DBX resource URI.", None))?;
+    if parsed.scheme() != "dbx"
+        || parsed.host_str() != Some("connections")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ErrorData::resource_not_found(format!("Unknown DBX resource: {uri}"), None));
+    }
+
+    let path = parsed.path().trim_matches('/');
+    let segments = if path.is_empty() { Vec::new() } else { path.split('/').collect::<Vec<_>>() };
+    let mut query = HashMap::new();
+    for (key, value) in parsed.query_pairs() {
+        let key = key.into_owned();
+        if query.insert(key.clone(), value.into_owned()).is_some() {
+            return Err(ErrorData::invalid_params(format!("Duplicate DBX resource parameter: {key}"), None));
+        }
+    }
+
+    match segments.as_slice() {
+        [] => {
+            reject_resource_parameters(&query, &[])?;
+            Ok(DbxResourceRequest::Connections)
+        }
+        [connection_id, "databases"] => {
+            reject_resource_parameters(&query, &[])?;
+            Ok(DbxResourceRequest::Databases {
+                connection_id: required_resource_value("connection_id", connection_id)?,
+            })
+        }
+        [connection_id, "tables"] => {
+            reject_resource_parameters(&query, &["database", "schema"])?;
+            Ok(DbxResourceRequest::Tables {
+                connection_id: required_resource_value("connection_id", connection_id)?,
+                database: optional_resource_parameter(&query, "database"),
+                schema: optional_resource_parameter(&query, "schema"),
+            })
+        }
+        [connection_id, "table-schema"] => {
+            reject_resource_parameters(&query, &["database", "schema", "table"])?;
+            Ok(DbxResourceRequest::TableSchema {
+                connection_id: required_resource_value("connection_id", connection_id)?,
+                database: optional_resource_parameter(&query, "database"),
+                schema: optional_resource_parameter(&query, "schema"),
+                table: required_resource_parameter(&query, "table")?,
+            })
+        }
+        _ => Err(ErrorData::resource_not_found(format!("Unknown DBX resource: {uri}"), None)),
+    }
+}
+
+fn reject_resource_parameters(parameters: &HashMap<String, String>, allowed: &[&str]) -> Result<(), ErrorData> {
+    if let Some(name) = parameters.keys().find(|name| !allowed.contains(&name.as_str())) {
+        return Err(ErrorData::invalid_params(format!("Unknown DBX resource parameter: {name}"), None));
+    }
+    Ok(())
+}
+
+fn optional_resource_parameter(parameters: &HashMap<String, String>, name: &str) -> Option<String> {
+    parameters.get(name).map(|value| value.trim()).filter(|value| !value.is_empty()).map(str::to_string)
+}
+
+fn required_resource_parameter(parameters: &HashMap<String, String>, name: &str) -> Result<String, ErrorData> {
+    optional_resource_parameter(parameters, name)
+        .ok_or_else(|| ErrorData::invalid_params(format!("Missing DBX resource parameter: {name}"), None))
+}
+
+fn required_resource_value(name: &str, value: &str) -> Result<String, ErrorData> {
+    let value = value.trim();
+    if value.is_empty() {
+        Err(ErrorData::invalid_params(format!("Missing DBX resource parameter: {name}"), None))
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn resource_result_from_tool(uri: String, result: CallToolResult) -> Result<ReadResourceResult, ErrorData> {
+    let output = result
+        .content
+        .iter()
+        .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if result.is_error == Some(true) {
+        let message = if output.is_empty() { "DBX resource read failed.".to_string() } else { output };
+        return Err(ErrorData::invalid_params(message, Some(json!({ "uri": uri }))));
+    }
+    if output.is_empty() {
+        return Err(ErrorData::internal_error("DBX resource returned no text content.", Some(json!({ "uri": uri }))));
+    }
+    Ok(ReadResourceResult::new(vec![ResourceContents::text(output, uri).with_mime_type("text/markdown")]))
 }
 
 fn text(value: impl Into<String>) -> CallToolResult {
@@ -2595,6 +4051,17 @@ fn sql_requires_batch_execution(sql: &str, database_type: DatabaseType) -> bool 
 const BATCH_MAX_ROWS: usize = 100;
 
 fn mcp_sql_activity_kind(sql: &str, database_type: DatabaseType) -> &'static str {
+    if database_type == DatabaseType::Salesforce {
+        // The generic path below derives the kind from SQL risk tiers, and the
+        // Salesforce tiers deliberately fail closed: an unscoped or unrecognized
+        // write lands in the DDL tier, which would file a record mutation under
+        // "schema_change". Every Salesforce statement is either a SOQL read or a
+        // DML write, so classify it as one unit instead.
+        return match classify_salesforce_statement_risk(sql) {
+            SalesforceStatementRisk::Read => "query",
+            SalesforceStatementRisk::ScopedWrite | SalesforceStatementRisk::OpaqueWrite => "data_change",
+        };
+    }
     let risks = dbx_core::sql::sql_execution_plan_for_database(sql, database_type)
         .statements
         .into_iter()
@@ -2610,6 +4077,18 @@ fn mcp_sql_activity_kind(sql: &str, database_type: DatabaseType) -> &'static str
 }
 
 fn mcp_sql_operation(sql: &str, database_type: DatabaseType) -> String {
+    if database_type == DatabaseType::Salesforce {
+        // Naming the DML verb keeps history readable; "DBX" (the first word of
+        // the pseudo-command header) would say nothing about what changed.
+        return match classify_salesforce_statement_risk(sql) {
+            SalesforceStatementRisk::Read => "SELECT".to_string(),
+            SalesforceStatementRisk::ScopedWrite | SalesforceStatementRisk::OpaqueWrite => {
+                parse_salesforce_statement(sql)
+                    .map(|parsed| parsed.op.as_str().to_ascii_uppercase())
+                    .unwrap_or_else(|_| "DML".to_string())
+            }
+        };
+    }
     dbx_core::sql::sql_execution_plan_for_database(sql, database_type)
         .statements
         .first()
@@ -2674,6 +4153,7 @@ fn empty_query_result() -> dbx_core::db::QueryResult {
         affected_rows: 0,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -2699,7 +4179,19 @@ fn policy_allows_connection(
 }
 
 fn policy_allows_tool(policy: &McpGlobalPolicy, tool_name: &str) -> bool {
-    policy.allowed_tool_names.as_ref().is_none_or(|allowed| allowed.iter().any(|name| name == tool_name))
+    let Some(allowed) = policy.allowed_tool_names.as_ref() else { return true };
+    if allowed.iter().any(|name| name == tool_name) {
+        return true;
+    }
+    // Plugin wildcard entries: plugin tool names are discovered from sidecars
+    // at runtime, so a static settings list cannot name them individually —
+    // `dbx_<prefix>__*` exposes every tool of one plugin, `dbx_*__*` every
+    // plugin. Static tools never contain the `__` separator (guarded by
+    // `is_plugin_tool_name`), so a wildcard cannot widen their access.
+    let Some((prefix, _)) = tool_name.strip_prefix("dbx_").and_then(|rest| rest.split_once("__")) else {
+        return false;
+    };
+    allowed.iter().any(|name| name == "dbx_*__*" || name == &format!("dbx_{prefix}__*"))
 }
 
 fn database_scope_for_connection(
@@ -2721,6 +4213,11 @@ fn resolved_connection(
     connection: dbx_core::models::connection::ConnectionConfig,
     group_path: Option<&dbx_core::mcp_policy::McpConnectionGroupPath>,
 ) -> ResolvedConnection {
+    let _ = CALL_HISTORY.try_with(|entry| {
+        let mut entry = entry.lock().unwrap();
+        entry.connection_id = connection.id.clone();
+        entry.connection_name = connection.name.clone();
+    });
     let database_scope = database_scope_for_connection(&policy, &connection);
     let group_ids = group_path.map(|path| path.ids.clone()).unwrap_or_default();
     ResolvedConnection { connection, policy, database_scope, group_ids }
@@ -3090,6 +4587,208 @@ fn validate_transaction_sql_shape(sql: &str) -> Result<(), String> {
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
 #[allow(clippy::result_large_err)]
+fn not_salesforce_error(connection: &ConnectionConfig) -> CallToolResult {
+    tool_error(
+        "NOT_SALESFORCE_CONNECTION",
+        format!(
+            "Connection \"{}\" is a {:?} connection, not Salesforce. The dbx_salesforce_* tools only work against a Salesforce org.",
+            connection.name, connection.db_type
+        ),
+    )
+}
+
+/// Build the exact `DBX SALESFORCE DML` pseudo-command the driver executes.
+///
+/// Validation lives here rather than in the driver so a rejected shape never
+/// receives a confirm token: the statement that gets summarized is the statement
+/// that gets sent, one record at a time. Upsert and bulk shapes are refused
+/// outright — the driver cannot express them, and a token must not promise what
+/// the org cannot do.
+fn build_salesforce_dml_statement(
+    op: &str,
+    object: &str,
+    id: Option<&str>,
+    fields: Option<&serde_json::Value>,
+) -> Result<String, String> {
+    let op = op.trim().to_ascii_lowercase();
+    let object = object.trim();
+    if object.is_empty() {
+        return Err("'object' must be a non-empty Salesforce object API name, e.g. \"Account\".".to_string());
+    }
+    let id = id.map(str::trim).filter(|id| !id.is_empty());
+    let fields = match fields {
+        None => None,
+        Some(serde_json::Value::Object(map)) => (!map.is_empty()).then_some(map),
+        Some(_) => return Err("'fields' must be a JSON object mapping field API names to values.".to_string()),
+    };
+    let body = match op.as_str() {
+        "insert" => {
+            if id.is_some() {
+                return Err("insert creates a new record: drop 'id' and let Salesforce assign it.".to_string());
+            }
+            let Some(fields) = fields else {
+                return Err("insert requires a non-empty 'fields' object.".to_string());
+            };
+            reject_salesforce_identity_field(fields)?;
+            json!({ "op": "insert", "object": object, "fields": fields })
+        }
+        "update" => {
+            let Some(id) = id else {
+                return Err("update requires the 'id' of the record to change.".to_string());
+            };
+            let Some(fields) = fields else {
+                return Err("update requires a non-empty 'fields' object.".to_string());
+            };
+            reject_salesforce_identity_field(fields)?;
+            json!({ "op": "update", "object": object, "id": id, "fields": fields })
+        }
+        "delete" => {
+            let Some(id) = id else {
+                return Err("delete requires the 'id' of the record to remove.".to_string());
+            };
+            if fields.is_some() {
+                return Err("delete takes no 'fields' — it removes the whole record.".to_string());
+            }
+            json!({ "op": "delete", "object": object, "id": id })
+        }
+        other => {
+            return Err(format!(
+                "Unknown op \"{other}\". Expected insert, update or delete — upsert, bulk and composite writes are not supported."
+            ));
+        }
+    };
+    Ok(format!("{SALESFORCE_DML_HEADER}\n{body}"))
+}
+
+/// `Id` is the record identity, never a write target: sending it would either be
+/// ignored (insert) or read as an attempt to re-key a record (update).
+fn reject_salesforce_identity_field(fields: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    if fields.keys().any(|name| name.eq_ignore_ascii_case("Id")) {
+        return Err(
+            "'fields' must not contain Id — the record identity is the 'id' parameter, and Salesforce assigns it on insert."
+                .to_string(),
+        );
+    }
+    if fields.keys().any(|name| name.trim().is_empty()) {
+        return Err("'fields' contains an empty field name.".to_string());
+    }
+    Ok(())
+}
+
+/// One-line description of a prepared statement, in the same words the driver
+/// uses in its own errors, so a summary and a failure line up.
+fn salesforce_write_label(statement: &str) -> String {
+    match parse_salesforce_statement(statement) {
+        Ok(parsed) => match parsed.id.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => format!("{} on {} (Id {id})", parsed.op.as_str(), parsed.object),
+            None => format!("{} on {}", parsed.op.as_str(), parsed.object),
+        },
+        // Unreachable for a token the server issued; keep the line honest anyway.
+        Err(_) => "Salesforce write".to_string(),
+    }
+}
+
+/// The confirmation an agent must show the user before applying a prepared
+/// write. It names the operation, the exact field values, and the identity the
+/// change will be attributed to, then states the two properties that make
+/// Salesforce different from SQL: no transaction and no rollback.
+fn format_salesforce_write_summary(
+    statement: &str,
+    connection: &ConnectionConfig,
+    identity: Option<&SalesforceCurrentUser>,
+    token: &str,
+    expires_in_secs: u64,
+) -> String {
+    let mut lines = vec!["Salesforce write prepared — nothing has been sent yet.".to_string(), String::new()];
+    match parse_salesforce_statement(statement) {
+        Ok(parsed) => {
+            lines.push(format!("Operation:  {}", parsed.op.as_str()));
+            lines.push(format!("Object:     {}", parsed.object));
+            if let Some(id) = parsed.id.as_deref().filter(|id| !id.is_empty()) {
+                lines.push(format!("Record Id:  {id}"));
+            }
+            if let Some(fields) = parsed.fields.as_ref() {
+                lines.push(format!("Fields ({}):", fields.len()));
+                for (index, (name, value)) in fields.iter().enumerate() {
+                    if index >= SALESFORCE_SUMMARY_MAX_FIELDS {
+                        lines.push(format!(
+                            "  … and {} more (full statement in structured_content)",
+                            fields.len() - index
+                        ));
+                        break;
+                    }
+                    lines.push(format!("  - {name} = {}", truncate_salesforce_value(value)));
+                }
+            }
+        }
+        Err(error) => lines.push(format!("Operation:  unparseable ({error})")),
+    }
+    lines.push(String::new());
+    lines.push(format!("Connection:   {} ({})", connection.name, connection.id));
+    lines.extend(format_salesforce_identity_lines(identity));
+    lines.push(String::new());
+    lines.push(
+        "Salesforce writes are not transactional: once applied, this cannot be rolled back. Field-level security, record sharing, validation rules and flows all still apply, and a refusal comes back as Salesforce's own error text."
+            .to_string(),
+    );
+    lines.push(String::new());
+    lines.push(format!(
+        "Show this summary to the user. Only if they approve, call dbx_salesforce_apply_write with confirm_token \"{token}\". The token is single-use and expires in {expires_in_secs} seconds; any change to the write needs a new dbx_salesforce_prepare_write."
+    ));
+    lines.join("\n")
+}
+
+/// The whole identity block, for `dbx_salesforce_current_user`.
+fn format_salesforce_identity_block(connection: &ConnectionConfig, identity: Option<&SalesforceCurrentUser>) -> String {
+    let mut lines = vec![format!("Salesforce identity for connection \"{}\" ({})", connection.name, connection.id)];
+    lines.extend(format_salesforce_identity_lines(identity));
+    lines.join("\n")
+}
+
+fn format_salesforce_identity_lines(identity: Option<&SalesforceCurrentUser>) -> Vec<String> {
+    let Some(identity) = identity else {
+        return vec![
+            "Signed in as:   unknown — the identity lookup failed, so treat every permission as unverified. Salesforce still enforces its own rules on the write."
+                .to_string(),
+        ];
+    };
+    let profile = identity.profile_name.as_deref().map(str::trim).filter(|name| !name.is_empty()).unwrap_or("unknown");
+    let rights = match identity.is_admin {
+        Some(true) => "has \"Modify All Data\": it bypasses field-level security and record sharing",
+        Some(false) => "no \"Modify All Data\": field-level security and record sharing apply",
+        None => "\"Modify All Data\" could not be determined, so treat it as if it were granted",
+    };
+    vec![
+        format!("Signed in as:   {} <{}> (user Id {})", identity.name, identity.email, identity.user_id),
+        format!("Organization:   {} ({})", identity.org_name, identity.organization_id),
+        format!("Profile:        \"{profile}\" — {rights}"),
+    ]
+}
+
+fn salesforce_identity_json(identity: &SalesforceCurrentUser) -> serde_json::Value {
+    json!({
+        "user_id": identity.user_id,
+        "name": identity.name,
+        "email": identity.email,
+        "username": identity.username,
+        "organization_id": identity.organization_id,
+        "org_name": identity.org_name,
+        "profile_name": identity.profile_name,
+        "is_admin": identity.is_admin,
+    })
+}
+
+fn truncate_salesforce_value(value: &serde_json::Value) -> String {
+    let rendered = value.to_string();
+    if rendered.chars().count() <= SALESFORCE_SUMMARY_MAX_VALUE_CHARS {
+        return rendered;
+    }
+    let kept: String = rendered.chars().take(SALESFORCE_SUMMARY_MAX_VALUE_CHARS).collect();
+    format!("{kept}…")
+}
+
+// CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
+#[allow(clippy::result_large_err)]
 fn validate_sql_policy(
     connection: &dbx_core::models::connection::ConnectionConfig,
     policy: &McpGlobalPolicy,
@@ -3293,11 +4992,11 @@ fn ambiguous_connections(name: &str, connections: &[dbx_core::models::connection
 
 fn format_connections(connections: &[ConnectionSummary]) -> String {
     let mut output = String::from(
-        "| ID | Name | Group Path | Type | Host | Port | Database |\n| --- | --- | --- | --- | --- | --- | --- |",
+        "| ID | Name | Group Path | Type | Host | Port | Database | Note |\n| --- | --- | --- | --- | --- | --- | --- | --- |",
     );
     for connection in connections {
         output.push_str(&format!(
-            "\n| {} | {} | {} | {} | {} | {} | {} |",
+            "\n| {} | {} | {} | {} | {} | {} | {} | {} |",
             escape_cell(&connection.id),
             escape_cell(&connection.name),
             escape_cell(&connection.group_path.join(" / ")),
@@ -3305,6 +5004,7 @@ fn format_connections(connections: &[ConnectionSummary]) -> String {
             escape_cell(&connection.host),
             connection.port,
             escape_cell(&connection.database),
+            escape_cell(&connection.note),
         ));
     }
     output
@@ -3420,6 +5120,25 @@ fn format_schema_context(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn history_response_keeps_long_text_and_all_rows() {
+        let value = serde_json::json!({"content": [{"type": "text", "text": "x".repeat(4000)}], "rows": (0..100).collect::<Vec<_>>()});
+        let stored: serde_json::Value = serde_json::from_str(&super::bounded_history_response(&value)).unwrap();
+        assert_eq!(stored, value);
+    }
+
+    #[test]
+    fn history_response_redacts_nested_json_and_marks_size_limit() {
+        let value =
+            serde_json::json!({"content": [{"type": "text", "text": r#"{"password":"secret-value","rows":[1,2]}"#}]});
+        let stored = super::bounded_history_response(&value);
+        assert!(!stored.contains("secret-value"));
+        assert!(stored.contains("[redacted]"));
+        let large = super::bounded_history_response(&serde_json::json!({"text": "中".repeat(70000)}));
+        assert!(large.len() <= 64 * 1024);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&large).unwrap()["truncated"], true);
+    }
+
     use super::*;
     use async_trait::async_trait;
     use dbx_core::models::connection::ConnectionConfig;
@@ -3429,6 +5148,34 @@ mod tests {
         ServiceExt,
     };
     use std::{collections::HashSet, sync::atomic::AtomicUsize, time::Duration};
+
+    #[test]
+    fn parses_dbx_resource_uris_and_decodes_query_values() {
+        assert_eq!(parse_dbx_resource_uri(CONNECTIONS_RESOURCE_URI).unwrap(), DbxResourceRequest::Connections);
+        assert_eq!(
+            parse_dbx_resource_uri("dbx://connections/connection-1/databases").unwrap(),
+            DbxResourceRequest::Databases { connection_id: "connection-1".to_string() }
+        );
+        assert_eq!(
+            parse_dbx_resource_uri(
+                "dbx://connections/connection-1/table-schema?database=sales%20data&schema=public&table=order%20items"
+            )
+            .unwrap(),
+            DbxResourceRequest::TableSchema {
+                connection_id: "connection-1".to_string(),
+                database: Some("sales data".to_string()),
+                schema: Some("public".to_string()),
+                table: "order items".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_dbx_resource_uris() {
+        assert!(parse_dbx_resource_uri("dbx://connections/connection-1/table-schema").is_err());
+        assert!(parse_dbx_resource_uri("dbx://connections/connection-1/tables?unknown=value").is_err());
+        assert!(parse_dbx_resource_uri("file:///tmp/connections").is_err());
+    }
 
     struct FakeTransactionIo {
         in_transaction: bool,
@@ -3465,6 +5212,7 @@ mod tests {
                     affected_rows: 0,
                     execution_time_ms: 0,
                     server_execute_time_us: None,
+                    query_timings_ms: None,
                     truncated: false,
                     session_id: None,
                     has_more: false,
@@ -3529,6 +5277,8 @@ mod tests {
         }
     }
 
+    type RecordedPluginToolCalls = std::sync::Mutex<Vec<(String, String, Option<String>, serde_json::Value)>>;
+
     struct FakeBackend {
         connections: Vec<ConnectionConfig>,
         policy: McpGlobalPolicy,
@@ -3546,6 +5296,9 @@ mod tests {
         transaction_open_after_owner: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         transaction_open_error: Option<String>,
         policy_override: std::sync::Mutex<Option<McpGlobalPolicy>>,
+        salesforce_identity: Option<SalesforceCurrentUser>,
+        plugin_providers: Vec<crate::plugin_tools::PluginToolProvider>,
+        plugin_tool_calls: RecordedPluginToolCalls,
     }
 
     impl Default for FakeBackend {
@@ -3567,6 +5320,9 @@ mod tests {
                 transaction_open_after_owner: None,
                 transaction_open_error: None,
                 policy_override: std::sync::Mutex::new(None),
+                salesforce_identity: None,
+                plugin_providers: Vec::new(),
+                plugin_tool_calls: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -3619,6 +5375,29 @@ mod tests {
 
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
             Ok(self.connections.clone())
+        }
+
+        async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
+            Ok(self.plugin_providers.clone())
+        }
+
+        async fn call_plugin_mcp_tool(
+            &self,
+            plugin_id: &str,
+            tool: &str,
+            connection_id: Option<&str>,
+            arguments: &serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            self.plugin_tool_calls.lock().unwrap().push((
+                plugin_id.to_string(),
+                tool.to_string(),
+                connection_id.map(str::to_string),
+                arguments.clone(),
+            ));
+            Ok(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("{plugin_id}/{tool} ok") }],
+                "isError": false
+            }))
         }
 
         async fn open_transaction_owner(
@@ -3680,6 +5459,13 @@ mod tests {
                 is_error,
                 explain_data: None,
             }
+        }
+
+        async fn salesforce_current_user(
+            &self,
+            _connection: &ConnectionConfig,
+        ) -> Result<SalesforceCurrentUser, String> {
+            self.salesforce_identity.clone().ok_or_else(|| "no Salesforce pool".to_string())
         }
 
         #[cfg(feature = "mq-admin")]
@@ -3782,6 +5568,7 @@ mod tests {
                     affected_rows: 0,
                     execution_time_ms: 1,
                     server_execute_time_us: None,
+                    query_timings_ms: None,
                     truncated: false,
                     session_id: None,
                     has_more: false,
@@ -3837,6 +5624,505 @@ mod tests {
             assert_eq!(args["count"], 20);
             assert_eq!(args["topic"]["topic"], "events");
         }
+    }
+
+    fn plugin_connection(id: &str, name: &str, plugin_id: &str) -> ConnectionConfig {
+        serde_json::from_value(json!({
+            "id": id,
+            "name": name,
+            "db_type": "plugin",
+            "plugin_id": plugin_id,
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": ""
+        }))
+        .unwrap()
+    }
+
+    fn plugin_provider(
+        plugin_id: &str,
+        plugin_name: &str,
+        tools: serde_json::Value,
+    ) -> crate::plugin_tools::PluginToolProvider {
+        crate::plugin_tools::PluginToolProvider {
+            plugin_id: plugin_id.to_string(),
+            plugin_name: plugin_name.to_string(),
+            tools: dbx_core::ai::plugin_tools::parse_tool_list(&tools),
+        }
+    }
+
+    fn kafka_plugin_listing() -> serde_json::Value {
+        json!({
+            "tools": [
+                {
+                    "name": "kafka_topics_delete",
+                    "description": "Delete topics",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "connectionId": { "type": "string" },
+                            "topics": { "type": "array", "items": { "type": "string" } }
+                        },
+                        "required": ["connectionId", "topics"]
+                    }
+                },
+                {
+                    "name": "kafka_topics_list",
+                    "description": "List topics",
+                    "annotations": { "readOnlyHint": true },
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "connectionId": { "type": "string" } }
+                    }
+                }
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn plugin_tools_merge_into_tools_list_with_connection_selector() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![
+                plugin_connection("k1", "prod", "io.dbx.kafka"),
+                plugin_connection("k2", "test", "io.dbx.kafka"),
+                plugin_connection("s1", "shell", "io.dbx.ssh"),
+            ],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        let tools = server.policy_filtered_tools().await;
+        assert!(tools.iter().any(|tool| tool.name.as_ref() == "dbx_list_connections"), "static tools remain");
+        let delete = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "dbx_kafka__kafka_topics_delete")
+            .expect("plugin tool listed");
+        let properties = delete.input_schema.get("properties").expect("object schema");
+        let selector = properties.get("dbx_connection").expect("selector present for multiple connections");
+        assert_eq!(selector["enum"], json!(["k1", "k2"]));
+        assert!(properties.get("connectionId").is_none(), "host-bound argument stays out of the advertised schema");
+        let list = tools.iter().find(|tool| tool.name.as_ref() == "dbx_kafka__kafka_topics_list").unwrap();
+        assert!(list.annotations.as_ref().and_then(|a| a.read_only_hint).expect("readOnlyHint passthrough"));
+    }
+
+    #[tokio::test]
+    async fn plugin_meta_tools_discover_and_call_by_plugin_id() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![
+                plugin_connection("k1", "prod", "io.dbx.kafka"),
+                plugin_connection("k2", "test", "io.dbx.kafka"),
+            ],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        // dbx_plugin_list: one row, id + counts.
+        let list = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
+        assert_eq!(list.is_error, Some(false));
+        let text = result_text(&list);
+        assert!(text.contains("io.dbx.kafka"), "{text}");
+        assert!(text.contains("2 tool(s)") && text.contains("2 allowed connection(s)"), "{text}");
+
+        // dbx_plugin_list with a filter that matches nothing.
+        let none = server.plugin_list(Parameters(PluginListRequest { filter: Some("postgres".into()) })).await;
+        assert!(result_text(&none).contains("No DBX plugin matches"), "{}", result_text(&none));
+
+        // dbx_plugin_tools: per-plugin schemas with the connection selector note.
+        let tools = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.kafka".into() })).await;
+        assert_eq!(tools.is_error, Some(false));
+        let text = result_text(&tools);
+        assert!(text.contains("kafka_topics_delete") && text.contains("kafka_topics_list"), "{text}");
+        assert!(text.contains("dbx_connection"), "multi-connection hint expected: {text}");
+
+        // Unknown plugin id fails with a discovery pointer.
+        let unknown = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.nope".into() })).await;
+        assert_eq!(unknown.is_error, Some(true));
+        assert!(result_text(&unknown).contains("does not contribute visible MCP tools"), "{}", result_text(&unknown));
+
+        // dbx_plugin_call routes by plugin id + tool name; selector stripped.
+        let call = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_delete".into(),
+                arguments: Some(json!({ "topics": ["t"], "dbx_connection": "k2" })),
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(call.is_error, Some(false), "{}", result_text(&call));
+        {
+            let calls = backend.plugin_tool_calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, "io.dbx.kafka");
+            assert_eq!(calls[0].1, "kafka_topics_delete");
+            assert_eq!(calls[0].2.as_deref(), Some("k2"));
+        }
+
+        // Unknown tool under a known plugin id.
+        let unknown_tool = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "nope".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(unknown_tool.is_error, Some(true));
+        assert!(result_text(&unknown_tool).contains("does not provide a tool named"), "{}", result_text(&unknown_tool));
+    }
+
+    #[tokio::test]
+    async fn plugin_meta_tools_respect_mode_and_policy() {
+        // flat 模式（默认构造走 env；此处直接构造 Lazy 验证过滤）——先验证 policy。
+        let restricted = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy {
+                allowed_tool_names: Some(vec!["dbx_plugin_list".to_string(), "dbx_list_connections".to_string()]),
+                ..Default::default()
+            },
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(restricted, McpScope::default(), false);
+        // call/tools 被白名单拒绝。
+        let call = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_list".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(call.is_error, Some(true));
+        assert!(result_text(&call).contains("TOOL_OUT_OF_SCOPE"), "{}", result_text(&call));
+        // list 仍在白名单内，可列出。
+        let list = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
+        assert_eq!(list.is_error, Some(false), "{}", result_text(&list));
+    }
+
+    #[tokio::test]
+    async fn plugin_tools_listing_is_filtered_by_the_flat_allowlist() {
+        // dbx_plugin_tools must disclose only what the flat surface would:
+        // denied tools stay hidden (with a count note) even though calls are
+        // gated separately.
+        let restricted = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy {
+                allowed_tool_names: Some(vec![
+                    "dbx_plugin_tools".to_string(),
+                    "dbx_kafka__kafka_topics_list".to_string(),
+                ]),
+                ..Default::default()
+            },
+            plugin_providers: vec![
+                plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing()),
+                plugin_provider(
+                    "io.dbx.ssh",
+                    "Terminal",
+                    json!({ "tools": [{ "name": "ssh_exec", "description": "Run a command" }] }),
+                ),
+            ],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(restricted, McpScope::default(), false);
+        let listing = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.kafka".into() })).await;
+        assert_eq!(listing.is_error, Some(false));
+        let text = result_text(&listing);
+        assert!(text.contains("kafka_topics_list"), "{text}");
+        assert!(!text.contains("kafka_topics_delete"), "denied tool must be hidden: {text}");
+        assert!(text.contains("1 further tool(s)"), "{text}");
+
+        let all_hidden = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.ssh".into() })).await;
+        assert_eq!(all_hidden.is_error, Some(true));
+        // A fully-hidden plugin and an unknown id answer identically so the
+        // listing cannot fingerprint installed plugin ids.
+        assert!(
+            result_text(&all_hidden).contains("does not contribute visible MCP tools"),
+            "{}",
+            result_text(&all_hidden)
+        );
+
+        // A plugin whose every tool is denied resolves to the hidden reason.
+        // Unknown plugin ids (never installed) keep the plain not-found text.
+        let unknown = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.nope".into() })).await;
+        assert_eq!(unknown.is_error, Some(true));
+        assert!(result_text(&unknown).contains("does not contribute visible MCP tools"), "{}", result_text(&unknown));
+    }
+
+    #[test]
+    fn plugin_tool_wildcards_match_only_the_plugin_namespace() {
+        let per_plugin =
+            McpGlobalPolicy { allowed_tool_names: Some(vec!["dbx_ssh__*".to_string()]), ..Default::default() };
+        assert!(policy_allows_tool(&per_plugin, "dbx_ssh__sftp_list_dir"));
+        assert!(policy_allows_tool(&per_plugin, "dbx_ssh__sftp_write_file"));
+        assert!(!policy_allows_tool(&per_plugin, "dbx_kafka__kafka_topics_list"));
+        assert!(
+            !policy_allows_tool(&per_plugin, "dbx_execute_query"),
+            "a plugin wildcard must never widen a static tool"
+        );
+
+        let every_plugin = McpGlobalPolicy {
+            allowed_tool_names: Some(vec!["dbx_plugin_list".to_string(), "dbx_*__*".to_string()]),
+            ..Default::default()
+        };
+        assert!(policy_allows_tool(&every_plugin, "dbx_kafka__kafka_topics_delete"));
+        assert!(policy_allows_tool(&every_plugin, "dbx_ssh__sftp_list_dir"));
+        assert!(policy_allows_tool(&every_plugin, "dbx_plugin_list"), "exact entries keep working beside the wildcard");
+        assert!(!policy_allows_tool(&every_plugin, "dbx_execute_query"));
+
+        let explicit = McpGlobalPolicy {
+            allowed_tool_names: Some(vec!["dbx_ssh__sftp_list_dir".to_string()]),
+            ..Default::default()
+        };
+        assert!(policy_allows_tool(&explicit, "dbx_ssh__sftp_list_dir"));
+        assert!(
+            !policy_allows_tool(&explicit, "dbx_ssh__sftp_write_file"),
+            "no wildcard means per-tool gating stays exact"
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_call_is_gated_by_the_flat_tool_allowlist() {
+        // The meta tool itself is allowed, but the flat name of the targeted
+        // plugin tool is not: lazy access must not bypass the allowlist.
+        let restricted = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy {
+                allowed_tool_names: Some(vec![
+                    "dbx_plugin_call".to_string(),
+                    "dbx_kafka__kafka_topics_list".to_string(),
+                ]),
+                ..Default::default()
+            },
+            connections: vec![plugin_connection("k1", "prod", "io.dbx.kafka")],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(restricted.clone(), McpScope::default(), false);
+
+        let denied = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_delete".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(denied.is_error, Some(true));
+        assert!(result_text(&denied).contains("TOOL_OUT_OF_SCOPE"), "{}", result_text(&denied));
+        assert!(restricted.plugin_tool_calls.lock().unwrap().is_empty(), "the backend must not be reached");
+
+        let allowed = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_list".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(allowed.is_error, Some(false), "{}", result_text(&allowed));
+        assert_eq!(restricted.plugin_tool_calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn plugin_tools_enforce_read_only_policy() {
+        // Under a read-only execution policy only plugin tools declared with
+        // readOnlyHint may run: the hint is the plugin's claim, and the host
+        // defaults to deny so the mode cannot be bypassed through a plugin
+        // tool (kafka_topics_delete is the canonical undeclared write).
+        let backend = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy { read_only: true, ..Default::default() },
+            connections: vec![plugin_connection("k1", "prod", "io.dbx.kafka")],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let denied = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_delete".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(denied.is_error, Some(true));
+        assert!(result_text(&denied).contains("MCP_READ_ONLY"), "{}", result_text(&denied));
+        assert!(backend.plugin_tool_calls.lock().unwrap().is_empty(), "the backend must not be reached");
+
+        // The flat dispatch path is gated by the same shared check.
+        let flat_denied =
+            server.call_plugin_tool_dispatch("dbx_kafka__kafka_topics_delete", json!({ "topics": ["t"] })).await;
+        let flat_denied = flat_denied.unwrap();
+        assert_eq!(flat_denied.is_error, Some(true));
+        assert!(result_text(&flat_denied).contains("MCP_READ_ONLY"), "{}", result_text(&flat_denied));
+        assert!(backend.plugin_tool_calls.lock().unwrap().is_empty(), "the backend must not be reached");
+
+        // The declared read-only tool keeps working under the same policy.
+        let read_allowed = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_list".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(read_allowed.is_error, Some(false), "{}", result_text(&read_allowed));
+        assert_eq!(backend.plugin_tool_calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn plugin_tools_enforce_session_scope() {
+        // A scoped session must not reach plugins whose connections are all
+        // out of scope — including their connection-less tools, which the
+        // flat view would never advertise and could never bind.
+        let backend = Arc::new(FakeBackend {
+            connections: vec![
+                plugin_connection("k1", "prod", "io.dbx.kafka"),
+                plugin_connection("s1", "box", "io.dbx.ssh"),
+            ],
+            plugin_providers: vec![
+                plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing()),
+                plugin_provider(
+                    "io.dbx.ssh",
+                    "Terminal",
+                    json!({ "tools": [{ "name": "ssh_ping", "description": "Ping the host" }] }),
+                ),
+            ],
+            ..Default::default()
+        });
+        let scope = McpScope { connection_ids: vec!["k1".into()], ..Default::default() };
+        let server = DbxMcpServer::with_runtime_options(backend, scope, false);
+
+        let denied = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.ssh".into(),
+                tool: "ssh_ping".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(denied.is_error, Some(true));
+        assert!(result_text(&denied).contains("PLUGIN_OUT_OF_SCOPE"), "{}", result_text(&denied));
+
+        // The out-of-scope plugin disappears from every meta listing too: no
+        // row, no tool schema, no hidden-count disclosure to fingerprint it.
+        let list = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
+        let list_text = result_text(&list);
+        assert!(!list_text.contains("io.dbx.ssh"), "{list_text}");
+        assert!(list_text.contains("io.dbx.kafka"), "{list_text}");
+
+        let tools = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.ssh".into() })).await;
+        assert_eq!(tools.is_error, Some(true));
+        let tools_text = result_text(&tools);
+        assert!(tools_text.contains("PLUGIN_OUT_OF_SCOPE") || tools_text.contains("session scope"), "{tools_text}");
+        assert!(!tools_text.contains("ssh_ping"), "{tools_text}");
+
+        // The in-scope plugin keeps working.
+        let allowed = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_list".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(allowed.is_error, Some(false), "{}", result_text(&allowed));
+    }
+
+    #[tokio::test]
+    async fn plugin_tools_mode_switches_advertised_views() {
+        // default（flat）：router 禁用 meta 路由。
+        let flat = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let flat_router = &flat.tool_router;
+        assert!(flat_router.list_all().iter().all(|tool| !tool.name.as_ref().starts_with("dbx_plugin_")));
+        // lazy 模式：保留 meta 路由（mode 注入，避免并行测试间的环境变量竞态）。
+        let lazy = DbxMcpServer::with_plugin_tools_mode(
+            Arc::new(FakeBackend::default()),
+            McpScope::default(),
+            false,
+            PluginToolsMode::Lazy,
+        );
+        let binding = lazy.tool_router.list_all();
+        let names: Vec<&str> = binding.iter().map(|tool| tool.name.as_ref()).collect();
+        for expected in ["dbx_plugin_list", "dbx_plugin_tools", "dbx_plugin_call"] {
+            assert!(names.contains(&expected), "{expected} missing in {names:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_tool_calls_bind_connections_and_respect_policy() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![
+                plugin_connection("k1", "prod", "io.dbx.kafka"),
+                plugin_connection("k2", "test", "io.dbx.kafka"),
+                plugin_connection("s1", "shell", "io.dbx.ssh"),
+            ],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        // Several connections: a missing selector is an error that names the argument.
+        let missing = server
+            .call_plugin_tool_dispatch("dbx_kafka__kafka_topics_delete", json!({ "topics": ["t"] }))
+            .await
+            .unwrap();
+        assert_eq!(missing.is_error, Some(true));
+        assert!(result_text(&missing).contains("dbx_connection"), "{}", result_text(&missing));
+
+        // A selector pointing at another plugin's connection is rejected.
+        let cross = server
+            .call_plugin_tool_dispatch(
+                "dbx_kafka__kafka_topics_delete",
+                json!({ "topics": ["t"], "dbx_connection": "s1" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cross.is_error, Some(true));
+        assert!(result_text(&cross).contains("not an allowed connection"), "{}", result_text(&cross));
+
+        // An explicit selector binds host-side; selector keys are stripped and
+        // the plugin's declared connectionId is injected.
+        let ok = server
+            .call_plugin_tool_dispatch(
+                "dbx_kafka__kafka_topics_delete",
+                json!({ "topics": ["t"], "dbx_connection": "k2" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.is_error, Some(false), "{}", result_text(&ok));
+        {
+            let calls = backend.plugin_tool_calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, "io.dbx.kafka");
+            assert_eq!(calls[0].1, "kafka_topics_delete");
+            assert_eq!(calls[0].2.as_deref(), Some("k2"));
+            assert_eq!(calls[0].3["connectionId"], "k2");
+            assert!(calls[0].3.get("dbx_connection").is_none());
+        }
+
+        // Unknown plugin namespace name fails cleanly.
+        let unknown = server.call_plugin_tool_dispatch("dbx_kafka__nope", json!({})).await.unwrap();
+        assert!(result_text(&unknown).contains("not available"), "{}", result_text(&unknown));
+
+        // The global policy tool allowlist applies to exposed plugin names.
+        let restricted = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy {
+                allowed_tool_names: Some(vec!["dbx_list_connections".to_string()]),
+                ..Default::default()
+            },
+            connections: backend.connections.clone(),
+            plugin_providers: backend.plugin_providers.clone(),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(restricted, McpScope::default(), false);
+        let blocked = server
+            .call_plugin_tool_dispatch("dbx_kafka__kafka_topics_delete", json!({ "topics": ["t"] }))
+            .await
+            .unwrap();
+        assert_eq!(blocked.is_error, Some(true));
+        assert!(result_text(&blocked).contains("TOOL_OUT_OF_SCOPE"), "{}", result_text(&blocked));
+        let tools = server.policy_filtered_tools().await;
+        assert!(!tools.iter().any(|tool| tool.name.as_ref() == "dbx_kafka__kafka_topics_delete"));
     }
 
     #[cfg(feature = "mq-admin")]
@@ -3957,10 +6243,14 @@ mod tests {
             port: 5432,
             database: "app".to_string(),
             group_path: vec!["Project|A".to_string(), "Staging\nWest".to_string()],
+            note: "Application | staging\nRead-only queries".to_string(),
         }]);
         assert!(output.contains("id\\|1"));
         assert!(output.contains("local pg"));
         assert!(output.contains("Project\\|A / Staging West"));
+        assert!(output.contains("| Database | Note |"));
+        assert!(output.contains("| Application \\| staging Read-only queries |"));
+        assert_eq!(output.lines().count(), 3);
     }
 
     #[test]
@@ -3969,9 +6259,9 @@ mod tests {
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 22);
+        assert_eq!(tools.len(), 25);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 23);
         #[cfg(feature = "mq-admin")]
         assert!(names.contains(&"dbx_peek_messages"));
         #[cfg(not(feature = "mq-admin"))]
@@ -3991,6 +6281,9 @@ mod tests {
         assert!(names.contains(&"dbx_duplicate_connection"));
         assert!(names.contains(&"dbx_remove_connection"));
         assert!(names.contains(&"dbx_execute_redis_command"));
+        assert!(names.contains(&"dbx_salesforce_current_user"));
+        assert!(names.contains(&"dbx_salesforce_prepare_write"));
+        assert!(names.contains(&"dbx_salesforce_apply_write"));
         assert!(names.contains(&"dbx_get_schema_context"));
         assert!(names.contains(&"dbx_open_table"));
         assert!(names.contains(&"dbx_execute_and_show"));
@@ -4238,9 +6531,9 @@ mod tests {
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 20);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 18);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
@@ -4254,6 +6547,12 @@ mod tests {
         assert!(names.iter().any(|name| name == "dbx_begin_transaction"));
         assert!(names.iter().any(|name| name == "dbx_commit_transaction"));
         assert!(names.iter().any(|name| name == "dbx_rollback_transaction"));
+        // The Salesforce tools act on the scoped connection itself, so connection
+        // scoping keeps them visible. What narrows them is the per-connection DML
+        // opt-in and the execution policy, both re-checked on every call.
+        assert!(names.iter().any(|name| name == "dbx_salesforce_current_user"));
+        assert!(names.iter().any(|name| name == "dbx_salesforce_prepare_write"));
+        assert!(names.iter().any(|name| name == "dbx_salesforce_apply_write"));
         #[cfg(feature = "mq-admin")]
         assert!(names.iter().any(|name| name == "dbx_send_message"));
     }
@@ -4384,6 +6683,7 @@ mod tests {
                         allow_dangerous_sql: false,
                     },
                 ],
+                allow_salesforce_dml: false,
             }],
             ..Default::default()
         };
@@ -4422,6 +6722,7 @@ mod tests {
                     database_policies: Vec::new(),
                     execution_mode_configured: false,
                     execution_mode_policy_version: None,
+                    allow_salesforce_dml: false,
                 }],
                 ..Default::default()
             },
@@ -4598,6 +6899,7 @@ mod tests {
                         allow_dangerous_sql: false,
                     },
                 ],
+                allow_salesforce_dml: false,
             }],
             ..Default::default()
         };
@@ -5912,6 +8214,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mcp_history_metadata_reads_salesforce_statements_as_one_unit() {
+        let database_type = DatabaseType::Salesforce;
+        assert_eq!(mcp_sql_activity_kind("SELECT Id FROM Account", database_type), "query");
+        assert_eq!(mcp_sql_operation("SELECT Id FROM Account", database_type), "SELECT");
+
+        let update = "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"id\":\"001x\",\"fields\":{\"Name\":\"Acme\"}}";
+        assert_eq!(mcp_sql_activity_kind(update, database_type), "data_change");
+        assert_eq!(mcp_sql_operation(update, database_type), "UPDATE");
+
+        // An unscoped write fails closed to the high-risk tier, which the generic
+        // tier-based path would file under "schema_change". It is still a record
+        // mutation; only the driver's own parser can say which verb it was.
+        let unscoped = "DBX SALESFORCE DML\n{\"op\":\"delete\",\"object\":\"Account\"}";
+        assert_eq!(mcp_sql_activity_kind(unscoped, database_type), "data_change");
+        assert_eq!(mcp_sql_operation(unscoped, database_type), "DML");
+
+        // A field value that reads like another statement is data, not a second
+        // statement: the label must not change because of what it contains.
+        let literal =
+            "DBX SALESFORCE DML\n{\"op\":\"insert\",\"object\":\"Lead\",\"fields\":{\"Description\":\"a; CREATE TABLE t (id int)\"}}";
+        assert_eq!(mcp_sql_activity_kind(literal, database_type), "data_change");
+        assert_eq!(mcp_sql_operation(literal, database_type), "INSERT");
+    }
+
     #[tokio::test]
     async fn execute_batch_rejects_transaction_with_session() {
         let postgres = connection("pg", "pg", "postgres", "app");
@@ -6218,6 +8545,7 @@ mod tests {
                 affected_rows: 0,
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -6250,6 +8578,7 @@ mod tests {
                 affected_rows: 2,
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -6283,6 +8612,7 @@ mod tests {
                 affected_rows: 1,
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -6405,5 +8735,497 @@ mod tests {
         assert!(!result_text(&result).contains("Statement 1"));
         let structured = result.structured_content.as_ref().expect("structured content must be populated");
         assert_eq!(structured["results"][0]["merged"], true);
+    }
+
+    fn salesforce_connection() -> ConnectionConfig {
+        connection("sfdc", "Acme QA org", "salesforce", "")
+    }
+
+    fn salesforce_dml_policy(allow_dml: bool, read_only: bool) -> McpGlobalPolicy {
+        McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            connection_policies: vec![dbx_core::storage::McpConnectionPolicy {
+                connection_id: "sfdc".to_string(),
+                read_only,
+                allow_dangerous_sql: false,
+                execution_mode_configured: false,
+                execution_mode_policy_version: None,
+                database_scope: McpDatabaseScope::All,
+                allowed_databases: Vec::new(),
+                database_policies: Vec::new(),
+                allow_salesforce_dml: allow_dml,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn salesforce_identity(is_admin: Option<bool>) -> SalesforceCurrentUser {
+        SalesforceCurrentUser {
+            user_id: "005000000000000001".to_string(),
+            name: "Jane Doe".to_string(),
+            email: "jane.doe@example.test".to_string(),
+            organization_id: "00D000000000000001".to_string(),
+            username: "jane.doe@example.test".to_string(),
+            profile_name: Some("System Administrator".to_string()),
+            is_admin,
+            org_name: "Acme".to_string(),
+        }
+    }
+
+    fn salesforce_server(policy: McpGlobalPolicy, identity: Option<SalesforceCurrentUser>) -> Arc<FakeBackend> {
+        Arc::new(FakeBackend {
+            connections: vec![salesforce_connection()],
+            policy,
+            salesforce_identity: identity,
+            ..Default::default()
+        })
+    }
+
+    fn prepare_request(
+        op: &str,
+        object: &str,
+        id: Option<&str>,
+        fields: Option<serde_json::Value>,
+    ) -> Parameters<SalesforcePrepareWriteRequest> {
+        Parameters(SalesforcePrepareWriteRequest {
+            selector: selector("sfdc"),
+            database: None,
+            op: op.to_string(),
+            object: object.to_string(),
+            id: id.map(str::to_string),
+            fields,
+        })
+    }
+
+    fn confirm_token(result: &CallToolResult) -> String {
+        result.structured_content.as_ref().expect("prepare returns structured content")["confirm_token"]
+            .as_str()
+            .expect("confirm_token")
+            .to_string()
+    }
+
+    #[test]
+    fn salesforce_dml_builder_accepts_only_single_scoped_records() {
+        let update =
+            build_salesforce_dml_statement("UPDATE", " Account ", Some(" 001x "), Some(&json!({"Name": "Acme"})))
+                .expect("a scoped update is the shape the driver executes");
+        assert!(update.starts_with("DBX SALESFORCE DML\n"), "missing pseudo-command header: {update}");
+        assert_eq!(
+            classify_salesforce_statement_risk(&update),
+            SalesforceStatementRisk::ScopedWrite,
+            "a prepared write must never land in the read tier"
+        );
+        let parsed = parse_salesforce_statement(&update).expect("the driver must accept what prepare handed out");
+        assert_eq!(parsed.op.as_str(), "update");
+        assert_eq!(parsed.object, "Account");
+        assert_eq!(parsed.id.as_deref(), Some("001x"));
+        assert_eq!(parsed.fields.expect("fields")["Name"], json!("Acme"));
+        assert_eq!(salesforce_write_label(&update), "update on Account (Id 001x)");
+
+        let insert = build_salesforce_dml_statement("insert", "Lead", None, Some(&json!({"Company": "Acme"}))).unwrap();
+        assert_eq!(salesforce_write_label(&insert), "insert on Lead");
+        let delete = build_salesforce_dml_statement("delete", "Lead", Some("00Qx"), None).unwrap();
+        assert_eq!(salesforce_write_label(&delete), "delete on Lead (Id 00Qx)");
+
+        let rejected: Vec<(&str, Result<String, String>)> = vec![
+            ("no object", build_salesforce_dml_statement("update", "  ", Some("001x"), Some(&json!({"Name": "a"})))),
+            ("no fields on insert", build_salesforce_dml_statement("insert", "Lead", None, None)),
+            ("empty fields", build_salesforce_dml_statement("insert", "Lead", None, Some(&json!({})))),
+            ("fields not an object", build_salesforce_dml_statement("insert", "Lead", None, Some(&json!(["Name"])))),
+            (
+                "id on insert",
+                build_salesforce_dml_statement("insert", "Lead", Some("00Qx"), Some(&json!({"Company": "a"}))),
+            ),
+            ("no id on update", build_salesforce_dml_statement("update", "Lead", None, Some(&json!({"Company": "a"})))),
+            ("no id on delete", build_salesforce_dml_statement("delete", "Lead", None, None)),
+            (
+                "fields on delete",
+                build_salesforce_dml_statement("delete", "Lead", Some("00Qx"), Some(&json!({"Company": "a"}))),
+            ),
+            (
+                "Id inside fields",
+                build_salesforce_dml_statement("update", "Lead", Some("00Qx"), Some(&json!({"id": "00Qy"}))),
+            ),
+            (
+                "empty field name",
+                build_salesforce_dml_statement("update", "Lead", Some("00Qx"), Some(&json!({" ": "x"}))),
+            ),
+            ("upsert", build_salesforce_dml_statement("upsert", "Lead", Some("00Qx"), Some(&json!({"Company": "a"})))),
+            ("raw sql", build_salesforce_dml_statement("DELETE FROM Lead", "Lead", None, None)),
+        ];
+        for (label, result) in rejected {
+            assert!(result.is_err(), "{label} must be refused, got {:?}", result.ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_salesforce_writes_are_single_use_and_expire() {
+        let statement =
+            build_salesforce_dml_statement("update", "Account", Some("001x"), Some(&json!({"Name": "Acme"}))).unwrap();
+        let pending = || PendingSalesforceWrite {
+            connection_id: "sfdc".to_string(),
+            database: String::new(),
+            statement: statement.clone(),
+            created_at: Instant::now(),
+        };
+
+        let live = PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL);
+        live.insert("sfdml-a".to_string(), pending()).await;
+        assert!(live.take("sfdml-a").await.is_some(), "a fresh token must apply");
+        assert!(live.take("sfdml-a").await.is_none(), "a token is single-use: a replay must not execute twice");
+        assert!(live.take(" sfdml-missing ").await.is_none());
+
+        let expired = PendingSalesforceWrites::new(Duration::ZERO);
+        expired.insert("sfdml-b".to_string(), pending()).await;
+        assert!(expired.take("sfdml-b").await.is_none(), "an expired token must not execute");
+    }
+
+    #[tokio::test]
+    async fn pending_salesforce_writes_stay_bounded() {
+        let store = PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL);
+        for index in 0..(SALESFORCE_WRITE_PENDING_LIMIT + 10) {
+            store
+                .insert(
+                    format!("sfdml-{index}"),
+                    PendingSalesforceWrite {
+                        connection_id: "sfdc".to_string(),
+                        database: String::new(),
+                        statement: "DBX SALESFORCE DML\n{}".to_string(),
+                        created_at: Instant::now(),
+                    },
+                )
+                .await;
+        }
+        assert_eq!(store.entries.lock().await.len(), SALESFORCE_WRITE_PENDING_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn salesforce_prepare_write_needs_an_explicit_connection_opt_in() {
+        for (label, policy) in [
+            ("no connection rule", McpGlobalPolicy::default()),
+            ("opt-in off", salesforce_dml_policy(false, false)),
+            ("opt-in void on read-only", salesforce_dml_policy(true, true)),
+        ] {
+            let backend = salesforce_server(policy, None);
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+            let prepared = server
+                .salesforce_prepare_write(prepare_request(
+                    "update",
+                    "Account",
+                    Some("001x"),
+                    Some(json!({"Name": "Acme"})),
+                ))
+                .await;
+            assert!(result_text(&prepared).contains("SALESFORCE_DML_DISABLED"), "{label}: {prepared:?}");
+            assert!(backend.recorded_arguments.lock().unwrap().is_empty(), "{label} must not reach the org");
+        }
+    }
+
+    #[tokio::test]
+    async fn salesforce_prepare_write_summarises_the_write_and_the_identity() {
+        let backend = salesforce_server(salesforce_dml_policy(true, false), Some(salesforce_identity(Some(true))));
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let prepared = server
+            .salesforce_prepare_write(prepare_request(
+                "update",
+                "Account",
+                Some("001x"),
+                Some(json!({"Name": "Acme", "AnnualRevenue": 1200})),
+            ))
+            .await;
+        let summary = result_text(&prepared);
+        assert_ne!(prepared.is_error, Some(true), "{prepared:?}");
+        for expected in [
+            "nothing has been sent yet",
+            "Operation:  update",
+            "Object:     Account",
+            "Record Id:  001x",
+            "Name = \"Acme\"",
+            "AnnualRevenue = 1200",
+            "Jane Doe",
+            "\"System Administrator\"",
+            "Modify All Data",
+            "cannot be rolled back",
+            "dbx_salesforce_apply_write",
+        ] {
+            assert!(summary.contains(expected), "summary is missing \"{expected}\":\n{summary}");
+        }
+        assert!(confirm_token(&prepared).starts_with("sfdml-"));
+        assert_eq!(
+            prepared.structured_content.as_ref().unwrap()["statement"].as_str().unwrap(),
+            build_salesforce_dml_statement(
+                "update",
+                "Account",
+                Some("001x"),
+                Some(&json!({"Name": "Acme", "AnnualRevenue": 1200}))
+            )
+            .unwrap()
+        );
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty(), "prepare must not write");
+    }
+
+    #[tokio::test]
+    async fn salesforce_prepare_write_survives_a_failed_identity_lookup() {
+        let backend = salesforce_server(salesforce_dml_policy(true, false), None);
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        let prepared = server.salesforce_prepare_write(prepare_request("delete", "Lead", Some("00Qx"), None)).await;
+        assert_ne!(prepared.is_error, Some(true), "{prepared:?}");
+        assert!(result_text(&prepared).contains("identity lookup failed"), "{}", result_text(&prepared));
+    }
+
+    #[tokio::test]
+    async fn salesforce_apply_write_sends_the_prepared_statement_exactly_once() {
+        let backend = salesforce_server(salesforce_dml_policy(true, false), Some(salesforce_identity(Some(false))));
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let prepared = server
+            .salesforce_prepare_write(prepare_request("update", "Account", Some("001x"), Some(json!({"Name": "Acme"}))))
+            .await;
+        let token = confirm_token(&prepared);
+        let statement = prepared.structured_content.as_ref().unwrap()["statement"].as_str().unwrap().to_string();
+
+        let applied = server
+            .salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token.clone() }))
+            .await;
+        assert_ne!(applied.is_error, Some(true), "{applied:?}");
+        assert!(
+            result_text(&applied).starts_with("Salesforce write applied: update on Account (Id 001x)."),
+            "{}",
+            result_text(&applied)
+        );
+
+        let recorded = backend.recorded_arguments.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "exactly one write reached the backend: {recorded:?}");
+        assert_eq!(recorded[0].0, "execute_query");
+        assert_eq!(
+            recorded[0].1["sql"].as_str(),
+            Some(statement.as_str()),
+            "the applied statement must be the prepared one"
+        );
+        assert_eq!(recorded[0].1["limit"], json!(1));
+
+        let history = backend.history.lock().unwrap().clone();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].sql, statement);
+        assert_eq!(history[0].operation, "UPDATE");
+        assert_eq!(history[0].activity_kind, "data_change");
+        assert!(history[0].success);
+
+        let replayed =
+            server.salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token })).await;
+        assert!(result_text(&replayed).contains("CONFIRM_TOKEN_INVALID"), "{replayed:?}");
+        assert_eq!(backend.recorded_arguments.lock().unwrap().len(), 1, "a replayed token must not write again");
+    }
+
+    #[tokio::test]
+    async fn salesforce_apply_write_rejects_a_token_it_never_issued() {
+        let backend = salesforce_server(salesforce_dml_policy(true, false), None);
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let applied = server
+            .salesforce_apply_write(Parameters(SalesforceApplyWriteRequest {
+                confirm_token: "sfdml-forged".to_string(),
+            }))
+            .await;
+        assert!(result_text(&applied).contains("CONFIRM_TOKEN_INVALID"), "{applied:?}");
+        assert!(result_text(&applied).contains("dbx_salesforce_prepare_write"));
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn salesforce_prepare_write_honours_read_only_and_production_rules() {
+        let read_only = McpGlobalPolicy { read_only: true, ..salesforce_dml_policy(true, false) };
+        let backend = salesforce_server(read_only, None);
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let prepared = server
+            .salesforce_prepare_write(prepare_request("update", "Account", Some("001x"), Some(json!({"Name": "Acme"}))))
+            .await;
+        assert!(result_text(&prepared).contains("MCP_READ_ONLY"), "{prepared:?}");
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+
+        let mut production = salesforce_connection();
+        production.is_production = true;
+        let backend = Arc::new(FakeBackend {
+            connections: vec![production],
+            policy: salesforce_dml_policy(true, false),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let prepared = server
+            .salesforce_prepare_write(prepare_request("update", "Account", Some("001x"), Some(json!({"Name": "Acme"}))))
+            .await;
+        assert!(result_text(&prepared).contains("PRODUCTION_WRITE_BLOCKED"), "{prepared:?}");
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn salesforce_write_pseudo_commands_cannot_sneak_through_execute_query() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![salesforce_connection()],
+            policy: McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, ..Default::default() },
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let statement = build_salesforce_dml_statement("delete", "Account", Some("001x"), None).unwrap();
+        let blocked = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("sfdc"),
+                database: None,
+                sql: statement,
+                session_id: None,
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        assert!(result_text(&blocked).contains("SALESFORCE_DML_REQUIRES_CONFIRMATION"), "{blocked:?}");
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty(), "the write must not reach the org");
+
+        // SOQL stays readable even when a literal or a custom field name looks
+        // like a write verb to a keyword scan.
+        for soql in ["SELECT Id FROM Case WHERE Subject = 'Delete request'", "SELECT Id, Update__c FROM Lead LIMIT 5"] {
+            let queried = server
+                .execute_query(Parameters(ExecuteQueryRequest {
+                    selector: selector("sfdc"),
+                    database: None,
+                    sql: soql.to_string(),
+                    session_id: None,
+                    cell_char_offset: None,
+                    cell_char_limit: None,
+                    max_rows: None,
+                }))
+                .await;
+            assert_ne!(queried.is_error, Some(true), "{soql}: {queried:?}");
+        }
+        let recorded = backend.recorded_arguments.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 2, "{recorded:?}");
+        assert_eq!(recorded[0].1["sql"], json!("SELECT Id FROM Case WHERE Subject = 'Delete request'"));
+    }
+
+    #[tokio::test]
+    async fn salesforce_database_discovery_probe_is_not_read_as_a_write() {
+        // `SHOW DATABASES` is not SOQL, so the Salesforce classifier calls it an
+        // opaque write. Answering it with "writes need confirmation" would send an
+        // agent looking for a schema into the DML flow; the discovery path already
+        // has the right answer.
+        let backend = salesforce_server(McpGlobalPolicy::default(), None);
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        for probe in ["SHOW DATABASES", " show schemas; "] {
+            let probed = server
+                .execute_query(Parameters(ExecuteQueryRequest {
+                    selector: selector("sfdc"),
+                    database: None,
+                    sql: probe.to_string(),
+                    session_id: None,
+                    cell_char_offset: None,
+                    cell_char_limit: None,
+                    max_rows: None,
+                }))
+                .await;
+            assert_ne!(probed.is_error, Some(true), "{probe}: {probed:?}");
+            assert!(result_text(&probed).contains("Salesforce has no databases"), "{probe}: {probed:?}");
+        }
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty(), "a discovery probe must not reach the org");
+
+        // The exemption is exact-match, so a pseudo-command still cannot use it as
+        // a way past the confirmation guard.
+        let smuggled = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("sfdc"),
+                database: None,
+                sql: "show databases; DBX SALESFORCE DML\n{\"op\":\"delete\",\"object\":\"Account\",\"id\":\"001x\"}"
+                    .to_string(),
+                session_id: None,
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        assert!(result_text(&smuggled).contains("SALESFORCE_DML_REQUIRES_CONFIRMATION"), "{smuggled:?}");
+    }
+
+    #[tokio::test]
+    async fn salesforce_has_no_batch_and_no_session() {
+        let backend = salesforce_server(McpGlobalPolicy::default(), None);
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let batch = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("sfdc"),
+                database: None,
+                sql: "SELECT Id FROM Account".to_string(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: None,
+                cell_window: CellWindowArgs::default(),
+            }))
+            .await;
+        assert!(result_text(&batch).contains("DBX_BATCH_UNSUPPORTED"), "{batch:?}");
+        let session = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("sfdc"),
+                database: None,
+                enable_transactions: false,
+            }))
+            .await;
+        assert!(result_text(&session).contains("SESSION_UNSUPPORTED"), "{session:?}");
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn salesforce_list_databases_points_at_objects_and_soql() {
+        let backend = salesforce_server(McpGlobalPolicy::default(), None);
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        let listed = server.list_databases(Parameters(ListDatabasesRequest { selector: selector("sfdc") })).await;
+        assert_ne!(listed.is_error, Some(true), "{listed:?}");
+        let text = result_text(&listed);
+        assert!(text.contains("Salesforce has no databases"), "{text}");
+        assert!(text.contains("dbx_list_tables"), "{text}");
+        assert!(text.contains("SELECT Id, Name FROM Account LIMIT 10"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn salesforce_current_user_names_the_profile_rights() {
+        for (is_admin, expected) in [
+            (Some(true), "bypasses field-level security"),
+            (Some(false), "field-level security and record sharing apply"),
+            (None, "could not be determined"),
+        ] {
+            let backend = salesforce_server(McpGlobalPolicy::default(), Some(salesforce_identity(is_admin)));
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+            let identity = server
+                .salesforce_current_user(Parameters(SalesforceIdentityRequest { selector: selector("sfdc") }))
+                .await;
+            assert_ne!(identity.is_error, Some(true), "{identity:?}");
+            let text = result_text(&identity);
+            assert!(text.contains("Jane Doe"), "{text}");
+            assert!(text.contains(expected), "{text}");
+            assert_eq!(identity.structured_content.as_ref().unwrap()["is_admin"], json!(is_admin));
+            assert!(backend.recorded_arguments.lock().unwrap().is_empty(), "identity must not run a query");
+        }
+    }
+
+    #[tokio::test]
+    async fn salesforce_tools_refuse_other_database_types() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("pg", "pg", "postgres", "app")],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let postgres_selector = || ConnectionSelector { connection_id: Some("pg".to_string()), connection_name: None };
+        let identity = server
+            .salesforce_current_user(Parameters(SalesforceIdentityRequest { selector: postgres_selector() }))
+            .await;
+        assert!(result_text(&identity).contains("NOT_SALESFORCE_CONNECTION"), "{identity:?}");
+        let prepared = server
+            .salesforce_prepare_write(Parameters(SalesforcePrepareWriteRequest {
+                selector: postgres_selector(),
+                database: None,
+                op: "update".to_string(),
+                object: "Account".to_string(),
+                id: Some("001x".to_string()),
+                fields: Some(json!({"Name": "Acme"})),
+            }))
+            .await;
+        assert!(result_text(&prepared).contains("NOT_SALESFORCE_CONNECTION"), "{prepared:?}");
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
     }
 }

@@ -5,9 +5,13 @@ use dbx_core::{
     agent_events::ToolResult, agent_tools::AgentSqlPermissions, models::connection::ConnectionConfig,
     storage::McpGlobalPolicy,
 };
-use dbx_mcp::{DbxBackend, DbxMcpServer, McpScope};
-use rmcp::{model::CallToolRequestParams, ServiceExt};
+use dbx_mcp::{with_legacy_discovery_fallback, DbxBackend, DbxMcpServer, McpScope};
+use rmcp::{
+    model::{CallToolRequestParams, ReadResourceRequestParams, ResourceContents},
+    ServiceExt,
+};
 use serde_json::{json, Map, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
 struct EmptyBackend;
 
@@ -70,6 +74,42 @@ impl DbxBackend for PolicyBackend {
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
         Ok(self.connections.clone())
+    }
+
+    async fn list_databases(&self, _connection: &ConnectionConfig) -> Result<Vec<String>, String> {
+        Ok(vec!["analytics".to_string(), "reporting".to_string()])
+    }
+
+    async fn list_tables(
+        &self,
+        _connection: &ConnectionConfig,
+        _database: &str,
+        _schema: &str,
+    ) -> Result<Vec<dbx_core::db::TableInfo>, String> {
+        Ok(vec![dbx_core::db::TableInfo {
+            name: "orders".to_string(),
+            table_type: "TABLE".to_string(),
+            valid: Some(true),
+            comment: Some("Customer orders".to_string()),
+            parent_schema: None,
+            parent_name: None,
+        }])
+    }
+
+    async fn get_columns(
+        &self,
+        _connection: &ConnectionConfig,
+        _database: &str,
+        _schema: &str,
+        _table: &str,
+    ) -> Result<Vec<dbx_core::db::ColumnInfo>, String> {
+        Ok(vec![dbx_core::db::ColumnInfo {
+            name: "id".to_string(),
+            data_type: "INTEGER".to_string(),
+            is_nullable: false,
+            is_primary_key: true,
+            ..Default::default()
+        }])
     }
 
     async fn load_connection_group_paths(&self) -> Result<HashMap<String, Vec<String>>, String> {
@@ -318,6 +358,105 @@ fn postgres_connection(id: &str, name: &str) -> ConnectionConfig {
     .expect("test PostgreSQL connection")
 }
 
+async fn stdio_request(stream: &mut BufReader<DuplexStream>, id: i64, method: &str, params: Value) -> Value {
+    let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    stream.get_mut().write_all(format!("{request}\n").as_bytes()).await.unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_line(&mut line))
+        .await
+        .expect("stdio response timed out")
+        .expect("read stdio response");
+    let response: Value = serde_json::from_str(&line).expect("JSON-RPC response");
+    assert_eq!(response["id"], id);
+    assert!(response.get("error").is_none(), "{method}: {response}");
+    response["result"].clone()
+}
+
+#[tokio::test]
+async fn list_results_include_complete_discriminator_for_modern_stdio_clients() {
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "protocol-test", "version": "0"}
+    });
+    for hide_tools in [false, true] {
+        let backend = PolicyBackend {
+            policy: McpGlobalPolicy { allowed_tool_names: hide_tools.then(Vec::new), ..Default::default() },
+            connections: Vec::new(),
+            group_paths: Ok(HashMap::new()),
+        };
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+        let server_task =
+            tokio::spawn(async move { server.serve(with_legacy_discovery_fallback(server_transport)).await });
+        let mut client = BufReader::new(client_transport);
+        let discovery = stdio_request(&mut client, 1, "server/discover", json!({"_meta": meta})).await;
+        assert!(discovery["supportedVersions"].as_array().unwrap().contains(&json!("2026-07-28")));
+
+        for (index, (method, items)) in [
+            ("tools/list", "tools"),
+            ("resources/list", "resources"),
+            ("resources/templates/list", "resourceTemplates"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let result = stdio_request(&mut client, index as i64 + 2, method, json!({"_meta": meta})).await;
+            assert_eq!(result["resultType"], "complete", "{method} requires resultType on 2026-07-28");
+            assert_eq!(result["ttlMs"], 0, "{method}");
+            assert_eq!(result["cacheScope"], "private", "{method}");
+            assert!(result.get("nextCursor").is_none(), "{method}");
+            assert_eq!(result[items].as_array().unwrap().is_empty(), hide_tools, "{method}");
+        }
+
+        drop(client);
+        server_task.abort();
+    }
+}
+
+#[tokio::test]
+async fn list_results_preserve_legacy_stdio_shapes_after_initialize() {
+    for requested_version in ["2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"] {
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server = DbxMcpServer::with_runtime_options(Arc::new(EmptyBackend), McpScope::default(), false);
+        let server_task =
+            tokio::spawn(async move { server.serve(with_legacy_discovery_fallback(server_transport)).await });
+        let mut client = BufReader::new(client_transport);
+        let initialized = stdio_request(
+            &mut client,
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": requested_version,
+                "capabilities": {},
+                "clientInfo": {"name": "protocol-test", "version": "0"}
+            }),
+        )
+        .await;
+        let negotiated_version = if requested_version == "2026-07-28" { "2025-11-25" } else { requested_version };
+        assert_eq!(initialized["protocolVersion"], negotiated_version);
+        client.get_mut().write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n").await.unwrap();
+
+        for (index, (method, items)) in [
+            ("tools/list", "tools"),
+            ("resources/list", "resources"),
+            ("resources/templates/list", "resourceTemplates"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let result = stdio_request(&mut client, index as i64 + 2, method, json!({})).await;
+            for field in ["resultType", "ttlMs", "cacheScope", "nextCursor"] {
+                assert!(result.get(field).is_none(), "{method} on {negotiated_version} unexpectedly includes {field}");
+            }
+            assert!(!result[items].as_array().unwrap().is_empty(), "{method}");
+        }
+
+        drop(client);
+        server_task.abort();
+    }
+}
+
 #[tokio::test]
 async fn initializes_lists_tools_and_calls_a_tool() {
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
@@ -328,9 +467,9 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 22);
+    assert_eq!(names.len(), 25);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 20);
+    assert_eq!(names.len(), 23);
     #[cfg(feature = "mq-admin")]
     assert!(names.contains(&"dbx_peek_messages"));
     #[cfg(not(feature = "mq-admin"))]
@@ -339,6 +478,9 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     assert!(names.contains(&"dbx_list_databases"));
     assert!(names.contains(&"dbx_duplicate_connection"));
     assert!(names.contains(&"dbx_execute_redis_command"));
+    assert!(names.contains(&"dbx_salesforce_current_user"));
+    assert!(names.contains(&"dbx_salesforce_prepare_write"));
+    assert!(names.contains(&"dbx_salesforce_apply_write"));
     assert!(names.contains(&"dbx_execute_and_show"));
     assert!(names.contains(&"dbx_execute_batch"));
     assert!(names.contains(&"dbx_list_routines"));
@@ -351,9 +493,101 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     #[cfg(feature = "mq-admin")]
     assert!(names.contains(&"dbx_send_message"));
 
+    let server_info = client.peer_info().expect("server info");
+    assert!(server_info.capabilities.resources.is_some());
+
+    let resources = client.peer().list_resources(None).await.expect("list resources");
+    assert_eq!(resources.resources.len(), 1);
+    assert_eq!(resources.resources[0].uri, "dbx://connections");
+
+    let templates = client.peer().list_resource_templates(None).await.expect("list resource templates");
+    let template_names = templates.resource_templates.iter().map(|template| template.name.as_str()).collect::<Vec<_>>();
+    assert_eq!(template_names, vec!["dbx_connection_databases", "dbx_connection_tables", "dbx_table_schema"]);
+
+    let resource = client
+        .peer()
+        .read_resource(ReadResourceRequestParams::new("dbx://connections"))
+        .await
+        .expect("read connections resource");
+    let ResourceContents::TextResourceContents { text, mime_type, .. } = &resource.contents[0] else {
+        panic!("connections resource should be text");
+    };
+    assert_eq!(mime_type.as_deref(), Some("text/markdown"));
+    assert_eq!(text, "No connections configured in DBX.");
+
     let result = client.peer().call_tool(CallToolRequestParams::new("dbx_list_connections")).await.expect("call tool");
     let response = result.content[0].as_text().expect("text response");
     assert_eq!(response.text, "No connections configured in DBX.");
+
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn reads_database_metadata_through_resource_templates() {
+    let backend = PolicyBackend {
+        policy: McpGlobalPolicy::default(),
+        connections: vec![test_connection("local", "local-db")],
+        group_paths: Ok(HashMap::new()),
+    };
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+    for (uri, expected) in [
+        ("dbx://connections/local/databases", "analytics"),
+        ("dbx://connections/local/tables?database=analytics", "orders (TABLE)"),
+        ("dbx://connections/local/table-schema?database=analytics&table=orders", "id (PK)"),
+    ] {
+        let result = client
+            .peer()
+            .read_resource(ReadResourceRequestParams::new(uri))
+            .await
+            .unwrap_or_else(|error| panic!("read {uri}: {error}"));
+        let ResourceContents::TextResourceContents { text, mime_type, .. } = &result.contents[0] else {
+            panic!("{uri} should return text");
+        };
+        assert_eq!(mime_type.as_deref(), Some("text/markdown"));
+        assert!(text.contains(expected), "{uri}: {text}");
+    }
+
+    let invalid = client
+        .peer()
+        .read_resource(ReadResourceRequestParams::new("dbx://connections/local/table-schema?database=analytics"))
+        .await;
+    assert!(invalid.is_err());
+
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn resource_catalog_follows_the_tool_allowlist() {
+    let backend = PolicyBackend {
+        policy: McpGlobalPolicy {
+            allowed_tool_names: Some(vec!["dbx_list_connections".to_string()]),
+            ..Default::default()
+        },
+        connections: vec![test_connection("local", "local-db")],
+        group_paths: Ok(HashMap::new()),
+    };
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+    let resources = client.peer().list_resources(None).await.expect("list resources");
+    assert_eq!(resources.resources.len(), 1);
+    let templates = client.peer().list_resource_templates(None).await.expect("list resource templates");
+    assert!(templates.resource_templates.is_empty());
+
+    let denied = client
+        .peer()
+        .read_resource(ReadResourceRequestParams::new("dbx://connections/local/databases"))
+        .await
+        .expect_err("database resource should respect the tool allowlist");
+    assert!(denied.to_string().contains("TOOL_OUT_OF_SCOPE"), "{denied}");
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();
@@ -438,6 +672,10 @@ async fn remove_connection_respects_global_connection_scope() {
 
 #[tokio::test]
 async fn enforces_global_connection_scope_and_read_only_policy() {
+    let mut allowed = test_connection("allowed", "shared-db");
+    allowed.note = "Allowed connection note".to_string();
+    let mut blocked_connection = test_connection("blocked", "blocked-db");
+    blocked_connection.note = "Hidden connection note".to_string();
     let backend = PolicyBackend {
         policy: McpGlobalPolicy {
             read_only: true,
@@ -445,11 +683,7 @@ async fn enforces_global_connection_scope_and_read_only_policy() {
             allowed_connection_ids: Some(vec!["allowed".to_string(), "allowed-staging".to_string()]),
             ..Default::default()
         },
-        connections: vec![
-            test_connection("allowed", "shared-db"),
-            test_connection("allowed-staging", "shared-db"),
-            test_connection("blocked", "blocked-db"),
-        ],
+        connections: vec![allowed, test_connection("allowed-staging", "shared-db"), blocked_connection],
         group_paths: Ok(HashMap::from([
             ("allowed".to_string(), vec!["Project".to_string(), "Production".to_string()]),
             ("allowed-staging".to_string(), vec!["Project".to_string(), "Staging".to_string()]),
@@ -469,6 +703,18 @@ async fn enforces_global_connection_scope_and_read_only_policy() {
     assert!(listed_text.contains("Project / Production"));
     assert!(listed_text.contains("Project / Staging"));
     assert!(!listed_text.contains("Secret"));
+    assert!(listed_text.contains("Allowed connection note"));
+    assert!(!listed_text.contains("Hidden connection note"));
+
+    let resource = client
+        .peer()
+        .read_resource(ReadResourceRequestParams::new("dbx://connections"))
+        .await
+        .expect("read scoped connections resource");
+    let ResourceContents::TextResourceContents { text, .. } = &resource.contents[0] else {
+        panic!("connections resource should be text");
+    };
+    assert_eq!(text, &listed_text);
 
     let blocked = client
         .peer()
@@ -629,6 +875,8 @@ async fn connection_group_path_failure_preserves_connection_listing() {
     assert_ne!(listed.is_error, Some(true));
     assert!(listed_text.contains("| ID | Name | Group Path |"));
     assert!(listed_text.contains("local-db"));
+    assert!(listed_text.contains("| Database | Note |"));
+    assert!(listed_text.contains("| :memory: |  |"));
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();
@@ -636,9 +884,13 @@ async fn connection_group_path_failure_preserves_connection_listing() {
 
 #[tokio::test]
 async fn runtime_connection_scope_preserves_group_paths() {
+    let mut scoped = test_connection("scoped", "shared-db");
+    scoped.note = "业务库 | TEST\n只读查询".to_string();
+    let mut outside = test_connection("outside", "shared-db");
+    outside.note = "Out-of-scope connection note".to_string();
     let backend = PolicyBackend {
         policy: McpGlobalPolicy::default(),
-        connections: vec![test_connection("scoped", "shared-db"), test_connection("outside", "shared-db")],
+        connections: vec![scoped, outside],
         group_paths: Ok(HashMap::from([
             ("scoped".to_string(), vec!["Project".to_string(), "Production".to_string()]),
             ("outside".to_string(), vec!["Project".to_string(), "Staging".to_string()]),
@@ -659,6 +911,19 @@ async fn runtime_connection_scope_preserves_group_paths() {
     assert!(listed_text.contains("| scoped | shared-db | Project / Production |"));
     assert!(!listed_text.contains("outside"));
     assert!(!listed_text.contains("Project / Staging"));
+    assert!(listed_text.contains("业务库 \\| TEST 只读查询"));
+    assert!(!listed_text.contains("Out-of-scope connection note"));
+    assert_eq!(listed_text.lines().count(), 3);
+
+    let resource = client
+        .peer()
+        .read_resource(ReadResourceRequestParams::new("dbx://connections"))
+        .await
+        .expect("read scoped connections resource");
+    let ResourceContents::TextResourceContents { text, .. } = &resource.contents[0] else {
+        panic!("connections resource should be text");
+    };
+    assert_eq!(text, &listed_text);
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();

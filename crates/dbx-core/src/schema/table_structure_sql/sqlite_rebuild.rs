@@ -685,6 +685,7 @@ fn execute_change_transaction(
             affected_rows: 0,
             execution_time_ms: started_at.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -1519,7 +1520,9 @@ mod tests {
             table_comment: None,
             original_table_comment: None,
             mysql_engine: None,
+            transwarp_create: None,
             partitioned: false,
+            foreign_table: false,
             is_gaussdb_m_mode: false,
             table_collation: None,
         }

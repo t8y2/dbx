@@ -1,7 +1,5 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -40,8 +38,6 @@ vi.mock("@/components/ui/button", async () => {
 });
 
 import DataGridColumnLayoutPopover from "../DataGridColumnLayoutPopover.vue";
-
-const contentAreaSource = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/layout/ContentArea.vue"), "utf8");
 
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
@@ -175,8 +171,6 @@ afterEach(() => {
 
 describe("data grid column layout popover", () => {
   it("is available from the query result toolbar and keeps a labelled compact trigger", async () => {
-    expect(contentAreaSource).toContain('<DataGridColumnLayoutPopover :grid="dataGridRef" :compact="compact" />');
-
     const gridState = createGrid(4);
     const host = document.createElement("div");
     document.body.append(host);

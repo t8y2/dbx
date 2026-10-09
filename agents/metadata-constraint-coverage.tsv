@@ -6,6 +6,7 @@ cassandra-go	shared-fallback	native-go	Uses cassandra-gocql-driver schema metada
 dameng	native-pushdown	java-sql	Uses ALL_OBJECTS with type, filter, stable order, and LIMIT/OFFSET with legacy fallback.
 databend	native-pushdown	java-sql	Uses system procedures for routine pushdown and shared table metadata constraints for table-like objects.
 db2	native-pushdown	java-sql	Uses SYSCAT metadata with type, filter, stable order, and OFFSET/FETCH.
+firebird	shared-fallback	java-jdbc-metadata	Delegates constrained listings to shared JDBC metadata and only applies explicitly configured legacy text decoding to comments.
 gbase8a	native-pushdown	java-sql	Uses information_schema with type, filter, stable order, and LIMIT/OFFSET.
 gbase8s	native-pushdown	java-sql	Uses systables with type, filter, stable order, and SKIP/FIRST.
 goldendb	native-pushdown	java-sql	Uses information_schema with type, filter, stable order, and LIMIT/OFFSET.
@@ -21,12 +22,14 @@ kingbase-go	shared-fallback	native-go	Uses sys_catalog/information_schema for co
 vastbase-go	shared-fallback	native-go	Uses pg_catalog/information_schema for Vastbase metadata, then applies stable filtering and paging in the native agent.
 kylin	intentional-fallback	java-jdbc-metadata	Uses JDBC metadata from Kylin driver; no portable server-side paging API, common constraints filter locally.
 neo4j-go	shared-fallback	native-go	Uses Neo4j schema procedures with stable local filtering and paging because label discovery does not expose portable server-side metadata pagination.
+nebula-go	shared-fallback	native-go	Uses SHOW TAGS and SHOW EDGES with stable local filtering and paging because nGQL metadata listing has no server-side pagination.
 oceanbase-oracle	native-pushdown	java-sql	Uses Oracle-compatible metadata SQL with type, filter, stable order, and ROWNUM paging.
 oracle-go	native-pushdown	native-go	Uses Oracle-compatible metadata SQL with type, filter, stable order, and ROWNUM paging, with legacy profile guard.
 snowflake	native-pushdown	java-sql	Uses INFORMATION_SCHEMA with type, filter, stable order, and literal LIMIT/OFFSET.
 spanner	intentional-fallback	java-jdbc-metadata	Uses the dialect-aware Spanner JDBC metadata with the schema passed through verbatim because GoogleSQL names the user schema with an empty string; JDBC exposes no portable server-side paging API, common constraints filter locally.
 spark	intentional-fallback	java-show-metadata	Uses SHOW TABLES/SHOW DATABASES; stable server-side fuzzy paging is not portable, common constraints filter locally.
-sundb	native-pushdown	java-sql	Uses information_schema with type, filter, stable order, and LIMIT/OFFSET.
+sundb	intentional-fallback	java-jdbc-metadata	Uses the vendor driver's DatabaseMetaData (INFORMATION_SCHEMA.DBC_* views) because the server rejects MySQL-only statements such as SHOW DATABASES; JDBC exposes no portable server-side paging API, common constraints filter locally.
 tdengine	shared-fallback	native-rust	Uses SHOW STABLES/TABLES with information_schema parent enrichment, then applies stable filtering and paging in the native agent.
 trino	native-pushdown	java-sql	Uses information_schema.tables with type, filter, stable order, and literal LIMIT/OFFSET.
+transwarp	shared-fallback	java-sql	Uses system catalog views with stable ordering and shared filtering/paging; the vendor SDK has no verified portable server-side paging contract.
 xugu	native-pushdown	native-go	Uses ALL_TABLES/ALL_VIEWS metadata with type, filter, stable order, and ROWNUM paging.

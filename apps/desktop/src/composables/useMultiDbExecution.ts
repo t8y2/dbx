@@ -1,5 +1,6 @@
 import { computed, reactive, ref, type ComputedRef, type Ref } from "vue";
 import type { MultiDbExecutionTarget, MultiDbExecutionItemStatus, MultiDbTargetExecutionResult, MultiDbManualTransaction } from "@/types/sqlExecution";
+import type { QueryResult } from "@/types/database";
 
 export interface MultiDbExecutionItem {
   id: string;
@@ -11,6 +12,8 @@ export interface MultiDbExecutionItem {
   durationMs?: number;
   transaction?: MultiDbManualTransaction;
   settling?: boolean;
+  /** Result produced by this target, kept for the merged multi-source view. */
+  result?: QueryResult;
 }
 
 export interface MultiDbExecutionBatch {
@@ -158,6 +161,7 @@ export function useMultiDbExecution(adapter: MultiDbExecutionAdapter, options: M
       item.status = current.cancelRequested && result.status === "failed" ? "cancelled" : result.status;
       item.errorMessage = result.errorMessage;
       item.durationMs = result.durationMs;
+      item.result = result.result;
       item.transaction = result.transaction;
     } catch (error) {
       // One target is intentionally isolated from the queue. Adapter errors
@@ -170,11 +174,11 @@ export function useMultiDbExecution(adapter: MultiDbExecutionAdapter, options: M
     }
   }
 
-  async function executeBatch(current: MultiDbExecutionBatch): Promise<void> {
+  async function executeBatch(current: MultiDbExecutionBatch, items = current.items): Promise<void> {
     if (current.mode === "parallel") {
-      await Promise.all(current.items.map((item) => executeItem(current, item)));
+      await Promise.all(items.map((item) => executeItem(current, item)));
     } else {
-      for (const item of current.items) {
+      for (const item of items) {
         await executeItem(current, item);
         if (current.cancelRequested) break;
       }
@@ -189,8 +193,17 @@ export function useMultiDbExecution(adapter: MultiDbExecutionAdapter, options: M
     current.durationMs = current.completedAt - current.startedAt;
   }
 
+  async function runBatch(current: MultiDbExecutionBatch, items = current.items): Promise<void> {
+    activeRun = executeBatch(current, items);
+    try {
+      await activeRun;
+    } finally {
+      activeRun = undefined;
+    }
+  }
+
   async function start(sql: string, targets: readonly MultiDbExecutionTarget[], context: MultiDbExecutionContextOverrides = {}, mode: MultiDbExecutionMode = "serial"): Promise<MultiDbExecutionBatch | undefined> {
-    if (disposed || isRunning.value || hasTransactions.value || !sql.trim() || targets.length === 0) return undefined;
+    if (disposed || activeRun || isRunning.value || hasTransactions.value || !sql.trim() || targets.length === 0) return undefined;
     const sourceId = sourceTabId();
     const id = executionId();
     const targetSnapshot = targets.map((target) => Object.freeze({ ...target }));
@@ -216,10 +229,23 @@ export function useMultiDbExecution(adapter: MultiDbExecutionAdapter, options: M
       startedAt: Date.now(),
     });
     batch.value = current;
-    activeRun = executeBatch(current);
-    await activeRun;
-    activeRun = undefined;
+    await runBatch(current);
     return current;
+  }
+
+  async function retry(itemId: string): Promise<void> {
+    const current = batch.value;
+    const item = current?.items.find((candidate) => candidate.id === itemId);
+    if (disposed || activeRun || isRunning.value || !current || !item || item.transaction || item.settling || !["failed", "cancelled", "not_executed", "skipped", "rolled_back"].includes(item.status)) return;
+    current.status = "running";
+    current.cancelRequested = false;
+    current.completedAt = undefined;
+    current.durationMs = undefined;
+    item.errorMessage = undefined;
+    item.completedAt = undefined;
+    item.durationMs = undefined;
+    item.result = undefined;
+    await runBatch(current, [item]);
   }
 
   async function cancel(): Promise<void> {
@@ -250,7 +276,7 @@ export function useMultiDbExecution(adapter: MultiDbExecutionAdapter, options: M
   }
 
   function reset(): void {
-    if (isRunning.value || hasTransactions.value) return;
+    if (activeRun || isRunning.value || hasTransactions.value) return;
     batch.value = undefined;
   }
 
@@ -275,6 +301,7 @@ export function useMultiDbExecution(adapter: MultiDbExecutionAdapter, options: M
     dispose,
     cancelAndRollback,
     start,
+    retry,
     cancel,
     reset,
   };

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use futures::stream::{self, StreamExt};
 
@@ -145,6 +145,18 @@ pub async fn collect_snapshot(
     progress: &(dyn Fn(CollectProgress) + Send + Sync),
     cancel: &AtomicBool,
 ) -> Result<SchemaSnapshot, String> {
+    collect_snapshot_with_concurrency(state, connection, options, progress, cancel, MAX_CONCURRENT_TABLES).await
+}
+
+/// Dictionary exports use a smaller limit to leave pool capacity for interactive queries.
+pub async fn collect_snapshot_with_concurrency(
+    state: &AppState,
+    connection: &ConnectionConfig,
+    options: &CollectOptions,
+    progress: &(dyn Fn(CollectProgress) + Send + Sync),
+    cancel: &AtomicBool,
+    max_concurrent_tables: usize,
+) -> Result<SchemaSnapshot, String> {
     let mut warnings: Vec<SnapshotWarning> = Vec::new();
     let engine = database_type_label(connection.db_type);
     let connection_id = connection.id.as_str();
@@ -199,64 +211,64 @@ pub async fn collect_snapshot(
 
     let total = targets.len();
 
+    progress(CollectProgress { completed: 0, total, current: String::new() });
+    let completed = AtomicUsize::new(0);
     let collected: Vec<Result<(DocTable, Vec<SnapshotWarning>), SnapshotWarning>> =
         stream::iter(targets.into_iter().enumerate())
-            .map(|(index, (schema_name, info))| {
+            .map(|(_index, (schema_name, info))| {
                 let database = options.database.clone();
+                let completed = &completed;
                 async move {
-                    if cancelled(cancel) {
-                        return Err(SnapshotWarning::TableSkipped {
-                            table: info.name.clone(),
-                            reason: "cancelled".to_string(),
-                        });
-                    }
-
-                    progress(CollectProgress {
-                        completed: index,
-                        total,
-                        current: format!("{schema_name}.{}", info.name),
-                    });
-
-                    let columns = schema::get_columns_core(state, connection_id, &database, &schema_name, &info.name)
-                        .await
-                        .map_err(|error| SnapshotWarning::TableSkipped {
-                            table: format!("{schema_name}.{}", info.name),
-                            reason: error,
-                        })?;
-                    let column_notes = database_column_notes(&columns);
-
-                    let mut table_warnings = Vec::new();
-
-                    // Indexes feed `relations.rs`'s uniqueness check, so a
-                    // failure here must not look identical to "this table
-                    // genuinely has no indexes" — that would silently
-                    // downgrade a OneToOne relationship to ManyToOne.
-                    let indexes = match schema::list_indexes_core(
-                        state,
-                        connection_id,
-                        &database,
-                        &schema_name,
-                        &info.name,
-                    )
-                    .await
-                    {
-                        Ok(indexes) => indexes,
-                        Err(error) => {
-                            table_warnings.push(SnapshotWarning::TableSkipped {
-                                table: format!("{schema_name}.{}", info.name),
-                                reason: format!("indexes unavailable: {error}"),
+                    let current = format!("{schema_name}.{}", info.name);
+                    let outcome = async {
+                        if cancelled(cancel) {
+                            return Err(SnapshotWarning::TableSkipped {
+                                table: info.name.clone(),
+                                reason: "cancelled".to_string(),
                             });
-                            Vec::new()
                         }
-                    };
 
-                    // Foreign keys also degrade to empty rather than failing the
-                    // table, but a real query failure must not look identical to
-                    // "this table genuinely has no foreign keys" — it is reported
-                    // as its own warning instead of being silently discarded.
-                    let foreign_keys =
-                        match schema::list_foreign_keys_core(state, connection_id, &database, &schema_name, &info.name)
-                            .await
+                        let columns =
+                            schema::get_columns_core(state, connection_id, &database, &schema_name, &info.name)
+                                .await
+                                .map_err(|error| SnapshotWarning::TableSkipped {
+                                table: format!("{schema_name}.{}", info.name),
+                                reason: error,
+                            })?;
+                        let column_notes = database_column_notes(&columns);
+
+                        let mut table_warnings = Vec::new();
+
+                        // Indexes feed `relations.rs`'s uniqueness check, so a
+                        // failure here must not look identical to "this table
+                        // genuinely has no indexes" — that would silently
+                        // downgrade a OneToOne relationship to ManyToOne.
+                        let indexes =
+                            match schema::list_indexes_core(state, connection_id, &database, &schema_name, &info.name)
+                                .await
+                            {
+                                Ok(indexes) => indexes,
+                                Err(error) => {
+                                    table_warnings.push(SnapshotWarning::TableSkipped {
+                                        table: format!("{schema_name}.{}", info.name),
+                                        reason: format!("indexes unavailable: {error}"),
+                                    });
+                                    Vec::new()
+                                }
+                            };
+
+                        // Foreign keys also degrade to empty rather than failing the
+                        // table, but a real query failure must not look identical to
+                        // "this table genuinely has no foreign keys" — it is reported
+                        // as its own warning instead of being silently discarded.
+                        let foreign_keys = match schema::list_foreign_keys_core(
+                            state,
+                            connection_id,
+                            &database,
+                            &schema_name,
+                            &info.name,
+                        )
+                        .await
                         {
                             Ok(keys) => keys,
                             Err(error) => {
@@ -268,31 +280,36 @@ pub async fn collect_snapshot(
                             }
                         };
 
-                    Ok((
-                        DocTable {
-                            schema: (!schema_name.is_empty()).then(|| schema_name.clone()),
-                            name: info.name.clone(),
-                            kind: table_kind_from(&info.table_type),
-                            columns,
-                            indexes,
-                            foreign_keys,
-                            group_id: None,
-                            note: info.comment.clone().filter(|value| !value.trim().is_empty()),
-                            note_source: if info.comment.as_deref().is_some_and(|v| !v.trim().is_empty()) {
-                                NoteSource::Database
-                            } else {
-                                NoteSource::None
+                        Ok((
+                            DocTable {
+                                schema: (!schema_name.is_empty()).then(|| schema_name.clone()),
+                                name: info.name.clone(),
+                                kind: table_kind_from(&info.table_type),
+                                columns,
+                                indexes,
+                                foreign_keys,
+                                group_id: None,
+                                note: info.comment.clone().filter(|value| !value.trim().is_empty()),
+                                note_source: if info.comment.as_deref().is_some_and(|v| !v.trim().is_empty()) {
+                                    NoteSource::Database
+                                } else {
+                                    NoteSource::None
+                                },
+                                shadowed_note: None,
+                                column_notes,
+                                estimated_rows: None,
+                                view_definition: None,
                             },
-                            shadowed_note: None,
-                            column_notes,
-                            estimated_rows: None,
-                            view_definition: None,
-                        },
-                        table_warnings,
-                    ))
+                            table_warnings,
+                        ))
+                    }
+                    .await;
+                    let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                    progress(CollectProgress { completed: done, total, current });
+                    outcome
                 }
             })
-            .buffer_unordered(MAX_CONCURRENT_TABLES)
+            .buffer_unordered(max_concurrent_tables.max(1))
             .collect()
             .await;
 

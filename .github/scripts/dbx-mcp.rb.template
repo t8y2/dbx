@@ -1,0 +1,33 @@
+class DbxMcp < Formula
+  desc "Native MCP server for DBX database connections, schema, and safe queries"
+  homepage "https://github.com/t8y2/dbx"
+  version "__VERSION__"
+  license "Apache-2.0"
+
+  on_macos do
+    if Hardware::CPU.intel?
+      url "https://github.com/t8y2/dbx/releases/download/packages-v#{version}/dbx-mcp-darwin-x64.tar.gz"
+      sha256 "__SHA_DARWIN_X64__"
+    else
+      url "https://github.com/t8y2/dbx/releases/download/packages-v#{version}/dbx-mcp-darwin-arm64.tar.gz"
+      sha256 "__SHA_DARWIN_ARM64__"
+    end
+  end
+  on_linux do
+    if Hardware::CPU.intel?
+      url "https://github.com/t8y2/dbx/releases/download/packages-v#{version}/dbx-mcp-linux-x64-gnu.tar.gz"
+      sha256 "__SHA_LINUX_X64__"
+    else
+      url "https://github.com/t8y2/dbx/releases/download/packages-v#{version}/dbx-mcp-linux-arm64-gnu.tar.gz"
+      sha256 "__SHA_LINUX_ARM64__"
+    end
+  end
+
+  def install
+    bin.install "dbx-mcp"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/dbx-mcp --version")
+  end
+end

@@ -1,10 +1,11 @@
 // @vitest-environment happy-dom
 import { computed, nextTick, ref, type Ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "@/composables/useDataGridEditor";
+import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor, type CustomSaveHandler } from "@/composables/useDataGridEditor";
 import { clearDataGridClipboardCopy, parseDataGridClipboard, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
 import { buildMongoUpdateDocument, MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridInputValue, mongoDocumentGridValue } from "@/lib/mongo/mongoDocumentValues";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
+import { buildOrderedGridRows } from "@/lib/dataGrid/gridNewRowPlacement";
 
 const mocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
@@ -51,11 +52,13 @@ function createEditorWithResult(
   mongoCollectionGrid = false,
   quickEntry = false,
   editable = ref(true),
+  resultColumnTypes?: string[],
 ) {
   let editor: ReturnType<typeof useDataGridEditor>;
-  const result = ref<{ columns: string[]; rows: CellValue[][] }>({
+  const result = ref<{ columns: string[]; rows: CellValue[][]; column_types?: string[] }>({
     columns: ["first", "hidden", "last"],
     rows: existingRows,
+    column_types: resultColumnTypes,
   });
 
   editor = useDataGridEditor({
@@ -686,9 +689,246 @@ describe("useDataGridEditor cell mutation notifications", () => {
   });
 });
 
+describe("useDataGridEditor addRows", () => {
+  it("prepares a large batch with progress before committing one undoable change", async () => {
+    const editor = createEditor();
+    editor.newRows.value = [];
+    const progress: number[] = [];
+    const firstId = await editor.addRowsInBatches(5000, null, {
+      onProgress: ({ completed }) => {
+        progress.push(completed);
+        expect(editor.newRows.value).toEqual([]);
+        expect(editor.canUndoPendingChange.value).toBe(false);
+      },
+    });
+    expect(firstId).toBe(-1);
+    expect(progress[0]).toBe(0);
+    expect(progress.at(-1)).toBe(5000);
+    expect(progress.length).toBeGreaterThan(2);
+    expect(editor.newRows.value).toHaveLength(5000);
+    editor.undoPendingChange();
+    expect(editor.newRows.value).toEqual([]);
+  });
+
+  it("cancels a prepared batch without pending rows, undo history, or a transaction", async () => {
+    const editor = createEditor();
+    const controller = new AbortController();
+    const before = editor.newRows.value;
+    const result = await editor.addRowsInBatches(5000, null, {
+      signal: controller.signal,
+      onProgress: ({ completed }) => {
+        if (completed >= 1000) controller.abort();
+      },
+    });
+    expect(result).toBeUndefined();
+    expect(editor.newRows.value).toBe(before);
+    expect(editor.canUndoPendingChange.value).toBe(false);
+    expect(editor.transactionActive.value).toBe(false);
+  });
+
+  it("drops prepared rows if pending state changes while yielding", async () => {
+    const editor = createEditor();
+    let changed = false;
+    const result = await editor.addRowsInBatches(5000, null, {
+      onProgress: ({ completed }) => {
+        if (completed >= 1000 && !changed) {
+          editor.discardChanges();
+          changed = true;
+        }
+      },
+    });
+    expect(result).toBeUndefined();
+    expect(editor.newRows.value).toEqual([]);
+    expect(editor.canUndoPendingChange.value).toBe(false);
+  });
+
+  it("rejects a huge allocation before emitting progress or modifying pending rows", async () => {
+    const editor = createEditor();
+    const onProgress = vi.fn();
+    expect(await editor.addRowsInBatches(1_000_000_000, null, { onProgress })).toBeUndefined();
+    expect(editor.newRows.value).toEqual([[null, null, null]]);
+    expect(editor.canUndoPendingChange.value).toBe(false);
+    expect(onProgress).not.toHaveBeenCalled();
+    expect(editor.saveError.value).not.toBe("");
+  });
+
+  it("uses the cumulative cell capacity for wide tables", () => {
+    const { editor, result } = createEditorWithResult();
+    editor.newRows.value = [];
+    result.value = { columns: Array.from({ length: 2000 }, (_, index) => `column${index}`), rows: [] };
+    expect(editor.availableInsertRows.value).toBe(500);
+    editor.addRows(400);
+    expect(editor.availableInsertRows.value).toBe(100);
+    const before = editor.newRows.value;
+    editor.addRows(101);
+    expect(editor.newRows.value).toBe(before);
+    expect(editor.saveError.value).not.toBe("");
+  });
+
+  it("adds more than 1000 independent blank rows as one undoable change", async () => {
+    const editor = createEditor();
+    editor.newRows.value = [];
+
+    expect(editor.addRows(1500)).toBe(-1);
+    expect(editor.newRows.value).toHaveLength(1500);
+    expect(editor.newRowMeta.value).toHaveLength(1500);
+    expect(editor.newRows.value.at(-1)).toEqual([null, null, null]);
+    editor.newRows.value[0]![0] = "first";
+    expect(editor.newRows.value[1]).toEqual([null, null, null]);
+    await nextTick();
+
+    editor.undoPendingChange();
+    expect(editor.newRows.value).toEqual([]);
+    editor.redoPendingChange();
+    expect(editor.newRows.value).toHaveLength(1500);
+    expect(editor.newRows.value[0]).toEqual(["first", null, null]);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])("rejects an invalid count without changing pending rows: %s", (count) => {
+    const editor = createEditor();
+    expect(editor.addRows(count)).toBeUndefined();
+    expect(editor.newRows.value).toEqual([[null, null, null]]);
+    expect(editor.canUndoPendingChange.value).toBe(false);
+  });
+});
+
 describe("useDataGridEditor appendPastedRowsToNewRow", () => {
+  it("can cancel before scanning a large reusable buffer", async () => {
+    const editor = createEditor();
+    editor.newRows.value = [];
+    editor.addRows(5000);
+    const read = vi.fn(() => null);
+    Object.defineProperty(editor.newRows.value[4900]!, 0, { get: read });
+    const controller = new AbortController();
+    const before = editor.newRows.value;
+    const result = await editor.appendPastedRowsToNewRowInBatches(
+      -1,
+      Array.from({ length: 5000 }, () => ["Ada"]),
+      [0],
+      undefined,
+      {
+        signal: controller.signal,
+        onProgress: () => controller.abort(),
+      },
+    );
+    expect(result).toEqual({ ok: false, reason: "cancelled" });
+    expect(read).not.toHaveBeenCalled();
+    expect(editor.newRows.value).toBe(before);
+  });
+
+  it("preserves unrelated pending row objects when replacing a blank target", () => {
+    const editor = createEditor();
+    editor.newRows.value = [
+      [null, null, null],
+      ["keep", null, null],
+    ];
+    const retained = editor.newRows.value[1];
+    expect(editor.appendPastedRowsToNewRow(-1, [["Ada"], ["Grace"]], [0])).toEqual({ ok: true, rowCount: 2 });
+    expect(editor.newRows.value[2]).toBe(retained);
+    editor.undoPendingChange();
+    expect(editor.newRows.value).toEqual([
+      [null, null, null],
+      ["keep", null, null],
+    ]);
+  });
+
+  it("keeps recent undo and redo available while bounding history for a million pending cells", () => {
+    const { editor, result } = createEditorWithResult();
+    result.value = { columns: Array.from({ length: 50 }, (_, i) => `c${i}`), rows: [] };
+    editor.newRows.value = [];
+    editor.addRows(20_000);
+    for (let i = 0; i < 6; i++) editor.applyCellValue(-1, 0, `edit-${i}`);
+    editor.undoPendingChange();
+    expect(editor.newRows.value[0]![0]).toBe("edit-4");
+    editor.undoPendingChange();
+    expect(editor.newRows.value[0]![0]).toBe("edit-3");
+    expect(editor.canUndoPendingChange.value).toBe(false);
+    editor.redoPendingChange();
+    expect(editor.newRows.value[0]![0]).toBe("edit-4");
+  });
+
+  it("cancels a large paste without consuming blank rows or adding undo history", async () => {
+    const editor = createEditor();
+    const controller = new AbortController();
+    const before = editor.newRows.value;
+    const result = await editor.appendPastedRowsToNewRowInBatches(
+      -1,
+      Array.from({ length: 5000 }, () => ["Ada"]),
+      [0],
+      undefined,
+      {
+        signal: controller.signal,
+        onProgress: ({ completed }) => {
+          if (completed >= 1000) controller.abort();
+        },
+      },
+    );
+    expect(result).toEqual({ ok: false, reason: "cancelled" });
+    expect(editor.newRows.value).toBe(before);
+    expect(editor.newRows.value).toEqual([[null, null, null]]);
+    expect(editor.canUndoPendingChange.value).toBe(false);
+  });
+
+  it("rejects a clipboard batch exceeding pending cell capacity atomically", () => {
+    const { editor, result } = createEditorWithResult();
+    result.value = { columns: Array.from({ length: 2000 }, (_, index) => `column${index}`), rows: [] };
+    editor.addRows(499);
+    const before = editor.newRows.value;
+    expect(editor.appendPastedRowsAsNewRows([["Ada"], ["Grace"]], [0])).toEqual({ ok: false, reason: "capacity-exceeded" });
+    expect(editor.newRows.value).toBe(before);
+  });
+
   beforeEach(() => {
     mocks.getConfig.mockReturnValue({ id: "connection-1", db_type: "postgres" });
+  });
+
+  it("pastes new rows without preallocating blanks and preserves existing edits in one undo step", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["old", "keep", "last"]]);
+    editor.newRows.value = [["pending", null, null]];
+    editor.applyCellValue(0, 0, "edited");
+
+    const result = editor.appendPastedRowsAsNewRows(
+      [
+        ["Ada", "Lovelace"],
+        ["Grace", "Hopper"],
+      ],
+      [0, 2],
+    );
+
+    expect(result).toEqual({ ok: true, rowCount: 2 });
+    expect(editor.newRows.value).toEqual([
+      ["pending", null, null],
+      ["Ada", null, "Lovelace"],
+      ["Grace", null, "Hopper"],
+    ]);
+    expect(editor.dirtyRows.value.get(0)?.get(0)).toBe("edited");
+    editor.undoPendingChange();
+    expect(editor.newRows.value).toEqual([["pending", null, null]]);
+    expect(editor.dirtyRows.value.get(0)?.get(0)).toBe("edited");
+    editor.redoPendingChange();
+    expect(editor.newRows.value).toHaveLength(3);
+  });
+
+  it("aligns INSERT columns and clears generated keys without creating a placeholder row", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [], undefined, [
+      { name: "first", data_type: "integer", extra: "autoincrement" },
+      { name: "hidden", data_type: "varchar" },
+      { name: "last", data_type: "varchar" },
+    ]);
+    editor.newRows.value = [];
+
+    expect(editor.appendPastedRowsAsNewRows([["Lovelace", "42"]], [0, 2], ["last", "first"])).toEqual({ ok: true, rowCount: 1 });
+    expect(editor.newRows.value).toEqual([[null, null, "Lovelace"]]);
+  });
+
+  it("rejects empty or read-only pastes without leaving blank rows", () => {
+    const editor = createEditor(undefined, true, undefined, [0]);
+    editor.newRows.value = [];
+
+    expect(editor.appendPastedRowsAsNewRows([], [0, 2])).toEqual({ ok: false, reason: "empty-paste" });
+    expect(editor.appendPastedRowsAsNewRows([["Ada"]], [0])).toEqual({ ok: false, reason: "readonly-column" });
+    expect(editor.newRows.value).toEqual([]);
+    expect(editor.hasPendingChanges.value).toBe(false);
   });
 
   it("fills the selected blank new row and appends remaining rows using visible columns", () => {
@@ -709,6 +949,36 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
       ["Grace", null, "Hopper"],
     ]);
     expect(editor.hasPendingChanges.value).toBe(true);
+  });
+
+  it("aligns pasted INSERT values by column name regardless of visible order", () => {
+    const editor = createEditor(["first", "hidden", "last"]);
+
+    // Visible columns are [2, 0]: "last" first, "first" second. The INSERT
+    // column names must map values to the real grid columns, not positions.
+    const result = editor.appendPastedRowsToNewRow(-1, [["Lovelace", "Ada"]], [2, 0], ["last", "first"]);
+
+    expect(result).toEqual({ ok: true, rowCount: 1 });
+    expect(editor.newRows.value).toEqual([["Ada", null, "Lovelace"]]);
+  });
+
+  it("matches INSERT column names case-insensitively and ignores unknown names", () => {
+    const editor = createEditor(["first", "hidden", "last"]);
+
+    const result = editor.appendPastedRowsToNewRow(-1, [["Ada", "extra", "Lovelace"]], [0, 1, 2], ["FIRST", "not_here", "Last"]);
+
+    expect(result).toEqual({ ok: true, rowCount: 1 });
+    expect(editor.newRows.value).toEqual([["Ada", null, "Lovelace"]]);
+  });
+
+  it("rejects an INSERT paste when no column names match", () => {
+    const editor = createEditor(["first", "hidden", "last"]);
+
+    const result = editor.appendPastedRowsToNewRow(-1, [["x"]], [0, 1, 2], ["nope"]);
+
+    expect(result).toEqual({ ok: false, reason: "no-matching-columns" });
+    // The pre-seeded blank new row stays untouched.
+    expect(editor.newRows.value).toEqual([[null, null, null]]);
   });
 
   it("clears generated key columns instead of pasting the copied value", () => {
@@ -734,12 +1004,66 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
     ]);
   });
 
-  it("keeps explicitly read-only mapped columns out of editing and paste", () => {
-    const editor = createEditor(["first", "hidden", "last"], true, undefined, [0]);
+  it("preserves ordinary read-only values when cloning while still blocking edits and paste", () => {
+    const editor = createEditor(["first", "hidden", "last"], true, undefined, [0], [["Ada", "hidden", "Lovelace"]]);
 
     expect(editor.canEditColumn(0)).toBe(false);
     expect(editor.canEditColumn(2)).toBe(true);
     expect(editor.appendPastedRowsToNewRow(-1, [["Ada"]], [0])).toEqual({ ok: false, reason: "readonly-column" });
+    editor.applyCellValue(0, 0, null);
+    expect(editor.dirtyRows.value.size).toBe(0);
+    editor.cloneRow(0);
+    expect(editor.newRows.value.at(-1)).toEqual(["Ada", "hidden", "Lovelace"]);
+  });
+
+  it("clears opaque aggregate states when cloning and prefers the result type over metadata", () => {
+    const opaque = createEditor(
+      ["first", "hidden", "last"],
+      true,
+      undefined,
+      [1],
+      [["Ada", "0x00ff", "Lovelace"]],
+      undefined,
+      [
+        { name: "first", data_type: "varchar" },
+        { name: "hidden", data_type: "varchar" },
+        { name: "last", data_type: "varchar" },
+      ],
+      false,
+      false,
+      ref(true),
+      ["varchar", "agg_state<sum(int)>", "varchar"],
+    );
+    opaque.cloneRow(0);
+    expect(opaque.newRows.value.at(-1)).toEqual(["Ada", null, "Lovelace"]);
+
+    const metadataFallback = createEditor(["first", "hidden", "last"], true, undefined, [1], [["Ada", "0x00ff", "Lovelace"]], undefined, [
+      { name: "first", data_type: "varchar" },
+      { name: "hidden", data_type: "agg_state<sum(int)>" },
+      { name: "last", data_type: "varchar" },
+    ]);
+    metadataFallback.cloneRow(0);
+    expect(metadataFallback.newRows.value.at(-1)).toEqual(["Ada", null, "Lovelace"]);
+
+    const resultTypeWins = createEditor(
+      ["first", "hidden", "last"],
+      true,
+      undefined,
+      [1],
+      [["Ada", "ordinary", "Lovelace"]],
+      undefined,
+      [
+        { name: "first", data_type: "varchar" },
+        { name: "hidden", data_type: "agg_state<sum(int)>" },
+        { name: "last", data_type: "varchar" },
+      ],
+      false,
+      false,
+      ref(true),
+      ["varchar", "varchar", "varchar"],
+    );
+    resultTypeWins.cloneRow(0);
+    expect(resultTypeWins.newRows.value.at(-1)).toEqual(["Ada", "ordinary", "Lovelace"]);
   });
 
   it("fills following blank new rows before adding more rows", () => {
@@ -755,6 +1079,63 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
     expect(editor.newRows.value).toEqual([
       ["Ada", null, null],
       ["Grace", null, null],
+    ]);
+  });
+
+  it.each(["above", "below"] as const)("keeps expanded paste rows %s the original anchor", async (position) => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["source", null, null]]);
+    editor.newRows.value = [];
+    editor.addRows(1, { anchorId: 0, position });
+    await nextTick();
+
+    expect(editor.appendPastedRowsToNewRow(-1, [["Ada"], ["Grace"]], [0])).toEqual({ ok: true, rowCount: 2 });
+    const ordered = () => buildOrderedGridRows([0], editor.newRowMeta.value, editor.newRows.value.length);
+    const expected =
+      position === "above"
+        ? [
+            { kind: "new", newIndex: 0 },
+            { kind: "new", newIndex: 1 },
+            { kind: "source", sourceIndex: 0 },
+          ]
+        : [
+            { kind: "source", sourceIndex: 0 },
+            { kind: "new", newIndex: 0 },
+            { kind: "new", newIndex: 1 },
+          ];
+    expect(ordered()).toEqual(expected);
+    editor.undoPendingChange();
+    expect(editor.newRows.value).toEqual([[null, null, null]]);
+    editor.redoPendingChange();
+    expect(ordered()).toEqual(expected);
+    expect(editor.newRows.value).toEqual([
+      ["Ada", null, null],
+      ["Grace", null, null],
+    ]);
+  });
+
+  it("preserves blank rows inserted at a different anchor while expanding a paste", async () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [
+      ["first", null, null],
+      ["second", null, null],
+    ]);
+    editor.newRows.value = [];
+    editor.addRows(1, { anchorId: 0, position: "below" });
+    editor.addRows(1, { anchorId: 1, position: "below" });
+    await nextTick();
+
+    editor.appendPastedRowsToNewRow(-1, [["Ada"], ["Grace"]], [0]);
+
+    expect(editor.newRows.value).toEqual([
+      ["Ada", null, null],
+      ["Grace", null, null],
+      [null, null, null],
+    ]);
+    expect(buildOrderedGridRows([0, 1], editor.newRowMeta.value, editor.newRows.value.length)).toEqual([
+      { kind: "source", sourceIndex: 0 },
+      { kind: "new", newIndex: 0 },
+      { kind: "new", newIndex: 1 },
+      { kind: "source", sourceIndex: 1 },
+      { kind: "new", newIndex: 2 },
     ]);
   });
 
@@ -947,12 +1328,14 @@ describe("useDataGridEditor saveChanges reload", () => {
       queryResult?: { columns: string[]; rows: CellValue[][] };
       currentPage?: Ref<number>;
       prepareFullReload?: () => void;
-      customSaveHandler?: { save: ReturnType<typeof vi.fn> };
+      customSaveHandler?: CustomSaveHandler;
+      confirmSaveRequest?: (request: import("@/composables/useDataGridEditor").DataGridSaveConfirmationRequest) => Promise<boolean>;
       manualTransactionSessionId?: string;
       ensureManualTransactionSession?: () => Promise<string>;
       refreshSavedRows?: ReturnType<typeof vi.fn>;
       onManualTransactionMutation?: ReturnType<typeof vi.fn>;
       connectionId?: string;
+      databaseType?: import("@/types/database").DatabaseType;
       primaryKeys?: string[];
       onExecuteSql?: (sql: string) => Promise<void>;
     } = {},
@@ -971,7 +1354,7 @@ describe("useDataGridEditor saveChanges reload", () => {
     const editor = useDataGridEditor({
       result: computed(() => result.value),
       editable: computed(() => true),
-      databaseType: computed(() => "mysql"),
+      databaseType: computed(() => options.databaseType ?? "mysql"),
       connectionId: computed(() => ("connectionId" in options ? options.connectionId : "connection-1")),
       database: computed(() => "app"),
       tableMeta: computed(() => ({
@@ -986,6 +1369,7 @@ describe("useDataGridEditor saveChanges reload", () => {
       joinedWriteTargets: computed(() => options.joinedWriteTargets),
       onExecuteSql: computed(() => options.onExecuteSql),
       customSaveHandler: computed(() => options.customSaveHandler),
+      confirmSaveRequest: computed(() => options.confirmSaveRequest),
       manualTransactionSessionId: computed(() => options.manualTransactionSessionId),
       ensureManualTransactionSession: computed(() => ensureManualTransactionSession.value),
       onManualTransactionMutation: options.onManualTransactionMutation,
@@ -1389,6 +1773,116 @@ describe("useDataGridEditor saveChanges reload", () => {
     expect(customSave).toHaveBeenCalledTimes(1);
     expect(prepareFullReload).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalledWith("reload", expect.anything());
+  });
+
+  it("previews and confirms a guarded custom delete before execution, then reloads", async () => {
+    const customSave = vi.fn().mockResolvedValue(undefined);
+    const preview = vi.fn().mockResolvedValue(["DELETE FROM guarded WHERE exact_identity"]);
+    const confirmSaveRequest = vi.fn().mockResolvedValue(true);
+    const prepareFullReload = vi.fn();
+    const { editor, emit } = createSaveTestEditor({
+      customSaveHandler: { save: customSave, preview, confirmation: "influxdb-v1-delete", canDelete: true },
+      confirmSaveRequest,
+      prepareFullReload,
+      databaseType: "influxdb",
+    });
+    editor.deletedRows.value.add(0);
+
+    await editor.saveChanges();
+
+    expect(preview).toHaveBeenCalledTimes(1);
+    expect(confirmSaveRequest).toHaveBeenCalledWith({ updates: 0, inserts: 0, deletes: 1, targetLabel: undefined, statements: ["DELETE FROM guarded WHERE exact_identity"] });
+    expect(customSave).toHaveBeenCalledTimes(1);
+    expect(editor.deletedRows.value.size).toBe(0);
+    expect(prepareFullReload).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("keeps a guarded delete staged when declined and refreshes after an execution failure", async () => {
+    const preview = vi.fn().mockResolvedValue(["DELETE FROM guarded WHERE exact_identity"]);
+    const declinedSave = vi.fn();
+    const declined = createSaveTestEditor({
+      customSaveHandler: { save: declinedSave, preview, confirmation: "influxdb-v1-delete", canDelete: true },
+      confirmSaveRequest: vi.fn().mockResolvedValue(false),
+      databaseType: "influxdb",
+    });
+    declined.editor.deletedRows.value.add(0);
+
+    await declined.editor.saveChanges();
+
+    expect(declinedSave).not.toHaveBeenCalled();
+    expect(declined.editor.deletedRows.value).toEqual(new Set([0]));
+    expect(declined.emit).not.toHaveBeenCalledWith("reload", expect.anything());
+
+    const failedSave = vi.fn().mockRejectedValue(new Error("server rejected delete"));
+    const failed = createSaveTestEditor({
+      customSaveHandler: { save: failedSave, preview, confirmation: "influxdb-v1-delete", reloadOnFailure: true, canDelete: true },
+      confirmSaveRequest: vi.fn().mockResolvedValue(true),
+      databaseType: "influxdb",
+    });
+    failed.editor.deletedRows.value.add(1);
+
+    await failed.editor.saveChanges();
+
+    expect(failed.editor.saveError.value).toContain("server rejected delete");
+    expect(failed.editor.deletedRows.value).toEqual(new Set([1]));
+    expect(failed.emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  // Engines that cannot roll a partial batch back (Salesforce: one REST call per
+  // record) hand the operation list to the host for review before it is written.
+  it("summarizes inserts, updates and deletes for the host save confirmation and writes once accepted", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["stmt-1", "stmt-2", "stmt-3"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 1 });
+    const confirmSaveRequest = vi.fn().mockResolvedValue(true);
+
+    const { editor } = createSaveTestEditor({ confirmSaveRequest, databaseType: "salesforce" });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+    editor.addRows(1);
+    editor.deletedRows.value.add(1);
+
+    await editor.saveChanges();
+
+    expect(confirmSaveRequest).toHaveBeenCalledTimes(1);
+    expect(confirmSaveRequest.mock.calls[0]?.[0]).toMatchObject({
+      updates: 1,
+      inserts: 1,
+      deletes: 1,
+      targetLabel: "orders_test",
+      statements: ["stmt-1", "stmt-2", "stmt-3"],
+    });
+    expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
+    expect(editor.saveError.value).toBeFalsy();
+  });
+
+  it("keeps every edit staged and reports no error when the host declines the save", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["stmt-1"], rollbackStatements: [] });
+    const confirmSaveRequest = vi.fn().mockResolvedValue(false);
+
+    const { editor } = createSaveTestEditor({ confirmSaveRequest, databaseType: "salesforce" });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(confirmSaveRequest).toHaveBeenCalledTimes(1);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.dirtyRows.value.get(0)?.get(1)).toBe("shipped");
+    expect(editor.isSaving.value).toBe(false);
+    expect(editor.saveError.value).toBeFalsy();
+  });
+
+  it("never writes an auto-save past a required confirmation", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["stmt-1"], rollbackStatements: [] });
+    const confirmSaveRequest = vi.fn().mockResolvedValue(true);
+
+    const { editor } = createSaveTestEditor({ confirmSaveRequest, databaseType: "salesforce" });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges({ autoSave: true });
+
+    expect(confirmSaveRequest).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.dirtyRows.value.get(0)?.get(1)).toBe("shipped");
   });
 });
 

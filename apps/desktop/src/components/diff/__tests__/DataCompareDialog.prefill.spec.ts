@@ -129,6 +129,7 @@ function completedSession(): DataCompareSession {
         targetRowCount: 0,
         sourceTruncated: false,
         targetTruncated: false,
+        rowBudget: 100_000,
         databaseType: "oracle",
         diff: {
           added: [
@@ -507,5 +508,30 @@ describe("DataCompareDialog results layout", () => {
     const dialogFooter = document.querySelector('[data-slot="dialog-footer"]');
     expect(dialogFooter).not.toBeNull();
     expect(scroller?.contains(dialogFooter)).toBe(false);
+  });
+});
+
+describe("DataCompareDialog truncation warning", () => {
+  it("warns that a table larger than the row budget was only partially compared", async () => {
+    const session = completedSession();
+    const result = session.batchResults[0]!;
+    result.sourceTruncated = true;
+    result.sourceRowCount = 4_000_000;
+    result.rowBudget = 100_000;
+
+    mountSessionDialog(session);
+    await flushAsyncSetup();
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain(i18n.global.t("dataCompare.truncatedTitle"));
+    expect(text).toContain(i18n.global.t("dataCompare.truncatedBadge", { budget: 100_000 }));
+    expect(text).toContain(i18n.global.t("dataCompare.truncatedTable", { table: "ORDERS", source: 4_000_000, target: 0, budget: 100_000 }));
+  });
+
+  it("keeps the warning out of the results when every table fit the budget", async () => {
+    mountSessionDialog(completedSession());
+    await flushAsyncSetup();
+
+    expect(document.body.textContent ?? "").not.toContain(i18n.global.t("dataCompare.truncatedTitle"));
   });
 });

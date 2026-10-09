@@ -2,14 +2,18 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, defineComponent, h, nextTick, reactive } from "vue";
+import { createPinia } from "pinia";
 
 const mocks = vi.hoisted(() => ({
   store: null as any,
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({
-  useI18n: () => ({ t: (key: string) => key }),
+// PR-A4: AppSidebar now pulls useQueryStore/useI18n chains through
+// chains, so partially mock vue-i18n here while keeping the other exports (e.g. createI18n).
+vi.mock("vue-i18n", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("vue-i18n")>()),
+  useI18n: () => ({ t: (key: string) => key, locale: { value: "en" } }),
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -146,6 +150,7 @@ function createStore() {
     moveConnectionToGroup: vi.fn(),
     createConnectionGroup: vi.fn(() => "group-new"),
     refreshAllTree: vi.fn().mockResolvedValue(undefined),
+    reloadFromDisk: vi.fn().mockResolvedValue(undefined),
     removeConnections: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn().mockResolvedValue(undefined),
   });
@@ -172,6 +177,7 @@ async function mountSidebar() {
       setup: () => () => h(AppSidebar, { sidebarWidth: 260 }),
     }),
   );
+  app.use(createPinia());
   app.mount(host);
   mountedApps.push({ unmount: () => app.unmount(), host });
   await nextTick();
@@ -189,6 +195,31 @@ describe("AppSidebar connection multi-select moves", () => {
       mounted.unmount();
       mounted.host.remove();
     }
+  });
+
+  it("waits for persisted connections before refreshing the tree", async () => {
+    let finishReload!: () => void;
+    mocks.store.reloadFromDisk.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finishReload = resolve;
+      }),
+    );
+    const host = await mountSidebar();
+    click(host.querySelector('[data-tooltip="contextMenu.refreshChildren"] button'));
+    expect(mocks.store.reloadFromDisk).toHaveBeenCalledOnce();
+    expect(mocks.store.refreshAllTree).not.toHaveBeenCalled();
+    finishReload();
+    await nextTick();
+    expect(mocks.store.refreshAllTree).toHaveBeenCalledOnce();
+  });
+
+  it("reports a failed connection reload without refreshing stale nodes", async () => {
+    mocks.store.reloadFromDisk.mockRejectedValue(new Error("storage unavailable"));
+    const host = await mountSidebar();
+    click(host.querySelector('[data-tooltip="contextMenu.refreshChildren"] button'));
+    await nextTick();
+    expect(mocks.store.refreshAllTree).not.toHaveBeenCalled();
+    expect(mocks.toast).toHaveBeenCalledOnce();
   });
 
   it("releases an existing-group batch including filtered connections before the next batch", async () => {

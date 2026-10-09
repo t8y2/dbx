@@ -187,7 +187,7 @@ func parseConnectionConfig(params connectParams) (connectionConfig, error) {
 		}
 		config.ConnectTimeoutMS = parsed
 	}
-	config.EnableCompression = queryBool(query, "enable_compression", "rpc_compression")
+	config.EnableCompression = queryBool(query, "enable_compression", "rpc_compression", "rpc_compress")
 	config.NodeURLs = parseNodeURLs(firstQueryValue(query, "node_urls", "nodes"))
 	if len(config.NodeURLs) == 0 {
 		config.NodeURLs = []string{net.JoinHostPort(config.Host, strconv.Itoa(config.Port))}

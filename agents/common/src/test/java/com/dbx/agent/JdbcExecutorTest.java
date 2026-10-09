@@ -27,6 +27,70 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcExecutorTest {
     @Test
+    void executeAllPreservesPrintMessagesAlongsideRows() {
+        CountingResultSetFixture rows = countingResultSet(new Object[][]{{1, "value"}});
+        List<QueryResult> results = JdbcExecutor.INSTANCE.executeAll(
+            executionConnection(true, -1, new SQLWarning("printed", "01000", 42), new AtomicInteger(), rows.resultSet(), null),
+            "SELECT; PRINT", 10, null, 5, JdbcExecutor.INSTANCE::defaultResultValue);
+        assertEquals("printed", results.get(0).getMessages().get(0).get("message"));
+        assertEquals("42", results.get(0).getMessages().get(0).get("code"));
+        assertEquals(1, results.get(0).getRows().size());
+    }
+
+    @Test
+    void executeAllDrainsTruncatedRowsAndLaterResultsWithoutReexecuting() {
+        AtomicInteger executeCalls = new AtomicInteger();
+        AtomicInteger index = new AtomicInteger();
+        AtomicInteger drained = new AtomicInteger();
+        ResultSet first = countingResultSet(new Object[][]{{1, "a"}, {2, "b"}, {3, "c"}, {4, "d"}}).resultSet();
+        ResultSet tracked = (ResultSet) Proxy.newProxyInstance(ResultSet.class.getClassLoader(), new Class<?>[]{ResultSet.class}, (ignored, method, args) -> {
+            Object result = method.invoke(first, args);
+            if (method.getName().equals("next") && Boolean.TRUE.equals(result)) drained.incrementAndGet();
+            return result;
+        });
+        ResultSet second = countingResultSet(new Object[][]{{9, "last"}}).resultSet();
+        Statement statement = (Statement) Proxy.newProxyInstance(Statement.class.getClassLoader(), new Class<?>[]{Statement.class}, (ignored, method, args) -> {
+            switch (method.getName()) {
+                case "execute": executeCalls.incrementAndGet(); return true;
+                case "setMaxRows": throw new AssertionError("UI retention must not cap JDBC responses");
+                case "getResultSet": return index.get() == 0 ? tracked : second;
+                case "getMoreResults": int next = index.incrementAndGet(); return next == 2;
+                case "getUpdateCount": return index.get() == 1 ? 7 : -1;
+                default: return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[]{Connection.class}, (ignored, method, args) ->
+            method.getName().equals("createStatement") ? statement : defaultValue(method.getReturnType()));
+        List<QueryResult> results = JdbcExecutor.INSTANCE.executeAll(conn, "SELECT; UPDATE; SELECT", 1, null, 5,
+            JdbcExecutor.INSTANCE::defaultResultValue);
+        assertEquals(1, executeCalls.get());
+        assertEquals(4, drained.get());
+        assertEquals(3, results.size());
+        assertTrue(results.get(0).getTruncated());
+        assertEquals(1, results.get(0).getRows().size());
+        assertEquals(7, results.get(1).getAffected_rows());
+        assertEquals(9, results.get(2).getRows().get(0).get(0));
+    }
+
+    @Test
+    void executeAllPropagatesLateErrorsInsteadOfReturningPartialSuccess() {
+        AtomicInteger executeCalls = new AtomicInteger();
+        Statement stmt = (Statement) Proxy.newProxyInstance(Statement.class.getClassLoader(), new Class<?>[]{Statement.class}, (ignored, method, args) -> {
+            switch (method.getName()) {
+                case "execute": executeCalls.incrementAndGet(); return false;
+                case "getUpdateCount": return 1;
+                case "getMoreResults": throw new SQLException("late failure");
+                default: return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[]{Connection.class}, (ignored, method, args) ->
+            method.getName().equals("createStatement") ? stmt : defaultValue(method.getReturnType()));
+        assertThrows(RuntimeException.class, () -> JdbcExecutor.INSTANCE.executeAll(conn, "UPDATE", 1, null, 5,
+            JdbcExecutor.INSTANCE::defaultResultValue));
+        assertEquals(1, executeCalls.get());
+    }
+
+    @Test
     void statementRowLimitIncludesOverflowProbeWithoutIntegerOverflow() {
         assertEquals(2, JdbcExecutor.statementMaxRows(0));
         assertEquals(JdbcExecutor.DEFAULT_MAX_ROWS + 1,

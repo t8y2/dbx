@@ -522,6 +522,7 @@ mod tests {
                     read_only: false,
                     allow_dangerous_sql: true,
                 }],
+                allow_salesforce_dml: false,
             }],
             ..Default::default()
         }

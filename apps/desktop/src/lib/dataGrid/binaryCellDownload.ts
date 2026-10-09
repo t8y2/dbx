@@ -117,6 +117,7 @@ const BINARY_STRING_TYPE_RE = /^(?:binary|varbinary)(?:\b|\()/i;
 const VARBINARY_TYPE_RE = /^varbinary(?:\b|\()/i;
 const BLOB_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob)(?:\b|\()/i;
 const MYSQL_FILE_IMPORT_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|binary|varbinary)(?:\b|\()/i;
+const OPAQUE_AGG_STATE_TYPE_RE = /^agg_state\s*<\s*[^>\s][^>]*>$/i;
 
 function copyBytesForBlob(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   return new Uint8Array(bytes);
@@ -181,7 +182,23 @@ export function parseBinaryCellBytes(value: unknown, columnType?: string, databa
 
 export function isBinaryCellColumnType(columnType?: string): boolean {
   const type = (columnType ?? "").trim();
-  return !!type && BINARY_TYPE_RE.test(type);
+  return !!type && (BINARY_TYPE_RE.test(type) || OPAQUE_AGG_STATE_TYPE_RE.test(type));
+}
+
+export function isOpaqueAggregateStateColumnType(columnType?: string): boolean {
+  return OPAQUE_AGG_STATE_TYPE_RE.test((columnType ?? "").trim());
+}
+
+export function hasUnsafeOpaqueAggregateStatePredicate(columnTypes: readonly (string | undefined)[], row: readonly CellValue[]): boolean {
+  return columnTypes.some((columnType, index) => isOpaqueAggregateStateColumnType(columnType) && row[index] !== null);
+}
+
+export function mergeOpaqueReadonlyColumnIndexes(readonlyColumnIndexes: readonly number[] | undefined, columnTypes: readonly (string | undefined)[]): ReadonlySet<number> | undefined {
+  const merged = new Set(readonlyColumnIndexes ?? []);
+  columnTypes.forEach((columnType, index) => {
+    if (isOpaqueAggregateStateColumnType(columnType)) merged.add(index);
+  });
+  return merged.size ? merged : undefined;
 }
 
 export function isBlobCellColumnType(columnType?: string): boolean {
@@ -294,6 +311,7 @@ export function binaryCellClipboardText(value: unknown, columnType?: string, dat
 // “显示是文本、编辑器却是十六进制”的不一致，故 blob 文本预览仅在 mysql 连接开启。
 // binary/varbinary 的文本预览早于该特性存在（如 TDengine BINARY 文本），保持全库通用。
 function isBinaryCellTextPreviewColumn(columnType: string | undefined, databaseType: DatabaseType | undefined): boolean {
+  if (isOpaqueAggregateStateColumnType(columnType)) return false;
   if (BINARY_STRING_TYPE_RE.test((columnType ?? "").trim())) return true;
   return isBlobCellColumnType(columnType) && databaseType === "mysql";
 }
@@ -367,6 +385,7 @@ function printableText(text: string): boolean {
 }
 
 function binaryCellDisplayLabel(columnType?: string): string {
+  if (isOpaqueAggregateStateColumnType(columnType)) return "AGG_STATE";
   const base = (columnType ?? "")
     .trim()
     .split(/[(:\s]/)[0]

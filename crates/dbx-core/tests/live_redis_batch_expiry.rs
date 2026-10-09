@@ -7,7 +7,6 @@ use dbx_core::redis_ops::{
     redis_delete_keys_in_db_core, redis_get_ttl_in_db_core, redis_set_keys_expire_at_in_db_core,
     redis_set_keys_ttl_in_db_core, redis_set_string_in_db_core,
 };
-use dbx_core::storage::Storage;
 
 /// Shared Redis fixtures used by the batch-expiration coverage below.
 ///
@@ -20,7 +19,7 @@ async fn live_state(connection_id: &str) -> Arc<AppState> {
     let username = std::env::var("DBX_LIVE_REDIS_USERNAME").unwrap_or_default();
     let password = std::env::var("DBX_LIVE_REDIS_PASSWORD").unwrap_or_default();
     let directory = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     let redis_config: ConnectionConfig = serde_json::from_value(serde_json::json!({
         "id": connection_id,

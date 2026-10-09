@@ -4,7 +4,7 @@ import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOther
 const t = (key: string) => key;
 
 describe("shared tab menu helpers", () => {
-  it("builds rename and duplicate items only when renaming is allowed", () => {
+  it("builds rename and duplicate items for query tabs", () => {
     const items = createRenameDuplicateTabItems({
       tab: { id: "t1" } as never,
       t,
@@ -27,6 +27,24 @@ describe("shared tab menu helpers", () => {
     });
     expect(queryOnly).toHaveLength(1);
     expect(queryOnly[0]?.visible).toBe(false);
+  });
+
+  it("allows duplicating data tabs without allowing rename", () => {
+    let duplicated = false;
+    const items = createRenameDuplicateTabItems({
+      tab: { id: "data", mode: "data" } as never,
+      t,
+      canRename: false,
+      onRename: () => undefined,
+      onDuplicate: () => {
+        duplicated = true;
+      },
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]?.label).toBe("contextMenu.duplicateTab");
+    expect(items[0]?.visible).toBe(true);
+    items[0]?.action?.();
+    expect(duplicated).toBe(true);
   });
 
   it("builds locate and pin menu items with the expected actions", () => {

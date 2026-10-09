@@ -1,10 +1,13 @@
-use axum::{extract::Query, Json};
+use std::sync::Arc;
+
+use axum::{extract::Query, extract::State, Json};
 use dbx_core::{changelog, update};
 
 use crate::error::AppError;
+use crate::state::WebState;
 
-pub async fn get_version() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
+pub async fn get_version(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "demoMode": state.demo_mode }))
 }
 
 #[derive(serde::Deserialize)]

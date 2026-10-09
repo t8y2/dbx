@@ -29,6 +29,7 @@ fn column(name: &str, data_type: &str) -> ColumnInfo {
         numeric_precision: None,
         numeric_scale: None,
         character_maximum_length: None,
+        metadata_capabilities: None,
         enum_values: None,
         character_set: None,
         collation: None,

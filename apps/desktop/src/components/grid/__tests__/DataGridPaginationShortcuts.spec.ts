@@ -1,8 +1,6 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { createApp, defineComponent, h, markRaw, nextTick, type App, type PropType } from "vue";
+import { createApp, defineComponent, h, markRaw, nextTick, shallowRef, type App, type PropType } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -30,7 +28,6 @@ vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
 import DataGrid from "../DataGrid.vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 
-const dataGridSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGrid.vue"), "utf8");
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 const shortcutCases = [
   { actionId: "goToFirstPage", key: "F1", offset: 0, functionName: "firstPage" },
@@ -93,6 +90,7 @@ function mountGrid(
     execution_time_ms: 0,
   });
   const paginate = vi.fn();
+  const gridState = shallowRef<Record<string, unknown>>({});
 
   const host = document.createElement("div");
   document.body.append(host);
@@ -114,6 +112,7 @@ function mountGrid(
                 totalRowCount: options.totalRowCount ?? 500,
                 loading: options.loading ?? false,
                 paginationEnabled: options.paginationEnabled ?? true,
+                ...gridState.value,
                 onPaginate: paginate,
               }),
           },
@@ -127,7 +126,7 @@ function mountGrid(
   app.mount(host);
   const mounted = { app, host };
   mountedApps.push(mounted);
-  return { host, paginate, settingsStore };
+  return { host, paginate, settingsStore, gridState };
 }
 
 async function settle() {
@@ -300,16 +299,6 @@ describe("DataGrid pagination shortcuts", () => {
     expect(paginate).not.toHaveBeenCalled();
   });
 
-  it("routes shortcuts to the existing pagination functions and preserves PageUp/PageDown navigation", () => {
-    expect(dataGridSource).toMatch(/if \(!targetAllowsNativeClipboard && handleGridPaginationShortcut\(event\)\) return;/);
-    for (const { actionId, functionName } of shortcutCases) {
-      expect(dataGridSource).toContain(`is${actionId[0]!.toUpperCase()}${actionId.slice(1)}Shortcut(event, shortcuts)`);
-      expect(dataGridSource).toContain(`navigate = ${functionName}`);
-    }
-    expect(dataGridSource).toContain('event.key === "PageUp" && navigateSelectedCell("pageUp", event.shiftKey)');
-    expect(dataGridSource).toContain('event.key === "PageDown" && navigateSelectedCell("pageDown", event.shiftKey)');
-  });
-
   it("keeps legacy settings without pagination mappings keyboard-neutral", async () => {
     const { host, paginate } = mountGrid({ configurePaginationShortcuts: false });
     await settle();
@@ -375,5 +364,59 @@ describe("DataGrid custom page size persistence", () => {
     expect(updateEditorSettings).toHaveBeenCalledWith({ pageSize: 250 });
     expect(settingsStore.editorSettings.pageSize).toBe(250);
     expect(settingsStore.editorSettings.tableOpenPageSize).toBe(100);
+  });
+});
+
+describe("DataGrid SQL load-all exhaustion", () => {
+  it.each([0, 1])("stops after a %i-row tail and does not probe again", async (tailRows) => {
+    const { host, paginate, gridState } = mountGrid({ pageOffset: 0, totalRowCount: 100 });
+    const result = (count: number, appended?: number) => ({ columns: ["id"], rows: Array.from({ length: count }, (_, i) => [i]), has_more: false, appended_from_row_count: appended, affected_rows: 0, execution_time_ms: 0 });
+    gridState.value = { context: "results", pageSql: "SELECT id FROM items LIMIT 100", executedPageOffset: 0, executedPageLimit: 100, result: result(100) };
+    await settle();
+    const button = host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!;
+    button.click();
+    await settle();
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([100, 100]);
+    gridState.value = { ...gridState.value, executedPageOffset: 100, result: result(100 + tailRows, 100) };
+    await settle();
+    button.click();
+    await settle();
+    expect(paginate).toHaveBeenCalledOnce();
+  });
+
+  it("respects the configured result cap when a SQL page is full", async () => {
+    const { host, paginate, settingsStore, gridState } = mountGrid({ pageOffset: 0, totalRowCount: 100 });
+    settingsStore.updateEditorSettings({ queryResultMaxRowsEnabled: true, queryResultMaxRows: 100 });
+    gridState.value = { context: "results", pageSql: "SELECT id FROM items LIMIT 100", result: { columns: ["id"], rows: Array.from({ length: 100 }, (_, i) => [i]), has_more: false, truncated: true, affected_rows: 0, execution_time_ms: 0 } };
+    await settle();
+    host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!.click();
+    await settle();
+    expect(paginate).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("probes past a cached total and stops at an empty tail (infiniteScroll=%s)", async (infiniteScroll) => {
+    const { host, paginate, settingsStore, gridState } = mountGrid({ infiniteScroll, pageOffset: 0, totalRowCount: 100 });
+    settingsStore.updateEditorSettings({ queryResultMaxRowsEnabled: true, queryResultMaxRows: 1000 });
+    const rows = Array.from({ length: 100 }, (_, index) => [index]);
+    gridState.value = { context: "results", pageSql: "SELECT id FROM items LIMIT 100", executedPageOffset: 0, executedPageLimit: 100, result: { columns: ["id"], rows, has_more: false, affected_rows: 0, execution_time_ms: 0 } };
+    await settle();
+    const button = host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!;
+    button.click();
+    await settle();
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([100, 100]);
+    expect(paginate.mock.calls[0]?.[4]).toBe(true);
+
+    // COUNT said 100, but the original session has another full page.
+    gridState.value = { ...gridState.value, executedPageOffset: 100, result: { columns: ["id"], rows: [...rows, ...rows], has_more: false, appended_from_row_count: 100, affected_rows: 0, execution_time_ms: 0 } };
+    await settle();
+    expect(paginate).toHaveBeenCalledTimes(2);
+    expect(paginate.mock.calls[1]?.slice(0, 2)).toEqual([200, 100]);
+
+    gridState.value = { ...gridState.value, executedPageOffset: 200, result: { columns: ["id"], rows: [...rows, ...rows], has_more: false, appended_from_row_count: 200, affected_rows: 0, execution_time_ms: 0 } };
+    await settle();
+    button.click();
+    await settle();
+    expect(paginate).toHaveBeenCalledTimes(2);
   });
 });

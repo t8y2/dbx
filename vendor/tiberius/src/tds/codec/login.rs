@@ -28,7 +28,7 @@ impl Default for FeatureLevel {
 }
 
 impl FeatureLevel {
-    pub fn done_row_count_bytes(self) -> u8 {
+    pub(crate) fn done_row_count_bytes(self) -> u8 {
         if self as u32 >= FeatureLevel::SqlServer2005 as u32 {
             8
         } else {

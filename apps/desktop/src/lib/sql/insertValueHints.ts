@@ -486,13 +486,14 @@ function stepLexState(sql: string, index: number, state: LexState, dialectId: st
     }
     return index + 1;
   }
-  if (ch === "(") {
+  // Match tokenizeSqlSemantic: fullwidth （） update nesting the same as ASCII ().
+  if (ch === "(" || ch === "\uFF08") {
     state.depth += 1;
-    return index + 1;
+    return index + ch.length;
   }
-  if (ch === ")") {
+  if (ch === ")" || ch === "\uFF09") {
     state.depth = Math.max(0, state.depth - 1);
-    return index + 1;
+    return index + ch.length;
   }
   return index + 1;
 }

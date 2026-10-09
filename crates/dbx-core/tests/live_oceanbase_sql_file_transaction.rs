@@ -7,7 +7,6 @@ use dbx_core::query::{
     begin_manual_transaction, commit_manual_transaction, execute_sql_statement, rollback_manual_transaction,
 };
 use dbx_core::sql::{SqlFileRequest, SqlFileStatus};
-use dbx_core::storage::Storage;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -38,7 +37,7 @@ async fn verify_committed_value(state: &AppState, database: &str, table: &str, e
 #[ignore = "requires an installed OceanBase Oracle agent and writable DBX_LIVE_SQL_FILE_OB_* environment"]
 async fn live_oceanbase_sql_files_commit_rollback_failure_and_cancel() {
     let directory = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&directory.path().join("state.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&directory.path().join("state.db")).await.unwrap();
     let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
         storage,
         directory.path().join("plugins"),
@@ -66,7 +65,7 @@ async fn live_oceanbase_sql_files_commit_rollback_failure_and_cancel() {
         query(&state, "file-writer", &database, &format!("INSERT INTO {table} VALUES (1, 10)")).await?;
         let mut request = SqlFileRequest {
             execution_id: "live-manual-file".to_string(), connection_id: "file-writer".to_string(),
-            database: database.clone(), file_path: String::new(), continue_on_error: false,
+            database: database.clone(), schema: None, file_path: String::new(), continue_on_error: false,
             selected_tables: None, part_cooldown_ms: 0, skip_relational_constraints: false, txn_session_id: None,
         };
         let first = directory.path().join("first.sql");

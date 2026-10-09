@@ -3,6 +3,8 @@ import { computed, ref } from "vue";
 import ContentArea from "./ContentArea.vue";
 import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEvents";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, QueryEditorSurfaceHandle, StatementRange } from "./querySurfaces";
+import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import type { TableInfoTab } from "@/types/database";
 
 const props = defineProps<ContentAreaSurfaceProps & { autoFocus?: boolean }>();
 const emit = defineEmits<ContentAreaSurfaceEmits>();
@@ -23,7 +25,9 @@ const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 
 defineExpose<QueryEditorSurfaceHandle>({
   focusSearch: (target: Element | null = null) => contentAreaRef.value?.focusSearch(target) ?? false,
+  focusWhere: () => contentAreaRef.value?.focusWhere() ?? false,
   openGoToColumn: () => contentAreaRef.value?.openGoToColumn() ?? false,
+  openTableStructureEditor: (initialTab?: TableInfoTab) => contentAreaRef.value?.openTableStructureEditor?.(initialTab) ?? false,
   refreshData: () => contentAreaRef.value?.refreshData() ?? false,
   toggleResultsPane: () => contentAreaRef.value?.toggleResultsPane() ?? false,
   refreshQueryEditorCompletionCache: () => contentAreaRef.value?.refreshQueryEditorCompletionCache() ?? false,
@@ -37,11 +41,14 @@ defineExpose<QueryEditorSurfaceHandle>({
   acceptQueryEditorExecutionViewport: (requestId: number) => contentAreaRef.value?.acceptQueryEditorExecutionViewport(requestId) ?? false,
   pasteClipboardAsSqlInCondition: () => contentAreaRef.value?.pasteClipboardAsSqlInCondition() ?? Promise.resolve(false),
   applyTableStructureChanges: () => contentAreaRef.value?.applyTableStructureChanges() ?? Promise.resolve(false),
-  insertRedisCommand: (command: string) => contentAreaRef.value?.insertRedisCommand(command) ?? Promise.resolve(false),
-  executeRedisCommand: (command: string) => contentAreaRef.value?.executeRedisCommand(command) ?? Promise.resolve(false),
+  insertRedisCommand: (command: string, target: AiConversationBinding) => contentAreaRef.value?.insertRedisCommand(command, target) ?? Promise.resolve(false),
+  executeRedisCommand: (command: string, target: AiConversationBinding) => contentAreaRef.value?.executeRedisCommand(command, target) ?? Promise.resolve(false),
+  isRedisConsoleReady: (target: AiConversationBinding) => contentAreaRef.value?.isRedisConsoleReady(target) ?? false,
   previewStatementRange: (range: StatementRange | null) => contentAreaRef.value?.previewStatementRange(range) ?? false,
   focusStatementRange: (range: StatementRange | null) => contentAreaRef.value?.focusStatementRange(range) ?? false,
   focusErrorPosition: (offset: number) => contentAreaRef.value?.focusErrorPosition(offset) ?? false,
+  foldAll: () => contentAreaRef.value?.foldAll() ?? false,
+  unfoldAll: () => contentAreaRef.value?.unfoldAll() ?? false,
 });
 </script>
 

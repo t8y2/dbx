@@ -1,4 +1,4 @@
-import { EditorSelection, StateEffect, type Extension } from "@codemirror/state";
+import { StateEffect, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { matchDollarQuoteTag } from "@/lib/sql/semantic/tokens";
 import { buildInsertValueHints, expandToSqlStatementWindow, findEnclosingDollarQuoteStartInText, insertValueHintsNeedTableColumns, parseInsertValuesClauses, type InsertValueHint, type InsertValuesClause, type TextRange } from "@/lib/sql/insertValueHints";
@@ -70,7 +70,7 @@ function decorationsForHints(hints: readonly InsertValueHint[]): DecorationSet {
  * keep this list in sync instead of re-inlining it at call sites.
  */
 export function supportsInsertValueHints(databaseType: string | undefined | null): boolean {
-  return databaseType !== "redis" && databaseType !== "mongodb" && databaseType !== "elasticsearch" && databaseType !== "easysearch" && databaseType !== "meilisearch" && databaseType !== "solr" && databaseType !== "victoriametrics";
+  return databaseType !== "redis" && databaseType !== "mongodb" && databaseType !== "elasticsearch" && databaseType !== "easysearch" && databaseType !== "meilisearch" && databaseType !== "solr" && databaseType !== "couchdb" && databaseType !== "victoriametrics" && databaseType !== "salesforce";
 }
 
 export function buildInsertValueHintDecorations(hints: readonly InsertValueHint[]): DecorationSet {
@@ -249,24 +249,9 @@ export function createInsertValueHintsExtension(options: InsertValueHintsExtensi
     { decorations: (value) => value.decorations },
   );
 
-  const clickWithoutScroll = EditorView.domEventHandlers({
-    mousedown(event, view) {
-      if (!(options.isEnabled?.() ?? true)) return false;
-      const pluginState = view.plugin(plugin);
-      if (!pluginState) return false;
-      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
-      if (pos == null || !isInsertValueHintDecorationAt(pluginState.decorations, pos)) return false;
-      event.preventDefault();
-      view.dispatch({
-        selection: EditorSelection.cursor(pos),
-        ...insertValueHintsRefreshDispatchSpec,
-      });
-      view.focus();
-      return true;
-    },
-  });
-
-  return [insertValueHintsTheme, plugin, clickWithoutScroll];
+  // Let CodeMirror handle pointer selection near hints. Consuming mousedown
+  // here prevents its drag-selection handler from starting.
+  return [insertValueHintsTheme, plugin];
 }
 
 export function requestInsertValueHintsRefresh(view: EditorView) {

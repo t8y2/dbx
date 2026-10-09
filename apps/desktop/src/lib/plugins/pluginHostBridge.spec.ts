@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { reactive, readonly } from "vue";
-import { PluginHostBridge, pluginSandboxDocument, pluginSdkSource } from "./pluginHostBridge";
+import { MAX_CONCURRENT_PLUGIN_DATA_QUERIES, PLUGIN_CLIPBOARD_AUDIT_CAPACITY, PluginHostBridge, clipboardReadGateAllows, createClipboardReadGate, pluginSandboxDocument, pluginSdkSource, recordClipboardRead } from "./pluginHostBridge";
 import type { InstalledPlugin, PluginResultViewContribution, PluginWorkbenchContribution } from "@/types/database";
 
-function plugin(permissions: string[] = []): InstalledPlugin {
+function plugin(permissions: string[] = [], contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
   return {
-    manifest: { id: "sample", name: "Sample", version: "1.0.0", permissions, drivers: [], contributions: [] },
+    manifest: { id: "sample", name: "Sample", version: "1.0.0", permissions, drivers: [], contributions },
     compatibility: { compatible: true },
   };
 }
@@ -14,6 +14,30 @@ const workbench: PluginWorkbenchContribution = { type: "workbench", id: "sample.
 const resultView: PluginResultViewContribution = { type: "result-view", id: "sample.graph", label: "Graph" };
 
 describe("PluginHostBridge", () => {
+  it("host.listConnections returns a read-only secret-free list scoped to the calling plugin", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const listConnections = vi.fn(() => [{ id: "conn-1", name: "Prod", providerId: "sample.connection", connectionType: "sample", readOnly: true }]);
+    const contributions = [
+      { type: "connection-provider", id: "sample.connection", label: "Sample", database_type: "sample", fields: [] },
+      { type: "workbench", id: "sample.main", label: "Sample" },
+    ] as InstalledPlugin["manifest"]["contributions"];
+    const bridge = new PluginHostBridge(plugin(["host.workbench"], contributions), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      listConnections,
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "9", method: "host.listConnections", params: {} },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(listConnections).toHaveBeenCalledWith("sample"));
+    expect(messages[0]).toMatchObject({ source: "dbx-host", type: "response", id: "9", result: [{ id: "conn-1", name: "Prod", providerId: "sample.connection", readOnly: true }] });
+  });
+
   it("streams downloads under the owning plugin, scopes cancellation and reports native capability", async () => {
     const messages: any[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
@@ -115,6 +139,87 @@ describe("PluginHostBridge", () => {
     });
     withoutAdapter.sendInit();
     expect(messages[0].capabilities.ai).toBe(false);
+  });
+
+  it("does not publish recommendation defaults without the host.ai permission", () => {
+    const updates: unknown[] = [];
+    const target = { postMessage: vi.fn() } as unknown as Window;
+    const contribution = {
+      ...workbench,
+      ai: { recommendations: [{ id: "health", label: "Health", prompt: "Check health" }] },
+    } as PluginWorkbenchContribution;
+    new PluginHostBridge(plugin([], [contribution]), contribution, { workbenchId: "wb-1" }, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      setAiRecommendations: (update) => updates.push(update),
+    });
+    expect(updates).toHaveLength(0);
+  });
+
+  it("publishes manifest and runtime AI recommendations per workbench instance", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const updates: any[] = [];
+    const contribution = {
+      ...workbench,
+      ai: { recommendations: [{ id: "health", label: "Inspect {{resource.name}}", prompt: "Check {{resource.name}}", order: 1 }] },
+    } as PluginWorkbenchContribution;
+    const bridge = new PluginHostBridge(plugin(["host.ai"], [contribution]), contribution, { workbenchId: "wb-1", connectionId: "conn-1", resource: { name: "orders" } }, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      openAiConversation: vi.fn().mockResolvedValue(undefined),
+      setAiRecommendations: (update) => updates.push(update),
+    });
+
+    expect(updates[0]).toMatchObject({ workbenchId: "wb-1", items: [{ label: "Inspect orders", prompt: "Check orders" }] });
+    bridge.handleWindowMessage({
+      source: target,
+      data: {
+        source: "dbx-plugin",
+        version: 1,
+        type: "request",
+        id: "set",
+        method: "host.ai.setRecommendations",
+        params: { context: { connectionId: "other-connection", resource: { name: "customers" } }, items: [{ id: "custom", label: "Review {{resource.name}}", prompt: "Review {{resource.name}}" }] },
+      },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages.some((message) => message.id === "set" && message.result === null)).toBe(true));
+    expect(updates[updates.length - 1]).toMatchObject({
+      pluginId: "sample",
+      pluginName: "Sample",
+      workbenchId: "wb-1",
+      context: { connectionId: "conn-1", resource: { name: "customers" } },
+      items: [{ label: "Review customers", prompt: "Review customers" }],
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "clear", method: "host.ai.clearRecommendations", params: {} },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages.some((message) => message.id === "clear" && message.result === null)).toBe(true));
+    expect(updates[updates.length - 1]).toMatchObject({ workbenchId: "wb-1", items: [] });
+  });
+
+  it("rejects malformed runtime recommendation placeholders", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      openAiConversation: vi.fn().mockResolvedValue(undefined),
+      setAiRecommendations: vi.fn(),
+    });
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "bad", method: "host.ai.setRecommendations", params: { context: {}, items: [{ id: "bad", label: "Inspect {{resource..name}}", prompt: "Check" }] } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages[0]?.error).toContain("invalid placeholder"));
   });
 
   it("binds backend calls to the owning plugin identity", async () => {
@@ -330,6 +435,68 @@ describe("PluginHostBridge", () => {
     request("default", { contributionId: "sample.other" });
     await vi.waitFor(() => expect(messages).toHaveLength(2));
     expect(openWorkbench).toHaveBeenNthCalledWith(2, "sample", "sample.other", undefined, { forceNew: false });
+  });
+
+  it("routes host.executeCommand to the surface handler scoped to the calling plugin", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const executeCommand = vi.fn(() => ({ error: "Command 'sample.open-panel' is disabled by enablement" }));
+    const bridge = new PluginHostBridge(plugin(["host.workbench"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      executeCommand,
+    });
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "3", method: "host.executeCommand", params: { commandId: "open-panel", context: { connectionId: "c1" } } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(executeCommand).toHaveBeenCalledWith("sample", "open-panel", { connectionId: "c1" });
+    // Expected business outcomes resolve as a result (no rejection) so webviews
+    // can surface a notice instead of catching.
+    expect(messages[0]).toMatchObject({ id: "3", result: { error: "Command 'sample.open-panel' is disabled by enablement" } });
+  });
+
+  it("normalizes a void executeCommand handler to an empty result object", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const executeCommand = vi.fn();
+    const bridge = new PluginHostBridge(plugin(["host.workbench"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      executeCommand,
+    });
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "4", method: "host.executeCommand", params: { commandId: "open-panel" } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(executeCommand).toHaveBeenCalledWith("sample", "open-panel", undefined);
+    expect(messages[0]).toMatchObject({ id: "4", result: {} });
+  });
+
+  it("host.executeCommand requires the host.workbench permission", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const executeCommand = vi.fn();
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      executeCommand,
+    });
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "5", method: "host.executeCommand", params: { commandId: "open-panel" } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "5", error: "Plugin has not declared permission 'host.workbench'" });
+    expect(executeCommand).not.toHaveBeenCalled();
   });
 
   it("reopens a plugin connection through host.reopenConnection", async () => {
@@ -567,6 +734,95 @@ describe("PluginHostBridge", () => {
     expect(messages[2]).toMatchObject({ id: "legacy", error: "Host plan API is unavailable" });
   });
 
+  it("requires host.schema:read, normalizes table identity, and serves narrow metadata", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const getTableMetadata = vi.fn().mockResolvedValue({
+      columns: [{ name: "id", dataType: "integer", nullable: false }],
+      fieldCapabilities: { length: "unknown", precision: "unknown", scale: "unknown", default: "unknown" },
+    });
+    const base = { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), getTableMetadata };
+
+    const denied = new PluginHostBridge(plugin(), workbench, {}, () => target, base);
+    planCall(denied, target, "host.getTableMetadata", { connectionId: "c1", table: "users" }, "denied");
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "denied", error: "Plugin has not declared permission 'host.schema:read'" });
+    expect(getTableMetadata).not.toHaveBeenCalled();
+
+    const allowed = new PluginHostBridge(plugin(["host.schema:read"]), workbench, {}, () => target, base);
+    allowed.sendInit();
+    planCall(allowed, target, "host.getTableMetadata", { connectionId: "  c1  ", database: " app ", schema: "   ", table: " users " }, "metadata");
+    await vi.waitFor(() => expect(messages).toHaveLength(3));
+
+    expect(getTableMetadata).toHaveBeenCalledWith({ connectionId: "c1", database: "app", table: "users" });
+    expect(messages[2]).toMatchObject({ id: "metadata", result: expect.objectContaining({ columns: expect.any(Array) }) });
+  });
+
+  it("rejects malformed table metadata contexts and advertises the adapter capability", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const getTableMetadata = vi.fn();
+    const bridge = new PluginHostBridge(plugin(["host.schema:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      getTableMetadata,
+    });
+    bridge.sendInit();
+    expect(messages[0].capabilities).toMatchObject({ schemaMetadataApi: true });
+
+    const cases: [string, unknown, string][] = [
+      ["missing-connection", { table: "users" }, "connectionId"],
+      ["blank-connection", { connectionId: " ", table: "users" }, "connectionId"],
+      ["missing-table", { connectionId: "c1" }, "table"],
+      ["table-type", { connectionId: "c1", table: 7 }, "table"],
+      ["identifier-long", { connectionId: "c1", table: "x".repeat(257) }, "table"],
+      ["scope-type", { connectionId: "c1", table: "users", schema: 1 }, "schema"],
+    ];
+    for (const [id, params] of cases) planCall(bridge, target, "host.getTableMetadata", params, id);
+    planCall(bridge, target, "host.getTableMetadata", "not an object", "params-object");
+    await vi.waitFor(() => expect(messages).toHaveLength(cases.length + 2));
+
+    cases.forEach(([id, , expected], index) => {
+      expect(messages[index + 1]).toMatchObject({ id });
+      expect(messages[index + 1].error).toContain(expected);
+    });
+    expect(messages[messages.length - 1]).toMatchObject({ id: "params-object", error: "host.getTableMetadata params must be an object" });
+    expect(getTableMetadata).not.toHaveBeenCalled();
+
+    const legacyMessages: any[] = [];
+    const legacyTarget = { postMessage: (message: unknown) => legacyMessages.push(message) } as unknown as Window;
+    const legacy = new PluginHostBridge(plugin(["host.schema:read"]), workbench, {}, () => legacyTarget, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+    legacy.sendInit();
+    expect(legacyMessages[0].capabilities).toMatchObject({ schemaMetadataApi: false });
+    planCall(legacy, legacyTarget, "host.getTableMetadata", { connectionId: "c1", table: "users" }, "legacy");
+    await vi.waitFor(() => expect(legacyMessages).toHaveLength(2));
+    expect(legacyMessages[1]).toMatchObject({ id: "legacy", error: "Host schema metadata API is unavailable" });
+  });
+
+  it.each(["Connection session is not open for the requested database", "Query canceled", "metadata provider denied", "DBX metadata pool is busy; please retry"])("forwards schema metadata failures without retrying: %s", async (error) => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const getTableMetadata = vi.fn().mockRejectedValue(new Error(error));
+    const bridge = new PluginHostBridge(plugin(["host.schema:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      getTableMetadata,
+    });
+    planCall(bridge, target, "host.getTableMetadata", { connectionId: "c1", table: "users" }, "failure");
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "failure", error });
+    expect(getTableMetadata).toHaveBeenCalledTimes(1);
+  });
+
   it("opens only the owning plugin filesystem with explicit permission", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
@@ -776,18 +1032,24 @@ describe("PluginHostBridge", () => {
   });
 
   it("injects a <base> and widens resource CSP sources for the plugin asset origin", () => {
-    const document = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, { baseUrl: "dbx-plugin://localhost/io.github.t8y2.s3/assets/" });
+    const document = pluginSandboxDocument('<html><head></head><body><script type="module" src="dbx-plugin://localhost/io.github.t8y2.s3/entry/app.mjs"></script><script type="module" src="https://cdn.example.test/app.mjs"></script></body></html>', [], undefined, {
+      baseUrl: "dbx-plugin://localhost/io.github.t8y2.s3/assets/",
+    });
     expect(document).toContain('<base href="dbx-plugin://localhost/io.github.t8y2.s3/assets/">');
     expect(document).toContain("script-src 'unsafe-inline' blob: dbx-plugin:;");
     expect(document).toContain("font-src data: blob: dbx-plugin:;");
+    expect(document).toContain('src="dbx-plugin://localhost/io.github.t8y2.s3/entry/app.mjs"');
+    const scriptPolicy = document.match(/script-src[^;]+;/)?.[0] ?? "";
+    expect(scriptPolicy).not.toContain("https://cdn.example.test");
     // <base> leads the head injection so inlined CSS url() resolves against it.
     expect(document.indexOf("<base ")).toBeLessThan(document.indexOf("<style>"));
   });
 
   it("allows the WebView2-mapped asset origin exactly", () => {
-    const document = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, { baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/" });
+    const document = pluginSandboxDocument('<html><head></head><body><script type="module" src="http://dbx-plugin.localhost/io.github.t8y2.s3/entry/app.mjs"></script></body></html>', [], undefined, { baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/" });
     expect(document).toContain("script-src 'unsafe-inline' blob: http://dbx-plugin.localhost;");
     expect(document).toContain('<base href="http://dbx-plugin.localhost/io.github.t8y2.s3/assets/">');
+    expect(document).toContain('src="http://dbx-plugin.localhost/io.github.t8y2.s3/entry/app.mjs"');
   });
 
   it("rejects malformed asset base URLs without touching the CSP", () => {
@@ -801,6 +1063,22 @@ describe("PluginHostBridge", () => {
     expect(document).toContain("script-src 'unsafe-inline' blob:;");
     expect(document).toContain("font-src data: blob:;");
     expect(document).not.toContain("<base ");
+  });
+
+  it("adds unsafe-eval to script-src only for the granted plugin", () => {
+    const granted = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, {
+      baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/",
+      allowUnsafeEval: true,
+    });
+    expect(granted).toContain("script-src 'unsafe-inline' 'unsafe-eval' blob: http://dbx-plugin.localhost;");
+    // The grant is scoped to script-src; no other directive picks it up.
+    expect(granted).toContain("style-src 'unsafe-inline' blob:;");
+    expect(granted).not.toContain("img-src data: blob: http://dbx-plugin.localhost 'unsafe-eval'");
+
+    const withheld = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, {
+      baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/",
+    });
+    expect(withheld).not.toContain("unsafe-eval");
   });
 
   it("pre-seeds the current theme as the sandbox first paint", () => {
@@ -927,6 +1205,362 @@ describe("PluginHostBridge", () => {
     expect(messages[0]).toMatchObject({ id: "nocopy", error: "Host clipboard is unavailable" });
   });
 
+  it("serves host.clipboardRead only with the declared host.clipboard:read permission", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const clipboardRead = vi.fn().mockResolvedValue("pasted text");
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // Without the permission the read is refused before the host clipboard is touched.
+    const denied = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+    });
+    denied.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "read-denied", method: "host.clipboardRead" },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(clipboardRead).not.toHaveBeenCalled();
+    expect(messages[0]).toMatchObject({ id: "read-denied", error: "Plugin has not declared permission 'host.clipboard:read'" });
+
+    // With the permission (and session consent granted) the call is scoped to
+    // the owning plugin and unwraps to { text }.
+    const allowed = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    allowed.sendInit();
+    expect((messages[1] as { capabilities?: { clipboardRead?: boolean } }).capabilities?.clipboardRead).toBe(true);
+    send(allowed, "read-ok", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "read-ok")).toBe(true));
+    expect(clipboardRead).toHaveBeenCalledWith("sample");
+    const byId = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(byId.get("read-ok")).toMatchObject({ id: "read-ok", result: { text: "pasted text" } });
+  });
+
+  it("rejects host.clipboardRead when the host cannot read the clipboard and caps oversized reads", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // Legacy or web host: no clipboardRead in the API surface.
+    const noRead = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(noRead, "read-missing", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "read-missing", error: "Host clipboard read is unavailable" });
+
+    // An oversized clipboard read is clamped to the bridge payload bound.
+    const clipboardRead = vi.fn().mockResolvedValue("x".repeat(2 * 1024 * 1024 + 1));
+    const clamping = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(clamping, "read-huge", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "read-huge")).toBe(true));
+    expect(clipboardRead).toHaveBeenCalled();
+    const byId = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    const result = (byId.get("read-huge") as { result?: { text?: string } }).result;
+    expect(result?.text).toHaveLength(2 * 1024 * 1024);
+  });
+
+  it("shares clipboard consent with image reads and validates the image payload", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const send = (bridge: PluginHostBridge, id: string, method: string, params?: unknown) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method, params } } as MessageEvent);
+    const clipboardReadImage = vi.fn().mockResolvedValue({ contentType: "image/png", dataBase64: "AQIDBA==", width: 1, height: 1 });
+    const bridge = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardReadImage,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(bridge, "image-ok", "host.clipboardReadImage");
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(clipboardReadImage).toHaveBeenCalledWith("sample");
+    expect(messages[0]).toMatchObject({ id: "image-ok", result: { contentType: "image/png", dataBase64: "AQIDBA==", width: 1, height: 1 } });
+  });
+
+  it("opens and revokes plugin-scoped media URLs", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const send = (bridge: PluginHostBridge, id: string, method: string, params?: unknown) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method, params } } as MessageEvent);
+    const openMedia = vi.fn().mockResolvedValue("550e8400-e29b-41d4-a716-446655440000");
+    const closeMedia = vi.fn().mockResolvedValue(undefined);
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      openMedia,
+      closeMedia,
+    });
+    send(bridge, "media-open", "host.mediaOpen", { method: "filesystem/media/read", params: { uri: "s3://bucket/video.mp4" } });
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(openMedia).toHaveBeenCalledWith("sample", "filesystem/media/read", { uri: "s3://bucket/video.mp4" });
+    send(bridge, "media-close", "host.mediaClose", { token: "550e8400-e29b-41d4-a716-446655440000" });
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    expect(closeMedia).toHaveBeenCalledWith("sample", "550e8400-e29b-41d4-a716-446655440000");
+  });
+
+  it("asks session consent before the first clipboard read and remembers a denial for the bridge lifetime", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // Denial on the consent prompt: the read rejects and the host clipboard is never touched.
+    const clipboardRead = vi.fn().mockResolvedValue("secret");
+    const deny = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(false),
+    });
+    send(deny, "consent-denied", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "consent-denied")).toBe(true));
+    expect(clipboardRead).not.toHaveBeenCalled();
+    const denialById = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(denialById.get("consent-denied")).toMatchObject({ id: "consent-denied", error: "Clipboard read was denied for this plugin session" });
+    expect(deny.clipboardAudit).toEqual([{ at: expect.any(Number), outcome: "denied", length: 0 }]);
+
+    // A denial is remembered: a second read rejects without asking again.
+    const confirm = (deny as unknown as { api: { confirmClipboardRead: ReturnType<typeof vi.fn> } }).api.confirmClipboardRead;
+    send(deny, "consent-denied-2", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "consent-denied-2")).toBe(true));
+    expect(confirm).toHaveBeenCalledTimes(1);
+
+    // Consent: the read proceeds, and later reads skip the prompt for the session.
+    const allow = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(allow, "consent-1", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "consent-1" && (message as { result?: { text?: string } }).result).valueOf()).toBe(true));
+    // The rate gate demands PLUGIN_CLIPBOARD_READ_MIN_INTERVAL_MS between reads.
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
+    send(allow, "consent-2", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "consent-2" && (message as { result?: { text?: string } }).result).valueOf()).toBe(true));
+    const allowConfirm = (allow as unknown as { api: { confirmClipboardRead: ReturnType<typeof vi.fn> } }).api.confirmClipboardRead;
+    expect(allowConfirm).toHaveBeenCalledTimes(1);
+    // Shared mock: the deny bridge never reached the clipboard, the allow bridge read twice.
+    expect(clipboardRead).toHaveBeenCalledTimes(2);
+    expect(readTextFromSharedBridgeAudit(allow)).toEqual(["granted", "granted"]);
+  });
+
+  function readTextFromSharedBridgeAudit(bridge: PluginHostBridge) {
+    return bridge.clipboardAudit.map((entry) => entry.outcome);
+  }
+
+  function dataApi(overrides: Record<string, unknown> = {}) {
+    return {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      queryData: vi.fn().mockResolvedValue({ dbType: "postgres", columns: [{ name: "id" }], rows: [[1]], truncated: false, elapsedMs: 3 }),
+      hasDataGrant: vi.fn().mockResolvedValue(false),
+      confirmDataAccess: vi.fn().mockResolvedValue(true),
+      grantDataAccess: vi.fn().mockResolvedValue(undefined),
+      ...overrides,
+    };
+  }
+
+  function dataHarness(permissions: string[], api: ReturnType<typeof dataApi>) {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(permissions), workbench, {}, () => target, api);
+    const query = async (id: string, params: unknown) => {
+      bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method: "host.queryData", params } } as MessageEvent);
+      await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === id)).toBe(true));
+      return messages.find((message) => (message as { id?: string }).id === id) as { result?: unknown; error?: string };
+    };
+    return { bridge, messages, query };
+  }
+
+  it("serves host.queryData only with host.data:read and after the user's consent", async () => {
+    const withoutPermission = dataHarness([], dataApi());
+    expect(await withoutPermission.query("no-permission", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: "Plugin has not declared permission 'host.data:read'" });
+
+    const api = dataApi();
+    const { query } = dataHarness(["host.data:read"], api);
+    const first = await query("first", { connectionId: " conn-1 ", sql: " SELECT id FROM users ", maxRows: 99_999, database: " " });
+    expect(first).toMatchObject({ result: { rows: [[1]] } });
+    expect(api.confirmDataAccess).toHaveBeenCalledWith("sample", expect.any(String), "conn-1");
+    expect(api.grantDataAccess).toHaveBeenCalledWith("sample", "conn-1");
+    // Bound to the owning plugin, trimmed, and pre-clamped to the host row cap.
+    expect(api.queryData).toHaveBeenCalledWith("sample", { connectionId: "conn-1", sql: "SELECT id FROM users", maxRows: 5_000 });
+
+    // The consent is remembered for this connection; another connection asks again.
+    await query("second", { connectionId: "conn-1", sql: "SELECT 2" });
+    expect(api.confirmDataAccess).toHaveBeenCalledTimes(1);
+    expect(api.hasDataGrant).toHaveBeenCalledTimes(1);
+    await query("other-connection", { connectionId: "conn-2", sql: "SELECT 3" });
+    expect(api.confirmDataAccess).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips the prompt for an existing grant and asks again after the backend reports a revocation", async () => {
+    const api = dataApi({
+      hasDataGrant: vi.fn().mockResolvedValue(true),
+      queryData: vi
+        .fn()
+        .mockResolvedValueOnce({ dbType: "mysql", columns: [], rows: [], truncated: false, elapsedMs: 1 })
+        .mockRejectedValueOnce(new Error("PLUGIN_DATA_ACCESS_NOT_GRANTED: the user has not granted this plugin access to the connection"))
+        .mockResolvedValue({ dbType: "mysql", columns: [], rows: [], truncated: false, elapsedMs: 1 }),
+    });
+    const { query } = dataHarness(["host.data:read"], api);
+    await query("granted", { connectionId: "conn-1", sql: "SELECT 1" });
+    expect(api.confirmDataAccess).not.toHaveBeenCalled();
+    expect(await query("revoked", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: expect.stringContaining("PLUGIN_DATA_ACCESS_NOT_GRANTED") });
+    await query("after-revoke", { connectionId: "conn-1", sql: "SELECT 1" });
+    expect(api.hasDataGrant).toHaveBeenCalledTimes(2);
+  });
+
+  it("remembers a declined data access and never queries without consent", async () => {
+    const api = dataApi({ confirmDataAccess: vi.fn().mockResolvedValue(false) });
+    const { query } = dataHarness(["host.data:read"], api);
+    expect(await query("declined", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: "Data access to this connection was denied" });
+    expect(await query("declined-again", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: "Data access to this connection was denied for this plugin session" });
+    expect(api.confirmDataAccess).toHaveBeenCalledTimes(1);
+    expect(api.grantDataAccess).not.toHaveBeenCalled();
+    expect(api.queryData).not.toHaveBeenCalled();
+
+    // A host without a consent surface denies instead of granting silently.
+    const noSurface = dataApi({ confirmDataAccess: undefined });
+    const { query: queryWithoutSurface } = dataHarness(["host.data:read"], noSurface);
+    expect(await queryWithoutSurface("no-surface", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: "Data access to this connection was denied" });
+    expect(noSurface.queryData).not.toHaveBeenCalled();
+  });
+
+  it("caps concurrent data queries per bridge so a plugin cannot occupy the shared pool", async () => {
+    const pending: Array<(value: unknown) => void> = [];
+    const api = dataApi({
+      hasDataGrant: vi.fn().mockResolvedValue(true),
+      queryData: vi.fn().mockImplementation(() => new Promise((resolve) => pending.push(resolve))),
+    });
+    const { bridge, messages } = dataHarness(["host.data:read"], api);
+    const target = (bridge as unknown as { targetWindow: () => Window }).targetWindow();
+    const start = (id: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method: "host.queryData", params: { connectionId: "conn-1", sql: "SELECT 1" } } } as MessageEvent);
+    for (let index = 0; index < MAX_CONCURRENT_PLUGIN_DATA_QUERIES; index += 1) start(`running-${index}`);
+    await vi.waitFor(() => expect(api.queryData).toHaveBeenCalledTimes(MAX_CONCURRENT_PLUGIN_DATA_QUERIES));
+    start("over-limit");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "over-limit")).toBe(true));
+    expect(messages.find((message) => (message as { id?: string }).id === "over-limit")).toMatchObject({ error: expect.stringContaining("data queries may run at once") });
+
+    // A finished query frees its slot.
+    pending.shift()?.({ dbType: "postgres", columns: [], rows: [], truncated: false, elapsedMs: 1 });
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "running-0")).toBe(true));
+    start("after-slot");
+    await vi.waitFor(() => expect(api.queryData).toHaveBeenCalledTimes(MAX_CONCURRENT_PLUGIN_DATA_QUERIES + 1));
+  });
+
+  it("rejects malformed data requests and advertises dataApi only with a complete consent surface", async () => {
+    const api = dataApi();
+    const { query, bridge, messages } = dataHarness(["host.data:read"], api);
+    expect(await query("no-sql", { connectionId: "conn-1" })).toMatchObject({ error: "host.queryData requires sql" });
+    expect(await query("blank-sql", { connectionId: "conn-1", sql: "  " })).toMatchObject({ error: "host.queryData requires a non-empty sql" });
+    expect(await query("no-connection", { sql: "SELECT 1" })).toMatchObject({ error: "connectionId must be a string" });
+    expect(await query("huge-sql", { connectionId: "conn-1", sql: "x".repeat(100_001) })).toMatchObject({ error: "sql must be at most 100000 characters" });
+    expect(api.queryData).not.toHaveBeenCalled();
+
+    bridge.sendInit();
+    const init = messages.find((message) => (message as { type?: string }).type === "init") as { capabilities?: Record<string, boolean> };
+    expect(init.capabilities?.dataApi).toBe(true);
+
+    const partial = dataHarness(["host.data:read"], dataApi({ grantDataAccess: undefined }));
+    partial.bridge.sendInit();
+    const partialInit = partial.messages.find((message) => (message as { type?: string }).type === "init") as { capabilities?: Record<string, boolean> };
+    expect(partialInit.capabilities?.dataApi).toBe(false);
+  });
+
+  it("denies clipboard reads on hosts without a consent surface and rate-limits repeated reads", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // No consent surface: deny rather than silently allow (option-a hardening).
+    const noSurface = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead: vi.fn().mockResolvedValue("secret"),
+    });
+    send(noSurface, "no-surface", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "no-surface")).toBe(true));
+    const noSurfaceById = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(noSurfaceById.get("no-surface")).toMatchObject({ error: "Clipboard read was denied for this plugin session" });
+
+    // Rate gate: two back-to-back reads — the second is refused with a retry hint
+    // and recorded as rate-limited without touching the clipboard.
+    const clipboardRead = vi.fn().mockResolvedValue("text");
+    const readBridge = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(readBridge, "rate-1", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "rate-1" && (message as { result?: unknown }).result).valueOf()).toBe(true));
+    send(readBridge, "rate-2", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "rate-2")).toBe(true));
+    const rateById = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(String((rateById.get("rate-2") as { error?: string }).error)).toContain("rate limit");
+    expect(readBridge.clipboardAudit.map((entry) => entry.outcome)).toEqual(["granted", "rate-limited"]);
+    expect(clipboardRead).toHaveBeenCalledTimes(1);
+  });
+
+  it("caps the clipboard read audit trail and exposes the pure rate helpers", () => {
+    expect(PLUGIN_CLIPBOARD_AUDIT_CAPACITY).toBeLessThanOrEqual(500);
+    const gate = createClipboardReadGate();
+    for (let index = 0; index < PLUGIN_CLIPBOARD_AUDIT_CAPACITY + 20; index += 1) {
+      recordClipboardRead(gate, index * 10_000, "granted", index);
+    }
+    expect(gate.audit).toHaveLength(PLUGIN_CLIPBOARD_AUDIT_CAPACITY);
+    expect(gate.audit[0].length).toBe(20);
+    // Exactly one read per min interval passes; within the window the gate refuses.
+    expect(clipboardReadGateAllows(gate, gate.audit[PLUGIN_CLIPBOARD_AUDIT_CAPACITY - 1].at + 999)).toBe(false);
+    expect(clipboardReadGateAllows(gate, gate.audit[PLUGIN_CLIPBOARD_AUDIT_CAPACITY - 1].at + 1_000)).toBe(true);
+    // A fresh gate (never read) always allows the first read.
+    expect(clipboardReadGateAllows(createClipboardReadGate(), 0)).toBe(true);
+  });
+
+  it("exposes clipboard image reads and plugin media URLs in the sandbox SDK", () => {
+    const source = pluginSdkSource();
+    expect(source).toContain("clipboard: Object.freeze({");
+    expect(source).toContain("writeText: (text) => request('host.copy', { text })");
+    expect(source).toContain("request('host.clipboardRead')");
+    expect(source).toContain("readImage: async () => request('host.clipboardReadImage')");
+    expect(source).toContain("request('host.mediaOpen', { method, params })");
+    expect(source).toContain("request('host.mediaClose', { token })");
+  });
+
   it("routes host.storage through the owning plugin, caps values, and needs the declared permission", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
@@ -1033,10 +1667,16 @@ describe("PluginHostBridge", () => {
 describe("plugin SDK source", () => {
   interface SdkWindow {
     dbxPlugin?: {
+      ready: Promise<unknown>;
+      contributionId?: string;
+      context?: Record<string, unknown>;
+      onInit: (listener: (context: unknown) => void) => () => void;
       invoke: (method: string, params?: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
       getPlanCapabilities: (connectionId: string) => Promise<unknown>;
       explainPlan: (request: unknown) => Promise<unknown>;
+      getTableMetadata: (context: unknown) => Promise<unknown>;
     };
+    receiveHostMessage: (message: unknown) => void;
   }
 
   function loadSdk(posted: unknown[], initialTheme?: { appearance: "dark" | "light"; tokens: Record<string, string> }): SdkWindow {
@@ -1048,10 +1688,19 @@ describe("plugin SDK source", () => {
       },
       dispatchEvent: vi.fn(),
     } as unknown as Document;
+    let onMessage: ((event: MessageEvent) => void) | undefined;
+    const parent = { postMessage: (message: unknown) => posted.push(message) };
+    const addEventListener = (type: string, listener: (event: MessageEvent) => void) => {
+      if (type === "message") onMessage = listener;
+    };
     // The SDK IIFE only touches window and the bare-global addEventListener at
     // boot; parent.postMessage is captured for later request() calls, so a
     // stub window/parent is enough here.
-    new Function("window", "parent", "addEventListener", "document", pluginSdkSource(initialTheme))(sandbox, { postMessage: (message: unknown) => posted.push(message) }, () => {}, document);
+    new Function("window", "parent", "addEventListener", "document", pluginSdkSource(initialTheme))(sandbox, parent, addEventListener, document);
+    sandbox.receiveHostMessage = (message) => {
+      if (!onMessage) throw new Error("SDK did not register its host-message listener");
+      onMessage({ source: parent, data: message } as unknown as MessageEvent);
+    };
     return sandbox;
   }
 
@@ -1091,6 +1740,51 @@ describe("plugin SDK source", () => {
     expect(posted[0]).toMatchObject({ source: "dbx-plugin", type: "ready" });
   });
 
+  it("exposes the opened contribution after ready when init was already delivered and context is empty", async () => {
+    const sdkMessages: unknown[] = [];
+    const hostMessages: unknown[] = [];
+    const sdk = loadSdk(sdkMessages);
+    const probe: PluginWorkbenchContribution = { type: "workbench", id: "sample.probe", label: "Probe" };
+    const generation: PluginWorkbenchContribution = { type: "workbench", id: "sample.generation", label: "Generation" };
+    const target = { postMessage: (message: unknown) => hostMessages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin([], [probe, generation]), generation, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+
+    bridge.sendInit();
+    const init = hostMessages[0] as Record<string, unknown>;
+    expect(init).toMatchObject({ type: "init", contributionId: "sample.generation", context: {} });
+    sdk.receiveHostMessage(init);
+
+    await sdk.dbxPlugin!.ready;
+
+    expect(sdk.dbxPlugin!.contributionId).toBe("sample.generation");
+    expect(sdk.dbxPlugin!.contributionId).not.toBe(probe.id);
+    expect(sdk.dbxPlugin!.context).toEqual({});
+    const lateInit = vi.fn();
+    sdk.dbxPlugin!.onInit(lateInit);
+    expect(lateInit).toHaveBeenCalledWith({});
+  });
+
+  it("sets contribution identity independently of table context before ready and onInit", async () => {
+    const sdk = loadSdk([]);
+    const hostMessages: unknown[] = [];
+    const tableContext = { connectionId: "connection-1", database: "app", schema: "public", table: "orders" };
+    const generation: PluginWorkbenchContribution = { type: "workbench", id: "sample.generation", label: "Generation" };
+    const target = { postMessage: (message: unknown) => hostMessages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin([], [generation]), generation, tableContext, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    let observed: { context: unknown; contributionId?: string } | undefined;
+    sdk.dbxPlugin!.onInit((context) => {
+      observed = { context, contributionId: sdk.dbxPlugin!.contributionId };
+    });
+
+    bridge.sendInit();
+    sdk.receiveHostMessage(hostMessages[0]);
+    await sdk.dbxPlugin!.ready;
+
+    expect(observed).toEqual({ context: tableContext, contributionId: "sample.generation" });
+    expect(sdk.dbxPlugin!.context).toEqual(tableContext);
+    expect(sdk.dbxPlugin!.contributionId).toBe("sample.generation");
+  });
+
   it("keeps cloneable values intact and plain scalars by reference", () => {
     const posted: unknown[] = [];
     const { dbxPlugin } = loadSdk(posted);
@@ -1121,6 +1815,17 @@ describe("plugin SDK source", () => {
     // The SDK forwards the mode verbatim: defaulting it would let a plugin reach
     // a plan mode it never asked for.
     expect(requests[1].params).toEqual({ connectionId: "c1", sql: "SELECT 1", mode: "estimated" });
+  });
+
+  it("exposes read-only table metadata through the SDK request surface", () => {
+    const posted: unknown[] = [];
+    const { dbxPlugin } = loadSdk(posted);
+
+    void dbxPlugin!.getTableMetadata({ connectionId: "c1", database: "app", table: "users" });
+
+    const request = firstRequest(posted);
+    expect(request.method).toBe("host.getTableMetadata");
+    expect(request.params).toEqual({ connectionId: "c1", database: "app", table: "users" });
   });
 
   it("forwards fileTransfer requests to the host api", async () => {
@@ -1195,5 +1900,214 @@ describe("plugin SDK source", () => {
     expect(source).toContain("onDragState");
     expect(source).toContain("type === 'filedrop'");
     expect(source).toContain("type === 'dragstate'");
+  });
+
+  it("sdk wires the workbench/close handshake: onClose listeners, ack and ready feature flag", () => {
+    const source = pluginSdkSource();
+    expect(source).toContain("workbench.close");
+    expect(source).toContain("onClose");
+    expect(source).toContain("type === 'workbench/close'");
+    expect(source).toContain("'workbench/close-ack'");
+  });
+
+  it("requestWorkbenchClose posts the close message and resolves true on the plugin ack", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, { workbenchId: "wb-1" }, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    // The new SDK advertises the handshake on ready.
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready", features: ["workbench.close"] } } as MessageEvent);
+
+    const pending = bridge.requestWorkbenchClose(200);
+    expect(messages.some((message) => message.type === "workbench/close" && message.workbenchId === "wb-1")).toBe(true);
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "workbench/close-ack", workbenchId: "wb-1" } } as MessageEvent);
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it("requestWorkbenchClose resolves false after the deadline when the plugin never acks", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready", features: ["workbench.close"] } } as MessageEvent);
+
+    await expect(bridge.requestWorkbenchClose(5)).resolves.toBe(false);
+    // A late ack after the deadline is ignored and must not throw.
+    expect(() => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "workbench/close-ack" } } as MessageEvent)).not.toThrow();
+  });
+
+  it("requestWorkbenchClose skips the wait for SDKs without the handshake feature", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready" } } as MessageEvent);
+
+    await expect(bridge.requestWorkbenchClose(5000)).resolves.toBe(false);
+    expect(messages.some((message) => message.type === "workbench/close")).toBe(true);
+  });
+});
+
+describe("AI completion bridge", () => {
+  it("gates permission, bounds input, strips metadata and binds plugin identity", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const api = { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), listAiModels: vi.fn().mockResolvedValue([{ configId: "one", name: "AI", model: "a", isDefault: true, apiKey: "secret" }]), generateAiText: vi.fn().mockResolvedValue("fix: example") };
+    let bridge = new PluginHostBridge(plugin([]), workbench, {}, () => target, api);
+    const request = async (method: string, params: unknown = {}) => {
+      const count = messages.length;
+      bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: String(count), method, params } } as MessageEvent);
+      await vi.waitFor(() => expect(messages.length).toBe(count + 1));
+      return messages[count];
+    };
+    expect((await request("host.ai.listModels")).error).toContain("host.ai");
+    expect((await request("host.ai.generateText")).error).toContain("host.ai");
+    bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, api);
+    expect((await request("host.ai.listModels")).result).toEqual([{ configId: "one", name: "AI", model: "a", isDefault: true }]);
+    expect((await request("host.ai.generateText", { configId: "one", model: "a", prompt: "x".repeat(100001) })).error).toContain("Invalid");
+    expect(api.generateAiText).not.toHaveBeenCalled();
+    expect((await request("host.ai.generateText", { pluginName: "forged", configId: "one", model: "a", prompt: "hi" })).result).toBe("fix: example");
+    expect(api.generateAiText).toHaveBeenCalledWith("Sample", { configId: "one", model: "a", prompt: "hi" });
+  });
+  it("validates the host-owned task enum and forwards known presets only", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const generateAiText = vi.fn().mockResolvedValue("ls -la");
+    const bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), generateAiText });
+    const request = async (params: unknown) => {
+      const count = messages.length;
+      bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: String(count), method: "host.ai.generateText", params } } as MessageEvent);
+      await vi.waitFor(() => expect(messages.length).toBe(count + 1));
+      return messages[count];
+    };
+    expect((await request({ configId: "one", model: "a", prompt: "hi", task: "system prompt injection" })).error).toContain("Invalid AI task");
+    expect(generateAiText).not.toHaveBeenCalled();
+    expect((await request({ configId: "one", model: "a", prompt: "hi", task: 42 })).error).toContain("Invalid AI task");
+    expect((await request({ configId: "one", model: "a", prompt: "hi", task: "command-generation" })).result).toBe("ls -la");
+    expect(generateAiText).toHaveBeenCalledWith("Sample", { configId: "one", model: "a", prompt: "hi", task: "command-generation" });
+    // Absent/null task keeps the exact legacy call shape.
+    generateAiText.mockClear();
+    expect((await request({ configId: "one", model: "a", prompt: "hi" })).result).toBe("ls -la");
+    expect(generateAiText).toHaveBeenCalledWith("Sample", { configId: "one", model: "a", prompt: "hi" });
+    expect((await request({ configId: "one", model: "a", prompt: "hi", task: null })).result).toBe("ls -la");
+    expect(generateAiText).toHaveBeenLastCalledWith("Sample", { configId: "one", model: "a", prompt: "hi" });
+  });
+  it("streams generations as requestId-scoped chunk events and resolves with the full text", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    let pushChunk!: (delta: string, done: boolean) => void;
+    let settle!: () => void;
+    const generateAiTextStream = vi.fn((_pluginName: string, _request: unknown, onChunk: (chunk: { delta: string; done: boolean }) => void) => {
+      pushChunk = (delta, done) => onChunk({ delta, done });
+      return new Promise<string>((resolve) => {
+        settle = () => resolve("ls -la");
+      });
+    });
+    const bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), generateAiTextStream, cancelAiGeneration: vi.fn().mockResolvedValue(true) });
+    const send = (id: string, method: string, params: unknown) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method, params } } as MessageEvent);
+    const waitResponse = async (id: string) => {
+      await vi.waitFor(() => expect(messages.some((message) => message.type === "response" && message.id === id)).toBe(true));
+      return messages.find((message) => message.type === "response" && message.id === id);
+    };
+    bridge.sendInit();
+    expect(messages[0].capabilities.aiCompletionStream).toBe(true);
+    send("open", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "list files", requestId: "gen-1", task: "command-generation" });
+    await vi.waitFor(() => expect(generateAiTextStream).toHaveBeenCalledOnce());
+    expect(generateAiTextStream.mock.calls[0][0]).toBe("Sample");
+    expect(generateAiTextStream.mock.calls[0][1]).toMatchObject({ configId: "one", model: "a", prompt: "list files", requestId: "gen-1", task: "command-generation" });
+    pushChunk("ls ", false);
+    pushChunk("-la", false);
+    await vi.waitFor(() => expect(messages.filter((message) => message.type === "event" && message.method === "host.ai.generationChunk")).toHaveLength(2));
+    expect(messages.filter((message) => message.method === "host.ai.generationChunk").map((message) => message.params)).toEqual([
+      { requestId: "gen-1", delta: "ls ", done: false },
+      { requestId: "gen-1", delta: "-la", done: false },
+    ]);
+    send("cancel", "host.ai.cancelGeneration", { requestId: "gen-1" });
+    await waitResponse("cancel");
+    expect(messages.find((message) => message.id === "cancel").result).toEqual({ cancelled: true });
+    // The completion emits the final done chunk before its promise resolves.
+    pushChunk("", true);
+    settle();
+    expect((await waitResponse("open")).result).toBe("ls -la");
+    // A finished stream is no longer cancellable and unknown ids answer false.
+    send("late", "host.ai.cancelGeneration", { requestId: "gen-1" });
+    await waitResponse("late");
+    expect(messages.find((message) => message.id === "late").result).toEqual({ cancelled: false });
+  });
+  it("gates streaming, validates requestId and task, and keeps the capability honest", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const baseApi = () => ({ invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    const generateAiTextStream = vi.fn().mockResolvedValue("done");
+    const cancelAiGeneration = vi.fn().mockResolvedValue(true);
+    // Without both stream and cancel the capability stays off and the call is refused.
+    let bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, { ...baseApi(), generateAiTextStream });
+    const send = (b: PluginHostBridge, id: string, method: string, params: unknown) => b.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method, params } } as MessageEvent);
+    const waitResponse = async (id: string) => {
+      await vi.waitFor(() => expect(messages.some((message) => message.type === "response" && message.id === id)).toBe(true));
+      return messages.find((message) => message.type === "response" && message.id === id);
+    };
+    bridge.sendInit();
+    expect(messages[messages.length - 1].capabilities.aiCompletionStream).toBe(false);
+    send(bridge, "half", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "hi", requestId: "gen-0" });
+    expect((await waitResponse("half")).error).toContain("unavailable");
+    // With both methods the capability is advertised, but permission, requestId
+    // and the task enum are still enforced.
+    bridge = new PluginHostBridge(plugin([]), workbench, {}, () => target, { ...baseApi(), generateAiTextStream, cancelAiGeneration });
+    send(bridge, "gate", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "hi", requestId: "gen-1" });
+    expect((await waitResponse("gate")).error).toContain("host.ai");
+    bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, { ...baseApi(), generateAiTextStream, cancelAiGeneration });
+    send(bridge, "missing-id", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "hi" });
+    expect((await waitResponse("missing-id")).error).toContain("AI requestId");
+    send(bridge, "bad-task", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "hi", requestId: "gen-2", task: "injected" });
+    expect((await waitResponse("bad-task")).error).toContain("Invalid AI task");
+    send(bridge, "ok", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "hi", requestId: "gen-2" });
+    expect((await waitResponse("ok")).result).toBe("done");
+    expect(generateAiTextStream).toHaveBeenCalledOnce();
+    expect(generateAiTextStream.mock.calls[0][1]).toMatchObject({ requestId: "gen-2" });
+  });
+  it("cancels only its own active streams and stops forwarding after cancellation", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    let pushChunk!: (delta: string, done: boolean) => void;
+    const generateAiTextStream = vi.fn((_pluginName: string, _request: unknown, onChunk: (chunk: { delta: string; done: boolean }) => void) => {
+      pushChunk = (delta, done) => onChunk({ delta, done });
+      return new Promise<string>(() => undefined);
+    });
+    const cancelAiGeneration = vi.fn().mockResolvedValue(true);
+    const bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), generateAiTextStream, cancelAiGeneration });
+    const send = (id: string, method: string, params: unknown) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method, params } } as MessageEvent);
+    const waitResponse = async (id: string) => {
+      await vi.waitFor(() => expect(messages.some((message) => message.type === "response" && message.id === id)).toBe(true));
+      return messages.find((message) => message.type === "response" && message.id === id);
+    };
+    send("open", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "hi", requestId: "gen-1" });
+    await vi.waitFor(() => expect(generateAiTextStream).toHaveBeenCalledOnce());
+    // A request from another workbench (never registered here) cannot cancel.
+    send("foreign", "host.ai.cancelGeneration", { requestId: "someone-else" });
+    await waitResponse("foreign");
+    expect(cancelAiGeneration).not.toHaveBeenCalled();
+    expect(messages.find((message) => message.id === "foreign").result).toEqual({ cancelled: false });
+    send("cancel", "host.ai.cancelGeneration", { requestId: "gen-1" });
+    await waitResponse("cancel");
+    expect(cancelAiGeneration).toHaveBeenCalledWith("gen-1");
+    expect(messages.find((message) => message.id === "cancel").result).toEqual({ cancelled: true });
+    // Chunks after cancellation are no longer forwarded.
+    pushChunk("late", false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(messages.some((message) => message.method === "host.ai.generationChunk" && message.params.delta === "late")).toBe(false);
+  });
+  it("cancels active streams when the workbench is disposed", async () => {
+    const target = { postMessage: vi.fn() } as unknown as Window;
+    const cancelAiGeneration = vi.fn().mockResolvedValue(true);
+    const bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      generateAiTextStream: vi.fn(() => new Promise<string>(() => undefined)),
+      cancelAiGeneration,
+    });
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: "open", method: "host.ai.generateTextStream", params: { configId: "one", model: "a", prompt: "hi", requestId: "gen-1" } } } as MessageEvent);
+    await vi.waitFor(() => expect(cancelAiGeneration.mock.calls.length).toBeGreaterThanOrEqual(0));
+    bridge.dispose();
+    expect(cancelAiGeneration).toHaveBeenCalledWith("gen-1");
   });
 });

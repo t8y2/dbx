@@ -1,19 +1,29 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import type { SqlExportOptions, SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import type { SqlExportColumnSelection, SqlExportOptions, SqlInsertMode } from "@/lib/export/sqlInsertMode";
 
 const { t } = useI18n();
 const open = defineModel<boolean>("open", { default: false });
-const props = defineProps<{ allowSplit?: boolean }>();
+const props = defineProps<{ allowSplit?: boolean; columns?: SqlExportColumnSelection[] }>();
 const selected = ref<SqlInsertMode>("batch");
+const selectedColumnIndexes = ref(props.columns?.map((column) => column.sourceIndex) ?? []);
 const splitSqlOutput = ref(false);
 const splitSqlPartMaxMb = ref(100);
 const MIN_SPLIT_SQL_PART_MB = 1;
 const MAX_SPLIT_SQL_PART_MB = 4096;
 let outcomeEmitted = false;
+const columnSelectionEnabled = computed(() => props.columns !== undefined);
+const selectedColumnSet = computed(() => new Set(selectedColumnIndexes.value));
+const selectedColumns = computed(() => props.columns?.filter((column) => selectedColumnSet.value.has(column.sourceIndex)) ?? []);
+const canConfirm = computed(() => !columnSelectionEnabled.value || selectedColumns.value.length > 0);
+const duplicateColumnNames = computed(() => {
+  const counts = new Map<string, number>();
+  for (const column of props.columns ?? []) counts.set(column.name, (counts.get(column.name) ?? 0) + 1);
+  return new Set([...counts].flatMap(([name, count]) => (count > 1 ? [name] : [])));
+});
 
 const emit = defineEmits<{
   confirm: [options: SqlExportOptions];
@@ -27,12 +37,22 @@ function normalizedSplitSqlPartMaxMb(): number {
 }
 
 function onConfirm() {
+  if (!canConfirm.value) return;
   outcomeEmitted = true;
   open.value = false;
   emit("confirm", {
     insertMode: selected.value,
     splitMaxMb: props.allowSplit && splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
+    ...(columnSelectionEnabled.value ? { selectedColumns: selectedColumns.value } : {}),
   });
+}
+
+function selectAllColumns() {
+  selectedColumnIndexes.value = props.columns?.map((column) => column.sourceIndex) ?? [];
+}
+
+function clearColumns() {
+  selectedColumnIndexes.value = [];
 }
 
 function onCancel() {
@@ -69,6 +89,27 @@ function onOpenChange(value: boolean) {
             <span class="mt-1 block text-xs text-muted-foreground">{{ t("grid.sqlInsertModeSingleDescription") }}</span>
           </span>
         </label>
+        <div v-if="columnSelectionEnabled" class="space-y-2 rounded-md border p-3" data-sql-export-columns>
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <p class="text-sm font-medium">{{ t("databaseExport.sqlColumnSelection") }}</p>
+              <p class="text-xs text-muted-foreground">{{ t("databaseExport.selectedColumns", { selected: selectedColumns.length, total: props.columns?.length ?? 0 }) }}</p>
+            </div>
+            <div class="flex gap-2">
+              <Button type="button" variant="ghost" size="sm" data-sql-export-select-all @click="selectAllColumns">{{ t("databaseExport.selectAllColumns") }}</Button>
+              <Button type="button" variant="ghost" size="sm" data-sql-export-clear @click="clearColumns">{{ t("databaseExport.clearColumns") }}</Button>
+            </div>
+          </div>
+          <div class="max-h-48 space-y-1 overflow-y-auto rounded border p-2">
+            <label v-for="column in props.columns" :key="column.sourceIndex" class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm hover:bg-accent/50">
+              <input v-model="selectedColumnIndexes" type="checkbox" :value="column.sourceIndex" class="h-4 w-4" :data-sql-export-column="column.sourceIndex" />
+              <span class="truncate"
+                >{{ column.name }}<span v-if="duplicateColumnNames.has(column.name)" class="text-muted-foreground"> #{{ column.nameOccurrence + 1 }}</span></span
+              >
+            </label>
+          </div>
+          <p v-if="!canConfirm" role="alert" class="text-xs text-destructive" data-sql-export-column-error>{{ t("databaseExport.selectAtLeastOneColumn") }}</p>
+        </div>
         <div v-if="props.allowSplit" class="space-y-2 rounded-md border p-3">
           <label class="flex cursor-pointer items-center gap-2 text-sm">
             <input v-model="splitSqlOutput" type="checkbox" class="h-4 w-4" data-sql-split-output />
@@ -85,7 +126,7 @@ function onOpenChange(value: boolean) {
       </div>
       <DialogFooter>
         <Button variant="outline" @click="onCancel">{{ t("common.cancel") }}</Button>
-        <Button data-sql-insert-mode-confirm @click="onConfirm">{{ t("common.confirm") }}</Button>
+        <Button :disabled="!canConfirm" data-sql-insert-mode-confirm @click="onConfirm">{{ t("common.confirm") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

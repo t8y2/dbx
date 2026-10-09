@@ -95,6 +95,8 @@ export interface DataCompareFromTablesPreparation extends DataComparePreparation
   targetRowCount: number;
   sourceTruncated: boolean;
   targetTruncated: boolean;
+  /** Rows per side this compare was allowed to read; fewer than `sourceRowCount`/`targetRowCount` when truncated. */
+  rowBudget: number;
 }
 
 export interface DataCompareSyncPlanTableOptions {

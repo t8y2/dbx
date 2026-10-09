@@ -46,6 +46,12 @@ public final class KafkaAgent {
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30_000;
     private static final int DEFAULT_ZOOKEEPER_CONNECTION_TIMEOUT_MS = 10_000;
     private static final String ZOOKEEPER_PROPERTY_PREFIX = "zookeeper.";
+    private static final Set<String> SASL_MECHANISMS_WITHOUT_SERVER_NAME = Set.of(
+        "PLAIN",
+        "SCRAM-SHA-256",
+        "SCRAM-SHA-512",
+        "OAUTHBEARER"
+    );
     private static final Set<String> KERBEROS_SYSTEM_PROPERTY_KEYS = Set.of(
         "java.security.krb5.conf",
         "sun.security.krb5.debug",
@@ -134,8 +140,17 @@ public final class KafkaAgent {
             case "handshake" -> handshakeResult();
             case "connect" -> connect(params);
             case "test_connection" -> testConnection(params);
-            case "disconnect" -> { closeClients(); yield Collections.singletonMap("ok", true); }
-            case "shutdown" -> { closeClients(); shutdownRequested = true; yield Collections.singletonMap("ok", true); }
+            case "disconnect" -> {
+                closeClients();
+                DbxInetAddressResolverProvider.setAvoidReverseDns(false);
+                yield Collections.singletonMap("ok", true);
+            }
+            case "shutdown" -> {
+                closeClients();
+                DbxInetAddressResolverProvider.setAvoidReverseDns(false);
+                shutdownRequested = true;
+                yield Collections.singletonMap("ok", true);
+            }
             // Topic management
             case "mq_list_topics" -> listTopics(params);
             case "mq_create_topic" -> createTopic(params);
@@ -175,6 +190,9 @@ public final class KafkaAgent {
 
     private static Object connect(JsonObject params) throws Exception {
         JsonObject conn = resolveBrokerConnection(connectionObject(params));
+        boolean previousReverseDnsMode = DbxInetAddressResolverProvider.setAvoidReverseDns(
+            shouldAvoidSaslReverseDns(conn)
+        );
         Map<String, String> previousKerberosSystemProperties = applyKerberosSystemProperties(conn);
         AdminClient nextAdmin = null;
         KafkaProducer<String, byte[]> nextProducer = null;
@@ -198,12 +216,16 @@ public final class KafkaAgent {
                 nextProducer.close(Duration.ofSeconds(5));
             }
             restoreKerberosSystemProperties(previousKerberosSystemProperties);
+            DbxInetAddressResolverProvider.setAvoidReverseDns(previousReverseDnsMode);
             throw e;
         }
     }
 
     private static Object testConnection(JsonObject params) throws Exception {
         JsonObject conn = resolveBrokerConnection(connectionObject(params));
+        boolean previousReverseDnsMode = DbxInetAddressResolverProvider.setAvoidReverseDns(
+            shouldAvoidSaslReverseDns(conn)
+        );
         Map<String, String> previousKerberosSystemProperties = applyKerberosSystemProperties(conn);
         AdminClient probe = null;
         try {
@@ -244,6 +266,7 @@ public final class KafkaAgent {
                 probe.close(Duration.ofSeconds(5));
             }
             restoreKerberosSystemProperties(previousKerberosSystemProperties);
+            DbxInetAddressResolverProvider.setAvoidReverseDns(previousReverseDnsMode);
         }
     }
 
@@ -468,6 +491,25 @@ public final class KafkaAgent {
         String protocol = stringOrEmpty(conn, "security_protocol");
         if (protocol.isBlank()) protocol = stringOrEmpty(conn, "securityProtocol");
         return protocol.isBlank() ? "PLAINTEXT" : protocol;
+    }
+
+    static boolean shouldAvoidSaslReverseDns(JsonObject conn) {
+        JsonObject properties = connectionProperties(conn);
+        String configuredProtocol = stringProperty(properties, "security.protocol");
+        String protocol = configuredProtocol == null || configuredProtocol.isBlank()
+            ? securityProtocol(conn)
+            : configuredProtocol;
+        if (!protocol.trim().toUpperCase(Locale.ROOT).startsWith("SASL_")) {
+            return false;
+        }
+
+        String mechanism = stringOrEmpty(conn, "sasl_mechanism");
+        if (mechanism.isBlank()) mechanism = stringOrEmpty(conn, "saslMechanism");
+        String configuredMechanism = stringProperty(properties, "sasl.mechanism");
+        if (configuredMechanism != null && !configuredMechanism.isBlank()) {
+            mechanism = configuredMechanism;
+        }
+        return SASL_MECHANISMS_WITHOUT_SERVER_NAME.contains(mechanism.trim().toUpperCase(Locale.ROOT));
     }
 
     static void applySecurityProperties(JsonObject conn, Properties props) {

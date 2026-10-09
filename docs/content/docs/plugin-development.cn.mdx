@@ -13,6 +13,24 @@ DBX 插件是独立安装的 `.dbxp` 包，可以提供连接类型、工作台�
   **插件上架 Pull Request 提交到 [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store)，不是 `t8y2/dbx`。** 插件自己的功能代码通常保留在开发者自己的源码仓库；只有修改 DBX Host、SDK、CLI、协议、Schema、文档或官方示例时，才向 [`t8y2/dbx`](https://github.com/t8y2/dbx) 提交 PR。
 </Callout>
 
+## 插件快捷入口
+
+在 **插件中心 → 设置 → 全局配置** 中管理快捷入口。默认开启并显示在右侧顶部；可选择左侧或右侧的顶部/底部优先、连接树底部，或更新按钮左侧的浮动栏。浮动栏默认显示 3 个图标，可设置 0–10 个，空间不足的入口放入下拉菜单，以图标和名称逐行显示。
+
+连接树底部区域的「插件」标题栏右上角默认提供「插件设置」入口，其他显示位置则将该入口固定在末尾，点击直达插件中心的设置页，不参与拖动排序。浮动栏溢出时，该入口位于下拉菜单末尾。在「全局配置」中关闭「显示“插件设置”快捷入口」可隐藏它；仍可从插件中心的「设置」页重新开启。没有可显示的插件快捷入口时，整个快捷区域（包括设置入口）隐藏，不占用布局空间。
+
+每个功能有独立图标，可以拖动排序；显示开关按插件生效，关闭后隐藏该插件的所有入口。所有位置共用保存的顺序。隐藏或卸载不会删除已有排序记录，重新出现的相同入口恢复原位置，未记录的入口排列在已保存入口之后。排序标识由插件 ID、入口类型和功能 ID 组成，修改这些 ID 会被视为新入口。
+
+拖动预览跟随光标，靠近窗口边缘时自动调整方向和位置；右侧停靠优先显示在光标左侧，长名称会根据可用宽度省略显示。
+
+选择「插件中心右侧（下拉）」可通过插件中心按钮旁的箭头展开全部快捷入口，每行显示图标和名称，支持拖动排序；该位置不受浮动栏显示数量限制。
+
+连接树底部采用左侧图标、右侧名称的单列列表，行样式和字号与连接树一致。默认按入口数量显示所需行数，最多五行，超出后竖向滚动。拖动分隔线可保存自定义高度，双击恢复自动高度。拖动图标时按 Esc、切换窗口或在区域外释放会取消排序；保存失败会提示并回滚。
+
+快捷入口保留 `appToolbar` 声明的可见条件及命令执行条件。无连接类型的插件还可从快捷栏打开已有工作台；有对应命令时优先执行命令，没有命令体系的旧式插件也可显示文件浏览入口。连接型插件只显示明确声明的全局命令，不自动生成缺少连接上下文的工作台入口。不兼容插件不展示。
+
+显示位置只决定图标位置，内容继续按原有 `panel/tab` 语义打开。隐藏快捷栏、切换位置或隐藏插件均不会关闭已打开的会话。面板快捷入口仅切换当前选中且匹配的命令面板，恢复时保留该实例。无需修改插件 Manifest 或后端协议；旧 `left/right` 设置迁移为对应侧顶部优先。
+
 ## 应该提交到哪个仓库
 
 | 你要修改的内容 | 提交位置 | 是否向 DBX 官方提 PR |
@@ -49,7 +67,7 @@ my-plugin/
 
 ## Manifest 完整说明
 
-`manifest.json` 是运行时契约，文件名必须位于插件包根目录。Manifest v1 不接受未声明字段，建议在编辑器中引用仓库内的 [`plugins/manifest.schema.json`](https://github.com/t8y2/dbx/blob/main/plugins/manifest.schema.json)。最小的纯前端 Manifest 如下：
+`manifest.json` 是运行时契约，文件必须位于插件包根目录。Manifest v1 不接受未声明字段，建议在编辑器中引用仓库内的 [`plugins/manifest.schema.json`](https://github.com/t8y2/dbx/blob/main/plugins/manifest.schema.json)。最小的纯前端 Manifest 如下：
 
 ```json
 {
@@ -89,7 +107,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 | `engines` | 是 | 运行时兼容范围，至少包含 `host_api`。 |
 | `permissions` | 否 | 最小权限集合，见下文。 |
 | `entrypoints` | 否 | UI 和原生 Sidecar 入口；贡献点存在时按需声明。 |
-| `contributions` | 否 | 连接、工作台、文件系统、连接右键菜单和结果视图声明。 |
+| `contributions` | 否 | 连接、工作台、文件系统、连接右键菜单、结果视图、命令/菜单和 MCP 工具面声明。 |
 | `localizations` | 否 | 按 locale 覆盖名称、说明、贡献点、字段和动作文案。 |
 
 ### `engines`、权限和入口
@@ -103,7 +121,10 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
     "host.filesystem",
     "host.binary",
     "host.plans:read",
+    "host.schema:read",
     "host.storage",
+    "host.clipboard:read",
+    "host.data:read",
     "host.network:https://s3.example.com:443"
   ],
   "entrypoints": {
@@ -120,8 +141,11 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 - `engines.dbx` 是可选的 DBX 版本范围；`engines.host_api` 是必需的 Host API 版本声明。
 - `host.workbench` 允许打开另一个工作台，`host.events` 接收宿主事件，`host.binary` 使用二进制通道，`host.filesystem` 使用文件系统入口。
 - `host.plans:read` 允许针对 DBX 自己的连接读取估算执行计划（见 [估算执行计划](#估算执行计划)）。它是只读权限：不授予普通 SQL 执行、写操作、DDL 或真实执行计划，且这是唯一存在的计划类权限。
-- `host.storage` 为工作台 UI 提供本插件独享的持久化键值存储（见 [持久化 UI 状态](#持久化-ui-状态)）；数据只落在插件自己的数据目录里。
-- `host.ai` 允许插件在 DBX 内置 AI 面板中新建带数据快照的对话，沿用宿主的模型选择、历史、追问、停止和导出功能。旧版 DBX 会在安装时因未知权限而失败，需要兼容旧宿主的插件应把 `host.ai` 作为可选能力。
+- `host.schema:read` 允许通过 `host.getTableMetadata` 读取已打开连接的窄化 table schema metadata；它不会授予任意 SQL、写入或隐式重连（见 [Table Schema Metadata](#table-schema-metadata)）。
+- `host.storage` 为工作台 UI 提供本插件独享的持久化键值存储（见 [持久化 UI 状态](#持久化-ui-状态)）；数据只落在插件自己的插件数据目录里。
+- `host.ai` 允许插件接入 DBX 全局 AI 面板：可以打开 Ask 快照对话、选择性打开使用实时插件工具的 Agent 对话，以及注册当前工作台的推荐问题。旧版 DBX 会在安装时因未知权限而失败，需要兼容旧宿主的插件应把 `host.ai` 作为可选能力，并通过 `capabilities.ai` / `capabilities.aiRecommendations` 判断运行时支持。
+- `host.clipboard:read` 允许工作台 UI 读取系统剪贴板（见 [系统剪贴板](#系统剪贴板)）。写剪贴板不需要权限；读取会把用户数据（密码、令牌）交给插件代码，因此需要门控。
+- `host.data:read` 允许 `window.dbxPlugin.queryData` 在用户授权给插件的连接上执行一条只读 SQL（见 [只读数据查询](#只读数据查询)）。每个连接都需要用户同意；它不会授予写入、DDL 或重连。
 - `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 8 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
 - `backend.transport` 默认是 `stdio-jsonl`；需要二进制帧时使用 `stdio-framed`，并同时声明 `host.binary`。
 - `backend.executable`、`ui.root` 和 `ui.entry` 必须指向包内文件；带原生后端的包必须为每个目标平台提供对应可执行文件。
@@ -214,10 +238,10 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 | --- | --- | --- |
 | `workbench` | `type`, `id`, `label` | 注册可从侧边栏或插件入口打开的工作台。 |
 | `filesystem-provider` | `type`, `id`, `label`, `schemes` | 注册虚拟文件系统；`root_uri` 例如 `s3://bucket`，能力可选 `read`、`write`、`delete`、`rename`、`mkdir`。 |
-| `context-menu` | `type`、`id`、`label`、`menu: "connection"` 或 `"table"` | 向 Sidebar Tree 的连接或 table 右键菜单增加动作。 |
+| `context-menu` | `type`、`id`、`label`、`menu: "connection"` 或 `"table"`、可选 `action` | 向 Sidebar Tree 的连接或 table 右键菜单增加后端动作，或打开已声明的 Workbench。 |
 | `result-view` | `type`, `id`, `label` | 注册查询或任务结果视图。 |
 
-`menu: "table"` contribution 当前只在用户对 Sidebar Tree 中的具体 table 节点打开右键菜单时生效。DBX 通过必需的 backend entrypoint 调用 `contextMenu/<contribution-id>`，并传递 table identity：
+`menu: "table"` contribution 当前只在用户对 Sidebar Tree 中的具体 table 节点打开右键菜单时生效。未声明 `action` 的旧式 contribution 会通过必需的 backend entrypoint 调用 `contextMenu/<contribution-id>`，并传递 table identity：
 
 ```json
 {
@@ -232,9 +256,25 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 
 `database` 和 `schema` 是可选字段；不可用时会省略，不会强制传递空字符串。该 context 只包含对象 identity，不包含 credential、connection string 或原始连接配置。Object Browser 后续可以复用相同 identity contract，但本次版本没有把它作为 table 菜单入口。
 
+context-menu 也可以声明由 Host 处理的 Workbench action：
+
+```json
+{
+  "type": "context-menu",
+  "id": "vendor.example.generate",
+  "label": "生成测试数据",
+  "menu": "table",
+  "action": { "type": "open-workbench", "workbench": "vendor.example.main" }
+}
+```
+
+`action.workbench` 必须引用同一插件 manifest 中声明的 `workbench`。Host 会直接打开该 Workbench，不调用 sidecar，并将当前 invocation context 作为 Workbench context 传入。`menu: "table"` 传入上面的 `TableContext` 对象本身（不是 backend 的 `{ "table": ... }` envelope）；`menu: "connection"` 传入现有的非敏感 connection summary（`id`、`dbType`、`name`、`database`）。Host 还可能提供用于 tab 关联的标准 `connectionId`。两者都不会暴露 host、port、username、password、connection string 或原始连接配置。再次打开同一个 Workbench 时会用最新 invocation context 刷新其 context。
+
+只有未声明 `action` 的旧式 context-menu 才要求 backend entrypoint；其返回的 `{ "message": "..." }` 仍会显示为 toast。
+
 同一插件内通过 `id` 互相引用：Connection Provider 的 `workbench` 必须指向一个已声明的工作台，`filesystem_provider` 必须指向一个已声明的文件系统 Provider。图标优先使用 Contribution 的 `icon`，缺失时回退到插件级 `icon`。
 
-自定义文件浏览器应使用 `workbench`：列表、虚拟滚动、预览、右键菜单和分栏由插件前端实现。只有希望使用 DBX 通用文件管理器时才选择 `filesystem_provider`；同时声明两者时默认打开工作台。`context-menu` 调用后端 `contextMenu/<contribution-id>`，`result-view` 则在工作台 context 中接收结果快照，被打开的 contribution id 会通过 `dbx-plugin-init` 负载下发，因此单个 UI 入口可以为多个工作台和结果视图服务；具体负载见[完整贡献点协议](https://github.com/t8y2/dbx/blob/main/plugins/README.md)。
+自定义文件浏览器应使用 `workbench`：列表、虚拟滚动、预览、右键菜单和分栏由插件前端实现。只有希望使用 DBX 通用文件管理器时才选择 `filesystem_provider`；同时声明两者时默认打开工作台。未声明 `action` 的旧式 `context-menu` 调用后端 `contextMenu/<contribution-id>`；声明式 `open-workbench` action 则由 Host 直接打开同插件 Workbench。`result-view` 在工作台 context 中接收结果快照。SDK 会在初始化后通过 `dbxPlugin.contributionId` 暴露 Host 选中的 contribution id，因此单个 UI 入口可以为多个工作台和结果视图服务；具体负载见[完整贡献点协议](https://github.com/t8y2/dbx/blob/main/plugins/README.md)。
 
 ### 文件系统协议
 
@@ -281,15 +321,27 @@ Workbench 上下文跨越 DBX 与插件边界时是 JSON 数据快照。宿主�
 
 连接 Provider 使用 `binding: "config"` 的字段会保存到 `external_config`；使用 `binding: "secret"` 的字段会保存到 Secret Store。插件连接的 `external_config` 会在新建、编辑、保存和重新连接流程中保留。
 
+宿主还会为每个 workbench 上下文写入三个保留字段：`workbenchId`（宿主生成的稳定实例 id）、`restored` 和 `surface`。`surface` 表示当前 UI 跑在哪种容器里——`"tab"`（主多标签工作台）、`"dock"`（底部面板）或 `"window"`（桌面浮动小组件窗口，见[浮动窗口](#浮动窗口)）。同一个插件的同一个 contribution 可以同时开在多个 surface 上，各自拥有独立的上下文和生命周期；遇到未知取值应退化成 `"tab"` 的行为。
+
 ## 前端 Host API
 
 UI 在隔离的 iframe 中运行，DBX 通过 `window.dbxPlugin` 提供桥接对象。不要导入 DBX 的 Vue/Tauri 模块，也不要假设浏览器页面能直接访问 Node.js、文件系统或网络。
+
+多个 Workbench 或 result-view contribution 共用同一个 UI 入口时，可通过 Host 选中的 identity 路由页面：
+
+```js
+await window.dbxPlugin.ready;
+const contributionId = window.dbxPlugin.contributionId;
+```
+
+`contributionId` 与 `context` 相互独立；例如从 Plugin Center 打开的 Workbench，其 context 可以是空对象 `{}`。SDK 会在 resolve `ready` 前记录 identity，因此 `await dbxPlugin.ready` 后可确定性地读取。为兼容旧插件，`dbx-plugin-init` 仍会携带完整 init payload 并作为通知派发；但该事件只派发一次，不应成为读取权威状态的唯一来源。
 
 以下自定义 `objects/list` 和 `objects/changed` 需要由插件后端实现，资源示例假设包内存在 `ui/assets/empty-state.svg`：
 
 ```js
 await window.dbxPlugin.ready;
 
+const contributionId = window.dbxPlugin.contributionId;
 const context = window.dbxPlugin.context;
 const result = await window.dbxPlugin.invoke("objects/list", { prefix: "docs/" }, { timeoutMs: 30000 });
 const off = window.dbxPlugin.onContext((nextContext) => render(nextContext));
@@ -301,6 +353,7 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | API | 作用 |
 | --- | --- |
 | `ready` | 等待 Host 完成初始化；应用启动逻辑放在 `await dbxPlugin.ready` 之后。 |
+| `contributionId` | Host 打开的 contribution 的只读 identity；`await ready` 后可读取，且与 `context` 独立。 |
 | `context` / `onContext(fn)` | 读取或监听当前工作台上下文。 |
 | `locale` | 读取当前语言；插件 UI 需自行完成翻译。 |
 | `theme` | 读取 `appearance` 和 DBX 设计 tokens，适配明暗主题。 |
@@ -310,14 +363,22 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `sendBinary(channel, data)` / `onBinary(fn)` | 发送或接收二进制数据；需要 `stdio-framed` 和 `host.binary`。 |
 | `readAsset(path)` / `readAssetUrl(path)` | 读取包内资源；路径不能越出插件资源根目录。 |
 | `openWorkbench(id, context)` | 打开本插件的另一个工作台；需要 `host.workbench`。 |
+| `closeWorkbench()` | 关闭承载当前 UI 的表面——工作台标签、dock 面板条目，或本插件的浮动窗口。与 `Ctrl/Cmd+W` 快捷键走同一条路径，因此插件可以提供自己的关闭或最小化按钮。 |
+| `executeCommand(commandId, context?)` | 执行本插件自己声明的命令，与菜单执行完全同径——重新检查 `enablement`、按单例复用，并遵循声明的 `presentation`（panel 停靠底部面板，tab 打开工作台标签页）。`context` 合并到命令上下文之上，并解析 `instance_key` 的 `{{path}}` 占位符（如 `instance_key: "logs:{{connectionId}}"` 即每个连接一个面板实例）。预期结果通过 `{ error }` 返回；需要 `host.workbench`。 |
 | `openFilesystem(id, context)` | 打开本插件的文件系统入口；需要 `host.filesystem`。 |
 | `getPlanCapabilities(connectionId)` | 读取宿主与该连接能提供什么计划能力；需要 `host.plans:read`。 |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | 返回 `sql` 的估算执行计划；需要 `host.plans:read`。 |
-| `capabilities` | 来自 init 消息的 `{ downloadFile, planApi, storage, ai }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。 |
-| `ai.openConversation({ title, prompt, context, send? })` | 在内置 AI 面板新建插件对话；`send` 默认 `false`，为 `true` 时立即分析；需要 `host.ai`，并以 `capabilities.ai` 广播——旧宿主不带该字段，请按能力位关闭而不是用真实请求试探。 |
+| `getTableMetadata({ connectionId, database?, schema?, table })` | 读取已打开连接的窄化 table schema metadata；需要 `host.schema:read`。 |
+| `queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` | 在用户授权给插件的连接上执行一条只读 SQL；需要 `host.data:read`。 |
+| `capabilities` | 来自 init 消息的 `{ downloadFile, planApi, schemaMetadataApi, dataApi, storage, ai, aiRecommendations, clipboardWrite, clipboardRead, floating }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。 |
+| `ai.openConversation({ title, prompt, context, send?, mode? })` | 在内置 AI 面板新建插件对话；`send` 默认 `false`，`mode` 默认 `ask`。`mode: "agent"` 会在 context 包含已打开插件连接时使用实时插件工具；需要 `host.ai`，并以 `capabilities.ai` 广播。 |
+| `ai.setRecommendations({ context, items })` | 覆盖当前工作台的默认推荐问题并立即刷新全局 AI 面板；每次最多 5 条，支持 `{{path.to.value}}` 占位符；需要 `host.ai` 和 `capabilities.aiRecommendations`。 |
+| `ai.clearRecommendations()` | 清空当前工作台的推荐问题；需要 `host.ai` 和 `capabilities.aiRecommendations`。 |
 | `onInit(fn)` / `onEvent(fn)` | 监听初始化、环境变化或后端事件；转发后端事件需要 `host.events`。 |
 | `storage` | 本插件独享的持久化键值状态；需要 `host.storage`；见下文。 |
-| `fileTransfer` | 本地文件流式传输与系统拖放（仅桌面端）；见下文。 |
+| `fileTransfer` | 本地文件流式传输、下载与（桌面端）系统拖放；见下文。 |
+| `clipboard` | 沙箱内的系统剪贴板访问；见下文。 |
+| `floating` | 打开并控制桌面浮动小组件窗口（仅桌面宿主）；见[浮动窗口](#浮动窗口)。 |
 
 调用失败会以 Promise rejection 返回，处理时应展示可理解的错误并允许重试。通过 `request` 调用的宿主方法、参数和返回值以当前 Host API 版本为准，不要调用未在协议中声明的 DBX 内部函数。
 
@@ -367,6 +428,127 @@ if (window.dbxPlugin.capabilities.planApi) {
 
 计划 API 属于 Host API 1.2。无法离开它工作的插件应在 manifest 里声明下限：`"engines": { "host_api": "^1.2" }`。manifest 里的版本范围是兼容下限，`capabilities.planApi` 是运行期探测，两者都保留。
 
+### Table Schema Metadata（表结构元数据）
+
+插件可以读取当前 DBX 已打开连接中某个 table 的窄化 schema metadata，而不需要拥有驱动、连接池、凭据或自己拼 SQL。请求复用现有的 `PluginTableContext`，只允许 table identity：
+
+```json
+{
+  "permissions": ["host.schema:read"]
+}
+```
+
+```js
+if (window.dbxPlugin.capabilities.schemaMetadataApi) {
+  const metadata = await window.dbxPlugin.getTableMetadata({
+    connectionId,
+    database,
+    schema,
+    table: "users"
+  });
+  for (const column of metadata.columns) {
+    renderColumn(column.name, column.dataType, column.nullable);
+  }
+}
+```
+
+`getTableMetadata({ connectionId, database?, schema?, table })` 返回：
+
+```json
+{
+  "columns": [
+    {
+      "name": "id",
+      "dataType": "integer",
+      "nullable": false,
+      "precision": 32,
+      "default": "nextval('users_id_seq'::regclass)"
+    }
+  ],
+  "fieldCapabilities": {
+    "length": "supported",
+    "precision": "supported",
+    "scale": "supported",
+    "default": "supported"
+  }
+}
+```
+
+- `columns` 只包含 `name`、`dataType`、`nullable`、可选的 `length`、`precision`、`scale` 和 `default`。不会返回 comment、key/index、credential、连接串、驱动内部对象或任意 SQL 结果。
+- 可选值在没有值时保持 `null` 或直接省略，绝不会被伪造为 `0` 或空字符串。`fieldCapabilities` 用 `supported`、`unsupported`、`unknown` 区分提供方支持、明确不支持和宿主没有可靠 provenance 的情况；`unknown` 不应被插件当成支持。
+- `database` 和 `schema` 可选；不可用时省略，不要把空字符串当作 public identity。`connectionId` 和 `table` 必须是非空且不超过 256 个字符的 identity 值。
+- 这是只读 API。DBX 只复用已打开的 Host connection/session，禁止插件隐式重连、创建连接池或执行任意 SQL。已保存但当前断开的连接会以 `Connection is not open` 拒绝；请求的 database 没有对应已打开 session 时也会拒绝，而不是切换到别的连接。
+
+该 API 属于 Host API 1.3。无法离开它工作的插件应声明：`"engines": { "host_api": "^1.3" }`；同时仍应读取 `capabilities.schemaMetadataApi`，因为旧宿主不会提供该字段。没有 `host.schema:read` 时，宿主会在请求到达 backend 前拒绝调用。
+
+### 只读数据查询
+
+插件可以在用户授权给它的 DBX 连接上执行一条只读 SQL，而不需要驱动、连接池、凭据或连接串。声明权限，并按能力位决定是否调用：
+
+```json
+{
+  "engines": { "host_api": "^1.4" },
+  "permissions": ["host.data:read"]
+}
+```
+
+```js
+if (window.dbxPlugin.capabilities.dataApi) {
+  const result = await window.dbxPlugin.queryData({
+    connectionId,
+    database,
+    sql: "SELECT status, count(*) AS total FROM orders GROUP BY status",
+    maxRows: 200
+  });
+  renderChart(result.columns, result.rows);
+}
+```
+
+`queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` 返回：
+
+```json
+{
+  "dbType": "postgres",
+  "columns": [{ "name": "status", "dataType": "text" }, { "name": "total", "dataType": "int8" }],
+  "rows": [["paid", 1204], ["refunded", 37]],
+  "truncated": false,
+  "elapsedMs": 12
+}
+```
+
+- **按连接征求同意。** 插件第一次查询某个连接时，宿主会弹窗写明插件名和连接名。用户允许后授权会持久保存，并显示在「插件中心 → 已安装」该插件下，用户可随时撤销；拒绝会在本次工作台会话内被记住。插件无法自行授权。
+- **只读且单条语句。** 宿主只接受一条被 DBX SQL 风险分类器判定为只读的语句——与 MCP 只读模式和 AI Agent 使用同一道闸门。写入、DDL、`SELECT … FOR UPDATE`、多条语句以及 `USE` 这类切换会话数据库的语句都会被拒绝；请改用 `database` 参数。
+- **只用已打开的连接。** 与执行计划和表结构元数据 API 一样，DBX 不会替插件发起连接：已保存但未打开的连接会以 `Connection is not open` 拒绝。Redis、MongoDB、搜索引擎等非 SQL 连接不提供该能力。
+- **有上限。** `maxRows` 默认 500、最多 5000；序列化后的行数据上限 8 MiB；`timeoutMs` 会被限制在连接自身超时和 60 秒上限之内。只要有行被截断，`truncated` 就为 `true`。
+- **不含凭据。** 响应只包含列和行。授权被撤销后，调用会返回以 `PLUGIN_DATA_ACCESS_NOT_GRANTED` 开头的错误，下一次查询会重新征求用户同意。
+
+该 API 属于 Host API 1.4。请同时保留 `engines.host_api` 下限和 `capabilities.dataApi` 运行时检查；无法弹出确认框的 Web 宿主会拒绝请求，而不会静默授权。
+
+### 系统剪贴板
+
+插件沙箱是 opaque origin 且没有剪贴板权限，`navigator.clipboard` 在里面不可用。宿主代为桥接系统剪贴板：
+
+- `window.dbxPlugin.copy(text)` / `window.dbxPlugin.clipboard.writeText(text)` 写系统剪贴板。两者走同一条无权限门控的桥接方法：写操作的输入就是用户数据本身，是低风险的一半。
+- `window.dbxPlugin.clipboard.readText()` 读系统剪贴板。它需要 `host.clipboard:read` 权限——读取会把用户数据（密码、令牌）交给插件代码，且没有后续用户交互兜底——属于 Host API 1.3：离开它无法工作的插件应声明 `"engines": { "host_api": "^1.3" }`。
+
+读剪贴板请看 init 能力而不是试探：`capabilities.clipboardRead`（写对应 `capabilities.clipboardWrite`）在旧宿主上缺失即为 falsy。读被拒绝（缺权限、Web 宿主没有原生剪贴板访问）时 Promise 会 reject——请优雅降级，例如回落到键盘粘贴路径，而不是让交互直接失败。
+
+```js
+await window.dbxPlugin.ready;
+const canRead = !!window.dbxPlugin.capabilities.clipboardRead;
+const canWrite = !!window.dbxPlugin.capabilities.clipboardWrite;
+
+async function pasteFromClipboard() {
+  if (!canRead) return null;
+  try {
+    return await window.dbxPlugin.clipboard.readText();
+  } catch {
+    // 缺权限或读取失败：保留键盘粘贴路径。
+    return null;
+  }
+}
+```
+
 ### 文件传输与系统拖放
 
 桌面端宿主通过 `window.dbxPlugin.fileTransfer` 把本地文件流式接入插件沙箱。句柄只在用户明确同意后打开：原生打开/保存对话框（`pick` / `beginSave`），或从系统拖放到本插件工作台区域内的文件（`onDrop`）。传输按分块进行，多 GB 文件也不会整体载入内存。
@@ -407,10 +589,10 @@ const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
 | `beginSave({ name, contentType?, size? })` | 原生保存对话框 + 写句柄；返回 `{ handleId, chunkBytes }`，用户取消时为 `null`。 |
 | `write(handleId, offset, data)` | 写入一个分块（二进制 transfer 或 base64）；返回 `{ written, nextOffset }`。 |
 | `finish(handleId)` / `cancel(handleId)` | 冲洗并关闭写句柄 / 丢弃任意句柄。 |
-| `onDrop(fn)` | 拖入本工作台的文件以已打开的读句柄送达。 |
+| `onDrop(fn)` | 拖入本工作台的文件以读句柄送达；拖入文件夹会被展开为其中包含的文件（`.git` 等点开头文件与目录会被跳过），每个文件额外携带 `relativePath`（以 `/` 分隔、以拖入文件夹自身名字开头的路径，如 `folder/nested/a.csv`），可用于还原拖入的目录结构，也能区分不同拖入根目录下的同名文件。监听器签名为 `(files, { dropId, truncated })`：`dropId` 标识本次拖入的整组条目（取消与进度记账的分组键），`truncated` 为 `true` 表示展开因 2000 文件或 8 层深度上限被截断。 |
 | `onDragState(fn)` | 是否有系统拖拽悬在本工作台上方；用它驱动拖放遮罩。 |
 
-仅桌面端可用：Web 宿主下整个命名空间是 `undefined`，使用前请先探测。`onDrop` 只在拖放落点位于本插件工作台区域内时触发；落点在宿主其他区域时保持宿主自身的行为。
+桌面端与网页端的行为差异：请以 init 消息里 additive 的 `capabilities.fileTransfer` 标志位（`pick`、`beginSave`、`read`、`drop`、`folderExpansion`）做能力探测，不要靠试调用。桌面端 `pick` / `beginSave` 走原生对话框、`onDrop` 接收系统拖放（句柄由宿主惰性打开，读时分块流式，因此超大文件夹与大文件都不会占满句柄；选取文件数超过共享句柄池时自动降级为惰性条目，不会静默丢弃）。网页端 `pick` 回退到浏览器文件选择器、`beginSave` 回退为内存缓冲加浏览器下载、`onDrop` / `onDragState` 不会触发（`drop`/`folderExpansion` 为 `false`）、句柄也没有 `relativePath`。`onDrop` 只在拖放落点位于本插件工作台区域内时触发；落点在宿主其他区域时保持宿主自身的行为。
 
 ### 持久化 UI 状态
 
@@ -435,20 +617,136 @@ if (window.dbxPlugin.capabilities.storage) {
 
 ### 在 DBX AI 中分析插件数据
 
-在 manifest 中声明 `"permissions": ["host.ai"]`，然后从插件的分析按钮调用：
+在 manifest 中声明 `"permissions": ["host.ai"]`。插件可以直接打开全局 AI 面板，也可以为每个 Workbench 注册快捷推荐问题。两种能力都沿用 DBX 的模型选择、历史、追问、停止和导出功能。
+
+#### 声明 Workbench 的默认推荐问题
+
+在 `workbench` contribution 下增加可选的 `ai.recommendations`。`label` 显示在 DBX 全局 AI 面板，`prompt` 是点击后发送给 AI 的文本；`order` 越小越靠前。
+
+```json
+{
+  "type": "workbench",
+  "id": "com.example.files.main",
+  "label": "Files",
+  "ai": {
+    "recommendations": [
+      {
+        "id": "health",
+        "label": "检查 {{resource.name}} 健康状态",
+        "prompt": "分析 {{resource.kind}}/{{resource.name}} 的健康状态和风险",
+        "order": 10
+      }
+    ]
+  }
+}
+```
+
+占位符从当前 Workbench context 读取，支持对象属性和数组下标，例如 `{{resource.name}}`、`{{items.0.status}}`。无法解析的占位符会使该条推荐被隐藏；`__proto__`、`prototype` 和 `constructor` 等路径会被拒绝。推荐问题最多显示 5 条。
+
+#### 根据资源变化更新推荐问题
+
+插件切换页面或资源时，可以提交运行时推荐问题。运行时 `items` 会覆盖 manifest 默认值；传入空数组表示清空当前推荐。运行时 context 通常只需要提交资源字段，Host 会保留当前 Workbench 的 `connectionId`、数据库和实例标识，确保点击推荐问题后仍绑定到正确的插件连接。
+
+```js
+function updateRecommendations(resource) {
+  if (!dbxPlugin.capabilities.aiRecommendations) return;
+
+  return dbxPlugin.ai.setRecommendations({
+    context: { resource },
+    items: [
+      {
+        id: "health",
+        label: `检查 ${resource.name} 健康状态`,
+        prompt: "分析 {{resource.kind}}/{{resource.name}} 的健康状态和风险",
+        order: 10,
+      },
+      {
+        id: "events",
+        label: "查看最近事件",
+        prompt: "列出这个资源最近的重要事件并给出处理建议",
+        order: 20,
+      },
+    ],
+  });
+}
+
+await dbxPlugin.ai.clearRecommendations();
+```
+
+推荐问题显示在 DBX 全局 AI 对话窗口中，而不是插件页面内新增一个 AI 入口。用户点击后，DBX 会使用当前推荐文本创建新的 Agent 对话并立即发送；Agent 会通过当前已打开的插件连接调用插件工具获取实时数据。推荐列表本身只属于当前 Workbench 上下文，不会写入对话历史；用户点击后发送的实际问题会正常保存。
+
+#### 直接打开 Ask 或 Agent 对话
+
+`ai.openConversation` 仍适合插件按钮或其他明确动作。默认 `mode` 为 `ask`，宿主会复制插件提供的 JSON 快照；快照会随对话保存，后续资源刷新不会改变已经创建的对话。需要实时工具时显式使用 `mode: "agent"`，并在 context 中提供当前已打开插件连接的 `connectionId`：
 
 ```js
 await dbxPlugin.ai.openConversation({
   title: "Watchlist analysis",
-  prompt: "Compare the supplied quotes and explain risks and missing data.",
-  context: { snapshotId: "watchlist-1", quotes, source, dataTimestamp },
+  prompt: "Compare the current quotes and explain risks and missing data.",
+  context: {
+    connectionId,
+    resource: { kind: "watchlist", name: "primary" },
+    dataTimestamp,
+  },
+  mode: "agent",
   send: true,
 });
 ```
 
-`title` 最多 200 字符，`prompt` 最多 32000 字符，`context` 必须是纯 JSON 对象，上限 2 MiB。宿主绑定真实插件身份，并复制快照；后续行情刷新或切换数据库不会替换该会话的数据。快照作为会话数据保存，在历史恢复及导出时保留。插件应提供来源、数据时间、延迟及缺失字段，AI 不会自动拉取行情。
+`title` 最多 200 字符，`prompt` 最多 32000 字符，`context` 必须是纯 JSON 对象，上限 2 MiB。Agent 只能使用宿主为该插件连接公开的工具；插件不会收到模型回复或模型配置，也不能借此获得数据库执行能力。旧插件不声明推荐问题时仍可正常使用原有 AI API；旧宿主缺少新增 capability 字段时，插件应关闭对应入口并继续提供其他功能。
 
-该接口只打开内置对话，不向插件返回模型回复或 AI 配置。首版使用纯文本 Ask 通道，支持 DBX 的 HTTP 模型供应商和 Ollama；不提供数据库工具或 CLI Agent。选择未配置的模型时会保留待发送问题，用户可在 DBX 面板中选择模型后继续。
+### 浮动窗口
+
+浮动窗口把插件的某个 workbench 放进一个独立的无边框、置顶桌面窗口，而不是塞在 DBX 外壳里——这正是小型常驻小组件需要的表面（播放器胶囊、会话状态徽章、快捷选择器）。它会盖在其他应用之上，可以被拖到桌面任意位置。在屏幕中间松手就停在落点；落到或越过工作区边缘（不管怼得多用力）都会齐着那条边吸附并停靠。停靠不会在落下的那一刻就把小组件藏起来：它先保持整颗可读的胶囊，光标离开约 2.5 秒后才滑到屏外只留一条细边，光标碰到细边就滑回来。重新打开一个上次吸在边上的小组件也是这套时序（先胶囊、后收起）；刚唤出的小组件即使默认落点就贴着边，也只停在胶囊态。使用前先判断 `capabilities.floating`：Web 宿主没有窗口，桌面宿主也可能不支持窗口管理。
+
+```js
+if (window.dbxPlugin.capabilities.floating) {
+  // 在标签或 dock 工作台里：打开小组件。
+  // 一个（插件, workbench contribution）只会有一个窗口，重复调用只是把已有窗口带到前台。
+  const { windowId } = await window.dbxPlugin.floating.open({
+    contributionId: "capsule",
+    title: "Now playing",
+    width: 260,
+    height: 60,
+    context: { queueId: currentQueueId },
+  });
+}
+
+// 在小组件内部（context.surface === "window"）：控制自己所在的窗口。
+grip.addEventListener("pointerdown", (event) => {
+  grip.setPointerCapture(event.pointerId);
+  dragging = false;
+});
+grip.addEventListener("pointermove", async (event) => {
+  if (dragging || Math.hypot(event.clientX - downX, event.clientY - downY) < 4) return;
+  dragging = true;
+  // 从这一刻起窗口归宿主移动：它自己读原生光标，不需要插件逐帧上报。
+  await window.dbxPlugin.floating.beginDrag();
+});
+grip.addEventListener("pointerup", async () => {
+  if (!dragging) return;
+  dragging = false;
+  await window.dbxPlugin.floating.endDrag(); // 吸附并记住位置
+});
+```
+
+| API | 作用 |
+| --- | --- |
+| `floating.open(options)` | 为本插件的某个 `workbench` contribution 打开（或前置）浮动窗口。`options`：`contributionId`（必填）、`title`、逻辑像素的 `width`/`height`、物理屏幕像素的 `x`/`y`、`alwaysOnTop`（默认 `true`）、`skipTaskbar`（默认 `true`）、`resizable`（默认 `false`）、`context`。返回 `{ windowId, reused }`；需要 `host.workbench`。 |
+| `floating.close(contributionId?)` | 关闭本插件的浮动窗口——指定某个 contribution，或省略 id 关闭本插件的全部浮动窗口。在小组件内部不带参数调用即关闭自己。 |
+| `floating.beginDrag()` | 把窗口交给宿主的拖动循环。在 `pointermove` 里、自己的拖动阈值越过之后调用（此时按键还按住）。之后由宿主自己读原生光标，插件没有逐帧调用要做。 |
+| `floating.endDrag({ snap? })` | 结束拖动。`snap`（默认 `true`）时宿主把窗口齐着它到达或越过的工作区边缘吸附并停靠在那（先保持整颗胶囊，光标离开一会儿才收起到屏外、只留一条悬停细边），落点在屏幕中间则完整夹回屏内；位置与停靠边都会记住，供下次打开使用。返回物理像素的最终矩形。实践中可不调：宿主在光标静止后也会自己收尾，收不到 pointerup 的小组件不会把窗口一直粘在光标上。 |
+| `floating.setSize(width, height)` | 以逻辑像素调整所在窗口大小；宿主会夹到自己的上下限内。 |
+
+小组件决定拖动**何时**开始（哪个元素是拖拽把手、指针要先走多远）；窗口由宿主移动，吸附与位置记忆也归宿主。刻意没有逐帧的桥调用：宿主轮询原生光标，webview 忙不过来时小组件也照样贴着指针走，光标静止即收尾，pointerup 丢了也不会一直拖下去。几何类调用（`beginDrag`/`endDrag`/`setSize`）只在浮动窗口内部有效，在其他表面调用会被拒绝，因此标签页永远无法移动它不在其中的窗口。
+
+几条规则让这个表面的行为可预期：
+
+- **一个 contribution 只有一个窗口。** 窗口 id 由插件 id 和 contribution id 推导，所以 `floating.open` 是幂等的：第二次调用会把已开的窗口带到前台，而不是叠出更多小组件。
+- **窗口是不透明的。** 宿主自己不画任何外壳，用户看到的就是小组件本身：给页面一个背景加圆角，配合宿主按内容收好的窗口尺寸，读起来就是浮在桌面上的一张卡片。刻意不提供逐像素透明（带镂空角的塑形小组件）——透明区域还收不收鼠标事件各平台不一致，而一个要给用户拖的小组件必须处处点得动。
+- **外壳导航会被转发。** 浮动窗口没有标签栏、dock 和面板，所以从它发起的 `openWorkbench` 和 `openFilesystem` 会在 DBX 主窗口里打开，主窗口会自行前置。`executeCommand` 在这个表面完全不提供：每个命令动作都要打开一个外壳表面，调用会成功返回但什么都看不见。
+- **位置跨重启保留**，按插件和 contribution 分别记录；当记录的位置已经不在任何已连接的显示器上时会被丢弃（拔掉显示器后退化为工作区默认位置，而不是开到屏幕外）。
+- **小组件就是一个完整工作台。** 它拿到和标签页相同的桥、权限、上下文契约和 sidecar RPC；`context.surface` 为 `"window"`，`context.workbenchId` 为窗口 id。它启动的是你 UI 的另一份实例，所以共享状态必须走 sidecar（或 `storage`），不能指望模块内存。
 
 ### 主题、布局和静态资源
 
@@ -493,6 +791,14 @@ UI 必须构建为包内静态资源，不要把 Vite 开发服务器或 CDN 的
 
 宿主会把入口脚本内联进沙箱文档，`ui/` 下的其余资源在运行时通过 `dbx-plugin` 协议保持可寻址：`dbx-plugin://localhost/<插件id>/<ui.root内相对路径>`（WebView2 上映射为 `http://dbx-plugin.localhost/<插件id>/…`）。宿主会把平台对应的形式注入为沙箱文档的 `<base>`，并放行资源类 CSP，因此打包后的插件可以正常动态 `import()` 代码分割的 chunk——前提是构建产物使用**相对**资源地址：Vite 设 `base: "./"`、webpack 设 `publicPath: "./"`，让 chunk 和 CSS 资源地址基于注入的 base 解析而不是宿主 origin。绝对路径 `/assets/…` 携带不了插件 id，会 404。该协议只读文件、限定在每个插件的 `ui.root` 内，且插件更新后不会沿用旧缓存。
 
+#### 内联后的样式表
+
+宿主会读取所有指向 `ui.root` 内部的 `<link rel="stylesheet">`，替换成带同样属性的 `<style>` 元素，因此插件运行时仍然能找到自己的样式表（`document.querySelectorAll("style[data-skin-css]")`）并切换它们。有一处差异需要注意：`disabled` 在 `<style>` 元素上不会像 `<link>` 那样从内容属性反映到 IDL，宿主重新序列化时也无法用 IDL 属性把它带过去。所以自带 disabled 样式表的插件必须在加载后自己重新设置 `sheet.disabled = true`；其余属性（id、`data-*` 标记、`media`）都会原样保留。
+
+#### 全屏
+
+沙箱里的 `requestFullscreen()` 取决于框架的 Permissions-Policy，宿主已经做了委派（`allow="clipboard-write; fullscreen"`）。插件无法自己授予该策略，因此应当用 `document.fullscreenEnabled` 做特性检测，为 `false` 时退化成页面内的最大化布局——否则在不委派该策略的旧宿主上，每次全屏请求都会被拒绝。
+
 ## 原生 Sidecar 和 RPC
 
 只有浏览器沙箱无法完成的能力才需要原生后端，例如 S3/SSH 协议、系统凭据、长连接或高性能计算。Sidecar 不是操作系统沙箱，会以当前用户权限运行。
@@ -532,6 +838,25 @@ Sidecar 约束：stdout 只能输出协议消息，日志写 stderr；请求 ID 
 每个 Sidecar 启动时都会带上 `DBX_PLUGIN_DATA_DIR` 环境变量，指向为本插件保留的持久化目录（`plugin-data/<id>`，与安装包目录平级）。它在版本升级和卸载后都保留，插件的所有 Sidecar 运行共享；缓存、Token、后端管理的数据库等应放在这里——首次写入前需自行创建目录，宿主不会预创建。Go SDK 提供了 `dbxpluginsdk.DataDir()` / `EnsureDataDir()` 封装。工作台 UI 需要小体量持久化时走同一目录里的 `host.storage`（见 [持久化 UI 状态](#持久化-ui-状态)），不要直接读写这些文件。
 
 上例可替换 Rust 模板的 `backend/src/main.rs`，同时让 Cargo 包版本与 Manifest 一致。Go 使用模板生成的 `dbxpluginsdk.NewServer(metadata, handler).Serve()`；当前 Go SDK 支持 JSONL，Rust SDK 还支持 framed transport。不要仅修改 Manifest transport 就认为 Go 已具备二进制帧处理能力。完整接口见 [Rust SDK](https://github.com/t8y2/dbx/tree/main/plugins/sdk/rust/dbx-plugin-sdk) 和 [Go SDK](https://github.com/t8y2/dbx/tree/main/plugins/sdk/go/dbx-plugin-sdk)。
+
+## 为 DBX AI 助手提供工具
+
+带原生后端的插件可以暴露工具，供 DBX 内置 AI 助手在 Agent 模式下调用。这样「订单接口为什么变慢了？」这类问题就能把数据库工具和插件提供的指标、日志或 Shell 能力结合起来。Sidecar 需要实现两个方法：
+
+- `mcp/tools` 以 MCP 工具格式返回 `{ "tools": [{ "name", "description", "inputSchema", "annotations"? }] }`。DBX 会传入正在绑定的 `{ "connectionId" }`，插件可以据此在只读连接上隐藏写工具。
+- `mcp/call` 接收 `{ "tool", "arguments", "lifecycle" }`，返回 MCP `CallToolResult`（`{ "content": [{ "type": "text", "text": "..." }], "isError": false }`）。`lifecycle` 与已打开连接的 `connection/connect` 载荷相同——凭据由宿主解析，运行端点已经过 SSH 或代理层——因此工具参数里永远不需要密钥。
+
+宿主在此之上负责：
+
+- **显式加入、可撤销。** 插件只有在用户于「插件中心 → 已安装 → 内置 AI 工具」中开启后才会贡献工具——仅安装不会暴露任何东西。同一面板会列出工具并标出哪些需要确认，开关可把某个插件永久关闭。manifest 中的 `mcp` 贡献声明 `ai_tools: false` 可让插件即使被用户开启也不进入该面。
+- **只用已打开的连接。** 只为用户当前已打开的插件连接提供工具。连接由 DBX 绑定：模型看到的 schema 中会去掉 `connectionId` / `connectionName`；如果插件 schema 声明了 `connectionId`，宿主会在转发参数中注入绑定连接的 id。打开了多个连接时，模型通过额外的 `dbx_connection` 参数选择其一。
+- **默认需要确认。** 只有声明了 `"annotations": { "readOnlyHint": true }` 的工具才会直接执行。其他调用都会暂停运行，并向用户展示将要转发的完整参数，由用户选择允许一次或拒绝；五分钟未响应视为拒绝。请为真正只读的工具加上标注，同时保留插件自身的防护（只读连接标志、两阶段确认等）——宿主确认拦截的是模型的误操作，不能替代插件自己的安全规则。
+- **可移植的 schema。** 工具以 `<前缀>__<工具名>` 暴露（例如 `ssh__ssh_exec`），schema 会被收敛到所有支持的模型供应商都接受的子集：`type`、`description`、`properties`、`required`、`items`、字符串 `enum` 以及数值、长度和元素数量边界。参数名请只使用字母、数字和下划线。
+- **结果有上限。** 单次调用 120 秒超时，结果在交给模型前会被压缩。长任务请作为后台任务启动并返回句柄，不要阻塞。
+
+内置 Agent 会把工具输出当作不可信数据处理。结果里请返回事实而不是指令，也不要回显任何密钥。
+
+同样的工具也会出现在外部 `dbx` MCP 服务器（Claude Code、Cursor 等）上，名称为 `dbx_<前缀>__<工具名>`，并受全局 MCP 设置（工具白名单 + 连接白名单）约束、绑定到插件已保存的连接。该面按作者声明加入：manifest 中的 `mcp` 贡献声明 `external_tools: true` 才会暴露；连接选择参数为 `dbx_connection`。
 
 ## 创建插件
 

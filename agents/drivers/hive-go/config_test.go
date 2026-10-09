@@ -406,6 +406,70 @@ func TestParseStandardJDBCURLSectionsAndCredentials(t *testing.T) {
 	}
 }
 
+func TestKyuubiIdentifierQuoteFollowsPreservedEngineType(t *testing.T) {
+	tests := []struct {
+		name            string
+		params          connectParams
+		configuration   string
+		identifierQuote string
+	}{
+		{
+			name: "URL fragment selects Trino",
+			params: connectParams{
+				Host:         "kyuubi.example.com",
+				DatabaseType: "kyuubi",
+				URLParams:    "#kyuubi.engine.type=TRINO",
+			},
+			configuration:   "set:hivevar:kyuubi.engine.type",
+			identifierQuote: trinoIdentifierQuote,
+		},
+		{
+			name: "JDBC hive conf selects Trino",
+			params: connectParams{
+				DatabaseType:     "kyuubi",
+				ConnectionString: "jdbc:hive2://kyuubi.example.com:10009/default?kyuubi.engine.type=trino",
+			},
+			configuration:   "set:hiveconf:kyuubi.engine.type",
+			identifierQuote: trinoIdentifierQuote,
+		},
+		{
+			name: "Kyuubi Spark keeps Hive quote",
+			params: connectParams{
+				Host:         "kyuubi.example.com",
+				DatabaseType: "kyuubi",
+				URLParams:    "#kyuubi.engine.type=SPARK_SQL",
+			},
+			configuration:   "set:hivevar:kyuubi.engine.type",
+			identifierQuote: defaultHiveIdentifierQuote,
+		},
+		{
+			name: "Hive ignores Kyuubi engine setting",
+			params: connectParams{
+				Host:         "hive.example.com",
+				DatabaseType: "hive",
+				URLParams:    "#kyuubi.engine.type=TRINO",
+			},
+			configuration:   "set:hivevar:kyuubi.engine.type",
+			identifierQuote: defaultHiveIdentifierQuote,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config, err := parseConnectionConfig(test.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := config.HiveConfiguration[test.configuration]; got == "" {
+				t.Fatalf("engine type was not preserved in %q: %#v", test.configuration, config.HiveConfiguration)
+			}
+			if got := config.identifierQuote(); got != test.identifierQuote {
+				t.Fatalf("identifier quote = %q, want %q", got, test.identifierQuote)
+			}
+		})
+	}
+}
+
 func TestOpenSessionCompatibilityVariablesFromSessionParams(t *testing.T) {
 	config, err := parseConnectionConfig(connectParams{
 		Host:      "hs2.example.com",

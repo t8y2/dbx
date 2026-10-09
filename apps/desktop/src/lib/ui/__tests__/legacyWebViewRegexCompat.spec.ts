@@ -43,7 +43,9 @@ describe("WebView startup sources stay compatible with old WebKit regex syntax",
         const source = readFileSync(file, "utf8");
         return source.includes("(?<=") || source.includes("(?<!");
       })
-      .map((file) => path.relative(workspaceRoot, file))
+      // 规范化路径分隔符：#allowlist 用的是仓库相对路径的 POSIX 形式，
+      // 否则在 Windows 上 path.relative 返回反斜杠会误报（白名单文件被当成违规）。
+      .map((file) => path.relative(workspaceRoot, file).split(path.sep).join("/"))
       .filter((relative) => !LOOKBEHIND_ALLOWLIST.has(relative));
     expect(offenders).toEqual([]);
   });

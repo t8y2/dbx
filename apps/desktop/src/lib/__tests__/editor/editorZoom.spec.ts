@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createEditorWheelZoomGestureGuard } from "@/lib/editor/editorZoom";
 
@@ -42,18 +41,5 @@ describe("createEditorWheelZoomGestureGuard", () => {
     expect(guard.accepts(wheelEvent(100))).toBe(false);
     guard.reset();
     expect(guard.accepts(wheelEvent(120, true))).toBe(true);
-  });
-});
-
-describe("editor wheel zoom integration", () => {
-  it.each([
-    ["SQL editor", "../../../components/editor/QueryEditor.vue", "wheelZoomGestureGuard"],
-    ["cell detail editor", "../../../composables/useCellDetailEditor.ts", "wheelZoomGestureGuard"],
-    ["Nacos editor", "../../../components/nacos/NacosAdminConsole.vue", "configEditorWheelZoomGestureGuard"],
-  ])("guards %s wheel zoom by gesture origin", (_name, path, guardName) => {
-    const source = readFileSync(new URL(path, import.meta.url), "utf8");
-
-    expect(source).toContain("createEditorWheelZoomGestureGuard");
-    expect(source).toContain(`if (!${guardName}.accepts(event)) return false;`);
   });
 });

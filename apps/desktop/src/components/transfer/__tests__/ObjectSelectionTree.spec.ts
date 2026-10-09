@@ -22,6 +22,7 @@ vi.mock("@lucide/vue", () => {
     MinusSquare: Icon,
     Search: Icon,
     ChevronRight: Icon,
+    X: Icon,
   };
 });
 vi.mock("vue-virtual-scroller", () => ({
@@ -67,8 +68,8 @@ const LARGE_TABLES: TreeGroup = {
   items: Array.from({ length: 40_000 }, (_, index) => (index === 20_000 ? "customer_order_special" : `table_${String(index).padStart(5, "0")}`)),
 };
 
-function mountTree(init: { groups?: TreeGroup[]; disabledGroups?: Kind[]; disabledHints?: Record<string, string>; selection?: Record<string, string[]>; search?: string }) {
-  const { groups = [VIEWS, FUNCTIONS], disabledGroups = [], disabledHints = {}, selection = {}, search = "" } = init;
+function mountTree(init: { groups?: TreeGroup[]; disabledGroups?: Kind[]; disabledHints?: Record<string, string>; selection?: Record<string, string[]>; search?: string; qualifiers?: string[] }) {
+  const { groups = [VIEWS, FUNCTIONS], disabledGroups = [], disabledHints = {}, selection = {}, search = "", qualifiers } = init;
   const state = reactive({ selection, search, groups });
   const Wrapper = defineComponent({
     setup() {
@@ -85,6 +86,7 @@ function mountTree(init: { groups?: TreeGroup[]; disabledGroups?: Kind[]; disabl
           "onUpdate:search": (v: string) => {
             state.search = v;
           },
+          qualifiers,
         });
     },
   });
@@ -216,7 +218,7 @@ describe("ObjectSelectionTree interaction", () => {
 
     expect(container.querySelector('label[data-test="item-FUNCTION-box"]')).toBeNull();
     expect(container.querySelector('label[data-test="item-SEQUENCE-biz_banner_id_seq"]')).not.toBeNull();
-    expect(container.querySelector('[data-test="group-FUNCTION"]')?.textContent).toContain("无匹配");
+    expect(container.querySelector('[data-test="group-FUNCTION"]')?.textContent).toContain("transfer.noMatchingObjects");
   });
 
   it("search ranks exact-prefix matches before mid-name matches", async () => {
@@ -372,5 +374,145 @@ describe("ObjectSelectionTree interaction", () => {
     // clearing the search shows every item selected again -> all
     await typeSearch(container, "");
     expect(groupToggle(container).dataset.state).toBe("all");
+  });
+});
+
+async function openBulkPanel(container: HTMLElement) {
+  container.querySelector<HTMLButtonElement>('button[data-test="bulk-open"]')!.click();
+  await nextTick();
+}
+
+async function fillBulkInput(container: HTMLElement, value: string) {
+  const textarea = container.querySelector<HTMLTextAreaElement>('textarea[data-test="bulk-input"]')!;
+  textarea.value = value;
+  textarea.dispatchEvent(new Event("input"));
+  await nextTick();
+}
+
+async function confirmBulkSelection(container: HTMLElement) {
+  container.querySelector<HTMLButtonElement>('button[data-test="bulk-confirm"]')!.click();
+  await nextTick();
+}
+
+function bulkFeedbackText(container: HTMLElement): string {
+  return container.querySelector('[data-test="bulk-feedback"]')?.textContent ?? "";
+}
+
+// i18n 在测试里被 mock 成直接返回 key，因此未匹配的名称通过 title 属性断言
+function bulkUnmatchedTitle(container: HTMLElement): string {
+  return container.querySelector('[data-test="bulk-feedback"] p[title]')?.getAttribute("title") ?? "";
+}
+
+describe("ObjectSelectionTree bulk input", () => {
+  it("stays collapsed until the toolbar button is clicked", async () => {
+    const { container, app } = mountTree({});
+    cleanup = () => app.unmount();
+    expect(container.querySelector('[data-test="bulk-panel"]')).toBeNull();
+
+    await openBulkPanel(container);
+    await nextTick();
+    expect(container.querySelector('[data-test="bulk-panel"]')).not.toBeNull();
+    expect(container.querySelector('textarea[data-test="bulk-input"]')).not.toBeNull();
+
+    container.querySelector<HTMLButtonElement>('button[data-test="bulk-close"]')!.click();
+    await nextTick();
+    expect(container.querySelector('[data-test="bulk-panel"]')).toBeNull();
+  });
+
+  it("selects the pasted names across groups and reports the match count", async () => {
+    const { state, container, app } = mountTree({ groups: [TABLES, VIEWS] });
+    cleanup = () => app.unmount();
+    await openBulkPanel(container);
+    await fillBulkInput(container, "T1\nv3, v1");
+    await confirmBulkSelection(container);
+
+    expect(state.selection.TABLE).toEqual(["t1"]);
+    expect(state.selection.VIEW).toEqual(["v1", "v3"]);
+    expect(bulkFeedbackText(container)).toContain("transfer.bulkSelectMatched");
+  });
+
+  it("merges the matches with the existing selection", async () => {
+    const { state, container, app } = mountTree({ selection: { VIEW: ["v1"] } });
+    cleanup = () => app.unmount();
+    await openBulkPanel(container);
+    await fillBulkInput(container, "v2");
+    await confirmBulkSelection(container);
+
+    expect(state.selection.VIEW).toEqual(["v1", "v2"]);
+  });
+
+  it("reports names that are missing from the catalog", async () => {
+    const { state, container, app } = mountTree({ groups: [TABLES, VIEWS] });
+    cleanup = () => app.unmount();
+    await openBulkPanel(container);
+    await fillBulkInput(container, "t1\nmissing_table");
+    await confirmBulkSelection(container);
+
+    expect(state.selection.TABLE).toEqual(["t1"]);
+    expect(bulkFeedbackText(container)).toContain("transfer.bulkSelectUnmatched");
+    expect(bulkUnmatchedTitle(container)).toContain("missing_table");
+  });
+
+  it("matches the full list even while a search filter is active", async () => {
+    const { state, container, app } = mountTree({ groups: [TABLES, VIEWS] });
+    cleanup = () => app.unmount();
+    await typeSearch(container, "v1");
+    await openBulkPanel(container);
+    await fillBulkInput(container, "t2");
+    await confirmBulkSelection(container);
+
+    expect(state.selection.TABLE).toEqual(["t2"]);
+  });
+
+  it("accepts schema-qualified names only for the current schema", async () => {
+    const { state, container, app } = mountTree({ groups: [TABLES, VIEWS], qualifiers: ["public"] });
+    cleanup = () => app.unmount();
+    await openBulkPanel(container);
+    await fillBulkInput(container, "public.t1\nother.t2");
+    await confirmBulkSelection(container);
+
+    expect(state.selection.TABLE).toEqual(["t1"]);
+    expect(bulkUnmatchedTitle(container)).toContain("other.t2");
+  });
+
+  it("skips disabled groups", async () => {
+    const { state, container, app } = mountTree({ groups: [TABLES, VIEWS], disabledGroups: ["VIEW"] });
+    cleanup = () => app.unmount();
+    await openBulkPanel(container);
+    await fillBulkInput(container, "t1\nv1");
+    await confirmBulkSelection(container);
+
+    expect(state.selection.TABLE).toEqual(["t1"]);
+    expect(state.selection.VIEW ?? []).toEqual([]);
+  });
+
+  it("expands the group that received matches", async () => {
+    const { state, container, app } = mountTree({ groups: [LARGE_TABLES] });
+    cleanup = () => app.unmount();
+    // 大清单默认折叠，批量勾选后应自动展开，否则用户看不到勾选结果
+    expect(container.querySelectorAll('label[data-test^="item-TABLE-"]')).toHaveLength(0);
+
+    await openBulkPanel(container);
+    await fillBulkInput(container, "customer_order_special");
+    await confirmBulkSelection(container);
+
+    expect(state.selection.TABLE).toEqual(["customer_order_special"]);
+    expect(container.querySelectorAll('label[data-test^="item-TABLE-"]').length).toBeGreaterThan(0);
+  });
+
+  it("clears the previous input and feedback when reopened", async () => {
+    const { container, app } = mountTree({ groups: [TABLES, VIEWS] });
+    cleanup = () => app.unmount();
+    await openBulkPanel(container);
+    await fillBulkInput(container, "t1");
+    await confirmBulkSelection(container);
+    expect(bulkFeedbackText(container)).toContain("transfer.bulkSelectMatched");
+
+    await openBulkPanel(container);
+    await nextTick();
+    await openBulkPanel(container);
+    await nextTick();
+    expect(container.querySelector<HTMLTextAreaElement>('textarea[data-test="bulk-input"]')!.value).toBe("");
+    expect(bulkFeedbackText(container)).toBe("");
   });
 });

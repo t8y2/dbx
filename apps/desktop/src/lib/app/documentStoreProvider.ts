@@ -1,10 +1,10 @@
 import type { ComposerTranslation } from "vue-i18n";
 import { normalizeJsonArgument } from "@dbx-app/mongo-shell";
-import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
+import { isCouchDbDatabaseType, isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 import { quoteUnquotedObjectKeys } from "@/lib/mongo/mongoShellCommand";
-import { formatMongoShellLiteral } from "@/lib/mongo/mongoDocumentValues";
+import { formatMongoShellLiteral, normalizeMongoDateInput } from "@/lib/mongo/mongoDocumentValues";
 
-export type DocumentStoreKind = "mongodb" | "dynamodb" | "elasticsearch" | "meilisearch" | "solr";
+export type DocumentStoreKind = "mongodb" | "dynamodb" | "elasticsearch" | "meilisearch" | "solr" | "couchdb";
 export type DocumentFilterMode = "equals" | "not-equals" | "like" | "not-like" | "begins-with" | "ends-with" | "greater-than" | "greater-than-or-equal" | "less-than" | "less-than-or-equal" | "in" | "not-in" | "between" | "not-between" | "is-null" | "is-not-null";
 export type DocumentFilterValueType = "auto" | "string" | "number" | "boolean" | "object-id" | "date" | "int32" | "int64" | "decimal128" | "json";
 export type ElasticsearchBoolClause = "filter" | "must" | "should" | "must_not";
@@ -82,7 +82,7 @@ export function documentFilterModeOptionsFor(kind: DocumentStoreKind): Array<{ v
   if (kind === "meilisearch") return documentFilterModeOptions.filter((option) => option.value !== "like" && option.value !== "not-like" && !MONGO_ONLY_DOCUMENT_FILTER_MODES.has(option.value));
   // Solr's driver translates every mode — including $in/$nin and range pairs —
   // into fq clauses, so the full Mongo-style operator set is available.
-  if (kind === "mongodb" || kind === "solr") return documentFilterModeOptions;
+  if (kind === "mongodb" || kind === "solr" || kind === "couchdb") return documentFilterModeOptions;
   return documentFilterModeOptions.filter((option) => !MONGO_ONLY_DOCUMENT_FILTER_MODES.has(option.value));
 }
 
@@ -184,6 +184,22 @@ const solrDocumentProvider: DocumentStoreProvider = {
   sortInputForColumn: mongoDocumentProvider.sortInputForColumn,
 };
 
+const couchdbDocumentProvider: DocumentStoreProvider = {
+  kind: "couchdb",
+  filterInputLabel: "selector",
+  sortInputLabel: "sort",
+  documentsLabel: ({ total }) => `${total} Documents`,
+  queryPreview: ({ collection, filterJson, sortJson, skip, limit }) => {
+    const lines = ["DBX COUCHDB FIND DOCUMENTS", `database: ${JSON.stringify(collection)}`, `skip: ${skip}`, `limit: ${limit}`];
+    const filter = documentStorePreviewJson(filterJson);
+    if (filter) lines.push("selector:", filter);
+    const sort = documentStorePreviewJson(sortJson);
+    if (sort) lines.push("sort:", sort);
+    return lines.join("\n");
+  },
+  sortInputForColumn: mongoDocumentProvider.sortInputForColumn,
+};
+
 const dynamodbDocumentProvider: DocumentStoreProvider = {
   kind: "dynamodb",
   filterInputLabel: "filter",
@@ -216,6 +232,7 @@ export function documentStoreProviderFor(databaseType?: DatabaseType): DocumentS
   if (isElasticsearchCompatibleDatabaseType(databaseType)) return elasticsearchDocumentProvider;
   if (isMeilisearchDatabaseType(databaseType)) return meilisearchDocumentProvider;
   if (isSolrDatabaseType(databaseType)) return solrDocumentProvider;
+  if (isCouchDbDatabaseType(databaseType)) return couchdbDocumentProvider;
   return mongoDocumentProvider;
 }
 
@@ -542,40 +559,45 @@ export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: 
   // Range and list predicates parse their raw input inside their own case, so the
   // single-value parse must not run for them (it would reject "18, 30" as a number).
   const parsesSingleValue = documentFilterModeNeedsValue(rule.mode) && !documentFilterModeUsesList(rule.mode) && !documentFilterModeUsesRange(rule.mode);
-  const value = parsesSingleValue ? parseDocumentFilterValue(rule.rawValue, { ...options, valueType: rule.valueType }) : null;
+  // Substring predicates match against the text the user typed, so the typed parse stays lazy:
+  // coercing "abc" to the column's own type (number, date, boolean, or a JSON object) throws,
+  // and that error reached the filter bar as an Apply click that appeared to do nothing.
+  const typedValue = () => (parsesSingleValue ? parseDocumentFilterValue(rule.rawValue, { ...options, valueType: rule.valueType }) : null);
   const textValue = parsesSingleValue ? String(parseDocumentFilterValue(rule.rawValue)) : "";
   switch (rule.mode) {
     case "equals":
-      return { [rule.fieldName]: value };
+      return { [rule.fieldName]: typedValue() };
     case "not-equals":
-      return { [rule.fieldName]: { $ne: value } };
+      return { [rule.fieldName]: { $ne: typedValue() } };
     case "like":
-      if (options.kind === "dynamodb") return { [rule.fieldName]: { $contains: value } };
-      if (options.kind === "mongodb" && mongoFilterValueIsNumeric(rule.valueType, options.sampleValue)) {
-        return mongoNumericContainsCondition(rule.fieldName, textValue);
+      if (options.kind === "dynamodb") return { [rule.fieldName]: { $contains: typedValue() } };
+      if (options.kind === "mongodb" && mongoFilterValueNeedsTextCoercion(rule.valueType, options.sampleValue)) {
+        return mongoTextCoercionContainsCondition(rule.fieldName, textValue);
       }
       return { [rule.fieldName]: { $regex: escapeRegexLiteral(textValue), $options: "i" } };
     case "not-like":
-      if (options.kind === "dynamodb") return { [rule.fieldName]: { $notContains: value } };
-      if (options.kind === "mongodb" && mongoFilterValueIsNumeric(rule.valueType, options.sampleValue)) {
-        return mongoNumericContainsCondition(rule.fieldName, textValue, true);
+      if (options.kind === "dynamodb") return { [rule.fieldName]: { $notContains: typedValue() } };
+      if (options.kind === "mongodb" && mongoFilterValueNeedsTextCoercion(rule.valueType, options.sampleValue)) {
+        return mongoTextCoercionContainsCondition(rule.fieldName, textValue, true);
       }
       return { [rule.fieldName]: { $not: { $regex: escapeRegexLiteral(textValue), $options: "i" } } };
     case "begins-with":
     case "ends-with": {
       if (!mongoDocumentFilterKind(options)) return null;
       const pattern = `${rule.mode === "begins-with" ? "^" : ""}${escapeRegexLiteral(textValue)}${rule.mode === "ends-with" ? "$" : ""}`;
-      if (mongoFilterValueIsNumeric(rule.valueType, options.sampleValue)) return mongoNumericRegexCondition(rule.fieldName, pattern);
+      // The coercion form is MongoDB-only: Solr shares this filter shape but translates
+      // anchored $regex into fq wildcards and cannot translate $expr.
+      if (options.kind === "mongodb" && mongoFilterValueNeedsTextCoercion(rule.valueType, options.sampleValue)) return mongoTextCoercionRegexCondition(rule.fieldName, pattern);
       return { [rule.fieldName]: { $regex: pattern, $options: "i" } };
     }
     case "greater-than":
-      return { [rule.fieldName]: { $gt: value } };
+      return { [rule.fieldName]: { $gt: typedValue() } };
     case "greater-than-or-equal":
-      return { [rule.fieldName]: { $gte: value } };
+      return { [rule.fieldName]: { $gte: typedValue() } };
     case "less-than":
-      return { [rule.fieldName]: { $lt: value } };
+      return { [rule.fieldName]: { $lt: typedValue() } };
     case "less-than-or-equal":
-      return { [rule.fieldName]: { $lte: value } };
+      return { [rule.fieldName]: { $lte: typedValue() } };
     case "in":
     case "not-in": {
       if (!mongoDocumentFilterKind(options)) return null;
@@ -612,7 +634,7 @@ function mongoDocumentFilterKind(options: DocumentFilterParseOptions): boolean {
   // Solr shares the Mongo-style filter document — the driver translates $in,
   // $gte/$lte and anchored $regex into fq clauses — so it uses the same
   // operator-rich condition shapes.
-  return options.kind === undefined || options.kind === "mongodb" || options.kind === "solr";
+  return options.kind === undefined || options.kind === "mongodb" || options.kind === "solr" || options.kind === "couchdb";
 }
 
 /** Splits a comma/newline separated filter value list, keeping quoted values intact. */
@@ -660,19 +682,21 @@ function unquoteSingleQuotedListToken(token: string): string {
   return token;
 }
 
-function mongoFilterValueIsNumeric(valueType?: DocumentFilterValueType, sampleValue?: unknown): boolean {
-  if (valueType === "number" || valueType === "int32" || valueType === "int64" || valueType === "decimal128") return true;
-  if (typeof sampleValue === "number") return true;
-  if (!isPlainRecord(sampleValue)) return false;
-  const keys = Object.keys(sampleValue);
-  return keys.length === 1 && ["$numberInt", "$numberLong", "$numberDouble", "$numberDecimal"].includes(keys[0]);
+/** Substring filters need the text-coercion form whenever the column does not hold plain
+ * strings: MongoDB `$regex` only matches a field whose value is itself a string (or a string
+ * element of an array), so numbers, dates, booleans, ObjectIds and embedded documents would
+ * otherwise silently match nothing. */
+function mongoFilterValueNeedsTextCoercion(valueType?: DocumentFilterValueType, sampleValue?: unknown): boolean {
+  if (valueType && valueType !== "auto" && valueType !== "string") return true;
+  const inferred = inferMongoFilterValueType(sampleValue);
+  return inferred !== null && inferred !== "string";
 }
 
-function mongoNumericContainsCondition(fieldName: string, textValue: string, negate = false): Record<string, unknown> {
-  return mongoNumericRegexCondition(fieldName, escapeRegexLiteral(textValue), negate);
+function mongoTextCoercionContainsCondition(fieldName: string, textValue: string, negate = false): Record<string, unknown> {
+  return mongoTextCoercionRegexCondition(fieldName, escapeRegexLiteral(textValue), negate);
 }
 
-function mongoNumericRegexCondition(fieldName: string, regex: string, negate = false): Record<string, unknown> {
+function mongoTextCoercionRegexCondition(fieldName: string, regex: string, negate = false): Record<string, unknown> {
   const regexMatch = { $regexMatch: { input: { $convert: { input: `$${fieldName}`, to: "string", onError: "", onNull: "" } }, regex, options: "i" } };
   return negate ? { $expr: { $not: [regexMatch] } } : { $expr: regexMatch };
 }
@@ -847,6 +871,7 @@ const documentQueryInputNormalizers: Record<DocumentStoreKind, DocumentQueryInpu
   elasticsearch: quoteUnquotedObjectKeys,
   meilisearch: quoteUnquotedObjectKeys,
   solr: quoteUnquotedObjectKeys,
+  couchdb: quoteUnquotedObjectKeys,
 };
 
 function normalizeDocumentQueryObjectInput(input: string, kind?: DocumentStoreKind): string {
@@ -903,10 +928,12 @@ function parseMongoFilterValueAs(raw: string, valueType: Exclude<DocumentFilterV
     case "object-id":
       if (!/^[0-9a-f]{24}$/i.test(text)) throw invalidMongoFilterValue(valueType, raw);
       return { $oid: text };
-    case "date":
+    case "date": {
       if (/^-?\d+$/.test(text)) return { $date: { $numberLong: text } };
-      if (Number.isNaN(Date.parse(text))) throw invalidMongoFilterValue(valueType, raw);
-      return { $date: text };
+      const normalized = normalizeMongoDateInput(text);
+      if (!normalized) throw invalidMongoFilterValue(valueType, raw);
+      return { $date: normalized };
+    }
     case "int32": {
       if (!/^-?\d+$/.test(text)) throw invalidMongoFilterValue(valueType, raw);
       const value = BigInt(text);

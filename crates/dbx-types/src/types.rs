@@ -145,12 +145,63 @@ pub struct ExtensionInfo {
     pub schema: Option<String>,
 }
 
+/// A PostgreSQL event trigger (`pg_event_trigger`). Event triggers fire on DDL
+/// commands at the database level, independent of any schema. This is distinct
+/// from MySQL events (`MysqlEventInfo`) and per-table triggers (`TriggerInfo`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventTriggerInfo {
+    pub name: String,
+    /// DDL event: ddl_command_start | ddl_command_end | sql_drop | table_rewrite.
+    pub event: String,
+    /// Owner role name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// `schema.function(args)` executed by the trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
+    /// Session replica status char: O | A | R | D.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<String>,
+    /// Command tags in the WHEN clause (NULL = all tags).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// `pg_get_eventtriggerdef` reconstruction of the CREATE statement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectStatistics {
     pub name: String,
     pub schema: Option<String>,
     pub estimated_rows: Option<i64>,
     pub total_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_row_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_data_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_increment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_free: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,6 +222,37 @@ pub enum ObjectSourceKind {
     TypeBody,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RoutineParameterMode {
+    In,
+    Out,
+    Inout,
+    Return,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoutineParameterMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub mode: RoutineParameterMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jdbc_type: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<i32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectSource {
     pub name: String,
@@ -179,6 +261,28 @@ pub struct ObjectSource {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine_parameters: Option<Vec<RoutineParameterMetadata>>,
+}
+
+/// Provenance for structured metadata fields that are optional in [`ColumnInfo`].
+/// This stays internal to the metadata mapping path and is not serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnMetadataCapabilities {
+    pub default: bool,
+    pub length: bool,
+    pub precision: bool,
+    pub scale: bool,
+}
+
+impl ColumnMetadataCapabilities {
+    pub const fn all_supported() -> Self {
+        Self { default: true, length: true, precision: true, scale: true }
+    }
+
+    pub const fn default_only() -> Self {
+        Self { default: true, length: false, precision: false, scale: false }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -203,6 +307,24 @@ pub struct ColumnInfo {
     pub character_set: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collation: Option<String>,
+    #[serde(skip)]
+    pub metadata_capabilities: Option<ColumnMetadataCapabilities>,
+}
+
+/// Doris aggregate-state columns contain opaque engine serialization, not a
+/// value that DBX can safely edit or emit as an INSERT literal.
+pub fn is_opaque_aggregate_state_type(data_type: &str) -> bool {
+    let data_type = data_type.trim();
+    let Some(prefix) = data_type.get(.."agg_state".len()) else { return false };
+    if !prefix.eq_ignore_ascii_case("agg_state") {
+        return false;
+    }
+    let Some(arguments) =
+        data_type.get("agg_state".len()..).map(str::trim_start).and_then(|value| value.strip_prefix('<'))
+    else {
+        return false;
+    };
+    arguments.strip_suffix('>').is_some_and(|inner| !inner.trim().is_empty())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,6 +441,20 @@ pub struct SpatialColumn {
     pub srid: Option<u32>,
 }
 
+/// Stable identity for one column selected for SQL INSERT export.
+///
+/// `source_index` preserves duplicate result labels. `name` and
+/// `name_occurrence` let paginated exports recover the same identity when a
+/// driver reports later-page metadata in a different order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlExportColumnSelection {
+    pub source_index: usize,
+    pub name: String,
+    #[serde(default)]
+    pub name_occurrence: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct SpatialColumnBuilder {
     // column_index -> first non-null srid seen (sticky once set)
@@ -345,10 +481,13 @@ impl SpatialColumnBuilder {
         }
     }
 
-    pub fn finish(self) -> Vec<SpatialColumn> {
+    fn finish(self) -> Vec<SpatialColumn> {
         self.columns.into_iter().map(|(column_index, srid)| SpatialColumn { column_index, srid }).collect()
     }
 
+    /// Drivers collect one SRID slot per cell while streaming rows; a result
+    /// without spatial columns drops that all-`None` matrix instead of sending
+    /// it to every consumer.
     pub fn finish_with_values(
         self,
         spatial_values: Vec<Vec<Option<u32>>>,
@@ -433,6 +572,9 @@ pub struct QueryResult {
     /// completed statement cannot be correlated to one audit row.
     #[serde(default)]
     pub server_execute_time_us: Option<u64>,
+    /// Optional measured query phases in milliseconds; absent on older agents.
+    #[serde(default)]
+    pub query_timings_ms: Option<std::collections::BTreeMap<String, f64>>,
     #[serde(default)]
     pub truncated: bool,
     #[serde(default)]
@@ -474,6 +616,7 @@ impl Serialize for QueryResult {
             + usize::from(!self.spatial_values.is_empty())
             + usize::from(self.elasticsearch_raw_body.is_some())
             + usize::from(self.server_execute_time_us.is_some())
+            + usize::from(self.query_timings_ms.is_some())
             + usize::from(!self.messages.is_empty());
         let mut state = serializer.serialize_struct("QueryResult", field_count)?;
         state.serialize_field("columns", &self.columns)?;
@@ -490,6 +633,9 @@ impl Serialize for QueryResult {
         state.serialize_field("execution_time_ms", &self.execution_time_ms)?;
         if let Some(server_execute_time_us) = &self.server_execute_time_us {
             state.serialize_field("server_execute_time_us", server_execute_time_us)?;
+        }
+        if let Some(timings) = &self.query_timings_ms {
+            state.serialize_field("query_timings_ms", timings)?;
         }
         state.serialize_field("truncated", &self.truncated)?;
         state.serialize_field("session_id", &self.session_id)?;
@@ -964,9 +1110,21 @@ pub struct CustomTypeDetails {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompletionAssistantCandidate, CompletionAssistantCandidateKind, ObjectInfo, ObjectSourceKind, QueryMessage,
-        SpatialColumn, SpatialColumnBuilder, TableInfo,
+        is_opaque_aggregate_state_type, CompletionAssistantCandidate, CompletionAssistantCandidateKind, ObjectInfo,
+        ObjectSource, ObjectSourceKind, QueryMessage, RoutineParameterMode, SpatialColumn, SpatialColumnBuilder,
+        TableInfo,
     };
+
+    #[test]
+    fn opaque_aggregate_state_type_is_narrow() {
+        assert!(is_opaque_aggregate_state_type("agg_state<group_concat(text)>"));
+        assert!(is_opaque_aggregate_state_type(" AGG_STATE <sum(int)> "));
+        assert!(!is_opaque_aggregate_state_type("agg_state"));
+        assert!(!is_opaque_aggregate_state_type("agg_state<"));
+        assert!(!is_opaque_aggregate_state_type("agg_state<>"));
+        assert!(!is_opaque_aggregate_state_type("😺agg_state<sum(int)>"));
+        assert!(!is_opaque_aggregate_state_type("varchar"));
+    }
 
     #[test]
     fn query_message_format_line_uppercases_severity() {
@@ -1154,6 +1312,46 @@ mod tests {
     }
 
     #[test]
+    fn object_source_accepts_legacy_payload_without_routine_parameters() {
+        let source: ObjectSource = serde_json::from_value(serde_json::json!({
+            "name": "legacy_proc",
+            "object_type": "PROCEDURE",
+            "schema": "APP",
+            "source": "CREATE PROCEDURE legacy_proc() BEGIN END"
+        }))
+        .unwrap();
+
+        assert!(source.routine_parameters.is_none());
+        assert!(serde_json::to_value(source).unwrap().get("routine_parameters").is_none());
+    }
+
+    #[test]
+    fn object_source_preserves_optional_jdbc_routine_parameters() {
+        let source: ObjectSource = serde_json::from_value(serde_json::json!({
+            "name": "calculate_total",
+            "object_type": "FUNCTION",
+            "schema": "APP",
+            "source": "",
+            "editable": false,
+            "routine_parameters": [{
+                "name": "RETURN",
+                "mode": "RETURN",
+                "jdbc_type": 3,
+                "type_name": "DECIMAL",
+                "precision": 12,
+                "scale": 2,
+                "ordinal": 0
+            }]
+        }))
+        .unwrap();
+
+        let parameters = source.routine_parameters.as_ref().unwrap();
+        assert_eq!(parameters[0].mode, RoutineParameterMode::Return);
+        assert_eq!(parameters[0].precision, Some(12));
+        assert_eq!(serde_json::to_value(source).unwrap()["routine_parameters"][0]["mode"], "RETURN");
+    }
+
+    #[test]
     fn completion_candidate_kind_accepts_uppercase_agent_wire_values() {
         for (wire_value, expected) in [
             ("DATABASE", CompletionAssistantCandidateKind::Database),
@@ -1203,6 +1401,7 @@ mod tests {
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,

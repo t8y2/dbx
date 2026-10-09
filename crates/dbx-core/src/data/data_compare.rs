@@ -88,6 +88,8 @@ pub struct DataCompareMissingTargetOptions {
     pub key_columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_batch_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degradation_threshold: Option<DegradationThreshold>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +181,12 @@ pub struct DataCompareFromTablesPreparation {
     pub target_row_count: u64,
     pub source_truncated: bool,
     pub target_truncated: bool,
+    /// Rows per side this compare was allowed to read. When a side holds more rows than
+    /// this, the diff only covers the first `row_budget` rows and the matching
+    /// `*_truncated` flag is set, so the UI can warn instead of showing a partial plan
+    /// as if it were complete.
+    #[serde(default)]
+    pub row_budget: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degradation_level: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -363,68 +371,77 @@ pub async fn prepare_data_compare_from_tables(
     let source_column_names = aligned_source_column_names(&options.columns, options.source_columns.as_ref());
     let source_key_columns = aligned_source_key_columns(&options.columns, &source_column_names, &options.key_columns);
 
-    let (source_rows, target_rows, sampling_rate, verification_method) = match &degradation_level {
-        DegradationLevel::Full => {
-            let (src, tgt) = tokio::try_join!(
-                fetch_compare_rows(
-                    state,
-                    &options.source_connection_id,
-                    &options.source_database,
-                    &options.source_schema,
-                    &options.source_table,
-                    &source_column_names,
-                    &source_key_columns,
-                    source_database_type,
-                    fetch_batch_size,
-                ),
-                fetch_compare_rows(
-                    state,
-                    &options.target_connection_id,
-                    &options.target_database,
-                    &options.target_schema,
-                    &options.target_table,
-                    &options.columns,
-                    &options.key_columns,
-                    target_database_type,
-                    fetch_batch_size,
-                )
-            )?;
-            (src, tgt, 1.0, "full_compare".to_string())
-        }
-        DegradationLevel::Sample => {
-            let (src, tgt) = tokio::try_join!(
-                fetch_sampled_compare_rows(
-                    state,
-                    &options.source_connection_id,
-                    &options.source_database,
-                    &options.source_schema,
-                    &options.source_table,
-                    &source_column_names,
-                    &source_key_columns,
-                    source_database_type,
-                    &sampling_strategy,
-                    threshold.sample_size,
-                ),
-                fetch_sampled_compare_rows(
-                    state,
-                    &options.target_connection_id,
-                    &options.target_database,
-                    &options.target_schema,
-                    &options.target_table,
-                    &options.columns,
-                    &options.key_columns,
-                    target_database_type,
-                    &sampling_strategy,
-                    threshold.sample_size,
-                )
-            )?;
-            let max_count = source_row_count.max(target_row_count);
-            let sample_rate = if max_count > 0 { threshold.sample_size as f64 / max_count as f64 } else { 1.0 };
-            let method = "sampled".to_string();
-            (src, tgt, sample_rate.min(1.0), method)
-        }
-        DegradationLevel::SkipWithRisk => (Vec::new(), Vec::new(), 0.0, "skipped".to_string()),
-    };
+    // Every row is read into memory and then shipped to the UI, so even the "full" level
+    // is capped: the degradation thresholds decide the level, the budget bounds the fetch.
+    let row_budget = rows_read_budget(&degradation_level, &threshold);
+
+    let (source_rows, target_rows, sampling_rate, verification_method, source_truncated, target_truncated) =
+        match &degradation_level {
+            DegradationLevel::Full => {
+                let (src, tgt) = tokio::try_join!(
+                    fetch_compare_rows(
+                        state,
+                        &options.source_connection_id,
+                        &options.source_database,
+                        &options.source_schema,
+                        &options.source_table,
+                        &source_column_names,
+                        &source_key_columns,
+                        source_database_type,
+                        fetch_batch_size,
+                        row_budget,
+                    ),
+                    fetch_compare_rows(
+                        state,
+                        &options.target_connection_id,
+                        &options.target_database,
+                        &options.target_schema,
+                        &options.target_table,
+                        &options.columns,
+                        &options.key_columns,
+                        target_database_type,
+                        fetch_batch_size,
+                        row_budget,
+                    )
+                )?;
+                let source_truncated = source_row_count > row_budget as u64;
+                let target_truncated = target_row_count > row_budget as u64;
+                (src, tgt, 1.0, "full_compare".to_string(), source_truncated, target_truncated)
+            }
+            DegradationLevel::Sample => {
+                let (src, tgt) = tokio::try_join!(
+                    fetch_sampled_compare_rows(
+                        state,
+                        &options.source_connection_id,
+                        &options.source_database,
+                        &options.source_schema,
+                        &options.source_table,
+                        &source_column_names,
+                        &source_key_columns,
+                        source_database_type,
+                        &sampling_strategy,
+                        threshold.sample_size,
+                    ),
+                    fetch_sampled_compare_rows(
+                        state,
+                        &options.target_connection_id,
+                        &options.target_database,
+                        &options.target_schema,
+                        &options.target_table,
+                        &options.columns,
+                        &options.key_columns,
+                        target_database_type,
+                        &sampling_strategy,
+                        threshold.sample_size,
+                    )
+                )?;
+                let max_count = source_row_count.max(target_row_count);
+                let sample_rate = if max_count > 0 { threshold.sample_size as f64 / max_count as f64 } else { 1.0 };
+                let method = "sampled".to_string();
+                (src, tgt, sample_rate.min(1.0), method, false, false)
+            }
+            DegradationLevel::SkipWithRisk => (Vec::new(), Vec::new(), 0.0, "skipped".to_string(), false, false),
+        };
 
     let target_columns = get_columns_core(
         state,
@@ -468,8 +485,9 @@ pub async fn prepare_data_compare_from_tables(
         pre_sync_statements: Vec::new(),
         source_row_count,
         target_row_count,
-        source_truncated: false,
-        target_truncated: false,
+        source_truncated,
+        target_truncated,
+        row_budget,
         degradation_level: Some(degradation_level.to_string()),
         sampling_rate: Some(sampling_rate),
         confidence_score: Some(confidence_score),
@@ -509,6 +527,11 @@ pub async fn prepare_data_compare_missing_target(
     )
     .await?;
     let source_row_count = first_count(&source_count_result.rows)?;
+    // A table that only exists on the source side has no count to compare against, but the
+    // sync plan still embeds one statement per row: reading the whole table freezes the
+    // client on large tables, so the plan covers at most one full-compare budget of rows.
+    let threshold = options.degradation_threshold.clone().unwrap_or_default();
+    let row_budget = threshold.full_compare_max_rows.max(1) as usize;
     let source_rows = fetch_compare_rows(
         state,
         &options.source_connection_id,
@@ -519,8 +542,10 @@ pub async fn prepare_data_compare_missing_target(
         &options.key_columns,
         source_database_type,
         fetch_batch_size,
+        row_budget,
     )
     .await?;
+    let source_truncated = source_row_count > row_budget as u64;
     let result = missing_target_diff(&column_names, &options.key_columns, source_rows);
     let mut pre_sync_statements = Vec::new();
     pre_sync_statements.push(format!(
@@ -567,12 +592,15 @@ pub async fn prepare_data_compare_missing_target(
         pre_sync_statements,
         source_row_count,
         target_row_count: 0,
-        source_truncated: false,
+        source_truncated,
         target_truncated: false,
-        degradation_level: Some("full".to_string()),
-        sampling_rate: Some(1.0),
-        confidence_score: Some(1.0),
-        verification_method: Some("missing_target_full".to_string()),
+        row_budget,
+        degradation_level: Some(should_degrade(source_row_count, 0, &threshold).to_string()),
+        sampling_rate: Some(if source_truncated { row_budget as f64 / source_row_count.max(1) as f64 } else { 1.0 }),
+        confidence_score: Some(if source_truncated { 0.5 } else { 1.0 }),
+        verification_method: Some(
+            if source_truncated { "missing_target_prefix" } else { "missing_target_full" }.to_string(),
+        ),
         source_checksums: None,
         target_checksums: None,
     })
@@ -1190,6 +1218,12 @@ fn build_rownum_data_compare_select_sql(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Fetches the rows a comparison needs, stopping after `row_budget` rows.
+///
+/// A compare reads both sides into memory and ships the diff to the UI, so an unbounded
+/// fetch turns a large table into an out-of-memory freeze on the client. Callers derive
+/// `source_truncated` / `target_truncated` from the table's row count versus `row_budget`
+/// so a partial diff is never mistaken for a complete one.
 async fn fetch_compare_rows(
     state: &AppState,
     connection_id: &str,
@@ -1200,20 +1234,15 @@ async fn fetch_compare_rows(
     key_columns: &[String],
     database_type: DatabaseType,
     fetch_batch_size: usize,
+    row_budget: usize,
 ) -> Result<Vec<Vec<Value>>, String> {
     let mut rows = Vec::new();
     let mut offset = 0usize;
 
-    loop {
-        let sql = build_data_compare_select_sql(
-            database_type,
-            schema,
-            table_name,
-            columns,
-            key_columns,
-            fetch_batch_size,
-            offset,
-        );
+    while rows.len() < row_budget {
+        let batch_size = fetch_batch_size.min(row_budget - rows.len());
+        let sql =
+            build_data_compare_select_sql(database_type, schema, table_name, columns, key_columns, batch_size, offset);
         let result = execute_sql_statement_with_options(
             state,
             connection_id,
@@ -1221,7 +1250,7 @@ async fn fetch_compare_rows(
             &sql,
             Some(schema),
             None,
-            QueryExecutionOptions { max_rows: Some(fetch_batch_size), ..Default::default() },
+            QueryExecutionOptions { max_rows: Some(batch_size), ..Default::default() },
         )
         .await?;
         let fetched = result.rows.len();
@@ -1229,7 +1258,7 @@ async fn fetch_compare_rows(
             break;
         }
         rows.extend(result.rows);
-        if fetched < fetch_batch_size {
+        if fetched < batch_size {
             break;
         }
         offset += fetched;
@@ -1292,6 +1321,15 @@ fn data_grid_column_info(column: crate::types::ColumnInfo) -> DataGridColumnInfo
         is_primary_key: column.is_primary_key,
         column_default: column.column_default,
         extra: column.extra,
+    }
+}
+
+/// Rows per side a compare may read for a given degradation level.
+fn rows_read_budget(level: &DegradationLevel, threshold: &DegradationThreshold) -> usize {
+    match level {
+        DegradationLevel::Full => threshold.full_compare_max_rows.max(1) as usize,
+        DegradationLevel::Sample => threshold.sample_size,
+        DegradationLevel::SkipWithRisk => 0,
     }
 }
 

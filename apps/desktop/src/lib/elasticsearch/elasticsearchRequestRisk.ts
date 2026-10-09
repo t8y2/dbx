@@ -2,7 +2,7 @@
  * Read/write classification for Elasticsearch-compatible REST requests.
  *
  * Mirrors `classify_search_engine_query_risk` in
- * `crates/dbx-sql/src/query_execution_sql.rs` so the desktop guards (read-only
+ * `crates/dbx-sql-core/src/query_execution_sql.rs` so the desktop guards (read-only
  * unlock, production safety) agree with the backend read-only gate instead of
  * treating every `GET`/`POST` request as an unrecognized — and therefore
  * unsafe — statement.

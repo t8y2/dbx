@@ -8,6 +8,8 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
+import PluginShortcutBar from "@/components/plugins/PluginShortcutBar.vue";
+import { useSettingsStore } from "@/stores/settingsStore";
 import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
 import { applyConnectionMultiSelection, emptyConnectionMultiSelection, isExitConnectionMultiSelectionShortcut } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
@@ -33,6 +35,7 @@ type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const connectionTreeRef = ref<InstanceType<typeof ConnectionTree>>();
 const showDeleteSelectedConfirm = ref(false);
@@ -84,6 +87,7 @@ const moveGroupItems = computed(() => [
 
 async function refreshTree() {
   try {
+    await connectionStore.reloadFromDisk();
     await connectionStore.refreshAllTree();
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
@@ -116,6 +120,10 @@ function focusSearch(target: Element | null = null): boolean {
 
 function locateTabInSidebar(tab: QueryTab) {
   return connectionTreeRef.value?.locateTabInSidebar(tab);
+}
+
+function disconnectAllActiveConnections() {
+  return connectionTreeRef.value?.disconnectAllActiveConnections();
 }
 
 function clearConnectionMultiSelection() {
@@ -194,7 +202,7 @@ function confirmCreateSelectedGroup() {
   showCreateSelectedGroupDialog.value = false;
 }
 
-defineExpose({ focusSearch, locateTabInSidebar });
+defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections });
 </script>
 
 <template>
@@ -296,6 +304,7 @@ defineExpose({ focusSearch, locateTabInSidebar });
       <div class="flex-1 min-h-0">
         <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" @add-to-ai="(nodes) => emit('add-to-ai', nodes)" />
       </div>
+      <PluginShortcutBar v-if="settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position === 'sidebar-bottom'" position="sidebar-bottom" />
     </div>
     <div class="panel-resize-handle panel-resize-handle--right" @pointerdown="emit('startResize', $event)" />
     <Dialog v-model:open="showDeleteSelectedConfirm">

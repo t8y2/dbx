@@ -1,8 +1,6 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { readCascadeCss } from "../../../styles/__tests__/cascadeCss";
 
-const nodeTreeSource = readFileSync(new URL("../ExplainPlanNodeTree.vue", import.meta.url), "utf8");
 const globalStyles = readCascadeCss();
 
 type Rgb = [number, number, number];
@@ -61,43 +59,6 @@ function blend(foreground: Rgb, background: Rgb, opacity: number): Rgb {
 }
 
 describe("ExplainPlanNodeTree interactions", () => {
-  it("keeps a concise preview of the most useful details in the tree row", () => {
-    expect(nodeTreeSource).toContain('const detailPreviewEntries = computed(() => detailEntries.value.filter((detail) => detail.label !== "Actual Rows").slice(0, 2))');
-    expect(nodeTreeSource).toContain('<div v-if="detailPreviewEntries.length"');
-    expect(nodeTreeSource).toContain('v-for="(detail, index) in detailPreviewEntries"');
-    expect(nodeTreeSource).toContain('class="min-w-0 flex-1 truncate"');
-    expect(nodeTreeSource).not.toContain("text-muted-foreground/40");
-  });
-
-  it("shows long details in a click-triggered, selectable popover", () => {
-    expect(nodeTreeSource).toContain('import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"');
-    expect(nodeTreeSource).toContain('<Popover v-if="detailEntries.length">');
-    expect(nodeTreeSource).toContain("<PopoverTrigger as-child>");
-    expect(nodeTreeSource).toContain('<PopoverContent align="end"');
-    expect(nodeTreeSource).toContain('data-native-clipboard class="max-h-');
-    expect(nodeTreeSource).toContain("select-text whitespace-pre-wrap break-words");
-    expect(nodeTreeSource).not.toContain("node.details.join");
-    expect(nodeTreeSource).not.toContain("{{ detailEntries.length }}");
-    expect(nodeTreeSource.match(/\{\{ t\("explain\.details"\) \}\}/g)).toHaveLength(1);
-  });
-
-  it("keeps detail fields distinct and tree disclosure on its own button", () => {
-    expect(nodeTreeSource).toContain('const separatorIndex = detail.indexOf(":")');
-    expect(nodeTreeSource).toContain('v-if="detail.label"');
-    expect(nodeTreeSource).toContain('<Button v-if="hasChildren"');
-    expect(nodeTreeSource).toContain(':aria-expanded="!collapsed"');
-    expect(nodeTreeSource).toContain('@click="toggleCollapsed"');
-    expect(nodeTreeSource).not.toContain("cursor-pointer");
-    expect(nodeTreeSource).not.toContain('@click="toggle"');
-  });
-
-  it("uses semantic foreground tokens instead of fixed status hues", () => {
-    expect(nodeTreeSource).toContain("text-foreground/80");
-    expect(nodeTreeSource).toContain("text-popover-foreground");
-    expect(nodeTreeSource).not.toMatch(/text-(?:blue|emerald|amber|green)-/);
-    expect(nodeTreeSource).not.toMatch(/border-(?:blue|emerald|amber|green)-/);
-  });
-
   it("keeps foreground-based tree metadata readable in every application palette", () => {
     expect(themeColors).toHaveLength(26);
 

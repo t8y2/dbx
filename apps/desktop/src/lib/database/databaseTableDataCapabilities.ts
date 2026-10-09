@@ -133,6 +133,16 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       transaction: false,
     },
   },
+  transwarp: {
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
+      requiresTransactionalTableForExistingRows: true,
+      transaction: true,
+    },
+  },
   jdbc: {
     tableData: {
       insert: false,
@@ -233,6 +243,25 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       existingRowsReadonly: true,
       transaction: false,
       readonly: true,
+    },
+  },
+  salesforce: {
+    // SOQL has no DML. A grid save becomes one `DBX SALESFORCE DML` pseudo-command
+    // per record (built by dbx-sql) which the driver turns into a REST call:
+    // PATCH /sobjects/{object}/{id}, POST /sobjects/{object}, DELETE /sobjects/{object}/{id}.
+    // Row identity is the `Id` column (the driver marks it is_primary_key), so both
+    // update and delete require it. REST has no transactions: records are written
+    // one by one, a failure leaves the earlier records applied, and nothing can be
+    // rolled back — the grid therefore asks for confirmation before saving.
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: true,
+      deleteRequiresPrimaryKey: true,
+      keylessRowPredicate: false,
+      requiresTransactionalTableForExistingRows: false,
+      existingRowsReadonly: false,
+      transaction: false,
+      readonly: false,
     },
   },
 };

@@ -40,6 +40,19 @@ pub trait MessageQueueAdmin: Send + Sync {
 
     // ---- Topics ----
     async fn list_topics(&self, ns: &NamespaceRef, opts: ListTopicsOpts) -> Result<Vec<TopicInfo>, String>;
+
+    /// Bounded topic listing for providers that support server-side paging.
+    /// The legacy unbounded method remains available for existing callers and
+    /// providers whose native APIs already return small lists.
+    async fn list_topics_page(
+        &self,
+        _ns: &NamespaceRef,
+        _opts: ListTopicsOpts,
+        _pagination: MqListPageRequest,
+    ) -> Result<MqListPage<TopicInfo>, String> {
+        Err("Paged topic listing is not supported by this MQ system".to_string())
+    }
+
     async fn create_topic(&self, topic: &TopicRef, partitions: Option<u32>) -> Result<(), String>;
     async fn delete_topic(&self, topic: &TopicRef, force: bool) -> Result<(), String>;
     async fn update_partitions(&self, topic: &TopicRef, partitions: u32) -> Result<(), String>;
@@ -54,6 +67,14 @@ pub trait MessageQueueAdmin: Send + Sync {
 
     async fn list_exchanges(&self, _ns: &NamespaceRef) -> Result<Vec<MqExchangeInfo>, String> {
         Err("Exchanges are not supported by this MQ system".to_string())
+    }
+
+    async fn list_exchanges_page(
+        &self,
+        _ns: &NamespaceRef,
+        _pagination: MqListPageRequest,
+    ) -> Result<MqListPage<MqExchangeInfo>, String> {
+        Err("Paged exchange listing is not supported by this MQ system".to_string())
     }
 
     async fn create_exchange(

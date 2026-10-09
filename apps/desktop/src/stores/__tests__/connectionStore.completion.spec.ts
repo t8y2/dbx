@@ -26,6 +26,19 @@ function postgresConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function spannerConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "spanner-1",
+    name: "Cloud Spanner",
+    db_type: "spanner",
+    host: "spanner.googleapis.com",
+    port: 443,
+    username: "",
+    database: "projects/test-project/instances/test-instance/databases/app",
+  } as ConnectionConfig;
+}
+
 function mysqlConnection(): ConnectionConfig {
   return {
     ...postgresConnection(),
@@ -115,6 +128,18 @@ function damengConnection(): ConnectionConfig {
     db_type: "dameng",
     port: 5236,
     username: "dbx_test",
+    database: "",
+  } as ConnectionConfig;
+}
+
+function db2Connection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "db2-1",
+    name: "DB2",
+    db_type: "db2",
+    port: 50000,
+    username: "DBX_TEST",
     database: "",
   } as ConnectionConfig;
 }
@@ -678,6 +703,59 @@ describe("connectionStore completion assistant", () => {
     ]);
   });
 
+  it("maps global OceanBase Oracle tables with safe qualification and schema priority", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [
+        { name: "ORDERS", kind: "table", schema: "DWD", data_type: "TABLE" },
+        { name: "ORDERS", kind: "table", schema: "STAGING", data_type: "TABLE" },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listTables: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+
+    const tables = await store.listCompletionTables("oceanbase-oracle-1", "OBORCL", "ORD", 20, "DWD", true, "DWD");
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ schema: "DWD", parent_schema: null, global_search: true, mask: "ORD" }));
+    expect(tables).toEqual([expect.objectContaining({ name: "ORDERS", schema: "DWD", applyName: "ORDERS", boost: 2400 }), expect.objectContaining({ name: "ORDERS", schema: "STAGING", applyName: "STAGING.ORDERS", boost: 0 })]);
+  });
+
+  it("scopes OceanBase Oracle table completion when a schema qualifier is present", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { schema?: string | null; parent_schema?: string | null }) => ({
+      candidates: request.parent_schema?.toLowerCase() === "staging" ? [{ name: "ORDERS", kind: "table", schema: "STAGING", data_type: "TABLE" }] : [],
+      incomplete: false,
+      fallback_used: false,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listTables: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+
+    const tables = await store.listCompletionTables("oceanbase-oracle-1", "OBORCL", "", 20, "staging", false, "DWD");
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ schema: "staging", parent_schema: "staging", global_search: false, mask: "" }));
+    expect(tables).toEqual([expect.objectContaining({ name: "ORDERS", schema: "STAGING", applyName: "ORDERS", boost: 2400 })]);
+  });
+
   it("lets Oracle resolve CURRENT_SCHEMA for unqualified column completion", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [],
@@ -736,6 +814,104 @@ describe("connectionStore completion assistant", () => {
     expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS", schema: undefined, dataType: "NUMBER" })]);
   });
 
+  it("loads Cloud Spanner columns from the empty GoogleSQL default schema", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "SingerId", kind: "column", schema: "", parent_schema: "", parent_name: "Singers", data_type: "INT64" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+    const getColumns = vi.fn();
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [spannerConnection()];
+    store.connectedIds.add("spanner-1");
+
+    const columns = await store.listCompletionColumns("spanner-1", spannerConnection().database, "Singers", "");
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ schema: "", parent_schema: "", parent_name: "Singers" }));
+    expect(getColumns).not.toHaveBeenCalled();
+    expect(columns).toEqual([expect.objectContaining({ name: "SingerId", table: "Singers", schema: "", dataType: "INT64" })]);
+  });
+
+  it.each(["sales", "public"])("keeps Cloud Spanner column completion scoped to the named %s schema", async (schema) => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "OrderId", kind: "column", schema, parent_schema: schema, parent_name: "Orders", data_type: schema === "public" ? "bigint" : "INT64" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+    const getColumns = vi.fn();
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [spannerConnection()];
+    store.connectedIds.add("spanner-1");
+
+    const columns = await store.listCompletionColumns("spanner-1", spannerConnection().database, "Orders", schema);
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ schema, parent_schema: schema, parent_name: "Orders" }));
+    expect(getColumns).not.toHaveBeenCalled();
+    expect(columns).toEqual([expect.objectContaining({ name: "OrderId", table: "Orders", schema })]);
+  });
+
+  it("still skips column metadata for another schema-aware database without a selected schema", async () => {
+    const completionAssistantSearch = vi.fn();
+    const getColumns = vi.fn();
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    await expect(store.listCompletionColumns("pg-1", "app", "orders", undefined)).resolves.toEqual([]);
+    expect(completionAssistantSearch).not.toHaveBeenCalled();
+    expect(getColumns).not.toHaveBeenCalled();
+  });
+
+  it.each(["empty", "error"] as const)("falls back to canonical Cloud Spanner metadata after an %s assistant result", async (assistantResult) => {
+    const completionAssistantSearch = assistantResult === "empty" ? vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false }) : vi.fn().mockRejectedValue(new Error("assistant unavailable"));
+    const getColumns = vi.fn().mockResolvedValue([{ name: "SingerId", data_type: "INT64", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [spannerConnection()];
+    store.connectedIds.add("spanner-1");
+
+    const columns = await store.listCompletionColumns("spanner-1", spannerConnection().database, "Singers", "");
+
+    expect(completionAssistantSearch).toHaveBeenCalledOnce();
+    expect(getColumns).toHaveBeenCalledWith("spanner-1", spannerConnection().database, "", "Singers", undefined, undefined);
+    expect(columns).toEqual([expect.objectContaining({ name: "SingerId", table: "Singers", schema: "", dataType: "INT64" })]);
+  });
+
   it("uses the Dameng login schema for unqualified column completion", async () => {
     const completionAssistantSearch = vi.fn().mockRejectedValue(new Error("assistant unavailable"));
     const getColumns = vi.fn().mockResolvedValue([{ name: "ID", data_type: "BIGINT", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]);
@@ -760,6 +936,33 @@ describe("connectionStore completion assistant", () => {
     expect(getColumns).toHaveBeenCalledWith("dameng-1", "", "dbx_test", "tb_user", undefined, undefined);
     expect(first).toEqual([expect.objectContaining({ name: "ID", table: "tb_user", schema: "dbx_test" })]);
     expect(cached).toEqual(first);
+  });
+
+  it("uses the DB2 login schema for unqualified column completion", async () => {
+    // DB2's CURRENT SCHEMA starts as the authorization ID of the session user, so an
+    // unqualified reference resolves against the login schema — the same convention
+    // as Dameng (see the test above). Without the fallback `listCompletionColumns`
+    // takes its schema-required early return and never asks for the columns at all,
+    // so a tab that has no schema selected gets an empty candidate list.
+    const completionAssistantSearch = vi.fn().mockRejectedValue(new Error("assistant unavailable"));
+    const getColumns = vi.fn().mockResolvedValue([{ name: "PMNUM", data_type: "VARCHAR", is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [db2Connection()];
+    store.connectedIds.add("db2-1");
+
+    const first = await store.listCompletionColumns("db2-1", "", "pm");
+
+    expect(getColumns).toHaveBeenCalledWith("db2-1", "", "DBX_TEST", "pm", undefined, undefined);
+    expect(first).toEqual([expect.objectContaining({ name: "PMNUM", table: "pm", schema: "DBX_TEST" })]);
   });
 
   it("rejects assistant columns returned for a different MySQL parent table", async () => {
@@ -1073,6 +1276,57 @@ describe("connectionStore completion assistant", () => {
     await store.listCompletionColumns("sqlserver-1", "app", "users", "dbo");
     await store.listCompletionColumns("sqlserver-1", "app", "orders", "dbo");
     expect(getColumns.mock.calls.map((call) => call[3])).toEqual(["users", "orders", "users"]);
+  });
+
+  it("caches Mongo completion indexes and invalidates them via invalidateCompletionTableCache and invalidateCompletionCache", async () => {
+    const mongoListIndexSpecs = vi.fn().mockResolvedValue([
+      {
+        name: "email_1",
+        keys: [{ field: "email", direction: "1" }],
+        is_unique: true,
+        is_primary: false,
+        is_sparse: false,
+        expire_after_seconds: null,
+        partial_filter_expression: null,
+        background: false,
+        bucket_size: null,
+        hidden: false,
+        properties_complete: true,
+        extra_options: null,
+      },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      mongoListIndexSpecs,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [
+      {
+        ...postgresConnection(),
+        id: "mongo-1",
+        name: "MongoDB",
+        db_type: "mongodb",
+      },
+    ];
+    store.connectedIds.add("mongo-1");
+
+    const first = await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(first).toEqual([{ name: "email_1", keyPattern: "{ email: 1 }" }]);
+    const second = await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(second).toEqual([{ name: "email_1", keyPattern: "{ email: 1 }" }]);
+    expect(mongoListIndexSpecs).toHaveBeenCalledTimes(1);
+
+    expect(store.invalidateCompletionTableCache("mongo-1", "app", "users")).toBeGreaterThan(0);
+    await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(mongoListIndexSpecs).toHaveBeenCalledTimes(2);
+
+    store.invalidateCompletionCache("mongo-1", "app");
+    await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(mongoListIndexSpecs).toHaveBeenCalledTimes(3);
   });
 
   it("does not let an invalidated column request overwrite fresh metadata", async () => {

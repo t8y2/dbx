@@ -25,11 +25,11 @@ capabilities:
   diagram: true
   tableDataEdit: true
   tableStructureEdit: false
-  tableImport: false
-  dataTransfer: false
+  tableImport: true
+  dataTransfer: true
   sqlFileExecution: true
   databaseCreate: false
-  fieldLineage: false
+  fieldLineage: true
   sqlExplain: false
   userAdmin: false
   driverManagement: true

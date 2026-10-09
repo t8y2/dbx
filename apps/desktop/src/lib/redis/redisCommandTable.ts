@@ -377,7 +377,7 @@ const RAW_COMMANDS: Record<string, Spec> = {
   DBSIZE: [1, "server"],
   FAILOVER: [-1, "server", "confirm"],
   FLUSHALL: [-1, "server", "blocked"],
-  FLUSHDB: [-1, "server", "confirm"],
+  FLUSHDB: [-1, "server", "blocked"],
   INFO: [-1, "server"],
   LASTSAVE: [1, "server"],
   "MEMORY USAGE": [-3, "server"],

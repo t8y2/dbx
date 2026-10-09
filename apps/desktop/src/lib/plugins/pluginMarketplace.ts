@@ -3,6 +3,8 @@ import { uuid } from "@/lib/common/utils";
 
 export type MarketplacePluginStatus = "install" | "installed" | "update" | "unsupported";
 
+export type MarketplacePluginSortMode = "name" | "recently-updated" | "recently-listed" | "updates-first";
+
 export const UNIVERSAL_PLUGIN_TARGET = "universal";
 
 export interface MarketplacePluginListing {
@@ -16,6 +18,9 @@ export interface MarketplacePluginListing {
   installed?: InstalledPlugin;
   verified: boolean;
   status: MarketplacePluginStatus;
+  // releasedAt of the catalog's latestVersion entry, when provided; shown on the card
+  // next to the version badge so time-based sort modes have a visible key.
+  latestVersionReleasedAt?: string;
 }
 
 /**
@@ -51,6 +56,7 @@ export function buildMarketplacePluginListings(results: readonly PluginRepositor
           installed,
           verified: plugin.verified && listingRepositoryCanVerify(result.repository),
           status,
+          latestVersionReleasedAt: latestVersion?.releasedAt || undefined,
         };
       }),
     )
@@ -161,6 +167,53 @@ export function filterMarketplacePluginListings(listings: readonly MarketplacePl
     if (!normalizedQuery) return true;
     return [listing.plugin.id, listing.name, listing.description, listing.plugin.publisher, listing.repository.name, ...listing.plugin.tags].join("\n").toLocaleLowerCase().includes(normalizedQuery);
   });
+}
+
+// Missing or unparsable releasedAt sorts below every dated listing (-Infinity tail).
+function releaseTime(releasedAt: string | undefined): number {
+  const time = Date.parse(releasedAt || "");
+  return Number.isNaN(time) ? Number.NEGATIVE_INFINITY : time;
+}
+
+// "Recently updated" must use the SAME value the card renders (latestVersionReleasedAt, the
+// catalog's latestVersion entry): the ranking can then never contradict the date on the badge.
+// Third-party catalogs are not required to keep latestVersion at the newest date, so a catalog
+// that dates an older version later than its current one sorts by the date it advertises for its
+// current version — the honest reading of "recently updated". The official store satisfies the
+// latestVersion-is-newest invariant 30/30 (verified live 2026-09-24), so real data is unaffected.
+function latestVersionReleaseTime(listing: MarketplacePluginListing): number {
+  return releaseTime(listing.latestVersionReleasedAt);
+}
+
+// "Recently listed" scans EVERY version: nothing on the card claims to display a first-listed
+// date, so min(releasedAt) across the catalog is the only signal available (min ≈ first listed,
+// the docs-site heuristic) and cannot contradict the badge.
+function firstReleaseTime(listing: MarketplacePluginListing): number {
+  const times = listing.plugin.versions.map((version) => Date.parse(version.releasedAt || "")).filter((time) => !Number.isNaN(time));
+  return times.length ? Math.min(...times) : Number.NEGATIVE_INFINITY;
+}
+
+// Copies before sorting: the builder output is also consumed elsewhere (batch selection,
+// the installed-tab update index) and must keep its name order there.
+export function sortMarketplacePluginListings(listings: readonly MarketplacePluginListing[], mode: MarketplacePluginSortMode): MarketplacePluginListing[] {
+  const byName = (left: MarketplacePluginListing, right: MarketplacePluginListing) => left.name.localeCompare(right.name);
+  if (mode === "name") return [...listings].sort(byName);
+  const releaseTimeFor = mode === "recently-listed" ? firstReleaseTime : latestVersionReleaseTime;
+  if (mode === "updates-first") {
+    return [...listings].sort((left, right) => {
+      const updatable = (listing: MarketplacePluginListing) => (listing.status === "update" ? 0 : 1);
+      if (updatable(left) !== updatable(right)) return updatable(left) - updatable(right);
+      return releaseTimeFor(right) - releaseTimeFor(left) || byName(left, right);
+    });
+  }
+  return [...listings].sort((left, right) => releaseTimeFor(right) - releaseTimeFor(left) || byName(left, right));
+}
+
+export function formatMarketplaceReleasedDate(releasedAt: string | undefined, locale: string): string {
+  if (!releasedAt) return "";
+  const date = new Date(releasedAt);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(locale.replace("_", "-"), { dateStyle: "medium" }).format(date);
 }
 
 function marketplacePluginLocalization(plugin: PluginMarketplacePlugin, locale: string): { name: string; description: string } {

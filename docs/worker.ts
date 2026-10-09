@@ -301,6 +301,32 @@ async function contributorAvatar(request: Request): Promise<Response> {
   });
 }
 
+const AGENT_ASSET_URL_PATTERN = /^https:\/\/github\.com\/t8y2\/dbx\/releases\/download\/(agents-v[0-9][A-Za-z0-9._-]*|agents-latest)\/([A-Za-z0-9][A-Za-z0-9._-]*\.(?:tar\.zst|zip|jar|exe|json))$/;
+
+/**
+ * Streams GitHub agents-release assets through the site because GitHub release
+ * downloads send no CORS headers; the browser custom-bundle builder on the
+ * drivers page fetches tar.zst driver packages through this route. CNB stays
+ * the primary source — this is the fallback for networks where CNB is slow.
+ */
+async function agentReleaseAsset(request: Request): Promise<Response> {
+  const target = new URL(request.url).searchParams.get("url") ?? "";
+  if (!AGENT_ASSET_URL_PATTERN.test(target)) return json({ error: "Unsupported asset URL" }, 400);
+
+  const response = await fetch(target, { redirect: "follow" });
+  if (!response.ok || !response.body) return json({ error: "Asset unavailable" }, 502);
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/octet-stream",
+    "Cache-Control": "public, max-age=3600, s-maxage=86400",
+    "X-Content-Type-Options": "nosniff",
+    "Cross-Origin-Resource-Policy": "same-origin",
+  };
+  const length = response.headers.get("Content-Length");
+  if (length) headers["Content-Length"] = length;
+  return new Response(request.method === "HEAD" ? null : response.body, { headers });
+}
+
 function issueSessionCookie(value: string, maxAge: number): string {
   return `${ISSUE_SESSION_COOKIE}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Strict`;
 }
@@ -633,6 +659,19 @@ export class IssueSubmissionLimiter {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/install-mcp" || url.pathname === "/install-mcp.ps1") {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return new Response("Method not allowed\n", { status: 405, headers: { Allow: "GET, HEAD", "Content-Type": "text/plain; charset=utf-8" } });
+      }
+      const assetPath = url.pathname === "/install-mcp" ? "/install-mcp.sh" : "/install-mcp.ps1";
+      const asset = await env.ASSETS.fetch(new Request(`${url.origin}${assetPath}`));
+      if (!asset.ok || asset.headers.get("Content-Type")?.includes("text/html")) {
+        return new Response("Installer unavailable\n", { status: 503, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+      }
+      return new Response(request.method === "HEAD" ? null : asset.body, {
+        headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=300", "X-Content-Type-Options": "nosniff" },
+      });
+    }
     const issueRedirect = issueRedirectPath(url.pathname, preferredIssueLanguage(request));
     if (issueRedirect && request.method === "GET") return Response.redirect(`${url.origin}${issueRedirect}`, 308);
     // Turkish docs routes no longer exist; keep old /tr/* links working by sending them to English.
@@ -645,6 +684,7 @@ export default {
     if (url.pathname === "/api/auth/me" && request.method === "GET") return currentUser(request, env);
     if (url.pathname === "/api/auth/logout" && request.method === "POST") return logout();
     if (url.pathname === "/api/contributor-avatar" && request.method === "GET") return contributorAvatar(request);
+    if (url.pathname === "/api/agent-asset" && (request.method === "GET" || request.method === "HEAD")) return agentReleaseAsset(request);
     // API paths must never fall through to the cached HTML 404 page: a navigation to an
     // unmatched /api route would otherwise be edge-cached and shadow this worker.
     if (url.pathname.startsWith("/api/")) return json({ error: "NOT_FOUND" }, 404);

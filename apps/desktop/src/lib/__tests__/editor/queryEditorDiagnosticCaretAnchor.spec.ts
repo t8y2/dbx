@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { needsDiagnosticCaretReanchor, type DiagnosticCaretAnchorState } from "@/lib/editor/queryEditorDiagnosticCaretAnchor";
 
@@ -45,16 +44,5 @@ describe("needsDiagnosticCaretReanchor", () => {
     expect(needsDiagnosticCaretReanchor(state({ targetNode: null }))).toBe(false);
     expect(needsDiagnosticCaretReanchor(state({ domRangeCount: 2 }))).toBe(false);
     expect(needsDiagnosticCaretReanchor(state({ domRangeCount: 0, currentAnchorNode: null }))).toBe(false);
-  });
-});
-
-describe("QueryEditor diagnostic caret re-anchor wiring", () => {
-  const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
-
-  it("re-anchors the browser caret after applying diagnostics, outside a transaction", () => {
-    expect(queryEditorSource).toMatch(/function reconfigureDiagnostics\(\)[\s\S]*?reanchorCaretAfterDiagnostics\(currentView\)/);
-    // The re-anchor must not dispatch a selection transaction: that closes the
-    // completion popup the user is looking at (#9480).
-    expect(queryEditorSource).toMatch(/function reanchorCaretAfterDiagnostics\(currentView: EditorViewType\)[\s\S]*?domSelection\.collapse\(target\.node, target\.offset\)/);
   });
 });

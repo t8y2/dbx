@@ -13,10 +13,60 @@
         background-color: rgb(255 255 255);
       }
 
+      body {
+        margin: 0;
+      }
+
       html.dark,
       html.dark body,
       html.dark #root {
         background-color: rgb(19 20 22);
+      }
+
+      #startup-loading {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        min-height: 100vh;
+        align-items: center;
+        justify-content: center;
+        color: #6b7280;
+        font:
+          14px system-ui,
+          sans-serif;
+      }
+
+      #startup-loading .startup-brand {
+        color: #111827;
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.5px;
+      }
+
+      html.dark #startup-loading .startup-brand {
+        color: #f3f4f6;
+      }
+
+      #startup-loading .startup-spinner {
+        width: 22px;
+        height: 22px;
+        box-sizing: border-box;
+        border: 2px solid rgba(107, 114, 128, 0.22);
+        border-top-color: currentColor;
+        border-radius: 999px;
+        animation: dbx-startup-spin 0.8s linear infinite;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #startup-loading .startup-spinner {
+          animation: none;
+        }
+      }
+
+      @keyframes dbx-startup-spin {
+        to {
+          transform: rotate(360deg);
+        }
       }
     </style>
     <script data-dbx-startup-theme>
@@ -69,21 +119,415 @@
   </head>
   <body>
     <div id="root">
-      <style>
-        #root:empty {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          height: 100vh;
-          font-family: system-ui, sans-serif;
-          color: #888;
-          font-size: 13px;
-        }
-        #root:empty::after {
-          content: "Loading…";
-        }
-      </style>
+      <div id="startup-loading" role="status" aria-live="polite" aria-busy="true">
+        <span class="startup-brand" aria-hidden="true">DBX</span>
+        <span class="startup-spinner" aria-hidden="true"></span>
+        <span>Loading…</span>
+      </div>
     </div>
+    <script data-dbx-compat-probe>
+      // Reports engines that cannot render the app shell and, when one is detected, shows a
+      // notice built only from inline styles. This has to keep working on an engine whose
+      // entire `@layer` output is discarded, so it must never depend on Tailwind, design
+      // tokens, media queries, `:has()`, `oklch()`, `color-mix()`, `min()` or `focus-visible`.
+      //
+      // The probe cluster is exactly Tailwind v4's browser baseline, which is also the oldest
+      // engine the shell is styled for:
+      //   @layer                      -> Safari 15.4, Chrome 99
+      //   oklch()                     -> Safari 15.4, Chrome 111
+      //   color-mix()                 -> Safari 16.2, Chrome 111
+      //   media query range syntax    -> Safari 16.4, Chrome 104
+      // Every probe fails open: a detection bug must never hide a working app behind a notice.
+      (() => {
+        const BYPASS_KEY = "dbx-compat-bypass";
+        const BANNER_KEY = "dbx-compat-banner-dismissed";
+
+        const FATAL_PROBES = [
+          ["layer", () => supportsLayer()],
+          ["oklch", () => supportsStyle("color", "oklch(0.5 0.1 180)")],
+          ["color-mix", () => supportsStyle("color", "color-mix(in oklab, black 10%, transparent)")],
+        ];
+        // Degraded: the shell renders, but responsive variants and focus rings are incomplete.
+        const DEGRADED_PROBES = [
+          ["media-query-range", () => supportsMediaQueryRange()],
+          ["has-selector", () => supportsSelector(":has(*)")],
+          ["focus-visible", () => supportsSelector(":focus-visible")],
+        ];
+        const FEATURE_LABELS = {
+          layer: "@layer",
+          oklch: "oklch()",
+          "color-mix": "color-mix()",
+          "media-query-range": "media query range syntax",
+          "has-selector": ":has()",
+          "focus-visible": ":focus-visible",
+        };
+
+        const TEXT = {
+          "zh-CN": {
+            listSeparator: "、",
+            macTitle: "当前系统的 WebKit 版本过旧，DBX 界面无法正常显示",
+            macBody: "DBX 的界面由 macOS 内置的 WebKit 渲染，而这台 Mac 上的 WebKit 版本过旧，缺少 DBX 需要的 CSS 特性，界面会显示异常。",
+            macSteps: [
+              "打开「系统设置 → 通用 → 软件更新」，把 macOS 升级到 Monterey 的最新版本（12.7.6）。",
+              "在同一页面把 Safari 升级到最新版（Monterey 最高支持 Safari 17.6）。",
+              "完全退出 DBX，然后重新打开。",
+            ],
+            macNote: "升级 Safari 会同时更新系统 WebKit，DBX 不需要重新安装。",
+            webTitle: "当前浏览器版本过旧，DBX 界面无法正常显示",
+            webBody: "检测到 {engine}，该版本过旧，缺少 DBX 需要的 CSS 特性，界面会显示异常。",
+            webSteps: [
+              "请把浏览器升级到最新版本（Chrome、Edge、Firefox、Safari 均可）。",
+              "升级完成后重新打开 DBX。",
+            ],
+            desktopSteps: [
+              "请把操作系统升级到最新版本，以便同步更新系统内置的 WebView。",
+              "完全退出 DBX，然后重新打开。",
+            ],
+            webNote: "如果浏览器由公司统一分发、无法自行升级，请联系 IT 部门。",
+            macBanner: "检测到 {engine}，部分样式可能显示异常。请在「系统设置 → 通用 → 软件更新」把 Safari 升级到最新版，再重新打开 DBX。",
+            desktopBanner: "检测到 {engine}，部分样式可能显示异常。建议升级操作系统以更新系统内置的 WebView，再重新打开 DBX。",
+            webBanner: "检测到 {engine}，部分样式可能显示异常。建议把浏览器升级到最新版本，再重新打开。",
+            continue: "仍然继续（界面会显示异常）",
+            dismiss: "知道了",
+            detected: "检测结果",
+          },
+          "zh-TW": {
+            listSeparator: "、",
+            macTitle: "目前系統的 WebKit 版本過舊，DBX 介面無法正常顯示",
+            macBody: "DBX 的介面由 macOS 內建的 WebKit 算繪，而這台 Mac 上的 WebKit 版本過舊，缺少 DBX 需要的 CSS 特性，介面會顯示異常。",
+            macSteps: [
+              "打開「系統設定 → 一般 → 軟體更新」，把 macOS 更新到 Monterey 的最新版本（12.7.6）。",
+              "在同一頁面把 Safari 更新到最新版（Monterey 最高支援 Safari 17.6）。",
+              "完整結束 DBX，然後重新打開。",
+            ],
+            macNote: "更新 Safari 會同時更新系統 WebKit，DBX 不需要重新安裝。",
+            webTitle: "目前瀏覽器版本過舊，DBX 介面無法正常顯示",
+            webBody: "偵測到 {engine}，該版本過舊，缺少 DBX 需要的 CSS 特性，介面會顯示異常。",
+            webSteps: [
+              "請把瀏覽器更新到最新版本（Chrome、Edge、Firefox、Safari 皆可）。",
+              "更新完成後重新打開 DBX。",
+            ],
+            desktopSteps: [
+              "請把作業系統更新到最新版本，以便同步更新系統內建的 WebView。",
+              "完整結束 DBX，然後重新打開。",
+            ],
+            webNote: "如果瀏覽器由公司統一派送、無法自行更新，請聯絡 IT 部門。",
+            macBanner: "偵測到 {engine}，部分樣式可能顯示異常。請在「系統設定 → 一般 → 軟體更新」把 Safari 更新到最新版，再重新打開 DBX。",
+            desktopBanner: "偵測到 {engine}，部分樣式可能顯示異常。建議更新作業系統以更新系統內建的 WebView，再重新打開 DBX。",
+            webBanner: "偵測到 {engine}，部分樣式可能顯示異常。建議把瀏覽器更新到最新版本，再重新打開。",
+            continue: "仍然繼續（介面會顯示異常）",
+            dismiss: "知道了",
+            detected: "偵測結果",
+          },
+          en: {
+            listSeparator: ", ",
+            macTitle: "This Mac's WebKit is too old for DBX to render correctly",
+            macBody: "DBX renders its UI with the WebKit built into macOS, and the WebKit on this Mac is too old: it is missing CSS features DBX relies on, so the UI renders incorrectly.",
+            macSteps: [
+              "Open System Settings → General → Software Update and update macOS to the latest Monterey release (12.7.6).",
+              "Update Safari to the latest version from the same panel (Monterey supports up to Safari 17.6).",
+              "Quit DBX completely, then open it again.",
+            ],
+            macNote: "Updating Safari also updates the system WebKit, so DBX does not need to be reinstalled.",
+            webTitle: "This browser is too old for DBX to render correctly",
+            webBody: "Detected {engine}, which is too old: it is missing CSS features DBX relies on, so the UI renders incorrectly.",
+            webSteps: [
+              "Update your browser to the latest version (any modern Chrome, Edge, Firefox or Safari works).",
+              "Reopen DBX once the update is done.",
+            ],
+            desktopSteps: [
+              "Update your operating system to the latest version so the built-in WebView is updated too.",
+              "Quit DBX completely, then open it again.",
+            ],
+            webNote: "If your browser is managed by your company and cannot be updated, please contact IT.",
+            macBanner: "Detected {engine}. Some styles may render incorrectly - update Safari from System Settings > General > Software Update, then reopen DBX.",
+            desktopBanner: "Detected {engine}. Some styles may render incorrectly - update your operating system so its built-in WebView is updated, then reopen DBX.",
+            webBanner: "Detected {engine}. Some styles may render incorrectly - update your browser to the latest version, then reopen.",
+            continue: "Continue anyway (the UI will look wrong)",
+            dismiss: "Got it",
+            detected: "Detected",
+          },
+        };
+
+        const report = { tier: "ok", missing: [], engine: "", platform: "web", desktop: false, bypassed: false };
+        window.__DBX_WEBVIEW_COMPAT__ = report;
+
+        const el = (tag, css, text) => {
+          const node = document.createElement(tag);
+          if (css) node.style.cssText = css;
+          if (text !== undefined) node.textContent = text;
+          return node;
+        };
+
+        const storage = (store, key, value) => {
+          try {
+            if (value === undefined) return String(window[store].getItem(key) || "");
+            window[store].setItem(key, value);
+          } catch {
+            return "";
+          }
+          return "";
+        };
+
+        function supportsStyle(property, value) {
+          try {
+            return typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports(property, value);
+          } catch {
+            return true;
+          }
+        }
+
+        function supportsSelector(selector) {
+          try {
+            return typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("selector(" + selector + ")");
+          } catch {
+            return true;
+          }
+        }
+
+        function supportsMediaQueryRange() {
+          try {
+            return typeof window.matchMedia === "function" && window.matchMedia("(width >= 0px)").matches;
+          } catch {
+            return true;
+          }
+        }
+
+        // `@layer` has no `CSS.supports()` form, so load a layered rule and read the custom
+        // property back: engines without cascade layers discard the whole block.
+        function supportsLayer() {
+          let style;
+          try {
+            style = document.createElement("style");
+            style.textContent = "@layer dbx-layer-probe{html{--dbx-layer-probe:1}}";
+            (document.head || document.documentElement).appendChild(style);
+            const value = window.getComputedStyle(document.documentElement).getPropertyValue("--dbx-layer-probe");
+            return String(value).trim() === "1";
+          } catch {
+            return true;
+          } finally {
+            if (style && style.parentNode) style.parentNode.removeChild(style);
+          }
+        }
+
+        function describeEngine(ua) {
+          const match =
+            /Edg\/(\d+)/.exec(ua) ||
+            /OPR\/(\d+)/.exec(ua) ||
+            /Firefox\/(\d+)/.exec(ua) ||
+            /Chrome\/(\d+)/.exec(ua) ||
+            /Version\/([\d.]+).*Safari/.exec(ua);
+          if (!match) return "";
+          const name = /Edg\//.test(ua)
+            ? "Edge"
+            : /OPR\//.test(ua)
+              ? "Opera"
+              : /Firefox\//.test(ua)
+                ? "Firefox"
+                : /Chrome\//.test(ua)
+                  ? "Chrome"
+                  : "Safari";
+          return name + " " + match[1];
+        }
+
+        function describePlatform() {
+          const platform = navigator.platform || "";
+          const ua = navigator.userAgent || "";
+          if (/Mac|iPhone|iPad|iPod/.test(platform) || /Mac OS X/.test(ua)) return "macos";
+          if (/Win/.test(platform) || /Windows/.test(ua)) return "windows";
+          if (/Linux|X11/.test(platform) || /Linux/.test(ua)) return "linux";
+          return "web";
+        }
+
+        function pickLanguage() {
+          const languages = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || ""];
+          for (const language of languages) {
+            const tag = String(language).toLowerCase();
+            if (tag.indexOf("zh") === 0) return /hant|tw|hk|mo/.test(tag) ? "zh-TW" : "zh-CN";
+            if (tag.indexOf("en") === 0) return "en";
+          }
+          return "en";
+        }
+
+        function format(template, values) {
+          return String(template).replace(/\{(\w+)\}/g, (match, key) => (key in values ? values[key] : match));
+        }
+
+        function featureList(names, separator) {
+          return names.map((name) => FEATURE_LABELS[name] || name).join(separator);
+        }
+
+        function palette() {
+          const dark = document.documentElement.classList.contains("dark");
+          return {
+            background: dark ? "#131416" : "#ffffff",
+            text: dark ? "#f3f4f6" : "#111827",
+            muted: dark ? "#9ca3af" : "#4b5563",
+            subtle: dark ? "#6b7280" : "#6b7280",
+            border: dark ? "#2f3136" : "#e5e7eb",
+            surface: dark ? "#1b1d21" : "#f9fafb",
+          };
+        }
+
+        function renderNotice(tier, copy, names) {
+          const color = palette();
+          const banner = tier === "degraded";
+          const mac = report.desktop && report.platform === "macos";
+          const engine = report.engine || (report.desktop ? report.platform : "unknown");
+          const values = { engine: engine, features: featureList(names, copy.listSeparator) };
+          const steps = mac ? copy.macSteps : report.desktop ? copy.desktopSteps : copy.webSteps;
+          // The degraded banner names the exact thing to upgrade, so "update it" can never be
+          // read as "update DBX" or "update macOS".
+          const bannerText = mac ? copy.macBanner : report.desktop ? copy.desktopBanner : copy.webBanner;
+          const detail = copy.detected + ": " + (engine || "-") + (names.length ? " / " + values.features : "");
+
+          const surface = el(
+            "div",
+            [
+              "box-sizing:border-box;z-index:2147483647;text-align:left;",
+              "background:" + color.background + ";color:" + color.text + ";",
+              "font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;",
+              "font-size:13px;line-height:1.6;",
+              banner
+                ? "position:fixed;left:50%;transform:translateX(-50%);bottom:16px;width:calc(100vw - 32px);max-width:520px;" +
+                  "border:1px solid " + color.border + ";border-radius:10px;padding:12px 14px;box-shadow:0 8px 24px rgba(0,0,0,0.14);"
+                : "position:fixed;top:0;left:0;right:0;bottom:0;display:flex;overflow:auto;padding:24px;",
+            ].join(""),
+          );
+          surface.setAttribute(banner ? "data-dbx-compat-banner" : "data-dbx-compat-gate", tier);
+
+          const card = banner
+            ? surface
+            : el(
+                "div",
+                "margin:auto;max-width:620px;width:100%;box-sizing:border-box;border:1px solid " +
+                  color.border +
+                  ";border-radius:12px;padding:22px;background:" +
+                  color.background +
+                  ";",
+              );
+
+          if (!banner) {
+            card.appendChild(
+              el("div", "font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:" + color.subtle + ";margin-bottom:10px;", "DBX"),
+            );
+            card.appendChild(el("h1", "margin:0 0 10px;font-size:17px;font-weight:600;line-height:1.4;", mac ? copy.macTitle : copy.webTitle));
+          }
+          card.appendChild(
+            el("p", "margin:0 0 12px;color:" + color.muted + ";", banner ? format(bannerText, values) : format(mac ? copy.macBody : copy.webBody, values)),
+          );
+
+          if (!banner) {
+            const list = el("ol", "margin:0 0 12px;padding-left:20px;");
+            for (const step of steps) {
+              list.appendChild(el("li", "margin:0 0 6px;", step));
+            }
+            card.appendChild(list);
+            card.appendChild(el("p", "margin:0 0 14px;font-size:12px;color:" + color.subtle + ";", mac ? copy.macNote : copy.webNote));
+          }
+
+          const footer = el("div", "display:flex;flex-wrap:wrap;align-items:center;gap:10px;");
+          if (!banner) {
+            footer.appendChild(
+              el(
+                "span",
+                "font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:" +
+                  color.subtle +
+                  ";background:" +
+                  color.surface +
+                  ";border-radius:6px;padding:4px 8px;overflow-wrap:anywhere;",
+                detail,
+              ),
+            );
+          }
+          const dismiss = el(
+            "button",
+            "font:inherit;font-size:12px;cursor:pointer;border:1px solid " +
+              color.border +
+              ";border-radius:6px;background:transparent;color:" +
+              color.text +
+              ";padding:6px 12px;",
+            banner ? copy.dismiss : copy.continue,
+          );
+          dismiss.setAttribute("type", "button");
+          dismiss.setAttribute("data-dbx-compat-dismiss", "");
+          dismiss.addEventListener("click", () => {
+            if (banner) {
+              storage("localStorage", BANNER_KEY, "1");
+              surface.remove();
+              return;
+            }
+            storage("sessionStorage", BYPASS_KEY, "1");
+            window.location.reload();
+          });
+          footer.appendChild(dismiss);
+          card.appendChild(footer);
+
+          if (!banner) surface.appendChild(card);
+          document.body.appendChild(surface);
+        }
+
+        try {
+          report.desktop = Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__);
+          report.platform = describePlatform();
+          report.engine = describeEngine(navigator.userAgent || "");
+
+          const missingFatal = FATAL_PROBES.filter((probe) => !probe[1]()).map((probe) => probe[0]);
+          const missingDegraded = DEGRADED_PROBES.filter((probe) => !probe[1]()).map((probe) => probe[0]);
+          report.missing = missingFatal.concat(missingDegraded);
+          // Only a missing @layer discards the stylesheet wholesale. Without @layer's
+          // fallback engine the shell cannot render at all (fatal); with @layer working,
+          // missing color functions only drop color declarations, so the shell still
+          // renders and the notice degrades to the dismissible banner. This also keeps
+          // builds that ship a fixed Chromium-109-based webview out of the blocking tier.
+          const missingColors = missingFatal.filter((name) => name !== "layer");
+          report.tier = missingFatal.includes("layer")
+            ? "fatal"
+            : missingColors.length || missingDegraded.length
+              ? "degraded"
+              : "ok";
+
+          let override = null;
+          try {
+            override = new URLSearchParams(window.location.search).get("dbx-compat");
+          } catch {
+            override = null;
+          }
+          const forced = override === "force" || override === "fatal" || override === "force-degraded" || override === "degraded";
+          if (override === "reset") storage("sessionStorage", BYPASS_KEY, "");
+          if (override === "off") {
+            report.tier = "ok";
+            report.missing = [];
+          } else if (override === "force" || override === "fatal") {
+            report.tier = "fatal";
+            report.missing = ["layer"];
+          } else if (override === "force-degraded" || override === "degraded") {
+            report.tier = "degraded";
+            report.missing = ["media-query-range"];
+          }
+          report.bypassed = !forced && storage("sessionStorage", BYPASS_KEY) === "1";
+          // Recorded for support and for automated checks, independently of the notice.
+          document.documentElement.setAttribute("data-dbx-compat", report.tier);
+
+          // Dismissing the banner is a per-device decision about an advisory notice. It must not
+          // silence the blocking gate, which is re-asked every session on purpose: a shell whose
+          // stylesheet is dropped renders as an unusable UI, and users need to know why.
+          const dismissedDegraded = report.tier === "degraded" && storage("localStorage", BANNER_KEY) === "1";
+          if (report.tier !== "ok" && !report.bypassed && !dismissedDegraded) {
+            renderNotice(report.tier, TEXT[pickLanguage()] || TEXT.en, report.missing);
+          }
+        } catch (error) {
+          // Fail open: never hide a working app because the probe itself misbehaved.
+          report.tier = "ok";
+          report.missing = [];
+          try {
+            console.warn("[COMPAT] engine probe failed", error);
+          } catch {
+            /* console is unavailable */
+          }
+        }
+      })();
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

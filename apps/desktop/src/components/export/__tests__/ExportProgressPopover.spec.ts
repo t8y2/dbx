@@ -94,6 +94,49 @@ describe("failure detail copy text", () => {
   });
 });
 
+describe("data dictionary background task", () => {
+  it("shows actual collected-object progress and retains the finished output after the wizard closes", async () => {
+    const tracker = useExportTracker();
+    tracker.addDataDictionaryTask("dictionary-task", "shop", 2);
+    tracker.updateDataDictionaryTask("dictionary-task", { dictionaryPhase: "collecting", dictionaryProgressKnown: true, dictionaryCompleted: 1, dictionaryTotal: 2 });
+    await mountPopover();
+    expect(document.body.textContent).toContain("Export Data Dictionary: shop");
+    expect(document.body.textContent).toContain("1 / 2 objects");
+    tracker.updateDataDictionaryTask("dictionary-task", { dictionaryPhase: "saving", status: "Writing" });
+    await nextTick();
+    expect(document.body.textContent).toContain("Saving file");
+    tracker.updateDataDictionaryTask("dictionary-task", { status: "Done", filePath: "/tmp/shop.pdf" });
+    await nextTick();
+    expect(document.body.textContent).toContain("Export completed!");
+    expect(document.querySelector('[title="Open containing folder"]')).not.toBeNull();
+  });
+});
+
+describe("data generation background task", () => {
+  it("shows global progress and opens the resumable task", async () => {
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const task = tracker.addDataGenerationTask("generate-task", "app.users", 1_000, 2, onOpen);
+    tracker.updateDataGenerationTask(task.exportId, {
+      status: "Running",
+      tableIndex: 1,
+      totalTables: 2,
+      currentTable: "users",
+      rowsGenerated: 250,
+      totalRows: 1_000,
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("Data generation: app.users");
+    expect(document.body.textContent).toContain("1 / 2 tables · users · 250 / 1,000 rows");
+    const openButton = document.body.querySelector<HTMLButtonElement>('button[title="Open task"]');
+    expect(openButton).not.toBeNull();
+    openButton?.click();
+    expect(onOpen).toHaveBeenCalledOnce();
+  });
+});
+
 describe("SQL file byte progress", () => {
   it("keeps legacy progress indeterminate instead of using successful statements as the total", async () => {
     const tracker = useExportTracker();

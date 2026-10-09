@@ -353,6 +353,35 @@ describe("DataGrid context menu target lifecycle", () => {
     expect(contextMenuLabels()).toContain("Filter");
   });
 
+  it("offers extractor file exports for the selected cell", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    openContextMenu(gridCell(host));
+    await settle();
+    contextMenuButton("Export").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+
+    expect(contextMenuButton("Cell Text").disabled).toBe(false);
+    expect(contextMenuButton("JSON Array").disabled).toBe(false);
+    expect(contextMenuButton("SQL Select").disabled).toBe(false);
+  });
+
+  it("keeps unsupported extractor exports disabled for a whole-column selection", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    columnHeader(host, 1).click();
+    await settle();
+    openContextMenu(columnHeader(host, 1));
+    await settle();
+    contextMenuButton("Export").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+
+    expect(contextMenuButton("JSON Array").disabled).toBe(false);
+    expect(contextMenuButton("SQL Select").disabled).toBe(true);
+  });
+
   async function openGridSearchAndType(host: HTMLElement, query: string) {
     await settle();
     const gridRoot = host.querySelector<HTMLElement>("[data-grid-root]");

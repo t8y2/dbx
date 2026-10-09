@@ -1,5 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH } from "@/lib/editor/queryEditorLargeDocument";
 
 // issue #9035：源码 tab 必须先出现再加载。这批用例锁定 pending 占位 tab 的
 // 行为契约：立即出现、原地填充、就地重试、加载中被关闭则丢弃、重复点击去重。
@@ -37,7 +38,7 @@ const CONNECTION_ID = "ora-1";
 const DATABASE = "ORCL";
 const SCHEMA = "APP";
 
-const pendingOptions = (request: { name: string; objectType: "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE"; signature?: string }) => ({
+const pendingOptions = (request: { name: string; objectType: "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY"; signature?: string }) => ({
   connectionId: CONNECTION_ID,
   database: DATABASE,
   title: `Source - ${request.name}`,
@@ -102,6 +103,24 @@ describe("queryStore pending object source tab", () => {
     expect(tab.sourceView).toBe(true);
     expect(tab.sourceLoad).toBeUndefined();
     expect(tab.objectSource).toMatchObject({ schema: SCHEMA, name: "v_orders", objectType: "VIEW" });
+  });
+
+  it("preserves every character of a realistically large package source", async () => {
+    const procedures = Array.from({ length: 25_000 }, (_, index) => `PROCEDURE p_${index} IS BEGIN NULL; END p_${index};\n`).join("");
+    const source = `CREATE OR REPLACE PACKAGE BODY huge_pkg AS\n${procedures}END huge_pkg;\n/`;
+    expect(source.length).toBeGreaterThan(QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH);
+    mocks.getObjectSource.mockResolvedValue(objectSource(source));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const id = store.openObjectSourceTabPending(pendingOptions({ name: "huge_pkg", objectType: "PACKAGE_BODY" }));
+    await settle();
+
+    const tab = store.tabs.find((candidate) => candidate.id === id)!;
+    expect(tab.sql).toBe(source);
+    expect(tab.sql.length).toBe(source.length);
+    expect(tab.objectSource).toMatchObject({ schema: SCHEMA, name: "huge_pkg", objectType: "PACKAGE_BODY" });
+    expect(tab.sourceLoad).toBeUndefined();
   });
 
   it("keeps the resolved (fallback) object type on the tab, not the requested one", async () => {

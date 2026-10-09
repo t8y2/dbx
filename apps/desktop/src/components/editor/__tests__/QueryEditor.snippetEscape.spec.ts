@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import componentSource from "../QueryEditor.vue?raw";
+import componentSource from "../useQueryEditorCompletionKeys.ts?raw";
 import ts from "typescript";
 import { indentMore } from "@codemirror/commands";
 import { autocompletion, nextSnippetField, closeCompletion, completionKeymap, completionStatus, hasNextSnippetField, snippet, startCompletion, type CompletionResult } from "@codemirror/autocomplete";
@@ -20,10 +20,11 @@ const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 // Exercise the component's highest-priority Tab handler with real selections,
 // including typing into each field before advancing to the next one.
-const componentAst = ts.createSourceFile("QueryEditor.ts", componentSource.match(/^<script setup[^>]*>([\s\S]*?)<\/script>/m)![1], ts.ScriptTarget.Latest, true);
+const componentAst = ts.createSourceFile("useQueryEditorCompletionKeys.ts", componentSource, ts.ScriptTarget.Latest, true);
 const tabFunctions = new Set(["handleTab", "tabKeyAcceptsCompletion", "handleTabWithoutAcceptingCompletion", "performNormalTab", "editorIndentUnit", "acceptCompletionOrNextSnippetField"]);
 const tabSource = componentAst.statements
-  .filter((statement) => ts.isFunctionDeclaration(statement) && statement.name && tabFunctions.has(statement.name.text))
+  .find(ts.isFunctionDeclaration)!
+  .body!.statements.filter((statement) => ts.isFunctionDeclaration(statement) && statement.name && tabFunctions.has(statement.name.text))
   .map((statement) => statement.getText(componentAst))
   .join("\n");
 const handleTab = new Function(
@@ -35,7 +36,7 @@ const handleTab = new Function(
   "shortcutToCodeMirrorKey",
   "isEditorComposing",
   "isBatchColumnSelectionCompletionActive",
-  ts.transpileModule(tabSource, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText + "\nreturn handleTab;",
+  ts.transpileModule("const codeMirrorRuntime = { codeMirrorCompletionStatus, codeMirrorNextSnippetField, codeMirrorIndentMore };\n" + tabSource, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText + "\nreturn handleTab;",
 )(
   completionStatus,
   nextSnippetField,

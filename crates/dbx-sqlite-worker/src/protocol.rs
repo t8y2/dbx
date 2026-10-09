@@ -28,6 +28,11 @@ pub struct WorkerResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum WorkerBody {
+    // Untagged variants are tried in order. `Ok` accepts any object because all of
+    // its fields are optional, so `Err` must come first or error payloads decode as success.
+    Err {
+        error: String,
+    },
     Ok {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         columns: Option<Vec<String>>,
@@ -41,9 +46,6 @@ pub enum WorkerBody {
         truncated: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pong: Option<bool>,
-    },
-    Err {
-        error: String,
     },
 }
 
@@ -96,5 +98,18 @@ mod tests {
         assert!(encoded.contains("\"op\":\"query\""));
         let decoded: WorkerRequest = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn response_roundtrip_keeps_errors_distinct_from_success() {
+        for body in [
+            WorkerBody::err("no such table: t"),
+            WorkerBody::ok(),
+            WorkerBody::query(vec!["id".into()], Vec::new(), vec![vec![serde_json::json!(1)]], 0, false),
+        ] {
+            let encoded = serde_json::to_string(&WorkerResponse { id: 7, body: body.clone() }).unwrap();
+            let decoded: WorkerResponse = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded.body, body, "{encoded}");
+        }
     }
 }

@@ -234,7 +234,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
   });
 
   it("updates the existing ID only after Save and preserves omitted fields", async () => {
-    await mountDialog(savedConnection(), "dbx://connection/new?id=saved-production&password=new-password");
+    await mountDialog(savedConnection({ sidebar_auto_load_all_tables: true }), "dbx://connection/new?id=saved-production&password=new-password");
     const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
     expect(save).toBeTruthy();
     save!.click();
@@ -255,6 +255,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
         is_production: true,
         production_databases: ["orders"],
         visible_databases: ["orders"],
+        sidebar_auto_load_all_tables: true,
         url_params: "connectTimeout=25",
       }),
     );

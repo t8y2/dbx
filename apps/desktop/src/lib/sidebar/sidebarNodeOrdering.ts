@@ -48,6 +48,10 @@ export function sortSidebarTreeChildrenByNameKeepingTableVGroups(parent: Pick<Tr
   return sortSidebarTreeChildrenForParent(parent, [...groups, ...orderedFlat], databaseType);
 }
 
+function isBottomConnectionUtilityNode(child: TreeNode): boolean {
+  return child.type === "oracle-db-links" || child.type === "user-admin" || child.type === "xugu-user-admin" || child.type === "dameng-users" || child.type === "dameng-roles" || child.type === "dameng-job-admin" || child.type === "group-tablespaces";
+}
+
 function orderSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">, children: readonly TreeNode[], databaseType?: DatabaseType): TreeNode[] {
   const normalized = children.map((child) => sortRecursive(child, databaseType));
 
@@ -67,11 +71,23 @@ function orderSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">, child
 
   if (parent.type === "connection") {
     const savedSqlNodes = normalized.filter((child) => child.type === "saved-sql-root");
-    const userAdminNodes = normalized.filter((child) => child.type === "user-admin" || child.type === "dameng-users" || child.type === "dameng-roles");
-    const regularChildren = normalized.filter((child) => child.type !== "user-admin" && child.type !== "dameng-users" && child.type !== "dameng-roles" && child.type !== "saved-sql-root");
-    const withConnectionUtilityOrder = (children: TreeNode[]) => [...savedSqlNodes, ...children, ...userAdminNodes];
+    const bottomUtilityNodes = normalized.filter(isBottomConnectionUtilityNode);
+    const regularChildren = normalized.filter((child) => child.type !== "saved-sql-root" && !isBottomConnectionUtilityNode(child));
+    const withConnectionUtilityOrder = (children: TreeNode[]) => [...savedSqlNodes, ...children, ...bottomUtilityNodes];
 
-    if (databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "solr" || databaseType === "qdrant" || databaseType === "milvus" || databaseType === "weaviate" || databaseType === "chromadb") {
+    if (
+      databaseType === "mongodb" ||
+      databaseType === "elasticsearch" ||
+      databaseType === "easysearch" ||
+      databaseType === "meilisearch" ||
+      databaseType === "solr" ||
+      databaseType === "couchdb" ||
+      databaseType === "qdrant" ||
+      databaseType === "milvus" ||
+      databaseType === "weaviate" ||
+      databaseType === "chromadb" ||
+      databaseType === "salesforce"
+    ) {
       const meilisearchSystem = regularChildren.filter((child) => child.type === "meilisearch-system");
       const databaseObjects = regularChildren.filter((child) => child.type !== "meilisearch-system");
       return withConnectionUtilityOrder([...sortByLabel(databaseObjects), ...meilisearchSystem]);

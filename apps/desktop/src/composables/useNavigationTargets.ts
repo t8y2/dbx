@@ -3,7 +3,7 @@ import { connectionObjectTreeNodeSchema, effectiveDatabaseTypeForConnection, met
 import { invalidateTableMetadataCache, loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
 import { canApplyDataTabMetadata, canReuseActiveMongoTab, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isNoSnapshotErrorResult, isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
-import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/lib/table/tableSelectSql";
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { editableRowIdentifierColumns, physicalTablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
@@ -28,6 +28,13 @@ export type NavigationTarget = {
   whereInput?: string;
 };
 
+export interface NavigationOpenOptions {
+  // Called once the selected tab has its target identity, before loading data.
+  onOpened?: (tabId: string) => void;
+  // Guards selection only; background loading uses the tab execution generation.
+  isCurrent?: () => boolean;
+}
+
 function openMongoCollectionTarget(target: NavigationTarget, reuseMode: DataTabReuseMode) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
@@ -50,26 +57,32 @@ function openMongoCollectionTarget(target: NavigationTarget, reuseMode: DataTabR
     columns: [],
     primaryKeys: [],
   });
+  return tabId;
 }
 
-async function openTableTarget(target: NavigationTarget, options: { tableInfoTab?: TableInfoTab } = {}) {
+async function openTableTarget(target: NavigationTarget, options: NavigationOpenOptions & { tableInfoTab?: TableInfoTab } = {}) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
   const pageLimit = tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
 
+  if (options.isCurrent?.() === false) return;
+
   connectionStore.activeConnectionId = target.connectionId;
   const config = connectionStore.getConfig(target.connectionId);
   if (config?.db_type === "mongodb") {
-    openMongoCollectionTarget(target, settingsStore.editorSettings.dataTabReuseMode);
+    const tabId = openMongoCollectionTarget(target, settingsStore.editorSettings.dataTabReuseMode);
+    options.onOpened?.(tabId);
     return;
   }
   const tableSchema = connectionObjectTreeNodeSchema(config, target.database, target.schema);
   const tabTitle = target.catalog ? `${target.catalog}.${tableSchema || target.database}.${target.tableName}` : tableSchema ? `${tableSchema}.${target.tableName}` : target.tableName;
   if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
     await connectionStore.ensureConnected(target.connectionId);
+    if (options.isCurrent?.() === false) return;
     const tabId = queryStore.createTab(target.connectionId, target.database || "default", tabTitle, "vector");
     queryStore.updateSql(tabId, target.tableName);
+    options.onOpened?.(tabId);
     return;
   }
   const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "data", tableSchema, undefined, undefined, { forceNew: true });
@@ -129,6 +142,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
   // isPreparationCurrent——停止/接管后的迟到错误不得写入；首次执行之后
   // preparationId 正常失效，回到 isCurrentTarget，真实错误仍要展示
   let firstExecuteStarted = false;
+  options.onOpened?.(tabId);
 
   try {
     await connectionStore.ensureConnected(target.connectionId);
@@ -147,6 +161,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
         driverProfile: config.driver_profile,
+        serverVersion: connectionStore.getConfig(target.connectionId)?.database_info?.productVersion,
         identifierQuote,
         schema: tableSchema,
         catalog: target.catalog,
@@ -179,7 +194,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       return;
     }
     let eagerMetadata: Awaited<ReturnType<typeof loadTableMetadata>> | undefined;
-    if (effectiveDbType === "mysql" || effectiveDbType === "postgres" || (settingsStore.editorSettings.tableOpenSortMode ?? "none") !== "none") {
+    if (requiresEagerTableMetadataForDataOpen(effectiveDbType) || (settingsStore.editorSettings.tableOpenSortMode ?? "none") !== "none") {
       try {
         eagerMetadata = await loadTableMetadata({
           connectionId: target.connectionId,
@@ -204,6 +219,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     const sql = await buildTableSelectSql({
       databaseType: effectiveDbType,
       driverProfile: config.driver_profile,
+      serverVersion: connectionStore.getConfig(target.connectionId)?.database_info?.productVersion,
       identifierQuote,
       schema: tableSchema,
       catalog: target.catalog,
@@ -255,6 +271,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       const emptySql = await buildTableSelectSql({
         databaseType: effectiveDbType,
         driverProfile: config.driver_profile,
+        serverVersion: connectionStore.getConfig(target.connectionId)?.database_info?.productVersion,
         identifierQuote,
         schema: tableSchema,
         catalog: target.catalog,
@@ -302,6 +319,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         const newSql = await buildTableSelectSql({
           databaseType: effectiveDbType,
           driverProfile: config.driver_profile,
+          serverVersion: connectionStore.getConfig(target.connectionId)?.database_info?.productVersion,
           identifierQuote,
           schema: tableSchema,
           catalog: target.catalog,
@@ -339,13 +357,15 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
   const settingsStore = useSettingsStore();
   const { openData } = useSidebarDataOpenRuntime();
 
-  async function openObjectBrowserTableTarget(target: NavigationTarget) {
+  async function openObjectBrowserTableTarget(target: NavigationTarget, options: NavigationOpenOptions = {}) {
+    if (options.isCurrent?.() === false) return;
     if (connectionStore.getConfig(target.connectionId)?.db_type === "mongodb") {
-      openMongoCollectionTarget(target, settingsStore.editorSettings.dataTabReuseMode);
+      const tabId = openMongoCollectionTarget(target, settingsStore.editorSettings.dataTabReuseMode);
+      options.onOpened?.(tabId);
       return;
     }
     if (settingsStore.editorSettings.dataTabReuseMode === "always-new") {
-      await openTableTarget(target);
+      await openTableTarget(target, options);
       return;
     }
     connectionStore.activeConnectionId = target.connectionId;
@@ -365,7 +385,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
       },
       undefined,
       "default",
-      { reuseMode: settingsStore.editorSettings.dataTabReuseMode },
+      { reuseMode: settingsStore.editorSettings.dataTabReuseMode, ...options },
     );
   }
 
@@ -384,14 +404,14 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
     await openTableTarget(target);
   }
 
-  async function onStructureEditorSaved(reloadData: () => Promise<void>, toast: (msg: string, duration?: number) => void, context: { connectionId: string; database: string; schema?: string; catalog?: string; tableName: string }, commentChanged?: boolean) {
+  async function onStructureEditorSaved(reloadData: () => Promise<void>, toast: (msg: string, duration?: number) => void, context: { connectionId: string; database: string; schema?: string; catalog?: string; tableName: string }, commentChanged?: boolean, createdTable = false) {
     if (!context.tableName) {
       try {
         await connectionStore.refreshObjectListTreeNode(context.connectionId, context.database, context.schema || undefined);
       } catch {}
       return;
     }
-    if (commentChanged) {
+    if (commentChanged || createdTable) {
       try {
         await connectionStore.refreshObjectListTreeNode(context.connectionId, context.database, context.schema || undefined);
       } catch {}

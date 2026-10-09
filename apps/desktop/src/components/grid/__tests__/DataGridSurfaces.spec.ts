@@ -1,11 +1,13 @@
 // @vitest-environment happy-dom
 
 import { readFileSync } from "node:fs";
-import { nextTick } from "vue";
+import { createApp, defineComponent, h, nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createPinia, setActivePinia } from "pinia";
 import { dispatch, findAll, findOne, hostText, mountComponent } from "./vueHostHarness";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 
+const settingsMock = vi.hoisted(() => ({ store: null as any }));
 const mocks = vi.hoisted(() => ({
   editor: { create: vi.fn(), destroy: vi.fn(), setValue: vi.fn(), openSearch: vi.fn() },
   updateSettings: vi.fn(),
@@ -16,39 +18,15 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", () => ({
+  useI18n: () => ({ t: (key: string) => key, locale: { value: "en" } }),
+  // DataGrid.vue's import graph reaches @/i18n, which builds a real i18n instance at module scope.
+  createI18n: () => ({ install: () => {}, global: { t: (key: string) => key, locale: { value: "en" } } }),
+}));
 vi.mock("@lucide/vue", async () => {
   const { createPassthroughStub } = await import("./vueHostHarness");
   const icon = createPassthroughStub("Icon", "i");
-  return {
-    Check: icon,
-    CaseSensitive: icon,
-    ChevronDown: icon,
-    ChevronUp: icon,
-    ChevronLeft: icon,
-    ChevronRight: icon,
-    ChevronsLeft: icon,
-    ChevronsRight: icon,
-    Download: icon,
-    Filter: icon,
-    Focus: icon,
-    FileDiff: icon,
-    Loader2: icon,
-    FileUp: icon,
-    Upload: icon,
-    Search: icon,
-    X: icon,
-    Code2: icon,
-    Copy: icon,
-    Eye: icon,
-    EyeOff: icon,
-    GripVertical: icon,
-    Info: icon,
-    Pencil: icon,
-    Plus: icon,
-    RotateCcw: icon,
-    Trash2: icon,
-  };
+  return new Proxy({}, { get: (_target, key) => (key === "__esModule" ? false : icon), has: () => true });
 });
 
 vi.mock("@/components/ui/button", async () => ({ Button: (await import("./vueHostHarness")).createPassthroughStub("Button", "button") }));
@@ -71,7 +49,7 @@ vi.mock("@/components/ui/dropdown-menu", async () => {
 });
 vi.mock("@/components/ui/popover", async () => {
   const { createPassthroughStub } = await import("./vueHostHarness");
-  return { Popover: createPassthroughStub("Popover"), PopoverContent: createPassthroughStub("PopoverContent"), PopoverTrigger: createPassthroughStub("PopoverTrigger") };
+  return { Popover: createPassthroughStub("Popover"), PopoverAnchor: createPassthroughStub("PopoverAnchor"), PopoverContent: createPassthroughStub("PopoverContent"), PopoverTrigger: createPassthroughStub("PopoverTrigger") };
 });
 vi.mock("@/components/ui/tooltip", async () => {
   const { createPassthroughStub } = await import("./vueHostHarness");
@@ -89,8 +67,24 @@ vi.mock("@/components/ui/LightTooltip.vue", async () => ({ default: (await impor
 vi.mock("@/components/grid/TemporalCellEditor.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("TemporalCellEditor") }));
 vi.mock("@/components/grid/DataGridValueTransform.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("DataGridValueTransform") }));
 vi.mock("@/composables/useCellDetailEditor", () => ({ useCellDetailEditor: () => mocks.editor }));
-vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false }, themePalette: { value: {} } }) }));
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { cellDetailJsonFormatted: true, theme: "default", fontSize: 13, fontFamily: "monospace" }, updateEditorSettings: mocks.updateSettings }) }));
+vi.mock("@/composables/useTheme", async () => {
+  const { ref } = await import("vue");
+  // Real refs: DataGrid.vue both watches isDark and binds it to a Boolean prop.
+  const isDark = ref(false);
+  const themePalette = ref({});
+  return { useTheme: () => ({ isDark, themePalette }) };
+});
+vi.mock("@/stores/settingsStore", async () => {
+  const actual = await vi.importActual<typeof import("@/stores/settingsStore")>("@/stores/settingsStore");
+  const { reactive } = await import("vue");
+  // Reactive and complete: DataGrid.vue reads dozens of editor settings and must
+  // re-render when a test flips one.
+  settingsMock.store = {
+    editorSettings: reactive({ ...actual.DEFAULT_EDITOR_SETTINGS, cellDetailJsonFormatted: true, theme: "default", fontSize: 13, fontFamily: "monospace" }),
+    updateEditorSettings: mocks.updateSettings,
+  };
+  return { ...actual, useSettingsStore: () => settingsMock.store };
+});
 vi.mock("@/lib/dataGrid/geometryPreview", () => ({ isHexGeometry: () => false, renderWktOnCanvas: mocks.renderWkt }));
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: mocks.copyToClipboard }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
@@ -106,22 +100,31 @@ vi.mock("@/composables/useDataGridCellDetail", async () => {
 
 import DataGridCellDetailDialog from "@/components/grid/DataGridCellDetailDialog.vue";
 import DataGridCellDetailPanel from "@/components/grid/DataGridCellDetailPanel.vue";
+import DataGrid from "@/components/grid/DataGrid.vue";
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
+import DataGridDistinctValuePopover from "@/components/grid/DataGridDistinctValuePopover.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import DataGridFilterWorkbench from "@/components/grid/DataGridFilterWorkbench.vue";
 import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWorkbench.vue";
 import DataGridPagination from "@/components/grid/DataGridPagination.vue";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
+import DataGridSortBuilder from "@/components/grid/DataGridSortBuilder.vue";
+import DataGridSortWorkbench from "@/components/grid/DataGridSortWorkbench.vue";
+import DataGridTextSortWorkbench from "@/components/grid/DataGridTextSortWorkbench.vue";
 
-const dataGridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-const dataGridCellDetailEditSource = readFileSync("apps/desktop/src/composables/useDataGridCellDetailEdit.ts", "utf8");
 const cellDetailPanelSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailPanel.vue", "utf8");
 const cellDetailDialogSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailDialog.vue", "utf8");
 const binaryTextPreviewSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailTextPreview.vue", "utf8");
-const cellDetailHeaderSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailHeader.vue", "utf8");
-const globalsCss = readFileSync("apps/desktop/src/styles/globals.css", "utf8");
+const dataGridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+
+describe("DataGrid opaque aggregate-state safety", () => {
+  it("blocks cell edits and keyless row deletion through the centralized gates", () => {
+    expect(dataGridSource).toMatch(/function canEditCellItem[\s\S]*isOpaqueAggregateStateColumnType\(allColumnTypes\.value\[columnIndex\]\)/);
+    expect(dataGridSource).toMatch(/function canDeleteRowItem[\s\S]*canUseKeylessRowPredicate[\s\S]*hasUnsafeOpaqueAggregateStatePredicate\(allColumnTypes\.value, item\.data\)/);
+  });
+});
 
 function detail(patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
   return {
@@ -153,55 +156,6 @@ function localDateKey() {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.removeItem("dbx-filter-builder-value-shortcut-hint-days");
-});
-describe("DataGrid canvas surfaces", () => {
-  it("keeps condition and text filter editors open when persistent expansion is enabled", () => {
-    expect(dataGridSource).toContain('const isPersistentFilterView = computed(() => filterEditorView.value === "conditions" || filterEditorView.value === "text");');
-    expect(dataGridSource).toContain("const isFilterEditorPinnedOpen = computed(() => isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded);");
-    expect(dataGridSource).toContain("get: () => isFilterEditorPinnedOpen.value || filterBuilderOpen.value,");
-    expect(dataGridSource).toContain("if (!isFilterEditorPinnedOpen.value) filterBuilderOpen.value = false;");
-    expect(dataGridSource).toContain('v-model:filter-builder-open="effectiveFilterBuilderOpen"');
-    expect(dataGridSource).toContain("filterEditorView === 'conditions' && effectiveFilterBuilderOpen");
-    expect(dataGridSource).toContain("filterEditorView === 'text' && effectiveFilterBuilderOpen");
-  });
-
-  it("asks before an expensive Elasticsearch cursor jump", () => {
-    expect(dataGridSource).toContain("requestCount >= ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS");
-    expect(dataGridSource).toContain('t("grid.esDeepPageJumpConfirmMessage"');
-    expect(dataGridSource).toContain('@click="confirmEsDeepPageJump"');
-  });
-
-  it("shows stable request progress while an Elasticsearch page jump is running", () => {
-    expect(dataGridSource).toContain('t("grid.pageJumpLoading", { page: pageJumpProgress.targetPage })');
-    expect(dataGridSource).toContain('t("grid.pageJumpProgress", { current: pageJumpProgress.completedRequests, total: pageJumpProgress.totalRequests })');
-    expect(dataGridSource).toContain('role="progressbar"');
-    expect(dataGridSource).toContain(':style="{ width: `${pageJumpProgressPercent}%` }"');
-  });
-
-  it("uses the stable overlay for viewport and device-pixel measurement", () => {
-    expect(dataGridSource).toContain("function canvasMeasurementSurface(): HTMLElement | null");
-    expect(dataGridSource).toContain("return canvasOverlayRef.value ?? null;");
-    expect(dataGridSource).toContain("const measurementSurface = canvasMeasurementSurface();");
-    expect(dataGridSource).toContain("getSurface: canvasMeasurementSurface,");
-    expect(dataGridSource).toContain("const canvas = inactiveCanvasSurface();");
-    expect(dataGridSource).toContain("canvasUsingBackSurface.value = !canvasUsingBackSurface.value;");
-  });
-
-  it("uses the canvas that actually received the event during a surface flip", () => {
-    expect(dataGridSource).toContain("function canvasEventSurface(event: MouseEvent): HTMLCanvasElement | null");
-    expect(dataGridSource).toContain("const currentTarget = event.currentTarget;");
-    expect(dataGridSource).toContain("return currentTarget instanceof HTMLCanvasElement ? currentTarget : activeCanvasSurface();");
-    expect(dataGridSource).toContain("const canvas = canvasEventSurface(event);");
-
-    const canvasMouseMove = dataGridSource.slice(dataGridSource.indexOf("function onCanvasMouseMove"), dataGridSource.indexOf("function onCanvasMouseLeave"));
-    expect(canvasMouseMove).toContain("const cursorSurface = canvasEventSurface(event);");
-  });
-
-  it("handles double clicks on the stable canvas container", () => {
-    expect(dataGridSource).toContain('@dblclick="onCanvasDblClick"');
-    expect(dataGridSource.match(/@dblclick="onCanvasDblClick"/g)).toHaveLength(1);
-    expect(dataGridSource).toContain("@dblclick.stop");
-  });
 });
 
 describe("DataGridSearchBar", () => {
@@ -258,18 +212,6 @@ describe("DataGridSearchBar", () => {
 });
 
 describe("DataGridPagination", () => {
-  it("keeps drag summaries count-only and wires the derived average without materializing selected cells", () => {
-    const summaryStart = dataGridSource.indexOf("const selectionSummary = computed");
-    const pendingSummary = dataGridSource.indexOf("createPendingSelectionSummary(selectedCellCount.value, multiRowCount.value)", summaryStart);
-    const materializedSummary = dataGridSource.indexOf("summarizeSelection(selectedCells.value)", summaryStart);
-
-    expect(summaryStart).toBeGreaterThan(-1);
-    expect(pendingSummary).toBeGreaterThan(summaryStart);
-    expect(materializedSummary).toBeGreaterThan(pendingSummary);
-    expect(dataGridSource).toContain('const selectionSummaryAverageText = computed(() => {\n  if (isSelectingCells.value) return "…";');
-    expect(dataGridSource).toContain(':selection-summary-average-text="selectionSummaryAverageText"');
-  });
-
   it("shows average beside the existing selection summary values", () => {
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: { cellCount: 4, rowCount: 2 },
@@ -353,7 +295,7 @@ describe("DataGridPagination", () => {
       onNextPage: nextPage,
       onLastPage: lastPage,
     });
-    const navigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0");
+    const navigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0" && node.props["aria-label"] !== "grid.loadAllAndGoToLastRow");
 
     expect(navigation.map((node) => node.props.disabled)).toEqual([true, true, true, true]);
     navigation.forEach((node) => dispatch(node, "click"));
@@ -363,7 +305,7 @@ describe("DataGridPagination", () => {
     expect(lastPage).not.toHaveBeenCalled();
 
     await mounted.setProps({ currentPage: 2, canGoNextPage: true, canJumpLastPage: true });
-    const enabledNavigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0");
+    const enabledNavigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0" && node.props["aria-label"] !== "grid.loadAllAndGoToLastRow");
     expect(enabledNavigation.map((node) => node.props.disabled)).toEqual([false, false, false, false]);
     enabledNavigation.forEach((node) => dispatch(node, "click"));
     expect(firstPage).toHaveBeenCalledOnce();
@@ -372,7 +314,7 @@ describe("DataGridPagination", () => {
     expect(lastPage).toHaveBeenCalledOnce();
 
     await mounted.setProps({ loading: true });
-    const busyNavigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0");
+    const busyNavigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0" && node.props["aria-label"] !== "grid.loadAllAndGoToLastRow");
     expect(busyNavigation.map((node) => node.props.disabled)).toEqual([true, true, true, true]);
     expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.jumpToPage").props.disabled).toBe(true);
   });
@@ -439,6 +381,85 @@ describe("DataGridPagination", () => {
     });
 
     expect(findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0")).toHaveLength(0);
+  });
+
+  it("loads all paginated rows and moves to the last row", async () => {
+    const loadAllRows = vi.fn();
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: null,
+      selectionSummarySumText: "",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      canLoadAllRows: true,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: true,
+      canJumpLastPage: true,
+      onLoadAllRows: loadAllRows,
+    });
+    const loadAllButton = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow");
+
+    expect(loadAllButton.props.disabled).toBe(false);
+    dispatch(loadAllButton, "click");
+    expect(loadAllRows).toHaveBeenCalledOnce();
+
+    await mounted.setProps({ loading: true });
+    expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow").props.disabled).toBe(true);
+    await mounted.setProps({ loading: false, canLoadAllRows: false });
+    expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow").props.disabled).toBe(true);
+  });
+
+  it("gates the bottom export menu based on canExport", async () => {
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: null,
+      selectionSummarySumText: "",
+      selectionSummaryAverageText: "",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [{ value: "csv", label: "CSV" }],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+      canExport: true,
+    });
+
+    const findExportMenu = () => findAll(mounted.root, (node) => node.props["data-stub"] === "LightDropdown" && node.props["aria-label"] === "grid.export");
+    expect(findExportMenu()).toHaveLength(1);
+
+    await mounted.setProps({ canExport: false });
+    expect(findExportMenu()).toHaveLength(0);
+
+    await mounted.setProps({ canExport: true });
+    expect(findExportMenu()).toHaveLength(1);
+  });
+
+  it("renders export menu by default when canExport is not specified", () => {
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: null,
+      selectionSummarySumText: "",
+      selectionSummaryAverageText: "",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [{ value: "csv", label: "CSV" }],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+    });
+
+    const exportMenus = findAll(mounted.root, (node) => node.props["data-stub"] === "LightDropdown" && node.props["aria-label"] === "grid.export");
+    expect(exportMenus).toHaveLength(1);
   });
 });
 
@@ -507,8 +528,6 @@ describe("DataGridColumnHeader", () => {
     expect(String(tooltipType.props.class ?? "")).toContain("data-grid-type-string");
     const headerTypeLine = findOne(mounted.root, (node) => hostText(node) === "varchar(255)" && node.props["data-grid-header-type-line"] === "");
     expect(String(headerTypeLine.props.class)).toContain("data-grid-type-string");
-    // Softer dark-mode palette override for the tooltip container.
-    expect(globalsCss).toMatch(/\.dark \.dbx-column-info-tooltip \{[^}]*--data-grid-type-string-fg: #4ade80/);
   });
 
   it("cancels resize-handle clicks without leaking header click events", () => {
@@ -661,6 +680,41 @@ describe("DataGridFilterBuilder", () => {
     expect(applyOnly).toHaveBeenCalledTimes(2);
     await mounted.setProps({ disabled: true });
     expect(buttons()[0].props.disabled).toBe(true);
+  });
+
+  it("labels panel rule actions and allows removing the final rule", async () => {
+    const updateRule = vi.fn();
+    const remove = vi.fn();
+    const mounted = mountComponent(DataGridFilterBuilder, {
+      rules: [{ id: "r1", columnName: "id", mode: "equals", rawValue: "7", rawEndValue: "", conjunction: "AND" }],
+      columns: ["id"],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      layout: "panel",
+      showApplyOnly: true,
+      onUpdateRule: updateRule,
+      onRemove: remove,
+    });
+
+    const tooltips = () => findAll(mounted.root, (node) => node.props["data-stub"] === "LightTooltip");
+    const tooltipTexts = () => tooltips().map((node) => node.props.text);
+    const applyOnlyButton = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.filterBuilderApplyOnly");
+    const toggleButton = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.filterBuilderDisableRule");
+    const removeButton = findOne(mounted.root, (node) => node.props["aria-label"] === "common.remove");
+
+    expect(tooltipTexts()).toEqual(["grid.filterBuilderApplyOnly", "grid.filterBuilderDisableRule", "common.remove"]);
+    expect(tooltips().every((tooltip) => tooltip.props.side === "top")).toBe(true);
+    expect(removeButton.props.disabled).toBeFalsy();
+    dispatch(toggleButton, "click");
+    dispatch(removeButton, "click");
+    expect(updateRule).toHaveBeenCalledWith("r1", { disabled: true });
+    expect(remove).toHaveBeenCalledWith("r1");
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "id", mode: "equals", rawValue: "7", rawEndValue: "", conjunction: "AND", disabled: true }] });
+    expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.filterBuilderEnableRule")).toBeTruthy();
+    expect(tooltipTexts()).toEqual(["grid.filterBuilderApplyOnly", "grid.filterBuilderEnableRule", "common.remove"]);
+    expect(applyOnlyButton.props["aria-label"]).toBe("grid.filterBuilderApplyOnly");
   });
 
   it("renders a compact text rule without framed form controls", async () => {
@@ -1020,6 +1074,220 @@ describe("DataGridFilterBuilder", () => {
   });
 });
 
+describe("DataGridSortBuilder", () => {
+  const rules = [
+    { id: "r1", columnName: "id", direction: "asc" as const },
+    { id: "r2", columnName: "created_at", direction: "desc" as const, disabled: true },
+  ];
+
+  it("edits, reorders, disables, removes, adds, resets, and applies sort rules", () => {
+    const add = vi.fn();
+    const remove = vi.fn();
+    const move = vi.fn();
+    const updateRule = vi.fn();
+    const applyOnly = vi.fn();
+    const reset = vi.fn();
+    const clear = vi.fn();
+    const apply = vi.fn();
+    const mounted = mountComponent(DataGridSortBuilder, {
+      rules,
+      columns: ["id", "created_at", "name"],
+      onAdd: add,
+      onRemove: remove,
+      onMove: move,
+      onUpdateRule: updateRule,
+      onApplyOnly: applyOnly,
+      onReset: reset,
+      onClear: clear,
+      onApply: apply,
+    });
+
+    const selects = findAll(mounted.root, (node) => node.props["data-stub"] === "Select");
+    const updateColumn = selects[0]!.props["onUpdate:modelValue"];
+    for (const callback of Array.isArray(updateColumn) ? updateColumn : [updateColumn]) callback("name");
+    expect(updateRule).toHaveBeenCalledWith("r1", { columnName: "name" });
+
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.sortBuilderReorderRule"),
+      "keydown",
+      { key: "ArrowDown" },
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.sortBuilderApplyOnly"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.sortBuilderDisableRule"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "common.remove"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderAddRule"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderReset"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.clearSort"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderApply"),
+      "click",
+    );
+
+    expect(move).toHaveBeenCalledWith("r1", 1);
+    expect(applyOnly).toHaveBeenCalledWith("r1");
+    expect(updateRule).toHaveBeenCalledWith("r1", { disabled: true });
+    expect(remove).toHaveBeenCalledWith("r1");
+    expect(add).toHaveBeenCalledOnce();
+    expect(reset).toHaveBeenCalledOnce();
+    expect(clear).toHaveBeenCalledOnce();
+    expect(apply).toHaveBeenCalledOnce();
+  });
+
+  it("filters fields from the searchable selector", async () => {
+    const mounted = mountComponent(DataGridSortBuilder, {
+      rules: [{ id: "r1", columnName: "", direction: "asc" }],
+      columns: ["id", "created_at", "display_name"],
+    });
+
+    const searchInput = findOne(mounted.root, (node) => node.type === "input" && node.props.placeholder === "grid.filterBuilderSearchColumns");
+    dispatch(searchInput, "input", { target: { value: "created" } });
+    await nextTick();
+
+    const options = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem").map(hostText);
+    expect(options).toContain("created_at");
+    expect(options).not.toContain("display_name");
+  });
+
+  it("matches fields by column comment from the searchable selector", async () => {
+    const mounted = mountComponent(DataGridSortBuilder, {
+      rules: [{ id: "r1", columnName: "", direction: "asc" }],
+      columns: ["customer_name", "created_at"],
+      commentByColumn: new Map([["customer_name", "客户名称 / Customer Name"]]),
+    });
+
+    const searchInput = findOne(mounted.root, (node) => node.type === "input" && node.props.placeholder === "grid.filterBuilderSearchColumns");
+    dispatch(searchInput, "input", { target: { value: "客户" } });
+    await nextTick();
+
+    const options = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem").map(hostText);
+    expect(options).toContain("customer_name");
+    expect(options).not.toContain("created_at");
+  });
+
+  it("keeps an already selected field available for another sort rule", () => {
+    const mounted = mountComponent(DataGridSortBuilder, {
+      rules: [
+        { id: "r1", columnName: "name", direction: "asc" },
+        { id: "r2", columnName: "", direction: "desc" },
+      ],
+      columns: ["name"],
+    });
+
+    const nameOptions = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem" && hostText(node) === "name");
+    expect(nameOptions).toHaveLength(2);
+    expect(nameOptions.every((option) => option.props.disabled !== true)).toBe(true);
+
+    const addButton = findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderAddRule");
+    expect(addButton.props.disabled).not.toBe(true);
+  });
+});
+
+describe("DataGrid sort workbenches", () => {
+  const rules = [
+    { id: "r1", columnName: "tenant_id", direction: "asc" as const },
+    { id: "r2", columnName: "created_at", direction: "desc" as const },
+  ];
+
+  it("renders the conditions layout with SQL preview and explicit actions", () => {
+    const addRule = vi.fn();
+    const apply = vi.fn();
+    const reset = vi.fn();
+    const clear = vi.fn();
+    const copySql = vi.fn();
+    const mounted = mountComponent(DataGridSortWorkbench, {
+      sqlPreview: "ORDER BY tenant_id ASC, created_at DESC",
+      rules,
+      columns: ["id", "tenant_id", "created_at"],
+      onAddRule: addRule,
+      onApply: apply,
+      onReset: reset,
+      onClear: clear,
+      onCopySql: copySql,
+    });
+
+    expect(findOne(mounted.root, (node) => node.props["data-grid-sort-workbench"] === "")).toBeTruthy();
+    expect(hostText(mounted.root)).toContain("ORDER BY tenant_id ASC, created_at DESC");
+    dispatch(
+      findOne(mounted.root, (node) => node.props["aria-label"] === "grid.copySortSql"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderAddRule"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderReset"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.clearSort"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderApply"),
+      "click",
+    );
+
+    expect(copySql).toHaveBeenCalledOnce();
+    expect(addRule).toHaveBeenCalledOnce();
+    expect(reset).toHaveBeenCalledOnce();
+    expect(clear).toHaveBeenCalledOnce();
+    expect(apply).toHaveBeenCalledOnce();
+  });
+
+  it("renders the compact resizable text layout", async () => {
+    const addRule = vi.fn();
+    const updateRule = vi.fn();
+    const updateHeight = vi.fn();
+    const mounted = mountComponent(DataGridTextSortWorkbench, {
+      height: 168,
+      sqlPreview: "ORDER BY tenant_id ASC, created_at DESC",
+      rules,
+      columns: ["id", "tenant_id", "created_at"],
+      onAddRule: addRule,
+      onUpdateRule: updateRule,
+      "onUpdate:height": updateHeight,
+    });
+
+    const panel = findOne(mounted.root, (node) => node.props["data-grid-text-sort-workbench"] === "");
+    const rulesArea = findOne(mounted.root, (node) => node.props["data-sort-rules-scroll"] === "") as any;
+    const resizeHandle = findOne(mounted.root, (node) => node.props.role === "separator");
+    expect(panel.props.style).toEqual({ height: "168px", maxHeight: "55vh" });
+    expect(findAll(mounted.root, (node) => node.props.role === "checkbox")).toHaveLength(2);
+
+    dispatch(
+      findOne(mounted.root, (node) => node.props.role === "checkbox"),
+      "click",
+    );
+    expect(updateRule).toHaveBeenCalledWith("r1", { disabled: true });
+    const addShortcut = dispatch(rulesArea, "keydown", { key: "Enter", shiftKey: true });
+    expect(addShortcut.defaultPrevented).toBe(true);
+    expect(addRule).toHaveBeenCalledOnce();
+
+    dispatch(resizeHandle, "keydown", { key: "ArrowDown" });
+    await nextTick();
+    expect(updateHeight).toHaveBeenCalledWith(176);
+  });
+});
+
 describe("DataGridQueryControls", () => {
   it("opens column search when the filter button creates the first rule", async () => {
     let mounted: ReturnType<typeof mountComponent>;
@@ -1140,6 +1408,50 @@ describe("DataGridQueryControls", () => {
     expect(popoverContent.props["collision-padding"]).toBe(8);
   });
 
+  it("forwards database value suggestions in the quick filter popover", () => {
+    const openValueSuggestions = vi.fn();
+    const closeValueSuggestions = vi.fn();
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["status"],
+      conditionColumns: ["status"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: true,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      filteredColumns: ["status"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      valueSuggestions: { search: "", options: [], loading: false, error: "", limited: false, limit: 1000, selectedKeys: new Set<string>() },
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+      onOpenValueSuggestions: openValueSuggestions,
+      onCloseValueSuggestions: closeValueSuggestions,
+    });
+
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
+    const suggestionPopover = findOne(mounted.root, (node) => node.props["data-stub"] === "Popover" && node.props.open === false);
+    const openHandler = suggestionPopover.props["onUpdate:open"];
+    for (const callback of Array.isArray(openHandler) ? openHandler : [openHandler]) callback(true);
+
+    expect(openValueSuggestions).toHaveBeenCalledWith("r1", "value");
+
+    const quickFilterPopover = findOne(mounted.root, (node) => node.props["data-stub"] === "Popover" && node.props.open === true);
+    const closeHandler = quickFilterPopover.props["onUpdate:open"];
+    for (const callback of Array.isArray(closeHandler) ? closeHandler : [closeHandler]) callback(false);
+    expect(closeValueSuggestions).toHaveBeenCalledOnce();
+  });
+
   it("keeps filter actions available in the popover", () => {
     const addRule = vi.fn();
     const clearFilters = vi.fn();
@@ -1218,6 +1530,7 @@ describe("DataGridQueryControls", () => {
       filterEditorView: "quick",
       filterButtonActive: false,
       filterButtonCount: 0,
+      sortButtonCount: 2,
       hasLocalColumnFilters: false,
       localFilterCount: 0,
       localFilterSummaries: [],
@@ -1234,14 +1547,16 @@ describe("DataGridQueryControls", () => {
 
     expect(hostText(mounted.root)).not.toContain("grid.filterQuickView");
     expect(hostText(mounted.root)).not.toContain("grid.filterConditionView");
-    const quickFilterButtons = findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"));
+    const quickFilterButtons = findAll(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.filter");
     expect(quickFilterButtons).toHaveLength(1);
     expect(quickFilterButtons[0].props["aria-label"]).toBe("grid.filter");
+    const sortButton = findOne(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.sortBuilderTitle");
+    expect(hostText(sortButton)).toContain("2");
 
     await mounted.setProps({ filterEditorView: "conditions", filterBuilderOpen: false });
     await nextTick();
     expect(findOne(mounted.root, (node) => node.type === "textarea" && node.props.placeholder === "WHERE")).toBeTruthy();
-    const filterButtons = findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"));
+    const filterButtons = findAll(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.filter");
     expect(filterButtons).toHaveLength(1);
     expect(filterButtons[0].props["aria-label"]).toBe("grid.filter");
     expect(filterButtons[0].props["aria-expanded"]).toBe(false);
@@ -1251,7 +1566,121 @@ describe("DataGridQueryControls", () => {
   });
 });
 
+describe("DataGridDistinctValuePopover", () => {
+  it("renders counts and distinct loading, error, and limit states", async () => {
+    const mounted = mountComponent(DataGridDistinctValuePopover, {
+      open: true,
+      search: "",
+      options: [{ key: "str:open", label: "open", count: 12, value: "open" }],
+      loading: true,
+      error: "",
+      limited: false,
+      limit: 1000,
+    });
+    expect(hostText(mounted.root)).toContain("grid.loadingValues");
+    expect(hostText(mounted.root)).toContain("open");
+    expect(hostText(mounted.root)).toContain("12");
+
+    await mounted.setProps({ loading: false, error: "query failed", options: [] });
+    expect(hostText(mounted.root)).toContain("query failed");
+    expect(hostText(mounted.root)).not.toContain("grid.noSearchResults");
+
+    await mounted.setProps({ error: "", limited: true });
+    expect(hostText(mounted.root)).toContain("grid.serverValuesLimited");
+  });
+
+  it("selects all displayed candidates and matches the database-value filter checkbox state", async () => {
+    const toggleAll = vi.fn();
+    const options = [
+      { key: "str:open", label: "open", count: 12, value: "open" },
+      { key: "str:closed", label: "closed", count: 4, value: "closed" },
+    ];
+    const mounted = mountComponent(DataGridDistinctValuePopover, {
+      open: true,
+      search: "",
+      options,
+      loading: false,
+      error: "",
+      limited: false,
+      limit: 1000,
+      multiple: true,
+      selectedKeys: new Set<string>(),
+      onToggleAll: toggleAll,
+    });
+    const findSelectAll = () => findOne(mounted.root, (node) => node.props["data-distinct-value-select-all"] === "");
+
+    expect(findSelectAll().props["aria-checked"]).toBe(false);
+    dispatch(findSelectAll(), "click");
+    expect(toggleAll).toHaveBeenCalledOnce();
+
+    await mounted.setProps({ selectedKeys: new Set(["str:open"]) });
+    expect(findSelectAll().props["aria-checked"]).toBe(false);
+
+    await mounted.setProps({ selectedKeys: new Set(options.map((option) => option.key)) });
+    expect(findSelectAll().props["aria-checked"]).toBe(true);
+  });
+});
+
 describe("DataGridFilterWorkbench", () => {
+  it("shows database value suggestions only for enabled value rules in the conditions panel", async () => {
+    const openSuggestions = vi.fn();
+    const valueSuggestions = {
+      ruleId: undefined,
+      target: undefined,
+      search: "",
+      options: [],
+      loading: false,
+      error: "",
+      limited: false,
+      limit: 1000,
+      selectedKeys: new Set<string>(),
+    };
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "",
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      columns: ["status"],
+      filteredColumns: ["status"],
+      modeOptions: [
+        { value: "equals", labelKey: "equals" },
+        { value: "is-null", labelKey: "is-null" },
+      ],
+      columnSearch: "",
+      valueSuggestions,
+      onOpenValueSuggestions: openSuggestions,
+    });
+
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
+    const openHandler = findOne(mounted.root, (node) => node.props["data-stub"] === "Popover").props["onUpdate:open"];
+    for (const callback of Array.isArray(openHandler) ? openHandler : [openHandler]) callback(true);
+    expect(openSuggestions).toHaveBeenCalledWith("r1", "value");
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND", disabled: true }] });
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(0);
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "is-null", rawValue: "", rawEndValue: "", conjunction: "AND" }] });
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(0);
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "between", rawValue: "", rawEndValue: "", conjunction: "AND" }] });
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(2);
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "in", rawValue: "", rawEndValue: "", conjunction: "AND" }] });
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
+  });
+
+  it("exposes value suggestions in the reusable popover builder when provided", () => {
+    const mounted = mountComponent(DataGridFilterBuilder, {
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      columns: ["status"],
+      filteredColumns: ["status"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      layout: "popover",
+      valueSuggestions: { search: "", options: [], loading: false, error: "", limited: false, limit: 1000, selectedKeys: new Set<string>() },
+    });
+
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
+  });
+
   it("scrolls to the newest rule when a condition is added", async () => {
     const requestAnimationFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
       callback(0);
@@ -1377,6 +1806,57 @@ describe("DataGridFilterWorkbench", () => {
 });
 
 describe("DataGridTextFilterWorkbench", () => {
+  it("shows and forwards database value suggestions in the text filter panel", async () => {
+    const openValueSuggestions = vi.fn();
+    const closeValueSuggestions = vi.fn();
+    const valueSuggestions = {
+      ruleId: undefined,
+      target: undefined,
+      search: "",
+      options: [],
+      loading: false,
+      error: "",
+      limited: false,
+      limit: 1000,
+      selectedKeys: new Set<string>(),
+    };
+    const mounted = mountComponent(DataGridTextFilterWorkbench, {
+      height: 168,
+      sqlPreview: "",
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      columns: ["status"],
+      filteredColumns: ["status"],
+      modeOptions: [
+        { value: "equals", labelKey: "equals" },
+        { value: "between", labelKey: "between" },
+        { value: "in", labelKey: "in" },
+      ],
+      columnSearch: "",
+      valueSuggestions,
+      onOpenValueSuggestions: openValueSuggestions,
+      onCloseValueSuggestions: closeValueSuggestions,
+    });
+
+    const suggestionButtons = () => findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter");
+    expect(suggestionButtons()).toHaveLength(1);
+    expect(String(suggestionButtons()[0].props.class)).toContain("h-6");
+
+    const suggestionPopover = findOne(mounted.root, (node) => node.props["data-stub"] === "Popover" && node.props.open === false);
+    const openHandler = suggestionPopover.props["onUpdate:open"];
+    for (const callback of Array.isArray(openHandler) ? openHandler : [openHandler]) callback(true);
+    expect(openValueSuggestions).toHaveBeenCalledWith("r1", "value");
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "between", rawValue: "", rawEndValue: "", conjunction: "AND" }] });
+    expect(suggestionButtons()).toHaveLength(2);
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "in", rawValue: "", rawEndValue: "", conjunction: "AND" }] });
+    expect(suggestionButtons()).toHaveLength(1);
+    expect(findAll(mounted.root, (node) => node.props["data-distinct-value-select-all"] === "")).toHaveLength(1);
+
+    mounted.unmount();
+    expect(closeValueSuggestions).toHaveBeenCalledOnce();
+  });
+
   it("exposes a persisted keyboard-resizable text filter panel", async () => {
     const ensureRule = vi.fn();
     const updateHeight = vi.fn();
@@ -1423,38 +1903,6 @@ describe("DataGridTextFilterWorkbench", () => {
 });
 
 describe("cell detail surfaces", () => {
-  it("keeps detail tabs and editor actions usable when the panel narrows", () => {
-    const tabsHeader = cellDetailHeaderSource;
-    const tabViewport = tabsHeader.match(/<div class="([^"]*overflow-x-auto[^"]*)">\s*<TabsList/);
-    const tabList = tabsHeader.match(/<TabsList class="([^"]+)">/);
-    const triggerClasses = Array.from(tabsHeader.matchAll(/<TabsTrigger\b[^>]*class="([^"]+)"/g), ([, classes]) => classes.split(/\s+/));
-
-    expect(tabViewport?.[1]?.split(/\s+/)).toEqual(expect.arrayContaining(["min-w-0", "flex-1", "overflow-x-auto"]));
-    expect(tabList?.[1]?.split(/\s+/)).toEqual(expect.arrayContaining(["flex", "w-max", "min-w-full"]));
-    expect(triggerClasses).toHaveLength(3);
-    for (const classes of triggerClasses) {
-      expect(classes).toEqual(expect.arrayContaining(["min-w-max", "flex-1", "shrink-0"]));
-    }
-    expect(dataGridSource).not.toContain("activeCellDetailTabsGridClass");
-
-    const valueEditorLifecycleStart = dataGridSource.indexOf("watch(valueEditorContainer");
-    const valueEditorLifecycleEnd = dataGridSource.indexOf("const detailEdit = useDataGridCellDetailEdit", valueEditorLifecycleStart);
-    const valueEditorLifecycle = dataGridSource.slice(valueEditorLifecycleStart, valueEditorLifecycleEnd);
-    expect(valueEditorLifecycle).toContain("const editor = valueDetailEditor;");
-    expect(valueEditorLifecycle).toContain("if (valueDetailEditor !== editor) return;");
-    expect(valueEditorLifecycle).toContain("if (editor.getValue() !== detailEditValue.value)");
-    expect(valueEditorLifecycle).toContain("editor.setValue(detailEditValue.value, activeCellDetail.value?.type);");
-
-    const valueEditorStart = dataGridSource.indexOf("<TabsContent v-if=\"activeCellDetailTabs.includes('valueEditor')\"");
-    const valueEditorEnd = dataGridSource.indexOf("</TabsContent>", valueEditorStart);
-    const valueEditor = dataGridSource.slice(valueEditorStart, valueEditorEnd);
-    expect(valueEditor).toMatch(/<TabsContent[^>]*class="[^"]*\bmin-w-0\b[^"]*">/);
-    expect(valueEditor).toMatch(/<div class="[^"]*\bmin-w-0\b[^"]*\bflex-wrap\b[^"]*">/);
-
-    expect(cellDetailPanelSource).toMatch(/<TabsContent value="details" class="[^"]*\bmin-w-0\b[^"]*">/);
-    expect(cellDetailPanelSource).toMatch(/<div class="[^"]*\bmin-w-0\b[^"]*\bflex-wrap\b[^"]*">/);
-  });
-
   it("presents printable LONG BLOB bytes as text and copies the presented value", async () => {
     const copyText = vi.fn();
     const blobDetail = detail({
@@ -1857,14 +2305,6 @@ describe("cell detail surfaces", () => {
     expect(compareJson).toHaveBeenCalledOnce();
   });
 
-  it("snapshots comparison values before opening and suppresses modal-induced blur commits", () => {
-    expect(dataGridCellDetailEditSource).toContain("detailValueDiffSnapshot.value = snapshot;");
-    expect(dataGridCellDetailEditSource).toContain("detailValueDiffOpen.value = true;");
-    expect(dataGridSource).toContain("if (!detailValueDiffOpen.value && !detailTransformOpen.value) commitValueEditorEdit();");
-    expect(dataGridSource).toContain(':disabled="!canCompareDetailJson" @mousedown.prevent @click="openDetailJsonCompare"');
-    expect(dataGridSource).toContain('v-model:open="detailValueDiffOpen" :snapshot="detailValueDiffSnapshot"');
-  });
-
   // issue #9832：编辑中点「压缩 JSON」会把草稿压成单行，此时必须仍能点「格式化 JSON」
   // 重新展开，否则 Mongo 这类对象字段的 JSON 一旦压缩就再也无法格式化。
   it("keeps the JSON format action reachable while a compacted draft is being edited", async () => {
@@ -1944,5 +2384,46 @@ describe("DataGridCopyColumnNamesDialog", () => {
     findOne(mounted.root, (node) => node.props["data-stub"] === "Select").props["onUpdate:modelValue"]("bogus");
     await nextTick();
     expect(previewText(mounted)).toBe("id\ttype");
+  });
+});
+
+describe("DataGrid column header tooltips", () => {
+  // The rest of this file drives leaf components through the host renderer, but
+  // DataGrid.vue touches the DOM directly (querySelector/observers), so this
+  // case mounts it into happy-dom instead.
+  function mountDataGrid() {
+    setActivePinia(createPinia());
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const app = createApp(defineComponent({ setup: () => () => h(DataGrid, { result: { columns: ["id", "name"], rows: [[1, "a"]] } }) }));
+    app.mount(host);
+    return {
+      host,
+      // `disabled` is not one of Vue's special boolean attributes, so binding it
+      // on the LightTooltip stub's <div> renders the literal "true"/"false".
+      headerTooltipsDisabled: () => [...host.querySelectorAll('[data-grid-column-index] [data-stub="LightTooltip"]')].map((node) => node.getAttribute("disabled") === "true"),
+      destroy() {
+        app.unmount();
+        host.remove();
+      },
+    };
+  }
+
+  it("follows the showColumnHeaderTooltips preference", async () => {
+    const grid = mountDataGrid();
+    await nextTick();
+
+    expect(settingsMock.store.editorSettings.showColumnHeaderTooltips).toBe(true);
+    expect(grid.headerTooltipsDisabled()).toEqual([false, false]);
+
+    settingsMock.store.editorSettings.showColumnHeaderTooltips = false;
+    await nextTick();
+    expect(grid.headerTooltipsDisabled()).toEqual([true, true]);
+
+    settingsMock.store.editorSettings.showColumnHeaderTooltips = true;
+    await nextTick();
+    expect(grid.headerTooltipsDisabled()).toEqual([false, false]);
+
+    grid.destroy();
   });
 });

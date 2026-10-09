@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 /// Events emitted by the agent loop, streamed to the frontend via SSE.
@@ -18,6 +20,25 @@ pub enum AgentEvent {
     ReasoningDelta { delta: String },
     /// The LLM wants to call a tool.
     ToolCallStart { tool_call_id: String, tool_name: String, args: serde_json::Value },
+    /// A plugin tool call that may change state waits for the user's explicit
+    /// approval. The run stays paused until the client answers through the
+    /// approval command, the approval times out, or the run is cancelled.
+    ToolApprovalRequired {
+        approval_id: String,
+        tool_call_id: String,
+        tool_name: String,
+        plugin_id: String,
+        plugin_name: String,
+        /// The tool name as the plugin declared it (without the DBX prefix).
+        plugin_tool: String,
+        connection_id: String,
+        connection_name: String,
+        /// Exactly the arguments DBX will forward if the user approves.
+        args: serde_json::Value,
+        timeout_secs: u64,
+    },
+    /// The approval requested by `ToolApprovalRequired` has been settled.
+    ToolApprovalResolved { approval_id: String, tool_call_id: String, outcome: ToolApprovalOutcome },
     /// A tool execution has completed.
     ToolCallEnd { tool_call_id: String, tool_name: String, result: serde_json::Value, is_error: bool },
     /// A turn in the agent loop has ended.
@@ -27,6 +48,8 @@ pub enum AgentEvent {
     /// stdout). Non-terminal: the frontend may stop the reply animation on it,
     /// but must keep listening for the real `AgentEnd` / `Error`.
     ResponseComplete,
+    /// The provider stopped because its output limit was reached.
+    OutputTruncated { finish_reason: String },
     /// The agent loop has finished successfully.
     AgentEnd { input_tokens: Option<u32>, output_tokens: Option<u32> },
     /// Context was compacted to stay within context window limits.
@@ -39,6 +62,18 @@ pub enum AgentEvent {
     },
     /// An error occurred during the agent loop.
     Error { message: String },
+}
+
+/// How a tool approval request ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolApprovalOutcome {
+    Approved,
+    Denied,
+    /// Nobody answered before the approval deadline.
+    TimedOut,
+    /// The run was cancelled while the approval was pending.
+    Cancelled,
 }
 
 /// A unified tool call extracted from any provider's response.
@@ -67,10 +102,13 @@ pub struct ToolResult {
 }
 
 /// Definition of a tool available to the agent.
+///
+/// Built-in tools use static names and descriptions; tools contributed by
+/// plugins are discovered at run time, so both fields accept owned text too.
 #[derive(Debug, Clone)]
 pub struct ToolDefinition {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: Cow<'static, str>,
+    pub description: Cow<'static, str>,
     pub parameters: serde_json::Value,
     pub read_only: bool,
     /// Whether this tool can be executed in parallel with other tools.

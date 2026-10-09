@@ -1,0 +1,71 @@
+# 公开演示栈：dbx-web（DBX_DEMO_MODE）+ 三台仅供演示的数据库。
+# 整个网络标记 internal: true —— 容器间互通、对外只暴露 4224 端口，
+# dbx-web 自身无法主动出网（插件 URL 安装 / 探测外网端点在网络层就被挡掉）。
+services:
+  dbx-demo:
+    build: .
+    # 中国大陆构建基镜像可改用：docker.cnb.cool/dbxio.com/dbx:latest（见 Dockerfile）
+    ports:
+      - "4224:4224"
+    environment:
+      DBX_DEMO_MODE: "1"
+      DBX_DISABLE_PASSWORD: "1"
+      DBX_MAX_UPLOAD_MB: "16"
+    volumes:
+      - dbx-demo-data:/app/data
+    depends_on:
+      demo-postgres:
+        condition: service_healthy
+      demo-mysql:
+        condition: service_healthy
+      demo-redis:
+        condition: service_started
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  demo-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: demo
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+    volumes:
+      - dbx-demo-postgres:/var/lib/postgresql/data
+      # 目录挂载（而非单文件）：对 rootless docker 等环境更稳。
+      - ./seed/sql/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d demo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  demo-mysql:
+    image: mysql:8
+    environment:
+      MYSQL_DATABASE: demo
+      MYSQL_USER: demo
+      MYSQL_PASSWORD: demo
+      MYSQL_ROOT_PASSWORD: root-demo-only
+    volumes:
+      - dbx-demo-mysql:/var/lib/mysql
+      - ./seed/sql/mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-udemo", "-pdemo"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  demo-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+volumes:
+  dbx-demo-data:
+  dbx-demo-postgres:
+  dbx-demo-mysql:
+
+networks:
+  default:
+    internal: true

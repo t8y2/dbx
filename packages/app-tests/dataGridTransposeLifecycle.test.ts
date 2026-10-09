@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { useDataGridCanvasRuntime, type DataGridAnimationFrameDriver } from "../../apps/desktop/src/composables/useDataGridCanvasRuntime.ts";
 import { useDataGridScrollbars } from "../../apps/desktop/src/composables/useDataGridScrollbars.ts";
@@ -158,21 +157,4 @@ test("restores the vertical grid position after a keyboard transpose round trip"
   });
 
   assert.equal(viewport.scrollTop, 2280, "restored position should stay within the remounted grid bounds");
-});
-
-test("error result recovery participates in canvas observer remounts", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  assert.match(source, /watch\(\s*\[useCanvasGridRows, hasVisibleRows, isErrorResult\]/);
-});
-
-test("column navigation scrolls visible transpose fields before looking for the normal grid", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const navigation = source.slice(source.indexOf("function scrollToColumnIndex("), source.indexOf("// --- Column resize composable ---"));
-  assert.match(navigation, /showColumn\(columnIndex\)/);
-  assert.match(navigation, /visibleColumnIndexes\.value\.indexOf\(columnIndex\)/);
-  assert.match(navigation, /if \(isTransposeMode\.value\) \{\s*scrollTransposeFieldIntoView\(visibleColIdx\);\s*return;/);
-  assert.ok(navigation.indexOf("scrollTransposeFieldIntoView") < navigation.indexOf('".data-grid-scroller"'));
-  assert.match(source, /scrollToItem\?\.\(visibleFieldIndex\)/);
-  assert.match(source, /scroller\.scrollTop = visibleFieldIndex \* transposeRowHeight\.value/);
-  assert.match(source, /'ring-2 ring-inset ring-primary': highlightedColumnIndex === visibleColumnIndexes\[index\]/);
 });

@@ -12,7 +12,6 @@ use dbx_core::query::{
     execute_multi_core_with_options_for_client_typed, execute_sql_statement, execute_sql_statement_with_options,
     ExecuteMultiResult, QueryExecutionOptions,
 };
-use dbx_core::storage::Storage;
 use std::sync::Arc;
 
 fn live_config(prefix: &str) -> ConnectionConfig {
@@ -36,7 +35,9 @@ fn live_config(prefix: &str) -> ConnectionConfig {
 async fn setup(config: &ConnectionConfig) -> (Arc<AppState>, std::path::PathBuf, String) {
     let storage_path =
         std::env::temp_dir().join(format!("dbx-autocommit-snapshot-{}.db", uuid::Uuid::new_v4().simple()));
-    let state = Arc::new(AppState::new(Storage::open(&storage_path).await.expect("temporary storage")));
+    let state = Arc::new(AppState::new(
+        dbx_core::persistence::test_storage::open(&storage_path).await.expect("temporary storage"),
+    ));
     let table_name = format!("dbx_issue_9479_{}", uuid::Uuid::new_v4().simple());
     let database = config.database.clone().expect("database");
     state.configs.write().await.insert(config.id.clone(), config.clone());
@@ -122,7 +123,9 @@ async fn run_in_tab_keeping_transactions(
 /// cases, seeded with `(1, 0)`.
 async fn setup_probe(config: &ConnectionConfig, tag: &str) -> (Arc<AppState>, std::path::PathBuf, String) {
     let storage_path = std::env::temp_dir().join(format!("{tag}-{}.db", uuid::Uuid::new_v4().simple()));
-    let state = Arc::new(AppState::new(Storage::open(&storage_path).await.expect("temporary storage")));
+    let state = Arc::new(AppState::new(
+        dbx_core::persistence::test_storage::open(&storage_path).await.expect("temporary storage"),
+    ));
     let table_name = format!("dbx_issue_9749_{}", uuid::Uuid::new_v4().simple());
     let database = config.database.clone().expect("database");
     state.configs.write().await.insert(config.id.clone(), config.clone());

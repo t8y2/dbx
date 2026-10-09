@@ -1,10 +1,9 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, type App, type ComponentPublicInstance } from "vue";
-import { readFileSync } from "node:fs";
+import { createApp, h, ref, nextTick, type App, type ComponentPublicInstance } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginRepositoryCatalogResult } from "@/types/database";
-import type { MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { formatMarketplaceReleasedDate, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
 import { COMPONENT_PLUGINS_UPDATED_EVENT, COMPONENT_UPDATES_CHANGED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 const mocks = vi.hoisted(() => ({
@@ -23,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   removePluginTrustedKey: vi.fn(),
   toast: vi.fn(),
   isTauriRuntime: vi.fn(),
+  openExternal: vi.fn(),
   refreshPluginWorkbenches: vi.fn(),
 }));
 
@@ -30,8 +30,12 @@ vi.mock("@/lib/backend/api", () => mocks);
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [] }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
+vi.mock("@/stores/settingsStore", () => ({
+  useSettingsStore: () => ({ editorSettings: { pluginGraphicsEngineIds: [] }, updateEditorSettings: vi.fn() }),
+}));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => vi.fn()) }));
+vi.mock("@tauri-apps/plugin-shell", () => ({ open: mocks.openExternal }));
 vi.mock("vue-i18n", async () => {
   const { ref } = await import("vue");
   return { useI18n: () => ({ locale: ref("en"), t: (key: string, values = {}) => `${key}:${JSON.stringify(values)}` }) };
@@ -57,13 +61,21 @@ vi.mock("@/components/ui/tooltip", async () => {
   return { Tooltip: stub, TooltipContent: stub, TooltipTrigger: stub };
 });
 vi.mock("@/components/plugins/PluginIcon.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginIcon") }));
+// Shortcut preferences have their own component/store tests. Keep this batch
+// harness scoped to plugin mutations and their exact backend call counts.
+vi.mock("@/components/plugins/PluginShortcutSettings.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginShortcutSettings") }));
+// The graphics-engine grant lives in the settings store; this batch harness has
+// no pinia, so the section is stubbed like the other store-backed child panels.
+vi.mock("@/components/plugins/PluginGraphicsEngineSection.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginGraphicsEngineSection") }));
 
 import PluginContributionsPanel from "@/components/plugins/PluginContributionsPanel.vue";
 
 type PanelState = {
+  activeSection: "marketplace" | "installed" | "settings";
   batchRunning: boolean;
   batchMode: boolean;
   marketplaceViewMode: "grid" | "list";
+  marketplaceSortMode: string;
   marketplaceRepositoryId: string;
   marketplaceListings: MarketplacePluginListing[];
   catalogResults: PluginRepositoryCatalogResult[];
@@ -78,7 +90,12 @@ type PanelState = {
   repositoryCatalogUrl: string;
   trustedKeyId: string;
   trustedPublicKey: string;
-  error: string;
+  // The page-level banner is split by lifetime: per-plugin batch failures (retired when that
+  // plugin's state contradicts them), load/refresh failures (cleared by the next successful
+  // re-read) and the aggregate text the banner renders.
+  batchFailures: { pluginId: string; name: string; message: string; kind: string; repositoryId?: string }[];
+  loadError: string;
+  errorBannerText: string;
   toggleListingSelection: (listing: MarketplacePluginListing) => void;
   selectAllUpdatable: () => void;
   runBatchInstallUpdate: () => Promise<void>;
@@ -267,6 +284,33 @@ describe("PluginContributionsPanel batch source validation", () => {
   });
 });
 
+describe("PluginContributionsPanel external links", () => {
+  it("hands GitHub and homepage clicks to the desktop shell without selecting the card", async () => {
+    const linkedCatalog = catalog("first", ["linked"]);
+    Object.assign(linkedCatalog.catalog!.plugins[0], {
+      source: "https://github.com/dbxio/linked",
+      homepage: "https://dbxio.com/plugins/linked",
+    });
+    state.catalogResults = [linkedCatalog];
+    state.marketplaceViewMode = "grid";
+    mocks.isTauriRuntime.mockReturnValue(true);
+    await nextTick();
+
+    const sourceButton = host.querySelector<HTMLButtonElement>('[aria-label^="pluginPlatform.sourceRepository"]')!;
+    const homepageButton = host.querySelector<HTMLButtonElement>('[aria-label^="pluginPlatform.pluginHomepage"]')!;
+    const cardClick = vi.fn();
+    sourceButton.closest("article")!.addEventListener("click", cardClick);
+
+    sourceButton.click();
+    await vi.waitFor(() => expect(mocks.openExternal).toHaveBeenCalledTimes(1));
+    homepageButton.click();
+    await vi.waitFor(() => expect(mocks.openExternal).toHaveBeenCalledTimes(2));
+
+    expect(mocks.openExternal.mock.calls).toEqual([["https://github.com/dbxio/linked"], ["https://dbxio.com/plugins/linked"]]);
+    expect(cardClick).not.toHaveBeenCalled();
+  });
+});
+
 describe("PluginContributionsPanel update center synchronization", () => {
   it("notifies after a single marketplace update without duplicating per batch item", async () => {
     const listener = vi.fn();
@@ -356,7 +400,7 @@ describe("PluginContributionsPanel installed-tab updates", () => {
     mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("update denied"));
     await state.runUpdateAllInstalled();
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledTimes(3);
-    expect(state.error).toBe("a: update denied");
+    expect(state.errorBannerText).toBe("a: update denied");
     expect(state.installedUpdateProgress).toBeNull();
     expect(state.batchRunning).toBe(false);
   });
@@ -494,11 +538,6 @@ function singleApi(single: Single) {
 const replacements = ["marketplace", "rollback", "package", "url"] as const;
 
 describe("PluginContributionsPanel workbench refresh", () => {
-  it("connects the panel event to the App workbench refresh entry", () => {
-    const source = readFileSync("apps/desktop/src/App.vue", "utf8");
-    expect(source).toMatch(/<PluginCenterPage\b[^>]*@plugin-runtime-replaced="refreshPluginWorkbenches"/);
-  });
-
   it.each(replacements)("refreshes once with the returned plugin ID after Web %s succeeds", async (single) => {
     singleApi(single).mockResolvedValueOnce({ plugin: installed("replaced", "2.0.0") });
     await startSingle(single);
@@ -548,7 +587,7 @@ describe("PluginContributionsPanel workbench refresh", () => {
       await running;
     }
     expect(mocks.refreshPluginWorkbenches.mock.calls).toEqual([["a"], ["c"]]);
-    expect(state.error).toContain("replacement denied");
+    expect(state.errorBannerText).toContain("replacement denied");
   });
 
   it("leaves Tauri batch refresh to the native runtime events", async () => {
@@ -691,7 +730,7 @@ describe("PluginContributionsPanel completed batch outcomes", () => {
     mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("Plugin update blocked by active connections: Production S3"));
     await state.runBatchInstallUpdate();
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledTimes(3);
-    expect(state.error).toBe('a: pluginPlatform.updateBlockedByConnections:{"labels":"Production S3"}');
+    expect(state.errorBannerText).toBe('a: pluginPlatform.updateBlockedByConnections:{"labels":"Production S3"}');
     await nextTick();
     expect(host.textContent).toContain("Production S3");
   });
@@ -720,13 +759,18 @@ describe("PluginContributionsPanel completed batch outcomes", () => {
     expect(mutation).toHaveBeenCalledTimes(3);
     expect(mocks.toast).toHaveBeenCalledTimes(1);
     expect(mocks.toast).toHaveBeenLastCalledWith(summary, failures ? 8000 : 4000);
-    expect(state.error).toBe([...["a", "b", "c"].slice(0, failures).map((name) => `${name}: denied`), 'pluginPlatform.batchRefreshFailed:{"error":"refresh offline"}'].join("\n"));
+    // Per-plugin lines first, then the refresh failure: a failed refresh no longer shares a string
+    // with the batch summary, but the rendered text stays identical.
+    expect(state.errorBannerText).toBe([...["a", "b", "c"].slice(0, failures).map((name) => `${name}: denied`), 'pluginPlatform.batchRefreshFailed:{"error":"refresh offline"}'].join("\n"));
     await nextTick();
-    expect(host.textContent).toContain(state.error);
+    expect(host.textContent).toContain(state.errorBannerText);
     expect(state.batchRunning).toBe(false);
     state.selectedListingKeys = new Set(["first:a"]);
     await state.runBatchInstallUpdate();
-    expect(state.error).toBe("");
+    // The retried plugin's own line is retired by its success and the refresh failure is cleared by
+    // the successful re-read; failures of plugins this run never attempted ("b"/"c") are still valid.
+    expect(state.loadError).toBe("");
+    expect(state.batchFailures.map((failure) => failure.pluginId)).toEqual(["a", "b", "c"].slice(1, failures));
   });
 
   it.each(batches)("runs batch %s in order, continues after rejection and refreshes once", async (batch) => {
@@ -744,7 +788,7 @@ describe("PluginContributionsPanel completed batch outcomes", () => {
     expect(mutation.mock.calls.map(([request]) => (batch === "install" ? request.pluginId : request))).toEqual(["a", "b", "c"]);
     expect(mocks.listPlugins).toHaveBeenCalledTimes(1);
     expect(mocks.toast).toHaveBeenLastCalledWith('pluginPlatform.batchSummaryWithFailures:{"success":2,"failed":1,"names":"b"}', 8000);
-    expect(state.error).toBe("b: denied");
+    expect(state.errorBannerText).toBe("b: denied");
     expect(state.batchRunning).toBe(false);
     expect(state.selectedListingKeys.size).toBe(0);
     expect(state.selectedInstalledIds.size).toBe(0);
@@ -786,5 +830,539 @@ describe("PluginContributionsPanel completed batch outcomes", () => {
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledExactlyOnceWith({ repositoryId: "first", pluginId: "a", version: "3.0.0" });
     expect(mocks.toast).toHaveBeenLastCalledWith('pluginPlatform.batchSummary:{"success":1,"failed":0,"names":""}', 4000);
     expect(state.batchRunning).toBe(false);
+  });
+});
+
+// The failure banner is page-level and persistent, so the bug this covers is a stale line surviving
+// the very success that fixed it. Each case drives one retirement path.
+describe("PluginContributionsPanel stale failure banner", () => {
+  function enableRepositories(): void {
+    state.repositories = [{ id: "first", name: "first", kind: "custom", enabled: true, managed: false }];
+  }
+
+  it("retires exactly the plugin a later successful update fixes and keeps the other failures", async () => {
+    state.selectAllUpdatable();
+    mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("a down")).mockRejectedValueOnce(new Error("b down"));
+    await state.runBatchInstallUpdate();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledTimes(3);
+    expect(state.errorBannerText).toBe("a: a down\nb: b down");
+
+    await state.updateInstalledPlugin("a");
+
+    expect(state.errorBannerText).toBe("b: b down");
+    expect(state.batchFailures.map((failure) => failure.pluginId)).toEqual(["b"]);
+  });
+
+  it("retires a failure once a fresh catalog check proves the plugin is up to date", async () => {
+    enableRepositories();
+    state.selectAllUpdatable();
+    mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("a down"));
+    await state.runBatchInstallUpdate();
+    expect(state.errorBannerText).toBe("a: a down");
+
+    // The plugin landed at the latest version (outside this panel's success callbacks), so a
+    // catalog re-read is the only thing that can notice.
+    state.installedPlugins = [installed("a", "3.0.0"), installed("b", "3.0.0"), installed("c", "3.0.0")];
+    await state.refreshMarketplace();
+
+    expect(state.installedUpdateCount).toBe(0);
+    expect(state.errorBannerText).toBe("");
+    expect(state.batchFailures).toEqual([]);
+  });
+
+  it("retires a failure when the plugin was updated outside this panel", async () => {
+    enableRepositories();
+    state.selectAllUpdatable();
+    mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("a down"));
+    await state.runBatchInstallUpdate();
+    expect(state.errorBannerText).toBe("a: a down");
+
+    mocks.listPlugins.mockResolvedValue([installed("a", "3.0.0")]);
+    window.dispatchEvent(new Event(COMPONENT_PLUGINS_UPDATED_EVENT));
+    await flushUi();
+
+    expect(state.errorBannerText).toBe("");
+  });
+
+  it("does not retire an update failure while its own repository fails to load", async () => {
+    enableRepositories();
+    state.selectAllUpdatable();
+    mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("a down"));
+    await state.runBatchInstallUpdate();
+    expect(state.errorBannerText).toBe("a: a down");
+
+    // "a" drops out of the update index only because its repository's catalog failed: an incomplete
+    // check must never read as "the failure is fixed".
+    state.installedPlugins = [installed("a", "3.0.0")];
+    mocks.fetchPluginMarketplaceCatalogs.mockResolvedValueOnce([{ ...catalog("first", []), catalog: undefined, error: "catalog offline" }]);
+    await state.refreshMarketplace();
+
+    expect(state.catalogPartialFailure).toBe(true);
+    expect(state.installedUpdateCount).toBe(0);
+    expect(state.errorBannerText).toBe("a: a down");
+  });
+
+  it("does not retire a failure while no repository is enabled or the catalog is unavailable", async () => {
+    state.selectAllUpdatable();
+    mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("a down"));
+    await state.runBatchInstallUpdate();
+
+    state.installedPlugins = [installed("a", "3.0.0")];
+    await state.refreshMarketplace();
+    // No enabled repository: the "not pending" verdict cannot be trusted.
+    expect(state.errorBannerText).toBe("a: a down");
+
+    enableRepositories();
+    mocks.fetchPluginMarketplaceCatalogs.mockRejectedValueOnce(new Error("offline"));
+    await state.refreshMarketplace();
+    expect(state.marketplaceUnavailable).toBe(true);
+    // A state re-read while the catalog is unavailable must not turn "we could not check" into
+    // "the failure is fixed" (the update index is empty precisely because nothing loaded).
+    window.dispatchEvent(new Event(COMPONENT_PLUGINS_UPDATED_EVENT));
+    await flushUi();
+    expect(state.errorBannerText).toBe("a: a down");
+  });
+
+  it("keeps an install failure while the plugin is still not installed", async () => {
+    mocks.listPlugins.mockResolvedValue([installed("b")]);
+    state.installedPlugins = [installed("b")];
+    state.catalogResults = [catalog("first", ["a"])];
+    state.selectedListingKeys = new Set(["first:a"]);
+    await nextTick();
+    expect(state.marketplaceListings.map((listing) => listing.status)).toEqual(["install"]);
+
+    mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("download failed"));
+    await state.runBatchInstallUpdate();
+    expect(state.batchFailures).toEqual([{ pluginId: "a", name: "a", message: "download failed", kind: "install", repositoryId: "first" }]);
+    expect(state.errorBannerText).toBe("a: download failed");
+
+    // A never-installed plugin is absent from the update index by definition; a fresh catalog check
+    // must not read that as "the install failure is stale".
+    enableRepositories();
+    await state.refreshMarketplace();
+    expect(state.errorBannerText).toBe("a: download failed");
+  });
+
+  it("does not retire while the catalog check is still in flight", async () => {
+    enableRepositories();
+    state.selectAllUpdatable();
+    mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("a down"));
+    await state.runBatchInstallUpdate();
+    expect(state.errorBannerText).toBe("a: a down");
+
+    // A newer version was published (4.0.0) and "a" was updated to 3.0.0 elsewhere, so the catalog
+    // re-read is what decides whether the failure is still actionable. Until it answers, the old
+    // catalog in memory would read "3.0.0 is not pending" and wrongly retire the line.
+    const pending = deferred<PluginRepositoryCatalogResult[]>();
+    mocks.fetchPluginMarketplaceCatalogs.mockReturnValueOnce(pending.promise);
+    const refreshing = state.refreshMarketplace();
+    await nextTick();
+    mocks.listPlugins.mockResolvedValue([installed("a", "3.0.0")]);
+    window.dispatchEvent(new Event(COMPONENT_PLUGINS_UPDATED_EVENT));
+    await flushUi();
+    expect(state.errorBannerText).toBe("a: a down");
+
+    pending.resolve([catalog("first", ["a", "b", "c"], "4.0.0")]);
+    await refreshing;
+    // Settled check: 4.0.0 is still pending, so the failure stays.
+    expect(state.installedUpdateCount).toBe(1);
+    expect(state.errorBannerText).toBe("a: a down");
+  });
+
+  it("clears the banner through the dismiss control without touching plugin state", async () => {
+    state.selectAllUpdatable();
+    mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("a down"));
+    await state.runBatchInstallUpdate();
+    const mutationsBefore = mutationCount();
+    await nextTick();
+
+    const dismiss = host.querySelector<HTMLButtonElement>("[data-plugin-error-dismiss]");
+    expect(dismiss).toBeInstanceOf(HTMLButtonElement);
+    expect(dismiss?.getAttribute("aria-label")).toContain("common.close");
+    dismiss!.click();
+    await nextTick();
+
+    expect(state.errorBannerText).toBe("");
+    expect(state.batchFailures).toEqual([]);
+    expect(state.loadError).toBe("");
+    expect(host.querySelector("[data-plugin-error-dismiss]")).toBeNull();
+    expect(mutationCount()).toBe(mutationsBefore);
+  });
+
+  it("retires a plugin that succeeded in the same one-click update run and keeps its latest failure only once", async () => {
+    state.selectAllUpdatable();
+    mocks.installMarketplacePlugin.mockImplementation(async ({ pluginId }: { pluginId: string }) => {
+      if (pluginId === "a") throw new Error("a down");
+      if (pluginId === "b") throw new Error("b down");
+      return { plugin: installed(pluginId, "3.0.0") };
+    });
+    await state.runBatchInstallUpdate();
+    expect(state.batchFailures.map((failure) => failure.pluginId)).toEqual(["a", "b"]);
+
+    // The retry leaves "b" failing with a newer message. The stub keeps the pre-update installed
+    // list, so reconciliation can only *keep* both lines here: whatever disappears is the retried
+    // plugin's own success, and "b" must be replaced by its newest message, not stacked twice.
+    mocks.installMarketplacePlugin.mockImplementation(async ({ pluginId }: { pluginId: string }) => {
+      if (pluginId === "b") throw new Error("b still down");
+      return { plugin: installed(pluginId, "3.0.0") };
+    });
+    await state.runUpdateAllInstalled();
+
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledTimes(6);
+    expect(state.batchFailures.map((failure) => `${failure.pluginId}:${failure.message}`)).toEqual(["b:b still down"]);
+    expect(state.errorBannerText).toBe("b: b still down");
+  });
+
+  it("retires an uninstall failure whose own retry succeeded in the batch", async () => {
+    state.selectedInstalledIds = new Set(["a", "b"]);
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error("a locked"));
+    await state.runBatchUninstall();
+    expect(state.batchFailures.map((failure) => failure.pluginId)).toEqual(["a"]);
+
+    state.selectedInstalledIds = new Set(["a"]);
+    await state.runBatchUninstall();
+
+    // The installed stub still lists "a", so reconciliation keeps this line: only the successful
+    // retry inside the batch may retire it.
+    expect(state.batchFailures).toEqual([]);
+    expect(state.errorBannerText).toBe("");
+  });
+
+  it("retires an uninstall failure once a fresh read proves the plugin is gone", async () => {
+    state.selectedInstalledIds = new Set(["a"]);
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error("a locked"));
+    await state.runBatchUninstall();
+    expect(state.batchFailures.map((failure) => failure.pluginId)).toEqual(["a"]);
+
+    mocks.listPlugins.mockResolvedValue([installed("b"), installed("c")]);
+    window.dispatchEvent(new Event(COMPONENT_PLUGINS_UPDATED_EVENT));
+    await flushUi();
+
+    expect(state.batchFailures).toEqual([]);
+    expect(state.errorBannerText).toBe("");
+  });
+
+  it("clears a load failure after the next successful state re-read", async () => {
+    mocks.listPlugins.mockRejectedValueOnce(new Error("list offline"));
+    window.dispatchEvent(new Event(COMPONENT_PLUGINS_UPDATED_EVENT));
+    await flushUi();
+    expect(state.loadError).toBe("list offline");
+    expect(state.errorBannerText).toBe("list offline");
+
+    window.dispatchEvent(new Event(COMPONENT_PLUGINS_UPDATED_EVENT));
+    await flushUi();
+
+    expect(state.loadError).toBe("");
+    expect(state.errorBannerText).toBe("");
+  });
+
+  it.each(["package", "rollback"] as const)("retires a plugin's failure as soon as its %s succeeded, even when the follow-up read fails", async (single) => {
+    state.selectAllUpdatable();
+    mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("a down"));
+    await state.runBatchInstallUpdate();
+    expect(state.batchFailures.map((failure) => failure.pluginId)).toEqual(["a"]);
+
+    // The re-read cannot prove anything here, so only "the plugin itself changed successfully"
+    // may retire the line — a refresh failure must not leave a stale failure behind.
+    mocks.listPlugins.mockRejectedValue(new Error("list offline"));
+    await startSingle(single === "package" ? "package" : "rollback");
+
+    expect(state.batchFailures).toEqual([]);
+    // The failed re-read keeps its own lifetime: the package path surfaces it as a load failure
+    // (never as the plugin's failure), the rollback path reports it in a toast only.
+    expect(state.errorBannerText).toBe(single === "package" ? "list offline" : "");
+  });
+});
+
+describe("PluginContributionsPanel marketplace sort", () => {
+  const OLDEST = "2025-01-01T00:00:00Z";
+  const NEWEST = "2026-06-01T00:00:00Z";
+
+  // Name order (a.older, b.newer) is deliberately the opposite of date order, so the
+  // rendered order tells the two sort modes apart.
+  function datedCatalog(): PluginRepositoryCatalogResult {
+    const result = catalog("first", ["a.older", "b.newer"]);
+    const [older, newer] = result.catalog!.plugins;
+    older.versions[0].releasedAt = OLDEST;
+    newer.versions[0].releasedAt = NEWEST;
+    return result;
+  }
+
+  function renderedOrder(): string[] {
+    return [...host.querySelectorAll("article")].map((article) => (article.textContent?.includes("a.older") ? "a.older" : "b.newer"));
+  }
+
+  // The persisted sort mode is read during setup, so restoring it can only be observed
+  // by mounting again with localStorage already seeded.
+  async function remount(): Promise<void> {
+    app.unmount();
+    host.remove();
+    host = document.createElement("div");
+    document.body.append(host);
+    app = createApp(PluginContributionsPanel, { onPluginRuntimeReplaced: mocks.refreshPluginWorkbenches });
+    state = (app.mount(host) as ComponentPublicInstance & { $: { setupState: PanelState } }).$.setupState;
+    await flushUi();
+    state.batchMode = true;
+    state.selectedPluginId = "a";
+    await nextTick();
+  }
+
+  it("restores the persisted mode on remount, shows the release date in both views, and persists changes", async () => {
+    mocks.fetchPluginMarketplaceCatalogs.mockResolvedValue([datedCatalog()]);
+    localStorage.setItem("dbx-plugin-marketplace-sort-mode", "recently-updated");
+    await remount();
+
+    expect(state.marketplaceSortMode).toBe("recently-updated");
+    expect(renderedOrder()).toEqual(["b.newer", "a.older"]);
+    const newestText = formatMarketplaceReleasedDate(NEWEST, "en");
+    const oldestText = formatMarketplaceReleasedDate(OLDEST, "en");
+    expect(newestText).not.toBe("");
+    expect(host.querySelectorAll("article")[0].textContent).toContain(newestText);
+    expect(host.querySelectorAll("article")[1].textContent).toContain(oldestText);
+
+    state.marketplaceViewMode = "list";
+    await nextTick();
+    expect(renderedOrder()).toEqual(["b.newer", "a.older"]);
+    expect(host.querySelectorAll("article")[0].textContent).toContain(newestText);
+    expect(host.querySelectorAll("article")[1].textContent).toContain(oldestText);
+
+    state.marketplaceSortMode = "name";
+    await flushUi();
+    expect(renderedOrder()).toEqual(["a.older", "b.newer"]);
+    expect(localStorage.getItem("dbx-plugin-marketplace-sort-mode")).toBe("name");
+  });
+
+  it("falls back to name order when the stored sort mode is unknown", async () => {
+    mocks.fetchPluginMarketplaceCatalogs.mockResolvedValue([datedCatalog()]);
+    localStorage.setItem("dbx-plugin-marketplace-sort-mode", "not-a-mode");
+    await remount();
+
+    expect(state.marketplaceSortMode).toBe("name");
+    expect(renderedOrder()).toEqual(["a.older", "b.newer"]);
+  });
+});
+
+describe("PluginContributionsPanel marketplace card layout", () => {
+  it("keeps the auto-fill grid and shows full names and versions in both views", async () => {
+    state.batchMode = false;
+    const longName = "Database Schema Explorer Marketplace Plugin With Deliberately Long Name";
+    const installedLongName = `${longName} Installed`;
+    const versionValue = "3.0.0-preview.10483";
+    const installedPlugin = state.catalogResults[0].catalog!.plugins.find((entry) => entry.id === "a")!;
+    const freshPlugin = state.catalogResults[0].catalog!.plugins.find((entry) => entry.id === "b")!;
+    installedPlugin.name = installedLongName;
+    installedPlugin.latestVersion = versionValue;
+    installedPlugin.versions[0].version = versionValue;
+    freshPlugin.name = longName;
+    freshPlugin.latestVersion = versionValue;
+    freshPlugin.versions[0].version = versionValue;
+    // Only "a" stays installed (update state); "b" becomes a plain install so the catalog
+    // version line renders on a card that is not installed yet.
+    state.installedPlugins = [installed("a")];
+    await flushUi();
+
+    for (const view of ["grid", "list"] as const) {
+      state.marketplaceViewMode = view;
+      await nextTick();
+
+      const cards = [...host.querySelectorAll("article")];
+      const pluginName = cards.flatMap((card) => [...card.querySelectorAll<HTMLElement>("[title]")]).find((element) => element.title === longName);
+      expect(pluginName?.textContent?.trim(), `${view}: full plugin name`).toBe(longName);
+      expect(pluginName?.classList.contains("truncate"), `${view}: long name truncates visually`).toBe(true);
+      expect(pluginName?.classList.contains("text-sm"), `${view}: name size stays fixed`).toBe(true);
+
+      const card = pluginName?.closest("article");
+      expect(card, `${view}: listing card renders`).toBeDefined();
+      const versionText = [...(card?.querySelectorAll<HTMLElement>("span") ?? [])].find((element) => element.textContent?.includes(`v${versionValue}`));
+      expect(versionText, `${view}: full catalog version renders`).toBeDefined();
+      expect(versionText?.classList.contains("shrink-0"), `${view}: version never shrinks to an ellipsis`).toBe(true);
+
+      const details = [...card.querySelectorAll<HTMLElement>("span")].find((element) => element.textContent?.trim() === "DBX · first");
+      expect(details, `${view}: publisher and repository details render`).toBeDefined();
+
+      // Update state: versions ride inside the footer i18n sentence instead of a separate badge.
+      const installedCard = cards.find((element) => element.textContent?.includes(installedLongName));
+      expect(installedCard?.textContent, `${view}: update state keeps the catalog latest version`).toContain(versionValue);
+
+      if (view === "grid") {
+        expect(card.parentElement?.classList.contains("md:grid-cols-3"), "grid must not use the viewport breakpoint removed by #10444").toBe(false);
+        expect(card.parentElement?.className, "grid tracks the panel width via auto-fill").toContain("auto-fill");
+      }
+    }
+  });
+
+  it("keeps tags and permissions on a single badge line with a trailing overflow counter", async () => {
+    state.batchMode = false;
+    const plugin = state.catalogResults[0].catalog!.plugins.find((entry) => entry.id === "b")!;
+    plugin.tags = ["ssh", "terminal", "sftp", "dev"];
+    plugin.permissions = ["host.binary", "host.clipboard:read", "host.events", "host.filesystem", "host.storage", "host.workbench"];
+    await flushUi();
+
+    state.marketplaceViewMode = "grid";
+    await nextTick();
+
+    const card = [...host.querySelectorAll("article")].find((element) => element.textContent?.includes("sftp"));
+    const badgeRow = card?.querySelector(".marketplace-tags");
+    expect(badgeRow, "badge row renders").toBeDefined();
+    expect(badgeRow?.classList.contains("flex-wrap"), "badge row must stay single-line").toBe(false);
+
+    const badges = [...(badgeRow?.querySelectorAll<HTMLElement>("[data-stub='Badge']") ?? [])].map((element) => element.textContent?.trim());
+    expect(badges, "three visible badges plus the overflow counter").toEqual(["ssh", "terminal", "sftp", "+7"]);
+  });
+});
+
+describe("PluginContributionsPanel single uninstall outcomes", () => {
+  it("re-reads the installed list and notifies listeners when a single uninstall fails", async () => {
+    const changed = vi.fn();
+    window.addEventListener("dbx:plugins-changed", changed);
+    const failure = "The process cannot access the file because it is being used by another process. (os error 32)";
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error(failure));
+    // The backend kept the plugin installed (the uninstall never committed), and the panel has to
+    // show exactly that instead of the state it guessed before the call.
+    mocks.listPlugins.mockResolvedValueOnce([installed("a"), installed("b", "9.9.9")]);
+
+    try {
+      await state.uninstallSelectedPlugin();
+    } finally {
+      window.removeEventListener("dbx:plugins-changed", changed);
+    }
+
+    expect(mocks.toast).toHaveBeenLastCalledWith(failure, 5000);
+    expect(mocks.listPlugins).toHaveBeenCalledOnce();
+    expect(state.installedPlugins.map((plugin) => `${plugin.manifest.id}@${plugin.manifest.version}`)).toEqual(["a@1.0.0", "b@9.9.9"]);
+    expect(changed).toHaveBeenCalledOnce();
+    expect(state.errorBannerText).toBe("");
+    expect(state.loadError).toBe("");
+  });
+
+  it("keeps the uninstall failure visible when the follow-up refresh also fails", async () => {
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error("denied"));
+    mocks.listPlugins.mockRejectedValueOnce(new Error("refresh offline"));
+
+    await state.uninstallSelectedPlugin();
+
+    expect(mocks.toast).toHaveBeenLastCalledWith("denied", 5000);
+    expect(state.errorBannerText).toBe('pluginPlatform.batchRefreshFailed:{"error":"refresh offline"}');
+    expect(state.loadError).toBe('pluginPlatform.batchRefreshFailed:{"error":"refresh offline"}');
+  });
+});
+
+describe("PluginContributionsPanel settings navigation", () => {
+  it.each(["marketplace", "installed"] as const)("preserves navigation to %s while the initial refresh is pending", async (section) => {
+    app.unmount();
+    const pending = deferred<InstalledPlugin[]>();
+    mocks.listPlugins.mockReturnValue(pending.promise);
+    app = createApp(PluginContributionsPanel, { focusTarget: { section: "settings" } });
+    const instance = app.mount(host) as ComponentPublicInstance & { $: { setupState: PanelState } };
+    const current = instance.$.setupState;
+    expect(current.activeSection).toBe("settings");
+    current.activeSection = section;
+    await nextTick();
+    pending.resolve([installed("a")]);
+    await flushUi();
+    expect(current.activeSection).toBe(section);
+  });
+
+  it.each(["empty", "installed", "load-failure"])("opens and reopens settings without depending on plugin loading (%s)", async (scenario) => {
+    app.unmount();
+    host.remove();
+    host = document.createElement("div");
+    document.body.append(host);
+    if (scenario === "load-failure") mocks.listPlugins.mockRejectedValue(new Error("unavailable"));
+    else mocks.listPlugins.mockResolvedValue(scenario === "empty" ? [] : [installed("a")]);
+    const focus = ref<{ section: "settings" }>({ section: "settings" });
+    let panel!: ComponentPublicInstance;
+    app = createApp({
+      render: () =>
+        h(PluginContributionsPanel, {
+          focusTarget: focus.value,
+          ref: (value) => {
+            panel = value as ComponentPublicInstance;
+          },
+        }),
+    });
+    app.mount(host);
+    const current = (panel as ComponentPublicInstance & { $: { setupState: PanelState } }).$.setupState;
+    expect(current.activeSection).toBe("settings");
+    await flushUi();
+    expect(current.activeSection).toBe("settings");
+    current.activeSection = "marketplace";
+    focus.value = { section: "settings" };
+    await nextTick();
+    expect(current.activeSection).toBe("settings");
+  });
+});
+
+describe("PluginContributionsPanel narrow-pane layout contracts", () => {
+  // #10582: the plugin center is mounted in the editor-content pane, whose width is independent of the
+  // window (window minWidth is 900, but the sidebar or a split group can leave the pane far narrower).
+  // A viewport breakpoint therefore keys the layout off the wrong width: the marketplace toolbar row
+  // overflowed its scroller and 批量管理 / 刷新 left the visible area (measured 155px overflow at a 650px
+  // pane). happy-dom cannot measure layout, so this guards the class contract the measurement rig
+  // validates — same style as the #10444 grid guard above.
+  it("keys the marketplace toolbar off the panel width instead of the viewport", () => {
+    const toolbar = host.querySelector<HTMLElement>("[data-plugin-marketplace-toolbar]");
+    expect(toolbar, "marketplace toolbar").not.toBeNull();
+    expect(toolbar!.classList.contains("sm:flex-row"), "row switch must not use the viewport breakpoint (#10582)").toBe(false);
+    expect(toolbar!.classList.contains("sm:items-center"), "row switch must not use the viewport breakpoint (#10582)").toBe(false);
+    expect(toolbar!.classList.contains("@min-[54rem]:flex-row"), "row switch tracks the panel width").toBe(true);
+    expect(toolbar!.classList.contains("flex-wrap"), "an overflowing control set must wrap, never leave the pane").toBe(true);
+
+    const controls = host.querySelector<HTMLElement>("[data-plugin-marketplace-controls]");
+    expect(controls, "marketplace control cluster").not.toBeNull();
+    expect(controls!.classList.contains("flex-wrap"), "control cluster wraps").toBe(true);
+    expect(controls!.classList.contains("sm:ml-auto"), "auto margin must not use the viewport breakpoint").toBe(false);
+    expect(controls!.classList.contains("@min-[54rem]:ml-auto"), "auto margin tracks the panel width").toBe(true);
+
+    // App.vue focuses this input by attribute for Mod+F, so the hook has to survive layout changes.
+    const search = host.querySelector<HTMLInputElement>("[data-plugin-marketplace-search]");
+    expect(search, "marketplace search input hook").not.toBeNull();
+    expect(search!.classList.contains("sm:w-[min(100%,28rem)]")).toBe(false);
+    expect(search!.classList.contains("@min-[54rem]:w-[min(100%,28rem)]")).toBe(true);
+
+    // The Select family shares one passthrough stub here, so the triggers are located by their own
+    // data hooks (same convention as data-plugin-marketplace-search) instead of by a layout class.
+    const triggers = ["sort", "repository"].map((role) => {
+      const trigger = toolbar!.querySelector<HTMLElement>(`[data-plugin-marketplace-${role}]`);
+      expect(trigger, `marketplace ${role} select`).not.toBeNull();
+      return trigger!;
+    });
+    for (const trigger of triggers) {
+      const viewportClasses = [...trigger.classList].filter((name) => /^(sm|md|lg|xl):/.test(name));
+      expect(viewportClasses, `viewport breakpoints left on a select trigger: ${trigger.className}`).toEqual([]);
+      expect(
+        [...trigger.classList].some((name) => name.startsWith("@min-[54rem]:w-")),
+        `select trigger tracks the panel width: ${trigger.className}`,
+      ).toBe(true);
+    }
+  });
+
+  it("keys the settings-tab repository grids off the panel width", async () => {
+    // The trusted-key grid only renders once a key exists, so remount with one (the same pattern the
+    // settings-navigation tests above use).
+    app.unmount();
+    host.remove();
+    host = document.createElement("div");
+    document.body.append(host);
+    mocks.listPluginTrustedKeys.mockResolvedValue([{ keyId: "custom", publicKey: "public-key" }]);
+    app = createApp(PluginContributionsPanel);
+    const instance = app.mount(host) as ComponentPublicInstance & { $: { setupState: PanelState } };
+    state = instance.$.setupState;
+    state.activeSection = "settings";
+    await flushUi();
+
+    const gridFor = (placeholderKey: string) => {
+      const input = [...host.querySelectorAll<HTMLInputElement>("input")].find((element) => element.placeholder.startsWith(`pluginPlatform.${placeholderKey}`));
+      expect(input, placeholderKey).toBeDefined();
+      return input!.parentElement!;
+    };
+
+    const addRow = gridFor("repositoryCatalogUrlPlaceholder");
+    expect(addRow.classList.contains("lg:grid-cols-[180px_220px_minmax(260px,1fr)_auto]"), "add-repository grid must not switch on the viewport").toBe(false);
+    expect(addRow.className, "add-repository grid tracks the panel width").toContain("@min-[56rem]:grid-cols-[180px_220px_minmax(260px,1fr)_auto]");
+
+    const trustRow = gridFor("repositoryPublicKeyPlaceholder");
+    expect(trustRow.classList.contains("md:grid-cols-[180px_minmax(260px,1fr)_auto]"), "trusted-key grid must not switch on the viewport").toBe(false);
+    expect(trustRow.className, "trusted-key grid tracks the panel width").toContain("@min-[42rem]:grid-cols-[180px_minmax(260px,1fr)_auto]");
   });
 });

@@ -1,13 +1,17 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { createApp, defineComponent, h, markRaw, nextTick, type App, type PropType } from "vue";
+import { createApp, defineComponent, h, markRaw, nextTick, ref, type App, type PropType } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import type { QueryResult } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import type { DataGridToolbarActionCapability } from "@/lib/dataGrid/dataGridToolbar";
+import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
+
+vi.mock("@/lib/metadata/objectDdlCache", () => ({
+  loadObjectDdl: vi.fn(async () => ({ ddl: "CREATE TABLE users (id INT);", cacheStatus: "remote" })),
+}));
 
 vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/composables/useDataGridColumnResize")>();
@@ -29,8 +33,6 @@ vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
 import DataGrid from "../DataGrid.vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 
-const dataGridSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGrid.vue"), "utf8");
-const appSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/App.vue"), "utf8");
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 const RecycleScroller = defineComponent({
@@ -50,7 +52,19 @@ const RecycleScroller = defineComponent({
   },
 });
 
-function mountGrid(options: { displayableColumns?: boolean; columns?: string[] } = {}) {
+function mountGrid(
+  options: {
+    displayableColumns?: boolean;
+    columns?: string[];
+    slots?: Record<string, () => ReturnType<typeof h>>;
+    withTableMetadata?: boolean;
+    context?: "table-data" | "results";
+    queryMultiSource?: boolean;
+    databaseType?: DatabaseType;
+    sourceDatabase?: string;
+    joinedWriteTargetCount?: number;
+  } = {},
+) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -69,6 +83,7 @@ function mountGrid(options: { displayableColumns?: boolean; columns?: string[] }
     hidden_column_indexes: options.displayableColumns === false ? [0] : undefined,
   });
 
+  const grid = ref<{ tableInfoToolbarCapability: DataGridToolbarActionCapability; goToColumnToolbarCapability: DataGridToolbarActionCapability }>();
   const host = document.createElement("div");
   document.body.append(host);
   const Root = defineComponent({
@@ -79,11 +94,25 @@ function mountGrid(options: { displayableColumns?: boolean; columns?: string[] }
           { delayDuration: 0 },
           {
             default: () =>
-              h(DataGrid, {
-                result,
-                databaseType: "mysql",
-                context: "table-data",
-              }),
+              h(
+                DataGrid,
+                {
+                  ref: grid,
+                  result,
+                  databaseType: options.databaseType ?? "mysql",
+                  context: options.context ?? "table-data",
+                  queryMultiSource: options.queryMultiSource,
+                  joinedWriteTargets: options.joinedWriteTargetCount ? Array.from({ length: options.joinedWriteTargetCount }, (_, index) => ({ tableMeta: { tableName: `table_${index}`, columns: [], primaryKeys: [] }, sourceColumns: ["id"] })) : undefined,
+                  ...(options.withTableMetadata
+                    ? {
+                        connectionId: "test-connection",
+                        database: "test-database",
+                        tableMeta: { tableName: "users", database: options.sourceDatabase, schema: options.databaseType === "sqlserver" ? "dbo" : "test-database", columns: [], primaryKeys: [] },
+                      }
+                    : {}),
+                },
+                options.slots,
+              ),
           },
         );
     },
@@ -95,7 +124,7 @@ function mountGrid(options: { displayableColumns?: boolean; columns?: string[] }
   app.mount(host);
   const mounted = { app, host };
   mountedApps.push(mounted);
-  return mounted;
+  return { ...mounted, settingsStore, grid };
 }
 
 async function settle() {
@@ -108,12 +137,6 @@ function gridRoot(host: HTMLElement): HTMLElement {
   const root = host.querySelector<HTMLElement>("[data-grid-root]");
   if (!root) throw new Error("Data grid root not found");
   return root;
-}
-
-function goToColumnButton(host: HTMLElement): HTMLButtonElement {
-  const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.trim() === "Go to column");
-  if (!button) throw new Error("Go-to-column button not found");
-  return button;
 }
 
 function goToColumnItem(name: string, position: number): HTMLButtonElement {
@@ -129,19 +152,103 @@ function goToColumnEvent(target: HTMLElement): KeyboardEvent {
 }
 
 afterEach(() => {
+  vi.clearAllMocks();
+  vi.restoreAllMocks();
   for (const { app, host } of mountedApps.splice(0)) {
     app.unmount();
     host.remove();
   }
 });
 
-function functionBody(name: string, nextName: string): string {
-  const start = dataGridSource.indexOf(`function ${name}`);
-  const end = dataGridSource.indexOf(`function ${nextName}`, start + 1);
-  return start >= 0 && end > start ? dataGridSource.slice(start, end) : "";
-}
-
 describe("DataGrid go-to-column shortcut", () => {
+  it("switches between the split and original single-row toolbar layouts", async () => {
+    const { host, settingsStore } = mountGrid();
+    await settle();
+
+    const topbar = host.querySelector<HTMLElement>("[data-grid-toolbar-layout]");
+    expect(topbar?.dataset.gridToolbarLayout).toBe("single");
+
+    settingsStore.updateEditorSettings({ dataGridToolbarLayout: "split" });
+    await settle();
+
+    expect(topbar?.dataset.gridToolbarLayout).toBe("split");
+    expect(topbar?.classList.contains("grid")).toBe(true);
+
+    settingsStore.updateEditorSettings({ dataGridToolbarLayout: "single" });
+    await settle();
+
+    expect(topbar?.dataset.gridToolbarLayout).toBe("single");
+    expect(topbar?.classList.contains("flex")).toBe(true);
+    expect(host.querySelector('[data-grid-topbar-row="actions"].ml-auto')).not.toBeNull();
+
+    settingsStore.updateEditorSettings({ dataGridToolbarLayout: "split" });
+    await settle();
+
+    expect(topbar?.dataset.gridToolbarLayout).toBe("split");
+    expect(topbar?.classList.contains("grid")).toBe(true);
+    expect(host.querySelector('[data-grid-topbar-row="filters"].data-grid-topbar-scroll--row-divider')).not.toBeNull();
+  });
+
+  it("does not duplicate the DDL action in the table-data toolbar", async () => {
+    const { host } = mountGrid({ withTableMetadata: true });
+    await settle();
+
+    expect(host.querySelector('[data-toolbar-action="tableInfo"]')).toBeNull();
+  });
+
+  it("shows a DDL action for query results with table metadata", async () => {
+    const { host, grid } = mountGrid({ withTableMetadata: true, context: "results" });
+    await settle();
+
+    expect(grid.value?.tableInfoToolbarCapability.visible).toBe(true);
+    expect(grid.value?.tableInfoToolbarCapability.label).toBe("DDL");
+    expect(host.querySelector('[data-toolbar-action="tableInfo"]')).toBeNull();
+  });
+
+  it.each([1, 2])("hides DDL for a multi-source query with %i writable targets", async (joinedWriteTargetCount) => {
+    const { grid } = mountGrid({ withTableMetadata: true, context: "results", queryMultiSource: true, joinedWriteTargetCount });
+    await settle();
+    expect(grid.value?.tableInfoToolbarCapability.visible).toBe(false);
+  });
+
+  it.each([
+    { withTableMetadata: false, databaseType: "mysql" as const },
+    { withTableMetadata: true, databaseType: "mongodb" as const },
+  ])("hides DDL without a supported source: %j", async (options) => {
+    const { grid } = mountGrid({ ...options, context: "results" });
+    await settle();
+    expect(grid.value?.tableInfoToolbarCapability.visible).toBe(false);
+  });
+
+  it.each([undefined, "reporting"])("opens DDL using source database %s with execution-database fallback", async (sourceDatabase) => {
+    const { host, settingsStore, grid } = mountGrid({ withTableMetadata: true, context: "results", databaseType: "sqlserver", sourceDatabase });
+    settingsStore.updateEditorSettings({ tableInfoActiveTab: "indexes" });
+    await settle();
+    await grid.value!.tableInfoToolbarCapability.onTrigger();
+    await vi.waitFor(() => {
+      expect(loadObjectDdl).toHaveBeenCalledWith(expect.objectContaining({ connectionId: "test-connection", database: sourceDatabase ?? "test-database", schema: "dbo", tableName: "users" }), expect.anything());
+      expect(host.querySelector("[data-table-info-drawer]")?.textContent).toContain("CREATE TABLE");
+    });
+    expect(grid.value?.tableInfoToolbarCapability.active).toBe(true);
+  });
+
+  it("keeps result actions and query filters in their separate toolbar rows", async () => {
+    const { host } = mountGrid({
+      slots: {
+        "result-toolbar-leading": () => h("span", { "data-testid": "result-view" }, "结果视图"),
+        "result-toolbar-actions": () => h("span", { "data-testid": "result-actions" }, "结果操作"),
+        "search-bar": () => h("span", { "data-testid": "search-controls" }, "文档筛选"),
+      },
+    });
+    await settle();
+
+    const actionRowSelector = '[data-grid-topbar-row="actions"]';
+    const filterRowSelector = '[data-grid-topbar-row="filters"]';
+    expect(host.querySelector('[data-testid="result-view"]')?.closest(actionRowSelector)).not.toBeNull();
+    expect(host.querySelector('[data-testid="result-actions"]')?.closest(actionRowSelector)).not.toBeNull();
+    expect(host.querySelector('[data-testid="search-controls"]')?.closest(filterRowSelector)).not.toBeNull();
+  });
+
   it("opens and consumes the configured shortcut when a column is displayable", async () => {
     const { host } = mountGrid();
     await settle();
@@ -156,8 +263,27 @@ describe("DataGrid go-to-column shortcut", () => {
 
     expect(event.defaultPrevented).toBe(true);
     expect(bubbled).not.toHaveBeenCalled();
-    expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("true");
+    expect(host.querySelector("[data-column-lookup-panel]")).not.toBeNull();
     expect(document.activeElement?.getAttribute("placeholder")).toBe("Search column/comment...");
+  });
+
+  it("toggles the column lookup panel from its toolbar capability", async () => {
+    const { host, grid } = mountGrid({ columns: ["id", "name"] });
+    await settle();
+
+    expect(grid.value?.goToColumnToolbarCapability.active).toBe(false);
+
+    await grid.value!.goToColumnToolbarCapability.onTrigger();
+    await settle();
+
+    expect(host.querySelector("[data-column-lookup-panel]")).not.toBeNull();
+    expect(grid.value?.goToColumnToolbarCapability.active).toBe(true);
+
+    await grid.value!.goToColumnToolbarCapability.onTrigger();
+    await settle();
+
+    expect(host.querySelector("[data-column-lookup-panel]")).toBeNull();
+    expect(grid.value?.goToColumnToolbarCapability.active).toBe(false);
   });
 
   it("moves the lookup selection with arrows and chooses it with Enter", async () => {
@@ -181,7 +307,7 @@ describe("DataGrid go-to-column shortcut", () => {
     await settle();
 
     expect(enter.defaultPrevented).toBe(true);
-    expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("false");
+    expect(host.querySelector("[data-column-lookup-panel]")).not.toBeNull();
   });
 
   it("does not consume the configured shortcut without a displayable column", async () => {
@@ -196,7 +322,7 @@ describe("DataGrid go-to-column shortcut", () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(bubbled).toHaveBeenCalledOnce();
-    expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("false");
+    expect(host.querySelector("[data-column-lookup-panel]")).toBeNull();
   });
 
   it("does not trigger or consume shortcuts from editable targets", async () => {
@@ -217,7 +343,7 @@ describe("DataGrid go-to-column shortcut", () => {
     await settle();
 
     expect(bubbled).toHaveBeenCalledTimes(targets.length);
-    expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("false");
+    expect(host.querySelector("[data-column-lookup-panel]")).toBeNull();
   });
 
   it("leaves an unmatched root event untouched", async () => {
@@ -233,63 +359,6 @@ describe("DataGrid go-to-column shortcut", () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(bubbled).toHaveBeenCalledOnce();
-    expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("false");
-  });
-
-  it("opens the existing popover through the shared grid action", () => {
-    const keydown = functionBody("onGridKeydown", "copyDetailValue");
-
-    expect(dataGridSource).toMatch(/<div\b(?=[^>]*\bdata-grid-root)(?=[^>]*\btabindex="0")(?=[^>]*@keydown="onGridKeydown")[^>]*>/);
-    expect(keydown).toMatch(
-      /const targetAllowsNativeClipboard = eventTargetAllowsNativeClipboard\(event\);[\s\S]*?if \(!targetAllowsNativeClipboard && isGoToColumnShortcut\(event, settingsStore\.editorSettings\.shortcuts\) && openGoToColumn\(\)\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?return;[\s\S]*?\}/,
-    );
-    expect(dataGridSource).toContain("function openGoToColumn(): boolean");
-    expect(dataGridSource).toContain("if (!displayableColumnIndexes.value.length) return false;");
-  });
-
-  it("keeps editable targets available for the application-level fallback", () => {
-    const keydown = functionBody("onGridKeydown", "copyDetailValue");
-    const shortcutStart = keydown.indexOf("if (!targetAllowsNativeClipboard && isGoToColumnShortcut");
-    const shortcutEnd = keydown.indexOf("if (isFocusSearchShortcut", shortcutStart);
-    const shortcutBranch = keydown.slice(shortcutStart, shortcutEnd);
-
-    expect(shortcutStart).toBeGreaterThan(-1);
-    expect(shortcutBranch).not.toContain("else");
-    expect(shortcutBranch.match(/preventDefault/g)).toHaveLength(1);
-    expect(shortcutBranch.match(/stopPropagation/g)).toHaveLength(1);
-  });
-
-  it("gives the data-tab fallback priority over conflicting global shortcuts", () => {
-    const keydown = functionBody("onGridKeydown", "copyDetailValue");
-
-    expect(keydown).toMatch(/if \(isFocusSearchShortcut\(event\) && !isGoToColumnShortcut\(event, settingsStore\.editorSettings\.shortcuts\)\)/);
-    expect(appSource).toMatch(
-      /const shortcuts = settingsStore\.editorSettings\.shortcuts;[\s\S]*?if \(showTabSwitcher\.value\) return;[\s\S]*?if \(isGoToColumnShortcut\(e, shortcuts\) && contentAreaRef\.value\?\.openGoToColumn\(\)\) \{[\s\S]*?return;[\s\S]*?const tabSwitcherDirection = tabSwitcherDirectionFromShortcut\(e, shortcuts\);/,
-    );
-  });
-
-  it("keeps toolbar navigation and adds keyboard selection to the lookup", () => {
-    const selectColumn = functionBody("scrollToColumn", "onGoToColumnKeydown");
-    const escape = functionBody("onGoToColumnKeydown", "matchesTableInfoColumn");
-    const scroll = functionBody("scrollToColumnIndex", "measureColumnHeaderText");
-
-    expect(dataGridSource.match(/<Popover v-model:open="goToColumnOpen">/g)).toHaveLength(1);
-    expect(dataGridSource).toContain('>{{ t("grid.goToColumn") }}</span');
-    expect(dataGridSource).toContain('v-model="goToColumnSearch"');
-    expect(dataGridSource).toContain('ref="goToColumnSearchInput"');
-    expect(dataGridSource).toContain('ref="goToColumnListRef"');
-    expect(dataGridSource).toContain("filterDataGridColumnLookupItems(goToColumnItems.value, goToColumnSearch.value)");
-    expect(dataGridSource).toContain("const goToColumnSelectedIndex = ref(0);");
-    expect(selectColumn).toContain('goToColumnSearch.value = ""');
-    expect(selectColumn).toContain("scrollToColumnIndex(columnIndex)");
-    expect(escape).toMatch(/event\.key === "ArrowDown"[\s\S]*?moveGoToColumnSelection\(1\)/);
-    expect(escape).toMatch(/event\.key === "ArrowUp"[\s\S]*?moveGoToColumnSelection\(-1\)/);
-    expect(escape).toMatch(/event\.key === "Enter"[\s\S]*?scrollToColumn\(selected\.index\)/);
-    expect(escape).toMatch(/event\.key === "Escape"[\s\S]*?goToColumnOpen\.value = false;[\s\S]*?goToColumnSearch\.value = ""/);
-    expect(scroll).toContain("if (hiddenColumnIndexes.value.has(columnIndex))");
-    expect(scroll).toContain("showColumn(columnIndex)");
-    expect(scroll).toContain("highlightedColumnIndex.value = columnIndex");
-    expect(scroll).toContain("scroller.scrollLeft = targetLeft");
-    expect(scroll).toContain("updateGridHorizontalViewport(scroller)");
+    expect(host.querySelector("[data-column-lookup-panel]")).toBeNull();
   });
 });

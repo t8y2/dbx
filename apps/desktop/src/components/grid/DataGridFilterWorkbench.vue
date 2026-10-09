@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
+import type { DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
+import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 
 const props = defineProps<{
   sqlPreview: string;
@@ -16,6 +18,7 @@ const props = defineProps<{
   columnSearch: string;
   applyOnlyBusy?: boolean;
   disabled?: boolean;
+  valueSuggestions?: DataGridDistinctValueSuggestionState;
 }>();
 
 const emit = defineEmits<{
@@ -30,6 +33,13 @@ const emit = defineEmits<{
   removeRule: [id: string];
   moveRule: [id: string, targetIndex: number];
   updateRule: [id: string, patch: Partial<DataGridStructuredFilterRule>];
+  openValueSuggestions: [id: string, target: DataGridDistinctValueSuggestionTarget];
+  closeValueSuggestions: [];
+  updateValueSuggestionSearch: [value: string];
+  selectValueSuggestion: [option: DataGridLocalFilterOption];
+  toggleValueSuggestion: [option: DataGridLocalFilterOption];
+  toggleAllValueSuggestions: [];
+  applyValueSuggestions: [];
 }>();
 
 const { t } = useI18n();
@@ -64,6 +74,7 @@ watch(
         :mode-options="modeOptions"
         :column-search="columnSearch"
         :disabled="disabled"
+        :value-suggestions="valueSuggestions"
         layout="panel"
         :show-header="false"
         :show-footer="false"
@@ -76,6 +87,13 @@ watch(
         @move="(id, targetIndex) => emit('moveRule', id, targetIndex)"
         @update-rule="(id, patch) => emit('updateRule', id, patch)"
         @update:column-search="emit('update:columnSearch', $event)"
+        @open-value-suggestions="(id, target) => emit('openValueSuggestions', id, target)"
+        @close-value-suggestions="emit('closeValueSuggestions')"
+        @update-value-suggestion-search="emit('updateValueSuggestionSearch', $event)"
+        @select-value-suggestion="emit('selectValueSuggestion', $event)"
+        @toggle-value-suggestion="emit('toggleValueSuggestion', $event)"
+        @toggle-all-value-suggestions="emit('toggleAllValueSuggestions')"
+        @apply-value-suggestions="emit('applyValueSuggestions')"
       />
     </div>
 

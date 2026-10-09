@@ -30,6 +30,19 @@ pub enum ManualTransactionCommandError {
     Legacy(String),
 }
 
+fn manual_transaction_command_error(error: String) -> ManualTransactionCommandError {
+    if let Some(error) = dbx_core::query::sqlserver_manual_transaction::backend_error(&error) {
+        return ManualTransactionCommandError::Structured(Box::new(error));
+    }
+    if dbx_core::query::is_manual_transaction_session_expired_error(&error) {
+        ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired(
+            dbx_core::query::MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS,
+        )))
+    } else {
+        ManualTransactionCommandError::Legacy(error)
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_query(
@@ -233,34 +246,36 @@ pub async fn execute_multi(
         schema
     );
 
-    let result = dbx_core::query::execute_multi_core_with_options_for_client_and_progress_typed(
-        &state,
-        &connection_id,
-        &database,
-        &sql,
-        schema.as_deref(),
-        cancel_token,
-        dbx_core::query::QueryExecutionOptions {
-            max_rows,
-            fetch_size,
-            page_size,
-            row_offset,
-            max_result_bytes,
-            result_key_columns: result_key_columns.unwrap_or_default(),
-            table_data_preview: table_data_preview.unwrap_or(false),
-            catalog,
-            result_session_id,
-            client_session_id,
-            timeout_secs,
-            await_cancel_completion: false,
-            execution_id,
-            use_transaction,
-            continue_on_error: continue_on_error.unwrap_or(false),
-            execution_mode: execution_mode.unwrap_or_default(),
-            preserve_explicit_transaction: preserve_explicit_transaction.unwrap_or(false),
-        },
-        progress,
-    )
+    let result = dbx_core::query::batch_progress::with_coalesced_execute_multi_progress(progress, |progress| {
+        dbx_core::query::execute_multi_core_with_options_for_client_and_progress_typed(
+            &state,
+            &connection_id,
+            &database,
+            &sql,
+            schema.as_deref(),
+            cancel_token,
+            dbx_core::query::QueryExecutionOptions {
+                max_rows,
+                fetch_size,
+                page_size,
+                row_offset,
+                max_result_bytes,
+                result_key_columns: result_key_columns.unwrap_or_default(),
+                table_data_preview: table_data_preview.unwrap_or(false),
+                catalog,
+                result_session_id,
+                client_session_id,
+                timeout_secs,
+                await_cancel_completion: false,
+                execution_id,
+                use_transaction,
+                continue_on_error: continue_on_error.unwrap_or(false),
+                execution_mode: execution_mode.unwrap_or_default(),
+                preserve_explicit_transaction: preserve_explicit_transaction.unwrap_or(false),
+            },
+            progress,
+        )
+    })
     .await;
     match &result {
         Ok(results) => log::info!(
@@ -460,12 +475,14 @@ pub async fn begin_manual_transaction(
     database: String,
     schema: Option<String>,
     catalog: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, ManualTransactionCommandError> {
     dbx_core::query::begin_manual_transaction(&state, &connection_id, &database, schema.as_deref(), catalog.as_deref())
         .await
+        .map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_in_manual_transaction(
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
@@ -477,6 +494,8 @@ pub async fn execute_in_manual_transaction(
     page_size: Option<usize>,
     result_session_id: Option<String>,
     classification_sql: Option<String>,
+    execution_id: Option<String>,
+    timeout_secs: Option<u64>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, ManualTransactionCommandError> {
     dbx_core::query::execute_in_manual_transaction_with_options(
         &state,
@@ -490,34 +509,30 @@ pub async fn execute_in_manual_transaction(
             page_size,
             result_session_id,
             classification_sql,
+            execution_id,
+            timeout_secs,
         },
     )
     .await
-    .map_err(|error| {
-        if dbx_core::query::is_manual_transaction_session_expired_error(&error) {
-            ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired(
-                dbx_core::query::MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS,
-            )))
-        } else {
-            ManualTransactionCommandError::Legacy(error)
-        }
-    })
+    .map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
 pub async fn commit_manual_transaction(
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
-) -> Result<db::QueryResult, String> {
-    dbx_core::query::commit_manual_transaction(&state, &txn_session_id).await
+) -> Result<db::QueryResult, ManualTransactionCommandError> {
+    dbx_core::query::commit_manual_transaction(&state, &txn_session_id).await.map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
 pub async fn rollback_manual_transaction(
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
-) -> Result<db::QueryResult, String> {
-    dbx_core::query::rollback_manual_transaction(&state, &txn_session_id).await
+) -> Result<db::QueryResult, ManualTransactionCommandError> {
+    dbx_core::query::rollback_manual_transaction(&state, &txn_session_id)
+        .await
+        .map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
@@ -831,14 +846,19 @@ pub async fn extract_data_grid_selection(
     request: dbx_core::data_grid_extractors::DataGridExtractRequest,
 ) -> Result<dbx_core::data_grid_extractors::DataGridExtractResult, dbx_core::data_grid_extractors::DataGridExtractError>
 {
-    tauri::async_runtime::spawn_blocking(move || dbx_core::data_grid_extractors::extract_data_grid_selection(request))
-        .await
-        .map_err(|error| {
-            dbx_core::data_grid_extractors::DataGridExtractError::new(
-                dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
-                format!("Data grid extractor worker failed: {error}"),
-            )
-        })?
+    tauri::async_runtime::spawn_blocking(move || {
+        // Cells pasted from the grid land in a spreadsheet, so formula-triggering text
+        // is neutralized before the extractor renders it (see dbx_core::data::grid_clipboard_guard).
+        let request = dbx_core::data::grid_clipboard_guard::neutralize_spreadsheet_formulas(request);
+        dbx_core::data_grid_extractors::extract_data_grid_selection(request)
+    })
+    .await
+    .map_err(|error| {
+        dbx_core::data_grid_extractors::DataGridExtractError::new(
+            dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
+            format!("Data grid extractor worker failed: {error}"),
+        )
+    })?
 }
 
 #[tauri::command]
@@ -997,6 +1017,36 @@ pub async fn get_plugin_estimated_plan(
     dbx_core::query::plugin_plan::explain_estimated_plan(&state, request).await
 }
 
+/// Read-only data query for the plugin Host API (`host.data:read`). The
+/// plugin id is bound by the host bridge; the core enforces the manifest
+/// permission, the user's grant, and the read-only statement gate.
+#[tauri::command]
+pub async fn query_plugin_data(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    plugin_id: String,
+    request: dbx_core::query::plugin_data::PluginDataQueryRequest,
+) -> Result<dbx_core::query::plugin_data::PluginDataQueryResult, String> {
+    dbx_core::query::plugin_data::query_plugin_data(&state, &plugin_id, request).await
+}
+
+#[tauri::command]
+pub async fn get_plugin_data_grants(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    plugin_id: String,
+) -> Result<Vec<dbx_core::query::plugin_data::PluginDataGrant>, String> {
+    dbx_core::query::plugin_data::list_plugin_data_grants(&state, &plugin_id).await
+}
+
+#[tauri::command]
+pub async fn set_plugin_data_grant(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    plugin_id: String,
+    connection_id: String,
+    granted: bool,
+) -> Result<Vec<dbx_core::query::plugin_data::PluginDataGrant>, String> {
+    dbx_core::query::plugin_data::set_plugin_data_grant(&state, &plugin_id, &connection_id, granted).await
+}
+
 #[tauri::command]
 pub fn build_create_user_sql(username: String, password: String, tablespace: String) -> Result<String, String> {
     Ok(dbx_core::db_admin_sql::build_create_user_sql(&username, &password, &tablespace))
@@ -1005,13 +1055,12 @@ pub fn build_create_user_sql(username: String, password: String, tablespace: Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dbx_core::storage::Storage;
     use std::sync::Arc;
 
     async fn test_app_state() -> Arc<AppState> {
         let dir = std::env::temp_dir().join(format!("dbx-query-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")))
     }
 

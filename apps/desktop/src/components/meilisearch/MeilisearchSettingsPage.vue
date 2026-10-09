@@ -9,6 +9,7 @@ import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import JsonTree from "@/components/common/JsonTree.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import * as api from "@/lib/backend/api";
+import type { MeilisearchIndexSettings } from "@/lib/backend/tauri";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -28,7 +29,7 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 
 const settingsText = ref("");
-const settingsValue = ref<Record<string, any>>({});
+const settingsValue = ref<MeilisearchIndexSettings>({});
 const loading = ref(false);
 const error = ref("");
 const editMode = ref(false);
@@ -82,9 +83,9 @@ async function saveSettings() {
   isSaving.value = true;
   saveError.value = "";
   try {
-    await api.meilisearchUpdateIndexSettings(props.connectionId, props.index, parsed as Record<string, any>);
+    await api.meilisearchUpdateIndexSettings(props.connectionId, props.index, parsed as Record<string, unknown>);
     toast(t("meilisearch.settingsSaved"));
-    settingsValue.value = parsed as Record<string, any>;
+    settingsValue.value = parsed as MeilisearchIndexSettings;
     settingsText.value = JSON.stringify(parsed, null, 2);
     editMode.value = false;
   } catch (e: any) {

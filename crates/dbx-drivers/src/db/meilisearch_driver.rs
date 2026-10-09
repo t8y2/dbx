@@ -395,6 +395,7 @@ pub async fn get_columns(client: &MeilisearchClient, index: &str) -> Result<Vec<
             enum_values: None,
             character_set: None,
             collation: None,
+            metadata_capabilities: None,
         })
         .collect())
 }
@@ -1909,6 +1910,7 @@ fn raw_response_result(status: u16, body: String, start: Instant, truncated: boo
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated,
         session_id: None,
         has_more: false,

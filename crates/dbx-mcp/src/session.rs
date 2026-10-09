@@ -80,6 +80,21 @@ impl McpSessionStore {
         Arc::new(Self { idle_ttl: session_idle_ttl_from_env(), ..Self::default() })
     }
 
+    /// Remove every active session so the caller can close its backend pool.
+    ///
+    /// One [`McpSessionStore`] is shared by every request of a Streamable HTTP
+    /// endpoint, so the sessions an agent opened outlive the `DbxMcpServer`
+    /// instance that served the request which created them. Its HTTP transport
+    /// session ending therefore cannot release them, and a stateless
+    /// `2026-07-28` agent never has one to end. Sessions are reclaimed by the
+    /// idle TTL or by an explicit `dbx_close_session`; server shutdown uses this
+    /// method to roll back whatever is still open.
+    pub async fn take_all_active(&self) -> Vec<McpSession> {
+        let mut state = self.state.lock().await;
+        let closing = state.closing.values().cloned().collect::<Vec<_>>();
+        closing.into_iter().chain(state.active.drain().map(|(_, session)| session)).collect()
+    }
+
     /// Open a new session bound to `connection_id` + `database`.
     ///
     /// Returns `Err` with a human-readable message when the session cap is

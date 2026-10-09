@@ -1,7 +1,7 @@
 import * as langSql from "@codemirror/lang-sql";
-import { ensureSyntaxTree, foldable } from "@codemirror/language";
+import { ensureSyntaxTree, foldable, foldService } from "@codemirror/language";
 import { Compartment, EditorState } from "@codemirror/state";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { collectUnionBranchFoldRanges, createSqlBlockFoldService, sqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 
@@ -21,6 +21,20 @@ function foldedTextAtLine(state: EditorState, lineNumber: number): string | null
 }
 
 describe("sqlBlockFoldService", () => {
+  it("does not flatten SQL documents for REST request detection", () => {
+    const state = stateFor("BEGIN\n SELECT 1;\nEND", "mysql", createSqlBlockFoldService("mysql"));
+    const flatten = vi.spyOn(state.doc, "toString");
+    expect(foldedTextAtLine(state, 1)).toBe("\n SELECT 1;\n");
+    expect(flatten).not.toHaveBeenCalled();
+  });
+
+  it("uses background ranges without falling back to a synchronous scan", () => {
+    const cached = vi.fn(() => null);
+    const state = stateFor("BEGIN\n SELECT 1;\nEND", "mysql", createSqlBlockFoldService("mysql", cached));
+    const service = state.facet(foldService)[0];
+    expect(service(state, 0, state.doc.line(1).to)).toBeNull();
+    expect(cached).toHaveBeenCalled();
+  });
   it.each(["elasticsearch", "easysearch", "meilisearch"] as const)("folds one %s REST request without a semicolon", (databaseType) => {
     const sql = `POST /orders/_search
 {
@@ -296,17 +310,42 @@ SELECT * FROM (SELECT 1 AS value) one_line;`;
     expect(foldedTextAtLine(state, 1)).toBeNull();
   });
 
-  it("regression: a comment between END and CASE/TRY/CATCH must not break continuation detection", () => {
+  it.each(["/* comment */", "/* outer /* inner */ note */"])("regression: a comment between END and CASE/TRY/CATCH must not break continuation detection (%s)", (comment) => {
     // Before the fix, the gap check required pure whitespace, so a comment there made `END`
     // look like a bare closer; the literal `CASE`/`TRY`/`CATCH` word right after was then
     // pushed as an unmatched new opener, desyncing every fold pairing after it.
-    const sql = "BEGIN\n  CASE v\n    WHEN 1 THEN SELECT 1;\n  END /* comment */ CASE;\nEND";
+    const sql = `BEGIN\n  CASE v\n    WHEN 1 THEN SELECT 1;\n  END ${comment} CASE;\nEND`;
     const state = stateFor(sql);
 
     expect(foldedTextAtLine(state, 2)).toBe("\n    WHEN 1 THEN SELECT 1;\n  ");
     const folded = foldedTextAtLine(state, 1);
     expect(folded).not.toBeNull();
-    expect(folded).toContain("END /* comment */ CASE;");
+    expect(folded).toContain(`END ${comment} CASE;`);
+  });
+
+  it("keeps the enclosing block fold when nested comments separate transaction keywords", () => {
+    const sql = "BEGIN\n  BEGIN /* outer /* inner */ note */ DISTRIBUTED /* outer /* inner */ note */ TRANSACTION;\n  SELECT 1;\n  COMMIT;\nEND";
+    const state = stateFor(sql, "sqlserver", createSqlBlockFoldService("sqlserver"));
+
+    expect(foldedTextAtLine(state, 1)).toBe(sql.slice(sql.indexOf("\n"), sql.lastIndexOf("END")));
+  });
+
+  it.each(["\n", "\r\n"])("bounds folding time when a separator comment precedes a procedure label (%j)", (newline) => {
+    const sql = ["BEGIN", "  SELECT 1;", "END", "-".repeat(47), "next_label:", "SELECT 2;"].join(newline);
+    const state = stateFor(sql, "sqlserver", createSqlBlockFoldService("sqlserver"));
+    const start = performance.now();
+
+    // EditorState normalizes CRLF input to its default LF line separator.
+    expect(foldedTextAtLine(state, 1)).toBe("\n  SELECT 1;\n");
+    expect(performance.now() - start).toBeLessThan(500);
+  });
+
+  it("keeps END CASE paired across long separator comments", () => {
+    const sql = `BEGIN\n  CASE v\n    WHEN 1 THEN SELECT 1;\n  END\n${"-".repeat(1000)}\n  CASE;\nEND`;
+    const state = stateFor(sql, "mysql", createSqlBlockFoldService("mysql"));
+
+    expect(foldedTextAtLine(state, 2)).toBe("\n    WHEN 1 THEN SELECT 1;\n  ");
+    expect(foldedTextAtLine(state, 1)).toContain(`${"-".repeat(1000)}\n  CASE;`);
   });
 
   it("still folds correctly after a dialect reconfigure with the document unchanged", () => {

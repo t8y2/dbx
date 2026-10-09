@@ -1,10 +1,14 @@
+pub mod batch_progress;
 pub mod document_ops;
 pub mod hbase_ops;
 pub mod mongo_ops;
 pub mod object_cache;
+pub mod plugin_data;
 pub mod plugin_plan;
 pub mod query_cancel;
 pub mod redis_ops;
+mod sqlserver_agent_batch;
+pub mod sqlserver_manual_transaction;
 pub mod two_phase_commit;
 
 pub use dbx_drivers::execution::{
@@ -570,6 +574,10 @@ fn truncate_server_large_value_preview(
         ServerLargeValuePreviewKind::Text => text.char_indices().nth(preview_size).map(|(index, _)| index),
         ServerLargeValuePreviewKind::Binary => text
             .strip_prefix("0x")
+            .or_else(|| text.strip_prefix("0X"))
+            // PostgreSQL text-protocol queries (including rows with timestamps)
+            // return bytea as \x hex instead of the binary driver's 0x form.
+            .or_else(|| text.strip_prefix("\\x"))
             .filter(|hex| hex.len() > preview_size.saturating_mul(2))
             .map(|_| 2usize.saturating_add(preview_size.saturating_mul(2))),
         ServerLargeValuePreviewKind::Vector | ServerLargeValuePreviewKind::Deferred => unreachable!(),
@@ -1427,7 +1435,7 @@ fn options_for_sequential_statements(
     statement_options
 }
 
-fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> bool {
+pub(crate) fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> bool {
     let Some(db_type) = db_type else {
         return false;
     };
@@ -1839,12 +1847,20 @@ async fn do_execute_typed(
             // (`preserve_explicit_transaction`) or a later execution already
             // decided to keep this one.
             if p.is_client_session_pool() {
+                // A truncated or failed result, or result sets still pending
+                // behind the one that was read, may leave the last status packet
+                // short of the end, so only a complete response can prove that
+                // the cleanup `ROLLBACK` is unnecessary.
+                let status_is_final = *mode == crate::connection::MysqlMode::Normal
+                    && statement_result.as_ref().is_ok_and(|result| !result.truncated)
+                    && db::mysql::last_ok_ends_response(&conn);
                 let transaction = settle_mysql_auto_commit_transaction_boxed(
                     state,
                     pool_key,
                     &mut conn,
                     options.preserve_explicit_transaction,
                     crate::query_execution_sql::mysql_statement_opens_explicit_transaction(sql),
+                    status_is_final,
                 )
                 .await;
                 match transaction {
@@ -2053,6 +2069,19 @@ async fn do_execute_typed(
             }
             result
         }
+        PoolKind::CouchDb(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows;
+            let result =
+                wait_for_query_opt(cancel_token, query_timeout, db::couchdb_driver::execute_rest_query(&client, &sql))
+                    .await
+                    .map(|result| truncate_result_with_max_rows(result, max_rows));
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
             let sql = sql.to_string();
@@ -2064,6 +2093,23 @@ async fn do_execute_typed(
             )
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
+        PoolKind::Salesforce(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows;
+            let result = wait_for_query_opt(cancel_token, query_timeout, async move {
+                if let Some(cursor) = options.result_session_id.as_deref() {
+                    client.fetch_more(cursor).await
+                } else {
+                    client.execute_query(&sql, max_rows).await
+                }
+            })
+            .await;
             if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
                 state.remove_pool_by_key(pool_key).await;
             }
@@ -2149,6 +2195,7 @@ async fn do_execute_typed(
             }
             let cancel_for_agent = cancel_token.clone();
             let result = async move {
+                let lock_started = std::time::Instant::now();
                 let mut client = match cancel_for_agent.as_ref() {
                     Some(token) => {
                         tokio::select! {
@@ -2162,7 +2209,10 @@ async fn do_execute_typed(
                     }
                     None => client.lock().await,
                 };
-                if let Some(session_id) = options.result_session_id.as_deref() {
+                let lock_ms = lock_started.elapsed().as_secs_f64() * 1000.0;
+                let response: Result<db::QueryResult, AgentCallError> = if let Some(session_id) =
+                    options.result_session_id.as_deref()
+                {
                     let params = agent_fetch_query_page_params(session_id, options.page_size.unwrap_or(MAX_ROWS));
                     client
                         .fetch_query_page_typed_with_timeout_and_cancel(params, rpc_timeout, cancel_for_agent.clone())
@@ -2177,7 +2227,14 @@ async fn do_execute_typed(
                     client
                         .execute_query_typed_with_timeout_and_cancel(params, rpc_timeout, cancel_for_agent.clone())
                         .await
-                }
+                };
+                response.map(|mut result| {
+                    // Older agents have no phase map. Do not imply complete telemetry.
+                    if let Some(timings) = result.query_timings_ms.as_mut() {
+                        timings.insert("core_lock".into(), lock_ms);
+                    }
+                    result
+                })
             }
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
@@ -2861,7 +2918,7 @@ async fn execute_sql_statement_with_options_typed_inner(
         || crate::sql::has_executable_sql(sql),
         |db_type| crate::sql::has_executable_sql_for_database(sql, db_type),
     );
-    if !has_executable_sql {
+    if !has_executable_sql && options.result_session_id.is_none() {
         return Ok(empty_query_result(0));
     }
 
@@ -3087,6 +3144,11 @@ pub async fn close_query_session(
             db::solr_driver::close_cursor(&client, session_id).await?;
             Ok(true)
         }
+        PoolKind::CouchDb(client) => {
+            let client = client.clone();
+            db::couchdb_driver::close_cursor(&client, session_id).await?;
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
@@ -3274,6 +3336,8 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
     };
 
     let compatibility_mode = connection_sql_compatibility_mode(state, &pool_key, db_type).await;
+    let complete_sqlserver_agent_batch =
+        is_sqlserver_agent && sqlserver_agent_batch::requires_complete_results(sql, &options);
     let execution_plan =
         query_execution_plan_with_compatibility(sql, db_type, is_sqlserver_agent, compatibility_mode.as_deref());
     let continue_on_error = options.continue_on_error && !execution_plan.stop_on_error;
@@ -3351,6 +3415,7 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
     };
 
     if statements.len() == 1
+        && !complete_sqlserver_agent_batch
         && !mysql_single_statement_uses_batch_route(
             db_type,
             mysql_pool.is_some(),
@@ -3415,24 +3480,56 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
             ));
             break;
         }
-        match execute_sql_statement_with_options_typed(
-            state,
-            connection_id,
-            database,
-            stmt,
-            schema,
-            cancel_token.clone(),
-            statement_options.clone(),
-        )
-        .await
-        {
-            Ok(r) => {
-                report_execute_multi_progress(progress.as_ref(), statement_index, statements.len(), &r, true, None);
-                results.push(ExecuteMultiResult::success_with_index_and_optional_server_large_values(
-                    r,
-                    statement_index,
-                    options.table_data_preview,
-                ));
+        let execution = if complete_sqlserver_agent_batch {
+            Box::pin(sqlserver_agent_batch::execute(
+                state,
+                &pool_key,
+                database,
+                stmt,
+                schema,
+                cancel_token.clone(),
+                statement_options.clone(),
+            ))
+            .await
+        } else {
+            execute_sql_statement_with_options_typed(
+                state,
+                connection_id,
+                database,
+                stmt,
+                schema,
+                cancel_token.clone(),
+                statement_options.clone(),
+            )
+            .await
+            .map(|result| vec![result])
+        };
+        match execution {
+            Ok(batch_results) => {
+                for result in batch_results {
+                    report_execute_multi_progress(
+                        progress.as_ref(),
+                        statement_index,
+                        statements.len(),
+                        &result,
+                        true,
+                        None,
+                    );
+                    results.push(if complete_sqlserver_agent_batch {
+                        // One GO batch can contain several statements/results;
+                        // do not label every result as its first statement.
+                        ExecuteMultiResult::success_with_optional_server_large_values(
+                            result,
+                            options.table_data_preview,
+                        )
+                    } else {
+                        ExecuteMultiResult::success_with_index_and_optional_server_large_values(
+                            result,
+                            statement_index,
+                            options.table_data_preview,
+                        )
+                    });
+                }
             }
             Err(error) => {
                 let action = query_execution_error_action(db_type, stmt, &error);
@@ -3907,6 +4004,26 @@ fn decide_mysql_auto_commit_transaction(
     MysqlAutoCommitDecision { preserve: false, rollback }
 }
 
+/// Whether the cleanup `ROLLBACK` after an execution would be a server no-op.
+///
+/// Every final status packet carries `SERVER_STATUS_IN_TRANS`, and MariaDB
+/// Connector/J skips `ROLLBACK`/`COMMIT` on the same flag. DBX only relies on it
+/// when the packet provably closes the execution (`status_is_final`: a native
+/// MySQL-mode connection whose response was read to the end without an error,
+/// so neither an earlier command's packet nor a pending result set is left
+/// behind) and the batch did not open a transaction itself. A batch with
+/// `BEGIN` keeps the historical cleanup, so a server or proxy that never
+/// reports the flag cannot leave the user's transaction open.
+fn mysql_cleanup_rollback_is_noop(
+    status_is_final: bool,
+    explicit_start_in_batch: bool,
+    status: Option<db::mysql::MySqlSessionStatus>,
+) -> bool {
+    status_is_final
+        && !explicit_start_in_batch
+        && status.is_some_and(|status| !status.in_transaction && status.autocommit)
+}
+
 /// Type-erased entry point for [`settle_mysql_auto_commit_transaction`].
 ///
 /// `do_execute_typed` is one of the largest async fns in the crate and is
@@ -3921,8 +4038,16 @@ fn settle_mysql_auto_commit_transaction_boxed<'a>(
     conn: &'a mut mysql_async::Conn,
     allow_preserve: bool,
     explicit_start_in_batch: bool,
+    status_is_final: bool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<MysqlAutoCommitTransaction, String>> + Send + 'a>> {
-    Box::pin(settle_mysql_auto_commit_transaction(state, pool_key, conn, allow_preserve, explicit_start_in_batch))
+    Box::pin(settle_mysql_auto_commit_transaction(
+        state,
+        pool_key,
+        conn,
+        allow_preserve,
+        explicit_start_in_batch,
+        status_is_final,
+    ))
 }
 
 /// Settles the open transaction of a tab-scoped MySQL connection after an
@@ -3937,6 +4062,7 @@ async fn settle_mysql_auto_commit_transaction(
     conn: &mut mysql_async::Conn,
     allow_preserve: bool,
     explicit_start_in_batch: bool,
+    status_is_final: bool,
 ) -> Result<MysqlAutoCommitTransaction, String> {
     let already_preserved = state.has_preserved_explicit_transaction(pool_key).await;
     let mut status = db::mysql::session_status_from_last_ok(conn);
@@ -3952,9 +4078,12 @@ async fn settle_mysql_auto_commit_transaction(
         return Ok(MysqlAutoCommitTransaction::Preserved);
     }
     state.clear_preserved_explicit_transaction(pool_key).await;
-    // Historical cleanup: `ROLLBACK` is a server no-op when no transaction is
-    // open, and releases the read view when one is.
-    db::mysql::rollback_open_transaction(conn).await?;
+    // Historical cleanup: `ROLLBACK` releases the read view of a transaction
+    // that is still open. Skip the round trip only when the final status
+    // packet proves nothing is open.
+    if !mysql_cleanup_rollback_is_noop(status_is_final, explicit_start_in_batch, status) {
+        db::mysql::rollback_open_transaction(conn).await?;
+    }
     Ok(match decision.rollback {
         MysqlAutoCommitRollback::Explicit => MysqlAutoCommitTransaction::RolledBackExplicit,
         MysqlAutoCommitRollback::SessionAutocommit => MysqlAutoCommitTransaction::RolledBackSessionAutocommit,
@@ -4060,15 +4189,22 @@ async fn execute_multi_mysql(
     // tab, making the tab read stale rows until disconnect. Closing any open
     // transaction before returning the connection restores the auto-commit
     // contract, unless the tab keeps explicit user transactions open
-    // (`preserve_explicit_transaction`); ROLLBACK on an already-committed/
-    // implicit transaction is a server no-op, and a failure here only discards
-    // this connection.
+    // (`preserve_explicit_transaction`). The ROLLBACK round trip is skipped when
+    // the final status packet proves nothing is open, and a failure here only
+    // discards this connection.
     {
         let tab_scoped = pool.is_client_session_pool();
-        let explicit_start_in_batch = tab_scoped
-            && statements
-                .iter()
-                .any(|statement| crate::query_execution_sql::mysql_statement_opens_explicit_transaction(statement));
+        let explicit_start_in_batch = statements
+            .iter()
+            .any(|statement| crate::query_execution_sql::mysql_statement_opens_explicit_transaction(statement));
+        // An error, a truncated result, or result sets still pending may leave
+        // the last status packet short of the end, so only a batch whose
+        // response was read completely can prove that the cleanup `ROLLBACK`
+        // is unnecessary.
+        let status_is_final = mode == crate::connection::MysqlMode::Normal
+            && error_action.is_none()
+            && results.iter().all(|result| !result.execution_error && !result.result.truncated)
+            && db::mysql::last_ok_ends_response(&conn);
         let rollback_started_at = std::time::Instant::now();
         let transaction = if tab_scoped {
             settle_mysql_auto_commit_transaction(
@@ -4077,8 +4213,15 @@ async fn execute_multi_mysql(
                 &mut conn,
                 options.preserve_explicit_transaction,
                 explicit_start_in_batch,
+                status_is_final,
             )
             .await
+        } else if mysql_cleanup_rollback_is_noop(
+            status_is_final,
+            explicit_start_in_batch,
+            db::mysql::session_status_from_last_ok(&conn),
+        ) {
+            Ok(MysqlAutoCommitTransaction::None)
         } else {
             db::mysql::rollback_open_transaction(&mut conn).await.map(|()| MysqlAutoCommitTransaction::None)
         };
@@ -4136,6 +4279,7 @@ fn error_query_result(message: String) -> db::QueryResult {
         affected_rows: 0,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4155,6 +4299,7 @@ fn empty_query_result(execution_time_ms: u128) -> db::QueryResult {
         affected_rows: 0,
         execution_time_ms,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4502,6 +4647,7 @@ async fn execute_statements_inner(
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4648,7 +4794,9 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Elasticsearch(_)
         | PoolKind::Easysearch(_)
         | PoolKind::Solr(_)
+        | PoolKind::CouchDb(_)
         | PoolKind::Meilisearch(_)
+        | PoolKind::Salesforce(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
@@ -5052,7 +5200,9 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
         | PoolKind::Elasticsearch(_)
         | PoolKind::Easysearch(_)
         | PoolKind::Solr(_)
+        | PoolKind::CouchDb(_)
         | PoolKind::Meilisearch(_)
+        | PoolKind::Salesforce(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
@@ -5114,6 +5264,7 @@ async fn exec_tx_pg_inner(
             affected_rows: total_affected,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5208,6 +5359,7 @@ async fn exec_tx_mysql_inner(
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -5251,6 +5403,9 @@ async fn exec_tx_sqlite_inner(
 ) -> Result<db::QueryResult, String> {
     let statements = statements.to_vec();
     let query_timeout = budget.query_timeout;
+    if let Some(worker) = pool.worker() {
+        return exec_tx_sqlite_worker_inner(worker, statements, start, query_timeout).await;
+    }
     tokio::task::spawn_blocking(move || {
         pool.with_connection(|conn| {
             conn.execute_batch("BEGIN").map_err(|e| format!("Failed to begin transaction: {}", e))?;
@@ -5401,6 +5556,7 @@ async fn exec_tx_sqlite_inner(
                         affected_rows: total_affected,
                         execution_time_ms: start.elapsed().as_millis(),
                         server_execute_time_us: None,
+                        query_timings_ms: None,
                         truncated: false,
                         session_id: None,
                         has_more: false,
@@ -5416,6 +5572,55 @@ async fn exec_tx_sqlite_inner(
                 }
             }
         })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn exec_tx_sqlite_worker_inner(
+    worker: Arc<db::sqlite_worker::SqliteWorkerClient>,
+    statements: Vec<String>,
+    start: std::time::Instant,
+    query_timeout: Option<Duration>,
+) -> Result<db::QueryResult, String> {
+    // Detached like the local spawn_blocking path, so a dropped caller cannot leave the
+    // worker connection inside an open transaction. One session keeps other requests out.
+    tokio::spawn(async move {
+        let mut session = worker.session().await;
+        session.query("BEGIN", None).await.map_err(|e| format!("Failed to begin transaction: {e}"))?;
+        // ponytail: the worker cannot interrupt a running statement, so the budget is only
+        // checked between statements; bounding one slow statement needs a worker interrupt op.
+        let within_budget = || match query_timeout {
+            Some(timeout) if start.elapsed() >= timeout => {
+                Err(format!("Query timed out after {} seconds", timeout.as_secs()))
+            }
+            _ => Ok(()),
+        };
+        let outcome: Result<db::QueryResult, String> = async {
+            let mut total_affected = 0;
+            for (i, sql) in statements.iter().enumerate() {
+                within_budget()?;
+                total_affected += session
+                    .query(sql, None)
+                    .await
+                    .map_err(|e| {
+                        query_error_with_omitted_sql_context(&format!("Statement {} failed: {}", i + 1, e), sql)
+                    })?
+                    .affected_rows;
+            }
+            within_budget()?;
+            let committed = session.query("COMMIT", None).await.map_err(|e| format!("COMMIT failed: {e}"))?;
+            Ok(db::QueryResult {
+                affected_rows: total_affected,
+                execution_time_ms: start.elapsed().as_millis(),
+                ..committed
+            })
+        }
+        .await;
+        if outcome.is_err() {
+            let _ = session.query("ROLLBACK", None).await;
+        }
+        outcome
     })
     .await
     .map_err(|e| e.to_string())?
@@ -5485,6 +5690,7 @@ async fn exec_tx_explicit_inner(
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -5576,6 +5782,12 @@ fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
             let message = server_error.message.to_ascii_lowercase();
             message.contains("syntax error") && (message.contains("encountered:") || message.contains("expected"))
         }
+        // PolarDB-X exposes parser failures such as PXC-4500 / ERR_PARSER
+        // through the generic MySQL protocol ERR_HANDLE_DATA code (3009).
+        mysql_async::Error::Server(server_error) if server_error.code == 3009 => {
+            let message = server_error.message.to_ascii_lowercase();
+            message.contains("[err_parser]") || message.contains("syntax error") || message.contains("语法错误")
+        }
         _ => false,
     }
 }
@@ -5627,6 +5839,9 @@ async fn begin_transaction_session(
     catalog: Option<&str>,
     consistent_snapshot: bool,
 ) -> Result<String, String> {
+    if !consistent_snapshot && connection_database_type(state, connection_id).await == Some(DatabaseType::SqlServer) {
+        return sqlserver_manual_transaction::begin(state, connection_id, database, schema, catalog).await;
+    }
     let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
     let pool_database = query_pool_database(database, catalog);
     // Probe the primary pool to learn the backend kind. Agent manual TX opens a
@@ -5785,6 +6000,7 @@ async fn begin_transaction_session(
 
     let txn_session_id = uuid::Uuid::new_v4().to_string();
     let session = TransactionSession {
+        sqlserver: None,
         connection: Arc::new(tokio::sync::Mutex::new(txn_conn)),
         pool_key: pool_key.clone(),
         last_activity: std::time::Instant::now(),
@@ -5888,6 +6104,8 @@ pub async fn execute_in_manual_transaction(
 pub struct ManualTransactionExecutionOptions {
     pub max_rows: Option<usize>,
     pub table_data_preview: bool,
+    pub execution_id: Option<String>,
+    pub timeout_secs: Option<u64>,
     pub page_size: Option<usize>,
     pub result_session_id: Option<String>,
     /// User-facing SQL to classify (Oracle-only). When present, the core
@@ -5906,6 +6124,9 @@ pub async fn execute_in_manual_transaction_with_options(
     schema: Option<&str>,
     options: ManualTransactionExecutionOptions,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
+    if sqlserver_manual_transaction::is_session_id(txn_session_id) {
+        return sqlserver_manual_transaction::execute(state, txn_session_id, sql, database, schema, options).await;
+    }
     const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS);
 
     // Resolve statements and validate before taking the per-session connection
@@ -6005,6 +6226,9 @@ pub async fn execute_in_manual_transaction_with_options(
     let mut conn = connection.lock().await;
     for (i, statement) in statements.iter().enumerate() {
         let result = match &mut *conn {
+            TxnConnection::SqlServer { .. } => {
+                return Err("SQL Server transaction must use its batch executor".to_string())
+            }
             TxnConnection::Postgres(conn) => {
                 execute_manual_txn_postgres_statement(conn.as_ref(), statement, row_limit).await
             }
@@ -6252,6 +6476,7 @@ where
             .await
         }
         TxnConnection::Mysql(None) => Err(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string()),
+        TxnConnection::SqlServer { .. } => Err("Streaming SQL Server manual transactions is not supported".to_owned()),
         TxnConnection::Agent { .. } => {
             Err("Streaming rows inside an agent manual transaction is not supported".to_string())
         }
@@ -6353,6 +6578,28 @@ async fn rollback_manual_txn_connection_with_postgres_timeout(
     postgres_timeout: Option<Duration>,
 ) -> Result<(), String> {
     match conn {
+        TxnConnection::SqlServer { client, client_session_id: _client_session_id, .. } => {
+            if let Some(client) = client {
+                let mut client = client.lock().await;
+                let count = db::sqlserver::manual_transaction_status(&mut client).await?.count;
+                if count == 0 {
+                    return Err("The transaction has already ended; rollback cannot be confirmed".to_string());
+                }
+                #[cfg(feature = "test-support")]
+                sqlserver_manual_transaction::live_test_hooks::run(
+                    _client_session_id,
+                    sqlserver_manual_transaction::live_test_hooks::Phase::BeforeRollback,
+                );
+                db::sqlserver::execute_simple_batch_with_max_rows_metadata(
+                    &mut client,
+                    "ROLLBACK TRANSACTION",
+                    Some(1),
+                )
+                .await?;
+            } else {
+                return Err("The transaction connection was discarded; rollback cannot be confirmed".to_string());
+            }
+        }
         TxnConnection::Postgres(conn) => {
             if let Some(timeout) = postgres_timeout {
                 db::postgres::execute_postgres_infra_statement(conn, "ROLLBACK", timeout, "manual_txn.rollback")
@@ -6415,7 +6662,8 @@ async fn discard_mysql_manual_txn_connection(conn: &mut TxnConnection, timeout: 
 
 async fn release_manual_txn_session_pool(state: &AppState, connection_id: &str, conn: &mut TxnConnection) {
     let (client_session_id, database, cleanup_guard) = match conn {
-        TxnConnection::Agent { client_session_id, database, cleanup_guard, .. }
+        TxnConnection::SqlServer { client_session_id, database, cleanup_guard, .. }
+        | TxnConnection::Agent { client_session_id, database, cleanup_guard, .. }
         | TxnConnection::ExternalDriver { client_session_id, database, cleanup_guard, .. } => {
             (client_session_id, database, cleanup_guard)
         }
@@ -6488,7 +6736,9 @@ async fn execute_manual_txn_agent_statement(
         execution_schema,
         options,
     );
+    let lock_started = std::time::Instant::now();
     let mut locked = client.lock().await;
+    let lock_ms = lock_started.elapsed().as_secs_f64() * 1000.0;
     let result = match request {
         ManualTxnAgentQueryRequest::Execute(params) => {
             locked.execute_query_typed_with_timeout::<db::QueryResult>(params, None).await
@@ -6501,7 +6751,12 @@ async fn execute_manual_txn_agent_statement(
         }
     };
     result
-        .map(|result| truncate_result_with_max_rows(result, Some(row_limit.max(1))))
+        .map(|mut result| {
+            if let Some(timings) = result.query_timings_ms.as_mut() {
+                timings.insert("core_lock".into(), lock_ms);
+            }
+            truncate_result_with_max_rows(result, Some(row_limit.max(1)))
+        })
         .map_err(|error| error.into_legacy_string())
 }
 
@@ -6593,6 +6848,7 @@ async fn execute_manual_txn_postgres_statement(
             affected_rows: affected,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6628,6 +6884,7 @@ async fn execute_manual_txn_mysql_statement(
                 affected_rows,
                 execution_time_ms: start.elapsed().as_millis(),
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -6660,6 +6917,7 @@ async fn execute_manual_txn_mysql_statement(
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated,
             session_id: None,
             has_more: false,
@@ -6680,6 +6938,7 @@ async fn execute_manual_txn_mysql_statement(
             affected_rows,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6691,6 +6950,9 @@ async fn execute_manual_txn_mysql_statement(
 
 /// Commit an existing manual transaction session.
 pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -> Result<db::QueryResult, String> {
+    if sqlserver_manual_transaction::is_session_id(txn_session_id) {
+        return sqlserver_manual_transaction::finish(state, txn_session_id, true).await;
+    }
     let session = {
         let mut sessions = state.transaction_sessions.write().await;
         sessions.remove(txn_session_id).ok_or("Transaction session not found")?
@@ -6698,6 +6960,7 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
 
     let mut conn = session.connection.lock().await;
     match &mut *conn {
+        TxnConnection::SqlServer { .. } => return Err("SQL Server transaction must use its commit handler".to_string()),
         TxnConnection::Postgres(conn) => {
             conn.execute_typed("COMMIT", &[]).await.map_err(|e| format!("COMMIT failed: {e}"))?;
         }
@@ -6737,6 +7000,7 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
         affected_rows: 0,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -6747,6 +7011,9 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
 
 /// Rollback an existing manual transaction session.
 pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str) -> Result<db::QueryResult, String> {
+    if sqlserver_manual_transaction::is_session_id(txn_session_id) {
+        return sqlserver_manual_transaction::finish(state, txn_session_id, false).await;
+    }
     let session = {
         let mut sessions = state.transaction_sessions.write().await;
         sessions.remove(txn_session_id).ok_or("Transaction session not found")?
@@ -6767,6 +7034,7 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
         affected_rows: 0,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -6868,7 +7136,9 @@ mod tests {
             fail_once: Option<&'static str>,
         ) -> (AppState, Arc<Mutex<Vec<String>>>, tempfile::TempDir) {
             let directory = tempfile::tempdir().unwrap();
-            let state = AppState::new(Storage::open(&directory.path().join("storage.db")).await.unwrap());
+            let state = AppState::new(
+                crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap(),
+            );
             let config = test_connection_config(DatabaseType::Postgres);
             state.configs.write().await.insert(config.id.clone(), config);
             let commands = Arc::new(Mutex::new(Vec::new()));
@@ -6882,6 +7152,7 @@ mod tests {
             state.transaction_sessions.write().await.insert(
                 "snapshot".to_string(),
                 TransactionSession {
+                    sqlserver: None,
                     connection: Arc::new(tokio::sync::Mutex::new(TxnConnection::Postgres(Box::new(connection)))),
                     pool_key: "conn-1".to_string(),
                     last_activity: std::time::Instant::now(),
@@ -7250,6 +7521,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_ssh_worker_transaction_rolls_back_on_failure_and_commits_on_success() {
+        let remote = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().expect("open remote SQLite")));
+        remote.lock().unwrap().execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)").expect("create table");
+        let (client_stream, worker_stream) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(fake_sqlite_ssh_worker(worker_stream, remote.clone()));
+        let pool = db::sqlite::SqliteHandle::from_worker(Arc::new(
+            db::sqlite_worker::SqliteWorkerClient::from_test_stream(client_stream),
+        ));
+        let budget = DbOperationBudget::with_defaults();
+        let row_count =
+            || remote.lock().unwrap().query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0)).unwrap();
+
+        let error = exec_tx_sqlite_inner(
+            pool.clone(),
+            &["INSERT INTO t VALUES (1)".to_string(), "INSERT INTO missing VALUES (2)".to_string()],
+            std::time::Instant::now(),
+            &budget,
+        )
+        .await
+        .expect_err("second statement fails");
+        assert!(error.contains("Statement 2 failed") && error.contains("no such table: missing"), "{error}");
+        assert_eq!(row_count(), 0);
+
+        let result = exec_tx_sqlite_inner(
+            pool,
+            &["INSERT INTO t VALUES (1)".to_string(), "INSERT INTO t VALUES (2)".to_string()],
+            std::time::Instant::now(),
+            &budget,
+        )
+        .await
+        .expect("transaction commits");
+        assert_eq!(result.affected_rows, 2);
+        assert_eq!(row_count(), 2);
+    }
+
+    /// Answers SQLite worker JSONL requests from a real SQLite connection.
+    async fn fake_sqlite_ssh_worker(stream: tokio::io::DuplexStream, conn: Arc<Mutex<rusqlite::Connection>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let request: serde_json::Value = serde_json::from_str(&line).expect("worker request");
+            let mut response = {
+                let conn = conn.lock().unwrap();
+                match conn.execute_batch(request["sql"].as_str().unwrap_or_default()) {
+                    Ok(()) => serde_json::json!({ "affected_rows": conn.changes() }),
+                    Err(error) => serde_json::json!({ "error": error.to_string() }),
+                }
+            };
+            response["id"] = request["id"].clone();
+            writer.write_all(format!("{response}\n").as_bytes()).await.expect("worker response");
+        }
+    }
+
+    #[tokio::test]
     async fn sqlite_external_interrupt_without_budget_does_not_panic() {
         // Regression: with query_timeout = None (MCP policy can set it to 0 =
         // unlimited; resolve_query_timeout(Some(0)) -> None), an SQLITE_INTERRUPT
@@ -7333,7 +7659,8 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let storage = Storage::open(&dir.path().join("storage.db")).await.expect("open test storage");
+        let storage =
+            crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.expect("open test storage");
         let state = Arc::new(AppState::new(storage));
         let connection_id = "sqlite-cancel-session";
         let client_session_id = "query-tab-8414";
@@ -7551,7 +7878,6 @@ mod tests {
         InstalledPlugin, PluginCompatibility, PluginDriverManifest, PluginDriverSession, PluginManifest,
         PluginRuntimeEnv,
     };
-    use crate::storage::Storage;
 
     #[cfg(unix)]
     async fn spawn_agent_batch_timeout_test_client() -> (AgentDriverClient, tempfile::NamedTempFile) {
@@ -7642,7 +7968,7 @@ for line in sys.stdin:
     async fn query_and_transaction_paths_resolve_catalog_dialect_from_connection() {
         let dir = std::env::temp_dir().join(format!("dbx-catalog-dialect-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
 
         let mut doris = test_connection_config(DatabaseType::Doris);
@@ -7826,6 +8152,8 @@ for line in sys.stdin:
 
     fn test_connection_config(db_type: DatabaseType) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "conn-1".to_string(),
             name: "Connection".to_string(),
@@ -7845,6 +8173,7 @@ for line in sys.stdin:
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -7871,6 +8200,7 @@ for line in sys.stdin:
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -7904,7 +8234,7 @@ for line in sys.stdin:
         let (host, port) = address.rsplit_once(':').expect("DynamoDB endpoint must include a port");
         let dir = std::env::temp_dir().join(format!("dbx-query-dynamodb-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut config = test_connection_config(DatabaseType::DynamoDb);
         config.host = host.to_string();
@@ -7955,14 +8285,31 @@ for line in sys.stdin:
 print(json.dumps({'ready': True}), flush=True)
 for line in sys.stdin:
     req = json.loads(line)
+    with open(sys.argv[1], 'a') as calls:
+        calls.write(json.dumps(req) + '\n')
     if req['method'] == 'handshake':
         result = {'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}
-    elif req['method'] == 'execute_query':
+    elif req['method'] in ('execute_query', 'execute_query_page'):
         result = {
             'columns': ['sql'], 'column_types': ['nvarchar'], 'column_sortables': [],
             'rows': [[req['params']['sql']]], 'affected_rows': 0, 'execution_time_ms': 1,
             'truncated': False, 'session_id': None, 'has_more': False
         }
+        if req['params'].get('returnAllResults'):
+            result = [result]
+            sql = req['params']['sql']
+            if 'RAISERROR' in sql:
+                print(json.dumps({'jsonrpc':'2.0', 'id':req['id'], 'error': {
+                    'code': -1, 'message': 'late SQL Server batch error', 'data': {
+                        'category': 'sql', 'sqlState': 'S0001', 'vendorCode': 50000,
+                        'retryable': False, 'sessionDisposition': 'keep', 'stage': 'execute'
+                    }}}), flush=True)
+                continue
+            if 'SELECT 101' in sql and 'SELECT 303' in sql:
+                result = [dict(result[0], columns=[name], rows=rows) for name, rows in [
+                    ('first_result', [[101], [102], [103]]), ('second_result', [[202]]), ('third_result', [[303]])]]
+    elif req['method'] == 'fetch_query_page':
+        result = {'columns': ['next_page'], 'rows': [[2]], 'affected_rows': 0, 'execution_time_ms': 1}
     elif req['method'] in ('execute_batch', 'execute_transaction'):
         if req['params'].get('schema') is not None:
             print(json.dumps({
@@ -7984,15 +8331,17 @@ for line in sys.stdin:
 
         let python = if cfg!(windows) { "python" } else { "python3" };
         let runtime = crate::db::agent_driver::AgentRuntimeClient::spawn(
-            crate::db::agent_driver::AgentLaunchSpec::new(python)
-                .with_args([script_path.to_string_lossy().to_string()]),
+            crate::db::agent_driver::AgentLaunchSpec::new(python).with_args([
+                script_path.to_string_lossy().to_string(),
+                dir.join("calls.jsonl").to_string_lossy().to_string(),
+            ]),
             "test",
         )
         .await
         .unwrap();
         runtime.increment_session_count();
 
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert("conn-1".to_string(), test_connection_config(DatabaseType::SqlServer));
         state
@@ -8036,6 +8385,172 @@ for line in sys.stdin:
         runtime.kill();
         drop(state);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn sqlserver_agent_calls(dir: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(dir.join("calls.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|request: &serde_json::Value| {
+                matches!(request["method"].as_str(), Some("execute_query" | "execute_query_page" | "fetch_query_page"))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn sqlserver_agent_multi_execution_collects_all_results_without_cursor_or_replay() {
+        for page_size in [None, Some(100)] {
+            let (state, dir, runtime) = sqlserver_agent_echo_state().await;
+            let sql = "SELECT 101 AS first_result; SELECT 202 AS second_result; SELECT 303 AS third_result;";
+            let results = execute_multi_core_with_options_for_client_and_progress_typed(
+                &state,
+                "conn-1",
+                "",
+                sql,
+                None,
+                None,
+                QueryExecutionOptions { max_rows: Some(1), page_size, ..Default::default() },
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(results.len(), 3);
+            assert_eq!(results[0].result.rows, vec![vec![serde_json::json!(101)]]);
+            assert!(results[0].result.truncated);
+            assert_eq!(results[1].result.rows, vec![vec![serde_json::json!(202)]]);
+            assert_eq!(results[2].result.rows, vec![vec![serde_json::json!(303)]]);
+            assert!(results.iter().all(|result| result.statement_index.is_none()));
+            let calls = sqlserver_agent_calls(&dir);
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0]["method"], "execute_query");
+            assert_eq!(calls[0]["params"]["returnAllResults"], true);
+            assert_eq!(calls[0]["params"]["sql"], sql);
+            assert_eq!(calls[0]["params"]["maxRows"], 1);
+            runtime.kill();
+            drop(state);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlserver_agent_multi_execution_keeps_go_batches_and_variable_scope() {
+        let (state, dir, runtime) = sqlserver_agent_echo_state().await;
+        let first = "DECLARE @n INT; SET @n=1; SELECT @n;";
+        let second = "SELECT 2 AS n;";
+        let results = execute_multi_core_with_options_for_client_and_progress_typed(
+            &state,
+            "conn-1",
+            "",
+            &format!("{first}\nGO\n{second}"),
+            None,
+            None,
+            QueryExecutionOptions::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 2);
+        let calls = sqlserver_agent_calls(&dir);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["params"]["sql"], first);
+        assert_eq!(calls[1]["params"]["sql"], second);
+        assert!(calls.iter().all(|call| call["params"]["returnAllResults"] == true));
+        runtime.kill();
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sqlserver_agent_multi_execution_preserves_errors_and_go_continue_policy() {
+        for continue_on_error in [false, true] {
+            let (state, dir, runtime) = sqlserver_agent_echo_state().await;
+            let results = execute_multi_core_with_options_for_client_and_progress_typed(
+                &state,
+                "conn-1",
+                "",
+                "SELECT 1; RAISERROR('late',16,1);\nGO\nSELECT 2;",
+                None,
+                None,
+                QueryExecutionOptions { continue_on_error, ..Default::default() },
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(results[0].execution_error);
+            assert!(results[0].result.rows[0][0].as_str().unwrap().contains("late SQL Server batch error"));
+            assert!(results[0].error.is_some());
+            assert_eq!(results.len(), if continue_on_error { 2 } else { 1 });
+            assert_eq!(sqlserver_agent_calls(&dir).len(), if continue_on_error { 2 } else { 1 });
+            assert!(matches!(state.pool_handle("conn-1").await, Some(PoolKind::Agent(_))));
+            runtime.kill();
+            drop(state);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlserver_agent_multi_execution_preserves_single_query_and_fetch_cursors() {
+        for session_id in [None, Some("cursor-1".to_string())] {
+            let (state, dir, runtime) = sqlserver_agent_echo_state().await;
+            let results = execute_multi_core_with_options_for_client_and_progress_typed(
+                &state,
+                "conn-1",
+                "",
+                "SELECT 1 AS n;",
+                None,
+                None,
+                QueryExecutionOptions {
+                    page_size: Some(100),
+                    result_session_id: session_id.clone(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(results.len(), 1);
+            let calls = sqlserver_agent_calls(&dir);
+            assert_eq!(calls.len(), 1);
+            assert_eq!(
+                calls[0]["method"],
+                if session_id.is_some() { "fetch_query_page" } else { "execute_query_page" }
+            );
+            assert!(calls[0]["params"].get("returnAllResults").is_none());
+            runtime.kill();
+            drop(state);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlserver_agent_multi_execution_preserves_read_only_and_pre_dispatch_cancel() {
+        for read_only in [true, false] {
+            let (state, dir, runtime) = sqlserver_agent_echo_state().await;
+            state.configs.write().await.get_mut("conn-1").unwrap().read_only = read_only;
+            let cancel = CancellationToken::new();
+            if !read_only {
+                cancel.cancel();
+            }
+            let results = execute_multi_core_with_options_for_client_and_progress_typed(
+                &state,
+                "conn-1",
+                "",
+                "SELECT 1; UPDATE users SET n=2;",
+                None,
+                Some(cancel),
+                QueryExecutionOptions::default(),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(results.len(), 1);
+            assert!(results[0].execution_error);
+            assert!(sqlserver_agent_calls(&dir).is_empty());
+            runtime.kill();
+            drop(state);
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[tokio::test]
@@ -8109,7 +8624,7 @@ for line in sys.stdin:
         .unwrap();
         runtime.increment_session_count();
 
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert("conn-1".to_string(), test_connection_config(DatabaseType::Dameng));
         state
@@ -8168,7 +8683,7 @@ for line in sys.stdin:
     async fn native_pre_dispatch_cancellation_stays_typed() {
         let dir = std::env::temp_dir().join(format!("dbx-query-native-cancel-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "sqlite-cancel";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
@@ -8348,7 +8863,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn ddl_schema_cache_invalidates_persisted_object_snapshots() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "schema-cache";
         let sqlite =
@@ -8390,7 +8905,7 @@ for line in sys.stdin:
             ("BEGIN; ALTER TABLE users ADD COLUMN added INTEGER; COMMIT", false, false, true),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+            let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
             let state = AppState::new(storage);
             let sqlite = db::sqlite::connect_path_create_if_missing(dir.path().join("query.db").to_str().unwrap())
                 .await
@@ -8449,7 +8964,7 @@ for line in sys.stdin:
     async fn ddl_schema_cache_storage_failure_preserves_sql_outcome() {
         let dir = tempfile::tempdir().unwrap();
         let storage_path = dir.path().join("storage.db");
-        let state = AppState::new(Storage::open(&storage_path).await.unwrap());
+        let state = AppState::new(crate::persistence::test_storage::open(&storage_path).await.unwrap());
         let sqlite =
             db::sqlite::connect_path_create_if_missing(dir.path().join("query.db").to_str().unwrap()).await.unwrap();
         state
@@ -8478,7 +8993,7 @@ for line in sys.stdin:
     async fn assert_sqlite_batch_error_behavior(failure_first: bool, continue_on_error: bool) {
         let dir = std::env::temp_dir().join(format!("dbx-query-batch-error-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "sqlite-batch";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
@@ -8529,7 +9044,7 @@ for line in sys.stdin:
     async fn transactional_sqlite_batch_rolls_back_when_a_later_statement_fails() {
         let dir = std::env::temp_dir().join(format!("dbx-query-transaction-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "sqlite-transaction";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
@@ -8572,7 +9087,7 @@ for line in sys.stdin:
     async fn transactional_batch_rejects_an_unsupported_backend_before_execution() {
         let dir = std::env::temp_dir().join(format!("dbx-query-unsupported-transaction-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "message-queue-transaction";
         state
@@ -8664,7 +9179,7 @@ for line in sys.stdin:
     async fn connection_pool_is_sqlserver_agent_detects_agent_and_native_pools() {
         let dir = std::env::temp_dir().join(format!("dbx-query-sqlserver-agent-flag-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
 
         // Non-SQL-Server connections never use the SQL Server agent splitter.
@@ -8700,7 +9215,7 @@ for line in sys.stdin:
         // on failure for DDL that cannot be rolled back.
         let dir = std::env::temp_dir().join(format!("dbx-query-tx-predispatch-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "message-queue-tx-ddl";
         state
@@ -8771,10 +9286,16 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    async fn gaussdb_on_error_stop_overrides_continue_on_error() {
+    async fn postgres_family_on_error_stop_overrides_continue_on_error() {
+        for db_type in [DatabaseType::Postgres, DatabaseType::OpenGauss, DatabaseType::Gaussdb] {
+            assert_psql_on_error_stop_overrides_continue_on_error(db_type).await;
+        }
+    }
+
+    async fn assert_psql_on_error_stop_overrides_continue_on_error(db_type: DatabaseType) {
         let dir = std::env::temp_dir().join(format!("dbx-query-gaussdb-on-error-stop-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "gaussdb-on-error-stop";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
@@ -8783,7 +9304,7 @@ for line in sys.stdin:
                 connections.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
             })
             .await;
-        state.configs.write().await.insert(connection_id.to_string(), test_connection_config(DatabaseType::Gaussdb));
+        state.configs.write().await.insert(connection_id.to_string(), test_connection_config(db_type));
 
         let results = execute_multi_core_with_options(
             &state,
@@ -8928,6 +9449,7 @@ for line in sys.stdin:
                     affected_rows: 0,
                     execution_time_ms: 4,
                     server_execute_time_us: None,
+                    query_timings_ms: None,
                     truncated: false,
                     session_id: None,
                     has_more: false,
@@ -9203,6 +9725,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 1,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -9962,7 +10485,7 @@ for line in sys.stdin:
         assert_eq!(cells.len(), 1);
         assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 4);
 
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -10018,7 +10541,7 @@ for line in sys.stdin:
                 .await
                 .expect("plugin should start"),
         );
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut config = test_connection_config(DatabaseType::Jdbc);
         config.id = "jdbc-conn".to_string();
@@ -10054,6 +10577,7 @@ for line in sys.stdin:
         state.transaction_sessions.write().await.insert(
             "txn-test".to_string(),
             TransactionSession {
+                sqlserver: None,
                 connection: Arc::new(tokio::sync::Mutex::new(TxnConnection::ExternalDriver {
                     session,
                     config,
@@ -10147,7 +10671,7 @@ for line in sys.stdin:
         assert_eq!(result.rows, vec![vec![serde_json::json!(42)]]);
         assert_eq!(std::fs::read_to_string(&calls).unwrap(), "executeQueryPage\nexecuteQuery\n");
 
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -10211,7 +10735,7 @@ for line in sys.stdin:
         assert_eq!(error, "Incorrect syntax near SELECT");
         assert_eq!(std::fs::read_to_string(&calls).unwrap(), "request\n");
 
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -10263,6 +10787,7 @@ for line in sys.stdin:
                 affected_rows: 0,
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -10289,6 +10814,7 @@ for line in sys.stdin:
                 affected_rows: 0,
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -10663,6 +11189,8 @@ for line in sys.stdin:
     #[test]
     fn external_driver_query_params_include_database_and_schema_context() {
         let config = ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "jdbc-1".to_string(),
             name: "JDBC".to_string(),
@@ -10682,6 +11210,7 @@ for line in sys.stdin:
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -10708,6 +11237,7 @@ for line in sys.stdin:
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -11206,7 +11736,11 @@ for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
     if method == "execute_query":
-        sql = request.get("params", {{}}).get("sql", "")
+        params = request.get("params", {{}})
+        sql = params.get("sql", "")
+        if "REQUIRE_APP_SCHEMA" in sql and params.get("schema") != "APP":
+            print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -32000, "message": "schema was not forwarded"}}}}), flush=True)
+            continue
         if "RAISE_FILE_ERROR" in sql:
             print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -32000, "message": "file statement rejected"}}}}), flush=True)
             continue
@@ -11240,7 +11774,7 @@ for line in sys.stdin:
 
         let dir = std::env::temp_dir().join(format!("dbx-manual-txn-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut config = test_connection_config(db_type);
         config.id = "agent-conn".to_string();
@@ -11258,6 +11792,7 @@ for line in sys.stdin:
         state.transaction_sessions.write().await.insert(
             txn_session_id.clone(),
             TransactionSession {
+                sqlserver: None,
                 connection: Arc::new(tokio::sync::Mutex::new(TxnConnection::Agent {
                     client: Arc::new(crate::db::agent_driver::PooledAgentClient::new(client)),
                     client_session_id,
@@ -11270,7 +11805,7 @@ for line in sys.stdin:
                 snapshot_rotation_safe: true,
                 connection_id: "agent-conn".to_string(),
                 database: "ORCL".to_string(),
-                schema: None,
+                schema: Some("APP".to_string()),
             },
         );
         (state, txn_session_id, dir)
@@ -11282,6 +11817,7 @@ for line in sys.stdin:
             execution_id: "manual-file-test".to_string(),
             connection_id: "agent-conn".to_string(),
             database: "ORCL".to_string(),
+            schema: Some("APP".to_string()),
             file_path: String::new(),
             continue_on_error: false,
             selected_tables: None,
@@ -11300,7 +11836,7 @@ for line in sys.stdin:
         crate::data::sql_file_import::execute_sql_file_content(
             &state,
             &request,
-            "UPDATE T SET V = 1; UPDATE T SET V = 2;",
+            "SELECT REQUIRE_APP_SCHEMA; UPDATE T SET V = 2;",
             CancellationToken::new(),
             std::time::Instant::now(),
             |event| events.push(event),
@@ -11416,6 +11952,23 @@ for line in sys.stdin:
             assert!(events.is_empty());
             assert!(state.transaction_sessions.read().await.contains_key(&session_id));
         }
+        let mut request = manual_sql_file_request(&session_id);
+        request.schema = Some("OTHER".to_string());
+        let mut events = Vec::new();
+        let error = crate::data::sql_file_import::execute_sql_file_content(
+            &state,
+            &request,
+            "UPDATE T SET V = 1;",
+            CancellationToken::new(),
+            std::time::Instant::now(),
+            |event| events.push(event),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("target does not match"));
+        assert!(events.is_empty());
+        assert!(state.transaction_sessions.read().await.contains_key(&session_id));
+
         rollback_manual_transaction(&state, &session_id).await.unwrap();
         let error = crate::data::sql_file_import::execute_sql_file_content(
             &state,
@@ -11585,6 +12138,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11623,6 +12177,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11691,6 +12246,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11727,10 +12283,22 @@ for line in sys.stdin:
             column_sortables: vec![true, true],
             spatial_columns: Vec::new(),
             spatial_values: Vec::new(),
-            rows: vec![vec![serde_json::json!("0x0102030405"), serde_json::json!("B:4:5")]],
+            rows: ["0x", "0X", "\\x"]
+                .into_iter()
+                .flat_map(|prefix| {
+                    [0, 1, 4, 5].into_iter().map(move |bytes| {
+                        vec![
+                            serde_json::json!(format!("{prefix}{}", "ab".repeat(bytes))),
+                            serde_json::json!(format!("B:4:{bytes}")),
+                        ]
+                    })
+                })
+                .chain([vec![serde_json::Value::Null, serde_json::Value::Null]])
+                .collect(),
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11740,8 +12308,129 @@ for line in sys.stdin:
 
         let cells = extract_server_large_value_markers(&mut result);
 
-        assert_eq!(result.rows, vec![vec![serde_json::json!("0x01020304...")]]);
-        assert_eq!(cells, vec![db::LargeValueCell { row_index: 0, column_index: 0, original_bytes: 5 }]);
+        assert_eq!(result.columns, vec!["raw_value"]);
+        assert_eq!(result.column_types, vec!["bytea"]);
+        for (prefix_index, prefix) in ["0x", "0X", "\\x"].into_iter().enumerate() {
+            for (size_index, bytes) in [0, 1, 4, 5].into_iter().enumerate() {
+                let suffix = if bytes > 4 { "..." } else { "" };
+                assert_eq!(
+                    result.rows[prefix_index * 4 + size_index],
+                    vec![serde_json::json!(format!("{prefix}{}{suffix}", "ab".repeat(bytes.min(4))))]
+                );
+            }
+        }
+        assert_eq!(result.rows[12], vec![serde_json::Value::Null]);
+        assert_eq!(
+            cells,
+            [3, 7, 11]
+                .into_iter()
+                .map(|row_index| db::LargeValueCell { row_index, column_index: 0, original_bytes: 5 })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at PostgreSQL (read-only queries)"]
+    async fn live_postgres_bytea_preview_preserves_size_and_full_value() {
+        use crate::sql_dialect::{build_table_data_select_sql, TableDataSelectSqlOptions};
+        use sha2::{Digest, Sha256};
+
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = db::postgres::connect(&url, Duration::from_secs(5)).await.expect("connect PostgreSQL");
+        let preview_size = 3276;
+        let sizes = [None, Some(0), Some(1), Some(3275), Some(3276), Some(3277), Some(9645), Some(261007)];
+        let pattern = db::hex_encode(&(0..=255).collect::<Vec<u8>>());
+        let inputs = sizes
+            .iter()
+            .enumerate()
+            .map(|(id, size)| {
+                format!("({id}, {})", size.map_or_else(|| "NULL::integer".to_string(), |n| n.to_string()))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        // A CTE supplies repeatable bytea data without creating database objects.
+        let fixture = format!(
+            "WITH payloads AS (SELECT id, substring(decode(repeat('{pattern}', (size + 255) / 256), 'hex') \
+             from 1 for size) AS content FROM (VALUES {inputs}) AS inputs(id, size)), \
+             bytea_preview AS (SELECT id, content, now() AS created_at, octet_length(content) AS bytes, \
+             encode(sha256(content), 'hex') AS checksum FROM payloads) "
+        );
+
+        for text_protocol in [false, true] {
+            let mut columns = vec!["id".to_string(), "content".to_string()];
+            let mut column_types = vec!["int4".to_string(), "bytea".to_string()];
+            if text_protocol {
+                // A temporal column makes the driver choose PostgreSQL's text protocol.
+                columns.push("created_at".to_string());
+                column_types.push("timestamptz".to_string());
+            }
+            let select = build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                table_name: "bytea_preview".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: columns.clone(),
+                column_types: column_types.clone(),
+                large_value_preview_size: Some(preview_size),
+                limit: Some(sizes.len()),
+                order_by: Some("id".to_string()),
+                ..Default::default()
+            });
+            let raw = db::postgres::execute_query(&pool, &format!("{fixture}{select}")).await.unwrap();
+            let result = ExecuteMultiResult::success_with_optional_server_large_values(raw, true);
+            assert_eq!(result.result.columns, columns);
+            assert_eq!(result.result.column_types, column_types);
+            assert_eq!(result.result.rows.len(), sizes.len());
+            let prefix = if text_protocol { "\\x" } else { "0x" };
+
+            for (row_index, size) in sizes.into_iter().enumerate() {
+                let Some(size) = size else {
+                    assert!(result.result.rows[row_index][1].is_null());
+                    continue;
+                };
+                let bytes = (0..size).map(|index| (index % 256) as u8).collect::<Vec<_>>();
+                let suffix = if size > preview_size { "..." } else { "" };
+                assert_eq!(
+                    result.result.rows[row_index][1],
+                    serde_json::json!(format!("{prefix}{}{suffix}", db::hex_encode(&bytes[..size.min(preview_size)])))
+                );
+                if size <= preview_size {
+                    continue;
+                }
+                // The download path fetches by primary key without preview options.
+                let full_select = build_table_data_select_sql(TableDataSelectSqlOptions {
+                    database_type: Some(DatabaseType::Postgres),
+                    table_name: "bytea_preview".to_string(),
+                    primary_keys: vec!["id".to_string()],
+                    columns: ["id", "content", "bytes", "checksum"].map(str::to_string).to_vec(),
+                    where_input: Some(format!("id = {row_index}")),
+                    limit: Some(1),
+                    ..Default::default()
+                });
+                let full = db::postgres::execute_query(&pool, &format!("{fixture}{full_select}")).await.unwrap();
+                assert_eq!(full.rows.len(), 1);
+                // The table-data builder can select *, so map columns by name like
+                // the grid does. A returned timestamp also makes this fetch use text.
+                let column = |name: &str| &full.rows[0][full.columns.iter().position(|c| c == name).unwrap()];
+                let value = column("content").as_str().unwrap();
+                let hex = value.strip_prefix("0x").or_else(|| value.strip_prefix("\\x")).unwrap();
+                assert_eq!(hex.len(), size * 2);
+                assert!(hex == db::hex_encode(&bytes), "full bytea differs for row {row_index}");
+                let actual_size =
+                    column("bytes").as_u64().or_else(|| column("bytes").as_str().and_then(|value| value.parse().ok()));
+                assert_eq!(actual_size, Some(size as u64));
+                assert_eq!(column("checksum"), &serde_json::json!(db::hex_encode(&Sha256::digest(&bytes))));
+            }
+            assert_eq!(
+                result.large_value_cells,
+                sizes
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(row_index, size)| size
+                        .filter(|size| *size > preview_size)
+                        .map(|original_bytes| { db::LargeValueCell { row_index, column_index: 1, original_bytes } }))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
@@ -11763,6 +12452,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11802,6 +12492,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11835,6 +12526,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -12002,6 +12694,22 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn mysql_cleanup_rollback_is_skipped_only_when_the_final_status_proves_nothing_is_open() {
+        assert!(mysql_cleanup_rollback_is_noop(true, false, Some(mysql_status(false, true))));
+
+        // A transaction is open, or auto-commit is off: the cleanup must run.
+        assert!(!mysql_cleanup_rollback_is_noop(true, false, Some(mysql_status(true, true))));
+        assert!(!mysql_cleanup_rollback_is_noop(true, false, Some(mysql_status(false, false))));
+        // The last statement failed, so no status packet is cached.
+        assert!(!mysql_cleanup_rollback_is_noop(true, false, None));
+        // A truncated or failed result may leave an earlier command's packet.
+        assert!(!mysql_cleanup_rollback_is_noop(false, false, Some(mysql_status(false, true))));
+        // A batch that opened a transaction keeps the cleanup even when the
+        // server reports nothing open, in case it never sets the flag.
+        assert!(!mysql_cleanup_rollback_is_noop(true, true, Some(mysql_status(false, true))));
+    }
+
+    #[test]
     fn database_backup_transactions_request_consistent_snapshots() {
         assert_eq!(postgres_transaction_begin_sql(true), "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
         assert_eq!(mysql_transaction_isolation_sql(true), Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"));
@@ -12049,5 +12757,27 @@ for line in sys.stdin:
 
         assert!(mysql_error_is_syntax_error(&doris_syntax_error));
         assert!(!mysql_error_is_syntax_error(&generic_unknown_error));
+    }
+
+    #[test]
+    fn mysql_backup_transaction_falls_back_for_polardbx_parser_errors() {
+        for message in [
+            "[PXC-4500][ERR_PARSER] syntax error, expect EOF, actual COMMA after WITH CONSISTENT SNAPSHOT",
+            "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY 语法错误",
+        ] {
+            let polardbx_parser_error = mysql_async::Error::Server(mysql_async::ServerError {
+                code: 3009,
+                message: message.to_string(),
+                state: "HY000".to_string(),
+            });
+            assert!(mysql_error_is_syntax_error(&polardbx_parser_error));
+        }
+        let polardbx_non_parser_error = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 3009,
+            message: "Failed to handle data".to_string(),
+            state: "HY000".to_string(),
+        });
+
+        assert!(!mysql_error_is_syntax_error(&polardbx_non_parser_error));
     }
 }

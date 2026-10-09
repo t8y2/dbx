@@ -1,6 +1,6 @@
 use dbx_drivers::db::sqlserver::{self, SqlServerStreamItem};
 use dbx_drivers::models::connection::DatabaseType;
-use dbx_sql::data_grid_sql::format_grid_sql_literal;
+use dbx_sql_data::data_grid_sql::format_grid_sql_literal;
 use serde_json::Value;
 use std::time::Duration;
 

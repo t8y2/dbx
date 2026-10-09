@@ -597,7 +597,21 @@ pub struct AiStreamChunk {
     pub delta: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_delta: Option<String>,
+    /// Provider termination reason observed on the final stream event.
+    /// `length` means output was cut by the provider limit, not that the model
+    /// completed a final answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
     pub done: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiChatSourceBinding {
+    pub connection_id: String,
+    pub database: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -617,6 +631,37 @@ pub struct AiChatMessage {
     pub failed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub covered_messages: Option<usize>,
+    /// Frozen target of the assistant turn. A Web confirmation card can remain
+    /// actionable after the conversation itself is rebound (#9902).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_binding: Option<AiChatSourceBinding>,
+    /// Footprint of a turn that carried a context selection (#10058): the
+    /// selection text is session-only (up to 12 000 chars, and conversation
+    /// records are synced), so only the fact that one existed is persisted, and
+    /// a reloaded transcript can still tell the model the content is gone
+    /// instead of showing an empty turn. Absent on records written before the
+    /// field existed.
+    ///
+    /// NOTE (2026-10-01): the sync surface carries no conversations member today
+    /// — `cloud_sync::SyncSnapshot` has no such field, and there is no projection
+    /// to exclude one from — so the reason this field holds today is write
+    /// amplification rather than sync exposure. If conversations ever do join the
+    /// snapshot, the original reason applies again as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selections_omitted: Option<bool>,
+    /// Which skills this conversation has had loaded (prd 09-30 Req 13), written
+    /// onto the newest assistant message of every snapshot.
+    ///
+    /// Only the FACT is persisted, never the body: a body can reach 1 MiB per
+    /// skill, `ai_conversations.messages_json` is an unbounded TEXT column with no
+    /// per-message or per-record cap, and the whole message array is re-serialised
+    /// on every save (send, streamed snapshot, chip click). A body here would be
+    /// written in full each time, and would ride along with anything that ships a
+    /// conversation record. Same shape as `selections_omitted` above, which keeps a
+    /// footprint instead of its payload; the panel holds the body in memory for the
+    /// current session and re-reads it from disk when a request needs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_skill_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -629,6 +674,20 @@ pub struct AiConversation {
     pub title: String,
     pub connection_name: String,
     pub database: String,
+    /// Connection this conversation is bound to (#9902). The binding belongs to
+    /// the conversation — not to whatever editor tab happens to be active — so
+    /// several conversations can run against different connections at once.
+    ///
+    /// Empty for conversations persisted before session-scoped binding existed,
+    /// and for legacy records whose `connection_name` matched zero or several
+    /// saved connections (a name is not unique). Callers must treat empty as
+    /// "unbound" and ask the user, never fall back to the active tab.
+    #[serde(default)]
+    pub connection_id: String,
+    /// Schema for schema-scoped engines (Postgres, Dameng). `None` when the
+    /// engine has no schema layer or the user has not picked one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
     pub messages: Vec<AiChatMessage>,
     /// One editable "send later" input saved while an active run occupies the
     /// conversation (parent PRD §5). Persisted with the conversation so it
@@ -1329,6 +1388,17 @@ fn openai_stream_has_finish_reason(event: &serde_json::Value) -> bool {
     event["choices"].as_array().is_some_and(|choices| {
         choices.iter().any(|choice| choice["finish_reason"].as_str().is_some_and(|reason| !reason.is_empty()))
     })
+}
+
+/// Normalizes provider-specific output-limit labels into the two values the
+/// agent event contract exposes. Other stop reasons (for example tool calls or
+/// a normal stop) are intentionally not surfaced as truncation.
+fn output_limit_finish_reason(reason: &str) -> Option<&'static str> {
+    match reason.to_ascii_lowercase().as_str() {
+        "length" => Some("length"),
+        "max_tokens" | "max_output_tokens" => Some("max_tokens"),
+        _ => None,
+    }
 }
 
 pub fn responses_stream_text(event: &serde_json::Value) -> Option<&str> {
@@ -3803,6 +3873,7 @@ async fn stream_claude(
                                         session_id: session_id.clone(),
                                         delta: text.to_string(),
                                         reasoning_delta: None,
+                                        finish_reason: None,
                                         done: false,
                                     });
                                 }
@@ -3819,6 +3890,7 @@ async fn stream_claude(
                 session_id: session_id.clone(),
                 delta: String::new(),
                 reasoning_delta: None,
+                finish_reason: None,
                 done: true,
             });
 
@@ -3901,6 +3973,7 @@ async fn stream_openai(
                                             session_id: session_id.clone(),
                                             delta: String::new(),
                                             reasoning_delta: Some(reasoning),
+                                            finish_reason: None,
                                             done: false,
                                         });
                                     }
@@ -3910,6 +3983,7 @@ async fn stream_openai(
                                             session_id: session_id.clone(),
                                             delta: text,
                                             reasoning_delta: None,
+                                            finish_reason: None,
                                             done: false,
                                         });
                                     }
@@ -3920,6 +3994,7 @@ async fn stream_openai(
                                             session_id: session_id.clone(),
                                             delta: String::new(),
                                             reasoning_delta: Some(reasoning.to_string()),
+                                            finish_reason: None,
                                             done: false,
                                         });
                                     }
@@ -3929,11 +4004,27 @@ async fn stream_openai(
                                             session_id: session_id.clone(),
                                             delta: text,
                                             reasoning_delta: None,
+                                            finish_reason: None,
                                             done: false,
                                         });
                                     }
                                 }
                                 if finish_reason_deadline.is_none() && openai_stream_has_finish_reason(&event) {
+                                    if let Some(reason) = event["choices"].get(0).and_then(|choice| choice["finish_reason"].as_str()).filter(|reason| !reason.is_empty()) {
+                                        on_chunk(AiStreamChunk {
+                                            session_id: session_id.clone(),
+                                            delta: String::new(),
+                                            reasoning_delta: None,
+                                            finish_reason: Some(reason.to_string()),
+                                            // Not `done`: this stream is not over. Both frontends
+                                            // stop listening on the first `done` chunk, and this
+                                            // stream deliberately keeps reading for up to a second
+                                            // after the finish reason to collect the trailing usage
+                                            // chunk. The batcher holds this reason and attaches it to
+                                            // the real terminal chunk.
+                                            done: false,
+                                        });
+                                    }
                                     finish_reason_deadline =
                                         Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
                                 }
@@ -3956,6 +4047,7 @@ async fn stream_openai(
                 session_id: session_id.clone(),
                 delta: String::new(),
                 reasoning_delta: None,
+                finish_reason: None,
                 done: true,
             });
 
@@ -4032,6 +4124,7 @@ async fn stream_responses_api(
                                         session_id: session_id.clone(),
                                         delta: text.to_string(),
                                         reasoning_delta: None,
+                                        finish_reason: None,
                                         done: false,
                                     });
                                 }
@@ -4048,6 +4141,7 @@ async fn stream_responses_api(
                 session_id: session_id.clone(),
                 delta: String::new(),
                 reasoning_delta: None,
+                finish_reason: None,
                 done: true,
             });
 
@@ -4126,6 +4220,7 @@ async fn stream_gemini(
                                         session_id: session_id.clone(),
                                         delta: text,
                                         reasoning_delta: None,
+                                        finish_reason: None,
                                         done: false,
                                     });
                                 }
@@ -4140,6 +4235,7 @@ async fn stream_gemini(
                 session_id: session_id.clone(),
                 delta: String::new(),
                 reasoning_delta: None,
+                finish_reason: None,
                 done: true,
             });
 
@@ -4167,6 +4263,8 @@ pub enum StreamToolEvent {
     ToolCallProviderPayload { index: u32, payload: serde_json::Value },
     /// A tool_use / function_call block has ended.
     ToolCallComplete { index: u32 },
+    /// Provider termination reason, retained even when no tool call was emitted.
+    FinishReason { reason: String },
 }
 
 /// Partially accumulated tool call during streaming.
@@ -4199,6 +4297,16 @@ impl StreamingToolCallAccumulator {
     pub fn process(&mut self, event: StreamToolEvent, on_chunk: &impl Fn(AiStreamChunk)) {
         match event {
             StreamToolEvent::Chunk(chunk) => on_chunk(chunk),
+            // Carries the reason on a non-terminal chunk on purpose: `done` ends the
+            // stream for the consumer, and the batcher is built to attach this reason
+            // to the terminal chunk that follows.
+            StreamToolEvent::FinishReason { reason } => on_chunk(AiStreamChunk {
+                session_id: String::new(),
+                delta: String::new(),
+                reasoning_delta: None,
+                finish_reason: Some(reason),
+                done: false,
+            }),
             StreamToolEvent::ToolCallStart { index, id, name } => {
                 // Merge with any existing entry for this index instead of
                 // overwriting it. Some OpenAI-compatible providers (e.g. GLM)
@@ -4393,6 +4501,11 @@ async fn stream_claude_with_tools(
                                             let existing_input = token_usage.as_ref().map(|u| u.input_tokens).unwrap_or(0);
                                             token_usage = Some(TokenUsage { input_tokens: existing_input, output_tokens: o as u32 });
                                         }
+                                        if let Some(reason) = event["delta"]["stop_reason"].as_str()
+                                            .and_then(output_limit_finish_reason)
+                                        {
+                                            on_event(StreamToolEvent::FinishReason { reason: reason.to_string() });
+                                        }
                                     }
                                     "content_block_start" => {
                                         let idx = event["index"].as_u64().unwrap_or(0) as u32;
@@ -4419,6 +4532,7 @@ async fn stream_claude_with_tools(
                                                         session_id: session_id.clone(),
                                                         delta: text.to_string(),
                                                         reasoning_delta: None,
+                                                        finish_reason: None,
                                                         done: false,
                                                     }));
                                                 }
@@ -4430,6 +4544,7 @@ async fn stream_claude_with_tools(
                                                         session_id: session_id.clone(),
                                                         delta: String::new(),
                                                         reasoning_delta: Some(thinking.to_string()),
+                                                        finish_reason: None,
                                                         done: false,
                                                     }));
                                                 }
@@ -4576,6 +4691,7 @@ async fn stream_openai_with_tools(
                                             session_id: session_id.clone(),
                                             delta: String::new(),
                                             reasoning_delta: Some(reasoning),
+                                            finish_reason: None,
                                             done: false,
                                         }));
                                     }
@@ -4585,6 +4701,7 @@ async fn stream_openai_with_tools(
                                             session_id: session_id.clone(),
                                             delta: text,
                                             reasoning_delta: None,
+                                            finish_reason: None,
                                             done: false,
                                         }));
                                     }
@@ -4595,6 +4712,7 @@ async fn stream_openai_with_tools(
                                             session_id: session_id.clone(),
                                             delta: String::new(),
                                             reasoning_delta: Some(reasoning.to_string()),
+                                            finish_reason: None,
                                             done: false,
                                         }));
                                     }
@@ -4604,6 +4722,7 @@ async fn stream_openai_with_tools(
                                             session_id: session_id.clone(),
                                             delta: text,
                                             reasoning_delta: None,
+                                            finish_reason: None,
                                             done: false,
                                         }));
                                     }
@@ -4630,6 +4749,9 @@ async fn stream_openai_with_tools(
                                     }
                                 }
                                 if finish_reason_deadline.is_none() && openai_stream_has_finish_reason(&event) {
+                                    if let Some(reason) = event["choices"].get(0).and_then(|choice| choice["finish_reason"].as_str()).filter(|reason| !reason.is_empty()) {
+                                        on_event(StreamToolEvent::FinishReason { reason: reason.to_string() });
+                                    }
                                     finish_reason_deadline =
                                         Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
                                 }
@@ -4737,6 +4859,12 @@ async fn stream_responses_with_tools(
                                 if let Some(usage) = responses_token_usage(&event) {
                                     token_usage = Some(usage);
                                 }
+                                if let Some(reason) = event["response"]["incomplete_details"]["reason"]
+                                    .as_str()
+                                    .and_then(output_limit_finish_reason)
+                                {
+                                    on_event(StreamToolEvent::FinishReason { reason: reason.to_string() });
+                                }
 
                                 if let Some(text) = responses_stream_text(&event) {
                                     emitted.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -4744,6 +4872,7 @@ async fn stream_responses_with_tools(
                                         session_id: session_id.clone(),
                                         delta: text.to_string(),
                                         reasoning_delta: None,
+                                        finish_reason: None,
                                         done: false,
                                     }));
                                 }
@@ -4990,6 +5119,12 @@ async fn stream_gemini_with_tools(
                                     token_usage = Some(TokenUsage { input_tokens: p as u32, output_tokens: c as u32 });
                                 }
                                 if let Some(candidates) = event["candidates"].as_array() {
+                                    if let Some(reason) = candidates[0]["finishReason"]
+                                        .as_str()
+                                        .and_then(output_limit_finish_reason)
+                                    {
+                                        on_event(StreamToolEvent::FinishReason { reason: reason.to_string() });
+                                    }
                                     if let Some(parts) = candidates[0]["content"]["parts"].as_array() {
                                         for part in parts {
                                             // Text
@@ -4999,6 +5134,7 @@ async fn stream_gemini_with_tools(
                                                     session_id: session_id.clone(),
                                                     delta: text.to_string(),
                                                     reasoning_delta: None,
+                                                    finish_reason: None,
                                                     done: false,
                                                 }));
                                             }
@@ -5147,10 +5283,10 @@ mod tests {
         gemini_text, is_agens_endpoint, is_kimi_model, is_retryable_error, list_models_core, maybe_bearer_headers,
         maybe_tag_retry_after, measure_first_stream_chunk, merge_global_max_retries, minimax_stream_semantics,
         ollama_selected_model_tool_support, openai_message_content, openai_response_text, openai_stream_reasoning,
-        openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
-        parse_model_list_response, parse_retry_after, parse_retry_after_secs, provider_requires_api_key,
-        redact_secrets, redact_url_query, resolve_endpoint, resolve_gemini_stream_endpoint, resolve_model_effort_core,
-        resolve_model_list_endpoint, resolve_ollama_show_endpoint, responses_function_tool,
+        openai_stream_text, output_limit_finish_reason, parse_dynamic_effort_capability,
+        parse_gemini_model_list_response, parse_model_list_response, parse_retry_after, parse_retry_after_secs,
+        provider_requires_api_key, redact_secrets, redact_url_query, resolve_endpoint, resolve_gemini_stream_endpoint,
+        resolve_model_effort_core, resolve_model_list_endpoint, resolve_ollama_show_endpoint, responses_function_tool,
         responses_max_output_tokens, responses_stream_text, responses_text, responses_token_usage,
         retain_ollama_completion_models, retry_after_secs, set_chat_completion_token_limit, stream, stream_claude,
         stream_claude_with_tools, stream_data_payload, stream_error, stream_openai_with_tools, stream_with_tools,
@@ -5162,6 +5298,15 @@ mod tests {
         MINIMAX_REASONING_DETAILS_PAYLOAD_KEY, TEST_PROMPT,
     };
     use super::{redacted_http_detail, sensitive_values};
+
+    #[test]
+    fn normalizes_provider_output_limit_reasons() {
+        assert_eq!(output_limit_finish_reason("length"), Some("length"));
+        assert_eq!(output_limit_finish_reason("MAX_TOKENS"), Some("max_tokens"));
+        assert_eq!(output_limit_finish_reason("max_output_tokens"), Some("max_tokens"));
+        assert_eq!(output_limit_finish_reason("stop"), None);
+        assert_eq!(output_limit_finish_reason("tool_calls"), None);
+    }
 
     #[test]
     fn structured_image_attachment_becomes_openai_image_content() {
@@ -5671,8 +5816,8 @@ mod tests {
         let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
         let request = anthropic_compatible_test_request(endpoint);
         let tools = [crate::agent_events::ToolDefinition {
-            name: "get_tables",
-            description: "List tables",
+            name: "get_tables".into(),
+            description: "List tables".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": { "schema": { "type": "string" } }
@@ -5727,8 +5872,8 @@ mod tests {
         let request = claude_http_test_request(endpoint);
         let client = build_ai_http_client(&request.config, 10).unwrap();
         let tools = [crate::agent_events::ToolDefinition {
-            name: "get_tables",
-            description: "List tables",
+            name: "get_tables".into(),
+            description: "List tables".into(),
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
             read_only: true,
             parallel_ok: true,
@@ -7303,8 +7448,8 @@ mod tests {
         assert_eq!(input[3]["call_id"], "call_1");
 
         let tool = crate::agent_events::ToolDefinition {
-            name: "list_tables",
-            description: "List tables",
+            name: "list_tables".into(),
+            description: "List tables".into(),
             parameters: serde_json::json!({"type": "object"}),
             read_only: true,
             parallel_ok: true,

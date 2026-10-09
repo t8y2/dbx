@@ -15,7 +15,8 @@ import EditorGroup from "./EditorGroup.vue";
 import QueryResultSurface from "./QueryResultSurface.vue";
 import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEvents";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, StatementRange } from "./querySurfaces";
-import type { QueryTab } from "@/types/database";
+import type { QueryTab, TableInfoTab } from "@/types/database";
+import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 defineOptions({ inheritAttrs: false });
 
@@ -33,7 +34,6 @@ const props = defineProps<
 >();
 const emit = defineEmits<
   ContentAreaSurfaceEmits & {
-    "locate-tab": [tab: QueryTab];
     "toggle-zen-mode": [];
     "start-resize": [event: PointerEvent];
     "toggle-collapse": [];
@@ -72,7 +72,9 @@ defineExpose({
     const group = groupForElement(element) ?? activeEditorGroup();
     return group?.focusSearch(element) ?? false;
   },
+  focusWhere: () => activeEditorGroup()?.focusWhere() ?? false,
   openGoToColumn: () => activeEditorGroup()?.openGoToColumn() ?? false,
+  openTableStructureEditor: (initialTab?: TableInfoTab) => activeEditorGroup()?.openTableStructureEditor?.(initialTab) ?? false,
   refreshData: (target: Element | null = null) => {
     const element = commandTargetElement(target);
     if (element?.closest("[data-shared-result-surface]")) {
@@ -107,8 +109,11 @@ defineExpose({
     const group = groupForElement(commandTargetElement(null));
     return group?.applyTableStructureChanges() ?? activeEditorGroup()?.applyTableStructureChanges() ?? Promise.resolve(false);
   },
-  insertRedisCommand: (command: string) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.insertRedisCommand(command) ?? Promise.resolve(false),
-  executeRedisCommand: (command: string) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.executeRedisCommand(command) ?? Promise.resolve(false),
+  // Redis's logical DB is part of the target, so a visible tab on another DB
+  // must be refused even when it shares the same connection.
+  insertRedisCommand: (command: string, target: AiConversationBinding) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.insertRedisCommand(command, target) ?? Promise.resolve(false),
+  executeRedisCommand: (command: string, target: AiConversationBinding) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.executeRedisCommand(command, target) ?? Promise.resolve(false),
+  isRedisConsoleReady: (target: AiConversationBinding) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.isRedisConsoleReady(target) ?? false,
 });
 
 const { t } = useI18n();
@@ -318,7 +323,6 @@ function handleFocusErrorOffset(tabId: string, offset: number): boolean {
           v-bind="editorGroupBindings"
           @focus-group="queryStore.focusGroup($event)"
           @activate-tab="queryStore.activateTabInGroup(group.id, $event)"
-          @locate-tab="emit('locate-tab', $event)"
           @toggle-zen-mode="emit('toggle-zen-mode')"
           @start-resize="emit('start-resize', $event)"
           @toggle-collapse="emit('toggle-collapse')"
@@ -351,7 +355,6 @@ function handleFocusErrorOffset(tabId: string, offset: number): boolean {
                 v-bind="editorGroupBindings"
                 @focus-group="queryStore.focusGroup($event)"
                 @activate-tab="queryStore.activateTabInGroup(group.id, $event)"
-                @locate-tab="emit('locate-tab', $event)"
                 @toggle-zen-mode="emit('toggle-zen-mode')"
                 @start-resize="emit('start-resize', $event)"
                 @toggle-collapse="emit('toggle-collapse')"

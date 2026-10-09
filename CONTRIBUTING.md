@@ -44,6 +44,23 @@ make docs              # preview the documentation site
 make cargo-check-fast  # fast Rust checks
 ```
 
+### macOS Development Signing
+
+Use `make dev`, `make dev-fast`, or `pnpm dev:tauri`. These entry points sign each rebuilt debug executable with a stable, local-only development identity before launching it. The first launch may still ask you to select **Always Allow** for DBX's existing Keychain item; subsequent rebuilds keep the same code identity. Direct `pnpm tauri dev` bypasses this setup.
+
+The first run creates a dedicated signing keychain and a self-signed certificate under `~/Library/Application Support/DBX/development-signing/`. It adds only this keychain to your user search list, without changing the default keychain or system trust settings. The directory is owner-only (`0700`); its files, including the generated password used to unlock this development-only signing keychain, are owner-only (`0600`). No release private key or DBX connection-encryption key is exported or replaced. Keep this local identity across rebuilds; do not commit or share it. An incomplete, corrupt, or expired identity fails explicitly rather than silently rotating or falling back to ad-hoc signing.
+
+The runner is restricted to `debug/dbx`, preserves Cargo feature and application arguments, and does not run for Linux, Windows, or release packaging. Custom `CARGO_TARGET_*_RUNNER` variables must be unset for these macOS development entry points.
+
+Core, desktop and Web storage test fixtures use `dbx_core::persistence::test_storage` (the `test-support` dev-dependency feature). They resolve their own data-directory keys before migration preflight, without accessing the user's Keychain or inheriting `DBX_SECRET_KEY` / `DBX_SECRET_KEY_FILE`. Keep the fixture directory and its key together when testing database copies.
+
+```bash
+node --test scripts/dev-tauri.test.mjs
+DBX_TEST_MACOS_KEYCHAIN=1 node --test scripts/dev-tauri.test.mjs
+```
+
+The opt-in macOS integration test creates and removes a temporary signing keychain. It verifies that an ad-hoc rebuild is denied and that two different builds signed with the same identity can read the same test item with system interaction disabled.
+
 ### JDBC Agent Drivers
 
 Agent driver projects live under `agents/`. Java/JDBC driver builds and tests require JDK 21; Gradle can auto-download the toolchain when available.

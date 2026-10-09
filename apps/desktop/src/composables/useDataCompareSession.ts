@@ -59,6 +59,8 @@ export interface DataCompareTableResult {
   targetRowCount: number;
   sourceTruncated: boolean;
   targetTruncated: boolean;
+  /** Rows the backend was allowed to read per side; the diff only covers this many rows when a side is truncated. */
+  rowBudget: number;
   databaseType?: DatabaseType;
   preSyncStatements?: string[];
   diff: SelectableDataCompareResult;
@@ -264,6 +266,7 @@ function buildTableResult(task: DataCompareTableTask, preparation: DataCompareFr
     targetRowCount: preparation.targetRowCount,
     sourceTruncated: preparation.sourceTruncated,
     targetTruncated: preparation.targetTruncated,
+    rowBudget: preparation.rowBudget,
     databaseType,
     preSyncStatements: preparation.preSyncStatements,
     diff: toSelectableDiff(preparation.result),
@@ -287,6 +290,7 @@ function buildMissingTargetResult(task: DataCompareTableTask, preparation: DataC
     targetRowCount: 0,
     sourceTruncated: preparation.sourceTruncated,
     targetTruncated: false,
+    rowBudget: preparation.rowBudget,
     databaseType,
     preSyncStatements: preparation.preSyncStatements,
     diff: toSelectableDiff(preparation.result),
@@ -310,6 +314,7 @@ function buildErrorResult(task: DataCompareTableTask, keyColumns: string[], data
     targetRowCount: 0,
     sourceTruncated: false,
     targetTruncated: false,
+    rowBudget: 0,
     databaseType,
     preSyncStatements: [],
     diff: { added: [], removed: [], modified: [] },

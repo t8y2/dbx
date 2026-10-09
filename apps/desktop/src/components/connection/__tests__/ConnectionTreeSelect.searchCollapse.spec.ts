@@ -26,6 +26,13 @@ vi.mock("@/components/icons/DatabaseIcon.vue", () => ({
   }),
 }));
 
+vi.mock("@/components/plugins/PluginIcon.vue", () => ({
+  default: defineComponent({
+    props: ["pluginId", "contributionId"],
+    setup: (props) => () => h("span", { "data-plugin-id": props.pluginId, "data-contribution-id": props.contributionId }),
+  }),
+}));
+
 const mountedApps: App[] = [];
 
 const connections: ConnectionConfig[] = [
@@ -45,12 +52,12 @@ const layout: SidebarLayout = {
   order: [{ type: "group", id: "g1", children: [{ type: "connection", id: "c1" }] }],
 };
 
-async function mountPicker() {
+async function mountPicker(extraConnections: ConnectionConfig[] = []) {
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(ConnectionTreeSelect, {
     modelValue: "",
-    connections,
+    connections: [...connections, ...extraConnections],
     layout,
     placeholder: "Select connection",
     searchPlaceholder: "Search connections",
@@ -82,6 +89,13 @@ afterEach(() => {
 });
 
 describe("ConnectionTreeSelect search collapse behavior", () => {
+  it("passes plugin identity and provider logo metadata to the shared icon", async () => {
+    await mountPicker([{ ...connections[0], id: "plugin", name: "Plugin", db_type: "plugin", plugin_id: "sample.plugin", plugin_connection_provider: "sample.connection" }]);
+    const icon = document.body.querySelector('[data-picker-connection="plugin"] [data-plugin-id]');
+    expect(icon?.getAttribute("data-plugin-id")).toBe("sample.plugin");
+    expect(icon?.getAttribute("data-contribution-id")).toBe("sample.connection");
+  });
+
   it("ignores group clicks during search without changing the post-search state", async () => {
     await mountPicker();
     await setSearchText("Primary");

@@ -29,6 +29,25 @@ describe("editable query hidden primary keys", () => {
     expect(result?.projections.map((projection) => projection.alias)).toEqual(["__DBX_PK_1", "__DBX_PK_2"]);
   });
 
+  it("quotes the appended key with each reported engine's own dialect", () => {
+    // #10233 reports OceanBase (Oracle mode), Dameng and HighGo. All three draw their
+    // quoting from the dialect adapter rather than a hard-coded quote character:
+    // Dameng/OceanBase Oracle mode ride the Oracle adapter, HighGo the PostgreSQL one.
+    for (const databaseType of ["dameng", "oceanbase-oracle", "highgo"] as const) {
+      expect(
+        buildQueryWithHiddenPrimaryKeys({
+          sql: "SELECT name FROM users",
+          databaseType,
+          primaryKeys: ["id"],
+          existingResultNames: ["name"],
+        }),
+      ).toEqual({
+        sql: 'SELECT name, "id" AS "__DBX_PK_0" FROM users',
+        projections: [{ sourceName: "id", alias: "__DBX_PK_0" }],
+      });
+    }
+  });
+
   it("preserves SQL Server TOP and Oracle optimizer hints", () => {
     expect(
       buildQueryWithHiddenPrimaryKeys({

@@ -59,6 +59,7 @@ const pollingTaskUid = ref<number | null>(null);
 const timedOutTaskUid = ref<number | null>(null);
 const appliedUserSelector = ref<TaskSelector>({});
 let disposed = false;
+let loadRequestId = 0;
 
 const currentCursor = computed(() => cursorStack.value[cursorStack.value.length - 1] ?? null);
 const hasPrevious = computed(() => cursorStack.value.length > 1);
@@ -149,17 +150,22 @@ const selectorPreview = computed(() => JSON.stringify(pendingSelector.value ?? {
 
 async function load(reset = false) {
   if (reset) cursorStack.value = [null];
+  const requestId = ++loadRequestId;
+  const selector = normalizedSelector();
+  const from = currentCursor.value;
   loading.value = true;
   error.value = "";
   try {
-    const page = await api.meilisearchGetTasks(props.connectionId, { selector: normalizedSelector(), from: currentCursor.value, limit: 20 });
+    const page = await api.meilisearchGetTasks(props.connectionId, { selector, from, limit: 20 });
+    if (requestId !== loadRequestId || disposed) return;
     rows.value = page.results;
     total.value = page.total;
     next.value = page.next ?? null;
   } catch (cause: any) {
+    if (requestId !== loadRequestId || disposed) return;
     error.value = cause?.message || String(cause);
   } finally {
-    loading.value = false;
+    if (requestId === loadRequestId) loading.value = false;
   }
 }
 
@@ -178,6 +184,7 @@ async function loadIndexes() {
 }
 
 function refresh() {
+  if (loading.value) return;
   timedOutTaskUid.value = null;
   void load();
   void loadIndexes();
@@ -305,7 +312,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="flex h-full flex-col overflow-hidden p-4">
+  <div class="flex h-full select-none flex-col overflow-hidden p-4">
     <div class="mb-3 flex items-center justify-between gap-3">
       <div>
         <h2 class="text-base font-semibold">{{ fixedIndexUid ? t("meilisearch.indexTasks", { index: fixedIndexUid }) : t("meilisearch.tasks") }}</h2>
@@ -317,7 +324,7 @@ onBeforeUnmount(() => {
     <div class="mb-3 flex items-center gap-2 overflow-x-auto rounded-lg border bg-muted/20 p-2 text-xs">
       <div class="relative min-w-[260px] flex-1">
         <Search class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input v-model="filters.uids" class="pl-9" :aria-label="t('meilisearch.uidFilter')" :placeholder="t('meilisearch.searchUid')" @keyup.enter="applyFilters" />
+        <Input v-model="filters.uids" class="pl-9 select-text" :aria-label="t('meilisearch.uidFilter')" :placeholder="t('meilisearch.searchUid')" @keyup.enter="applyFilters" />
       </div>
       <div v-if="!fixedIndexUid" class="w-[200px] shrink-0">
         <Select :model-value="filters.indexUid" :disabled="indexesLoading" @update:model-value="updateIndexFilter">
@@ -422,7 +429,7 @@ onBeforeUnmount(() => {
         ><DialogHeader
           ><DialogTitle>{{ t("meilisearch.taskDetails") }} #{{ detail?.uid }}</DialogTitle></DialogHeader
         >
-        <pre v-if="detail" class="max-h-[65vh] overflow-auto rounded-md border bg-muted/30 p-3 text-xs">{{ JSON.stringify(detail, null, 2) }}</pre>
+        <pre v-if="detail" class="max-h-[65vh] select-text overflow-auto rounded-md border bg-muted/30 p-3 text-xs">{{ JSON.stringify(detail, null, 2) }}</pre>
         <DialogFooter
           ><Button variant="outline" @click="detailOpen = false">{{ t("common.close") }}</Button></DialogFooter
         ></DialogContent

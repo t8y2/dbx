@@ -27,11 +27,7 @@ interface InitializeOpenTabsOptions {
 }
 
 export async function initializeOpenTabs({ initializeOptionalState, restoreOpenTabs, onOptionalStateError }: InitializeOpenTabsOptions): Promise<void> {
-  try {
-    await initializeOptionalState();
-  } catch (error) {
-    onOptionalStateError(error);
-  }
+  void Promise.resolve().then(initializeOptionalState).catch(onOptionalStateError);
   await restoreOpenTabs();
 }
 

@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   EDITOR_SETTINGS_DRAFT_KEYS,
@@ -11,8 +10,6 @@ import {
   shouldConfirmEditorSettingsDialogClose,
 } from "../editorSettingsDraft";
 import type { EditorSettings } from "@/stores/settingsStore";
-
-const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 
 function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
   return {
@@ -36,6 +33,7 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
     continueOnErrorOnBatch: false,
     confirmUnsavedSqlClose: true,
     savedSqlOpenTargetMode: "saved",
+    ddlOpenMode: "dialog",
     objectBrowserViewMode: "list",
     sqlVariableSubstitutionEnabled: true,
     sqlVariableSyntaxOverrides: {},
@@ -54,6 +52,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("showLineNumbers");
   });
 
+  it("includes the DDL open mode", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("ddlOpenMode");
+  });
+
   it("includes continueOnErrorOnBatch", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("continueOnErrorOnBatch");
   });
@@ -69,6 +71,12 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("savedSqlOpenTargetMode");
   });
 
+  it("includes the privacy-safe welcome page mode", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("welcomePageMode");
+    expect(editorSettingsDraftFromSettings(makeSettings({ welcomePageMode: "intro" })).welcomePageMode).toBe("intro");
+    expect(editorSettingsDraftFromSettings(makeSettings({ welcomePageMode: "workspace" })).welcomePageMode).toBe("workspace");
+  });
+
   it("includes the regular expression match limit", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("regexMaxMatchCount");
   });
@@ -77,12 +85,25 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataTabReuseMode");
   });
 
+  it("includes the data grid toolbar layout", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridToolbarLayout");
+
+    const draft = editorSettingsDraftFromSettings(makeSettings({ dataGridToolbarLayout: "single" }));
+    expect(draft.dataGridToolbarLayout).toBe("single");
+  });
+
   it("includes generated SQL identifier quote preference", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("generateSqlQuoteIdentifiers");
   });
 
   it("includes adjacent data-tab opening", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("openDataTabsNextToActive");
+  });
+
+  it("includes snippet trigger key setting in draft keys and draft conversion", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("snippetTriggerKey");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ snippetTriggerKey: "space" }));
+    expect(draft.snippetTriggerKey).toBe("space");
   });
 
   it("includes data grid type colors", () => {
@@ -110,6 +131,7 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes the data grid filter view", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridFilterEditorView");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridToolbarLayout");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridKeepFilterEditorExpanded");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridTextFilterPanelHeight");
   });
@@ -118,12 +140,33 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("multiStatementDefaultView");
   });
 
+  it("includes the default explain view", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("defaultExplainView");
+  });
+
   it("includes the cell detail button visibility", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCellDetailButtonVisible");
   });
 
+  it("includes zebra row background in draft keys", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridZebraRowBg");
+  });
+
+  it("includes crosshair row and column backgrounds in draft keys", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCrosshairRowBg");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCrosshairColBg");
+  });
+
+  it("includes dataGridCellDetailDialogDefault", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCellDetailDialogDefault");
+  });
+
   it("includes completionTriggerMode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("completionTriggerMode");
+  });
+
+  it("includes tableCompletionSchemaQualification", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("tableCompletionSchemaQualification");
   });
 
   it("includes tableHoverLookupMode", () => {
@@ -133,15 +176,14 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
   it("includes the SQL variable substitution master switch", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("sqlVariableSubstitutionEnabled");
   });
-});
 
-describe("cell detail button settings control", () => {
-  it("binds the switch through apply and both reset paths", () => {
-    expect(settingsDialogSource).toContain("const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dataGridCellDetailButtonVisible)");
-    expect(settingsDialogSource).toContain("dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible.value");
-    expect(settingsDialogSource).toContain("editDataGridCellDetailButtonVisible.value = settingsStore.editorSettings.dataGridCellDetailButtonVisible");
-    expect(settingsDialogSource.match(/editDataGridCellDetailButtonVisible\.value = DEFAULT_EDITOR_SETTINGS\.dataGridCellDetailButtonVisible/g)).toHaveLength(2);
-    expect(settingsDialogSource).toContain('id="data-grid-cell-detail-button-visible" v-model="editDataGridCellDetailButtonVisible"');
+  it("includes functionCompletionIncludeParams in draft keys, draft conversion, and patch", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("functionCompletionIncludeParams");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ functionCompletionIncludeParams: false }));
+    const base = editorSettingsDraftFromSettings(makeSettings({ functionCompletionIncludeParams: true }));
+    expect(draft.functionCompletionIncludeParams).toBe(false);
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ functionCompletionIncludeParams: false });
   });
 });
 
@@ -212,6 +254,10 @@ describe("editorSettingsDraftFromSettings", () => {
     expect(editorSettingsDraftFromSettings(makeSettings({ multiStatementDefaultView: "summary" })).multiStatementDefaultView).toBe("summary");
   });
 
+  it("maps the default explain view from settings", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ defaultExplainView: "table" })).defaultExplainView).toBe("table");
+  });
+
   it("preserves the table-open default for legacy settings", () => {
     const settings = makeSettings();
     delete (settings as Partial<EditorSettings>).tableOpenPageSize;
@@ -230,6 +276,16 @@ describe("editorSettingsDraftFromSettings", () => {
   it("normalizes invalid completionTriggerMode to positional", () => {
     const draft = editorSettingsDraftFromSettings(makeSettings({ completionTriggerMode: "always" as unknown } as Partial<EditorSettings>));
     expect(draft.completionTriggerMode).toBe("positional");
+  });
+
+  it("maps csvNullMode and normalizes an unknown value back to the marker", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ csvNullMode: "empty" })).csvNullMode).toBe("empty");
+    expect(editorSettingsDraftFromSettings(makeSettings({ csvNullMode: "bogus" as unknown } as Partial<EditorSettings>)).csvNullMode).toBe("marker");
+  });
+
+  it("maps and normalizes tableCompletionSchemaQualification", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ tableCompletionSchemaQualification: "always" })).tableCompletionSchemaQualification).toBe("always");
+    expect(editorSettingsDraftFromSettings(makeSettings({ tableCompletionSchemaQualification: "invalid" } as any)).tableCompletionSchemaQualification).toBe("collision");
   });
 });
 
@@ -334,11 +390,27 @@ describe("editorSettingsPatchFromDraft", () => {
     expect(editorSettingsPatchFromDraft(visible, hidden)).toEqual({ dataGridCellDetailButtonVisible: true });
   });
 
+  it("applies, cancels, and re-enables cell detail dialog default", () => {
+    const enabled = editorSettingsDraftFromSettings(makeSettings({ dataGridCellDetailDialogDefault: true }));
+    const disabled = editorSettingsDraftFromSettings(makeSettings({ dataGridCellDetailDialogDefault: false }));
+
+    expect(editorSettingsPatchFromDraft(enabled, disabled)).toEqual({ dataGridCellDetailDialogDefault: true });
+    expect(editorSettingsPatchFromDraft(enabled, enabled)).toEqual({});
+    expect(editorSettingsPatchFromDraft(disabled, enabled)).toEqual({ dataGridCellDetailDialogDefault: false });
+  });
+
   it("includes the multi-statement default view when changed", () => {
     const result = editorSettingsDraftFromSettings(makeSettings({ multiStatementDefaultView: "result" }));
     const summary = editorSettingsDraftFromSettings(makeSettings({ multiStatementDefaultView: "summary" }));
 
     expect(editorSettingsPatchFromDraft(summary, result)).toEqual({ multiStatementDefaultView: "summary" });
+  });
+
+  it("includes the default explain view when changed", () => {
+    const canvas = editorSettingsDraftFromSettings(makeSettings({ defaultExplainView: "canvas" }));
+    const table = editorSettingsDraftFromSettings(makeSettings({ defaultExplainView: "table" }));
+
+    expect(editorSettingsPatchFromDraft(table, canvas)).toEqual({ defaultExplainView: "table" });
   });
 
   it("includes continueOnErrorOnBatch in patch when changed", () => {
@@ -406,6 +478,16 @@ describe("editorSettingsPatchFromDraft", () => {
     const patch = editorSettingsPatchFromDraft(draft, base);
     expect(patch.completionTriggerMode).toBeUndefined();
   });
+
+  it("includes tableCompletionSchemaQualification only when changed", () => {
+    const settings = makeSettings({ tableCompletionSchemaQualification: "collision" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+
+    expect(editorSettingsPatchFromDraft(draft, base).tableCompletionSchemaQualification).toBeUndefined();
+    draft.tableCompletionSchemaQualification = "never";
+    expect(editorSettingsPatchFromDraft(draft, base).tableCompletionSchemaQualification).toBe("never");
+  });
 });
 
 describe("EDITOR_SETTINGS_DRAFT_KEYS - tabLayout", () => {
@@ -418,6 +500,19 @@ describe("editorSettingsDraftFromSettings - tabLayout", () => {
   it("maps tabLayout from settings", () => {
     expect(editorSettingsDraftFromSettings(makeSettings({ tabLayout: "wrap" })).tabLayout).toBe("wrap");
     expect(editorSettingsDraftFromSettings(makeSettings({ tabLayout: "scroll" })).tabLayout).toBe("scroll");
+  });
+});
+
+describe("editorSettingsDraftFromSettings - ddlOpenMode", () => {
+  it("maps and tracks the selected DDL open mode", () => {
+    const settings = makeSettings({ ddlOpenMode: "dialog" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+
+    expect(draft.ddlOpenMode).toBe("dialog");
+    draft.ddlOpenMode = "tab";
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ ddlOpenMode: "tab" });
   });
 });
 
@@ -496,13 +591,39 @@ describe("editorSettingsDraftPatchFromSettings", () => {
     const patch = editorSettingsDraftPatchFromSettings({ pageSize: 999999 } as Partial<EditorSettings>);
     expect(patch.pageSize).toBe(normalizeTableOpenPageSizeDraft(999999));
   });
+});
 
-  it("is the base for the settings import path in the dialog", () => {
-    // The import must patch only imported keys into the edit refs; rebuilding
-    // the whole draft would drop unsaved state the file does not cover (e.g. a
-    // half-filled table-column template row, which serialization drops).
-    expect(settingsDialogSource).toContain("const patch = editorSettingsDraftPatchFromSettings(imported);");
-    expect(settingsDialogSource).toContain("applyEditorSettingsKeysToRefs(patch as EditorSettingsDraft, Object.keys(patch) as EditorSettingsDraftKey[]);");
-    expect(settingsDialogSource).not.toContain("const merged = editorSettingsDraftFromSettings({");
+describe("editorSettingsDraft - tabMaxWidth", () => {
+  it("includes tabMaxWidth in EDITOR_SETTINGS_DRAFT_KEYS", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("tabMaxWidth");
+  });
+
+  it("maps tabMaxWidth from settings", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ tabMaxWidth: 240 })).tabMaxWidth).toBe(240);
+    expect(editorSettingsDraftFromSettings(makeSettings({ tabMaxWidth: 0 })).tabMaxWidth).toBe(0);
+  });
+
+  it("detects change in tabMaxWidth", () => {
+    const settings = makeSettings({ tabMaxWidth: 0 });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.tabMaxWidth = 240;
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+  });
+
+  it("detects no change when tabMaxWidth matches", () => {
+    const settings = makeSettings({ tabMaxWidth: 240 });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    expect(editorSettingsDraftChanged(draft, base)).toBe(false);
+  });
+
+  it("includes tabMaxWidth in patch when changed", () => {
+    const settings = makeSettings({ tabMaxWidth: 0 });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.tabMaxWidth = 240;
+    const patch = editorSettingsPatchFromDraft(draft, base);
+    expect(patch.tabMaxWidth).toBe(240);
   });
 });

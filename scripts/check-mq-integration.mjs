@@ -37,11 +37,11 @@ assertIncludes("apps/desktop/src/lib/backend/mq-tauri.ts", 'invoke("mq_get_consu
 assertIncludes("crates/dbx-web/src/main.rs", '"/mq/consumers/group-config/get"', "dbx-web must register consumer group config get route.");
 assertIncludes("src-tauri/src/lib.rs", "mq_get_consumer_group_config", "Tauri must register consumer group config command.");
 
-for (const route of ["exchanges/list", "exchanges/create", "exchanges/delete", "bindings/list", "bindings/bind", "bindings/unbind", "client-connections/list", "client-connections/close", "channels/list"]) {
+for (const route of ["topics/list-page", "exchanges/list", "exchanges/list-page", "exchanges/create", "exchanges/delete", "bindings/list", "bindings/bind", "bindings/unbind", "client-connections/list", "client-connections/close", "channels/list"]) {
   assertIncludes("apps/desktop/src/lib/backend/mq-http.ts", `post("/api/mq/${route}"`, `MQ HTTP client must call /api/mq/${route} route.`);
   assertIncludes("crates/dbx-web/src/main.rs", `"/mq/${route}"`, `dbx-web must register /mq/${route} route.`);
 }
-for (const command of ["mq_list_exchanges", "mq_create_exchange", "mq_delete_exchange", "mq_list_bindings", "mq_bind", "mq_unbind", "mq_list_client_connections", "mq_list_client_channels", "mq_close_client_connection"]) {
+for (const command of ["mq_list_topics_page", "mq_list_exchanges", "mq_list_exchanges_page", "mq_create_exchange", "mq_delete_exchange", "mq_list_bindings", "mq_bind", "mq_unbind", "mq_list_client_connections", "mq_list_client_channels", "mq_close_client_connection"]) {
   assertIncludes("apps/desktop/src/lib/backend/mq-tauri.ts", `invoke("${command}"`, `MQ Tauri client must invoke ${command} command.`);
   assertIncludes("src-tauri/src/lib.rs", command, `Tauri must register ${command} command.`);
 }

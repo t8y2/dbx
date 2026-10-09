@@ -2,6 +2,7 @@ import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { h2JdbcUrlHasPasswordParam, h2JdbcUrlHasUserParam, parseH2JdbcUrl } from "@/lib/database/h2Connection";
 import { damengSslFormConfig } from "@/lib/database/damengSslOptions";
 import { normalizeRedisDatabaseValue } from "@/lib/redis/redisDatabaseIndex";
+import { parseJdbcProperties } from "@/lib/connection/jdbcProperties";
 
 export interface ParsedConnectionUrl {
   name?: string;
@@ -53,6 +54,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   "mongodb+srv": { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
   dynamodb: { type: "dynamodb", profile: "dynamodb", label: "Amazon DynamoDB", defaultPort: 443 },
   clickhouse: { type: "clickhouse", profile: "clickhouse", label: "ClickHouse", defaultPort: 8123 },
+  nebula: { type: "nebula", profile: "nebula", label: "NebulaGraph", defaultPort: 9669 },
   sqlserver: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   mssql: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   oracle: { type: "oracle", profile: "oracle", label: "Oracle", defaultPort: 1521 },
@@ -60,6 +62,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   easysearch: { type: "easysearch", profile: "easysearch", label: "Easysearch", defaultPort: 9200 },
   meilisearch: { type: "meilisearch", profile: "meilisearch", label: "Meilisearch", defaultPort: 7700 },
   solr: { type: "solr", profile: "solr", label: "Apache Solr", defaultPort: 8983 },
+  couchdb: { type: "couchdb", profile: "couchdb", label: "Apache CouchDB", defaultPort: 5984 },
   qdrant: { type: "qdrant", profile: "qdrant", label: "Qdrant", defaultPort: 6333 },
   milvus: { type: "milvus", profile: "milvus", label: "Milvus", defaultPort: 19530 },
   weaviate: { type: "weaviate", profile: "weaviate", label: "Weaviate", defaultPort: 8080 },
@@ -83,6 +86,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   iotdb: { type: "iotdb", profile: "iotdb", label: "Apache IoTDB", defaultPort: 6667 },
   iris: { type: "iris", profile: "iris", label: "IRIS", defaultPort: 1972 },
   victoriametrics: { type: "victoriametrics", profile: "victoriametrics", label: "VictoriaMetrics", defaultPort: 8428 },
+  salesforce: { type: "salesforce", profile: "salesforce", label: "Salesforce", defaultPort: 443 },
 };
 
 const OCEANBASE_ORACLE_PROFILE: ConnectionProfile = {
@@ -99,11 +103,13 @@ const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
   easysearch: SCHEME_PROFILES.easysearch,
   meilisearch: SCHEME_PROFILES.meilisearch,
   solr: SCHEME_PROFILES.solr,
+  couchdb: SCHEME_PROFILES.couchdb,
   qdrant: SCHEME_PROFILES.qdrant,
   milvus: SCHEME_PROFILES.milvus,
   weaviate: SCHEME_PROFILES.weaviate,
   chromadb: SCHEME_PROFILES.chromadb,
   victoriametrics: SCHEME_PROFILES.victoriametrics,
+  salesforce: SCHEME_PROFILES.salesforce,
   consul: SCHEME_PROFILES.consul,
   "nacos-v2": SCHEME_PROFILES["nacos-v2"],
   "nacos-v3": SCHEME_PROFILES["nacos-v3"],
@@ -421,8 +427,8 @@ export function connectionProfileForScheme(scheme: string, preferredProfile?: st
   return SCHEME_PROFILES[normalizedScheme];
 }
 
-function parseJdbcHiveUrl(source: string): ParsedConnectionUrl | null {
-  const match = /^jdbc:hive2:\/\/(?<hosts>[^/?#;]+)(?:\/(?<path>[^?#]*))?(?<query>\?[^#]*)?(?<fragment>#.*)?$/i.exec(source);
+function parseJdbcHiveUrl(source: string, preferredProfile?: string): ParsedConnectionUrl | null {
+  const match = /^jdbc:(?<subprotocol>hive2|inceptor2|transwarp2):\/\/(?<hosts>[^/?#;]+)(?:\/(?<path>[^?#]*))?(?<query>\?[^#]*)?(?<fragment>#.*)?$/i.exec(source);
   if (!match?.groups) return null;
 
   const firstHost = match.groups.hosts.split(",")[0]?.trim();
@@ -439,11 +445,13 @@ function parseJdbcHiveUrl(source: string): ParsedConnectionUrl | null {
   const [rawDatabase = "", ...paramParts] = (match.groups.path || "").split(";");
   const structured = extractHiveStructuredParams(paramParts.join(";"));
   const urlParams = `${structured.urlParams}${match.groups.query || ""}${match.groups.fragment || ""}`;
+  const profile = preferredProfile === "transwarp-inceptor" ? preferredProfile : match.groups.subprotocol.toLowerCase() === "hive2" ? "hive" : "transwarp-inceptor";
+  const transwarp = profile !== "hive";
 
   return {
-    dbType: "hive",
-    driverProfile: "hive",
-    driverLabel: "Apache Hive",
+    dbType: transwarp ? "transwarp" : "hive",
+    driverProfile: profile,
+    driverLabel: profile === "transwarp-inceptor" ? "星环Inceptor" : "Apache Hive",
     host: endpoint.hostname.replace(/^\[(.*)]$/, "$1"),
     port: endpoint.port ? Number(endpoint.port) : 10000,
     username: structured.username ?? decodeUrlPart(endpoint.username),
@@ -462,16 +470,14 @@ function parseJdbcSqlServerUrl(source: string): ParsedConnectionUrl | null {
   const profile = SCHEME_PROFILES.sqlserver;
   const props = new Map<string, string>();
   const urlParams: string[] = [];
-  for (const part of (match[3] || "").split(";")) {
-    if (!part) continue;
-    const [rawKey, ...rest] = part.split("=");
-    const key = rawKey.trim();
-    const value = rest.join("=");
+  const properties = parseJdbcProperties(match[3] || "", "sqlserver");
+  if (!properties) throw new Error("Invalid SQL Server JDBC properties");
+  for (const { key, value, raw: part, quoted } of properties) {
     const normalizedKey = key.toLowerCase();
-    if (normalizedKey === "databasename" || normalizedKey === "database" || normalizedKey === "user") {
-      props.set(normalizedKey, value);
-    } else if (normalizedKey === "password") {
-      props.set(normalizedKey, value);
+    // Braces are literal JDBC values; unquoted %xx values retain DBX's old import behavior.
+    const importedValue = quoted ? value : decodeUrlPart(value);
+    if (normalizedKey === "databasename" || normalizedKey === "database" || normalizedKey === "user" || normalizedKey === "password") {
+      props.set(normalizedKey, importedValue);
     } else {
       urlParams.push(part);
     }
@@ -484,9 +490,9 @@ function parseJdbcSqlServerUrl(source: string): ParsedConnectionUrl | null {
     host: match[1],
     port: match[2] ? Number(match[2]) : profile.defaultPort,
     ...(match[2] ? { portExplicit: true } : {}),
-    username: decodeUrlPart(props.get("user") || ""),
-    password: decodeUrlPart(props.get("password") || ""),
-    database: decodeUrlPart(props.get("databasename") || props.get("database") || "") || undefined,
+    username: props.get("user") || "",
+    password: props.get("password") || "",
+    database: props.get("databasename") || props.get("database") || undefined,
     urlParams: urlParams.join(";"),
     ssl: false,
   };
@@ -697,7 +703,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   if (/^jdbc:oceanbase:(?:oracle:)?loadbalance:\/\//i.test(input)) {
     throw new Error("Unsupported OceanBase JDBC URL variant: loadbalance");
   }
-  const jdbcHive = parseJdbcHiveUrl(input);
+  const jdbcHive = parseJdbcHiveUrl(input, preferredProfile);
   if (jdbcHive) return jdbcHive;
   const jdbcH2 = parseH2JdbcUrl(input);
   if (jdbcH2) return jdbcH2;

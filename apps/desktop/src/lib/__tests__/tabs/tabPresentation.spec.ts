@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import {
   connectionGroupDisplayName,
   executionSummaryItems,
@@ -10,30 +11,35 @@ import {
   resultGridCacheKey,
   resultGridColumnWidthCacheKey,
   resultGridInstanceKey,
+  resultRunItems,
   resultSourceRange,
   statementExecutionMarkers,
   tabColorStyle,
+  tabConnectionColor,
   tabDatabaseIconType,
   tabDisplayTitle,
   tabDisplayTitles,
   syncTabTitleNumbers,
   tabIconClass,
+  tabModeLabel,
   tabTooltipLines,
   tabularResultItems,
   dirtyTabTitleStyle,
 } from "@/lib/tabs/tabPresentation";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
-import type { ConnectionConfig, QueryResult, QueryTab } from "@/types/database";
+import type { ConnectionConfig, QueryResult, QueryResultRun, QueryTab } from "@/types/database";
 
 const translations: Record<string, string> = {
   "tabs.tooltipConnection": "Connection:",
   "tabs.tooltipGroup": "Group:",
   "tabs.tooltipDatabase": "Database:",
+  "tabs.tooltipSchema": "Schema:",
   "tabs.tooltipTable": "Table:",
   "tabs.tooltipTableComment": "Table Comment:",
   "tree.events": "Events",
   "connectionGroup.ungroupedLabel": "Ungrouped",
   "editor.noDatabase": "No database",
+  "databaseSearch.title": "Search Database",
 };
 
 const translate = (key: string) => translations[key] ?? key;
@@ -176,6 +182,115 @@ describe("query result labels", () => {
     expect(item?.label).toBeUndefined();
     expect(item?.title).toBe("SELECT 1");
   });
+
+  it("shows only the object name when result set names exclude the database", () => {
+    const results = [
+      {
+        columns: ["id"],
+        rows: [[1]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        sourceLabel: "cosimulation2.0.data_monitor",
+        sourceQualifier: "cosimulation2.0",
+        sourceName: "data_monitor",
+        sourceStatement: "SELECT * FROM data_monitor",
+      },
+    ];
+
+    const [withDatabase] = tabularResultItems(results);
+    const [withoutDatabase] = tabularResultItems(results, { includeSourceDatabase: false });
+
+    expect(withDatabase?.label).toBe("cosimulation2.0.data_monitor");
+    expect(withoutDatabase?.label).toBe("data_monitor");
+    expect(withoutDatabase?.displayLabel).toBe("data_monitor");
+    // 完整名称（含库名）仍保留在悬浮提示中
+    expect(withoutDatabase?.title).toBe("cosimulation2.0.data_monitor");
+  });
+
+  it("uses a custom result name in comment mode even when the database is hidden", () => {
+    const [item] = tabularResultItems(
+      [
+        {
+          columns: ["id"],
+          rows: [[1]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+          sourceLabel: "My weekly report",
+          sourceLabelKind: "comment",
+          sourceQualifier: "app",
+          sourceName: "users",
+          sourceStatement: "SELECT * FROM users",
+        },
+      ],
+      { includeSourceDatabase: false, namingMode: "comment" },
+    );
+
+    expect(item?.label).toBe("My weekly report");
+    expect(item?.title).toBe("My weekly report");
+  });
+
+  it("uses the source table in source mode when a SQL comment also names the result", () => {
+    const [item] = tabularResultItems(
+      [
+        {
+          columns: ["id"],
+          rows: [[1]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+          sourceLabel: "My weekly report",
+          sourceLabelKind: "comment",
+          sourceQualifier: "app",
+          sourceName: "users",
+        },
+      ],
+      { namingMode: "source", preferComments: false },
+    );
+
+    expect(item?.label).toBe("app.users");
+  });
+
+  it.each([
+    ["source", undefined, true, "Weekly report"],
+    ["source", true, false, "Weekly report"],
+    ["source", false, true, "app.users"],
+    ["source", false, false, "users"],
+    ["comment", false, true, "Weekly report"],
+    ["ordinal", true, true, undefined],
+  ] as const)("respects %s naming with preferComments=%s and includeSourceDatabase=%s", (namingMode, preferComments, includeSourceDatabase, expected) => {
+    const result: QueryResult = { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceLabel: "Weekly report", sourceLabelKind: "comment", sourceQualifier: "app", sourceName: "users" };
+    expect(tabularResultItems([result], { namingMode, preferComments, includeSourceDatabase })[0]?.label).toBe(expected);
+  });
+
+  it("uses the explicit label kind for comment mode and keeps legacy source labels out", () => {
+    const comment = tabularResultItems(
+      [
+        {
+          columns: ["id"],
+          rows: [[1]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+          sourceLabel: "Weekly report",
+          sourceLabelKind: "comment",
+        },
+      ],
+      { namingMode: "comment" },
+    )[0];
+    const legacySource = tabularResultItems(
+      [
+        {
+          columns: ["id"],
+          rows: [[1]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+          sourceLabel: "app.users",
+        },
+      ],
+      { namingMode: "comment" },
+    )[0];
+
+    expect(comment?.label).toBe("Weekly report");
+    expect(legacySource?.label).toBeUndefined();
+  });
 });
 
 describe("query result grid identity", () => {
@@ -189,6 +304,79 @@ describe("query result grid identity", () => {
     expect(resultGridCacheKey(rerun)).not.toBe(resultGridCacheKey(first));
     expect(resultGridColumnWidthCacheKey(rerun)).toBe(resultGridColumnWidthCacheKey(first));
     expect(resultGridColumnWidthCacheKey({ ...first, activeResultIndex: 1 })).not.toBe(resultGridColumnWidthCacheKey(first));
+  });
+});
+
+describe("result run labels", () => {
+  // 与 store 真实创建批次的方式保持一致：默认标题是 `Run N`，只有重命名/多库执行才标记 customTitle
+  const run = (id: string, sequence: number, result?: QueryResult, overrides: Partial<QueryResultRun> = {}): QueryResultRun => ({ id, title: `Run ${sequence}`, sequence, sql: "SELECT * FROM users", createdAt: sequence, result, ...overrides });
+  const sourceResult = (label: string, qualifier: string, name: string): QueryResult => ({ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceLabel: label, sourceQualifier: qualifier, sourceName: name }) as QueryResult;
+
+  it("names result runs after their source table instead of the run ordinal", () => {
+    const items = resultRunItems(
+      queryTab({
+        resultRuns: [run("run-1", 1, sourceResult("app.users", "app", "users")), run("run-2", 2, sourceResult("app.orders", "app", "orders"))],
+      }) as QueryTab,
+    );
+
+    expect(items.map((item) => item.sourceLabel)).toEqual(["app.users", "app.orders"]);
+  });
+
+  it("suffixes repeated sources and follows the database-name setting", () => {
+    const tab = queryTab({
+      resultRuns: [run("run-1", 1, sourceResult("cosimulation2.0.users", "cosimulation2.0", "users")), run("run-2", 2, sourceResult("cosimulation2.0.users", "cosimulation2.0", "users")), run("run-3", 3)],
+    }) as QueryTab;
+
+    expect(resultRunItems(tab).map((item) => item.sourceLabel)).toEqual(["cosimulation2.0.users", "cosimulation2.0.users (2)", undefined]);
+    expect(resultRunItems(tab, { includeSourceDatabase: false }).map((item) => item.sourceLabel)).toEqual(["users", "users (2)", undefined]);
+  });
+
+  it("keeps a renamed run title ahead of the source label", () => {
+    const items = resultRunItems(queryTab({ resultRuns: [run("run-1", 1, sourceResult("app.users", "app", "users"), { title: "报表", customTitle: true })] }) as QueryTab);
+
+    expect(items[0]?.title).toBe("报表");
+    expect(items[0]?.sourceLabel).toBe("app.users");
+  });
+
+  it("replaces the default Run N title with the source label", () => {
+    const items = resultRunItems(queryTab({ resultRuns: [run("run-1", 1, sourceResult("app.users", "app", "users"))] }) as QueryTab);
+
+    expect(items[0]?.title).toBe("");
+    expect(items[0]?.sourceLabel).toBe("app.users");
+  });
+
+  it("falls back to the run SQL for runs created before source labels were stored", () => {
+    const items = resultRunItems(queryTab({ resultRuns: [run("run-1", 1)] }) as QueryTab, { database: "cosimulation2.0", databaseType: "mysql" });
+
+    expect(items[0]?.sourceLabel).toBe("cosimulation2.0.users");
+  });
+
+  it("uses explicit comment labels while ignoring legacy source labels in comment mode", () => {
+    const commentRun = run("run-1", 1, { ...sourceResult("Weekly report", "app", "users"), sourceLabelKind: "comment", sourceName: undefined });
+    const legacySourceRun = run("run-2", 2, { ...sourceResult("app.orders", "app", "orders"), sourceLabelKind: undefined });
+
+    expect(resultRunItems(queryTab({ resultRuns: [commentRun, legacySourceRun] }) as QueryTab, { namingMode: "comment" }).map((item) => item.sourceLabel)).toEqual(["Weekly report", undefined]);
+    expect(resultRunItems(queryTab({ resultRuns: [commentRun] }) as QueryTab, { namingMode: "ordinal" })[0]?.sourceLabel).toBeUndefined();
+  });
+
+  it("uses the source table for a commented run in source mode", () => {
+    const commentRun = run("run-1", 1, { ...sourceResult("Weekly report", "app", "users"), sourceLabelKind: "comment" });
+
+    expect(resultRunItems(queryTab({ resultRuns: [commentRun] }) as QueryTab, { namingMode: "source", preferComments: false }).map((item) => item.sourceLabel)).toEqual(["app.users"]);
+  });
+
+  it.each([false, true])("switches comment preference after the run payload is evicted (%s)", (preferComments) => {
+    const commentRun = run("run-1", 1, undefined, { sourceLabel: "Weekly report", sourceLabelKind: "comment", sourceName: "users" });
+    const tab = queryTab({ resultRuns: [commentRun] }) as QueryTab;
+    expect(resultRunItems(tab, { database: "app", databaseType: "mysql", preferComments })[0]?.sourceLabel).toBe(preferComments ? "Weekly report" : "app.users");
+    expect(resultRunItems(tab, { database: "app", databaseType: "mysql", preferComments, includeSourceDatabase: false })[0]?.sourceLabel).toBe(preferComments ? "Weekly report" : "users");
+    expect(resultRunItems(tab, { namingMode: "comment", preferComments })[0]?.sourceLabel).toBe("Weekly report");
+    expect(resultRunItems(tab, { namingMode: "ordinal", preferComments })[0]?.sourceLabel).toBeUndefined();
+  });
+
+  it("prefers comments by default for stored runs without a result payload", () => {
+    const commentRun = run("run-1", 1, undefined, { sourceLabel: "Weekly report", sourceLabelKind: "comment" });
+    expect(resultRunItems(queryTab({ resultRuns: [commentRun] }) as QueryTab)[0]?.sourceLabel).toBe("Weekly report");
   });
 });
 
@@ -289,6 +477,47 @@ describe("tab group presentation", () => {
     expect(tabDisplayTitle(queryTab({ mode: "objects", objectBrowser: { objectType: "tables", initialObjectFilter: "events" } }), translate)).toBe("Events@db");
   });
 
+  it("formats database-search tab titles with database and schema scope", () => {
+    expect(tabDisplayTitle(queryTab({ mode: "database-search", database: "shop", schema: "public" }), translate)).toBe("Search Database@shop.public");
+    expect(tabDisplayTitle(queryTab({ mode: "database-search", database: "shop" }), translate)).toBe("Search Database@shop");
+    expect(tabModeLabel(queryTab({ mode: "database-search" }), translate)).toBe("Search Database");
+
+    const settings = useSettingsStore();
+    settings.editorSettings.compactTabTitle = true;
+    expect(tabDisplayTitle(queryTab({ mode: "database-search", database: "shop" }), translate)).toBe("Search Database");
+    settings.editorSettings.compactTabTitle = false;
+  });
+
+  it("formats query tab titles with database, schema, and catalog scope", () => {
+    const store = useConnectionStore();
+    store.connections = [
+      { id: "conn-1", name: "PostgreSQL", db_type: "postgres", database: "app" } as ConnectionConfig,
+      { id: "conn-oracle", name: "Oracle", db_type: "oracle", database: "" } as ConnectionConfig,
+      { id: "conn-doris", name: "Doris", db_type: "doris", database: "analytics" } as ConnectionConfig,
+    ];
+
+    expect(tabDisplayTitle(queryTab({ connectionId: "conn-1", database: "app", schema: "public" }), translate)).toBe("PostgreSQL@app.public");
+    expect(tabDisplayTitle(queryTab({ connectionId: "conn-1", database: "app", schema: "tenant_a" }), translate)).toBe("PostgreSQL@app.tenant_a");
+    expect(tabDisplayTitle(queryTab({ connectionId: "conn-oracle", database: "", schema: "SCOTT" }), translate)).toBe("Oracle@SCOTT");
+    expect(tabDisplayTitle(queryTab({ connectionId: "conn-doris", database: "analytics", catalog: "internal", schema: "dim" }), translate)).toBe("Doris@internal.analytics.dim");
+    expect(tabDisplayTitle(queryTab({ connectionId: "conn-1", database: "app", schema: "app" }), translate)).toBe("PostgreSQL@app");
+  });
+
+  it("includes schema in tab tooltips when schema is present", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", database: "app" } as ConnectionConfig];
+    store.sidebarLayout = { groups: [], order: [{ type: "connection", id: "conn-1" }] };
+
+    const queryTabLines = tabTooltipLines(queryTab({ connectionId: "conn-1", database: "app", schema: "public" }), translate);
+    expect(queryTabLines).toContainEqual({ label: "Schema:", value: "public" });
+
+    const dataTabLines = tabTooltipLines(queryTab({ connectionId: "conn-1", mode: "data", database: "app", tableMeta: { schema: "analytics", tableName: "events", columns: [], primaryKeys: [] } }), translate);
+    expect(dataTabLines).toContainEqual({ label: "Schema:", value: "analytics" });
+
+    const sameSchemaLines = tabTooltipLines(queryTab({ connectionId: "conn-1", database: "app", schema: "app" }), translate);
+    expect(sameSchemaLines.some((line) => line.label === "Schema:")).toBe(false);
+  });
+
   it("uses the live database and branch context for Dolt version control tabs", () => {
     const store = useConnectionStore();
     store.connections = [{ id: "conn-1", name: "Production Dolt", db_type: "mysql", driver_profile: "dolt", database: "app" } as ConnectionConfig];
@@ -320,6 +549,43 @@ describe("tab group presentation", () => {
       { label: "Group:", value: "Project / Staging" },
       { label: "Database:", value: "app" },
     ]);
+  });
+
+  it("omits the database row from tooltips for connections without a database target", () => {
+    const store = useConnectionStore();
+    store.sidebarLayout = {
+      groups: [],
+      order: [{ type: "connection", id: "conn-1" }],
+    };
+
+    for (const dbType of ["dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "weaviate", "chromadb", "etcd", "zookeeper", "nacos", "consul", "mq", "mqtt", "victoriametrics"] as const) {
+      store.connections = [{ id: "conn-1", name: "Local", db_type: dbType, database: "default" } as ConnectionConfig];
+
+      const lines = tabTooltipLines(queryTab({ database: "default" }), translate);
+
+      expect(lines, dbType).toContainEqual({ label: "Connection:", value: "Local" });
+      expect(lines, dbType).toContainEqual({ label: "Group:", value: "Ungrouped" });
+      expect(lines, dbType).not.toContainEqual({ label: "Database:", value: "default" });
+    }
+  });
+
+  it("shows a database row for plugin tabs only when the tab or connection has a database", () => {
+    const store = useConnectionStore();
+    store.sidebarLayout = {
+      groups: [],
+      order: [{ type: "connection", id: "conn-1" }],
+    };
+    store.connections = [{ id: "conn-1", name: "SSH server", db_type: "plugin" } as ConnectionConfig];
+
+    const tab = queryTab({ mode: "plugin-workbench", database: "" });
+    expect(tabTooltipLines(tab, translate)).toEqual([
+      { label: "Connection:", value: "SSH server" },
+      { label: "Group:", value: "Ungrouped" },
+    ]);
+
+    store.connections = [{ id: "conn-1", name: "Database plugin", db_type: "plugin", database: "analytics" } as ConnectionConfig];
+    expect(tabTooltipLines(tab, translate)).toContainEqual({ label: "Database:", value: "analytics" });
+    expect(tabTooltipLines(queryTab({ mode: "plugin-workbench", database: "reporting" }), translate)).toContainEqual({ label: "Database:", value: "reporting" });
   });
 
   it("labels a top-level connection as ungrouped", () => {
@@ -576,10 +842,57 @@ describe("shared tab presentation helpers", () => {
   });
 
   it("builds active/inactive color styles for classic and non-classic layouts", () => {
-    const activeClassic = tabColorStyle(queryTab({}), true, true);
-    expect(activeClassic?.boxShadow).toContain("var(--foreground)");
-    const inactiveModern = tabColorStyle(queryTab({}), false, false);
-    expect(inactiveModern?.borderColor).toBeUndefined();
+    useSettingsStore().editorSettings.colorizeConnectionTabs = false;
+    // Node has no window/CSS globals: pin both to modern-engine answers.
+    vi.stubGlobal("CSS", { supports: () => true });
+    vi.stubGlobal("window", {
+      matchMedia: (query: string) => ({
+        media: query,
+        matches: true,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    });
+    try {
+      const activeClassic = tabColorStyle(queryTab({}), true, true);
+      expect(activeClassic?.boxShadow).toContain("var(--foreground)");
+      const inactiveModern = tabColorStyle(queryTab({}), false, false);
+      expect(inactiveModern?.borderColor).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("swaps inline color-mix tab colors for concrete rgba on legacy WebViews", () => {
+    useSettingsStore().editorSettings.colorizeConnectionTabs = false;
+    // WebKit without color-mix() invalidates the inline values at computed-value
+    // time, which left the active tab with no background at all (macOS 12); and
+    // it cannot substitute var() inside inline custom properties, so the legacy
+    // branch resolves the token to concrete rgb. Node has no document: the
+    // helper falls back to the default theme's foreground (10, 10, 10).
+    vi.stubGlobal("CSS", { supports: () => false });
+    try {
+      const pill = tabColorStyle(queryTab({}), true, false);
+      expect(pill?.["--app-tab-background"]).toBe("rgba(10, 10, 10, 0.18)");
+      expect(pill?.borderColor).toBe("var(--ring)");
+      const classic = tabColorStyle(queryTab({}), true, true);
+      expect(classic?.["--app-tab-background"]).toBe("rgba(10, 10, 10, 0.18)");
+      expect(classic?.boxShadow).toBe("inset 0 -2px 0 rgba(10, 10, 10, 0.72)");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("assigns stable palette colors to unconfigured connections", () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      { id: "conn-1", name: "One", db_type: "mysql", color: "" },
+      { id: "conn-2", name: "Two", db_type: "mysql", color: "#abcdef" },
+    ] as ConnectionConfig[];
+    expect(tabConnectionColor("conn-1")).toBe(tabConnectionColor("conn-1"));
+    expect(tabConnectionColor("conn-1")).not.toBe("");
+    expect(tabConnectionColor("conn-1")).not.toBe(tabConnectionColor("conn-3"));
+    expect(tabConnectionColor("conn-2")).toBe("#abcdef");
   });
 
   it("resolves MQ driver icons from the connection store", () => {

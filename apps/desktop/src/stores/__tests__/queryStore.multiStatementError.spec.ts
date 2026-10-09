@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   defaultAutoKeepResults: false,
+  continueOnErrorOnBatch: false,
   analyzeEditableQueryEditability: vi.fn(),
   cancelQuery: vi.fn(),
   closeClientConnectionSession: vi.fn(),
@@ -44,7 +45,7 @@ vi.mock("@/stores/connectionStore", () => ({
 
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: { autoCalculateTotalRows: false, pageSize: 100, continueOnErrorOnBatch: false, defaultAutoKeepResults: mocks.defaultAutoKeepResults },
+    editorSettings: { autoCalculateTotalRows: false, pageSize: 100, continueOnErrorOnBatch: mocks.continueOnErrorOnBatch, defaultAutoKeepResults: mocks.defaultAutoKeepResults },
   }),
 }));
 
@@ -112,9 +113,28 @@ function structuredSqlError(detail = "duplicate key") {
 }
 
 describe("queryStore multi-statement errors", () => {
+  it.each(["oracle", "oceanbase-oracle"])("preserves the intended offset timing scope for %s", async (dbType) => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "timing-offset", name: "Timing", db_type: dbType, database: "APP", query_timeout_secs: 30 });
+    mocks.analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
+    mocks.prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({ sqlToExecute: options.sql, pageSql: options.sql, pageLimit: options.pagination.limit, pageOffset: options.pagination.offset, countSql: undefined, useAgentResultSession: true }));
+    const timed = true;
+    mocks.executeMulti
+      .mockResolvedValueOnce([{ columns: ["VALUE"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 12, session_id: "offset-page", has_more: true, ...(timed ? { query_timings_ms: { agent_total: 10 } } : {}) }])
+      .mockResolvedValueOnce([{ columns: ["VALUE"], rows: [[3], [4]], affected_rows: 0, execution_time_ms: 34, has_more: false, ...(timed ? { query_timings_ms: { agent_total: 30 } } : {}) }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("timing-offset", "APP", "Query", "query", "APP");
+    await store.executeTabSql(tabId, "SELECT VALUE FROM T", { pagination: { limit: 2, offset: 2 } });
+    const result = store.tabs.find((item) => item.id === tabId)!.result!;
+    expect(result.rows).toEqual([[3], [4]]);
+    expect(result.execution_time_ms).toBe(timed ? 46 : 34);
+    expect(result.query_timings_ms).toEqual(timed ? { agent_total: 40 } : undefined);
+    expect(result.timing_page_count).toBe(timed ? 2 : undefined);
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.defaultAutoKeepResults = false;
+    mocks.continueOnErrorOnBatch = false;
     vi.unstubAllGlobals();
     mocks.tabResultSnapshots.clear();
     installLocalStorage();
@@ -158,7 +178,7 @@ describe("queryStore multi-statement errors", () => {
     });
   });
 
-  it.each(["oceanbase-oracle", "mysql"] as const)("measures complete result wait only for a single %s query result", async (databaseType) => {
+  it.each(["oceanbase-oracle", "oracle", "mysql", "postgres", "sqlite", "sqlserver", "db2"] as const)("measures complete result wait only for a single %s query result", async (databaseType) => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "timing-1",
       name: "Timing",
@@ -181,7 +201,7 @@ describe("queryStore multi-statement errors", () => {
       await execution;
       const result = store.tabs.find((item) => item.id === tabId)?.result;
       expect(result?.execution_time_ms).toBe(12);
-      expect(result?.client_request_wait_ms).toBe(databaseType === "oceanbase-oracle" ? 45 : undefined);
+      expect(result?.client_request_wait_ms).toBe(45);
     } finally {
       vi.restoreAllMocks();
     }
@@ -318,6 +338,37 @@ describe("queryStore multi-statement errors", () => {
       completed: 2,
       items: [{ status: "success" }, { status: "error", error: "bad statement" }, { status: "skipped" }],
     });
+  });
+
+  it.each(["oracle", "postgres"])("skips the redundant health probe before a %s batch execution", async (dbType) => {
+    const sql = Array.from({ length: 20 }, (_, index) => `INSERT INTO users (id) VALUES (${index + 1});`).join("\n");
+    const blockedHealthProbe = deferred<void>();
+    mocks.ensureConnected.mockImplementation((_connectionId, options) => (options?.verifyHealth === false ? Promise.resolve() : blockedHealthProbe.promise));
+    const connectionId = `${dbType}-1`;
+    mocks.getConnectionConfig.mockReturnValue({
+      id: connectionId,
+      name: dbType,
+      db_type: dbType,
+      database: "app",
+      query_timeout_secs: 30,
+    });
+    mocks.executeMulti.mockResolvedValue(
+      Array.from({ length: 20 }, (_, statementIndex) => ({
+        columns: [],
+        rows: [],
+        affected_rows: 1,
+        execution_time_ms: 1,
+        statement_index: statementIndex,
+      })),
+    );
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab(connectionId, "app", "Query", "query", "public", sql);
+
+    await store.executeTabSql(tabId, sql, { sourceOffset: 0 });
+
+    expect(mocks.ensureConnected).toHaveBeenCalledWith(connectionId, { verifyHealth: false });
+    expect(mocks.executeMultiWithProgress).toHaveBeenCalledTimes(1);
   });
 
   it("skips a failed statement and continues the original batch without replaying successful statements", async () => {
@@ -494,6 +545,52 @@ describe("queryStore multi-statement errors", () => {
       { columns: ["COUNT(*)"], rows: [[2]], affected_rows: 0, execution_time_ms: 2, statement_index: 3 },
     ]);
     await execution;
+  });
+
+  it("settles the statements between coalesced progress events without overwriting a failure", async () => {
+    mocks.continueOnErrorOnBatch = true;
+    const pendingExecution = deferred<any[]>();
+    let reportProgress!: (progress: any) => void;
+    mocks.executeMultiWithProgress.mockImplementationOnce((_connectionId, _database, _sql, onProgress) => {
+      reportProgress = onProgress;
+      return pendingExecution.promise;
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const sql = Array.from({ length: 6 }, (_, index) => `INSERT INTO t VALUES (${index + 1});`).join("\n");
+    const tabId = store.createTab("mysql-1", "app", "Query", "query", undefined, sql);
+    const batch = () => store.tabs.find((item) => item.id === tabId)?.batchSqlExecution;
+
+    const execution = store.executeTabSql(tabId, sql);
+    await vi.waitFor(() => expect(batch()?.items[0]?.status).toBe("running"));
+    const executionId = store.tabs.find((item) => item.id === tabId)!.executionId!;
+    const report = (statementIndex: number, success: boolean) =>
+      reportProgress({
+        executionId,
+        statementIndex,
+        completed: statementIndex + 1,
+        total: 6,
+        success,
+        executionTimeMs: 1,
+        affectedRows: success ? 1 : 0,
+        error: success ? undefined : structuredSqlError(),
+      });
+
+    report(1, true);
+    expect(batch()).toMatchObject({ completed: 2, items: [{ status: "success" }, { status: "success" }, { status: "running" }, { status: "pending" }, { status: "pending" }, { status: "pending" }] });
+    report(3, false);
+    expect(batch()).toMatchObject({ completed: 4, items: [{ status: "success" }, { status: "success" }, { status: "success" }, { status: "error" }, { status: "running" }, { status: "pending" }] });
+    report(5, true);
+    expect(batch()).toMatchObject({ completed: 6, items: [{ status: "success" }, { status: "success" }, { status: "success" }, { status: "error" }, { status: "success" }, { status: "success" }] });
+
+    pendingExecution.resolve(
+      Array.from({ length: 6 }, (_, index) =>
+        index === 3 ? { columns: ["Error"], rows: [["duplicate key"]], affected_rows: 0, execution_time_ms: 1, statement_index: index, execution_error: true, error: structuredSqlError() } : { columns: [], rows: [], affected_rows: 1, execution_time_ms: 1, statement_index: index },
+      ),
+    );
+    await execution;
+
+    expect(batch()).toMatchObject({ completed: 6, items: [{ status: "success" }, { status: "success" }, { status: "success" }, { status: "error" }, { status: "success" }, { status: "success" }] });
   });
 
   it("records a top-level batch failure on the current statement", async () => {
@@ -881,6 +978,10 @@ describe("queryStore multi-statement errors", () => {
     await store.executeTabSql(tabId, sql);
 
     expect(store.tabs.find((item) => item.id === tabId)?.results?.map((result) => result.sourceLabel)).toEqual(["Orders", "Users"]);
+    expect(store.tabs.find((item) => item.id === tabId)?.results).toMatchObject([
+      { sourceLabelKind: "comment", sourceQualifier: "app", sourceName: "orders" },
+      { sourceLabelKind: "comment", sourceQualifier: "app", sourceName: "users" },
+    ]);
   });
 
   it("does not repeatedly scan the full document when naming a selected large batch", async () => {

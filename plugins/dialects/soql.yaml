@@ -1,0 +1,85 @@
+# Salesforce SOQL dialect — query-only via REST API, no DDL support.
+# Metadata is fetched through the Salesforce describe API, not SQL queries.
+dialect:
+  name: "SOQL"
+  display_name: "Salesforce SOQL"
+  versions:
+    - version: "62"
+      status: "RECOMMENDED"
+
+types:
+  - name: "string"
+    category: "STRING"
+    has_length: true
+    aliases: ["textarea", "email", "phone", "url", "encryptedstring", "combobox"]
+  - name: "id"
+    category: "STRING"
+  - name: "boolean"
+    category: "BOOLEAN"
+  - name: "int"
+    category: "INTEGER"
+  - name: "long"
+    category: "INTEGER"
+    aliases: ["BIGINT"]
+  - name: "double"
+    category: "FLOAT"
+    has_precision: true
+  - name: "currency"
+    category: "DECIMAL"
+    has_precision: true
+  - name: "percent"
+    category: "DECIMAL"
+    has_precision: true
+  - name: "date"
+    category: "DATE"
+  - name: "datetime"
+    category: "DATETIME"
+    aliases: ["TIMESTAMP"]
+  - name: "time"
+    category: "TIME"
+  - name: "picklist"
+    category: "ENUM"
+    semantic_fidelity_base: 0.9
+  - name: "multipicklist"
+    category: "ENUM"
+    semantic_fidelity_base: 0.8
+  - name: "reference"
+    category: "STRING"
+  - name: "address"
+    category: "JSON"
+    semantic_fidelity_base: 0.7
+  - name: "location"
+    category: "SPATIAL"
+    semantic_fidelity_base: 0.6
+  - name: "base64"
+    category: "BINARY"
+    semantic_fidelity_base: 0.5
+  - name: "anyType"
+    category: "STRING"
+    semantic_fidelity_base: 0.5
+
+# SOQL is query-only from DBX — DML goes through the REST API, not SQL DDL.
+# All DDL capabilities are disabled.
+ddl_capabilities:
+  add_column: false
+  drop_column: false
+  create_index: false
+  drop_index: false
+  create_table: false
+  drop_table: false
+
+structural_capabilities:
+  max_columns_per_table: 500
+  max_query_size_bytes: 20000
+  supports_json_type: true
+
+# SOQL identifiers are case-insensitive and not quoted.
+# The schema requires a quote_char so we use the conventional '"', but
+# case_sensitive is false to reflect that SOQL ignores identifier casing.
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: false
+  max_length: 40
+
+# No metadata_queries — the Salesforce driver uses REST describe calls,
+# not SQL information_schema queries.

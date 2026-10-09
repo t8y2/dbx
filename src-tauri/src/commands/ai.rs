@@ -235,6 +235,7 @@ impl<R: tauri::Runtime> AiAgentEventBatcher<R> {
 struct AiStreamChunkBatch {
     delta: String,
     reasoning: Option<String>,
+    finish_reason: Option<String>,
     last_emit: Option<std::time::Instant>,
 }
 
@@ -266,8 +267,12 @@ impl<R: tauri::Runtime> AiStreamChunkBatcher<R> {
 
     fn handle(&self, mut chunk: AiStreamChunk) {
         let mut batch = self.lock_batch();
+        if let Some(reason) = chunk.finish_reason.take() {
+            batch.finish_reason = Some(reason);
+        }
         if chunk.done {
             self.flush_locked(&mut batch);
+            chunk.finish_reason = batch.finish_reason.take();
             self.emit_chunk(chunk);
             return;
         }
@@ -300,6 +305,7 @@ impl<R: tauri::Runtime> AiStreamChunkBatcher<R> {
                 session_id: self.session_id.clone(),
                 delta: std::mem::take(&mut batch.delta),
                 reasoning_delta: batch.reasoning.take(),
+                finish_reason: None,
                 done: false,
             });
         }
@@ -314,6 +320,44 @@ impl<R: tauri::Runtime> AiStreamChunkBatcher<R> {
 #[tauri::command]
 pub async fn ai_cancel_stream(session_id: String) -> Result<bool, String> {
     Ok(dbx_core::ai::cancel_stream(&session_id).await)
+}
+
+/// Answers a pending plugin tool approval of the agent run `session_id`.
+/// Returns false when nothing was waiting (already answered or expired).
+#[tauri::command]
+pub async fn ai_resolve_tool_approval(session_id: String, approval_id: String, approved: bool) -> Result<bool, String> {
+    Ok(dbx_core::tool_approval::resolve_tool_approval(&session_id, &approval_id, approved))
+}
+
+/// Plugin ids whose MCP tools the built-in AI agent may call.
+/// Plugin ids whose MCP tools the built-in AI agent may call: every detected
+/// tool-capable plugin (a manifest `mcp` contribution with `ai_tools: false`
+/// opts out) minus the ids the user explicitly turned off in the Plugin
+/// Center.
+#[tauri::command]
+pub async fn get_ai_plugin_tool_plugins(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
+    let mut ids =
+        dbx_core::ai::plugin_tools::effective_ai_tool_plugin_ids(state.inner()).await.into_iter().collect::<Vec<_>>();
+    ids.sort();
+    Ok(ids)
+}
+
+#[tauri::command]
+pub async fn set_ai_plugin_tool_plugin_enabled(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+    enabled: bool,
+) -> Result<Vec<String>, String> {
+    state.storage.set_ai_plugin_tool_plugin_enabled(&plugin_id, enabled).await
+}
+
+/// Lists the tools the built-in AI would get from `plugin_id`.
+#[tauri::command]
+pub async fn preview_plugin_ai_tools(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+) -> Result<dbx_core::plugin_tools::PluginToolPreview, String> {
+    dbx_core::plugin_tools::preview_plugin_tools(state.inner(), None, &plugin_id).await
 }
 
 #[tauri::command]
@@ -334,6 +378,9 @@ pub async fn ai_agent_stream(
     confirmed_database: Option<String>,
     confirmed_schema: Option<String>,
     selected_databases: Option<Vec<String>>,
+    // Set by the frontend exactly when this send carries a skill listing; the
+    // agent loop appends the skill tools only then (ADR Decision 10).
+    allow_skills: Option<bool>,
 ) -> Result<String, String> {
     let mut request = resolve_cli_provider_request(request);
     merge_global_max_retries(
@@ -395,6 +442,9 @@ pub async fn ai_agent_stream(
         sql_permissions,
         max_agent_turns,
         prompt_cache_key: request.prompt_cache_key.clone(),
+        session_id: Some(session_id.clone()),
+        host_runtime: Some(tokio::runtime::Handle::current()),
+        allow_skills: allow_skills.unwrap_or(false),
     };
     let is_agent_mode = mode.as_deref() == Some("agent");
 
@@ -602,6 +652,7 @@ mod tests {
             session_id: "session-2".to_string(),
             delta: "a".to_string(),
             reasoning_delta: None,
+            finish_reason: None,
             done: false,
         });
         // Held within the interval …
@@ -609,6 +660,7 @@ mod tests {
             session_id: "session-2".to_string(),
             delta: "b".to_string(),
             reasoning_delta: Some("r".to_string()),
+            finish_reason: None,
             done: false,
         });
         // … and flushed in order before the terminal chunk is forwarded.
@@ -616,6 +668,7 @@ mod tests {
             session_id: "session-2".to_string(),
             delta: String::new(),
             reasoning_delta: None,
+            finish_reason: None,
             done: true,
         });
 
@@ -802,7 +855,7 @@ mod tests {
     async fn tauri_entry_respects_global_max_retries_zero() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-mr-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&dir);
-        let storage = dbx_core::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         storage.save_max_retries(0).await.unwrap();
         assert_eq!(storage.load_max_retries().await.unwrap(), 0);
 

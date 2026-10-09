@@ -512,6 +512,7 @@ mod tests {
             target_row_count: 2,
             source_truncated: false,
             target_truncated: false,
+            row_budget: 100_000,
             degradation_level: Some("full".to_string()),
             sampling_rate: Some(1.0),
             confidence_score: Some(1.0),

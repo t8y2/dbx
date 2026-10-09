@@ -22,3 +22,10 @@ test("Apache Phoenix database icon keeps its official source attribution", () =>
   assert.match(svg, /#f7931d/i);
   assert.match(svg, /#ed1c24/i);
 });
+
+test("Inceptor connection icon matches the Waterdrop provider asset", () => {
+  const png = readFileSync(path.resolve("apps/desktop/public/icons/database/transwarp-inceptor.png"));
+  assert.equal(png.subarray(1, 4).toString("ascii"), "PNG");
+  assert.equal(png.readUInt32BE(16), 64);
+  assert.equal(png.readUInt32BE(20), 64);
+});

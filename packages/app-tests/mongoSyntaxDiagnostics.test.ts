@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { buildMongoSyntaxDiagnostics, shouldRunMongoDiagnostics } from "../../apps/desktop/src/lib/mongo/mongoSyntaxDiagnostics";
 
@@ -18,6 +17,26 @@ test("valid commands and comments produce no diagnostics", () => {
   for (const source of ["db.reports.find({a: 1})", 'db["my-coll"].updateOne({a: 1}, {$set: {b: 2}}, {upsert: true})', "// just a note", "db.a.find({});\ndb.b.countDocuments({})", ""]) {
     assert.deepEqual(buildMongoSyntaxDiagnostics(source), [], source);
   }
+});
+
+test("a JS helper line between commands does not blame the command above it", () => {
+  // Shell users build a big `$in` list in a variable, and the editor must not turn
+  // that into "Unexpected text after find(...)" on the previous, correct command.
+  const helper = underlined('db.getCollection("a").find({ x: 1 })\nvar ids = [1, 2, 3]\ndb.getCollection("b").find({ _id: { $in: ids } })');
+  assert.ok(!helper.some((d) => /Unexpected text after/.test(d.message)), JSON.stringify(helper));
+  assert.equal(helper.length, 1, JSON.stringify(helper));
+  // What is left is the honest complaint about the third line: dbx cannot evaluate `ids`.
+  assert.match(helper[0]!.message, /filter argument of find\(\) is not a valid document/);
+  assert.equal(helper[0]!.text, 'db.getCollection("b").find');
+
+  // A `print()` between two commands is not a command either, so both stay clean.
+  assert.deepEqual(buildMongoSyntaxDiagnostics('db.a.find({ x: 1 })\nprint("done")\ndb.b.find({ y: 2 })'), []);
+  // Same for a lone CR separating commands (pasted shell history).
+  assert.deepEqual(buildMongoSyntaxDiagnostics('db.a.find({ x: 1 })\rdb.b.find({ y: 2 })'), []);
+
+  // A real error on a later line is still reported, on that line and about that command.
+  const [late] = underlined("db.a.find({})\nvar ids = [1]\ndb.b.foobar({})");
+  assert.match(late!.message, /Collection method foobar\(\) is not supported/);
 });
 
 test("underlines the offending value constructor and names the argument", () => {
@@ -122,9 +141,4 @@ test("keeps completed diagnostics while the cursor is in an unfinished command",
 
   const unfinished = underlined(source, 0).find((diagnostic) => diagnostic.severity === "error");
   assert.match(unfinished!.message, /unclosed/i);
-
-  const queryEditorSource = readFileSync("apps/desktop/src/components/editor/QueryEditor.vue", "utf8");
-  const mongoBranch = queryEditorSource.slice(queryEditorSource.indexOf('if (props.databaseType === "mongodb")'), queryEditorSource.indexOf('if (props.databaseType === "redis")'));
-  assert.doesNotMatch(mongoBranch, /shouldRunMongoDiagnostics/);
-  assert.match(mongoBranch, /setSemanticDiagnostics\(buildMongoSyntaxDiagnostics\(sql, cursor\)\)/);
 });

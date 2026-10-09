@@ -18,7 +18,9 @@ const EMPTY = 0;
 
 export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKey>> = {
   access: "lightweight",
+  argo: "domestic",
   bigquery: "analytics",
+  cache: "sql",
   cassandra: "document",
   dameng: "domestic",
   databend: "analytics",
@@ -27,6 +29,7 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   duckdb: "lightweight",
   "sqlite-worker": "lightweight",
   etcd: "registry_config",
+  etcd2: "registry_config",
   exasol: "analytics",
   firebird: "sql",
   gbase8a: "domestic",
@@ -46,8 +49,12 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   ignite3: "analytics",
   mongodb: "document",
   neo4j: "graph_ai",
+  nebula: "graph_ai",
   "oceanbase-oracle": "domestic",
   oracle: "sql",
+  // OCI (thick) mode ships as its own store-visible agent package under the
+  // Oracle connection type, so it needs its own category entry.
+  "oracle-oci": "sql",
   oscar: "domestic",
   phoenix: "analytics",
   prestosql: "analytics",
@@ -61,6 +68,7 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   sundb: "domestic",
   tdengine: "timeseries",
   teradata: "analytics",
+  transwarp: "domestic",
   trino: "analytics",
   uxdb: "domestic",
   vastbase: "domestic",

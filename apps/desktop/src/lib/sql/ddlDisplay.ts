@@ -1,11 +1,30 @@
 import { requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
 import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
 import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
-import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import { dropsSchemaQualifier, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import type { DatabaseType } from "@/types/database";
 
 const SIMPLE_SQLSERVER_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const CREATE_TABLE_MODIFIERS = new Set(["external", "global", "local", "materialized", "or", "replace", "temp", "temporary", "transient", "unlogged", "volatile"]);
+const TABLE_CONSTRAINT_NAMES = new Set(["check", "constraint", "exclude", "foreign", "fulltext", "index", "key", "period", "primary", "spatial", "unique"]);
+
+type DdlColumnAlignment = {
+  lineIndex: number;
+  nameEnd: number;
+};
+
+type DdlColumnAttributePositions = {
+  nullable?: number;
+  default?: number;
+  identity?: number;
+  onUpdate?: number;
+  unique?: number;
+  references?: number;
+  comment?: number;
+};
 
 function canRenderUnquoted(identifier: string, dialect: SqlFormatDialect): boolean {
   switch (dialect) {
@@ -360,4 +379,207 @@ export function applyDdlDatabaseQualifier(sql: string, dialect: SqlFormatDialect
   if (removals.length === 0) return sql;
 
   return applyDdlSpans(sql, removals);
+}
+
+function findLineIndex(lineStarts: number[], position: number): number {
+  for (let index = lineStarts.length - 1; index >= 0; index -= 1) {
+    if (lineStarts[index]! <= position) return index;
+  }
+  return 0;
+}
+
+function findCreateTableBody(sql: string, dialect: SqlFormatDialect): { start: number; end: number } | undefined {
+  const tokens = tokenizeSqlSemantic(sql, dialect);
+  const createIndex = tokens.findIndex((token) => token.kind === "word" && token.normalized === "create");
+  if (createIndex < 0) return undefined;
+
+  let tableIndex = createIndex + 1;
+  while (tableIndex < tokens.length && tokens[tableIndex]?.kind === "word" && CREATE_TABLE_MODIFIERS.has(tokens[tableIndex]!.normalized)) tableIndex += 1;
+  if (tokens[tableIndex]?.kind !== "word" || tokens[tableIndex]?.normalized !== "table") return undefined;
+
+  let openingIndex = -1;
+  for (let index = tableIndex + 1; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    if (token.depth === 0 && token.kind === "punctuation" && token.text === ";") break;
+    if (token.depth === 0 && token.kind === "word" && token.normalized === "as") break;
+    if (token.depth === 0 && token.kind === "punctuation" && token.text === "(") {
+      openingIndex = index;
+      break;
+    }
+  }
+  if (openingIndex < 0) return undefined;
+  const opening = tokens[openingIndex]!;
+  const closing = tokens.find((token, index) => index > openingIndex && token.kind === "punctuation" && token.text === ")" && token.depth === opening.depth);
+  if (!closing) return undefined;
+  return { start: opening.span.end, end: closing.span.start };
+}
+
+function readColumnAlignment(line: string, lineIndex: number, dialect: SqlFormatDialect): DdlColumnAlignment | undefined {
+  const tokens = tokenizeSqlSemantic(line, dialect);
+  const name = tokens[0];
+  const dataType = tokens[1];
+  if (!tokenIsIdentifier(name) || !tokenIsIdentifier(dataType) || TABLE_CONSTRAINT_NAMES.has(name.normalized)) return undefined;
+  return { lineIndex, nameEnd: name.span.end };
+}
+
+function findColumnAttributePositions(line: string, dialect: SqlFormatDialect): DdlColumnAttributePositions {
+  const tokens = tokenizeSqlSemantic(line, dialect);
+  const name = tokens[0];
+  const dataType = tokens[1];
+  if (!tokenIsIdentifier(name) || !tokenIsIdentifier(dataType)) return {};
+
+  const words = tokens.filter((token) => token.kind === "word" && token.depth === 0 && token.span.start >= dataType.span.end);
+  const findWord = (value: string) => words.find((token) => token.normalized === value);
+  const defaultToken = findWord("default");
+  let nullableToken = words.find((token, index) => token.normalized === "not" && words[index + 1]?.normalized === "null");
+  if (!nullableToken) {
+    nullableToken = words.find((token) => token.normalized === "null" && (!defaultToken || token.span.start < defaultToken.span.start));
+  }
+
+  const identityToken = words.find((token) => token.normalized === "auto_increment" || token.normalized === "identity");
+  const onToken = words.find((token, index) => token.normalized === "on" && words[index + 1]?.normalized === "update");
+  const uniqueToken = findWord("unique");
+  const referencesToken = findWord("references");
+  const commentToken = findWord("comment");
+
+  return {
+    ...(nullableToken ? { nullable: nullableToken.span.start } : {}),
+    ...(defaultToken ? { default: defaultToken.span.start } : {}),
+    ...(identityToken ? { identity: identityToken.span.start } : {}),
+    ...(onToken ? { onUpdate: onToken.span.start } : {}),
+    ...(uniqueToken ? { unique: uniqueToken.span.start } : {}),
+    ...(referencesToken ? { references: referencesToken.span.start } : {}),
+    ...(commentToken ? { comment: commentToken.span.start } : {}),
+  };
+}
+
+export function uppercaseDdlColumnTypes(sql: string, dialect: SqlFormatDialect): string {
+  const body = findCreateTableBody(sql, dialect);
+  if (!body) return sql;
+
+  const lines = sql.split("\n");
+  const lineStarts: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineStarts.push(offset);
+    offset += line.length + 1;
+  }
+
+  const firstBodyLine = findLineIndex(lineStarts, body.start) + 1;
+  const lastBodyLine = findLineIndex(lineStarts, body.end);
+  for (let lineIndex = firstBodyLine; lineIndex < lastBodyLine; lineIndex += 1) {
+    const line = lines[lineIndex]!;
+    if (!readColumnAlignment(line, lineIndex, dialect)) continue;
+
+    const tokens = tokenizeSqlSemantic(line, dialect);
+    const dataType = tokens[1];
+    if (dataType?.kind !== "word") continue;
+
+    const attributePositions = findColumnAttributePositions(line, dialect);
+    const attributeStart = Math.min(line.length, ...Object.values(attributePositions).filter((position): position is number => position !== undefined));
+    const typeWords = tokens.filter((token) => token.kind === "word" && token.span.start >= dataType.span.start && token.span.start < attributeStart);
+    for (let tokenIndex = typeWords.length - 1; tokenIndex >= 0; tokenIndex -= 1) {
+      const token = typeWords[tokenIndex]!;
+      const upper = token.text.toUpperCase();
+      if (token.text === upper) continue;
+      lines[lineIndex] = `${lines[lineIndex]!.slice(0, token.span.start)}${upper}${lines[lineIndex]!.slice(token.span.end)}`;
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function alignColumnAttribute(lines: string[], columns: DdlColumnAlignment[], attribute: keyof DdlColumnAttributePositions, dialect: SqlFormatDialect) {
+  const positions = columns.map(({ lineIndex }) => findColumnAttributePositions(lines[lineIndex]!, dialect)[attribute]);
+  const target = Math.max(-1, ...positions.filter((position): position is number => position !== undefined));
+  if (target < 0) return;
+
+  columns.forEach(({ lineIndex }, index) => {
+    const position = positions[index];
+    if (position === undefined || position >= target) return;
+    lines[lineIndex] = `${lines[lineIndex]!.slice(0, position)}${" ".repeat(target - position)}${lines[lineIndex]!.slice(position)}`;
+  });
+}
+
+export function alignDdlColumnDefinitions(sql: string, dialect: SqlFormatDialect): string {
+  const body = findCreateTableBody(sql, dialect);
+  if (!body) return sql;
+
+  const lines = sql.split("\n");
+  const lineStarts: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineStarts.push(offset);
+    offset += line.length + 1;
+  }
+
+  const firstBodyLine = findLineIndex(lineStarts, body.start) + 1;
+  const lastBodyLine = findLineIndex(lineStarts, body.end);
+  const columns: DdlColumnAlignment[] = [];
+  for (let lineIndex = firstBodyLine; lineIndex < lastBodyLine; lineIndex += 1) {
+    const column = readColumnAlignment(lines[lineIndex]!, lineIndex, dialect);
+    if (column) columns.push(column);
+  }
+  if (columns.length < 2) return sql;
+
+  const maxNameWidth = Math.max(
+    ...columns.map(({ lineIndex, nameEnd }) => {
+      const line = lines[lineIndex]!;
+      const indentWidth = line.length - line.trimStart().length;
+      return nameEnd - indentWidth;
+    }),
+  );
+  for (const { lineIndex, nameEnd } of columns) {
+    const line = lines[lineIndex]!;
+    const indentWidth = line.length - line.trimStart().length;
+    const name = line.slice(indentWidth, nameEnd);
+    lines[lineIndex] = `${line.slice(0, indentWidth)}${name.padEnd(maxNameWidth + 2)}${line.slice(nameEnd).trimStart()}`;
+  }
+
+  const initialPositions = columns.map(({ lineIndex }) => findColumnAttributePositions(lines[lineIndex]!, dialect));
+  const defaultBeforeNullable = initialPositions.filter((positions) => positions.default !== undefined && positions.nullable !== undefined && positions.default < positions.nullable).length;
+  const nullableBeforeDefault = initialPositions.filter((positions) => positions.default !== undefined && positions.nullable !== undefined && positions.nullable < positions.default).length;
+  const attributeOrder: Array<keyof DdlColumnAttributePositions> = defaultBeforeNullable > nullableBeforeDefault ? ["default", "nullable", "identity", "onUpdate", "unique", "references", "comment"] : ["nullable", "default", "identity", "onUpdate", "unique", "references", "comment"];
+  for (const attribute of attributeOrder) alignColumnAttribute(lines, columns, attribute, dialect);
+
+  return lines.join("\n");
+}
+
+export interface DdlDisplayFormatOptions {
+  dialect: SqlFormatDialect;
+  databaseType?: DatabaseType;
+  database?: string;
+  catalog?: string;
+  includeDatabaseName: boolean;
+  quoteIdentifiers: boolean;
+  /**
+   * Storage-clause filtering for surfaces that bake the text once (DDL viewer
+   * tabs store plain SQL). The dialog and the structure editor keep it off and
+   * re-filter on read instead, so toggling the preference updates them without
+   * reloading the DDL.
+   */
+  excludeDdlStorage?: boolean;
+}
+
+/**
+ * Shared preference tail of the read-only DDL display pipeline: applies the
+ * database-name qualifier, the identifier-quoting preference, and the column
+ * type casing/alignment to already-formatted DDL. Use {@link formatDdlForDisplay}
+ * unless the input is formatted separately.
+ */
+export function applyDdlDisplayPreferences(sql: string, options: DdlDisplayFormatOptions): string {
+  const qualified = applyDdlDatabaseQualifier(sql, options.dialect, options.databaseType, options.includeDatabaseName, options.database, options.catalog);
+  const quoted = options.quoteIdentifiers ? qualified : omitDdlIdentifierQuotes(qualified, options.dialect);
+  const aligned = alignDdlColumnDefinitions(uppercaseDdlColumnTypes(quoted, options.dialect), options.dialect);
+  return options.excludeDdlStorage ? applyDdlStoragePreference(aligned, options.databaseType) : aligned;
+}
+
+/**
+ * Canonical read-only DDL display pipeline shared by the DDL dialog, DDL viewer
+ * tabs, and the structure editor's DDL tab: format the statement, apply the
+ * SQL-editor preferences, and align the column definitions. Callers feed the
+ * result of the object DDL fetch straight through it.
+ */
+export async function formatDdlForDisplay(ddl: string, options: DdlDisplayFormatOptions, formatter: Partial<SqlFormatterSettings> = DEFAULT_SQL_FORMATTER_SETTINGS): Promise<string> {
+  return applyDdlDisplayPreferences(await formatSqlForDisplay(ddl, options.dialect, formatter), options);
 }

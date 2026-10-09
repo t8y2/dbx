@@ -2,7 +2,7 @@
 import { createApp, defineComponent, h, reactive, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import { useAppUpdater } from "@/composables/useAppUpdater";
+import { isNewerRemoteVersion, resolveReleaseTagUrl, useAppUpdater } from "@/composables/useAppUpdater";
 const mocks = vi.hoisted(() => ({
   checkForUpdates: vi.fn(),
   downloadUpdate: vi.fn(),
@@ -71,6 +71,23 @@ afterEach(() => {
   app?.unmount();
   vi.useRealTimers();
 });
+describe("older version release pages", () => {
+  it("maps a historical version to the matching GitHub release page", () => {
+    expect(resolveReleaseTagUrl("0.5.59", "official")).toBe("https://github.com/t8y2/dbx/releases/tag/v0.5.59");
+    expect(resolveReleaseTagUrl("v0.5.59", "official")).toBe("https://github.com/t8y2/dbx/releases/tag/v0.5.59");
+  });
+
+  it("uses the CNB release page when the CNB download source is selected", () => {
+    expect(resolveReleaseTagUrl("v0.5.59", "cnb")).toBe("https://cnb.cool/dbxio.com/dbx/-/releases/tag/v0.5.59");
+  });
+
+  it("treats only strictly older releases as rollback candidates", () => {
+    expect(isNewerRemoteVersion("0.5.60", "v0.5.59")).toBe(true);
+    expect(isNewerRemoteVersion("0.5.60", "v0.5.60")).toBe(false);
+    expect(isNewerRemoteVersion("0.5.60", "v0.5.61")).toBe(false);
+  });
+});
+
 describe("silent update lifecycle", () => {
   it("checks and shows a badge without downloading when automatic downloads are disabled", async () => {
     settings.autoUpdateApp = false;

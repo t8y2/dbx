@@ -8,7 +8,6 @@ use dbx_core::query::{
     begin_manual_transaction, commit_manual_transaction, execute_in_manual_transaction, execute_sql_statement,
     rollback_manual_transaction, stream_rows_in_manual_transaction,
 };
-use dbx_core::storage::Storage;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -46,7 +45,7 @@ fn live_config(prefix: &str, db_type: DatabaseType, default_port: u16) -> Connec
 
 async fn app_state_with_config(config: ConnectionConfig) -> (Arc<AppState>, std::path::PathBuf) {
     let db_path = std::env::temp_dir().join(format!("dbx-live-manual-txn-{}.db", uuid::Uuid::new_v4().simple()));
-    let storage = Storage::open(&db_path).await.expect("open temp storage");
+    let storage = dbx_core::persistence::test_storage::open(&db_path).await.expect("open temp storage");
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(config.id.clone(), config);
     (state, db_path)
@@ -328,9 +327,12 @@ async fn live_postgres_backup_snapshot_exports_wide_jsonb_then_next_table_inner(
         include_create_database: false,
         drop_table_if_exists: false,
         omit_auto_increment: false,
+        preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
         output_compression: Default::default(),
+        insert_dialect: Default::default(),
+        insert_mode: Default::default(),
         snapshot_session_id: Some(snapshot.session_id.clone()),
         batch_size: 1000,
         split_max_mb: None,
@@ -443,9 +445,12 @@ async fn live_postgres_backup_snapshot_cancel_interrupts_pending_row_inner() {
         include_create_database: false,
         drop_table_if_exists: false,
         omit_auto_increment: false,
+        preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
         output_compression: Default::default(),
+        insert_dialect: Default::default(),
+        insert_mode: Default::default(),
         snapshot_session_id: Some(snapshot.session_id.clone()),
         batch_size: 1,
         split_max_mb: None,
@@ -560,9 +565,12 @@ async fn live_mysql_database_backup_refreshes_an_idle_snapshot_before_export() {
         include_create_database: false,
         drop_table_if_exists: false,
         omit_auto_increment: false,
+        preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
         output_compression: Default::default(),
+        insert_dialect: Default::default(),
+        insert_mode: Default::default(),
         snapshot_session_id: Some(snapshot.session_id.clone()),
         batch_size: 100,
         split_max_mb: None,

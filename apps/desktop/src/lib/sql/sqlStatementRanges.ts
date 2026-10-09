@@ -3,7 +3,7 @@ import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDe
 import { splitMongoCommandRanges } from "@/lib/mongo/mongoShellCommand";
 import { isRedisCommentLine } from "@/lib/redis/redisCommandTokenizer";
 import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
-import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
+import { isCouchDbDatabaseType, isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 
 /**
  * A contiguous range of SQL text expressed as document offsets plus the
@@ -18,7 +18,7 @@ export interface SqlTextRange {
 const ELASTICSEARCH_REST_REQUEST = /^(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+\S+/i;
 
 function isHttpJsonRestDatabaseType(databaseType?: DatabaseType): boolean {
-  return isElasticsearchCompatibleDatabaseType(databaseType) || isMeilisearchDatabaseType(databaseType) || isSolrDatabaseType(databaseType);
+  return isElasticsearchCompatibleDatabaseType(databaseType) || isMeilisearchDatabaseType(databaseType) || isSolrDatabaseType(databaseType) || isCouchDbDatabaseType(databaseType);
 }
 
 export function elasticsearchRestRequestRanges(sql: string, databaseType?: DatabaseType): SqlTextRange[] {
@@ -27,7 +27,7 @@ export function elasticsearchRestRequestRanges(sql: string, databaseType?: Datab
   return requests.length > 0 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
 }
 
-const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "neo4j", "victoriametrics"]);
+const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "couchdb", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "neo4j", "nebula", "victoriametrics", "salesforce"]);
 
 export function supportsExecutionTargetPicker(databaseType?: DatabaseType): boolean {
   return !!databaseType && (databaseType === "redis" || isHttpJsonRestDatabaseType(databaseType) || !NON_SQL_EXECUTION_TARGET_TYPES.has(databaseType));
@@ -214,7 +214,8 @@ function splitElasticsearchRestRequestRanges(sql: string): RawStatement[] | unde
 type QuoteState = "none" | "single" | "double" | "backtick" | "bracket" | "dollar";
 
 function usesBracketIdentifierQuotes(databaseType?: DatabaseType): boolean {
-  return databaseType !== "doris" && databaseType !== "starrocks";
+  // IRIS uses `[` as its Contains operator, with no matching `]`.
+  return databaseType !== "doris" && databaseType !== "starrocks" && databaseType !== "iris";
 }
 
 const COMMON_SOFT_STATEMENT_START_KEYWORDS = [
@@ -271,6 +272,7 @@ const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly st
   elasticsearch: [],
   easysearch: [],
   solr: [],
+  couchdb: [],
   qdrant: [],
   milvus: [],
   weaviate: [],
@@ -293,7 +295,7 @@ const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
 // in sync. ArgoDB (Transwarp Hive/Inceptor fork) ships a PL/SQL-compatible procedure
 // language (`CREATE [OR REPLACE] PROCEDURE ... IS BEGIN ... END;`), so its statement
 // ranges must stay whole instead of splitting at every body semicolon.
-const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu", "argo"]);
+const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu", "argo", "transwarp"]);
 const MYSQL_ROUTINE_BLOCK_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
 // PostgreSQL/openGauss are also the connection types users pick for GaussDB/openGauss instances
 // running in Oracle (A) compatibility mode, where a routine body is written in Oracle style
@@ -305,7 +307,7 @@ const POSTGRES_FAMILY_DATABASES: ReadonlySet<DatabaseType> = new Set(["postgres"
 // escape unconditionally makes ESCAPE '\' swallow its closing quote and the following statement
 // boundary, so the next statement loses its run button (#8189). Gate it by dialect, matching the
 // tokenizer/completion side.
-export const BACKSLASH_ESCAPE_STRING_DIALECTS: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "hive", "argo", "impala", "spark", "databend"]);
+export const BACKSLASH_ESCAPE_STRING_DIALECTS: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "hive", "argo", "transwarp", "impala", "spark", "databend"]);
 function allowsBackslashStringEscape(databaseType?: DatabaseType): boolean {
   return !!databaseType && BACKSLASH_ESCAPE_STRING_DIALECTS.has(databaseType);
 }
@@ -1229,6 +1231,11 @@ function softStatementKeywordAt(sql: string, pos: number, databaseType?: Databas
   // COMMENT is also a common column name. Only COMMENT ON starts a standalone
   // SQL command; otherwise a line-start projection column must stay in SELECT.
   if (keyword === "COMMENT" && nextSqlWord(sql, pos + match[0].length, databaseType, parameterOptions) !== "ON") return null;
+  // `WITH (` is a SQL Server table hint (`FROM t WITH (NOLOCK)`), not a CTE
+  // opener — CTEs are always `WITH name AS (` / `WITH RECURSIVE name AS (`.
+  // Formatters break table hints onto their own line; without this, the
+  // following statement loses its run target (#10098).
+  if (keyword === "WITH" && nextNonWhitespaceChar(sql, pos + match[0].length) === "(") return null;
   return softStatementStartKeywords(databaseType).has(keyword) ? keyword : null;
 }
 
@@ -2465,11 +2472,13 @@ function isSqlServerGoLine(sql: string, pos: number): boolean {
 
 function startsDelimiterCommand(sql: string, pos: number): boolean {
   const prefix = sql.slice(pos, pos + 9);
-  return prefix.toLowerCase() === "delimiter" && (sql[pos + 9] === " " || sql[pos + 9] === "\t");
+  return prefix.toLowerCase() === "delimiter" && (sql[pos + 9] === " " || sql[pos + 9] === "\t" || sql[pos + 9] === ";");
 }
 
 function parseDelimiterCommand(line: string): string | null {
-  const match = /^delimiter[ \t]+(.+)$/i.exec(line.trim());
+  const trimmed = line.trim();
+  if (/^delimiter;$/i.test(trimmed)) return ";";
+  const match = /^delimiter[ \t]+(.+)$/i.exec(trimmed);
   const delimiter = match?.[1]?.trim();
   return delimiter ? delimiter : null;
 }

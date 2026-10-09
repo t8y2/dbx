@@ -3,8 +3,8 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Json;
 use dbx_core::cloud_sync::{
-    apply_sync_snapshot, build_sync_snapshot, build_sync_snapshot_with_saved_secrets, finalize_snippet_migration,
-    forget_snippet_token, forget_webdav_password,
+    apply_sync_snapshot_with_selection, build_sync_snapshot_with_selection, describe_local_sync_state,
+    describe_sync_snapshot, finalize_snippet_migration, forget_snippet_token, forget_webdav_password,
     forget_webdav_sync_secrets_passphrase as core_forget_webdav_sync_secrets_passphrase, resolve_snippet_token,
     resolve_webdav_password, resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup,
     save_snippet_sync_id_for_instance as core_save_snippet_sync_id, save_snippet_token, save_webdav_password,
@@ -12,7 +12,8 @@ use dbx_core::cloud_sync::{
     snippet_sync_settings_for_instance as core_snippet_sync_settings, webdav_saved_password_status,
     webdav_sync_secrets_status as core_webdav_sync_secrets_status, ApplySnapshotOptions, ApplySnapshotSummary,
     SnippetProvider, SnippetSyncClient, SnippetSyncConfig, SnippetSyncSettings, SnippetSyncSummary, SnippetTokenStatus,
-    WebDavClient, WebDavConfig, WebDavPasswordStatus, WebDavSyncSecretsStatus, WebDavSyncSummary,
+    SyncSelection, SyncSnapshotCatalog, WebDavClient, WebDavConfig, WebDavPasswordStatus, WebDavSyncSecretsStatus,
+    WebDavSyncSummary,
 };
 use dbx_core::storage::DesktopSettings;
 use serde::{Deserialize, Serialize};
@@ -57,6 +58,11 @@ pub struct WebDavUploadRequest {
     pub config: WebDavConfig,
     pub editor_settings: Option<serde_json::Value>,
     pub secrets_passphrase: Option<String>,
+    /// Explicit opt-in for exporting credentials.
+    #[serde(default)]
+    pub include_secrets: bool,
+    #[serde(default)]
+    pub selection: Option<SyncSelection>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,6 +70,30 @@ pub struct WebDavUploadRequest {
 pub struct WebDavDownloadRequest {
     pub config: WebDavConfig,
     pub secrets_passphrase: Option<String>,
+    /// Explicitly controls whether encrypted or legacy plaintext secrets may
+    /// be restored. Older clients omitted this field and retain the historical
+    /// restore behavior.
+    #[serde(default = "default_restore_secrets")]
+    pub restore_secrets: bool,
+    #[serde(default)]
+    pub selection: Option<SyncSelection>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavInspectRequest {
+    pub config: WebDavConfig,
+    pub secrets_passphrase: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalCatalogRequest {
+    pub editor_settings: Option<serde_json::Value>,
+}
+
+fn default_restore_secrets() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,6 +125,8 @@ pub struct SnippetUploadRequest {
     #[serde(default)]
     pub include_secrets: bool,
     pub secrets_passphrase: Option<String>,
+    #[serde(default)]
+    pub selection: Option<SyncSelection>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,6 +136,16 @@ pub struct SnippetDownloadRequest {
     pub snippet_passphrase: Option<String>,
     #[serde(default)]
     pub restore_secrets: bool,
+    pub secrets_passphrase: Option<String>,
+    #[serde(default)]
+    pub selection: Option<SyncSelection>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetInspectRequest {
+    pub config: SnippetSyncConfig,
+    pub snippet_passphrase: Option<String>,
     pub secrets_passphrase: Option<String>,
 }
 
@@ -180,15 +222,58 @@ pub async fn webdav_sync_upload(
     Json(mut req): Json<WebDavUploadRequest>,
 ) -> Result<Json<WebDavSyncSummary>, AppError> {
     resolve_webdav_password(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
-    let snapshot = build_sync_snapshot_with_saved_secrets(
+    let explicit_passphrase = req.secrets_passphrase.as_deref().and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then_some(value)
+    });
+    let saved_passphrase = if explicit_passphrase.is_none() {
+        resolve_webdav_sync_secrets_passphrase(&state.app.storage).await.map_err(AppError::from)?
+    } else {
+        None
+    };
+    let passphrase = explicit_passphrase.or(saved_passphrase.as_deref());
+    let snapshot = build_sync_snapshot_with_selection(
         &state.app.storage,
         env!("CARGO_PKG_VERSION"),
         req.editor_settings,
-        req.secrets_passphrase.as_deref(),
+        dbx_core::cloud_sync::SyncExportOptions {
+            include_secrets: req.include_secrets,
+            sync_passphrase: passphrase,
+            include_ai_secrets: req.include_secrets,
+            include_tunnel_secrets: req.include_secrets,
+            include_plugin_secrets: req.include_secrets,
+        },
+        req.selection.as_ref(),
+        Some(&state.app.plugins),
     )
     .await
     .map_err(AppError::from)?;
     WebDavClient::new(req.config).put_snapshot(&snapshot).await.map(Json).map_err(AppError::from)
+}
+
+pub async fn cloud_sync_local_catalog(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<LocalCatalogRequest>,
+) -> Result<Json<SyncSnapshotCatalog>, AppError> {
+    describe_local_sync_state(&state.app.storage, req.editor_settings, Some(&state.app.plugins))
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
+pub async fn webdav_sync_inspect(
+    State(state): State<Arc<WebState>>,
+    Json(mut req): Json<WebDavInspectRequest>,
+) -> Result<Json<SyncSnapshotCatalog>, AppError> {
+    resolve_webdav_password(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
+    let (snapshot, _) = WebDavClient::new(req.config).get_snapshot().await.map_err(AppError::from)?;
+    let explicit = req.secrets_passphrase.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let saved = if explicit.is_none() {
+        resolve_webdav_sync_secrets_passphrase(&state.app.storage).await.map_err(AppError::from)?
+    } else {
+        None
+    };
+    describe_sync_snapshot(&snapshot, explicit.or(saved.as_deref())).map(Json).map_err(AppError::from)
 }
 
 pub async fn webdav_sync_download(
@@ -203,20 +288,22 @@ pub async fn webdav_sync_download(
     } else {
         resolve_webdav_sync_secrets_passphrase(&state.app.storage).await.map_err(AppError::from)?
     };
-    let apply_summary = apply_sync_snapshot(
+    let apply_summary = apply_sync_snapshot_with_selection(
         &state.app.storage,
         &snapshot,
         ApplySnapshotOptions {
             secrets_passphrase: explicit_passphrase.or(saved_passphrase.as_deref()),
-            restore_secrets: true,
+            restore_secrets: req.restore_secrets,
         },
+        req.selection.as_ref(),
+        Some(&state.app.plugins),
     )
     .await
     .map_err(AppError::from)?;
     Ok(Json(WebDavDownloadResult {
         summary,
-        editor_settings: snapshot.editor_settings,
-        desktop_settings: snapshot.desktop_settings,
+        editor_settings: state.app.storage.load_editor_settings().await.map_err(AppError::from)?,
+        desktop_settings: state.app.storage.load_desktop_settings().await.map_err(AppError::from)?,
         apply_summary,
     }))
 }
@@ -299,10 +386,23 @@ pub async fn snippet_sync_upload(
     } else {
         None
     };
-    let snapshot =
-        build_sync_snapshot(&state.app.storage, env!("CARGO_PKG_VERSION"), req.editor_settings, secrets_passphrase)
-            .await
-            .map_err(AppError::from)?;
+    let include_secrets = req.include_secrets;
+    let snapshot = build_sync_snapshot_with_selection(
+        &state.app.storage,
+        env!("CARGO_PKG_VERSION"),
+        req.editor_settings,
+        dbx_core::cloud_sync::SyncExportOptions {
+            include_secrets,
+            sync_passphrase: secrets_passphrase,
+            include_ai_secrets: include_secrets,
+            include_tunnel_secrets: include_secrets,
+            include_plugin_secrets: include_secrets,
+        },
+        req.selection.as_ref(),
+        Some(&state.app.plugins),
+    )
+    .await
+    .map_err(AppError::from)?;
     let client = SnippetSyncClient::new(req.config).map_err(AppError::from)?;
     let mut summary = client
         .put_snapshot(&snapshot, req.snippet_passphrase.as_deref(), secrets_passphrase)
@@ -322,22 +422,43 @@ pub async fn snippet_sync_download(
         .get_snapshot(req.snippet_passphrase.as_deref())
         .await
         .map_err(AppError::from)?;
-    let apply_summary = apply_sync_snapshot(
+    let apply_summary = apply_sync_snapshot_with_selection(
         &state.app.storage,
         &snapshot,
         ApplySnapshotOptions {
             secrets_passphrase: req.secrets_passphrase.as_deref(),
             restore_secrets: req.restore_secrets,
         },
+        req.selection.as_ref(),
+        Some(&state.app.plugins),
     )
     .await
     .map_err(AppError::from)?;
     Ok(Json(SnippetDownloadResult {
         summary,
-        editor_settings: snapshot.editor_settings,
-        desktop_settings: snapshot.desktop_settings,
+        editor_settings: state.app.storage.load_editor_settings().await.map_err(AppError::from)?,
+        desktop_settings: state.app.storage.load_desktop_settings().await.map_err(AppError::from)?,
         apply_summary,
     }))
+}
+
+pub async fn snippet_sync_inspect(
+    State(state): State<Arc<WebState>>,
+    Json(mut req): Json<SnippetInspectRequest>,
+) -> Result<Json<SyncSnapshotCatalog>, AppError> {
+    resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
+    let (snapshot, _) = SnippetSyncClient::new(req.config)
+        .map_err(AppError::from)?
+        .get_snapshot(req.snippet_passphrase.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let explicit = req.secrets_passphrase.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let saved = if explicit.is_none() {
+        resolve_webdav_sync_secrets_passphrase(&state.app.storage).await.map_err(AppError::from)?
+    } else {
+        None
+    };
+    describe_sync_snapshot(&snapshot, explicit.or(saved.as_deref())).map(Json).map_err(AppError::from)
 }
 
 #[cfg(test)]
@@ -348,7 +469,6 @@ mod tests {
     use axum::Json;
     use dbx_core::cloud_sync::SnippetProvider;
     use dbx_core::connection::AppState;
-    use dbx_core::storage::Storage;
 
     use crate::state::WebState;
 
@@ -357,11 +477,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dbx-web-snippet-cleanup-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("storage.db");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&db).await.unwrap();
         storage.save_snippet_migration_state("github", "replacement-id", "legacy-id", "content-hash").await.unwrap();
         drop(storage);
 
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&db).await.unwrap();
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let state = Arc::new(WebState::for_tests(app, dir.clone()));
         let Json(settings) = super::snippet_sync_settings(

@@ -89,6 +89,79 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters(sql)).toEqual(["real_param"]);
   });
 
+  it.each(["oracle", "oceanbase-oracle"] as const)("preserves alternative-quoted strings and following parameters for %s", (databaseType) => {
+    for (const literal of [
+      "q'[O'Reilly :hidden]'",
+      "nq'{O'Reilly :hidden}'",
+      "Q'<O'Reilly :hidden>'",
+      "NQ'(O'Reilly :hidden)'",
+      "q'!O'Reilly :hidden!'",
+      "q'[O'Reilly [nested] :hidden]'",
+      "q'[O'Reilly /* :inside */ @LINK ${shell} #{mybatis} ? :hidden]'",
+      "q''O'Reilly :hidden''",
+      "nq'😀O'Reilly :hidden😀'",
+    ]) {
+      const sql = `UPDATE t SET name = ${literal} WHERE id = :id`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" }, hidden: { kind: "string", value: "WRONG" } }, { databaseType })).toBe(`UPDATE t SET name = ${literal} WHERE id = 7`);
+    }
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("ignores parameters inside unterminated alternative-quoted strings for %s", (databaseType) => {
+    for (const literal of ["q'[O'Reilly :hidden", "nq'{O'Reilly :hidden]"]) {
+      const sql = `SELECT :id, ${literal}`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType })).toBe(`SELECT 7, ${literal}`);
+    }
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("preserves separated database links after alternative-quoted strings for %s", (databaseType) => {
+    for (const literal of ["q'[O'Reilly :hidden]'", "nq'{O'Reilly :hidden}'", "q''O'Reilly :hidden''", "nq'😀O'Reilly :hidden😀'"]) {
+      const sql = `SELECT ${literal} FROM employees /* separator */ @LINK WHERE id = :id`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" }, LINK: { kind: "string", value: "WRONG" } }, { databaseType })).toBe(`SELECT ${literal} FROM employees /* separator */ @LINK WHERE id = 7`);
+    }
+  });
+
+  it.each(["postgres", "mysql", "sqlserver", "dameng"] as const)("does not apply alternative-quote rules to %s", (databaseType) => {
+    const sql = "SELECT q'[O' AS label, :id";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT q'[O' AS label, 7");
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("requires a complete alternative-quote prefix for %s", (databaseType) => {
+    for (const prefix of ["myq", "mynq", "my$q"]) {
+      const sql = `SELECT ${prefix}'[O' AS label, :id`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    }
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps alternative-quoted content during MyBatis substitution for %s", (databaseType) => {
+    const sql = "SELECT q'[O'Reilly &lt; :hidden]' FROM t WHERE id &gt; #{id}";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT q'[O'Reilly &lt; :hidden]' FROM t WHERE id > 7");
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("ignores MyBatis closing tags inside alternative-quoted strings for %s", (databaseType) => {
+    const sql = "SELECT * FROM t <where> name = q'[O'Reilly </where> :hidden]' AND id = #{id} </where>";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT * FROM t WHERE name = q'[O'Reilly </where> :hidden]' AND id = 7");
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("preserves trigger pseudo-records after alternative-quoted strings for %s", (databaseType) => {
+    const sql = "CREATE TRIGGER trg BEFORE UPDATE ON t FOR EACH ROW BEGIN :new.name := nq'[O'Reilly :hidden]'; :new.id := :id; END;";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType })).toBe("CREATE TRIGGER trg BEFORE UPDATE ON t FOR EACH ROW BEGIN :new.name := nq'[O'Reilly :hidden]'; :new.id := 7; END;");
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps parameters after ordinary strings ending in a literal backslash for %s", (databaseType) => {
+    const sql = "UPDATE t SET name = 'a\\' WHERE id = :id";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType })).toBe("UPDATE t SET name = 'a\\' WHERE id = 7");
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+    expect(substituteSqlParameters("SELECT 'a\\' FROM t WHERE id &gt; #{id}", { id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT 'a\\' FROM t WHERE id > 7");
+  });
+
   it("extracts supported placeholder syntaxes in order", () => {
     const sql = "select ? as a, :named as b, ${shell_name} as c, #{mybatis_name} as d, @sql_server_name as e";
     expect(extractSqlParameters(sql)).toEqual(["?1", "named", "shell_name", "mybatis_name", "sql_server_name"]);

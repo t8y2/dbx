@@ -371,7 +371,7 @@ function decodeMyBatisXmlComparisonEntities(sql: string, databaseType?: Database
     const next = sql[i + 1];
 
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, databaseType);
       continue;
     }
     if (ch === "[") {
@@ -467,7 +467,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         i = foreach.end;
         continue;
       }
-      const where = readMyBatisWhereAt(sql, i);
+      const where = readMyBatisWhereAt(sql, i, databaseType);
       if (where) {
         occurrences.push({
           key: "",
@@ -491,7 +491,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         i = quoted.end;
         continue;
       }
-      const quotedEnd = skipQuoted(sql, i, ch);
+      const quotedEnd = skipQuoted(sql, i, ch, databaseType);
       // Double quotes can delimit identifiers, so only ordinary single-quoted
       // values opt into embedded interpolation.
       if (ch === "'" && !hasSqlStringLiteralPrefix(sql, i)) {
@@ -663,12 +663,12 @@ function readMyBatisForeachAt(sql: string, start: number, databaseType?: Databas
   };
 }
 
-function readMyBatisWhereAt(sql: string, start: number): { body: string; end: number } | null {
+function readMyBatisWhereAt(sql: string, start: number, databaseType?: DatabaseType): { body: string; end: number } | null {
   if (!/^<where(?:\s|>)/i.test(sql.slice(start))) return null;
   const openingEnd = findXmlTagEnd(sql, start);
   if (openingEnd === -1) return null;
 
-  const close = findMatchingXmlTagClose(sql, openingEnd + 1, "where");
+  const close = findMatchingXmlTagClose(sql, openingEnd + 1, "where", databaseType);
   if (!close) return null;
   return { body: sql.slice(openingEnd + 1, close.start), end: close.end };
 }
@@ -724,7 +724,7 @@ function findMatchingXmlTagClose(sql: string, start: number, tagName: string, da
     const next = sql[i + 1];
 
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, databaseType);
       continue;
     }
     if (ch === "[") {
@@ -986,7 +986,7 @@ function collectTriggerPseudoRecordFieldStarts(sql: string, databaseType?: Datab
     const ch = sql[i];
     const next = sql[i + 1];
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, databaseType);
       continue;
     }
     if (ch === "[") {
@@ -1793,10 +1793,29 @@ function hasSqlStringLiteralPrefix(sql: string, quoteStart: number): boolean {
   return PARAMETER_NAME_CHAR_RE.test(sql[quoteStart - 1]);
 }
 
-function skipQuoted(sql: string, start: number, quote: string): number {
+function skipOracleAlternativeQuoted(sql: string, quoteStart: number): number | null {
+  if (sql[quoteStart - 1]?.toLowerCase() !== "q") return null;
+  const prefixStart = sql[quoteStart - 2]?.toLowerCase() === "n" ? quoteStart - 2 : quoteStart - 1;
+  const previous = sql[prefixStart - 1] ?? "";
+  if (PARAMETER_NAME_CHAR_RE.test(previous) || previous === "$" || previous === "#") return null;
+
+  const openerCodePoint = sql.codePointAt(quoteStart + 1);
+  if (openerCodePoint === undefined) return null;
+  const opener = String.fromCodePoint(openerCodePoint);
+  if (/\s/.test(opener)) return null;
+  const closer = ({ "[": "]", "{": "}", "(": ")", "<": ">" } as Record<string, string>)[opener] ?? opener;
+  const end = sql.indexOf(closer + "'", quoteStart + 1 + opener.length);
+  return end === -1 ? sql.length : end + closer.length + 1;
+}
+
+function skipQuoted(sql: string, start: number, quote: string, databaseType?: DatabaseType): number {
+  if (quote === "'" && (databaseType === "oracle" || databaseType === "oceanbase-oracle")) {
+    const end = skipOracleAlternativeQuoted(sql, start);
+    if (end !== null) return end;
+  }
   let i = start + 1;
   while (i < sql.length) {
-    if (sql[i] === "\\" && quote === "'" && i + 1 < sql.length) {
+    if (sql[i] === "\\" && quote === "'" && databaseType !== "oracle" && databaseType !== "oceanbase-oracle" && i + 1 < sql.length) {
       i += 2;
       continue;
     }

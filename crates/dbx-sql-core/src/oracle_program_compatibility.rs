@@ -195,4 +195,3 @@ pub fn conversion_profile(source_type: &DatabaseType, source_banner: &str, targe
     }
     Ok(conversion)
 }
-

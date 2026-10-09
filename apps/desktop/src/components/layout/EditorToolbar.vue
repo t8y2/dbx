@@ -42,6 +42,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import RuntimeDiagnostics from "@/components/editor/RuntimeDiagnostics.vue";
+import SessionBlockingMonitor from "@/components/editor/SessionBlockingMonitor.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -629,6 +630,7 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ explainAnalyzeTooltip }}</TooltipContent>
       </Tooltip>
+      <SessionBlockingMonitor v-if="activeConnection && ['oracle', 'oceanbase-oracle'].includes(activeConnection.db_type)" :connection="activeConnection" :database="activeTab.database" />
       <Tooltip v-if="showFormatButton">
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @click="emit('formatSql')">

@@ -88,6 +88,7 @@ export interface DesktopSettings {
 export interface McpGlobalPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
+  promptHighRiskSql: boolean;
   allowedConnectionIds: string[] | null;
   allowedGroupIds: string[];
   allowedToolNames: string[] | null;
@@ -169,6 +170,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
 export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
   readOnly: false,
   allowDangerousSql: false,
+  promptHighRiskSql: false,
   allowedConnectionIds: null,
   allowedGroupIds: [],
   allowedToolNames: null,
@@ -240,6 +242,7 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
   return {
     readOnly: policy?.readOnly === true,
     allowDangerousSql: policy?.allowDangerousSql === true,
+    promptHighRiskSql: policy?.promptHighRiskSql === true,
     allowedConnectionIds,
     allowedGroupIds,
     allowedToolNames,
@@ -2429,6 +2432,7 @@ export const useSettingsStore = defineStore("settings", () => {
       await api.saveMcpGlobalPolicy({
         readOnly: next.readOnly,
         allowDangerousSql: next.allowDangerousSql,
+        promptHighRiskSql: next.promptHighRiskSql,
         allowedConnectionIds: next.allowedConnectionIds,
         allowedGroupIds: next.allowedGroupIds,
         allowedToolNames: next.allowedToolNames,

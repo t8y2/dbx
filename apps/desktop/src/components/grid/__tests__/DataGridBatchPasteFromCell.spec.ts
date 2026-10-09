@@ -103,9 +103,10 @@ function mountGrid(options: MountGridOptions = {}) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
-  settingsStore.updateEditorSettings({ dataGridRenderMode: "canvas", dataGridHideNullColumns: options.hideNullColumns ?? false, dataGridQuickEntry: options.quickEntry ?? false });
+  settingsStore.updateEditorSettings({ dataGridRenderMode: "canvas", dataGridMultiRowTranspose: false, dataGridHideNullColumns: options.hideNullColumns ?? false, dataGridQuickEntry: options.quickEntry ?? false });
   const resultRef = shallowRef(markRaw(options.result ?? defaultResult()));
   const visibleRef = shallowRef(true);
+  const gridRef = shallowRef<InstanceType<typeof DataGrid> | null>(null);
 
   const host = document.createElement("div");
   document.body.append(host);
@@ -121,6 +122,7 @@ function mountGrid(options: MountGridOptions = {}) {
                 default: () =>
                   visibleRef.value
                     ? h(DataGrid, {
+                        ref: gridRef,
                         result: resultRef.value,
                         databaseType: options.databaseType ?? "dameng",
                         context: "table-data",
@@ -155,7 +157,7 @@ function mountGrid(options: MountGridOptions = {}) {
   settingsStore.updateEditorSettings({ dataGridRenderMode: "dom" });
   const mounted = { app, host };
   mountedApps.push(mounted);
-  return { ...mounted, resultRef, visibleRef };
+  return { ...mounted, resultRef, visibleRef, gridRef };
 }
 
 async function settle() {
@@ -184,10 +186,10 @@ async function selectCell(cell: HTMLElement, options: { shiftKey?: boolean; ctrl
   await settle();
 }
 
-async function selectRowNumber(row: HTMLElement) {
+async function selectRowNumber(row: HTMLElement, ctrlKey = false) {
   const rowNumber = row.querySelector<HTMLElement>(".data-grid-row-number");
   if (!rowNumber) throw new Error("Row number not found");
-  rowNumber.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+  rowNumber.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, ctrlKey }));
   window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
   await settle();
 }
@@ -751,5 +753,115 @@ describe("DataGrid INSERT statement paste into blank new rows", () => {
     expect(visibleCellTexts(rows[0]!)[2]).toBe("a");
     expect(visibleCellTexts(rows[1]!)[0]).toBe("2");
     expect(visibleCellTexts(rows[1]!)[2]).toBe("b");
+  });
+});
+
+describe("selected transpose edit scope", () => {
+  function resultWithThreeRows(): QueryResult {
+    return {
+      ...defaultResult(),
+      rows: [
+        [1, null, "first", "a"],
+        [2, null, "hidden", "b"],
+        [3, null, "third", "c"],
+      ],
+    };
+  }
+
+  async function toggleTranspose(host: HTMLElement) {
+    gridRoot(host).dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+    await settle();
+  }
+
+  function transposeCells(host: HTMLElement, columnIndex = 2): HTMLElement[] {
+    const field = host.querySelector(`[data-grid-transpose-column-index="${columnIndex}"]`);
+    return [...(field?.closest(".data-grid-transpose-row")?.querySelectorAll<HTMLElement>("[data-grid-transpose-cell]") ?? [])];
+  }
+
+  async function openSelectedRows(host: HTMLElement) {
+    await settle();
+    const rows = displayRows(host);
+    await selectRowNumber(rows[0]);
+    await selectRowNumber(rows[2], true);
+    await toggleTranspose(host);
+    expect(transposeCells(host).map((cell) => cell.textContent?.trim())).toEqual(["first", "third"]);
+  }
+
+  it.each(["keyboard", "mouse"])("fills only visible selected records after %s range selection", async (input) => {
+    const { host } = mountGrid({ result: resultWithThreeRows() });
+    await openSelectedRows(host);
+    transposeCells(host)[0].click();
+    await settle();
+    if (input === "keyboard") {
+      gridRoot(host).dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", shiftKey: true, bubbles: true, cancelable: true }));
+    } else {
+      transposeCells(host)[1].dispatchEvent(new MouseEvent("click", { shiftKey: true, bubbles: true }));
+    }
+    await settle();
+    await paste(host, "changed");
+    await toggleTranspose(host);
+    expect(
+      displayRows(host)
+        .slice(0, 3)
+        .map((row) => visibleCellTexts(row)[2]),
+    ).toEqual(["changed", "hidden", "changed"]);
+  });
+
+  it("generates consecutive values and reports only the selected visible cells", async () => {
+    const { host } = mountGrid({ result: resultWithThreeRows() });
+    await openSelectedRows(host);
+    transposeCells(host)[0].click();
+    await settle();
+    transposeCells(host)[1].dispatchEvent(new MouseEvent("click", { shiftKey: true, bubbles: true }));
+    await settle();
+    transposeCells(host)[1].dispatchEvent(new MouseEvent("contextmenu", { shiftKey: true, bubbles: true, cancelable: true, clientX: 12, clientY: 12 }));
+    await settle();
+    const menuButton = (label: string) => {
+      const button = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((item) => item.textContent?.trim() === label);
+      if (!button) throw new Error(`Context menu item not found: ${label}`);
+      return button;
+    };
+    menuButton(i18n.global.t("grid.generateValue")).dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    menuButton(i18n.global.t("grid.generateIncrementId")).click();
+    await settle();
+    const dialog = document.querySelector<HTMLElement>("[role='dialog']")!;
+    expect(dialog.textContent).toContain(i18n.global.t("grid.generateSequenceDescription", { count: 2 }));
+    const apply = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("grid.applyBulkEdit"))!;
+    apply.click();
+    await settle();
+    expect(useToast().message.value).toBe(i18n.global.t("grid.generatedValuesApplied", { count: 2 }));
+    await toggleTranspose(host);
+    expect(
+      displayRows(host)
+        .slice(0, 3)
+        .map((row) => visibleCellTexts(row)[2]),
+    ).toEqual(["1", "hidden", "2"]);
+  });
+
+  it("maps pasted records through the transpose scope and stops at its end", async () => {
+    const { host } = mountGrid({ result: resultWithThreeRows() });
+    await openSelectedRows(host);
+    transposeCells(host)[0].click();
+    await settle();
+    await paste(host, "one\ntwo\nextra");
+    await toggleTranspose(host);
+    expect(
+      displayRows(host)
+        .slice(0, 3)
+        .map((row) => visibleCellTexts(row)[2]),
+    ).toEqual(["one", "hidden", "two"]);
+  });
+
+  it("restores the captured records by primary key after clicking a cell and refreshing reordered data", async () => {
+    const original = resultWithThreeRows();
+    const { host, gridRef, resultRef } = mountGrid({ result: original });
+    await openSelectedRows(host);
+    transposeCells(host)[0].click();
+    await settle();
+    await gridRef.value!.onToolbarRefresh();
+    resultRef.value = markRaw({ ...original, rows: [original.rows[2], original.rows[0], original.rows[1]] });
+    await settle();
+    expect(transposeCells(host).map((cell) => cell.textContent?.trim())).toEqual(["third", "first"]);
   });
 });

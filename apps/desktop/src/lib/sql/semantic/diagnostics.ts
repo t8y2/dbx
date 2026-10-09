@@ -1,5 +1,5 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
-import { getSqlCompletionContext, isOracleSystemValueName, matchesOceanBaseCompletionCacheKey } from "@/lib/sql/sqlCompletion";
+import { getSqlCompletionContext, isOraclePseudoColumnName, isOracleSystemValueName, matchesOceanBaseCompletionCacheKey } from "@/lib/sql/sqlCompletion";
 import { tokenizeSqlSemantic, tokenIsIdentifier } from "@/lib/sql/semantic/tokens";
 import { executableStatementRanges, keepsOracleStyleBlockTogether, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { DBX_TDENGINE_TBNAME_COLUMN, isTdengineStableTableType } from "@/lib/table/tableEditing";
@@ -289,7 +289,7 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   }
 
   for (const column of analysis.columns) {
-    if (isUnquotedOracleSystemValueReference(column, schema)) continue;
+    if (isUnquotedOracleBuiltinReference(column, schema)) continue;
     const table = resolveColumnTable(column, tables, knownTables, schema.sql, scopesById);
     if (!table) continue;
     if (schema.missingTables?.has(tableReferenceKey(table))) continue;
@@ -354,8 +354,8 @@ function completionTableReferenceKey(table: Pick<SqlCompletionTable, "name" | "d
   return normalizeName(table.name);
 }
 
-function isUnquotedOracleSystemValueReference(column: SqlColumnReference, schema: SqlSemanticDiagnosticSchema): boolean {
-  if (column.qualifier || !isOracleSystemValueName(column.name, schema.databaseType)) return false;
+function isUnquotedOracleBuiltinReference(column: SqlColumnReference, schema: SqlSemanticDiagnosticSchema): boolean {
+  if (column.qualifier || !(isOracleSystemValueName(column.name, schema.databaseType) || isOraclePseudoColumnName(column.name, schema.databaseType))) return false;
   if (!schema.sql) return false;
 
   const range = sqlTextSpanToOffsetRange(schema.sql, column.span);

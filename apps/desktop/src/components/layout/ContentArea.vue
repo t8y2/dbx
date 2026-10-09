@@ -2367,7 +2367,7 @@ defineExpose({
                         <span>{{ t("grid.transposeMultiRowToggle") }}</span>
                       </div>
                       <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                        <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                        <div class="grid min-w-40 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
                           <button
                             type="button"
                             class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
@@ -3068,7 +3068,7 @@ defineExpose({
                   <span>{{ t("grid.transposeMultiRowToggle") }}</span>
                 </div>
                 <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                  <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                  <div class="grid min-w-40 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
                     <button
                       type="button"
                       class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"

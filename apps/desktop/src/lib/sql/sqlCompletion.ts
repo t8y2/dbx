@@ -673,9 +673,14 @@ const ORACLE_SQL_TYPES = [
 const ORACLE_SYSTEM_VALUE_NAMES = ["SYSDATE", "SYSTIMESTAMP", "CURRENT_DATE", "CURRENT_TIMESTAMP", "LOCALTIMESTAMP", "SESSIONTIMEZONE", "DBTIMEZONE", "USER", "UID"] as const;
 
 const ORACLE_SYSTEM_VALUE_NAME_SET = new Set<string>(ORACLE_SYSTEM_VALUE_NAMES);
+const ORACLE_PSEUDO_COLUMN_NAMES = new Set(["CONNECT_BY_ISCYCLE", "CONNECT_BY_ISLEAF", "LEVEL", "ORA_ROWSCN", "ROWID", "ROWNUM"]);
 
 export function isOracleSystemValueName(name: string, databaseType?: DatabaseType): boolean {
   return isOracleLikeDatabase(databaseType) && ORACLE_SYSTEM_VALUE_NAME_SET.has(name.toUpperCase());
+}
+
+export function isOraclePseudoColumnName(name: string, databaseType?: DatabaseType): boolean {
+  return isOracleLikeDatabase(databaseType) && ORACLE_PSEUDO_COLUMN_NAMES.has(name.toUpperCase());
 }
 
 const NON_ORACLE_COMPLETION_WORDS = new Set(["BIGSERIAL", "BOOLEAN", "ELSEIF", "LIMIT", "LOCALTIME", "SERIAL", "STRING", "TEXT", "TIME", "USE"]);

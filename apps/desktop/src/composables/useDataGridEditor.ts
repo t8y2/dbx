@@ -131,6 +131,7 @@ export interface UseDataGridEditorOptions {
   manualTransactionSessionId?: ComputedRef<string | undefined>;
   ensureManualTransactionSession?: ComputedRef<(() => Promise<string>) | undefined>;
   onManualTransactionMutation?: () => void;
+  onSaveConflict?: (message: string) => void;
   sql: ComputedRef<string | undefined>;
   searchText: Ref<string>;
   whereFilterInput: Ref<string>;
@@ -2297,6 +2298,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     clearSavedPendingChanges(snapshot);
     if (!hasPendingChanges.value) exitTransaction();
     clearPendingChangeHistory();
+    // Notify before reload can replace the rows and clear their error state.
+    if (deleteConflict) options.onSaveConflict?.(deleteConflict);
     if (shouldReloadAfterSqlSave && !savedRowsRefreshed) {
       reloadCurrentData();
     }

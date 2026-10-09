@@ -15,6 +15,7 @@ struct Fixture {
     index_exists: bool,
     index_name: String,
     ambiguous: bool,
+    readback_error: bool,
 }
 struct Session {
     engine: Engine,
@@ -67,6 +68,7 @@ fn fixture_session(engine: Engine, request: &UniqueChange) -> Session {
             index_exists: true,
             index_name,
             ambiguous: false,
+            readback_error: false,
         }),
     }
 }
@@ -79,6 +81,9 @@ impl ConstraintSession for Session {
         let mut fixture = self.fixture.lock().unwrap();
         fixture.queries.push(sql.into());
         if sql.starts_with("SELECT c.CONSTRAINT_NAME") {
+            if fixture.readback_error && !fixture.writes.is_empty() {
+                return Err("dictionary unavailable".into());
+            }
             return Ok(rows(
                 fixture
                     .current
@@ -194,7 +199,7 @@ impl ConstraintSession for Session {
                 let definition = fixture.desired.clone().unwrap();
                 let index_name = if self.engine == Engine::OceanBaseOracle {
                     definition.name.clone()
-                } else if sql.contains(&qualified("Owner", &fixture.index_name)?) {
+                } else if sql.contains(" RENAME CONSTRAINT ") || sql.contains(&qualified("Owner", &fixture.index_name)?) {
                     fixture.index_name.clone()
                 } else {
                     "Replacement Index".into()
@@ -209,6 +214,54 @@ impl ConstraintSession for Session {
             return Ok(rows(vec![]));
         }
         Err(format!("Unexpected query: {sql}"))
+    }
+}
+
+#[tokio::test]
+async fn oracle_name_only_rename_preserves_the_backing_index() {
+    let mut request = request();
+    let mut desired = key();
+    desired.name = "UQ renamed".into();
+    request.desired = Some(desired);
+    let session = fixture_session(Engine::Oracle, &request);
+    let plan = preview_unique(&session, &request).await.unwrap();
+    assert_eq!(plan.statements.len(), 1);
+    assert!(plan.statements[0].contains(" RENAME CONSTRAINT "));
+    let result = apply_unique(&session, &request, &plan.revision).await.unwrap();
+    assert!(result.success);
+    let current = result.current_constraint.unwrap();
+    assert_eq!(current.definition, request.desired.unwrap());
+    assert_eq!(current.index_name.as_deref(), Some("User Index"));
+    assert!(session.fixture.lock().unwrap().index_exists);
+}
+
+#[tokio::test]
+async fn stale_preview_refuses_writes_and_preserves_original_unique_constraint() {
+    for engine in [Engine::Oracle, Engine::OceanBaseOracle] {
+        let request = request();
+        let session = fixture_session(engine, &request);
+        let plan = preview_unique(&session, &request).await.unwrap();
+        session.fixture.lock().unwrap().stamp += 1;
+        assert!(apply_unique(&session, &request, &plan.revision).await.is_err());
+        let fixture = session.fixture.lock().unwrap();
+        assert!(fixture.writes.is_empty());
+        assert_eq!(fixture.current.as_ref().unwrap().definition, key());
+    }
+}
+
+#[tokio::test]
+async fn failed_dictionary_readback_does_not_report_success_or_fabricate_recovery() {
+    for engine in [Engine::Oracle, Engine::OceanBaseOracle] {
+        let request = request();
+        let session = fixture_session(engine, &request);
+        let plan = preview_unique(&session, &request).await.unwrap();
+        session.fixture.lock().unwrap().readback_error = true;
+        let result = apply_unique(&session, &request, &plan.revision).await.unwrap();
+        assert!(!result.success);
+        assert!(result.refresh_error.is_some());
+        assert!(result.current_constraint.is_none());
+        assert!(result.recovery_statements.is_empty());
+        assert_eq!(session.fixture.lock().unwrap().writes.len(), plan.statements.len());
     }
 }
 

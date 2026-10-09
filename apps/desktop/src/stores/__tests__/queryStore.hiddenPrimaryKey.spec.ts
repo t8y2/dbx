@@ -34,6 +34,8 @@ const prepareQueryPaginationExecutionPlan = vi.fn(async (options) => ({
 const editorSettings = {
   pageSize: 100,
   autoCalculateTotalRows: false,
+  queryResultMaxRowsEnabled: true,
+  queryResultMaxRows: 100_000,
 };
 
 function deferred<T>() {
@@ -122,6 +124,8 @@ describe("queryStore hidden primary key editing", () => {
     }));
     editorSettings.pageSize = 100;
     editorSettings.autoCalculateTotalRows = false;
+    editorSettings.queryResultMaxRowsEnabled = true;
+    editorSettings.queryResultMaxRows = 100_000;
     executeQuery.mockResolvedValue({
       columns: ["row_count"],
       rows: [[0]],
@@ -1961,6 +1965,52 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.result?.hidden_column_indexes).toEqual([1]);
     await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("primary-key-not-returned"));
     expect(tab.queryAnalysis).toBeUndefined();
+  });
+
+  it.each([
+    { manual: false, tailRows: 0 },
+    { manual: false, tailRows: 1 },
+    { manual: false, tailRows: 4 },
+    { manual: true, tailRows: 0 },
+    { manual: true, tailRows: 1 },
+    { manual: true, tailRows: 4 },
+  ])("accounts for appended rows once (manual=$manual, tail=$tailRows)", async ({ manual, tailRows }) => {
+    editorSettings.queryResultMaxRows = 10;
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false });
+    prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageSql: options.sql,
+      pageLimit: options.pagination.limit,
+      pageOffset: options.pagination.offset,
+      countSql: undefined,
+      useAgentResultSession: false,
+    }));
+    const page = (offset: number, count: number) => ({ columns: ["id"], rows: Array.from({ length: count }, (_, index) => [offset + index]), has_more: false, affected_rows: 0, execution_time_ms: 1 });
+    const execute = manual ? executeInManualTransaction : executeMulti;
+    execute.mockResolvedValueOnce([page(0, 6)]).mockResolvedValueOnce([page(6, tailRows)]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("mysql-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === id)!;
+    if (manual) {
+      tab.autoCommit = false;
+      tab.txnSessionId = "source-transaction";
+    }
+    await store.executeTabSql(id, "SELECT id FROM items", { pagination: { limit: 6, offset: 0 } });
+    await store.executeTabSql(id, "SELECT id FROM items", {
+      pagination: { limit: 4, offset: 6 },
+      preserveResultDuringExecution: true,
+      appendResult: { maxRows: 10 },
+    });
+    expect(tab.result?.rows).toHaveLength(6 + tailRows);
+    expect(tab.result?.truncated === true).toBe(tailRows === 4);
+    expect(tab.resultExecutedPageOffset).toBe(6);
+    expect(tab.resultPageOffset).toBe(0);
+    if (tailRows < 4) {
+      expect((await store.fetchTabResultForExport(id, undefined, true))?.rows).toEqual(tab.result?.rows);
+      expect(execute).toHaveBeenCalledTimes(2);
+    }
+    if (manual) expect(tab.txnSessionId).toBe("source-transaction");
   });
 
   it("removes the generated row number before appending OceanBase Oracle pages", async () => {

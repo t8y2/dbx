@@ -7,7 +7,7 @@ name: UI preview
 #
 # Pull requests come from forks, so this runs on pull_request_target with
 # the scripts from main. The PR's code is only built and run in the record
-# job, which holds the DeepSeek key (environment ui-preview, no approval
+# job, which holds the planner's API key (environment ui-preview, no approval
 # asked: any PR's code can read it, so the key there is one with a low
 # limit) and nothing that can write to the repo. The publish job, which can
 # write, never runs the PR's code.
@@ -149,7 +149,9 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Record
         env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          PLAN_API_URL: https://api.atlascloud.ai/v1/chat/completions
+          PLAN_API_KEY: ${{ secrets.PLAN_API_KEY }}
+          PLAN_MODEL: ${{ vars.UI_PREVIEW_PLAN_MODEL || 'openai/gpt-5.4-mini' }}
           DIFF_FILE: ${{ github.workspace }}/pr-info/pr.diff
           PR_BODY_FILE: ${{ github.workspace }}/pr-info/body.txt
           DIST_DIR: ${{ github.workspace }}/pr/dist

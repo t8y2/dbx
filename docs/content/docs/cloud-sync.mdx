@@ -163,7 +163,11 @@ Neither password can be recovered. An encrypted snippet cannot be restored witho
 
 Enter the WebDAV endpoint, username, application password, and remote snapshot path. The default path is `DBX/sync/snapshot.json`.
 
-Some WebDAV services (for example CSTCloud) only allow specific client applications and reject unknown clients based on the User-Agent. When you hit such a restriction, fill the User-Agent field with an identifier the service accepts (for example `Zotero/7.0.15`). It stays empty by default, which sends no User-Agent.
+Set the remote snapshot path to `DBX/sync/snapshot.zip` to enable ZIP snapshots. DBX compresses the same JSON snapshot into a ZIP containing only `snapshot.json` and uploads it as `application/zip`. Other paths still upload JSON. Downloads detect JSON or ZIP from the content, including JSON snapshots that older versions stored at a `.zip` path. Both the ZIP archive and its uncompressed JSON are limited to 100 MiB, and no files are extracted to disk. Compression is not encryption; existing sensitive-data encryption settings still apply.
+
+Some WebDAV services, including CSTCloud Capsule, restrict both client applications and upload file types. For a client restriction, set User-Agent to an identifier accepted by the service (for example `Zotero/10.0.0`). It stays empty by default, which sends no User-Agent. Zotero-specific endpoints may also accept only `.zip` / `.prop` uploads, so changing User-Agent alone does not make JSON uploads compatible; try a ZIP snapshot in this case. For upload errors 403, 405 or 415, also check account write permissions and server policies. ZIP support does not bypass permission checks.
+
+Switching formats uses a new remote path and does not delete the original JSON snapshot. Configure the same path on all devices. Upgrade every device to a DBX version supporting ZIP snapshots before enabling ZIP; older versions must keep using a JSON path. Use a separate DBX directory, not Zotero's own synchronization directory.
 
 In Web/Docker mode, the DBX server sends WebDAV requests, so browser CORS restrictions do not apply. WebDAV application passwords are encrypted in the current DBX instance and are never included in sync snapshots.
 

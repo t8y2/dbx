@@ -1309,6 +1309,7 @@ export default withEnglishFallback({
     globalQueryTimeoutHint: "範圍為0～3600秒。設為0表示不限制",
     useConnectionQueryTimeout: "目前連線",
     idleTimeout: "閒置逾時（秒）",
+    idleTimeoutHint: "作用於連線池內閒置連線的回收釋放。",
     keepaliveInterval: "保持連線間隔（秒）",
     readOnly: "唯讀模式",
     readOnlyHint: "阻止所有寫入操作（INSERT、UPDATE、DELETE 等）",

@@ -84,7 +84,7 @@ test("uses agent-reported visible schemas for Vastbase and Kingbase index lookup
   const listIndexes = vi.fn(async (): Promise<IndexInfo[]> => []);
   vi.doMock("@/lib/backend/api", () => ({ getColumns, listIndexes }));
 
-  const { clearTableMetadataCache, loadTableMetadata } = await import("../../apps/desktop/src/lib/metadata/tableMetadataCache.ts");
+  const { clearTableMetadataCache, loadTableColumns, loadTableMetadata } = await import("../../apps/desktop/src/lib/metadata/tableMetadataCache.ts");
   clearTableMetadataCache();
 
   const testCases = [
@@ -104,6 +104,18 @@ test("uses agent-reported visible schemas for Vastbase and Kingbase index lookup
 
     assert.equal(result.metadata.schema, testCase.resolvedSchema);
     assert.equal(listIndexes.mock.calls[index]?.[2], testCase.resolvedSchema);
+
+    const columnsResult = await loadTableColumns({
+      connectionId: testCase.connectionId,
+      database: "app",
+      schema: "",
+      tableName: "users",
+      tableType: "TABLE",
+      databaseType: testCase.databaseType,
+      driverProfile: testCase.databaseType,
+      force: true,
+    });
+    assert.equal(columnsResult.schema, testCase.resolvedSchema);
   }
   assert.equal(listIndexes.mock.calls.length, 2);
 });

@@ -4657,3 +4657,101 @@ test("recordCompletionSelection boosts future ranking", () => {
   // user_profiles should now rank higher than users due to history boost
   assert.equal(tableItems[0]?.label, "user_profiles");
 });
+
+// --- Table completion identifierCase (#11400) ---
+
+test("table completions follow identifierCase lower (#11400)", () => {
+  const oracleTables = [
+    { name: "USERS", schema: "SCOTT", type: "table" as const },
+    { name: "DEPARTMENT", schema: "SCOTT", type: "table" as const },
+  ];
+  const items = buildSqlCompletionItems("select * from u", "select * from u".length, {
+    tables: oracleTables,
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+    currentSchema: "SCOTT",
+    identifierCase: "lower",
+    autoAliasTables: true,
+  });
+  const userItem = items.find((item) => item.label === "users");
+  assert.ok(userItem, "should provide lowercase table label");
+  assert.equal(userItem?.apply, "users us", "should apply bare lowercase table name and alias in Oracle");
+});
+
+test("table completions follow identifierCase upper (#11400)", () => {
+  const pgTables = [{ name: "users", schema: "public", type: "table" as const }];
+  const items = buildSqlCompletionItems("select * from u", "select * from u".length, {
+    tables: pgTables,
+    columnsByTable: new Map(),
+    databaseType: "postgres",
+    currentSchema: "public",
+    identifierCase: "upper",
+    autoAliasTables: true,
+  });
+  const userItem = items.find((item) => item.label === "USERS");
+  assert.ok(userItem, "should provide uppercase table label");
+  assert.equal(userItem?.apply, "USERS us", "should apply bare uppercase table name and alias");
+});
+
+test("table completions preserve identifier case by default (#11400)", () => {
+  const oracleTables = [{ name: "USERS", schema: "SCOTT", type: "table" as const }];
+  const items = buildSqlCompletionItems("select * from u", "select * from u".length, {
+    tables: oracleTables,
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+    currentSchema: "SCOTT",
+    identifierCase: "preserve",
+    autoAliasTables: false,
+  });
+  const userItem = items.find((item) => item.label === "USERS");
+  assert.ok(userItem, "should keep original uppercase label");
+  assert.equal(userItem?.apply, "USERS", "should apply original table name");
+});
+
+test("schema-qualified table completions follow identifierCase (#11400)", () => {
+  const collidingTables = [
+    { name: "ORDERS", schema: "SCOTT", type: "table" as const },
+    { name: "ORDERS", schema: "STAGING", type: "table" as const },
+  ];
+  const items = buildSqlCompletionItems("select * from o", "select * from o".length, {
+    tables: collidingTables,
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+    currentSchema: "OTHER",
+    identifierCase: "lower",
+    autoAliasTables: false,
+  });
+  const scottOrder = items.find((item) => item.apply === "scott.orders");
+  const stagingOrder = items.find((item) => item.apply === "staging.orders");
+  assert.ok(scottOrder, "should qualify scott.orders in lowercase");
+  assert.ok(stagingOrder, "should qualify staging.orders in lowercase");
+});
+
+test("table completions with applyName follow identifierCase (#11400)", () => {
+  const tablesWithApplyName = [
+    { name: "DEPT_DICT", schema: "COMM", applyName: "COMM.DEPT_DICT", type: "table" as const },
+  ];
+  const items = buildSqlCompletionItems("select * from d", "select * from d".length, {
+    tables: tablesWithApplyName,
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+    identifierCase: "lower",
+  });
+  const deptItem = items.find((item) => item.label === "dept_dict");
+  assert.ok(deptItem, "should provide lowercase table label");
+  assert.equal(deptItem?.apply, "comm.dept_dict", "should lowercase supplied applyName");
+});
+
+test("CTE table completions follow identifierCase (#11400)", () => {
+  const sql = "with MY_CTE as (select 1 from dual) select * from m";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+    identifierCase: "lower",
+  });
+  const cteItem = items.find((item) => item.label === "my_cte");
+  assert.ok(cteItem, "should provide lowercase CTE table label");
+  assert.equal(cteItem?.apply, "my_cte", "should apply lowercase CTE name");
+});
+

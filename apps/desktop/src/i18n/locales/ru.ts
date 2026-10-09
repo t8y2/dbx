@@ -1542,6 +1542,7 @@ export default withEnglishFallback({
     globalQueryTimeoutHint: "Диапазон: от 0 до 3600 секунд. Установите 0, чтобы отключить тайм-аут.",
     useConnectionQueryTimeout: "Подключение",
     idleTimeout: "Тайм-аут простоя (секунды)",
+    idleTimeoutHint: "Применяется для освобождения простаивающих соединений в пуле соединений.",
     keepaliveInterval: "Интервал keepalive (секунды)",
     readOnly: "Только чтение",
     readOnlyHint: "Блокировать все операции записи (INSERT, UPDATE, DELETE и т. д.)",

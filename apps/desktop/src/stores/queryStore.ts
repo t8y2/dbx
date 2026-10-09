@@ -6283,13 +6283,15 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function loadedEditableSourceFromColumns(target: EditableSourceMetadataTarget, loadedColumns: Awaited<ReturnType<typeof loadTableColumns>>): LoadedEditableSource {
+    const usesReportedSchema = target.request.databaseType === "vastbase" || target.request.databaseType === "kingbase";
+    const writeSchema = usesReportedSchema && !target.writeSchema ? loadedColumns.schema : target.writeSchema;
     return {
       source: target.source,
       analysis: target.analysis,
       tableMeta: {
         catalog: target.request.catalog,
         database: target.request.database,
-        schema: target.writeSchema,
+        schema: writeSchema,
         tableName: target.request.tableName,
         tableType: loadedColumns.tableType,
         columns: loadedColumns.columns,

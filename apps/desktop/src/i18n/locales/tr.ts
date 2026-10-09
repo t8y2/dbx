@@ -1286,6 +1286,7 @@ export default withEnglishFallback({
     globalQueryTimeoutHint: "Aralık: 0 ile 3600 saniye. Zaman aşımı istemiyorsanız 0 yapın.",
     useConnectionQueryTimeout: "Bağlantı",
     idleTimeout: "Boşta Kalma Zaman Aşımı (saniye)",
+    idleTimeoutHint: "Bağlantı havuzundaki boşta kalan bağlantıların geri kazanılması için geçerlidir.",
     keepaliveInterval: "Keepalive Aralığı (saniye)",
     readOnly: "Salt Okunur",
     readOnlyHint: "Tüm yazma işlemlerini engelle (INSERT, UPDATE, DELETE vb.)",

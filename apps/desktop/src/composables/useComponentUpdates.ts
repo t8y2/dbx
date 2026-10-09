@@ -215,6 +215,10 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
     if (!options.isDesktop) return result;
     if (activeUpdatePromise) return activeUpdatePromise;
     updating.value = true;
+    // 作废更新窗口开始前发出的刷新：旧的 refreshPromise 带的是升级前快照，
+    // 必须一并清掉，否则更新流程会复用它而拿不到安装后的权威状态。
+    refreshVersion += 1;
+    refreshPromise = null;
     const operation = (async () => {
       await refresh();
       const initialCheckError = lastError.value;
@@ -229,6 +233,9 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
       return await operation;
     } finally {
       if (activeUpdatePromise === operation) activeUpdatePromise = null;
+      // 安装结束后同样作废在途刷新，确保权威状态不会被旧快照覆盖。
+      refreshVersion += 1;
+      refreshPromise = null;
       updating.value = false;
       updatingCategory.value = null;
     }

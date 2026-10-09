@@ -150,6 +150,28 @@ export function useScheduledDatabaseBackups(_options: { scheduler?: boolean } = 
     return waitForRun(await api.databaseBackupCommand<DatabaseBackupRun>({ action: "run", request: { config, displayName, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone } }));
   }
 
+  /**
+   * Queues one one-shot run per config and waits for all of them. The backend worker executes queued runs one at a
+   * time, so this only fans out the requests; a config that cannot be queued is reported without blocking the rest.
+   * `onQueued` lets the caller track run IDs (for example to cancel the whole batch) before the runs finish.
+   */
+  async function runOneShotBatch(configs: readonly DatabaseBackupExecutionConfig[], displayName = "Database backup", onQueued?: (run: DatabaseBackupRun) => void) {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const queued: DatabaseBackupRun[] = [];
+    const enqueueErrors: Array<{ connectionId: string; error: unknown }> = [];
+    for (const config of configs) {
+      try {
+        const run = await api.databaseBackupCommand<DatabaseBackupRun>({ action: "run", request: { config, displayName, timeZone } });
+        queued.push(run);
+        onQueued?.(run);
+      } catch (error) {
+        enqueueErrors.push({ connectionId: config.connectionId, error });
+      }
+    }
+    const finished = await Promise.all(queued.map((run) => waitForRun(run)));
+    return { runs: finished.filter((run): run is DatabaseBackupRun => !!run), enqueueErrors };
+  }
+
   onMounted(() => {
     subscribers += 1;
     if (!timer)
@@ -184,6 +206,7 @@ export function useScheduledDatabaseBackups(_options: { scheduler?: boolean } = 
     renameRun,
     runSchedule,
     runOneShot,
+    runOneShotBatch,
     cancelRun,
     processDueSchedules: refresh,
   };

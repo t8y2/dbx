@@ -39,7 +39,9 @@ def configure(path, validate=None):
         if original_stat:
             backup = path.with_name(path.name + ".before-dbx-mirror")
             if not backup.exists():
-                with backup.open("xb") as output:
+                descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                     stat.S_IMODE(original_stat.st_mode))
+                with os.fdopen(descriptor, "wb") as output:
                     output.write(path.read_bytes())
                 shutil.copystat(path, backup)
                 if hasattr(os, "chown"):

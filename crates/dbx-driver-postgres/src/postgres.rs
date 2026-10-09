@@ -503,6 +503,26 @@ impl<'a> FromSql<'a> for PgRawBytes {
     }
 }
 
+struct PgJsonText(String);
+
+impl<'a> FromSql<'a> for PgJsonText {
+    fn from_sql(ty: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        let text = if *ty == Type::JSONB {
+            match raw.split_first() {
+                Some((&1, text)) => text,
+                _ => return Err("unsupported PostgreSQL jsonb version".into()),
+            }
+        } else {
+            raw
+        };
+        Ok(PgJsonText(std::str::from_utf8(text)?.to_string()))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(*ty, Type::JSON | Type::JSONB)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PgPoint {
     x: f64,
@@ -1103,6 +1123,9 @@ pub fn pg_value_to_json_classified(row: &impl ValueRow, idx: usize, col_type: Pg
             .map(|bytes| super::binary_value_to_json(&bytes))
             .unwrap_or(serde_json::Value::Null),
         PgColType::Json => {
+            if let Ok(PgJsonText(text)) = row.try_get::<_, PgJsonText>(idx) {
+                return serde_json::Value::String(text);
+            }
             if let Ok(v) = row.try_get::<_, serde_json::Value>(idx) {
                 return serde_json::Value::String(v.to_string());
             }
@@ -11505,6 +11528,43 @@ mod tests {
         assert!(Vec::<Option<serde_json::Value>>::accepts(&Type::JSONB_ARRAY));
         assert!(!Vec::<Option<serde_json::Value>>::accepts(&Type::TEXT_ARRAY));
         assert!(!Vec::<Option<serde_json::Value>>::accepts(&Type::INT4_ARRAY));
+    }
+
+    #[test]
+    fn postgres_json_text_keeps_server_formatting() {
+        let json = PgJsonText::from_sql(&Type::JSON, br#"{"k1":      12, "k1": 2}"#).unwrap();
+        let jsonb = PgJsonText::from_sql(&Type::JSONB, &pg_jsonb_binary(br#"{"k1": 12}"#)).unwrap();
+
+        assert_eq!(json.0, r#"{"k1":      12, "k1": 2}"#);
+        assert_eq!(jsonb.0, r#"{"k1": 12}"#);
+        assert!(PgJsonText::from_sql(&Type::JSONB, &[2, b'1']).is_err());
+        assert!(!PgJsonText::accepts(&Type::TEXT));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL database"]
+    async fn postgres_query_json_cells_match_server_text_output() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(10), "UTC")
+            .await
+            .expect("connect PostgreSQL database");
+        let client = pool.get().await.expect("checkout PostgreSQL database");
+        let sql = r#"SELECT '{"k1":      12, "b": [1,2]}'::json AS j, '{"k1":      12, "b": [1,2]}'::jsonb AS jb"#;
+
+        for prefer_text_protocol in [false, true] {
+            let result = execute_query_with_max_rows_inner(&client, sql, None, prefer_text_protocol, None, false)
+                .await
+                .expect("select json values");
+
+            assert_eq!(
+                result.rows[0],
+                vec![
+                    serde_json::json!(r#"{"k1":      12, "b": [1,2]}"#),
+                    serde_json::json!(r#"{"b": [1, 2], "k1": 12}"#),
+                ],
+                "prefer_text_protocol={prefer_text_protocol}"
+            );
+        }
     }
 
     #[test]

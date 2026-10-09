@@ -461,6 +461,7 @@ mod tests {
 
     fn sample_schema_preparation() -> SchemaDiffPreparation {
         SchemaDiffPreparation {
+            routine_steps: Vec::new(),
             diffs: vec![sample_table_diff("added", "users"), sample_table_diff("modified", "orders")],
             sync_sql: "-- Schema sync SQL for users\n-- Schema sync SQL for orders".to_string(),
             function_diffs: Vec::new(),

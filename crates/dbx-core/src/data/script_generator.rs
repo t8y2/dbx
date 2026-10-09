@@ -2081,6 +2081,7 @@ mod tests {
 
     fn empty_schema_diff() -> SchemaDiffPreparation {
         SchemaDiffPreparation {
+            routine_steps: vec![],
             diffs: vec![],
             function_diffs: vec![],
             sequence_diffs: vec![],

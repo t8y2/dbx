@@ -6437,6 +6437,14 @@ export const useQueryStore = defineStore("query", () => {
           traceLogger: (event) => queryExecutionLog("debug", "metadata:table-trace", { sourceTraceId: traceId, ...event }),
         });
         void fullMetadataPromise.catch((error) => queryExecutionLog("warn", "metadata:table-prefetch:failed", { traceId, error, elapsed: elapsed() }));
+        // Synonyms and views often have no directly reported primary index.
+        // Bound the full metadata wait as well, including named projections,
+        // and start its deadline before waiting for indexes so both share it.
+        // Manual transactions still need their first-run type/LOB metadata.
+        const preparedMetadata = tab.autoCommit !== false ? waitForQueryMetadataPreflight(fullMetadataPromise) : fullMetadataPromise;
+        // The primary-index shortcut can return before this promise is awaited;
+        // the original prefetch already records errors in that background path.
+        void preparedMetadata.catch(() => undefined);
         const wholeSourceAutoCommit = projectsAllColumnsForSource(target.analysis, target.source.key) && tab.autoCommit !== false;
         if (wholeSourceAutoCommit) {
           const indexes = await waitForQueryMetadataPreflight(loadTableIndexes(target.request));
@@ -6451,7 +6459,17 @@ export const useQueryStore = defineStore("query", () => {
           }
           if (primaryKeyIndex(indexes)) return unchanged;
         }
-        loaded = loadedEditableSourceFromMetadata(target, (await fullMetadataPromise).metadata);
+        const metadata = await preparedMetadata;
+        if (metadata === QUERY_METADATA_PREFLIGHT_TIMEOUT) {
+          queryExecutionLog("info", "metadata:preflight:timeout", {
+            traceId,
+            table: target.request.tableName,
+            budgetMs: QUERY_METADATA_PREFLIGHT_BUDGET_MS,
+            elapsed: elapsed(),
+          });
+          return unchanged;
+        }
+        loaded = loadedEditableSourceFromMetadata(target, metadata.metadata);
       }
 
       if (!loaded) {

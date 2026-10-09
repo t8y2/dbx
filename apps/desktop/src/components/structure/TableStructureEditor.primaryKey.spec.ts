@@ -25,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   getTablePartitionStatus: vi.fn(),
   getTableOwner: vi.fn(),
   buildTableOwnerChangeSql: vi.fn(),
+  previewForeignKeyChange: vi.fn(),
+  applyForeignKeyChange: vi.fn(),
   editorSettings: {
     structureEditorDensity: "compact",
     sqlFormatter: {},
@@ -246,6 +248,8 @@ vi.mock("@/lib/backend/api", () => ({
   buildTableOwnerChangeSql: mocks.buildTableOwnerChangeSql,
   getTablePartitionStatus: mocks.getTablePartitionStatus,
   getTableOwner: mocks.getTableOwner,
+  previewForeignKeyChange: mocks.previewForeignKeyChange,
+  applyForeignKeyChange: mocks.applyForeignKeyChange,
 }));
 
 import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
@@ -256,7 +260,7 @@ function draft(isPrimaryKey = false, identity?: { seed: number; increment: numbe
   const isNullable = identity ? false : !isPrimaryKey;
   return {
     initialized: true,
-    activeTab: "columns" as const,
+    activeTab: "columns" as "columns" | "foreignKeys" | "indexes",
     newTableName: "",
     tableComment: "",
     originalTableComment: "",
@@ -341,7 +345,7 @@ function draftWithColumns(count: number) {
 async function mountEditor(
   databaseType: "mysql" | "sqlserver" | "postgres" | "sqlite" | "oracle" | "oceanbase-oracle" | "iris" | "dameng" | "duckdb" | "informix" | "clickhouse",
   isPrimaryKey = false,
-  options: { database?: string; dynamicTypes?: string[]; identity?: { seed: number; increment: number }; tableName?: string; columnName?: string; foreignKeyRefTable?: string; draftOverride?: ReturnType<typeof draft>; onDraftUpdate?: (value: unknown) => void } = {},
+  options: { database?: string; schema?: string; dynamicTypes?: string[]; identity?: { seed: number; increment: number }; tableName?: string; columnName?: string; foreignKeyRefTable?: string; draftOverride?: ReturnType<typeof draft>; onDraftUpdate?: (value: unknown) => void } = {},
 ) {
   mocks.connection.db_type = databaseType;
   mocks.connection.name = databaseType;
@@ -355,7 +359,7 @@ async function mountEditor(
   const app = createApp(TableStructureEditor, {
     connectionId: mocks.connection.id,
     database: options.database ?? "test",
-    schema: "SYSDBA",
+    schema: "schema" in options ? options.schema : "SYSDBA",
     tableName: options.tableName ?? "users",
     draft: options.draftOverride ?? draft(isPrimaryKey, options.identity, options.columnName, options.foreignKeyRefTable),
     "onUpdate:draft": options.onDraftUpdate,
@@ -447,6 +451,33 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor primary key editing", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("opens the actual %s foreign-key editor with complete identity and blocks a dirty parent draft", async (databaseType) => {
+    const value = draft();
+    value.activeTab = "foreignKeys";
+    mocks.previewForeignKeyChange.mockResolvedValue({ statements: [], revision: "preview", currentConstraint: null, affectedObjects: [], recoveryStatements: [] });
+    const root = await mountEditor(databaseType, false, { database: "Owner", schema: undefined, draftOverride: value });
+    const section = root.querySelector<HTMLElement>('[aria-label="foreignKeyEditor.title"]')!;
+    const add = buttonWithText(section, "foreignKeyEditor.add");
+    await vi.waitFor(() => expect(add.disabled).toBe(false));
+    add.click();
+    await nextTick();
+    expect(section.querySelector<HTMLInputElement>('[data-ref-schema]')?.value).toBe("Owner");
+    expect(section.querySelector<HTMLSelectElement>('[data-source-column]')?.value).toBe("id");
+    buttonWithText(section, "constraintEditor.preview").click();
+    await vi.waitFor(() => expect(mocks.previewForeignKeyChange).toHaveBeenCalledWith(
+      mocks.connection.id, "Owner", expect.objectContaining({ schema: "Owner", tableName: "users", originalName: null }),
+    ));
+    buttonWithText(section, "common.cancel").click();
+    await nextTick();
+    buttonWithText(root, "structureEditor.addColumn").click();
+    await nextTick();
+    expect(buttonWithText(section, "foreignKeyEditor.add").disabled).toBe(true);
+    buttonWithText(section, "foreignKeyEditor.add").click();
+    await nextTick();
+    expect(section.querySelector('[data-name]')).toBeNull();
+    expect(mocks.applyForeignKeyChange).not.toHaveBeenCalled();
+  });
+
   it("allows enabling identity on an existing Dameng integer column", async () => {
     const root = await mountEditor("dameng");
     const identity = columnPropertyCheckbox(root, "structureEditor.identity");

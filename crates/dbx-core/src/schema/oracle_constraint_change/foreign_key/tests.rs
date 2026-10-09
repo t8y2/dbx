@@ -182,6 +182,90 @@ async fn composite_quoted_cross_schema_replacement_preserves_order_and_reads_act
     }
 }
 
+struct PermissionSession {
+    inner: Session,
+    object_grant: Result<u64, &'static str>,
+    system_grant: Result<u64, &'static str>,
+    granted_roles: Result<u64, &'static str>,
+    role_alter: Result<u64, &'static str>,
+    queries: Mutex<Vec<String>>,
+}
+impl PermissionSession {
+    fn new(engine: Engine, request: &ForeignKeyChange) -> Self {
+        Self { inner: session(engine, request), object_grant: Ok(0), system_grant: Ok(0), granted_roles: Ok(0), role_alter: Ok(0), queries: Mutex::new(vec![]) }
+    }
+}
+#[async_trait]
+impl ConstraintSession for PermissionSession {
+    fn engine(&self) -> Engine { self.inner.engine }
+    async fn query(&self, sql: &str) -> Result<db::QueryResult, String> {
+        self.queries.lock().unwrap().push(sql.into());
+        if sql == "SELECT USER FROM DUAL" { return Ok(rows(vec![vec![json!("Visitor")]])); }
+        let grant = if sql.contains("SESSION_PRIVS") || sql.contains("SESSION_ROLES") {
+            if self.engine() == Engine::OceanBaseOracle { return Err("ORA-00942: SESSION dictionary view does not exist".into()); }
+            if sql.contains("SESSION_ROLES") { self.role_alter } else { self.system_grant }
+        } else if sql.contains("SYS.USER_SYS_PRIVS") { self.system_grant
+        } else if sql.contains("SYS.USER_ROLE_PRIVS") { self.granted_roles
+        } else if sql.contains("SYS.ALL_TAB_PRIVS") && sql.contains("PRIVILEGE='ALTER'") { self.object_grant
+        } else { return self.inner.query(sql).await; };
+        grant.map(|value| rows(vec![vec![json!(value)]])).map_err(str::to_owned)
+    }
+}
+
+#[tokio::test]
+async fn oceanbase_cross_owner_direct_alter_grants_reach_real_foreign_key_plan_without_missing_session_views() {
+    for system in [false, true] {
+        let request = change();
+        let mut session = PermissionSession::new(Engine::OceanBaseOracle, &request);
+        if system { session.system_grant = Ok(1); } else { session.object_grant = Ok(1); }
+        let plan = preview_foreign_key(&session, &request).await.unwrap();
+        assert!(apply_foreign_key(&session, &request, &plan.revision).await.unwrap().success);
+        assert_eq!(session.inner.fixture.lock().unwrap().writes.len(), 2);
+        assert!(!session.queries.lock().unwrap().iter().any(|query| query.contains("SESSION_PRIVS") || query.contains("SESSION_ROLES")));
+    }
+}
+
+#[tokio::test]
+async fn oceanbase_denied_role_unknown_and_dictionary_unknown_permissions_preserve_original_foreign_key() {
+    for reason in ["denied", "role", "object dictionary", "system dictionary", "role dictionary"] {
+        let request = change();
+        let mut session = PermissionSession::new(Engine::OceanBaseOracle, &request);
+        match reason {
+            "role" => session.granted_roles = Ok(1),
+            "object dictionary" => session.object_grant = Err("ORA-01031 object catalog"),
+            "system dictionary" => session.system_grant = Err("ORA-01031 system catalog"),
+            "role dictionary" => session.granted_roles = Err("ORA-01031 role catalog"),
+            _ => (),
+        }
+        let error = preview_foreign_key(&session, &request).await.unwrap_err();
+        assert!(error.contains(if reason == "denied" { "not granted" } else { "unknown" }), "{reason}: {error}");
+        let fixture = session.inner.fixture.lock().unwrap();
+        assert!(fixture.writes.is_empty());
+        assert_eq!(fixture.current, Some(key()));
+    }
+}
+
+#[tokio::test]
+async fn independent_direct_system_grant_remains_usable_when_object_privilege_dictionary_is_unavailable() {
+    let request = change();
+    let mut session = PermissionSession::new(Engine::OceanBaseOracle, &request);
+    session.object_grant = Err("ORA-01031 object catalog");
+    session.system_grant = Ok(1);
+    assert!(preview_foreign_key(&session, &request).await.is_ok());
+}
+
+#[tokio::test]
+async fn native_oracle_cross_owner_effective_system_and_active_object_role_grants_are_preserved() {
+    for system in [false, true] {
+        let request = change();
+        let mut session = PermissionSession::new(Engine::Oracle, &request);
+        if system { session.system_grant = Ok(1); } else { session.role_alter = Ok(1); }
+        let plan = preview_foreign_key(&session, &request).await.unwrap();
+        assert!(apply_foreign_key(&session, &request, &plan.revision).await.unwrap().success);
+        assert!(session.queries.lock().unwrap().iter().any(|query| query.contains("SYS.SESSION_PRIVS")));
+    }
+}
+
 #[tokio::test]
 async fn invalid_data_missing_reference_privileges_and_truncated_metadata_block_before_drop() {
     for engine in [Engine::Oracle, Engine::OceanBaseOracle] {

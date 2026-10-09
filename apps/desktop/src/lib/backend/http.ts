@@ -161,6 +161,7 @@ import type {
   SqlFileTable,
   SqlFileProgress,
   TransferRequest,
+  TransferDatabaseLinkCredential,
   TransferProgress,
   TransferOwnershipPreview,
   TableImportPreviewRequest,
@@ -2990,13 +2991,19 @@ export async function saveGlobalSearchSettings(settings: GlobalSearchSettings): 
 // Data Transfer
 // ---------------------------------------------------------------------------
 
-export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void): Promise<void> {
+export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void, databaseLinkCredentials?: TransferDatabaseLinkCredential[]): Promise<void> {
   // 1. POST to start the transfer
-  const res = await fetch(apiUrl("/api/transfer/start"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ request }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(apiUrl("/api/transfer/start"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request, databaseLinkCredentials }),
+    });
+  } finally {
+    for (const credential of databaseLinkCredentials ?? []) credential.password = "";
+    databaseLinkCredentials = undefined;
+  }
   if (!res.ok) throw await backendResponseError(res);
   onStarted?.();
 

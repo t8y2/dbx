@@ -54,6 +54,13 @@ import java.util.regex.Pattern;
 import java.util.regex.Matcher;
 
 public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
+    @Override
+    public boolean supportsSecureDatabaseLink() { return true; }
+
+    @Override
+    public Map<String, Object> createDatabaseLinkSecure(com.google.gson.JsonObject params) {
+        return com.dbx.agent.SecureDatabaseLink.executeOceanBase(getConnection(), params);
+    }
     private static final long MICROS_PER_SECOND = 1_000_000L;
     private static final long UNLIMITED_QUERY_TIMEOUT_MICROS = 3_216_672_000_000_000L;
     private static final String COMPATIBLE_OJDBC_VERSION = "compatibleOjdbcVersion";
@@ -422,6 +429,22 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                     AND o.OBJECT_TYPE IN ('TABLE', 'VIEW')
                 WHERE o.OWNER = ? AND o.OBJECT_TYPE IN (%s)
                 """.stripIndent().trim();
+            if (objectTypes.contains("SYNONYM")) {
+                // Public synonyms can use OB's internal owner. Canonicalize before
+                // filtering/paging, keeping the private and public scopes separate.
+                baseSql = """
+                    SELECT OBJECT_NAME, OBJECT_TYPE
+                    FROM (
+                        SELECT OWNER, OBJECT_NAME, OBJECT_TYPE
+                        FROM ALL_OBJECTS WHERE OBJECT_TYPE <> 'SYNONYM'
+                        UNION
+                        SELECT CASE WHEN OWNER = '__public' THEN 'PUBLIC' ELSE OWNER END AS OWNER,
+                               SYNONYM_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE
+                        FROM ALL_SYNONYMS
+                    )
+                    WHERE OWNER = ? AND OBJECT_TYPE IN (%s)
+                    """.stripIndent().trim();
+            }
             MetadataSql query = oceanBaseMetadataSql(
                 String.format(baseSql, placeholders(objectTypes.size())),
                 "OBJECT_NAME, OBJECT_TYPE, COMMENTS",

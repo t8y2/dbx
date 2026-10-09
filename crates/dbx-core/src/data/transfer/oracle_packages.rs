@@ -23,6 +23,8 @@ pub struct TransferSchemaObjectDependency {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferSchemaObjectItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_required: Option<bool>,
     pub object_type: TransferObjectKind,
     pub name: String,
     pub source_schema: String,
@@ -261,6 +263,11 @@ async fn dependencies(
         let dependency = text(&row, 1);
         let object_type = text(&row, 2);
         let link = text(&row, 3);
+        if !link.is_empty() {
+            let available = oracle_database_links::dependency_available(state, request, target_pool, &target_schema, &link, true).await?;
+            result.push(TransferSchemaObjectDependency { owner: target_schema.clone(), name: link, object_type: "DATABASE LINK (remote object unverified)".into(), available });
+            continue;
+        }
         // The definition header moves into the selected target schema. Other schemas stay intact.
         let words = sql_words(&declaration(original, kind)?.2);
         let explicit = words.windows(3).any(|part| identifier_word(&part[0]) == owner && part[1] == "." && identifier_word(&part[2]) == dependency);
@@ -346,6 +353,7 @@ async fn build_plan(
     let mut items = Vec::new();
     for (kind, name) in &selections {
         let mut item = TransferSchemaObjectItem {
+            credential_required: None,
             object_type: *kind,
             name: name.clone(),
             source_schema: source_schema.clone(),
@@ -879,6 +887,7 @@ mod tests {
 
     fn plan_item(kind: TransferObjectKind, name: &str, dependencies: &[&str]) -> TransferSchemaObjectItem {
         TransferSchemaObjectItem {
+            credential_required: None,
             object_type: kind,
             name: name.into(),
             source_schema: "S".into(),

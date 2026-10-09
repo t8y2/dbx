@@ -91,6 +91,47 @@ describe("transfer strategies", () => {
 });
 
 describe("transfer submission", () => {
+  it("cannot dispatch a DBLink with missing credentials even if a confirmation accepts it", async () => {
+    const execute = vi.fn();
+    const plan: TransferOwnershipPreview = { missingOwners: [], targetOwner: "TARGET", schemaObjects: { canExecute: true, items: [{ objectType: "DB_LINK", name: "L", sourceSchema: "SOURCE", targetSchema: "TARGET", action: "create", ddl: "-- Create DBLink L using credentials supplied for this run", credentialRequired: true, dependencies: [], warnings: [], errors: [] }] } };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm: async () => true, execute });
+    await expect(submission.start(request({ tables: [], objects: [{ objectType: "DB_LINK", names: ["L"] }], dropTargetBeforeCreate: false, databaseLinks: [{ objectType: "DB_LINK", name: "L", sourceOwner: "SOURCE", targetName: "L", targetScope: "private", authentication: "fixedUser", username: "REMOTE", host: "connect-string", credentialAvailable: false }] }))).resolves.toBe(false);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("freezes the target DBLink scope before asynchronous confirmation", async () => {
+    const decision = deferred<boolean>();
+    const execute = vi.fn();
+    const confirm = vi.fn(() => decision.promise);
+    const config = { objectType: "PUBLIC_DB_LINK" as const, name: "L", sourceOwner: "PUBLIC", targetName: "L", targetScope: "tenant" as const, authentication: "fixedUser" as const, username: "REMOTE", host: "connect-string", credentialAvailable: true };
+    const plan: TransferOwnershipPreview = { missingOwners: [], targetOwner: "TARGET", schemaObjects: { canExecute: true, items: [{ objectType: "PUBLIC_DB_LINK", name: "L", sourceSchema: "PUBLIC", targetSchema: "PUBLIC", action: "create", ddl: "-- Create tenant-visible DBLink L", dependencies: [], warnings: [], errors: [] }] } };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm, execute });
+    const pending = submission.start(request({ tables: [], objects: [{ objectType: "PUBLIC_DB_LINK", names: ["L"] }], dropTargetBeforeCreate: false, databaseLinks: [config] }));
+    config.targetName = "UNREVIEWED";
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalled());
+    decision.resolve(true);
+    await expect(pending).resolves.toBe(true);
+    expect(execute.mock.calls[0]![0].databaseLinks[0].targetName).toBe("L");
+  });
+  it("does not accept a private synonym plan for a same-named selected public synonym", async () => {
+    const execute = vi.fn();
+    const confirm = vi.fn();
+    const plan: TransferOwnershipPreview = { missingOwners: [], targetOwner: "TARGET", schemaObjects: { canExecute: true, items: [{ objectType: "SYNONYM", name: "S", sourceSchema: "SOURCE", targetSchema: "TARGET", action: "create", ddl: 'CREATE SYNONYM "TARGET"."S" FOR "TARGET"."T"', dependencies: [], warnings: [], errors: [] }] } };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm, execute });
+    await expect(submission.start(request({ tables: [], objects: [{ objectType: "PUBLIC_SYNONYM", names: ["S"] }], dropTargetBeforeCreate: false }))).rejects.toThrow("TRANSFER_OBJECT_PREVIEW_UNAVAILABLE");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("reviews the original remote synonym reference without expanding it to a table transfer", async () => {
+    const execute = vi.fn();
+    const plan: TransferOwnershipPreview = { missingOwners: [], targetOwner: "TARGET", schemaObjects: { canExecute: true, items: [{ objectType: "PUBLIC_SYNONYM", name: "Remote S", sourceSchema: "PUBLIC", targetSchema: "PUBLIC", action: "create", ddl: 'CREATE PUBLIC SYNONYM "Remote S" FOR "REMOTE_OWNER"."T"@"REMOTE_LINK"', dependencies: [{ owner: "TARGET", name: "REMOTE_LINK", objectType: "DB_LINK", available: true }], warnings: ["Remote object not validated"], errors: [] }] } };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm: async () => true, execute });
+    const input = request({ tables: [], objects: [{ objectType: "PUBLIC_SYNONYM", names: ["Remote S"] }], dropTargetBeforeCreate: false });
+    await expect(submission.start(input)).resolves.toBe(true);
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ tables: [], objects: input.objects }));
+    expect(transferPreviewSql(plan)).toBe(plan.schemaObjects!.items[0]!.ddl);
+  });
   it("requires a complete package plan without adding an unselected body", async () => {
     const execute = vi.fn();
     const confirm = vi.fn().mockResolvedValue(true);

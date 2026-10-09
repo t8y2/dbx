@@ -624,9 +624,14 @@ export function useExportTracker() {
       onDone?: () => void | Promise<void>;
       onOpen?: () => void;
       formatOverlapError?: (tables: string[]) => string;
+      databaseLinkCredentials?: api.TransferDatabaseLinkCredential[];
     } = {},
   ): ExportTask {
     const existingTask = taskMap.get(request.transferId);
+    const clearCredentials = () => {
+      for (const credential of options.databaseLinkCredentials ?? []) credential.password = "";
+      options.databaseLinkCredentials = undefined;
+    };
     const task = existingTask ?? addDataTransferTask(request.transferId, label, request.tables.length);
     task.onOpen = options.onOpen;
     task.startedAt ??= Date.now();
@@ -635,7 +640,10 @@ export function useExportTracker() {
     task.targetDatabase = request.targetDatabase;
     task.targetSchema = request.targetSchema;
     task.targetTables = request.tables.map((table) => targetTableName(table, request.targetTableNameCase));
-    if (activeTransferRuns.has(request.transferId)) return task;
+    if (activeTransferRuns.has(request.transferId)) {
+      clearCredentials();
+      return task;
+    }
 
     const overlappingTables = findActiveOverlappingTransfer(request);
     if (overlappingTables.length > 0) {
@@ -643,6 +651,7 @@ export function useExportTracker() {
       const visibleTables = overlappingTables.slice(0, 5);
       task.errorMessage = options.formatOverlapError?.(visibleTables) ?? `Another data transfer is already running for target table(s): ${visibleTables.join(", ")}`;
       finishDataTransferTask(task);
+      clearCredentials();
       return task;
     }
 
@@ -664,6 +673,7 @@ export function useExportTracker() {
             updateDataTransferTask(progress.transferId, progress);
           },
           acknowledgeStart,
+          options.databaseLinkCredentials,
         );
 
         if (terminalStatus === "done" && task.status === "Done") {
@@ -682,6 +692,7 @@ export function useExportTracker() {
           terminal: true,
         });
       } finally {
+        clearCredentials();
         activeTransferRuns.delete(request.transferId);
       }
     })();

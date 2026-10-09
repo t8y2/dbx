@@ -89,6 +89,13 @@ public final class JsonRpcServer {
     }
 
     Object dispatchForRuntime(String method, JsonObject params) throws Exception {
+        if ("create_database_link_secure_v1".equals(method)) {
+            try {
+                return dispatchWithConnection(method, params);
+            } catch (Throwable ignored) {
+                return java.util.Map.of("ok", false, "errorCode", "DBLINK_OUTCOME_UNKNOWN");
+            }
+        }
         boolean timedQuery = agent.supportsQueryTiming()
             && (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)
                 || AgentProtocol.METHOD_EXECUTE_QUERY_PAGE.equals(method)
@@ -293,6 +300,16 @@ public final class JsonRpcServer {
         if (AgentProtocol.METHOD_LIST_SUBPARTITIONS.equals(method)) {
             switchCatalog(params);
             return agent.listSubpartitions(params.get("schema").getAsString(), params.get("table").getAsString());
+        }
+        if ("database_link_secure_v1_info".equals(method)) {
+            return java.util.Map.of("supported", agent.supportsSecureDatabaseLink());
+        }
+        if ("create_database_link_secure_v1".equals(method)) {
+            try {
+                return agent.createDatabaseLinkSecure(params);
+            } catch (Throwable ignored) {
+                return java.util.Map.of("ok", false, "errorCode", "DBLINK_OUTCOME_UNKNOWN");
+            }
         }
         if (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)) {
             ExecuteQueryOptions options = new ExecuteQueryOptions(

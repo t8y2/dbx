@@ -1126,6 +1126,8 @@ export type {
   TransferContent,
   TransferObjectKind,
   TransferObjectConflictPolicy,
+  TransferDatabaseLinkConfig,
+  TransferDatabaseLinkCredential,
   TransferSchemaObjectPlan,
   TransferSchemaObjectPreview,
   TransferObjectResult,

@@ -1415,6 +1415,8 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         quote_target_column_names: true,
         ownership_policy: dbx_core::transfer::TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 100,
     };
     let result = dbx_core::transfer::transfer_table(

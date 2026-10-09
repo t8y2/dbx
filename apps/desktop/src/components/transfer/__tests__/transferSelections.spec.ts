@@ -24,6 +24,12 @@ describe("countTransferObjects", () => {
 });
 
 describe("buildTransferObjectSelections", () => {
+  it("preserves same-named private and public synonyms as two selected objects", () => {
+    expect(buildTransferObjectSelections({ SYNONYM: setOf(["Case S"]), PUBLIC_SYNONYM: setOf(["Case S"]) }, [])).toEqual([
+      { objectType: "SYNONYM", names: ["Case S"] },
+      { objectType: "PUBLIC_SYNONYM", names: ["Case S"] },
+    ]);
+  });
   it("keeps package specification and body selections separate", () => {
     expect(buildTransferObjectSelections({ PACKAGE: setOf(["Case P"]) }, [])).toEqual([{ objectType: "PACKAGE", names: ["Case P"] }]);
     expect(buildTransferObjectSelections({ PACKAGE_BODY: setOf(["Case P"]) }, [])).toEqual([{ objectType: "PACKAGE_BODY", names: ["Case P"] }]);

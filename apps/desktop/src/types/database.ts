@@ -1,5 +1,5 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
-import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
+import type { TransferContent, TransferDatabaseLinkConfig, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
@@ -2464,6 +2464,7 @@ export interface TransferTaskConfig {
   targetTableNameCase: TransferTableNameCase;
   quoteTargetColumnNames: boolean;
   objectConflictPolicy?: "skip" | "replace";
+  databaseLinks?: TransferDatabaseLinkConfig[];
   batchSize: number;
   /** Optional per-source-table transfer filter (bare WHERE or a full SELECT). */
   tableFilters?: Record<string, string>;

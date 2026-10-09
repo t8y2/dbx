@@ -4,6 +4,7 @@ import { uuid } from "@/lib/common/utils";
 import * as api from "@/lib/backend/api";
 import type { TransferTask, TransferTaskConfig, TransferTaskFolder, TransferTaskLibrary } from "@/types/database";
 import { resolveTransferStrategy, transferStrategyOptions } from "@/components/transfer/transferStrategy";
+import { savedTransferDatabaseLinks } from "@/components/transfer/transferDatabaseLinks";
 
 export class TransferTaskNameConflictError extends Error {
   readonly code = "TRANSFER_TASK_NAME_CONFLICT";
@@ -102,6 +103,7 @@ function normalizeTask(raw: unknown): TransferTask | null {
       targetTableNameCase: config.targetTableNameCase ?? "preserve",
       quoteTargetColumnNames: config.quoteTargetColumnNames ?? true,
       objectConflictPolicy: config.objectConflictPolicy === "replace" ? "replace" : "skip",
+      databaseLinks: savedTransferDatabaseLinks(config.databaseLinks),
       batchSize: typeof config.batchSize === "number" && config.batchSize > 0 ? config.batchSize : 1000,
       tableFilters: normalizeTransferTableFilters(config.tableFilters),
       dropTargetConfirmed: false,
@@ -295,7 +297,8 @@ export const useTransferTaskStore = defineStore("transferTasks", () => {
     const folderId = Object.prototype.hasOwnProperty.call(input, "folderId") ? input.folderId || undefined : existing?.folderId;
     ensureTaskNameAvailable(trimmed, folderId, input.id);
     const timestamp = nowIso();
-    const config: TransferTaskConfig = { ...input.config, ...transferStrategyOptions(resolveTransferStrategy(input.config)), dropTargetConfirmed: false };
+    const config = normalizeTask({ id: input.id || "pending", name: trimmed, config: input.config })?.config;
+    if (!config) throw new Error("Invalid transfer task configuration");
     const task: TransferTask = existing
       ? { ...existing, folderId, name: trimmed, config, updatedAt: timestamp }
       : {

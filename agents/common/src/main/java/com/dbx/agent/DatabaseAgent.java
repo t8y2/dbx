@@ -11,6 +11,10 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 public interface DatabaseAgent {
+    default boolean supportsSecureDatabaseLink() { return false; }
+    default Map<String, Object> createDatabaseLinkSecure(com.google.gson.JsonObject params) {
+        return Map.of("ok", false, "errorCode", "DBLINK_SECURE_RPC_UNSUPPORTED");
+    }
     /** Opt in to request-boundary timing, including pooled connection lifecycle. */
     default boolean supportsQueryTiming() { return false; }
 

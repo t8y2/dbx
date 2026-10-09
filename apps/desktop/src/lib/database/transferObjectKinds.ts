@@ -8,7 +8,16 @@ export enum TransferObjectFamily {
   SqlServer = "sqlserver",
 }
 
-export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "PACKAGE_BODY";
+export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "PACKAGE_BODY" | "SYNONYM" | "PUBLIC_SYNONYM" | "DB_LINK" | "PUBLIC_DB_LINK";
+
+export function requiresTransferSchemaObjectPlan(kind: TransferObjectKind): boolean {
+  return kind === "PACKAGE" || kind === "PACKAGE_BODY" || kind === "SYNONYM" || kind === "PUBLIC_SYNONYM" || kind === "DB_LINK" || kind === "PUBLIC_DB_LINK";
+}
+
+export function transferObjectMetadataTarget(kind: TransferObjectKind, schema: string): { objectType: string; schema: string } | undefined {
+  if (kind === "SYNONYM" && (schema === "PUBLIC" || schema === "__public")) return undefined;
+  return kind === "PUBLIC_SYNONYM" ? { objectType: "SYNONYM", schema: "PUBLIC" } : { objectType: kind, schema };
+}
 
 const MYSQL_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"];
 const POSTGRES_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE"];
@@ -40,7 +49,7 @@ export function isSameTransferFamily(a?: DatabaseType, b?: DatabaseType): boolea
 }
 
 export function transferObjectKindsForDatabase(dbType?: DatabaseType): TransferObjectKind[] {
-  if (dbType === "oracle" || dbType === "oceanbase-oracle") return [...ORACLE_KINDS, "PACKAGE", "PACKAGE_BODY"];
+  if (dbType === "oracle" || dbType === "oceanbase-oracle") return [...ORACLE_KINDS, "PACKAGE", "PACKAGE_BODY", "SYNONYM", "PUBLIC_SYNONYM", "DB_LINK", "PUBLIC_DB_LINK"];
   switch (transferObjectFamily(dbType)) {
     case TransferObjectFamily.Mysql:
       return [...MYSQL_KINDS];

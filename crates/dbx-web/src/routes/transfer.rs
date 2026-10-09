@@ -67,6 +67,8 @@ async fn finish_transfer_channel(state: &Arc<WebState>, transfer_id: &str, chann
 #[serde(rename_all = "camelCase")]
 pub struct StartTransferRequest {
     pub request: TransferRequest,
+    #[serde(default)]
+    pub database_link_credentials: Vec<transfer::TransferDatabaseLinkCredential>,
 }
 
 #[derive(Deserialize)]
@@ -85,7 +87,8 @@ pub async fn start_transfer(
     State(state): State<Arc<WebState>>,
     Json(body): Json<StartTransferRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let req = body.request;
+    let mut req = body.request;
+    req.database_link_credentials = body.database_link_credentials;
     transfer::validate_transfer_request(&req).map_err(AppError::from)?;
 
     // Reject transfer early if the target connection is read-only
@@ -873,6 +876,8 @@ mod tests {
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             object_conflict_policy: Default::default(),
+            database_links: Vec::new(),
+            database_link_credentials: Vec::new(),
             batch_size: 1000,
         }
     }
@@ -891,12 +896,12 @@ mod tests {
 
         let req = transfer_request("src", "dst", &dir);
         let transfer_id = req.transfer_id.clone();
-        let response = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req })).await.unwrap();
+        let response = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req, database_link_credentials: Vec::new() })).await.unwrap();
         let _ = response.into_response();
 
         let duplicate = start_transfer(
             State(state.clone()),
-            Json(StartTransferRequest { request: transfer_request("src", "dst", &dir) }),
+            Json(StartTransferRequest { request: transfer_request("src", "dst", &dir), database_link_credentials: Vec::new() }),
         )
         .await
         .unwrap_err();
@@ -966,7 +971,7 @@ mod tests {
         Arc::get_mut(&mut state).unwrap().demo_mode = true;
         let req = transfer_request("src", "dst", &dir);
         let transfer_id = req.transfer_id.clone();
-        let _ = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req })).await.unwrap();
+        let _ = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req, database_link_credentials: Vec::new() })).await.unwrap();
         let channel = {
             let channels = state.transfer_progress_channels.read().await;
             channels.get(&transfer_id).cloned().expect("transfer channel registered")

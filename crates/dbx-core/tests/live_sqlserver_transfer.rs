@@ -188,6 +188,8 @@ async fn live_sqlserver_transfer_rebuild_releases_constraint_and_index_names() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10,
     };
 
@@ -351,6 +353,8 @@ async fn live_sqlserver_transfer_overwrite_handles_existing_identity_target() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 1,
     };
 
@@ -470,6 +474,8 @@ async fn live_sqlserver_keyset_pagination_copies_every_row() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 3,
     };
 
@@ -593,6 +599,8 @@ async fn live_sqlserver_progress_read_survives_total_duration_beyond_timeout() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10000,
     };
 
@@ -714,6 +722,8 @@ async fn live_sqlserver_keyset_uniqueidentifier_datetime2_composite_key() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 3,
     };
 
@@ -828,6 +838,8 @@ async fn live_sqlserver_transfer_new_identity_target_keeps_explicit_identity_val
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 1,
     };
 

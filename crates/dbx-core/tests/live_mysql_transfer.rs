@@ -95,6 +95,8 @@ fn transfer_request(
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 2,
     }
 }
@@ -203,6 +205,8 @@ async fn run_live_mysql_cross_version_transfer_completes_on_small_stack() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 100,
     };
 
@@ -360,6 +364,8 @@ async fn live_mysql_transfer_keeps_columns_whose_comment_mentions_foreign_key() 
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10,
     };
 
@@ -521,6 +527,8 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10,
     };
 
@@ -587,6 +595,8 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             object_conflict_policy: Default::default(),
+            database_links: Vec::new(),
+            database_link_credentials: Vec::new(),
             batch_size: 10,
         };
         assert_eq!(
@@ -896,6 +906,8 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10,
     };
 
@@ -954,6 +966,8 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             object_conflict_policy: Default::default(),
+            database_links: Vec::new(),
+            database_link_credentials: Vec::new(),
             batch_size: 10,
         };
         let required_result = transfer_table(
@@ -1053,6 +1067,8 @@ async fn live_mysql_transfer_structure_only_rejects_incompatible_target_columns(
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10,
     };
 
@@ -1154,6 +1170,8 @@ async fn live_mysql_transfer_drop_target_parent_child_foreign_key() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10,
     };
 
@@ -1349,6 +1367,8 @@ async fn live_mysql_transfer_drop_target_rebuilds_incompatible_structure() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10,
     };
 
@@ -1539,6 +1559,8 @@ async fn live_mysql_transfer_drop_target_rejects_external_incoming_fk() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10,
     };
 
@@ -1632,6 +1654,8 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10,
     };
 
@@ -1863,6 +1887,8 @@ async fn live_mysql_transfer_drop_target_retains_backup_on_failure() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10,
     };
 
@@ -2043,6 +2069,8 @@ async fn live_mysql_keyset_pagination_copies_every_row() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 3,
     };
 
@@ -2169,6 +2197,8 @@ async fn live_mysql_progress_read_survives_total_duration_beyond_timeout() {
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10000,
     };
 
@@ -2271,6 +2301,8 @@ async fn live_mysql_transfer_drop_target_inspects_dependent_views_without_the_us
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10,
     };
 

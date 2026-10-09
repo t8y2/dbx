@@ -930,6 +930,10 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		objectType := stringParam(params, "object_type")
 		ddl, err := s.getTableDDLWithOptions(schema, table, objectType, boolParam(params, "portable"))
 		return ddl, false, err
+	case "database_link_secure_v1_info":
+		return map[string]any{"supported": true}, false, nil
+	case "create_database_link_secure_v1":
+		return s.createDatabaseLinkSecure(params), false, nil
 	case "execute_query":
 		var opts queryOptions
 		if err := decodeParams(params, &opts); err != nil {

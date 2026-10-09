@@ -60,6 +60,26 @@ afterEach(() => {
 });
 
 describe("DataTransferProgressDialog", () => {
+  it("reports a public synonym privilege failure without losing the private synonym result", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("synonym-results", "SOURCE → TARGET", 2);
+    const progress = { transferId: task.exportId, table: "S", tableIndex: 1, totalTables: 2, rowsTransferred: 0, totalRows: null, status: "done", terminal: false, error: null };
+    tracker.updateDataTransferTask(task.exportId, { ...progress, objectResult: { objectType: "SYNONYM", name: "S", schema: "TARGET", status: "transferred", sourceVerified: true } });
+    tracker.updateDataTransferTask(task.exportId, { ...progress, status: "error", objectResult: { objectType: "PUBLIC_SYNONYM", name: "S", schema: "PUBLIC", status: "failed", sourceVerified: false, error: "CREATE PUBLIC SYNONYM privilege is required" } });
+    tracker.updateDataTransferTask(task.exportId, { ...progress, terminal: true });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const app = createApp({ render: () => h(DataTransferProgressDialog, { open: true, task }) });
+    mountedApps.push(app);
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+    expect(task.status).toBe("Error");
+    expect(task.transferObjectResults).toHaveLength(2);
+    expect(container.textContent).toContain("SYNONYM TARGET.S");
+    expect(container.textContent).toContain("PUBLIC_SYNONYM PUBLIC.S");
+    expect(container.textContent).toContain("CREATE PUBLIC SYNONYM privilege is required");
+  });
   it("shows an invalid package and recovery without reporting it as transferred", async () => {
     const tracker = useExportTracker();
     const task = tracker.addDataTransferTask("package-result", "SOURCE → TARGET", 1);

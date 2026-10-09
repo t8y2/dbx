@@ -25,6 +25,9 @@ mod iris_tests;
 mod db2;
 mod ddl_plan;
 mod oracle_packages;
+mod oracle_synonyms;
+mod oracle_database_links;
+pub use oracle_database_links::{TransferDatabaseLinkConfig, TransferDatabaseLinkCredential};
 mod structure_plan;
 pub use oracle_packages::{TransferObjectConflictPolicy, TransferSchemaObjectPlan, TransferSchemaObjectResult};
 
@@ -207,6 +210,10 @@ pub enum TransferObjectKind {
     Event,
     Package,
     PackageBody,
+    Synonym,
+    PublicSynonym,
+    DbLink,
+    PublicDbLink,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -260,7 +267,8 @@ pub fn transfer_object_kinds_for_family(family: &TransferObjectFamily) -> Vec<Tr
 pub fn transfer_object_kinds(db_type: &DatabaseType) -> Vec<TransferObjectKind> {
     if matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
         let mut kinds = transfer_object_kinds_for_family(&TransferObjectFamily::Oracle);
-        kinds.extend([TransferObjectKind::Package, TransferObjectKind::PackageBody]);
+        kinds.extend([TransferObjectKind::Package, TransferObjectKind::PackageBody, TransferObjectKind::Synonym, TransferObjectKind::PublicSynonym]);
+        kinds.extend([TransferObjectKind::DbLink, TransferObjectKind::PublicDbLink]);
         return kinds;
     }
     match transfer_object_family(db_type) {
@@ -297,6 +305,10 @@ pub struct TransferRequest {
     pub ownership_policy: TransferOwnershipPolicy,
     #[serde(default)]
     pub object_conflict_policy: TransferObjectConflictPolicy,
+    #[serde(default)]
+    pub database_links: Vec<TransferDatabaseLinkConfig>,
+    #[serde(skip)]
+    pub database_link_credentials: Vec<TransferDatabaseLinkCredential>,
     pub batch_size: usize,
     /// Optional per-table source filter for this transfer.
     ///
@@ -7962,6 +7974,9 @@ pub fn ordered_transfer_object_kinds(kinds: Vec<TransferObjectKind>) -> Vec<Tran
         TransferObjectKind::Event => 6,
         TransferObjectKind::Package => 3,
         TransferObjectKind::PackageBody => 4,
+        TransferObjectKind::Synonym => 7,
+        TransferObjectKind::PublicSynonym => 8,
+        TransferObjectKind::DbLink | TransferObjectKind::PublicDbLink => 0,
     };
     let mut kinds = kinds;
     kinds.sort_by_key(rank);
@@ -8177,7 +8192,9 @@ pub async fn ensure_transfer_schema_objects_ready(
     source_pool_key: &str,
     target_pool_key: &str,
 ) -> Result<(), String> {
-    oracle_packages::ensure_ready(state, request, source_pool_key, target_pool_key).await
+    oracle_database_links::ensure_ready(state, request, source_pool_key, target_pool_key).await?;
+    oracle_packages::ensure_ready(state, request, source_pool_key, target_pool_key).await?;
+    oracle_synonyms::ensure_ready(state, request, source_pool_key, target_pool_key).await
 }
 
 async fn transfer_mysql_schema_objects<F>(
@@ -8263,15 +8280,22 @@ async fn transfer_oracle_schema_objects<F>(
 where
     F: FnMut(TransferProgress),
 {
-    let mut outcome =
-        oracle_packages::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await?;
+    let mut outcome = oracle_database_links::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await?;
+    if !outcome.failed.is_empty() {
+        return Ok(outcome);
+    }
+    let packages = oracle_packages::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await?;
+    outcome.transferred.extend(packages.transferred);
+    outcome.skipped.extend(packages.skipped);
+    outcome.failed.extend(packages.failed);
+    outcome.object_results.extend(packages.object_results);
     let source_schema = resolve_oracle_schema(&request.source_schema, &request.source_database);
     let target_schema = resolve_oracle_schema(&request.target_schema, &request.target_database);
     let order = ordered_transfer_object_kinds(
         request.object_selection_mode().selections().iter().map(|s| s.object_type).collect(),
     );
     for kind in order {
-        if matches!(kind, TransferObjectKind::Package | TransferObjectKind::PackageBody) {
+        if matches!(kind, TransferObjectKind::Package | TransferObjectKind::PackageBody | TransferObjectKind::Synonym | TransferObjectKind::PublicSynonym | TransferObjectKind::DbLink | TransferObjectKind::PublicDbLink) {
             continue;
         }
         for name in selected_object_names(request.object_selection_mode().selections(), &kind) {
@@ -8326,6 +8350,11 @@ where
             }
         }
     }
+    let synonyms = oracle_synonyms::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await?;
+    outcome.transferred.extend(synonyms.transferred);
+    outcome.skipped.extend(synonyms.skipped);
+    outcome.failed.extend(synonyms.failed);
+    outcome.object_results.extend(synonyms.object_results);
     Ok(outcome)
 }
 
@@ -9311,7 +9340,22 @@ pub async fn preview_transfer_ownership(
         None
     };
 
-    let schema_objects = oracle_packages::preview(state, request, source_pool_key, target_pool_key).await?;
+    let mut schema_objects = oracle_packages::preview(state, request, source_pool_key, target_pool_key).await?;
+    if let Some(mut links) = oracle_database_links::preview(state, request, source_pool_key, target_pool_key).await? {
+        if let Some(objects) = schema_objects.take() {
+            links.can_execute &= objects.can_execute;
+            links.items.extend(objects.items);
+        }
+        schema_objects = Some(links);
+    }
+    if let Some(synonyms) = oracle_synonyms::preview(state, request, source_pool_key, target_pool_key).await? {
+        if let Some(objects) = &mut schema_objects {
+            objects.can_execute &= synonyms.can_execute;
+            objects.items.extend(synonyms.items);
+        } else {
+            schema_objects = Some(synonyms);
+        }
+    }
     Ok(TransferOwnershipPreview { missing_owners, target_owner, rebuild, structure, schema_objects })
 }
 
@@ -13379,6 +13423,8 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             object_conflict_policy: Default::default(),
+            database_links: Vec::new(),
+            database_link_credentials: Vec::new(),
             batch_size: 1000,
             drop_target_before_create: false,
             drop_target_confirmed: false,
@@ -13467,6 +13513,8 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 quote_target_column_names: true,
                 ownership_policy: TransferOwnershipPolicy::Preserve,
                 object_conflict_policy: Default::default(),
+                database_links: Vec::new(),
+                database_link_credentials: Vec::new(),
                 batch_size: 1000,
                 content: TransferContent::DataOnly,
                 objects: Some(Vec::new()),
@@ -13509,6 +13557,8 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 quote_target_column_names: true,
                 ownership_policy: TransferOwnershipPolicy::Preserve,
                 object_conflict_policy: Default::default(),
+                database_links: Vec::new(),
+                database_link_credentials: Vec::new(),
                 batch_size: 1000,
                 content: TransferContent::StructureAndData,
                 objects: Some(Vec::new()),
@@ -14673,6 +14723,8 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             object_conflict_policy: Default::default(),
+            database_links: Vec::new(),
+            database_link_credentials: Vec::new(),
             batch_size: 1000,
             drop_target_before_create: false,
             drop_target_confirmed: false,

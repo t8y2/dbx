@@ -27,8 +27,10 @@ async fn emit_terminal_progress(app: &AppHandle, history: Option<&TransferTaskJo
 pub async fn start_transfer(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
-    request: TransferRequest,
+    mut request: TransferRequest,
+    database_link_credentials: Option<Vec<dbx_core::transfer::TransferDatabaseLinkCredential>>,
 ) -> Result<(), String> {
+    request.database_link_credentials = database_link_credentials.unwrap_or_default();
     let state = state.inner().clone();
     let transfer_id = request.transfer_id.clone();
 

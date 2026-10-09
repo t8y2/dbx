@@ -326,6 +326,83 @@ class OceanBaseOracleObjectListTest {
         assertTrue(metadata.statementClosed);
     }
 
+    @Test
+    void sameNamePrivateAndPublicSynonymsKeepTheirScopeAndPagedDictionaryListing() {
+        JdbcFixture jdbc = new JdbcFixture();
+        List<ObjectInfo> objects = new ArrayList<>();
+        for (String owner : List.of("Mixed.Owner", "PUBLIC")) {
+            JdbcCall call = jdbc.rows(row("Mixed.Syn", "SYNONYM"));
+            objects.addAll(jdbc.agent.listObjects(owner, constraints("Mixed", 1, 1, "SYNONYM")));
+            assertEquals(List.of(owner, "SYNONYM", "%M%I%X%E%D%", 2, 1), call.args);
+            assertTrue(call.sql.contains("FROM ALL_SYNONYMS"), call.sql);
+            assertTrue(call.sql.contains("WHEN OWNER = '__public' THEN 'PUBLIC' ELSE OWNER END"), call.sql);
+            assertTrue(call.sql.contains("FROM ALL_OBJECTS WHERE OBJECT_TYPE <> 'SYNONYM'"), call.sql);
+            // UNION removes duplicate PUBLIC/__public identities before SQL paging.
+            assertTrue(call.sql.contains("UNION\n"), call.sql);
+            assertFalse(call.sql.contains("UNION ALL"), call.sql);
+            assertTrue(call.sql.contains("WHERE OWNER = ? AND OBJECT_TYPE IN (?)"), call.sql);
+            assertTrue(call.sql.endsWith("ORDER BY DBX_RN"), call.sql);
+            call.assertClosed();
+        }
+        assertEquals(List.of(new ObjectInfo("Mixed.Syn", "SYNONYM", "Mixed.Owner", null),
+            new ObjectInfo("Mixed.Syn", "SYNONYM", "PUBLIC", null)), objects);
+    }
+
+    @Test
+    void publicSynonymSourceAcceptsInternalOwnerAndKeepsPublicDeclarationAndRemoteReference() {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall call = jdbc.rows(row("Other.Owner", "Target\"Name", "LINK.DOMAIN"));
+
+        ObjectSource source = jdbc.agent.getObjectSource("PUBLIC", "Mixed.Syn", "SYNONYM");
+
+        assertEquals("CREATE OR REPLACE PUBLIC SYNONYM \"Mixed.Syn\" FOR \"Other.Owner\".\"Target\"\"Name\"@LINK.DOMAIN;", source.getSource());
+        assertEquals(List.of("PUBLIC", "Mixed.Syn"), call.args);
+        assertTrue(call.sql.contains("(OWNER = ? OR OWNER = '__public')"), call.sql);
+        assertTrue(call.sql.endsWith("ORDER BY CASE WHEN OWNER = 'PUBLIC' THEN 0 ELSE 1 END"), call.sql);
+        assertEquals(1, jdbc.prepared, "source loading must not access the remote link");
+        call.assertClosed();
+    }
+
+    @Test
+    void publicSynonymSourcePrefersCanonicalRowWhenBothDictionaryOwnersExist() {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall call = jdbc.rows(row("Canonical", "First", null), row("Internal", "Second", null));
+
+        assertEquals("CREATE OR REPLACE PUBLIC SYNONYM \"S\" FOR \"Canonical\".\"First\";",
+            jdbc.agent.getObjectSource("PUBLIC", "S", "SYNONYM").getSource());
+        assertTrue(call.sql.endsWith("ORDER BY CASE WHEN OWNER = 'PUBLIC' THEN 0 ELSE 1 END"));
+        call.assertClosed();
+    }
+
+    @Test
+    void privateSynonymSourceNeverFallsBackToPublicAndPreservesQuotedIdentity() {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall call = jdbc.rows(row("Other.Owner", "Target", null));
+        assertEquals("CREATE OR REPLACE SYNONYM \"Mixed.Owner\".\"Mixed.Syn\" FOR \"Other.Owner\".\"Target\";",
+            jdbc.agent.getObjectSource("Mixed.Owner", "Mixed.Syn", "SYNONYM").getSource());
+        assertEquals(List.of("Mixed.Owner", "Mixed.Syn"), call.args);
+        assertEquals("SELECT TABLE_OWNER, TABLE_NAME, DB_LINK FROM ALL_SYNONYMS WHERE OWNER = ? AND SYNONYM_NAME = ?", call.sql);
+        call.assertClosed();
+        JdbcCall missing = jdbc.rows();
+        assertEquals("", jdbc.agent.getObjectSource("Mixed.Owner", "Missing", "SYNONYM").getSource());
+        assertEquals(2, jdbc.prepared);
+        missing.assertClosed();
+    }
+
+    @Test
+    void publicSynonymDictionaryPermissionFailureDoesNotBecomeMissingOrPrivate() {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall call = jdbc.rows();
+        SQLException denied = new SQLException("ORA-01031: insufficient privileges", "42000", 1031);
+        call.executeFailure = denied;
+
+        RuntimeException error = assertThrows(RuntimeException.class,
+            () -> jdbc.agent.getObjectSource("PUBLIC", "S", "SYNONYM"));
+        assertSame(denied, error.getCause());
+        assertEquals(1, jdbc.prepared);
+        assertTrue(call.statementClosed);
+    }
+
     private static MetadataListConstraints constraints(String filter, Integer limit, Integer offset, String... types) {
         return new MetadataListConstraints(filter, limit, offset, Arrays.asList(types));
     }
@@ -414,8 +491,12 @@ class OceanBaseOracleObjectListTest {
                     }
                     yield cursor[0] < rows.length;
                 }
-                case "getString" -> (Integer) values[0] <= rows[cursor[0]].length
-                    ? rows[cursor[0]][(Integer) values[0] - 1] : null;
+                case "getString" -> {
+                    int index = values[0] instanceof Integer position ? position - 1
+                        : List.of("TABLE_OWNER", "TABLE_NAME", "DB_LINK").indexOf(values[0]);
+                    if (index < 0) throw new AssertionError("Unexpected column: " + values[0]);
+                    yield index < rows[cursor[0]].length ? rows[cursor[0]][index] : null;
+                }
                 case "close" -> {
                     resultClosed = true;
                     yield null;

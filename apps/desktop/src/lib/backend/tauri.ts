@@ -5422,7 +5422,7 @@ export interface HistoryConnectionOption extends HistoryConnectionFilter {
 export type TaskType = "transfer";
 export type TaskLifecycleOwner = "tauri" | "web";
 export type TaskRunStatus = "running" | "succeeded" | "partial_failed" | "failed" | "cancelled";
-export type TaskItemKind = "table" | "view" | "materialized_view" | "procedure" | "function" | "trigger" | "sequence" | "event" | "object" | "package" | "package_body";
+export type TaskItemKind = "table" | "view" | "materialized_view" | "procedure" | "function" | "trigger" | "sequence" | "event" | "object" | "package" | "package_body" | "synonym" | "public_synonym" | "db_link" | "public_db_link";
 export type TaskItemStatus = "pending" | "running" | "succeeded" | "skipped" | "failed" | "cancelled" | "not_started" | "incomplete";
 export type TaskRowCountState = "not_applicable" | "known" | "unknown" | "incomplete";
 export type TransferRunContent = "structure_and_data" | "structure_only" | "data_only";
@@ -5655,7 +5655,28 @@ export type TransferTableNameCase = "preserve" | "lower" | "upper";
 export type TransferOwnershipPolicy = "preserve" | "skip" | "reassignMissing";
 export type TransferContent = "structureAndData" | "structureOnly" | "dataOnly";
 export type TransferObjectConflictPolicy = "skip" | "replace";
-export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "PACKAGE_BODY";
+export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "PACKAGE_BODY" | "SYNONYM" | "PUBLIC_SYNONYM" | "DB_LINK" | "PUBLIC_DB_LINK";
+
+export interface TransferDatabaseLinkConfig {
+  objectType: "DB_LINK" | "PUBLIC_DB_LINK";
+  name: string;
+  sourceOwner: string;
+  targetName: string;
+  targetScope: "private" | "public" | "tenant" | "";
+  authentication: "fixedUser";
+  username: string;
+  host: string;
+  protocol?: "OB" | "OCI";
+  tenant?: string;
+  cluster?: string;
+  credentialAvailable: boolean;
+}
+
+export interface TransferDatabaseLinkCredential {
+  objectType: "DB_LINK" | "PUBLIC_DB_LINK";
+  name: string;
+  password: string;
+}
 
 export interface TransferObjectSelection {
   objectType: TransferObjectKind;
@@ -5681,6 +5702,7 @@ export interface TransferRequest {
   quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
   objectConflictPolicy?: TransferObjectConflictPolicy;
+  databaseLinks?: TransferDatabaseLinkConfig[];
   batchSize: number;
   /**
    * Optional per-source-table transfer filter.
@@ -5742,6 +5764,7 @@ export interface TransferSchemaObjectPlan {
   dependencies: Array<{ owner: string; name: string; objectType: string; available: boolean }>;
   warnings: string[];
   errors: string[];
+  credentialRequired?: boolean;
 }
 
 export interface TransferSchemaObjectPreview {
@@ -5774,7 +5797,7 @@ export interface TransferProgress {
   objectResult?: TransferObjectResult;
 }
 
-export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void): Promise<void> {
+export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void, databaseLinkCredentials?: TransferDatabaseLinkCredential[]): Promise<void> {
   return new Promise((resolve, reject) => {
     let unlisten: UnlistenFn | null = null;
     void (async () => {
@@ -5788,9 +5811,16 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
           }
         });
 
-        await invoke("start_transfer", { request });
+        try {
+          await invoke("start_transfer", { request, databaseLinkCredentials });
+        } finally {
+          for (const credential of databaseLinkCredentials ?? []) credential.password = "";
+          databaseLinkCredentials = undefined;
+        }
         onStarted?.();
       } catch (e) {
+        for (const credential of databaseLinkCredentials ?? []) credential.password = "";
+        databaseLinkCredentials = undefined;
         unlisten?.();
         reject(e instanceof BackendErrorException ? e : new BackendErrorException(e));
       }

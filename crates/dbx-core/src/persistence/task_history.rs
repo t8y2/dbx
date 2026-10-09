@@ -297,6 +297,8 @@ pub enum TaskItemKind {
     Event,
     Package,
     PackageBody,
+    Synonym,
+    PublicSynonym,
     Object,
 }
 
@@ -313,6 +315,8 @@ impl TaskItemKind {
             Self::Event => "event",
             Self::Package => "package",
             Self::PackageBody => "package_body",
+            Self::Synonym => "synonym",
+            Self::PublicSynonym => "public_synonym",
             Self::Object => "object",
         }
     }
@@ -329,6 +333,8 @@ impl TaskItemKind {
             "event" => Some(Self::Event),
             "package" => Some(Self::Package),
             "package_body" => Some(Self::PackageBody),
+            "synonym" => Some(Self::Synonym),
+            "public_synonym" => Some(Self::PublicSynonym),
             "object" => Some(Self::Object),
             _ => None,
         }
@@ -349,6 +355,8 @@ impl TaskItemKind {
             "Event" => Self::Event,
             "Package" => Self::Package,
             "PackageBody" => Self::PackageBody,
+            "Synonym" => Self::Synonym,
+            "PublicSynonym" => Self::PublicSynonym,
             _ => return (Self::Object, value.to_string()),
         };
         (kind, name.to_string())
@@ -793,7 +801,7 @@ impl TransferTaskJournal {
                     .find(|result| format!("{:?}:{}", result.object_type, result.name) == *raw);
                 let safe_summary = object_result.map(|result| {
                     format!(
-                        "Package result: {}; compile status: {}; source verified: {}. {}",
+                        "Object result: {}; compile status: {}; source verified: {}. {}",
                         result.status,
                         result.compile_status.as_deref().unwrap_or("not checked"),
                         result.source_verified.map_or("not checked", |verified| if verified { "yes" } else { "no" }),
@@ -957,6 +965,35 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn journal_keeps_private_and_public_synonym_results_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db")).await.unwrap();
+        let app = AppState::new_with_plugin_dir(storage.clone(), dir.path().join("plugins"));
+        let request: TransferRequest = serde_json::from_value(serde_json::json!({
+            "transferId": "synonym-history", "sourceConnectionId": "s", "sourceDatabase": "S", "sourceSchema": "S",
+            "targetConnectionId": "t", "targetDatabase": "T", "targetSchema": "T", "tables": [],
+            "createTable": true, "batchSize": 10, "content": "structureOnly",
+            "objects": [{"objectType": "SYNONYM", "names": ["SAME"]}, {"objectType": "PUBLIC_SYNONYM", "names": ["SAME"]}]
+        })).unwrap();
+        let journal = TransferTaskJournal::accept(&storage, &app, &request, TaskLifecycleOwner::Web).await.unwrap().unwrap();
+        journal.record_object_outcome(&TransferObjectOutcome {
+            transferred: vec!["Synonym:SAME".into()], skipped: Vec::new(), failed: vec!["PublicSynonym:SAME".into()],
+            object_results: vec![
+                crate::transfer::TransferSchemaObjectResult { object_type: crate::transfer::TransferObjectKind::Synonym, name: "SAME".into(), schema: "T".into(), status: "transferred".into(), compile_status: None, source_verified: Some(true), error: None, recovery: None },
+                crate::transfer::TransferSchemaObjectResult { object_type: crate::transfer::TransferObjectKind::PublicSynonym, name: "SAME".into(), schema: "PUBLIC".into(), status: "failed".into(), compile_status: None, source_verified: Some(false), error: Some("raw_synonym_driver_secret".into()), recovery: Some("Target synonym restored and verified".into()) },
+            ],
+        }).await;
+        let items = storage.list_task_run_items(&request.transfer_id, TaskRunItemsQuery::default()).await.unwrap();
+        assert_eq!(items.items.len(), 2);
+        assert_eq!(items.items[0].item_kind, TaskItemKind::Synonym);
+        assert_eq!(items.items[0].status, TaskItemStatus::Succeeded);
+        assert_eq!(items.items[1].item_kind, TaskItemKind::PublicSynonym);
+        assert_eq!(items.items[1].status, TaskItemStatus::Failed);
+        assert!(items.items[1].safe_error_summary.as_deref().unwrap().contains("restored and verified"));
+        assert!(!serde_json::to_string(&items).unwrap().contains("raw_synonym_driver_secret"));
+    }
+
+    #[tokio::test]
     async fn journal_drops_raw_filters_and_driver_errors_from_persistent_history() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("dbx.db");
@@ -983,6 +1020,8 @@ mod tests {
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             object_conflict_policy: Default::default(),
+            database_links: Vec::new(),
+            database_link_credentials: Vec::new(),
             batch_size: 500,
             table_filters: HashMap::from([
                 ("orders".to_string(), format!("WHERE note = '{filter_secret}'")),

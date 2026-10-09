@@ -3393,6 +3393,7 @@ export default withEnglishFallback({
     noDatabasesFound: "Veritabanı bulunamadı",
   },
   contextMenu: {
+    oracleInvalidObjects: "Geçersiz nesneler",
     openConnection: "Bağlantıyı Aç",
     closeConnection: "Bağlantıyı Kapat",
     closeSelectedConnections: "Seçili {count} Bağlantıyı Kapat",

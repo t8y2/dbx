@@ -3822,6 +3822,7 @@ export default withEnglishFallback({
     editCancel: "Cancelar",
   },
   contextMenu: {
+    oracleInvalidObjects: "Objetos no válidos",
     compileObjectFailedTitle: "Error al compilar la vista",
     compileObjectFailedMessage: 'No se pudo compilar la vista "{name}":\n{message}',
     openConnection: "Abrir conexión",

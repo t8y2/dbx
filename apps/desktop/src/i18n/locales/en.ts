@@ -3921,6 +3921,7 @@ export default {
     noDatabasesFound: "No databases found",
   },
   contextMenu: {
+    oracleInvalidObjects: "Invalid objects",
     openConnection: "Open Connection",
     closeConnection: "Close Connection",
     closeSelectedConnections: "Close Selected {count} Connections",

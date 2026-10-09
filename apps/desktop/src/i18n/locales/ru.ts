@@ -3777,6 +3777,7 @@ export default withEnglishFallback({
     noDatabasesFound: "Базы данных не найдены",
   },
   contextMenu: {
+    oracleInvalidObjects: "Недействительные объекты",
     openConnection: "Открыть подключение",
     closeConnection: "Закрыть подключение",
     closeSelectedConnections: "Закрыть выбранные подключения ({count})",

@@ -3691,6 +3691,7 @@ export default withEnglishFallback({
     editCancel: "キャンセル",
   },
   contextMenu: {
+    oracleInvalidObjects: "無効なオブジェクト",
     compileObjectFailedTitle: "ビューのコンパイルに失敗しました",
     compileObjectFailedMessage: "ビュー「{name}」のコンパイルに失敗しました:\n{message}",
     openConnection: "接続を開く",

@@ -3855,6 +3855,7 @@ export default withEnglishFallback({
     noDatabasesFound: "未找到数据库",
   },
   contextMenu: {
+    oracleInvalidObjects: "无效对象",
     openConnection: "打开连接",
     closeConnection: "关闭连接",
     closeSelectedConnections: "关闭选中的 {count} 个连接",

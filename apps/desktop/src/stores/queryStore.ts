@@ -3728,6 +3728,13 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab({ id: uuid(), title: t("tree.schedulerJobs"), connectionId, database: connection?.database || "", sql: "", isExecuting: false, isCancelling: false, isExplaining: false, mode: "oracle-jobs" });
   }
 
+  function openOracleInvalidObjects(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "oracle-invalid-objects" && tab.connectionId === connectionId);
+    if (existing) { switchTab(existing.id); return existing.id; }
+    const connection = useConnectionStore().getConfig(connectionId);
+    return registerOpenTab({ id: uuid(), title: t("contextMenu.oracleInvalidObjects"), connectionId, database: connection?.database || "", sql: "", isExecuting: false, isCancelling: false, isExplaining: false, mode: "oracle-invalid-objects" });
+  }
+
   function openDamengUsers(connectionId: string) {
     const existing = tabs.value.find((tab) => tab.mode === "dameng-users" && tab.connectionId === connectionId);
     if (existing) {
@@ -10110,6 +10117,7 @@ export const useQueryStore = defineStore("query", () => {
     openDamengJobAdmin,
     openOracleTypeEditor,
     openOracleJobs,
+    openOracleInvalidObjects,
     openMqAdmin,
     openMqttAdmin,
     openNacosAdmin,

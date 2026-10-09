@@ -3612,6 +3612,7 @@ export default withEnglishFallback({
     noDatabasesFound: "데이터베이스를 찾을 수 없습니다",
   },
   contextMenu: {
+    oracleInvalidObjects: "유효하지 않은 객체",
     compileObjectFailedTitle: "뷰 컴파일 실패",
     compileObjectFailedMessage: '뷰 "{name}" 컴파일에 실패했습니다:\n{message}',
     openConnection: "연결 열기",

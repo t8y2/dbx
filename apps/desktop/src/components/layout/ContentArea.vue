@@ -144,6 +144,7 @@ const XuguServerDashboard = defineAsyncComponent(() => import("@/components/admi
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
 const OracleTypeEditor = defineAsyncComponent(() => import("@/components/admin/OracleTypeEditor.vue"));
 const OracleJobAdmin = defineAsyncComponent(() => import("@/components/admin/OracleJobAdmin.vue"));
+const OracleInvalidObjects = defineAsyncComponent(() => import("@/components/admin/OracleInvalidObjects.vue"));
 
 const DamengUserAdmin = defineAsyncComponent(() => import("@/components/admin/DamengUserAdmin.vue"));
 const DamengRoleAdmin = defineAsyncComponent(() => import("@/components/admin/DamengRoleAdmin.vue"));
@@ -3553,6 +3554,10 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'oracle-jobs' && activeConnection">
       <OracleJobAdmin :key="activeTab.id" :connection="activeConnection" :database="activeTab.database" />
+    </template>
+
+    <template v-else-if="activeTab.mode === 'oracle-invalid-objects' && activeConnection">
+      <OracleInvalidObjects :key="activeTab.id" :connection="activeConnection" />
     </template>
 
     <template v-else-if="activeTab.mode === 'dameng-jobs' && activeConnection">

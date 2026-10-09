@@ -3675,6 +3675,7 @@ export default withEnglishFallback({
     noDatabasesFound: "未找到資料庫",
   },
   contextMenu: {
+    oracleInvalidObjects: "無效物件",
     compileObjectFailedTitle: "檢視編譯失敗",
     compileObjectFailedMessage: "檢視「{name}」編譯失敗：\n{message}",
     openConnection: "開啟連線",

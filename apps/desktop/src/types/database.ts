@@ -2166,6 +2166,7 @@ export interface QueryTab {
     | "dameng-jobs"
     | "oracle-type-editor"
     | "oracle-jobs"
+    | "oracle-invalid-objects"
     | "processlist"
     | "sqlserver-trace"
     | "mysql-dashboard"

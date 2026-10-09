@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
+import { formatError } from "@/lib/backend/errorUtils";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { compileOracleObject, inspectOracleObject, listOracleInvalidObjects, oracleCompileSql, oracleObjectKey, supportsOracleInvalidObjects, type OracleCompileError, type OracleCompileResult, type OracleInvalidObject, type OracleMetadataQuery, type OracleObjectInspection } from "@/lib/database/oracleInvalidObjects";
@@ -124,7 +125,7 @@ async function apply() {
     const query = queryFor(connection);
     const result = await executeWithProductionContextGuard({ connection, database: connection.database, reviewText: sql, source: t("title"), execute: () => compileOracleObject({
       databaseType: connection.db_type, target, query, cancelled: () => cancellationRequested || !alive || epoch !== detailEpoch,
-      execute: async (statement) => { const response = await query(statement); if (response.execution_error) throw new Error(response.error?.message || String(response.rows[0]?.[0] ?? "Compile failed")); return true; },
+      execute: async (statement) => { const response = await query(statement); if (response.execution_error) throw new Error(response.error ? formatError(response.error) : String(response.rows[0]?.[0] ?? "Compile failed")); return true; },
     }) });
     if (!alive || epoch !== detailEpoch) return;
     if (result) {

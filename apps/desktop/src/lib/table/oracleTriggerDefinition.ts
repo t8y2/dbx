@@ -282,7 +282,7 @@ function requireSingleTriggerBody(tokens: Token[], body: number): void {
   let closed = false;
   for (let index = body + (compound ? 2 : 0); index < tokens.length; index++) {
     const token = tokens[index];
-    const top = () => stack.at(-1);
+    const top = () => stack[stack.length - 1];
     if (token.kind === "symbol" && token.text === ";") {
       if (top() === "ROUTINE_HEADER") stack.pop();
       if (closed && !stack.length) {
@@ -310,7 +310,7 @@ function requireSingleTriggerBody(tokens: Token[], body: number): void {
         stack.pop(); index++;
       } else {
         // Compound declarations belong to the trigger, outside its timing sections.
-        if (top() === "DECLARATION" && stack.at(-2) === "COMPOUND") stack.pop();
+        if (top() === "DECLARATION" && stack[stack.length - 2] === "COMPOUND") stack.pop();
         if (!["BLOCK", "COMPOUND"].includes(top() ?? "")) throw new Error("Unbalanced trigger block");
         stack.pop();
       }

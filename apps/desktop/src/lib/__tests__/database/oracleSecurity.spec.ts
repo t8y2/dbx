@@ -51,6 +51,17 @@ describe("Oracle security dictionary reads", () => {
     expect(snapshot.users).toMatchObject({ visibility: "limited", truncated: true });
   });
 
+  it.each(["truncated", "has_more"] as const)("preserves incomplete dictionary visibility when %s is set below the row cap", async (flag) => {
+    const snapshot = await loadOracleSecurity(async (sql) => {
+      if (sql.includes("FROM DBA_USERS")) return { ...result(["USERNAME"], [["Reader"]]), [flag]: true };
+      if (sql.includes("FROM DBA_ROLE_PRIVS")) return { ...result([]), [flag]: true };
+      return blankQuery(sql);
+    });
+    expect(snapshot.users).toMatchObject({ state: "ok", visibility: "limited", truncated: true, rows: [{ name: "Reader" }] });
+    expect(snapshot.roleGrants).toMatchObject({ state: "empty", visibility: "limited", truncated: true });
+    expect(snapshot.systemGrants).toMatchObject({ visibility: "complete", truncated: false });
+  });
+
   it("preserves direct, role and public paths and terminates role cycles", async () => {
     const snapshot = await loadOracleSecurity(blankQuery);
     snapshot.roleGrants.rows = [

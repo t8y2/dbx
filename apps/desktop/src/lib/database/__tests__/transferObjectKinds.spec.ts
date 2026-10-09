@@ -26,6 +26,11 @@ describe("transferObjectKinds", () => {
     expect(requiresTransferSchemaObjectPlan("PUBLIC_SYNONYM")).toBe(true);
   });
 
+  it("keeps database links on their dedicated metadata loader", () => {
+    expect(transferObjectMetadataTarget("DB_LINK", "Case Owner")).toBeUndefined();
+    expect(transferObjectMetadataTarget("PUBLIC_DB_LINK", "Case Owner")).toBeUndefined();
+  });
+
   it.each(["oracle", "oceanbase-oracle"] as const)("exposes separate synonym scopes for %s without allowing unrelated targets", (source) => {
     expect(crossFamilyTransferableKinds(source, "oracle")).toEqual(expect.arrayContaining(["SYNONYM", "PUBLIC_SYNONYM"]));
     expect(crossFamilyTransferableKinds(source, "dameng")).not.toContain("SYNONYM");

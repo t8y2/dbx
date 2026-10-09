@@ -57,8 +57,9 @@ async function readDictionary<T>(query: OracleSecurityQuery, primary: string, fa
   for (const [index, sql] of [primary, fallback].entries()) {
     if (!sql) break;
     try {
-      const raw = dictionaryRows(await query(sql));
-      const truncated = raw.length >= ORACLE_SECURITY_ROW_LIMIT;
+      const result = await query(sql);
+      const raw = dictionaryRows(result);
+      const truncated = result.truncated === true || result.has_more === true || raw.length >= ORACLE_SECURITY_ROW_LIMIT;
       return { state: raw.length ? "ok" : "empty", visibility: index || truncated ? "limited" : "complete", source: sql, rows: raw.map(parse), message, truncated };
     } catch (error) {
       const state = readState(error);

@@ -2,6 +2,7 @@ import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
 import type { DatabaseType, QueryResult } from "@/types/database";
+import { formatError } from "@/lib/backend/errorUtils";
 
 export type TypePart = "TYPE" | "TYPE_BODY";
 export interface TypeTarget { schema: string; name: string }
@@ -24,7 +25,7 @@ const qualified = (target: TypeTarget) => `${identifier(target.schema)}.${identi
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 function dictionaryRows(result: QueryResult): Record<string, unknown>[] {
-  if (result.execution_error) throw new Error(result.error?.message || String(result.rows[0]?.[0] ?? "Dictionary query failed"));
+  if (result.execution_error) throw new Error(result.error ? formatError(result.error) : String(result.rows[0]?.[0] ?? "Dictionary query failed"));
   if (result.truncated || result.has_more || result.large_value_cells?.length) throw new Error("Complete metadata is required; the dictionary result was truncated.");
   return result.rows.map((row) => Object.fromEntries(result.columns.map((column, index) => [column.toUpperCase(), row[index]])));
 }
@@ -134,7 +135,7 @@ export async function executeTypeWritePlan(io: TypeWriteIO, plan: TypeWritePlan)
       result.sent.push(step);
       try {
         const response = await io.execute(step.sql);
-        if (response.execution_error) executionError = response.error?.message || String(response.rows[0]?.[0] ?? "Type DDL failed");
+        if (response.execution_error) executionError = response.error ? formatError(response.error) : String(response.rows[0]?.[0] ?? "Type DDL failed");
       } catch (error) { executionError = errorText(error); }
       // Sent DDL is not transactional. Read back even after a cancellation or execution failure.
       try {
@@ -148,6 +149,14 @@ export async function executeTypeWritePlan(io: TypeWriteIO, plan: TypeWritePlan)
         if (actual || (step.kind === "TYPE" && result.after.definitions.length)) return { ...result, message: "The object is still present after DROP." };
       } else {
         if (!actual || actual.status !== "VALID" || result.errors.some((row) => row.TYPE === step.kind.replaceAll("_", " ") && row.ATTRIBUTE !== "WARNING")) return { ...result, state: "invalid", message: "The saved definition was not confirmed VALID." };
+        try {
+          for (const sent of result.sent.filter((item) => item.action !== "drop")) {
+            const saved = result.after.definitions.find((item) => item.kind === sent.kind);
+            if (!saved || typeDefinitionSql(saved.source, plan.target, sent.kind, sent.action === "replace") !== sent.sql) return { ...result, state: "changed", message: "The complete definition read back differs from the sent statement. Remaining steps were not sent." };
+          }
+        } catch (error) {
+          return { ...result, state: "changed", message: `The complete definition read back could not be verified: ${errorText(error)}` };
+        }
       }
     }
     if (result.after?.definitions.some((item) => item.status !== "VALID") || result.errors.some((row) => row.ATTRIBUTE !== "WARNING")) return { ...result, state: "invalid", message: "The specification and body were not both confirmed VALID." };

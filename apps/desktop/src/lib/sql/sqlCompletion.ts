@@ -2944,7 +2944,8 @@ function detectCompletionContextKind(options: {
 
 function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseType): { start: number; prefix: string; prefixQuoted?: boolean; qualifier?: string; qualifierParts?: string[]; qualifierQuoted?: boolean[] } | null {
   if (databaseType === "oceanbase-oracle" && input.includes('"')) {
-    const tail = tokenizeSqlSemantic(input, "oracle").at(-1);
+    const tokens = tokenizeSqlSemantic(input, "oracle");
+    const tail = tokens[tokens.length - 1];
     if (tail?.kind === "quoted_identifier" && tail.quote === '"' && tail.closed === false) {
       return parseTrailingIdentifierContext(`${input}"`, databaseType);
     }

@@ -28,7 +28,7 @@ const error = ref("");
 const preview = ref("");
 const recovery = ref<OracleTriggerRecoveryEntry[]>([]);
 const recoveryId = ref("");
-const selectedRecovery = computed(() => recovery.value.find((entry) => entry.id === recoveryId.value) ?? recovery.value.at(-1));
+const selectedRecovery = computed(() => recovery.value.find((entry) => entry.id === recoveryId.value) ?? recovery.value[recovery.value.length - 1]);
 const recoveryOpen = ref(false);
 let loadEpoch = 0;
 
@@ -53,7 +53,7 @@ watch(() => [props.open, props.name, props.schema, props.connectionId, props.dat
     const history = await loadOracleTriggerRecovery(scope);
     if (epoch !== loadEpoch) return;
     recovery.value = history;
-    recoveryId.value = history.at(-1)?.id ?? "";
+    recoveryId.value = history[history.length - 1]?.id ?? "";
     const result = await api.getObjectSource(scope.connectionId, scope.database, scope.schema, scope.name, "TRIGGER");
     if (epoch !== loadEpoch) return;
     source.value = result.source;

@@ -99,6 +99,48 @@ describe("Oracle type write execution", () => {
     const actual = await executeTypeWritePlan(io, plan);
     expect(actual.state).toBe("invalid"); expect(actual.sent).toHaveLength(1); expect(io.execute).toHaveBeenCalledTimes(1);
   });
+
+  it.each(["TYPE", "TYPE_BODY"] as const)("does not report complete when another session replaces a VALID %s definition", async (kind) => {
+    const before = kind === "TYPE" ? empty() : { definitions: [definition()], references: [] };
+    const plan = prepareTypeWritePlan("oracle", target, before, { [kind]: kind === "TYPE" ? spec : body, ...(kind === "TYPE" ? { TYPE_BODY: body } : {}) });
+    const { io, current } = ioFor(before);
+    vi.mocked(io.execute).mockImplementation(async (sql) => {
+      current.definitions.push(definition({ kind, source: kind === "TYPE" ? sql.replace("20", "80") : sql.replace("RETURN 1", "RETURN 9"), objectId: "2" }));
+      return result([], []);
+    });
+    const actual = await executeTypeWritePlan(io, plan);
+    expect(actual.state).toBe("changed");
+    expect(actual.message).toContain("differs from the sent statement");
+    expect(actual.sent).toHaveLength(1);
+    expect(io.execute).toHaveBeenCalledTimes(1);
+    expect(actual.before).toEqual(before);
+    expect(actual.after?.definitions.every((item) => item.status === "VALID")).toBe(true);
+  });
+
+  it("verifies the exact type identity while accepting the readback CREATE OR REPLACE prefix", async () => {
+    const plan = prepareTypeWritePlan("oracle", target, empty(), { TYPE: spec });
+    const { io, current } = ioFor(empty());
+    vi.mocked(io.execute).mockImplementation(async () => { current.definitions.push(definition()); return result([], []); });
+    expect((await executeTypeWritePlan(io, plan)).state).toBe("complete");
+    const wrong = ioFor(empty());
+    vi.mocked(wrong.io.execute).mockImplementation(async () => { wrong.current.definitions.push(definition({ source: spec.replace('"T.中文"', '"OTHER"') })); return result([], []); });
+    expect((await executeTypeWritePlan(wrong.io, plan)).state).toBe("changed");
+  });
+
+  it("detects a specification replaced while its body is being saved", async () => {
+    const plan = prepareTypeWritePlan("oracle", target, empty(), { TYPE: spec, TYPE_BODY: body });
+    const { io, current } = ioFor(empty());
+    vi.mocked(io.execute).mockImplementation(async (sql) => {
+      const kind = sql.startsWith("CREATE TYPE BODY") ? "TYPE_BODY" : "TYPE";
+      if (kind === "TYPE_BODY") current.definitions[0].source = spec.replace("20", "80");
+      current.definitions.push(definition({ kind, source: sql, objectId: String(current.definitions.length + 1) }));
+      return result([], []);
+    });
+    const actual = await executeTypeWritePlan(io, plan);
+    expect(actual.state).toBe("changed");
+    expect(actual.sent).toHaveLength(2);
+    expect(actual.after?.definitions.every((item) => item.status === "VALID")).toBe(true);
+  });
   it("keeps original definitions and attempts readback after a failed DDL", async () => {
     const before = { definitions: [definition()], references: [] };
     const plan = prepareTypeWritePlan("oracle", target, before, { TYPE: spec.replace("20", "40") });

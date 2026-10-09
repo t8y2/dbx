@@ -1,4 +1,5 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
+import { formatError } from "@/lib/backend/errorUtils";
 
 export interface OracleObjectIdentity { schema: string; name: string; object_type: string }
 export interface OracleInvalidObject extends OracleObjectIdentity { status: string | null; object_id: string | null; last_ddl_time: string | null }
@@ -24,7 +25,7 @@ export const oracleObjectKey = (object: OracleObjectIdentity) => JSON.stringify(
 export const supportsOracleInvalidObjects = (databaseType?: DatabaseType) => databaseType === "oracle" || databaseType === "oceanbase-oracle";
 
 function rows(result: QueryResult): Record<string, string | number | boolean | null>[] {
-  if (result.execution_error) throw new Error(result.error?.message || String(result.rows[0]?.[0] ?? "Metadata query failed"));
+  if (result.execution_error) throw new Error(result.error ? formatError(result.error) : String(result.rows[0]?.[0] ?? "Metadata query failed"));
   if (result.truncated || result.has_more || result.large_value_cells?.length) throw new Error("Metadata is truncated; refine the filter or read the complete source before continuing.");
   return result.rows.map((values) => Object.fromEntries(result.columns.map((column, index) => [column.toUpperCase(), values[index] ?? null])));
 }
@@ -66,7 +67,7 @@ export function readOracleObjectSourceLines(query: OracleMetadataQuery, target: 
   return section(async () => rows(await query(`SELECT LINE, TEXT FROM ALL_SOURCE WHERE ${predicate(target)} ORDER BY LINE`)).flatMap((row) => {
     // OB can return a whole unit in one TEXT cell; Oracle commonly returns one row per line.
     const parts = String(row.TEXT ?? "").replaceAll("\r\n", "\n").split("\n");
-    if (parts.length > 1 && parts.at(-1) === "") parts.pop();
+    if (parts.length > 1 && parts[parts.length - 1] === "") parts.pop();
     return parts.map((part, index) => ({ line: Number(row.LINE) + index, text: part }));
   }), "unavailable");
 }

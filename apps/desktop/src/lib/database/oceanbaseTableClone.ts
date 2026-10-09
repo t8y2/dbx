@@ -1,4 +1,5 @@
 import * as api from "@/lib/backend/api";
+import { formatError } from "@/lib/backend/errorUtils";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { QueryResult } from "@/types/database";
 import type { DuplicateTableStructurePlan, DuplicateTableStructurePlanOptions } from "./dbAdminSql";
@@ -25,7 +26,7 @@ export async function buildOceanbaseTableClone(options: DuplicateTableStructureP
   let sourceSchema = options.schema || "";
   const query = async (sql: string) => {
     const result = await api.executeQuery(options.connectionId, options.database, sql, sourceSchema, undefined, { catalog: options.catalog, maxRows: 10001 });
-    if (result.execution_error) throw new Error(result.error?.message || "Unable to read clone metadata.");
+    if (result.execution_error) throw new Error(result.error ? formatError(result.error) : "Unable to read clone metadata.");
     if (result.rows.length >= 10001 || result.has_more) throw new Error("Clone metadata was truncated. No DDL was executed.");
     return result.rows;
   };
@@ -121,7 +122,7 @@ export async function executeOceanbaseTableClone(clone: OceanbaseTableClone, exe
   for (const step of clone.steps) {
     try {
       result = await execute(step.sql.replace(/;\s*$/, ""));
-      if (result.execution_error) throw new Error(result.error?.message || "DDL execution failed");
+      if (result.execution_error) throw new Error(result.error ? formatError(result.error) : "DDL execution failed");
       completed.push(step.label);
     } catch (error) {
       const target = `${ident(clone.targetSchema)}.${ident(clone.targetName)}`;

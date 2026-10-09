@@ -83,7 +83,7 @@ describe("complete trigger definition dialog", () => {
 
   it("reloads the same object identity after a database change and clears stale source on failure", async () => {
     const { database } = await mountDialog();
-    const body = [...document.querySelectorAll("textarea")].at(-1)!;
+    const body = [...document.querySelectorAll("textarea")].slice(-1)[0]!;
     body.value = "BEGIN dbms_output.put_line('old database edit'); END;";
     body.dispatchEvent(new Event("input", { bubbles: true }));
     await nextTick();
@@ -100,14 +100,14 @@ describe("complete trigger definition dialog", () => {
 
   it("preserves structured body edits when switching to source and back", async () => {
     await mountDialog();
-    const body = [...document.querySelectorAll("textarea")].at(-1)!;
+    const body = [...document.querySelectorAll("textarea")].slice(-1)[0]!;
     body.value = "BEGIN dbms_output.put_line(q'[O'Reilly]'); END;";
     body.dispatchEvent(new Event("input", { bubbles: true }));
     await nextTick();
     click("structureEditor.triggerSourceMode"); await nextTick();
     expect(document.querySelector("textarea")!.value).toContain("q'[O'Reilly]'");
     click("structureEditor.triggerStructuredMode"); await nextTick();
-    expect([...document.querySelectorAll("textarea")].at(-1)!.value).toContain("q'[O'Reilly]'");
+    expect([...document.querySelectorAll("textarea")].slice(-1)[0]!.value).toContain("q'[O'Reilly]'");
   });
 
   it("does not write recovery material or execute SQL when production confirmation is cancelled", async () => {

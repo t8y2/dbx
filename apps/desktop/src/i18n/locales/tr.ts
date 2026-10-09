@@ -1,4 +1,4 @@
-import { sidebarMenuMessages } from "./sidebarMenuMessages";
+import { sidebarMenuTr as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/tr";
 import { dataDictionaryTr as dataDictionary } from "./dataDictionaryMessages";
@@ -61,7 +61,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
-  sidebarMenu: sidebarMenuMessages["tr"],
+  sidebarMenu,
   pluginPlatform: {
     dataAccessConsent: '"{name}", "{connection}" bağlantısındaki verileri okumak istiyor. Bu bağlantı açık olduğu sürece eklenti, Eklenti Merkezi\'nden erişimi iptal edene kadar bağlantıda salt okunur sorgular çalıştırabilir. İzin verilsin mi?',
     dataAccessConsentTitle: "Veri Erişim İsteği",

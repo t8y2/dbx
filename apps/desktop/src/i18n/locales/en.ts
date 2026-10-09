@@ -1,4 +1,4 @@
-import { sidebarMenuMessages } from "./sidebarMenuMessages";
+import { sidebarMenuEn as sidebarMenu } from "./sidebarMenuMessages";
 import { redisGroupingEn as redisGrouping } from "./redisGrouping";
 import docs from "./docs/en";
 import { dataDictionaryEn as dataDictionary } from "./dataDictionaryMessages";
@@ -62,7 +62,7 @@ const consul = {
 };
 
 export default {
-  sidebarMenu: sidebarMenuMessages["en"],
+  sidebarMenu,
   modelGeneration: {
     title: "Generate model",
     editTemplate: "Edit template",

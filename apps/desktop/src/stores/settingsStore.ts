@@ -28,7 +28,7 @@ import { REDIS_DATABASE_DISPLAY_LIMIT_DEFAULT, REDIS_DATABASE_DISPLAY_LIMIT_MIN,
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { normalizeSidebarCopyTableNameSeparator } from "@/lib/sidebar/sidebarTableNameCopy";
 import type { SidebarActivation } from "@/lib/sidebar/treeNodeClick";
-import { normalizeSidebarMenuPinnedActions, normalizeSidebarMenuOrder, type SidebarMenuLayout, type SidebarMenuPinnedActions, type SidebarMenuOrder } from "@/lib/sidebar/sidebarMenuLayout";
+import { normalizeSidebarMenuPinnedActions, normalizeSidebarMenuOrder, type SidebarMenuLayout, type SidebarMenuPinnedActions, type SidebarMenuOrder } from "@/lib/sidebar/sidebarMenuPreferences";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlSnippetTemplates";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { canonicalSqlShortcutSql, DEFAULT_SQL_SHORTCUTS, deriveSqlShortcutDatabaseTypes, mergeDefaultSqlShortcuts, normalizeSqlShortcutDatabaseTypes, normalizeSqlShortcutKind, normalizeSqlShortcutLimit, normalizeSqlShortcutSqlByDatabaseType } from "@/lib/sql/sqlShortcutActions";

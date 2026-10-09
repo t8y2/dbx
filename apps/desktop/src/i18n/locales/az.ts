@@ -1,4 +1,4 @@
-import { sidebarMenuMessages } from "./sidebarMenuMessages";
+import { sidebarMenuAz as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/az";
 import { dataDictionaryAz as dataDictionary } from "./dataDictionaryMessages";
@@ -61,7 +61,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
-  sidebarMenu: sidebarMenuMessages["az"],
+  sidebarMenu,
   pluginPlatform: {
     dataAccessConsent: '"{name}" "{connection}" bağlantısındakı məlumatları oxumaq istəyir. Bu bağlantı açıq olduqca plagin, Plagin Mərkəzində girişi ləğv edənə qədər orada yalnız oxuma sorğuları icra edə bilər. İcazə verilsin?',
     dataAccessConsentTitle: "Məlumat girişi sorğusu",

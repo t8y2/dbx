@@ -1,4 +1,4 @@
-import { sidebarMenuMessages } from "./sidebarMenuMessages";
+import { sidebarMenuPtBR as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpPtBR as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementPtBR } from "./meilisearchManagement";
@@ -63,7 +63,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
-  sidebarMenu: sidebarMenuMessages["pt-BR"],
+  sidebarMenu,
   modelGeneration: {
     title: "Gerar modelo",
     editTemplate: "Editar modelo",

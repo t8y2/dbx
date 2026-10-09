@@ -1,4 +1,4 @@
-import { sidebarMenuMessages } from "./sidebarMenuMessages";
+import { sidebarMenuId as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/id";
 import { dataDictionaryId as dataDictionary } from "./dataDictionaryMessages";
@@ -7,7 +7,7 @@ import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessag
 import { meilisearchManagementId } from "./meilisearchManagement";
 
 export default withEnglishFallback({
-  sidebarMenu: sidebarMenuMessages["id"],
+  sidebarMenu,
   cellTransform: {
     title: "Pratinjau konversi",
     description: "Konversi nilai saat ini untuk dilihat atau disalin. Nilai sumber dan draf editor tidak berubah.",

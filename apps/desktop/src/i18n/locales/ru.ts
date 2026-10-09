@@ -1,4 +1,4 @@
-import { sidebarMenuMessages } from "./sidebarMenuMessages";
+import { sidebarMenuRu as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/ru";
 import { dataDictionaryRu as dataDictionary } from "./dataDictionaryMessages";
@@ -6,7 +6,7 @@ import { meilisearchManagementRu } from "./meilisearchManagement";
 
 // Russian locale. Entries omitted here fall back to English at runtime.
 export default withEnglishFallback({
-  sidebarMenu: sidebarMenuMessages["ru"],
+  sidebarMenu,
   modelGeneration: {
     title: "Создать модель",
     editTemplate: "Изменить шаблон",

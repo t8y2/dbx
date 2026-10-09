@@ -1,12 +1,11 @@
 import { ArrowRightLeft, Clipboard, Code2, FolderTree, ListTree, Settings2, TriangleAlert, Wrench } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/customContextMenuRegistry";
 import type { TreeNodeType } from "@/types/database";
+import { SIDEBAR_MENU_SCOPES, type SidebarMenuLayout, type SidebarMenuScope } from "./sidebarMenuPreferences";
 
-export type SidebarMenuLayout = "grouped" | "full";
-export type SidebarMenuScope = "connection" | "database" | "schema" | "table" | "view" | "sql-editor";
+export { normalizeSidebarMenuPinnedActions, normalizeSidebarMenuOrder } from "./sidebarMenuPreferences";
+export type { SidebarMenuLayout, SidebarMenuScope, SidebarMenuPinnedActions, SidebarMenuOrder } from "./sidebarMenuPreferences";
 export type SidebarMenuTargetType = TreeNodeType | "sql-editor";
-export type SidebarMenuPinnedActions = Partial<Record<SidebarMenuScope, string[]>>;
-export type SidebarMenuOrder = Partial<Record<SidebarMenuScope, string[]>>;
 export interface SidebarMenuLayoutOptions {
   hiddenPrimaryIds?: readonly string[];
   order?: readonly string[];
@@ -14,21 +13,11 @@ export interface SidebarMenuLayoutOptions {
 type MenuGroup = "data" | "sql" | "structure" | "copy" | "selection" | "organize" | "manage" | "other" | "danger";
 type Translate = (key: string) => string;
 
-const scopes = new Set<SidebarMenuScope>(["connection", "database", "schema", "table", "view", "sql-editor"]);
+const scopes = new Set<SidebarMenuScope>(SIDEBAR_MENU_SCOPES);
 
 export function sidebarMenuScope(type: SidebarMenuTargetType): SidebarMenuScope | null {
   if (type === "materialized_view") return "view";
   return scopes.has(type as SidebarMenuScope) ? (type as SidebarMenuScope) : null;
-}
-
-export function normalizeSidebarMenuPinnedActions(value: unknown): SidebarMenuPinnedActions {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const result: SidebarMenuPinnedActions = {};
-  for (const scope of scopes) {
-    const ids = (value as Record<string, unknown>)[scope];
-    if (Array.isArray(ids)) result[scope] = [...new Set(ids.filter((id): id is string => typeof id === "string" && /^[a-zA-Z][\w.-]{0,159}$/.test(id)))];
-  }
-  return result;
 }
 
 const primaryActions: Record<SidebarMenuScope, readonly string[]> = {
@@ -51,10 +40,6 @@ const recommendedPrimaryActions: Partial<Record<SidebarMenuScope, readonly strin
 
 export function sidebarMenuRecommendedPrimaryActionIds(scope: SidebarMenuScope): readonly string[] {
   return recommendedPrimaryActions[scope] ?? [];
-}
-
-export function normalizeSidebarMenuOrder(value: unknown): SidebarMenuOrder {
-  return normalizeSidebarMenuPinnedActions(value);
 }
 
 /** Connection status changes should not move the user's connect/disconnect entry. */

@@ -1,4 +1,5 @@
 pub mod table_structure_sql;
+pub mod oracle_constraint_change;
 
 pub use dbx_drivers::metadata::sqlite_ddl;
 

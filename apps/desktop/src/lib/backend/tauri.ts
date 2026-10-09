@@ -2343,6 +2343,30 @@ export async function buildCreatePartitionedTableSql(options: BuildCreatePartiti
   return invoke("build_create_partitioned_table_sql", { options: options.options, partitioning: options.partitioning });
 }
 
+export async function previewCheckChange(connectionId: string, database: string, change: import("@/types/constraintChange").CheckChange): Promise<import("@/types/constraintChange").CheckChangePreview> {
+  return invoke("preview_check_change", { connectionId, database, change });
+}
+
+export async function applyCheckChange(connectionId: string, database: string, change: import("@/types/constraintChange").CheckChange, revision: string): Promise<import("@/types/constraintChange").CheckChangeResult> {
+  return invoke("apply_check_change", { connectionId, database, change, revision });
+}
+
+export async function previewForeignKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").ForeignKeyChange): Promise<import("@/types/constraintChange").ForeignKeyChangePreview> {
+  return invoke("preview_foreign_key_change", { connectionId, database, change });
+}
+
+export async function applyForeignKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").ForeignKeyChange, revision: string): Promise<import("@/types/constraintChange").ForeignKeyChangeResult> {
+  return invoke("apply_foreign_key_change", { connectionId, database, change, revision });
+}
+
+export async function previewPrimaryKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").PrimaryKeyChange): Promise<import("@/types/constraintChange").ConstraintChangePreview> {
+  return invoke("preview_primary_key_change", { connectionId, database, change });
+}
+
+export async function applyPrimaryKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").PrimaryKeyChange, revision: string): Promise<import("@/types/constraintChange").ConstraintChangeResult> {
+  return invoke("apply_primary_key_change", { connectionId, database, change, revision });
+}
+
 export async function previewSqliteTableStructureChange(connectionId: string, database: string, options: BuildTableStructureChangeSqlOptions): Promise<SqliteTableStructureChangePreview> {
   return invoke("preview_sqlite_table_structure_change", {
     connectionId,

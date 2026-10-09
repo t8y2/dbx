@@ -304,6 +304,129 @@ pub struct PreviewSqliteTableStructureChangeRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PrimaryKeyChangeRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub change: dbx_core::schema::oracle_constraint_change::PrimaryKeyChange,
+    pub revision: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKeyChangeRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub change: dbx_core::schema::oracle_constraint_change::ForeignKeyChange,
+    pub revision: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckChangeRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub change: dbx_core::schema::oracle_constraint_change::CheckChange,
+    pub revision: Option<String>,
+}
+
+pub async fn preview_check_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<CheckChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::CheckChangePreview>, AppError> {
+    dbx_core::schema::oracle_constraint_change::preview_check_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn apply_check_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<CheckChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::CheckChangeResult>, AppError> {
+    let revision = req.revision.ok_or_else(|| AppError::from("A preview revision is required.".to_string()))?;
+    dbx_core::schema::oracle_constraint_change::apply_check_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+        &revision,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn preview_foreign_key_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ForeignKeyChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::ForeignKeyChangePreview>, AppError> {
+    dbx_core::schema::oracle_constraint_change::preview_foreign_key_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn apply_foreign_key_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ForeignKeyChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::ForeignKeyChangeResult>, AppError> {
+    let revision = req.revision.ok_or_else(|| AppError::from("A preview revision is required.".to_string()))?;
+    dbx_core::schema::oracle_constraint_change::apply_foreign_key_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+        &revision,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn preview_primary_key_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<PrimaryKeyChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::ConstraintChangePreview>, AppError> {
+    dbx_core::schema::oracle_constraint_change::preview_primary_key_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn apply_primary_key_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<PrimaryKeyChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::ConstraintChangeResult>, AppError> {
+    let revision = req.revision.ok_or_else(|| AppError::from("A preview revision is required.".to_string()))?;
+    dbx_core::schema::oracle_constraint_change::apply_primary_key_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+        &revision,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApplySqliteTableStructureChangeRequest {
     pub connection_id: String,
     pub database: String,

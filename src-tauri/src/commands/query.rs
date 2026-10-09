@@ -826,6 +826,86 @@ pub async fn preview_sqlite_table_structure_change(
 }
 
 #[tauri::command]
+pub async fn preview_check_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::CheckChange,
+) -> Result<dbx_core::schema::oracle_constraint_change::CheckChangePreview, String> {
+    dbx_core::schema::oracle_constraint_change::preview_check_change(&state, &connection_id, &database, change).await
+}
+
+#[tauri::command]
+pub async fn apply_check_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::CheckChange,
+    revision: String,
+) -> Result<dbx_core::schema::oracle_constraint_change::CheckChangeResult, String> {
+    dbx_core::schema::oracle_constraint_change::apply_check_change(&state, &connection_id, &database, change, &revision)
+        .await
+}
+
+#[tauri::command]
+pub async fn preview_foreign_key_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::ForeignKeyChange,
+) -> Result<dbx_core::schema::oracle_constraint_change::ForeignKeyChangePreview, String> {
+    dbx_core::schema::oracle_constraint_change::preview_foreign_key_change(&state, &connection_id, &database, change)
+        .await
+}
+
+#[tauri::command]
+pub async fn apply_foreign_key_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::ForeignKeyChange,
+    revision: String,
+) -> Result<dbx_core::schema::oracle_constraint_change::ForeignKeyChangeResult, String> {
+    dbx_core::schema::oracle_constraint_change::apply_foreign_key_change(
+        &state,
+        &connection_id,
+        &database,
+        change,
+        &revision,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn preview_primary_key_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::PrimaryKeyChange,
+) -> Result<dbx_core::schema::oracle_constraint_change::ConstraintChangePreview, String> {
+    dbx_core::schema::oracle_constraint_change::preview_primary_key_change(&state, &connection_id, &database, change)
+        .await
+}
+
+#[tauri::command]
+pub async fn apply_primary_key_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::PrimaryKeyChange,
+    revision: String,
+) -> Result<dbx_core::schema::oracle_constraint_change::ConstraintChangeResult, String> {
+    dbx_core::schema::oracle_constraint_change::apply_primary_key_change(
+        &state,
+        &connection_id,
+        &database,
+        change,
+        &revision,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn apply_sqlite_table_structure_change(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

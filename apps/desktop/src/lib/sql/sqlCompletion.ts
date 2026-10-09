@@ -1435,6 +1435,7 @@ export interface SqlCompletionObject {
   parentName?: string;
   dataType?: string;
   signature?: string;
+  routineId?: string;
   comment?: string | null;
   applyName?: string;
   boost?: number;
@@ -1525,11 +1526,13 @@ export type SqlCompletionContextKind = "table" | "schema" | "catalog" | "routine
 
 export interface SqlCompletionContext {
   prefix: string;
+  prefixQuoted?: boolean;
   replacementRange?: { start: number; end: number };
   preferredValueKeywords?: string[];
   localVariables?: string[];
   qualifier?: string;
   qualifierParts?: string[];
+  qualifierQuoted?: boolean[];
   suggestTables: boolean;
   suggestColumns: boolean;
   suggestKeywords: boolean;
@@ -2654,6 +2657,8 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     localVariables,
     qualifier: insertInfo ? undefined : qualifier,
     qualifierParts: insertInfo ? undefined : qualifierParts,
+    qualifierQuoted: insertInfo ? undefined : trailingIdentifier?.qualifierQuoted,
+    prefixQuoted: trailingIdentifier?.prefixQuoted,
     suggestTables: insertInfo || dataTypeContext ? false : afterTableTrigger,
     suggestColumns,
     suggestKeywords: !exclusiveTableSuggestions && !exclusiveColumnSuggestions && !insertInfo && !inCallRoutineContext,
@@ -2928,7 +2933,13 @@ function detectCompletionContextKind(options: {
   return "keyword";
 }
 
-function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseType): { start: number; prefix: string; qualifier?: string; qualifierParts?: string[] } | null {
+function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseType): { start: number; prefix: string; prefixQuoted?: boolean; qualifier?: string; qualifierParts?: string[]; qualifierQuoted?: boolean[] } | null {
+  if (databaseType === "oceanbase-oracle" && input.includes('"')) {
+    const tail = tokenizeSqlSemantic(input, "oracle").at(-1);
+    if (tail?.kind === "quoted_identifier" && tail.quote === '"' && tail.closed === false) {
+      return parseTrailingIdentifierContext(`${input}"`, databaseType);
+    }
+  }
   if (/\s$/.test(input)) return null;
   let i = input.length - 1;
   while (i >= 0 && /\s/.test(input[i] ?? "")) i--;
@@ -2962,19 +2973,23 @@ function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseTy
 
   if (parts.length >= 2 || endsWithDot) {
     const qualifierParts = (endsWithDot ? parts : parts.slice(0, -1)).map((part) => completionLookupIdentifier(part, databaseType));
-    const prefixPart = endsWithDot ? "" : unquoteIdentifier(parts[parts.length - 1] ?? "");
+    const rawPrefix = endsWithDot ? "" : unquoteIdentifier(parts[parts.length - 1] ?? "");
+    const prefixPart = databaseType === "oceanbase-oracle" ? rawPrefix.replaceAll('""', '"') : rawPrefix;
     const qualifierValue = qualifierParts.join(".");
     return {
       start,
       prefix: prefixPart,
       qualifier: qualifierValue || undefined,
       qualifierParts: qualifierParts.length > 0 ? qualifierParts : undefined,
+      qualifierQuoted: (endsWithDot ? parts : parts.slice(0, -1)).map((part) => part.startsWith('"')),
+      prefixQuoted: !endsWithDot && parts[parts.length - 1]?.startsWith('"'),
     };
   }
 
   return {
     start,
-    prefix: unquoteIdentifier(parts[0] ?? ""),
+    prefix: databaseType === "oceanbase-oracle" ? unquoteIdentifier(parts[0] ?? "").replaceAll('""', '"') : unquoteIdentifier(parts[0] ?? ""),
+    prefixQuoted: parts[0]?.startsWith('"'),
   };
 }
 
@@ -4390,15 +4405,18 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
   const onlyFunctions = context.suggestColumns && context.referencedTables.length > 0 && !context.qualifier;
   const prioritizeOracleFunctions = isOracleCompletionDatabase(databaseType) && context.statementKind === "select";
   return objects
-    .filter((object) => object.type !== "sequence" && (!onlyProcedures || object.type === "procedure") && (!onlyFunctions || (object.type === "function" && object.name.toLowerCase().startsWith(context.prefix.toLowerCase()))) && objectMatchesCompletionContext(object, context))
+    .filter((object) => object.type !== "sequence" && (!onlyProcedures || object.type === "procedure") && (!onlyFunctions || (object.type === "function" && object.name.toLowerCase().startsWith(context.prefix.toLowerCase()))) && objectMatchesCompletionContext(object, context, databaseType))
     .map((object) => {
-      const qualifiedByContext = objectIsQualifiedByContext(object, context);
-      const objectInCurrentSchema = !!currentSchema && !!object.schema && normalizeIdentifierPart(object.schema) === normalizeIdentifierPart(currentSchema);
+      const qualifiedByContext = objectIsQualifiedByContext(object, context, databaseType);
+      const objectInCurrentSchema = !!currentSchema && !!object.schema && (databaseType === "oceanbase-oracle" ? object.schema === currentSchema : normalizeIdentifierPart(object.schema) === normalizeIdentifierPart(currentSchema));
       const suppliedApplyName = object.applyName ? quoteCompletionRoutineName(object.applyName, dialect) : undefined;
+      const oceanBaseApplyName = databaseType === "oceanbase-oracle"
+        ? [...(object.schema && !objectInCurrentSchema ? [object.schema] : []), ...(object.parentName ? [object.parentName] : []), object.name].map((part) => quoteCompletionRoutineIdentifier(part, dialect)).join(".")
+        : undefined;
       const applyName =
-        qualifiedByContext || (context.qualifier && object.schema?.toLowerCase() === context.qualifier.toLowerCase())
+        qualifiedByContext || (context.qualifier && (databaseType === "oceanbase-oracle" ? object.schema === oceanBaseRoutineQualifierParts(context)[0] : object.schema?.toLowerCase() === context.qualifier.toLowerCase()))
           ? quoteCompletionRoutineIdentifier(object.name, dialect)
-          : (suppliedApplyName ?? (object.schema && !objectInCurrentSchema ? `${quoteCompletionRoutineIdentifier(object.schema, dialect)}.${quoteCompletionRoutineIdentifier(object.name, dialect)}` : quoteCompletionRoutineIdentifier(object.name, dialect)));
+          : (oceanBaseApplyName ?? suppliedApplyName ?? (object.schema && !objectInCurrentSchema ? `${quoteCompletionRoutineIdentifier(object.schema, dialect)}.${quoteCompletionRoutineIdentifier(object.name, dialect)}` : quoteCompletionRoutineIdentifier(object.name, dialect)));
       const locationDetail = object.type === "trigger" && object.parentName ? `trigger on ${object.parentName}` : object.parentName ? `${object.type} in ${object.parentName}` : object.schema ? `${object.type} in ${object.schema}` : object.type;
       const signature = object.signature?.trim();
       const detail = [locationDetail, signature ? `(${signature})` : undefined, object.dataType ? `[${object.dataType}]` : undefined].filter(Boolean).join("  ");
@@ -4410,9 +4428,9 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
         type: "function" as const,
         detail,
         info: buildRoutineInfo(object),
-        apply: object.type === "trigger" || object.type === "package" ? applyName : buildRoutineApply(applyName, object.signature, includeParams),
+        apply: object.type === "trigger" || object.type === "package" || (databaseType === "oceanbase-oracle" && object.signature == null) ? applyName : buildRoutineApply(applyName, object.signature, includeParams),
         boost: computeBoost(object.name, context.prefix) + typeBoost + schemaBoost,
-        dedupeKey: signature ? `${baseDedupeKey ?? object.name}(${signature})` : baseDedupeKey,
+        dedupeKey: object.routineId ? JSON.stringify([applyName, object.routineId]) : signature ? `${baseDedupeKey ?? object.name}(${signature})` : baseDedupeKey,
         // Preserve exact routine matches before the capped candidate list is truncated.
         exactMatch: !!context.prefix && object.name.toLowerCase() === context.prefix.toLowerCase(),
       };
@@ -4487,8 +4505,16 @@ function completionQualifierIsReferencedTable(context: SqlCompletionContext): bo
   return context.referencedTables.some((table) => referencedTableMatchesColumnQualifier(table, qualifier, qualifierLower, qualifiedTarget));
 }
 
-function objectIsQualifiedByContext(object: SqlCompletionObject, context: SqlCompletionContext): boolean {
+function oceanBaseRoutineQualifierParts(context: SqlCompletionContext): string[] {
+  return (context.qualifierParts ?? context.qualifier?.split(".") ?? []).map((part, index) => context.qualifierQuoted?.[index] ? part.replaceAll('""', '"') : part.toUpperCase());
+}
+
+function objectIsQualifiedByContext(object: SqlCompletionObject, context: SqlCompletionContext, databaseType?: DatabaseType): boolean {
   if (!context.qualifier || !object.parentName) return false;
+  if (databaseType === "oceanbase-oracle") {
+    const parts = oceanBaseRoutineQualifierParts(context);
+    return object.parentName === parts[parts.length - 1] && (parts.length === 1 || (object.parentSchema ?? object.schema) === parts[parts.length - 2]);
+  }
   const qualifier = context.qualifier.toLowerCase();
   const qualifierParts = qualifier.split(".").filter(Boolean);
   const qualifierSchema = qualifierParts.length > 1 ? qualifierParts[qualifierParts.length - 2] : undefined;
@@ -4496,8 +4522,14 @@ function objectIsQualifiedByContext(object: SqlCompletionObject, context: SqlCom
   return object.parentName.toLowerCase() === qualifier || (!!qualifierPackage && object.parentName.toLowerCase() === qualifierPackage && (!qualifierSchema || !object.parentSchema || object.parentSchema.toLowerCase() === qualifierSchema));
 }
 
-function objectMatchesCompletionContext(object: SqlCompletionObject, context: SqlCompletionContext): boolean {
+function objectMatchesCompletionContext(object: SqlCompletionObject, context: SqlCompletionContext, databaseType?: DatabaseType): boolean {
   if (context.oracleTableFunctionContext && object.type !== "function") return false;
+  if (databaseType === "oceanbase-oracle") {
+    const prefixMatches = context.prefixQuoted ? object.name.startsWith(context.prefix) : matchesPrefix(object.name, context.prefix);
+    if (!context.qualifier) return prefixMatches;
+    const parts = oceanBaseRoutineQualifierParts(context);
+    return prefixMatches && (object.parentName ? objectIsQualifiedByContext(object, context, databaseType) : parts.length === 1 && object.schema === parts[0]);
+  }
   if (context.qualifier) {
     const qualifier = context.qualifier.toLowerCase();
     const qualifierParts = qualifier.split(".").filter(Boolean);

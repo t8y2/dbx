@@ -2475,6 +2475,7 @@ pub async fn completion_assistant_search(
                 parent_name: row.get::<&str, _>(4).map(str::to_string),
                 comment: row.get::<&str, _>(5).filter(|s: &&str| !s.is_empty()).map(|s| (*s).to_string()),
                 data_type: row.get::<&str, _>(6).map(str::to_string),
+                routine_id: None,
                 signature: None,
             }
         })
@@ -5667,6 +5668,7 @@ mod tests {
             parent_name: None,
             comment: None,
             data_type: None,
+            routine_id: None,
             signature: None,
         };
 
@@ -5696,6 +5698,7 @@ mod tests {
             parent_name: None,
             comment: None,
             data_type: None,
+            routine_id: None,
             signature: None,
         };
 

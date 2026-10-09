@@ -14,6 +14,13 @@ import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion"
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts } from "@/lib/sql/sqlCompletionTriggerPolicy";
 
+describe("OceanBase quoted routine lookup context", () => {
+  it.each(['CALL "Mixed.Owner"."Do', 'CALL "Mixed.Owner"."Do"'])("preserves quoted prefixes in %s", (sql) => {
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "oceanbase-oracle" });
+    expect(context).toMatchObject({ prefix: "Do", prefixQuoted: true, qualifierParts: ["Mixed.Owner"], qualifierQuoted: [true] });
+  });
+});
+
 describe("SQL completion replacement", () => {
   const columnItem = { label: "price", type: "column" as const, apply: "price", boost: 0 };
 

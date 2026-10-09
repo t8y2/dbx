@@ -423,6 +423,8 @@ pub struct CompletionAssistantCandidate {
     pub comment: Option<String>,
     pub data_type: Option<String>,
     pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -83,6 +83,7 @@ export interface CompletionAssistantCandidate {
   comment?: string | null;
   data_type?: string | null;
   signature?: string | null;
+  routine_id?: string | null;
 }
 
 export interface CompletionAssistantResponse {

@@ -3990,6 +3990,7 @@ async fn completion_assistant_search_inner(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                routine_id: None,
                 signature: None,
             });
         }
@@ -4019,6 +4020,7 @@ async fn completion_assistant_search_inner(
                 parent_name: row.try_get::<_, Option<String>>(5).ok().flatten(),
                 comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
                 data_type: None,
+                routine_id: None,
                 signature: None,
             });
         }
@@ -4050,6 +4052,7 @@ async fn completion_assistant_search_inner(
                 parent_name: None,
                 comment: None,
                 data_type: Some("PACKAGE".to_string()),
+                routine_id: None,
                 signature: None,
             });
         }
@@ -4100,6 +4103,7 @@ async fn completion_assistant_search_inner(
                 parent_name: None,
                 comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
                 data_type: row.try_get::<_, Option<String>>(4).ok().flatten(),
+                routine_id: None,
                 signature: row.try_get::<_, Option<String>>(5).ok().flatten(),
             });
         }
@@ -4123,6 +4127,7 @@ async fn completion_assistant_search_inner(
                 parent_name: None,
                 comment: row.try_get::<_, Option<String>>(2).ok().flatten(),
                 data_type: None,
+                routine_id: None,
                 signature: None,
             });
         }
@@ -4161,6 +4166,7 @@ async fn completion_assistant_search_inner(
                     parent_name: Some(table.to_string()),
                     comment: row.try_get::<_, Option<String>>(2).ok().flatten(),
                     data_type: Some(pg_row_try_string(&row, 1)),
+                    routine_id: None,
                     signature: None,
                 });
             }
@@ -7125,6 +7131,7 @@ pub async fn opengauss_package_members(
                 parent_name: Some(catalog_name.clone()),
                 comment: None,
                 data_type: row.try_get::<_, Option<String>>(3).ok().flatten(),
+                routine_id: None,
                 signature: row.try_get::<_, Option<String>>(2).ok().flatten(),
             }
         })

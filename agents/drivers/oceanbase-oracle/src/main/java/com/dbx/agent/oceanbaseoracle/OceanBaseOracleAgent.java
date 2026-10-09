@@ -350,7 +350,180 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         if (hasTableLikeCompletionKind(request.getObject_kinds())) {
             return unchecked(() -> completionAssistantTables(request));
         }
+        if (request.getObject_kinds().stream().anyMatch(kind -> kind == CompletionAssistantObjectKind.ROUTINE
+            || kind == CompletionAssistantObjectKind.PROCEDURE || kind == CompletionAssistantObjectKind.FUNCTION)) {
+            return unchecked(() -> completionAssistantRoutines(request));
+        }
         return super.completionAssistantSearch(request);
+    }
+
+    private CompletionAssistantResponse completionAssistantRoutines(CompletionAssistantRequest request) throws SQLException {
+        if (firstNonBlank(request.getParent_name()) != null) {
+            return completionAssistantPackageMembers(request);
+        }
+        int limit = boundedCompletionLimit(request.getMax_results());
+        String preferredSchema = preferredCompletionSchema(request);
+        List<CompletionAssistantObjectKind> kinds = request.getObject_kinds();
+        List<Object> args = new ArrayList<>();
+        String types = kinds.contains(CompletionAssistantObjectKind.ROUTINE)
+            || (kinds.contains(CompletionAssistantObjectKind.PROCEDURE) && kinds.contains(CompletionAssistantObjectKind.FUNCTION))
+            ? "'PROCEDURE', 'FUNCTION'"
+            : kinds.contains(CompletionAssistantObjectKind.PROCEDURE) ? "'PROCEDURE'" : "'FUNCTION'";
+        String pattern = completionLikePattern(request.getMask(), request.getMatch_mode());
+        args.add(request.getCase_sensitive() ? pattern : pattern.toUpperCase(Locale.ROOT));
+        String ownerFilter = "";
+        if (!request.getGlobal_search()) {
+            ownerFilter = " AND OWNER = ?";
+            args.add(firstNonBlank(request.getParent_schema(), request.getSchema(), preferredSchema));
+        }
+        args.add(preferredSchema);
+        args.add(limit + 1);
+        String sql = """
+            SELECT OWNER, OBJECT_NAME, OBJECT_TYPE FROM (
+                SELECT OWNER, OBJECT_NAME, OBJECT_TYPE FROM ALL_OBJECTS
+                WHERE OBJECT_TYPE IN (%s) AND %s%s
+                ORDER BY CASE WHEN OWNER = ? THEN 0 ELSE 1 END, OBJECT_NAME, OWNER, OBJECT_TYPE
+            ) WHERE ROWNUM <= ?
+            """.formatted(types, completionNamePredicate("OBJECT_NAME", request.getCase_sensitive()), ownerFilter);
+        List<CompletionAssistantCandidate> candidates = new ArrayList<>();
+        boolean incomplete = false;
+        try (PreparedStatement stmt = requireConnection().prepareStatement(sql)) {
+            bindCompletionArgs(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    if (candidates.size() == limit) {
+                        incomplete = true;
+                        break;
+                    }
+                    String objectType = rs.getString(3);
+                    candidates.add(new CompletionAssistantCandidate(rs.getString(2),
+                        "PROCEDURE".equals(objectType) ? CompletionAssistantCandidateKind.PROCEDURE : CompletionAssistantCandidateKind.FUNCTION,
+                        blankToNull(request.getDatabase()), rs.getString(1), null, null, null, objectType));
+                }
+            }
+        }
+        return new CompletionAssistantResponse(candidates, incomplete, false, true);
+    }
+
+    private CompletionAssistantResponse completionAssistantPackageMembers(CompletionAssistantRequest request) throws SQLException {
+        String owner = firstNonBlank(request.getParent_schema(), request.getSchema(), preferredCompletionSchema(request));
+        String packageName = request.getParent_name();
+        String objectId;
+        try (PreparedStatement stmt = requireConnection().prepareStatement(
+            "SELECT OBJECT_ID FROM ALL_OBJECTS WHERE OWNER = ? AND OBJECT_NAME = ? AND OBJECT_TYPE = 'PACKAGE'")) {
+            bindCompletionArgs(stmt, List.of(owner, packageName));
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) throw new SQLException("Package is not visible: " + owner + "." + packageName);
+                objectId = rs.getString(1);
+            }
+        }
+        int limit = boundedCompletionLimit(request.getMax_results());
+        String pattern = completionLikePattern(request.getMask(), request.getMatch_mode());
+        List<Object> args = new ArrayList<>(List.of(owner, packageName, objectId,
+            request.getCase_sensitive() ? pattern : pattern.toUpperCase(Locale.ROOT)));
+        String kindFilter = request.getObject_kinds().contains(CompletionAssistantObjectKind.ROUTINE)
+            || (request.getObject_kinds().contains(CompletionAssistantObjectKind.PROCEDURE)
+                && request.getObject_kinds().contains(CompletionAssistantObjectKind.FUNCTION))
+            ? "" : request.getObject_kinds().contains(CompletionAssistantObjectKind.FUNCTION)
+                ? " WHERE ROUTINE_KIND = 'FUNCTION'" : " WHERE ROUTINE_KIND = 'PROCEDURE'";
+        args.add(limit + 1);
+        // Limit subprograms before loading arguments, so the last signature cannot be cut in half.
+        String sql = """
+            SELECT PROCEDURE_NAME, SUBPROGRAM_ID, ROUTINE_KIND FROM (
+                SELECT * FROM (
+                    SELECT p.PROCEDURE_NAME, p.SUBPROGRAM_ID,
+                        CASE WHEN EXISTS (SELECT 1 FROM ALL_ARGUMENTS a
+                            WHERE a.OWNER = p.OWNER AND a.OBJECT_ID = p.OBJECT_ID
+                              AND a.SUBPROGRAM_ID = p.SUBPROGRAM_ID AND a.DATA_LEVEL = 0 AND a.POSITION = 0)
+                            THEN 'FUNCTION' ELSE 'PROCEDURE' END ROUTINE_KIND
+                    FROM ALL_PROCEDURES p
+                    WHERE p.OWNER = ? AND p.OBJECT_NAME = ? AND p.OBJECT_ID = ?
+                      AND p.OBJECT_TYPE = 'PACKAGE' AND p.PROCEDURE_NAME IS NOT NULL AND %s
+                )%s ORDER BY PROCEDURE_NAME, SUBPROGRAM_ID
+            ) WHERE ROWNUM <= ?
+            """.formatted(completionNamePredicate("p.PROCEDURE_NAME", request.getCase_sensitive()), kindFilter);
+        List<PackageCompletionMember> members = new ArrayList<>();
+        boolean incomplete = false;
+        try (PreparedStatement stmt = requireConnection().prepareStatement(sql)) {
+            bindCompletionArgs(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    if (members.size() == limit) { incomplete = true; break; }
+                    members.add(new PackageCompletionMember(rs.getString(1), rs.getString(2), "FUNCTION".equals(rs.getString(3))));
+                }
+            }
+        }
+        if (!members.isEmpty()) {
+            String placeholders = String.join(",", Collections.nCopies(members.size(), "?"));
+            String argumentSql = """
+                SELECT SUBPROGRAM_ID, POSITION, ARGUMENT_NAME, IN_OUT, DATA_TYPE,
+                    TYPE_OWNER, TYPE_NAME, TYPE_SUBNAME, DEFAULTED
+                FROM ALL_ARGUMENTS
+                WHERE OWNER = ? AND OBJECT_ID = ? AND DATA_LEVEL = 0 AND SUBPROGRAM_ID IN (%s)
+                ORDER BY SUBPROGRAM_ID, POSITION, SEQUENCE
+                """.formatted(placeholders);
+            List<Object> argumentArgs = new ArrayList<>(List.of(owner, objectId));
+            Map<String, PackageCompletionMember> byId = new LinkedHashMap<>();
+            for (PackageCompletionMember member : members) {
+                argumentArgs.add(member.id);
+                byId.put(member.id, member);
+            }
+            try (PreparedStatement stmt = requireConnection().prepareStatement(argumentSql)) {
+                bindCompletionArgs(stmt, argumentArgs);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        PackageCompletionMember member = byId.get(rs.getString(1));
+                        if (member == null) continue;
+                        String typeName = rs.getString(7);
+                        String type = typeName == null ? rs.getString(5)
+                            : java.util.stream.Stream.of(rs.getString(6), typeName, rs.getString(8))
+                                .filter(value -> value != null && !value.isBlank())
+                                .map(OceanBaseOracleAgent::quotePackageCompletionIdentifier)
+                                .collect(java.util.stream.Collectors.joining("."));
+                        if (rs.getInt(2) == 0) {
+                            member.returnType = type;
+                            continue;
+                        }
+                        String name = rs.getString(3);
+                        String direction = rs.getString(4);
+                        if (name == null || type == null || direction == null) {
+                            member.signatureKnown = false;
+                            continue;
+                        }
+                        member.parameters.add(quotePackageCompletionIdentifier(name) + " " + direction + " " + type
+                            + ("Y".equals(rs.getString(9)) ? " DEFAULT" : ""));
+                    }
+                }
+            }
+        }
+        List<CompletionAssistantCandidate> candidates = new ArrayList<>();
+        for (PackageCompletionMember member : members) {
+            String identity = owner.length() + ":" + owner + ":" + objectId + ":" + member.id;
+            candidates.add(new CompletionAssistantCandidate(member.name,
+                member.function ? CompletionAssistantCandidateKind.FUNCTION : CompletionAssistantCandidateKind.PROCEDURE,
+                blankToNull(request.getDatabase()), owner, owner, packageName, null, member.returnType,
+                member.signatureKnown ? String.join(", ", member.parameters) : null, identity));
+        }
+        return new CompletionAssistantResponse(candidates, incomplete, false, true);
+    }
+
+    private static String quotePackageCompletionIdentifier(String identifier) {
+        return identifier.matches("[A-Z][A-Z0-9_$#]*") ? identifier : "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    private static final class PackageCompletionMember {
+        final String name;
+        final String id;
+        final boolean function;
+        final List<String> parameters = new ArrayList<>();
+        boolean signatureKnown = true;
+        String returnType;
+
+        PackageCompletionMember(String name, String id, boolean function) {
+            this.name = name;
+            this.id = id;
+            this.function = function;
+        }
     }
 
     private CompletionAssistantResponse completionAssistantTables(CompletionAssistantRequest request) throws SQLException {

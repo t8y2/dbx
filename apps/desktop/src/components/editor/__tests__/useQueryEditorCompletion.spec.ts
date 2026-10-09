@@ -9,7 +9,7 @@ import { useQueryEditorCompletion } from "../useQueryEditorCompletion";
 import { useQueryEditorCompletionMetadata } from "../useQueryEditorCompletionMetadata";
 import type { QueryEditorProps } from "../queryEditorTypes";
 import type { RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
-import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import type { SqlCompletionColumn, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { analyzeSqlCompletion, type SqlCompletionAnalysisResult } from "@/lib/sql/sqlCompletionAnalysis";
 
 vi.mock("@/stores/connectionStore", () => ({ COMPLETION_METADATA_CONCURRENCY: 4 }));
@@ -48,7 +48,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
     lookupLocalCompletionSchemas: vi.fn((): string[] => []),
     lookupLocalCompletionForeignKeys: vi.fn(() => []),
     listCompletionTables: vi.fn(async (): Promise<SqlCompletionTable[]> => []),
-    listCompletionObjects: vi.fn(async () => []),
+    listCompletionObjects: vi.fn(async (): Promise<SqlCompletionObject[]> => []),
     listCompletionColumns: vi.fn(async (): Promise<SqlCompletionColumn[]> => []),
     listCompletionSchemas: vi.fn(async (): Promise<string[]> => []),
     listCompletionDatabases: vi.fn(async (): Promise<string[]> => []),
@@ -103,6 +103,64 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
   const provide = (explicit = true) => completion.provideSqlCompletions(new CompletionContext(currentView.state, currentView.state.selection.main.head, explicit));
   return { props, currentView, view, store, settings, runtime, completion, provide, startCompletion };
 }
+
+describe.each([false, true])("OceanBase standalone routine completion (semantic=%s)", (semanticCompletionEnabled) => {
+  beforeEach(() => vi.useRealTimers());
+
+  it("loads a quoted owner exactly and inserts a case-sensitive routine identifier", async () => {
+    const sql = 'CALL "Mixed.Owner".';
+    const { provide, store, currentView } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: sql }, undefined, semanticCompletionEnabled);
+    store.listCompletionObjects.mockResolvedValue([{ name: "Do.Work", schema: "Mixed.Owner", type: "procedure", signature: "" }]);
+    const result = await provide();
+    expect(store.listCompletionObjects).toHaveBeenCalledWith("connection", "OB", "", 100, "Mixed.Owner", undefined, false, "APP", expect.any(Array), false);
+    const option = result!.options.find((candidate) => candidate.label === "Do.Work")!;
+    expect(option).toBeDefined();
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe('CALL "Mixed.Owner"."Do.Work"()');
+  });
+
+  it.each([
+    ["CALL pkg.", "APP", "PKG", "CALL pkg.\"Do.Work\"()"],
+    ['CALL "Mixed.Owner"."Mixed.Package".', "Mixed.Owner", "Mixed.Package", 'CALL "Mixed.Owner"."Mixed.Package"."Do.Work"()'],
+  ])("loads package members for %s and inserts only the member", async (sql, owner, packageName, expected) => {
+    const { provide, store, currentView } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: sql }, undefined, semanticCompletionEnabled);
+    store.listCompletionObjects.mockImplementation(async (...args: unknown[]) => args[5] === packageName
+      ? [{ name: "Do.Work", schema: owner, parentSchema: owner, parentName: packageName, type: "procedure", signature: "", routineId: "101:1" }]
+      : []);
+    const result = await provide();
+    expect(store.listCompletionObjects).toHaveBeenCalledWith("connection", "OB", "", 100, owner, packageName, false, "APP", expect.any(Array), false);
+    const option = result!.options.find((candidate) => candidate.label === "Do.Work")!;
+    expect(option).toBeDefined();
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(expected);
+  });
+
+  it("keeps unknown overloads separate and does not invent empty argument lists", async () => {
+    const { provide, store, currentView } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: "CALL APP.PKG." }, undefined, semanticCompletionEnabled);
+    store.listCompletionObjects.mockResolvedValue([1, 2].map((id) => ({ name: "RUN", schema: "APP", parentSchema: "APP", parentName: "PKG", type: "procedure", routineId: `101:${id}` })));
+    const result = await provide();
+    const options = result!.options.filter((candidate) => candidate.label === "RUN");
+    expect(options).toHaveLength(2);
+    const option = options[0]!;
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe("CALL APP.PKG.RUN");
+  });
+
+  it("drops a routine response when the request is invalidated", async () => {
+    const { provide, store, completion } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: "CALL P" }, undefined, semanticCompletionEnabled);
+    let resolve!: (objects: SqlCompletionObject[]) => void;
+    store.listCompletionObjects.mockReturnValue(new Promise((done) => { resolve = done; }));
+    const pending = provide();
+    await vi.waitFor(() => expect(store.listCompletionObjects).toHaveBeenCalled());
+    completion.invalidateRequests();
+    resolve([{ name: "P_OLD", schema: "APP", type: "procedure" }]);
+    const result = await pending;
+    expect(result?.options.some((option) => option.label === "P_OLD") ?? false).toBe(false);
+  });
+});
 
 describe.each([false, true])("Snowflake namespace completion (semantic=%s)", (semanticCompletionEnabled) => {
   beforeEach(() => vi.useRealTimers());

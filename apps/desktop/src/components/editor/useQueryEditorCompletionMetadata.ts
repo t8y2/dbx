@@ -571,7 +571,8 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   }
 
   function completionObjectScopeKey(scope: CompletionMetadataScope): string {
-    return `${scope.database}:${scope.schema ?? ""}`.toLowerCase();
+    const key = JSON.stringify([scope.database, scope.schema]);
+    return props.databaseType === "oceanbase-oracle" ? key : key.toLowerCase();
   }
 
   function completionObjectsForScope(scope: CompletionMetadataScope): SqlCompletionObject[] {
@@ -579,7 +580,8 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   }
 
   function completionObjectIdentityKey(object: SqlCompletionObject): string {
-    return `${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}:${object.signature?.trim() ?? ""}`.toLowerCase();
+    const key = JSON.stringify([object.type, object.schema, object.name, object.parentName, object.routineId ?? object.signature?.trim()]);
+    return props.databaseType === "oceanbase-oracle" ? key : key.toLowerCase();
   }
 
   function completionObjectsDiffer(existing: SqlCompletionObject[], incoming: SqlCompletionObject[]): boolean {

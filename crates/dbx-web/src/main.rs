@@ -858,6 +858,8 @@ async fn serve() -> Result<(), String> {
         .route("/query/preview-foreign-key-change", post(routes::query::preview_foreign_key_change))
         .route("/query/preview-check-change", post(routes::query::preview_check_change))
         .route("/query/apply-check-change", post(routes::query::apply_check_change))
+        .route("/query/preview-unique-change", post(routes::query::preview_unique_change))
+        .route("/query/apply-unique-change", post(routes::query::apply_unique_change))
         .route("/query/apply-foreign-key-change", post(routes::query::apply_foreign_key_change))
         .route("/query/apply-primary-key-change", post(routes::query::apply_primary_key_change))
         .route("/query/build-table-owner-change-sql", post(routes::query::build_table_owner_change_sql))

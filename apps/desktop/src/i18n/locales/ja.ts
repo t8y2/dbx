@@ -4626,6 +4626,18 @@ export default withEnglishFallback({
     missing: "CHECK 制約を読み取れません。",
     current: "現在の CHECK",
   },
+  uniqueEditor: {
+    title: "UNIQUE 制約の編集",
+    add: "UNIQUE を追加",
+    existing: "UNIQUE 制約を選択",
+    edit: "選択した UNIQUE を編集",
+    drop: "この UNIQUE を削除",
+    index: "関連索引",
+    oracleHint: "制約と索引は別のオブジェクトです。保持した一意索引は一意性を引き続き適用します。",
+    oceanbaseHint: "OceanBase の UNIQUE は関連する一意索引で管理されます。削除すると索引も削除されます。状態・遅延オプションは使用できません。",
+    missing: "UNIQUE 制約を読み取れません。",
+    current: "現在の UNIQUE",
+  },
   foreignKeyEditor: {
     title: "外部キーの編集",
     add: "外部キーを追加",

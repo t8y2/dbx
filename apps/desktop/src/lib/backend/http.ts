@@ -1968,6 +1968,14 @@ export async function applyCheckChange(connectionId: string, database: string, c
   return post("/api/query/apply-check-change", { connectionId, database, change, revision });
 }
 
+export async function previewUniqueChange(connectionId: string, database: string, change: import("@/types/constraintChange").UniqueChange): Promise<import("@/types/constraintChange").UniqueChangePreview> {
+  return post("/api/query/preview-unique-change", { connectionId, database, change });
+}
+
+export async function applyUniqueChange(connectionId: string, database: string, change: import("@/types/constraintChange").UniqueChange, revision: string): Promise<import("@/types/constraintChange").UniqueChangeResult> {
+  return post("/api/query/apply-unique-change", { connectionId, database, change, revision });
+}
+
 export async function previewForeignKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").ForeignKeyChange): Promise<import("@/types/constraintChange").ForeignKeyChangePreview> {
   return post("/api/query/preview-foreign-key-change", { connectionId, database, change });
 }

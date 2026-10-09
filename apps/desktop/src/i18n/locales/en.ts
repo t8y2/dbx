@@ -5322,6 +5322,18 @@ export default {
     missing: "The CHECK constraint is no longer visible.",
     current: "Current CHECK",
   },
+  uniqueEditor: {
+    title: "Edit UNIQUE constraints",
+    add: "Add UNIQUE",
+    existing: "Select a UNIQUE constraint",
+    edit: "Edit selected UNIQUE",
+    drop: "Delete this UNIQUE",
+    index: "Backing index",
+    oracleHint: "Constraints and indexes have separate identities. Preserved unique indexes continue enforcing uniqueness.",
+    oceanbaseHint: "OceanBase manages UNIQUE through its backing unique index. Dropping the constraint removes that index; state and deferred options are unavailable.",
+    missing: "The UNIQUE constraint is no longer visible.",
+    current: "Current UNIQUE",
+  },
   foreignKeyEditor: {
     title: "Edit foreign keys",
     add: "Add foreign key",

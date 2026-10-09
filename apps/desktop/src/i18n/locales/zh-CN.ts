@@ -5315,6 +5315,18 @@ export default withEnglishFallback({
     missing: "无法读取此 CHECK 约束。",
     current: "当前 CHECK",
   },
+  uniqueEditor: {
+    title: "编辑 UNIQUE 约束",
+    add: "添加 UNIQUE",
+    existing: "选择 UNIQUE 约束",
+    edit: "编辑所选 UNIQUE",
+    drop: "删除此 UNIQUE",
+    index: "关联索引",
+    oracleHint: "约束与索引身份分开处理；保留的唯一索引仍会限制重复值。",
+    oceanbaseHint: "OceanBase 的 UNIQUE 与关联唯一索引共用身份。删除会移除该索引；不提供启停、验证或延迟选项。",
+    missing: "无法读取此 UNIQUE 约束。",
+    current: "当前 UNIQUE",
+  },
   foreignKeyEditor: {
     title: "编辑外键",
     add: "添加外键",

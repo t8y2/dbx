@@ -848,6 +848,32 @@ pub async fn apply_check_change(
 }
 
 #[tauri::command]
+pub async fn preview_unique_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::UniqueChange,
+) -> Result<dbx_core::schema::oracle_constraint_change::UniqueChangePreview, String> {
+    dbx_core::schema::oracle_constraint_change::preview_unique_change(&state, &connection_id, &database, change).await
+}
+#[tauri::command]
+pub async fn apply_unique_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::UniqueChange,
+    revision: String,
+) -> Result<dbx_core::schema::oracle_constraint_change::UniqueChangeResult, String> {
+    dbx_core::schema::oracle_constraint_change::apply_unique_change(
+        &state,
+        &connection_id,
+        &database,
+        change,
+        &revision,
+    )
+    .await
+}
+#[tauri::command]
 pub async fn preview_foreign_key_change(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

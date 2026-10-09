@@ -2135,6 +2135,8 @@ pub fn run() {
             commands::query::preview_foreign_key_change,
             commands::query::preview_check_change,
             commands::query::apply_check_change,
+            commands::query::preview_unique_change,
+            commands::query::apply_unique_change,
             commands::query::apply_foreign_key_change,
             commands::query::apply_primary_key_change,
             commands::query::build_table_owner_change_sql,

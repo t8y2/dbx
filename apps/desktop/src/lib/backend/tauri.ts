@@ -2351,6 +2351,14 @@ export async function applyCheckChange(connectionId: string, database: string, c
   return invoke("apply_check_change", { connectionId, database, change, revision });
 }
 
+export async function previewUniqueChange(connectionId: string, database: string, change: import("@/types/constraintChange").UniqueChange): Promise<import("@/types/constraintChange").UniqueChangePreview> {
+  return invoke("preview_unique_change", { connectionId, database, change });
+}
+
+export async function applyUniqueChange(connectionId: string, database: string, change: import("@/types/constraintChange").UniqueChange, revision: string): Promise<import("@/types/constraintChange").UniqueChangeResult> {
+  return invoke("apply_unique_change", { connectionId, database, change, revision });
+}
+
 export async function previewForeignKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").ForeignKeyChange): Promise<import("@/types/constraintChange").ForeignKeyChangePreview> {
   return invoke("preview_foreign_key_change", { connectionId, database, change });
 }

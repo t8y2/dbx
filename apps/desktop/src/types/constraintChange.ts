@@ -14,6 +14,15 @@ export interface CheckDefinition {
   initiallyDeferred: boolean;
   rely: boolean;
 }
+export interface UniqueDefinition {
+  name: string;
+  columns: string[];
+  enabled: boolean;
+  validated: boolean;
+  deferrable: boolean;
+  initiallyDeferred: boolean;
+  rely: boolean;
+}
 export interface CheckChange {
   schema: string;
   tableName: string;
@@ -26,6 +35,24 @@ export interface CheckChangePreview extends Omit<ConstraintChangePreview, "curre
 export interface CheckChangeResult extends Omit<ConstraintChangeResult, "currentConstraint"> {
   currentConstraint: CheckDefinition | null;
   originalConstraint: CheckDefinition | null;
+}
+export interface UniqueSnapshot extends UniqueDefinition {
+  indexOwner: string | null;
+  indexName: string | null;
+}
+export interface UniqueChange {
+  schema: string;
+  tableName: string;
+  originalName: string | null;
+  desired: UniqueDefinition | null;
+  dropPreviousIndex: boolean;
+}
+export interface UniqueChangePreview extends Omit<ConstraintChangePreview, "currentConstraint"> {
+  currentConstraint: UniqueSnapshot | null;
+}
+export interface UniqueChangeResult extends Omit<ConstraintChangeResult, "currentConstraint"> {
+  currentConstraint: UniqueSnapshot | null;
+  originalConstraint: UniqueSnapshot | null;
 }
 
 export interface ForeignKeyDefinition {

@@ -8,6 +8,8 @@ mod foreign_key;
 pub use foreign_key::*;
 mod check;
 pub use check::*;
+mod unique;
+pub use unique::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

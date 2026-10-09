@@ -4332,6 +4332,18 @@ export default withEnglishFallback({
     missing: "無法讀取此 CHECK 約束。",
     current: "目前 CHECK",
   },
+  uniqueEditor: {
+    title: "編輯 UNIQUE 約束",
+    add: "新增 UNIQUE",
+    existing: "選擇 UNIQUE 約束",
+    edit: "編輯所選 UNIQUE",
+    drop: "刪除此 UNIQUE",
+    index: "關聯索引",
+    oracleHint: "約束與索引分別處理；保留的唯一索引仍會限制重複值。",
+    oceanbaseHint: "OceanBase 的 UNIQUE 與關聯唯一索引共用身分。刪除會移除此索引；不提供啟停、驗證或延遲選項。",
+    missing: "無法讀取此 UNIQUE 約束。",
+    current: "目前 UNIQUE",
+  },
   foreignKeyEditor: {
     title: "編輯外鍵",
     add: "新增外鍵",

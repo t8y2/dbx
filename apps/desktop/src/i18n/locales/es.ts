@@ -4744,6 +4744,18 @@ export default withEnglishFallback({
     missing: "La restricción CHECK ya no es visible.",
     current: "CHECK actual",
   },
+  uniqueEditor: {
+    title: "Editar restricciones UNIQUE",
+    add: "Añadir UNIQUE",
+    existing: "Seleccionar UNIQUE",
+    edit: "Editar UNIQUE seleccionado",
+    drop: "Eliminar este UNIQUE",
+    index: "Índice asociado",
+    oracleHint: "Las restricciones y los índices son objetos distintos. Los índices únicos conservados siguen imponiendo unicidad.",
+    oceanbaseHint: "OceanBase gestiona UNIQUE mediante su índice único. Al eliminar la restricción se elimina ese índice; no hay opciones de estado ni diferimiento.",
+    missing: "La restricción UNIQUE ya no es visible.",
+    current: "UNIQUE actual",
+  },
   foreignKeyEditor: {
     title: "Editar claves externas",
     add: "Añadir clave externa",

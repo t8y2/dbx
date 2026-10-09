@@ -4607,6 +4607,18 @@ export default withEnglishFallback({
     missing: "CHECK 제약 조건을 읽을 수 없습니다.",
     current: "현재 CHECK",
   },
+  uniqueEditor: {
+    title: "UNIQUE 제약 조건 편집",
+    add: "UNIQUE 추가",
+    existing: "UNIQUE 선택",
+    edit: "선택한 UNIQUE 편집",
+    drop: "이 UNIQUE 삭제",
+    index: "연결된 인덱스",
+    oracleHint: "제약 조건과 인덱스는 별도로 처리합니다. 유지된 고유 인덱스는 계속 고유성을 적용합니다.",
+    oceanbaseHint: "OceanBase는 고유 인덱스로 UNIQUE를 관리합니다. 제약 조건 삭제 시 인덱스도 삭제됩니다. 상태 및 지연 옵션은 제공되지 않습니다.",
+    missing: "UNIQUE 제약 조건을 읽을 수 없습니다.",
+    current: "현재 UNIQUE",
+  },
   foreignKeyEditor: {
     title: "외래 키 편집",
     add: "외래 키 추가",

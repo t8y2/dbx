@@ -84,7 +84,7 @@ pub async fn apply_foreign_key_change(
 pub(super) fn qualified(owner: &str, name: &str) -> Result<String, String> {
     Ok(format!("{}.{}", identifier(owner)?, identifier(name)?))
 }
-fn column_list(columns: &[String]) -> Result<String, String> {
+pub(super) fn column_list(columns: &[String]) -> Result<String, String> {
     let mut seen = std::collections::HashSet::new();
     if columns.is_empty() || columns.iter().any(|column| !seen.insert(column)) {
         return Err("Constraint columns must be nonempty and distinct.".into());

@@ -5087,6 +5087,18 @@ export default withEnglishFallback({
     missing: "Ограничение CHECK больше не видно.",
     current: "Текущий CHECK",
   },
+  uniqueEditor: {
+    title: "Изменение ограничений UNIQUE",
+    add: "Добавить UNIQUE",
+    existing: "Выберите UNIQUE",
+    edit: "Изменить выбранный UNIQUE",
+    drop: "Удалить этот UNIQUE",
+    index: "Связанный индекс",
+    oracleHint: "Ограничения и индексы учитываются отдельно. Сохранённые уникальные индексы продолжают обеспечивать уникальность.",
+    oceanbaseHint: "OceanBase управляет UNIQUE через уникальный индекс. При удалении ограничения удаляется индекс; параметры состояния и отсрочки недоступны.",
+    missing: "Ограничение UNIQUE больше не видно.",
+    current: "Текущий UNIQUE",
+  },
   foreignKeyEditor: {
     title: "Изменение внешних ключей",
     add: "Добавить внешний ключ",

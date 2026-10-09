@@ -57,6 +57,7 @@ import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import OraclePrimaryKeyEditor from "./OraclePrimaryKeyEditor.vue";
 import OracleForeignKeyEditor from "./OracleForeignKeyEditor.vue";
 import OracleCheckEditor from "./OracleCheckEditor.vue";
+import OracleUniqueEditor from "./OracleUniqueEditor.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -6570,11 +6571,25 @@ watch(
               v-if="(databaseType === 'oracle' || databaseType === 'oceanbase-oracle') && !isCreateMode && !connection?.read_only"
               :connection-id="connectionId"
               :database="database"
-              :schema="metadataSchema"
-              :table-name="tableName"
+              :schema="metadataSchema || database"
+              :table-name="tableName || ''"
               :names="constraints.filter((item) => item.constraint_type.toUpperCase() === 'CHECK').map((item) => item.name)"
               :oceanbase="databaseType === 'oceanbase-oracle'"
-              :disabled="saving || loading || constraintsLoading || hasPendingStructureChanges || ddlDirty"
+              :disabled="saving || loading || constraintsLoading || hasPendingStructureChanges() || ddlDirty"
+              :confirm="confirmPrimaryKeyChange"
+              @busy="saving = $event"
+              @changed="primaryKeyChanged"
+            />
+            <OracleUniqueEditor
+              v-if="(databaseType === 'oracle' || databaseType === 'oceanbase-oracle') && !isCreateMode && !connection?.read_only"
+              :connection-id="connectionId"
+              :database="database"
+              :schema="metadataSchema || database"
+              :table-name="tableName || ''"
+              :columns="columns.map((column) => column.name)"
+              :names="constraints.filter((item) => item.constraint_type.toUpperCase() === 'UNIQUE').map((item) => item.name)"
+              :oceanbase="databaseType === 'oceanbase-oracle'"
+              :disabled="saving || loading || constraintsLoading || hasPendingStructureChanges() || ddlDirty"
               :confirm="confirmPrimaryKeyChange"
               @busy="saving = $event"
               @changed="primaryKeyChanged"

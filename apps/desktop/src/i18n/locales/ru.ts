@@ -4318,8 +4318,6 @@ export default withEnglishFallback({
     indexes: "Индексы",
     firebirdObjectManager: "Управление объектами Firebird",
     firebirdGenerators: "Генераторы",
-    firebirdObjectSearch: "Поиск объектов, таблиц и модулей…",
-    firebirdObjectContext: "Таблица / модуль",
     firebirdReadOnlyHint: "Метаданные и сохранённый код только для чтения. Просмотр не увеличивает значения генераторов.",
     internalFunctions: "Внутренние функции (PSQL)",
     udfFunctions: "UDF / внешние функции",

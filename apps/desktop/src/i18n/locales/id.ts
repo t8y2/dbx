@@ -4268,8 +4268,6 @@ export default withEnglishFallback({
     indexes: "Indeks",
     firebirdObjectManager: "Pengelola objek Firebird",
     firebirdGenerators: "Generator",
-    firebirdObjectSearch: "Cari nama objek, tabel, atau modul…",
-    firebirdObjectContext: "Tabel / modul",
     firebirdReadOnlyHint: "Metadata dan sumber tersimpan hanya-baca. Melihat generator tidak menaikkan nilainya.",
     internalFunctions: "Fungsi internal (PSQL)",
     udfFunctions: "UDF / fungsi eksternal",

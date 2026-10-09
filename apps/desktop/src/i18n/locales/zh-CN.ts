@@ -4408,8 +4408,6 @@ export default withEnglishFallback({
     indexes: "索引",
     firebirdObjectManager: "Firebird 对象管理",
     firebirdGenerators: "生成器（Generators）",
-    firebirdObjectSearch: "搜索对象名称、所属表或模块…",
-    firebirdObjectContext: "所属表 / 模块",
     firebirdReadOnlyHint: "仅查看元数据和存储的源码。查看生成器不会递增其当前值。",
     internalFunctions: "内部函数（PSQL）",
     udfFunctions: "UDF / 外部函数",

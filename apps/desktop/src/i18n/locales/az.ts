@@ -3945,8 +3945,6 @@ export default withEnglishFallback({
     indexes: "İndekslər",
     firebirdObjectManager: "Firebird obyekt idarəetməsi",
     firebirdGenerators: "Generatorlar",
-    firebirdObjectSearch: "Obyekt adları, cədvəllər və ya modullar axtarın…",
-    firebirdObjectContext: "Cədvəl / modul",
     firebirdReadOnlyHint: "Metadata və saxlanmış mənbə yalnız oxumaq üçündür. Baxış generator dəyərlərini artırmır.",
     internalFunctions: "Daxili funksiyalar (PSQL)",
     udfFunctions: "UDF / xarici funksiyalar",

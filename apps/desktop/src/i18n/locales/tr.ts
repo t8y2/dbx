@@ -3915,8 +3915,6 @@ export default withEnglishFallback({
     indexes: "Dizinler",
     firebirdObjectManager: "Firebird nesne yönetimi",
     firebirdGenerators: "Üreteçler",
-    firebirdObjectSearch: "Nesne adları, tablolar veya modüller ara…",
-    firebirdObjectContext: "Tablo / modül",
     firebirdReadOnlyHint: "Salt okunur meta veriler ve kayıtlı kaynak. Üreteçleri görüntülemek değerlerini artırmaz.",
     internalFunctions: "Dahili işlevler (PSQL)",
     udfFunctions: "UDF / harici işlevler",

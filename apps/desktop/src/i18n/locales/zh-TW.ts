@@ -4204,8 +4204,6 @@ export default withEnglishFallback({
     indexes: "索引",
     firebirdObjectManager: "Firebird 物件管理",
     firebirdGenerators: "產生器（Generators）",
-    firebirdObjectSearch: "搜尋物件名稱、所屬資料表或模組…",
-    firebirdObjectContext: "所屬資料表 / 模組",
     firebirdReadOnlyHint: "僅檢視中繼資料和儲存的原始碼。檢視產生器不會遞增目前值。",
     internalFunctions: "內部函式（PSQL)",
     udfFunctions: "UDF／外部函式",

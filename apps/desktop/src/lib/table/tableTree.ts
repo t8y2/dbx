@@ -855,7 +855,7 @@ const objectGroupNodeTypes = new Set<TreeNodeType>([
   "group-triggers",
   "group-events",
   "group-sequences",
-  "group-indexes",
+  "group-database-indexes",
   "group-synonyms",
   "group-jobs",
   "group-packages",

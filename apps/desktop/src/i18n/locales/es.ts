@@ -4377,8 +4377,6 @@ export default withEnglishFallback({
     indexes: "Índices",
     firebirdObjectManager: "Gestor de objetos Firebird",
     firebirdGenerators: "Generadores",
-    firebirdObjectSearch: "Buscar nombres, tablas o módulos…",
-    firebirdObjectContext: "Tabla / módulo",
     firebirdReadOnlyHint: "Metadatos y código guardado de solo lectura. Ver generadores no incrementa sus valores.",
     internalFunctions: "Funciones internas (PSQL)",
     udfFunctions: "UDF / funciones externas",

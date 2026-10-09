@@ -4474,8 +4474,6 @@ export default {
     indexes: "Indexes",
     firebirdObjectManager: "Firebird object manager",
     firebirdGenerators: "Generators",
-    firebirdObjectSearch: "Search object names, tables or modules…",
-    firebirdObjectContext: "Table / module",
     firebirdReadOnlyHint: "Read-only metadata and stored source. Viewing generators does not advance their values.",
     internalFunctions: "Internal functions (PSQL)",
     udfFunctions: "UDF / external functions",

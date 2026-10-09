@@ -4219,8 +4219,6 @@ export default withEnglishFallback({
     indexes: "インデックス",
     firebirdObjectManager: "Firebird オブジェクト管理",
     firebirdGenerators: "ジェネレーター",
-    firebirdObjectSearch: "オブジェクト名、テーブル、モジュールを検索…",
-    firebirdObjectContext: "テーブル / モジュール",
     firebirdReadOnlyHint: "メタデータと保存されたソースの読み取り専用表示です。ジェネレーターの値は増加しません。",
     internalFunctions: "内部関数 (PSQL)",
     udfFunctions: "UDF / 外部関数",

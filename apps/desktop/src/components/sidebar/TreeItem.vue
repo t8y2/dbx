@@ -415,6 +415,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-types":
       return { icon: Braces, colorClass: "text-violet-500" };
+    case "group-database-indexes":
+      return { icon: Key, colorClass: "text-amber-400" };
     case "group-partitions":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "group-extensions":

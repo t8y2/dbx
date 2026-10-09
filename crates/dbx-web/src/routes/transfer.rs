@@ -230,7 +230,7 @@ pub async fn start_transfer(
         };
         if let Some(journal) = history.as_ref() { journal.record_object_outcome(&prerequisites).await; }
         if !prerequisites.failed.is_empty() {
-            send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, "Type prerequisite failed; tables and dependent programs were not executed".into()));
+            send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, "Type prerequisite failed; tables and dependent programs were not executed"));
             finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
             return;
         }

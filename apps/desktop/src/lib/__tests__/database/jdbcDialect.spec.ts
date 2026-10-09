@@ -550,6 +550,22 @@ describe("object tree node schema", () => {
     expect(metadataSchemaForConnection({ db_type: "sqlserver" }, "dbx_test")).toBe("dbo");
   });
 
+  it("keeps the SunDB catalog name out of the metadata schema", () => {
+    // SUNDB's database (the JDBC URL path segment) is a catalog, and the driver
+    // matches getTables' schemaPattern with a literal `TABLE_SCHEMA LIKE '<name>'`.
+    // Sending the catalog name as the schema matched no objects, so the sidebar
+    // showed an empty "表 0" node (issue #11360). The schema tree now resolves the
+    // real schema first; before one is picked the blank schema lets the backend
+    // use the session default.
+    const connection = { db_type: "sundb" as const };
+    expect(connectionObjectTreeQuerySchema(connection, "vpnccw")).toBe("");
+    expect(connectionObjectTreeNodeSchema(connection, "vpnccw")).toBeUndefined();
+    expect(metadataSchemaForConnection(connection, "vpnccw")).toBe("");
+    // A real schema still passes through unchanged.
+    expect(connectionObjectTreeQuerySchema(connection, "vpnccw", "APP")).toBe("APP");
+    expect(connectionObjectTreeNodeSchema(connection, "vpnccw", "APP")).toBe("APP");
+  });
+
   it("keeps the database-as-schema fallback for engines whose database is the schema", () => {
     // Oracle, Dameng and the Hive family address objects as schema.table with no
     // separate schema level in the tree, so the database name is the schema there

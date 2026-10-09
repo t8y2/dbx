@@ -81,6 +81,35 @@ class SundbAgentMetadataTest {
     }
 
     @Test
+    void retriesSchemasWithoutTheCatalogFilterThatMatchesNoSunDbRows() {
+        // 驱动的 getCatalog() 返回 null，所以 schema 查询会用连接上的 database 作为 catalog 过滤；
+        // SUNDB 的 CATALOG_NAME 与该值不一致时会返回空集，此时必须退回不带 catalog 的 getSchemas()，
+        // 否则对象树会停在空的 schema 节点上（库下的表永远加载不出来）。
+        List<String> statements = new ArrayList<>();
+        List<String> metadataRequests = new ArrayList<>();
+        SundbAgent agent = new SundbAgent();
+        DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (proxy, method, args) -> {
+            switch (method.getName()) {
+                case "getCatalogs":
+                    return emptyRows();
+                case "getSchemas":
+                    metadataRequests.add("getSchemas:" + args[0]);
+                    return args[0] == null ? schemas("APP", "PUBLIC") : emptyRows();
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
+        TestSupport.setPrivateConnection(agent, connection(statements, metadata));
+        setConfiguredDatabase(agent, "SUNDB");
+
+        List<String> schemas = agent.listSchemas();
+
+        Assertions.assertEquals(List.of("getSchemas:SUNDB", "getSchemas:null"), metadataRequests);
+        Assertions.assertEquals(List.of("APP", "PUBLIC"), schemas);
+        Assertions.assertTrue(statements.isEmpty(), "元数据不应执行手写 SQL: " + statements);
+    }
+
+    @Test
     void switchesSchemaWithSetSchemaInsteadOfMysqlUse() {
         SundbAgent agent = new SundbAgent();
         TestSupport.setPrivateConnection(agent, connection(new ArrayList<>(), metadata(

@@ -24,6 +24,8 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class H2AgentProcessTest {
     @TempDir
@@ -79,57 +81,55 @@ class H2AgentProcessTest {
         }
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(strings = {"h2-v1", "h2-v2", "h2-v3"})
     @Timeout(60)
-    void autoFileSessionReopensAfterConnectionTestWithDelayedClose() throws Exception {
+    void autoFileSessionReopensAfterConnectionTestWithDelayedClose(String profile) throws Exception {
         Path jar = Path.of(System.getProperty("dbx.h2.agent.jar"));
-        for (String profile : List.of("h2-v1", "h2-v2", "h2-v3")) {
-            String database = "file:" + tempDirectory.resolve("delayed-" + profile) + ";AUTO_SERVER=TRUE";
-            JsonObject params = connectParams("delayed-close", profile);
-            params.addProperty("database", database);
-            // Persist the setting, then start a fresh Agent just like a client restart.
-            try (RpcProcess creator = new RpcProcess(jar)) {
-                creator.result(creator.request("open_session", params));
-                creator.result(creator.request("execute_query", queryParams("delayed-close", "SET DB_CLOSE_DELAY -1")));
-            }
-            params.addProperty("driver_profile", "h2");
-            try (RpcProcess rpc = new RpcProcess(jar)) {
-                Assertions.assertTrue(rpc.result(rpc.request("test_connection", params)).get("ok").getAsBoolean());
-                Assertions.assertTrue(rpc.result(rpc.request("test_connection", params)).get("ok").getAsBoolean());
-                rpc.result(rpc.request("open_session", params));
-                Assertions.assertEquals("1", firstCell(rpc.result(rpc.request("execute_query", queryParams("delayed-close", "SELECT 1")))));
-                rpc.result(rpc.request("close_session", sessionParams("delayed-close")));
-                rpc.result(rpc.request("open_session", params));
-            }
+        String database = "file:" + tempDirectory.resolve("delayed-" + profile) + ";AUTO_SERVER=TRUE";
+        JsonObject params = connectParams("delayed-close", profile);
+        params.addProperty("database", database);
+        // Persist the setting, then start a fresh Agent just like a client restart.
+        try (RpcProcess creator = new RpcProcess(jar)) {
+            creator.result(creator.request("open_session", params));
+            creator.result(creator.request("execute_query", queryParams("delayed-close", "SET DB_CLOSE_DELAY -1")));
+        }
+        params.addProperty("driver_profile", "h2");
+        try (RpcProcess rpc = new RpcProcess(jar)) {
+            Assertions.assertTrue(rpc.result(rpc.request("test_connection", params)).get("ok").getAsBoolean());
+            Assertions.assertTrue(rpc.result(rpc.request("test_connection", params)).get("ok").getAsBoolean());
+            rpc.result(rpc.request("open_session", params));
+            Assertions.assertEquals("1", firstCell(rpc.result(rpc.request("execute_query", queryParams("delayed-close", "SELECT 1")))));
+            rpc.result(rpc.request("close_session", sessionParams("delayed-close")));
+            rpc.result(rpc.request("open_session", params));
         }
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(strings = {"h2-v1", "h2-v2", "h2-v3"})
     @Timeout(60)
-    void failedFirstAutoFileOpenDoesNotMaskAuthenticationError() throws Exception {
+    void failedFirstAutoFileOpenDoesNotMaskAuthenticationError(String profile) throws Exception {
         Path jar = Path.of(System.getProperty("dbx.h2.agent.jar"));
-        for (String profile : List.of("h2-v1", "h2-v2", "h2-v3")) {
-            JsonObject params = connectParams("failed-first", profile);
-            params.addProperty("database", "file:" + tempDirectory.resolve("failed-first-" + profile)
-                + ";AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1");
-            params.addProperty("password", "owner-secret");
-            try (RpcProcess creator = new RpcProcess(jar)) {
-                creator.result(creator.request("open_session", params));
+        JsonObject params = connectParams("failed-first", profile);
+        params.addProperty("database", "file:" + tempDirectory.resolve("failed-first-" + profile)
+            + ";AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1");
+        params.addProperty("password", "owner-secret");
+        try (RpcProcess creator = new RpcProcess(jar)) {
+            creator.result(creator.request("open_session", params));
+        }
+        params.addProperty("driver_profile", "h2");
+        try (RpcProcess rpc = new RpcProcess(jar)) {
+            JsonObject denied = params.deepCopy();
+            denied.addProperty("password", "wrong-secret");
+            for (int attempt = 0; attempt < 2; attempt++) {
+                JsonObject response = rpc.request("test_connection", denied);
+                Assertions.assertTrue(response.has("error"));
+                JsonObject errorData = response.getAsJsonObject("error").getAsJsonObject("data");
+                Assertions.assertTrue(errorData.has("sqlState"), response.toString());
+                Assertions.assertEquals("28000", errorData.get("sqlState").getAsString(), response.toString());
             }
-            params.addProperty("driver_profile", "h2");
-            try (RpcProcess rpc = new RpcProcess(jar)) {
-                JsonObject denied = params.deepCopy();
-                denied.addProperty("password", "wrong-secret");
-                for (int attempt = 0; attempt < 2; attempt++) {
-                    JsonObject response = rpc.request("test_connection", denied);
-                    Assertions.assertTrue(response.has("error"));
-                    JsonObject errorData = response.getAsJsonObject("error").getAsJsonObject("data");
-                    Assertions.assertTrue(errorData.has("sqlState"), response.toString());
-                    Assertions.assertEquals("28000", errorData.get("sqlState").getAsString(), response.toString());
-                }
-                rpc.result(rpc.request("open_session", params));
-                Assertions.assertEquals("1", firstCell(rpc.result(rpc.request("execute_query", queryParams("failed-first", "SELECT 1")))));
-            }
+            rpc.result(rpc.request("open_session", params));
+            Assertions.assertEquals("1", firstCell(rpc.result(rpc.request("execute_query", queryParams("failed-first", "SELECT 1")))));
         }
     }
 

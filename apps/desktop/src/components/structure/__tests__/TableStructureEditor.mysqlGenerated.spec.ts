@@ -344,6 +344,24 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
+describe("TableStructureEditor extended properties column width", () => {
+  it("widens the extended properties column to fit its content", async () => {
+    const offsetWidth = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute("data-structure-extended-properties") ? 320 : 0;
+    });
+    try {
+      const root = await mountEditor(draftWithColumns([{ name: "id" }]));
+      await vi.waitFor(() => {
+        const cols = root.querySelectorAll<HTMLElement>("colgroup")[0]!.querySelectorAll<HTMLElement>("col");
+        // Content (320) + horizontal cell padding and border for the compact density.
+        expect(parseFloat(cols[cols.length - 1]!.style.width)).toBeGreaterThanOrEqual(320);
+      });
+    } finally {
+      offsetWidth.mockRestore();
+    }
+  });
+});
+
 describe("TableStructureEditor MySQL generated columns", () => {
   it("shows a hydrated generated column as checked with its expression", async () => {
     const root = await mountEditor(

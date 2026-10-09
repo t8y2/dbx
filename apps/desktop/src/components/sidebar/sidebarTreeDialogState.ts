@@ -85,6 +85,7 @@ export const dropDatabasePreviewSql = ref("");
 export const dropSchemaPreviewSql = ref("");
 export const showDuplicateDialog = ref(false);
 export const duplicateTableName = ref("");
+export const duplicateTableSchema = ref("");
 export const duplicateStructureSource = ref<DuplicateStructureSource | null>(null);
 export const showPasteDialog = ref(false);
 export const pasteTableMode = ref<PasteTableMode>("structure-and-data");

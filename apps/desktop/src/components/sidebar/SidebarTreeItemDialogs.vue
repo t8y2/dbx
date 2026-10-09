@@ -50,6 +50,8 @@ const {
   copyStructureDocText,
   showDuplicateDialog,
   duplicateTableName,
+  duplicateTableSchema,
+  duplicateUsesOceanbaseOracle,
   confirmDuplicateStructure,
   showPasteDialog,
   pasteTableEntries,
@@ -507,6 +509,7 @@ watch(
       <DialogHeader>
         <DialogTitle>{{ t("contextMenu.duplicateNameTitle") }}</DialogTitle>
       </DialogHeader>
+      <Input v-if="duplicateUsesOceanbaseOracle" v-model="duplicateTableSchema" :aria-label="t('contextMenu.oceanbaseCloneTargetSchema')" :placeholder="t('contextMenu.oceanbaseCloneTargetSchema')" />
       <Input v-model="duplicateTableName" :placeholder="t('contextMenu.duplicateNamePlaceholder')" @keydown.enter.prevent="confirmDuplicateStructure" />
       <DialogFooter>
         <Button variant="outline" @click="showDuplicateDialog = false">{{ t("dangerDialog.cancel") }}</Button>

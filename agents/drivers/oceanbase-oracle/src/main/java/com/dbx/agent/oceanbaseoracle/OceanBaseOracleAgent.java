@@ -262,7 +262,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 String.format(baseSql, placeholders(objectTypes.size())),
                 "OBJECT_NAME, TABLE_TYPE, COMMENTS",
                 "o.OBJECT_NAME",
-                "ORDER BY OBJECT_NAME",
+                "ORDER BY OBJECT_NAME, o.OBJECT_ID",
                 owner,
                 objectTypes,
                 constraints
@@ -319,7 +319,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                     WHEN 'PACKAGE BODY' THEN 5
                     WHEN 'SEQUENCE' THEN 6
                     ELSE 7
-                END, OBJECT_NAME
+                END, OBJECT_NAME, o.OBJECT_ID
                 """.stripIndent().trim(),
                 owner,
                 objectTypes,
@@ -327,11 +327,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             );
 
             List<ObjectInfo> result = new ArrayList<>();
-            String sql = query.sql;
-            if (constraints.hasLimit() || constraints.hasOffset()) {
-                sql += "\nORDER BY DBX_RN";
-            }
-            try (var stmt = requireConnection().prepareStatement(sql)) {
+            try (var stmt = requireConnection().prepareStatement(query.sql)) {
                 bind(stmt, query.args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
@@ -869,13 +865,16 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             sql = "SELECT " + selectList + "\nFROM (\n  SELECT DBX_Q.*, ROWNUM AS DBX_RN\n  FROM (\n"
                 + sql
                 + "\n  ) DBX_Q\n  WHERE ROWNUM <= ?\n)\nWHERE DBX_RN > ?";
-            args.add(offset + constraints.getLimit());
+            args.add((long) offset + constraints.getLimit());
             args.add(offset);
         } else if (constraints.hasOffset()) {
             sql = "SELECT " + selectList + "\nFROM (\n  SELECT DBX_Q.*, ROWNUM AS DBX_RN\n  FROM (\n"
                 + sql
                 + "\n  ) DBX_Q\n)\nWHERE DBX_RN > ?";
             args.add(constraints.getOffset());
+        }
+        if (constraints.hasLimit() || constraints.hasOffset()) {
+            sql += "\nORDER BY DBX_RN";
         }
         return new MetadataSql(sql, args);
     }
@@ -1068,6 +1067,8 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             Object arg = args.get(index);
             if (arg instanceof Integer) {
                 stmt.setInt(index + 1, (Integer) arg);
+            } else if (arg instanceof Long) {
+                stmt.setLong(index + 1, (Long) arg);
             } else {
                 stmt.setString(index + 1, String.valueOf(arg));
             }

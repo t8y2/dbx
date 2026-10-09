@@ -998,6 +998,13 @@ pub async fn list_tables_core(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
+    let db_config = connection_config(state, connection_id).await;
+    if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
+        validate_oceanbase_metadata_page(limit, offset)?;
+        if limit == Some(0) {
+            return Ok(vec![]);
+        }
+    }
     let metadata_session = EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "tables").await;
     let result = retry_metadata_connection_for_session(
         state,
@@ -2399,6 +2406,7 @@ async fn list_tables_once(
         if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
             let use_mongodb_collection_listing = uses_mongodb_agent_collection_listing(db_config.as_ref());
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
+            let is_oceanbase = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle);
             let is_tdengine = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Tdengine);
             let use_agent_table_paging = db_config.as_ref().is_some_and(supports_agent_table_paging);
             let filter_locally_after_oracle_comments =
@@ -2484,7 +2492,7 @@ async fn list_tables_once(
                     }
                     let final_offset = if filter_locally_after_comments || force_local_table_name_filter {
                         offset
-                    } else if agent_paging_likely_applied(use_agent_table_paging, limit, tables.len()) {
+                    } else if is_oceanbase || agent_paging_likely_applied(use_agent_table_paging, limit, tables.len()) {
                         Some(0)
                     } else {
                         offset
@@ -6502,6 +6510,12 @@ pub async fn list_objects_core(
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
     let db_config = connection_config(state, connection_id).await;
+    if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
+        validate_oceanbase_metadata_page(limit, offset)?;
+        if limit == Some(0) {
+            return Ok(vec![]);
+        }
+    }
     let filter_locally_after_oracle_comments = db_config.as_ref().is_some_and(|config| {
         config.db_type == DatabaseType::Oracle && filter.is_some_and(|filter| !filter.trim().is_empty())
     });
@@ -7195,7 +7209,9 @@ async fn list_objects_once(
         }
         if let Some(agent_client) = extract_pool!(pool_handle.as_ref(), Agent) {
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
+            let is_oceanbase = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle);
             let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config);
+            let use_agent_paging = use_oracle_agent_paging || is_oceanbase;
             let filter_locally_after_oracle_comments =
                 is_oracle && filter.is_some_and(|filter| !filter.trim().is_empty());
             let timeout_duration = agent_metadata_timeout(db_config.as_ref());
@@ -7219,14 +7235,14 @@ async fn list_objects_once(
             let agent_filter = if filter_locally_after_oracle_comments { None } else { filter };
             let agent_limit = if filter_locally_after_oracle_comments || force_local_table_name_filter {
                 None
-            } else if use_oracle_agent_paging {
+            } else if use_agent_paging {
                 limit
             } else {
                 None
             };
             let agent_offset = if filter_locally_after_oracle_comments || force_local_table_name_filter {
                 None
-            } else if use_oracle_agent_paging {
+            } else if use_agent_paging {
                 offset
             } else {
                 None
@@ -7243,6 +7259,9 @@ async fn list_objects_once(
                 )
                 .await
             {
+                Ok(objects) if is_oceanbase => {
+                    return Ok(ObjectListOutcome { objects, paging_applied: !force_local_table_name_filter });
+                }
                 Ok(mut objects) if !objects.is_empty() => {
                     if is_oracle {
                         load_oracle_table_comments_for_objects(
@@ -9785,6 +9804,15 @@ fn object_types_only_custom_types(object_types: Option<&[String]>) -> bool {
     })
 }
 
+fn validate_oceanbase_metadata_page(limit: Option<usize>, offset: Option<usize>) -> Result<(), String> {
+    for (name, value) in [("limit", limit), ("offset", offset)] {
+        if value.is_some_and(|value| value > i32::MAX as usize) {
+            return Err(format!("OceanBase metadata {name} must not exceed {}", i32::MAX));
+        }
+    }
+    Ok(())
+}
+
 fn is_default_oracle_agent_config(config: &ConnectionConfig) -> bool {
     // Only the default go-oracle agent handles filtered/paged metadata; legacy profiles keep Rust fallback paging.
     matches!(config.db_type, DatabaseType::Oracle)
@@ -9801,7 +9829,7 @@ fn uses_oracle_metadata_object_source(config: Option<&ConnectionConfig>, object_
 
 fn supports_agent_table_paging(config: &ConnectionConfig) -> bool {
     // Keep paging opt-in until each legacy agent is known to apply metadata constraints server-side.
-    matches!(config.db_type, DatabaseType::Tdengine)
+    matches!(config.db_type, DatabaseType::Tdengine | DatabaseType::OceanbaseOracle)
         || crate::agent_catalog::agent_key(&config.db_type, config.driver_profile.as_deref()) == Some("cache")
         || is_default_oracle_agent_config(config)
 }

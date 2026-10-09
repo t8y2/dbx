@@ -97,7 +97,9 @@ import {
   supportsDropTableCascade,
   supportsTruncateTableCascade,
   type TableAdminSqlOptions,
+  type DuplicateTableStructurePlan,
 } from "@/lib/database/dbAdminSql";
+import { confirmOceanbaseTableClone, executeOceanbaseTableClone, showOceanbaseTableCloneFailure, OceanbaseTableCloneError } from "@/lib/database/oceanbaseTableClone";
 import { useToast } from "@/composables/useToast";
 import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
@@ -134,6 +136,7 @@ import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { applyDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
+import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
@@ -165,7 +168,7 @@ import {
 } from "@/lib/table/objectBrowserRows";
 import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, singleClickRowAction, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
 import { objectBrowserTableSelectionAnchor, objectBrowserTableSelectionRange } from "@/lib/table/objectBrowserSelection";
-import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
+import { customTypeCapabilities, supportsTypeObjectSource, type SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { visibleMongoCollections } from "@/lib/sidebar/mongoCollectionMutation";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
@@ -227,12 +230,16 @@ const selectedSchema = ref<string | undefined>(props.schema);
 const rows = ref<ObjectBrowserRow[]>([]);
 const rootRef = ref<HTMLElement>();
 const search = ref(props.initialSearchQuery ?? "");
-const objectFilter = ref<ObjectFilter>("all");
+const objectFilter = ref<ObjectFilter>(props.connection.db_type === "oceanbase-oracle" ? (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables") : "all");
 const userHasSelectedFilter = ref(false);
 const sortKey = ref<ObjectBrowserSortKey>("name");
 const sortDirection = ref<ObjectBrowserSortDirection>("asc");
 const loadingSchemas = ref(false);
 const loadingObjects = ref(false);
+const loadingMoreObjects = ref(false);
+const hasMoreObjects = ref(false);
+let objectPageOffset = 0;
+let objectSearchTimer: ReturnType<typeof setTimeout> | undefined;
 const refreshingObjects = ref(false);
 const scaffoldRefreshError = ref("");
 const sourceLoading = ref(false);
@@ -315,6 +322,8 @@ const sidePanelGuard = createSidePanelRequestGuard();
 const sidePanelRef = ref<InstanceType<typeof CustomTypeInfoPanel> | null>(null);
 const tableMetadataCapabilities = computed<TableMetadataCapabilities>(() => getTableMetadataCapabilities(effectiveDatabaseType.value));
 const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
+const usesServerObjectPaging = computed(() => props.connection.db_type === "oceanbase-oracle");
+const objectPageSize = computed(() => Math.max(1, Math.min(10_000, Math.floor(settingsStore.desktopSettings?.sidebar_table_page_size || 500))));
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
 const isVictoriaMetrics = computed(() => effectiveDatabaseType.value === "victoriametrics");
 const isMongodb = computed(() => props.connection.db_type === "mongodb");
@@ -323,7 +332,7 @@ const supportsObjectSizeStats = computed(() => !isVictoriaMetrics.value && effec
 // The batch table toolbar (export/copy/truncate/empty/drop selected) is SQL-only:
 // MongoDB collections are not dropped or truncated through it.
 const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !isMongodb.value && effectiveDatabaseType.value !== "nebula");
-const showTableStatistics = computed(() => effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
+const showTableStatistics = computed(() => !usesServerObjectPaging.value && effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
 const showObjectRowStats = computed(() => showTableStatistics.value);
 const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
@@ -372,6 +381,7 @@ const emptyPreviewSql = ref("");
 const showDuplicateDialog = ref(false);
 const duplicateTarget = ref<ObjectBrowserRow | null>(null);
 const duplicateTableName = ref("");
+const duplicateTableSchema = ref("");
 const showProcedureExecutionConfirm = ref(false);
 const procedureExecutionTarget = ref<ObjectBrowserRow | null>(null);
 const selectedTableIds = ref<Set<string>>(new Set());
@@ -429,23 +439,25 @@ const vacuumRiskMessage = computed(() => (vacuumExecuting.value ? t("contextMenu
 const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(effectiveDatabaseType.value));
 const objectFilters = computed<ObjectFilter[]>(() =>
-  (
-    [
-      ["all", objectCounts.value.all],
-      ["tables", objectCounts.value.tables],
-      ["views", objectCounts.value.views],
-      ["materializedViews", objectCounts.value.materializedViews],
-      ["procedures", objectCounts.value.procedures],
-      ["functions", objectCounts.value.functions],
-      ["triggers", objectCounts.value.triggers],
-      ["events", objectCounts.value.events],
-      ["sequences", objectCounts.value.sequences],
-      ["packages", objectCounts.value.packages],
-      ["types", objectCounts.value.types],
-    ] as Array<[ObjectFilter, number]>
-  )
-    .filter(([filter, count]) => filter === "all" || count > 0)
-    .map(([filter]) => filter),
+  usesServerObjectPaging.value
+    ? ["all", "tables", "views", "procedures", "functions", "sequences", "packages"]
+    : (
+        [
+          ["all", objectCounts.value.all],
+          ["tables", objectCounts.value.tables],
+          ["views", objectCounts.value.views],
+          ["materializedViews", objectCounts.value.materializedViews],
+          ["procedures", objectCounts.value.procedures],
+          ["functions", objectCounts.value.functions],
+          ["triggers", objectCounts.value.triggers],
+          ["events", objectCounts.value.events],
+          ["sequences", objectCounts.value.sequences],
+          ["packages", objectCounts.value.packages],
+          ["types", objectCounts.value.types],
+        ] as Array<[ObjectFilter, number]>
+      )
+        .filter(([filter, count]) => filter === "all" || count > 0)
+        .map(([filter]) => filter),
 );
 const showObjectFilter = computed(() => objectFilters.value.length > 2);
 // Measured condensation for the header row: tier 1 moves the sort/view/checkbox
@@ -603,10 +615,24 @@ watch([sortKey, sortDirection], () => scrollObjectsToTop());
 
 // Also jump to the top when the search query or object-type filter changes —
 // filtered results bear no relation to the previous scroll position.
-watch(search, (value) => {
-  scrollObjectsToTop();
-  emit("searchChange", value);
-});
+watch(
+  search,
+  (value) => {
+    scrollObjectsToTop();
+    emit("searchChange", value);
+    if (usesServerObjectPaging.value) {
+      clearTimeout(objectSearchTimer);
+      objectBrowserRowsLoadGuard.invalidate();
+      rows.value = [];
+      hasMoreObjects.value = false;
+      loadingMoreObjects.value = false;
+      loadingObjects.value = true;
+      if (!value.trim()) void loadObjects();
+      else objectSearchTimer = setTimeout(() => void loadObjects(), 300);
+    }
+  },
+  { flush: "sync" },
+);
 watch(objectFilter, () => {
   if (preserveObjectFilterScrollOnce) {
     preserveObjectFilterScrollOnce = false;
@@ -796,11 +822,13 @@ function typeLabel(row: ObjectBrowserRow) {
 }
 
 function sortIconFor(key: ObjectBrowserSortKey) {
+  if (usesServerObjectPaging.value) return null;
   if (sortKey.value !== key) return null;
   return sortDirection.value === "asc" ? ArrowUp : ArrowDown;
 }
 
 function toggleSort(key: ObjectBrowserSortKey) {
+  if (usesServerObjectPaging.value) return;
   if (sortKey.value === key) {
     sortDirection.value = sortDirection.value === "asc" ? "desc" : "asc";
     return;
@@ -952,6 +980,7 @@ function removePinnedObjectBrowserRows(rows: readonly ObjectBrowserRow[]) {
 }
 
 function groupedFilteredRows() {
+  if (usesServerObjectPaging.value) return { rows: rows.value, depths: new Map<string, number>() };
   return groupObjectBrowserRows({
     rows: rows.value.filter(rowMatchesObjectFilter),
     matchingRows: objectSearchSummary.value.matchingRows.filter(rowMatchesObjectFilter),
@@ -2598,10 +2627,11 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
 function requestDuplicateStructure(row: ObjectBrowserRow) {
   duplicateTarget.value = row;
   duplicateTableName.value = `${row.name}_copy`;
+  duplicateTableSchema.value = row.schema || selectedSchema.value || "";
   showDuplicateDialog.value = true;
 }
 
-async function buildDuplicateStructurePlan(sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, sourceColumns?: ColumnInfo[]) {
+async function buildDuplicateStructurePlan(sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, sourceColumns?: ColumnInfo[], targetSchema?: string) {
   return buildSharedDuplicateTableStructurePlan({
     connectionId: props.connection.id,
     database: props.database,
@@ -2612,11 +2642,13 @@ async function buildDuplicateStructurePlan(sourceName: string, targetName: strin
     targetName,
     tableComment,
     sourceColumns,
+    targetSchema,
     identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
   });
 }
 
-function executeDuplicateStructurePlan(plan: { sql: string; executeAsScript: boolean }, schema: string | undefined) {
+function executeDuplicateStructurePlan(plan: DuplicateTableStructurePlan, schema: string | undefined) {
+  if (plan.oceanbaseClone) return executeOceanbaseTableClone(plan.oceanbaseClone, (sql) => api.executeQuery(props.connection.id, props.database, sql, plan.oceanbaseClone!.targetSchema));
   return plan.executeAsScript ? api.executeScript(props.connection.id, props.database, plan.sql, schema) : api.executeQuery(props.connection.id, props.database, plan.sql, schema);
 }
 
@@ -2627,13 +2659,15 @@ async function confirmDuplicateStructure() {
   showDuplicateDialog.value = false;
   try {
     const schema = row.schema || selectedSchema.value;
-    const plan = await buildDuplicateStructurePlan(row.name, newName, schema, row.comment);
+    const plan = await buildDuplicateStructurePlan(row.name, newName, schema, row.comment, undefined, effectiveDatabaseType.value === "oceanbase-oracle" ? duplicateTableSchema.value : undefined);
+    if (!confirmOceanbaseTableClone(plan, t)) return;
     const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
     if (!executed) return;
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }));
     await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, plan.oceanbaseClone?.targetSchema ?? schema);
   } catch (e: any) {
+    showOceanbaseTableCloneFailure(e);
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
 }
@@ -2810,6 +2844,10 @@ async function confirmPasteTable() {
       if (mode === "structure-and-data" || mode === "structure-only") {
         const plan = await buildDuplicateStructurePlan(entry.sourceName, targetName, schema, entry.tableComment, sourceColumns);
         sourceColumns = plan.sourceColumns;
+        if (!confirmOceanbaseTableClone(plan, t)) {
+          pasteCancelled = true;
+          break;
+        }
         const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
         if (!executed) {
           pasteCancelled = true;
@@ -2842,6 +2880,8 @@ async function confirmPasteTable() {
       successCount++;
     } catch (e: any) {
       pasteFailCount++;
+      showOceanbaseTableCloneFailure(e);
+      if (e instanceof OceanbaseTableCloneError) hasMutatedTable = true;
       firstPasteError ??= e;
       console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
     }
@@ -3244,7 +3284,7 @@ function openInitialEventIfNeeded() {
 function finishObjectBrowserRowsLoad() {
   loadingObjects.value = false;
   const preferredFilter = props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables");
-  if (!userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
+  if (!usesServerObjectPaging.value && !userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
     // The default table filter is a presentation choice, not a user query
     // change, so preserve the tab's saved scroll offset across remounts.
     preserveObjectFilterScrollOnce = objectFilter.value !== "tables";
@@ -3267,6 +3307,8 @@ watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () =
 // (#8301)。经 objectListSchemaForConnection 回退到连接用户名（大写），仅限
 // 达梦；oracle/oceanbase-oracle 维持空 schema 由后端解析当前 schema。
 async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean }) {
+  clearTimeout(objectSearchTimer);
+  if (usesServerObjectPaging.value) return loadObjectPage(false);
   error.value = "";
   // A new load supersedes any in-flight one, so reset the transient refresh flags
   // on entry. A superseded request's finally() can no longer run (the guard's
@@ -3339,6 +3381,61 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
       loadingObjects.value = false;
       refreshingObjects.value = false;
       finishOnce();
+    }
+  }
+}
+
+async function loadObjectPage(append: boolean) {
+  if (append && (loadingObjects.value || loadingMoreObjects.value || !hasMoreObjects.value)) return;
+  const schema = needsSchema.value ? objectListSchemaForConnection(props.connection, selectedSchema.value) : props.database;
+  const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));
+  const offset = append ? objectPageOffset : 0;
+  const pageSize = objectPageSize.value;
+  const filter = search.value.trim();
+  const typeFilter = objectFilter.value;
+  const objectTypes: Partial<Record<ObjectFilter, (SidebarObjectKind | "EVENT")[]>> = {
+    tables: ["TABLE"],
+    views: ["VIEW"],
+    materializedViews: ["MATERIALIZED_VIEW"],
+    procedures: ["PROCEDURE"],
+    functions: ["FUNCTION"],
+    triggers: ["TRIGGER"],
+    events: ["EVENT"],
+    sequences: ["SEQUENCE"],
+    packages: ["PACKAGE", "PACKAGE_BODY"],
+    types: ["TYPE", "TYPE_BODY"],
+  };
+  const isCurrent = () => objectBrowserRowsLoadGuard.isCurrent(request) && search.value.trim() === filter && objectFilter.value === typeFilter;
+  error.value = "";
+  scaffoldRefreshError.value = "";
+  loadingObjects.value = !append;
+  loadingMoreObjects.value = append;
+  if (!append) {
+    rows.value = [];
+    hasMoreObjects.value = false;
+    objectPageOffset = 0;
+  }
+  try {
+    if (parseSlashDelimitedRegexQuery(filter)) {
+      error.value = t("objects.pagedRegexUnsupported");
+      return;
+    }
+    const objects = await api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, objectTypes[typeFilter], filter || undefined, pageSize + 1, offset, request.scope.catalog);
+    if (!isCurrent()) return;
+    const page = objects.slice(0, pageSize);
+    const pageRows = buildObjectBrowserRows({ objects: page, database: request.scope.database, fallbackSchema: request.scope.schema, rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value) });
+    applyObjectBrowserRows(append ? [...rows.value, ...pageRows] : pageRows);
+    objectPageOffset = offset + page.length;
+    hasMoreObjects.value = objects.length > pageSize;
+  } catch (e: unknown) {
+    if (!isCurrent()) return;
+    if (append) scaffoldRefreshError.value = translateBackendError(t, e);
+    else error.value = translateBackendError(t, e);
+  } finally {
+    if (isCurrent()) {
+      loadingObjects.value = false;
+      loadingMoreObjects.value = false;
+      if (!append) finishObjectBrowserRowsLoad();
     }
   }
 }
@@ -3443,7 +3540,7 @@ function onSchemaChange(value: any) {
   selectedSchema.value = typeof value === "string" && value ? value : undefined;
   emit("schemaChange", selectedSchema.value);
   userHasSelectedFilter.value = false;
-  objectFilter.value = "all";
+  objectFilter.value = usesServerObjectPaging.value ? (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables") : "all";
   void loadObjects();
 }
 
@@ -3476,13 +3573,15 @@ function filterLabel(filter: ObjectFilter) {
                       : filter === "types"
                         ? "tree.types"
                         : "objects.all";
-  return `${t(key)} ${filterCount(filter)}`;
+  return usesServerObjectPaging.value ? t(key) : `${t(key)} ${filterCount(filter)}`;
 }
 
 function selectObjectFilter(filter: ObjectFilter) {
+  if (filter === objectFilter.value) return;
   userHasSelectedFilter.value = true;
   objectFilter.value = filter;
   emit("filterChange", filter);
+  if (usesServerObjectPaging.value) void loadObjects();
 }
 
 function getSearchInput(): HTMLInputElement | null {
@@ -3524,6 +3623,7 @@ function matchesRefreshScope(scope: { schema?: string; catalog?: string }): bool
 defineExpose({ focusSearch, refresh, matchesRefreshScope });
 
 onBeforeUnmount(() => {
+  clearTimeout(objectSearchTimer);
   objectBrowserRowsLoadGuard.invalidate();
   schemaListLoadGuard.invalidate();
   stopColumnResize?.();
@@ -3536,7 +3636,7 @@ watch(
     const contextEpoch = schemaListLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
-    objectFilter.value = "all";
+    objectFilter.value = usesServerObjectPaging.value ? (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables") : "all";
     clearTableSelection();
     // Close side panel and invalidate any pending source/table-info requests
     // so stale results from the old context don't overwrite new state.
@@ -3879,7 +3979,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         @update:model-value="onSchemaChange"
       />
       <!-- Sort selector -->
-      <div v-if="showInlineSortAndView" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
+      <div v-if="showInlineSortAndView && !usesServerObjectPaging" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
         <select
           class="h-6 cursor-pointer appearance-none rounded-sm bg-transparent px-1.5 text-xs text-muted-foreground outline-none hover:text-foreground focus:text-foreground"
           :value="sortKey"
@@ -3915,7 +4015,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         {{ t("objects.pasteTableSelected") }}
       </Button>
       <ToolbarOverflowMenu v-if="showToolbarOverflow" :label="t('toolbar.moreActions')" button-class="h-7 w-7">
-        <DropdownMenuSub>
+        <DropdownMenuSub v-if="!usesServerObjectPaging">
           <DropdownMenuSubTrigger>
             <ArrowDown class="h-3.5 w-3.5" />
             {{ t("objects.sortBy") }}
@@ -3927,7 +4027,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             </DropdownMenuItem>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
-        <DropdownMenuItem @select="sortDirection = sortDirection === 'asc' ? 'desc' : 'asc'">
+        <DropdownMenuItem v-if="!usesServerObjectPaging" @select="sortDirection = sortDirection === 'asc' ? 'desc' : 'asc'">
           <ArrowUp v-if="sortDirection === 'asc'" class="h-3.5 w-3.5" />
           <ArrowDown v-else class="h-3.5 w-3.5" />
           {{ sortDirection === "asc" ? t("objects.sortDesc") : t("objects.sortAsc") }}
@@ -4007,7 +4107,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('name')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('name')">
                   <span class="truncate">{{ t("objects.name") }}</span>
                   <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4016,7 +4116,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('type')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('type')">
                   <span class="truncate">{{ t("objects.type") }}</span>
                   <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4025,7 +4125,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div v-if="showObjectRowStats" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
                   <span class="truncate">{{ objectRowsLabel }}</span>
                   <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4038,7 +4138,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div v-if="showObjectSizeStats" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
                   <span class="truncate">{{ t("objects.size") }}</span>
                   <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4051,7 +4151,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div v-if="hasCreatedAt" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('created_at')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('created_at')">
                   <span class="truncate">{{ t("objects.createdAt") }}</span>
                   <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4064,7 +4164,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div v-if="hasUpdatedAt" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('updated_at')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('updated_at')">
                   <span class="truncate">{{ t("objects.updatedAt") }}</span>
                   <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4077,7 +4177,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('comment')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('comment')">
                   <span class="truncate">{{ t("objects.comment") }}</span>
                   <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4206,6 +4306,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </div>
             </template>
           </RecycleScroller>
+        </div>
+        <div v-if="usesServerObjectPaging" class="flex shrink-0 items-center justify-between gap-2 border-t px-3 py-2 text-xs text-muted-foreground">
+          <span>{{ t("objects.pagedOrder", { count: rows.length }) }}</span>
+          <Button v-if="hasMoreObjects" data-object-load-more variant="outline" size="sm" :disabled="loadingMoreObjects" @click="loadObjectPage(true)">
+            <Loader2 v-if="loadingMoreObjects" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            {{ t("tree.loadMore") }}
+          </Button>
         </div>
       </div>
       <!-- Right-side panel: table info or source -->
@@ -4662,6 +4769,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <DialogHeader>
         <DialogTitle>{{ t("contextMenu.duplicateNameTitle") }}</DialogTitle>
       </DialogHeader>
+      <Input v-if="effectiveDatabaseType === 'oceanbase-oracle'" v-model="duplicateTableSchema" :aria-label="t('contextMenu.oceanbaseCloneTargetSchema')" :placeholder="t('contextMenu.oceanbaseCloneTargetSchema')" />
       <Input v-model="duplicateTableName" :placeholder="t('contextMenu.duplicateNamePlaceholder')" @keydown.enter.prevent="confirmDuplicateStructure" />
       <DialogFooter>
         <Button variant="outline" @click="showDuplicateDialog = false">{{ t("dangerDialog.cancel") }}</Button>

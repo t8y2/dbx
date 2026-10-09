@@ -78,6 +78,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { useToast } from "@/composables/useToast";
+import { confirmOceanbaseTableClone, executeOceanbaseTableClone, showOceanbaseTableCloneFailure, OceanbaseTableCloneError } from "@/lib/database/oceanbaseTableClone";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { activatePluginContextMenuItem, buildPluginConnectionContextMenuInvocation, buildPluginTableContextMenuInvocation } from "@/lib/plugins/pluginContext";
 import { parseDynamicMenuResponse, renderDynamicMenuEntries, type DynamicMenuAction } from "@/lib/plugins/dynamicContextMenu";
@@ -313,6 +314,7 @@ import {
   dropSchemaPreviewSql,
   showDuplicateDialog,
   duplicateTableName,
+  duplicateTableSchema,
   duplicateStructureSource,
   showPasteDialog,
   pasteTableMode,
@@ -1256,7 +1258,7 @@ function openDriverStoreForInstallError(errMsg: string, node: TreeNode = activeN
 
 async function loadMoreObjectGroupChildren() {
   const node = activeNode.value;
-  const searchFilter = node.loadMore?.parentId ? connectionStore.sidebarTableSearchQueries[node.loadMore.parentId]?.trim() || "" : "";
+  const searchFilter = node.loadMore?.searchFilter ?? (node.loadMore?.parentId ? connectionStore.sidebarTableSearchQueries[node.loadMore.parentId]?.trim() || "" : "");
   try {
     await connectionStore.loadMoreObjectGroupChildren(node, { searchFilter });
   } catch (e: any) {
@@ -3394,6 +3396,7 @@ async function executeTreeNodeSqlWithProductionGuard(
     beforeExecute?: () => Promise<void>;
     markDispatched?: () => void;
     timeoutSecs?: number;
+    execute?: (timeoutSecs: number | undefined) => ReturnType<typeof api.executeQuery>;
   } = {},
 ) {
   if (!node.connectionId) return undefined;
@@ -3419,6 +3422,7 @@ async function executeTreeNodeSqlWithProductionGuard(
       await options.beforeExecute?.();
       if (options.isCancelledBeforeDispatch?.()) throw new Error("Operation cancelled before it was sent to the database.");
       options.markDispatched?.();
+      if (options.execute) return options.execute(options.timeoutSecs ?? timeoutSecs);
       return options.executeAsScript ? api.executeScript(node.connectionId!, database, sql, options.schema ?? node.schema) : api.executeQuery(node.connectionId!, database, sql, options.schema ?? node.schema, executionId, { timeoutSecs: options.timeoutSecs ?? timeoutSecs });
     },
   });
@@ -4737,6 +4741,7 @@ function duplicateStructure(source: TreeNode = activeNode.value) {
   if (databaseTypeForNode(source) === "victoriametrics") return;
   duplicateStructureSource.value = source;
   duplicateTableName.value = `${source.label}_copy`;
+  duplicateTableSchema.value = source.schema || "";
   showDuplicateDialog.value = true;
 }
 
@@ -4761,17 +4766,23 @@ async function confirmDuplicateStructure() {
       schema: node.schema,
       sourceName: node.label,
       targetName: newName,
+      targetSchema: databaseType === "oceanbase-oracle" ? duplicateTableSchema.value : undefined,
       tableComment: node.comment,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
-    await executeTreeNodeSqlWithProductionGuard(node, plan.sql, {
+    if (!confirmOceanbaseTableClone(plan, t)) return;
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, plan.sql, {
       database: node.database,
       schema: node.schema,
       executeAsScript: plan.executeAsScript,
+      execute: plan.oceanbaseClone ? (timeoutSecs) => executeOceanbaseTableClone(plan.oceanbaseClone!, (sql) => api.executeQuery(node.connectionId, node.database, sql, plan.oceanbaseClone!.targetSchema, undefined, { timeoutSecs })) : undefined,
     });
+    if (!executed) return;
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }), 3000);
-    await refreshTableList(node);
+    if (plan.oceanbaseClone) await connectionStore.refreshObjectListTreeNode(node.connectionId, node.database, plan.oceanbaseClone.targetSchema);
+    else await refreshTableList(node);
   } catch (e: any) {
+    showOceanbaseTableCloneFailure(e);
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
 }
@@ -4817,10 +4828,15 @@ async function confirmPasteTable() {
           identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId),
         });
         sourceColumns = plan.sourceColumns;
+        if (!confirmOceanbaseTableClone(plan, t)) {
+          pasteCancelled = true;
+          break;
+        }
         const structureExecuted = await executeTreeNodeSqlWithProductionGuard(entry, plan.sql, {
           database: entry.database,
           schema: entry.schema,
           executeAsScript: plan.executeAsScript,
+          execute: plan.oceanbaseClone ? (timeoutSecs) => executeOceanbaseTableClone(plan.oceanbaseClone!, (sql) => api.executeQuery(entry.connectionId, entry.database, sql, plan.oceanbaseClone!.targetSchema, undefined, { timeoutSecs })) : undefined,
         });
         if (!structureExecuted) {
           pasteCancelled = true;
@@ -4857,6 +4873,11 @@ async function confirmPasteTable() {
       successCount++;
     } catch (e: any) {
       pasteFailCount++;
+      showOceanbaseTableCloneFailure(e);
+      if (e instanceof OceanbaseTableCloneError) {
+        hasMutatedTable = true;
+        queueRefreshTarget(entry);
+      }
       firstPasteError ??= e;
       console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
     }
@@ -5577,6 +5598,8 @@ function objectDialogCapabilities() {
     copyStructureDocText,
     showDuplicateDialog,
     duplicateTableName,
+    duplicateTableSchema,
+    duplicateUsesOceanbaseOracle: databaseTypeForNode(duplicateStructureSource.value || activeNode.value) === "oceanbase-oracle",
     confirmDuplicateStructure,
     showPasteDialog,
     pasteTableEntries,

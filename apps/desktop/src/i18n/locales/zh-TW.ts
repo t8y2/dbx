@@ -4267,6 +4267,8 @@ export default withEnglishFallback({
     schema: "Schema",
     search: "搜尋資料表、檢視、函式、序列或預存程序……",
     searchCollections: "搜尋集合...",
+    pagedRegexUnsupported: "分頁物件搜尋暫不支援正則運算式，請輸入名稱或註解文字。",
+    pagedOrder: "已載入 {count} 個物件，依資料庫順序排列。物件變更後請重新整理。",
     loading: "正在載入物件……",
     empty: "沒有找到物件",
     selectedTables: "已選擇 {count} 張資料表",

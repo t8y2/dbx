@@ -2,6 +2,7 @@ import type { ColumnInfo, ConnectionConfig, DatabaseObjectType, DatabaseType, Fo
 import * as api from "@/lib/backend/api";
 import { createColumnDrafts, createForeignKeyDrafts, createIndexDrafts, createTriggerDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildTableStructureChangeSqlOptions } from "@/lib/table/tableStructureEditorSql";
+import { buildOceanbaseTableClone, type OceanbaseTableClone } from "./oceanbaseTableClone";
 
 export interface DropObjectSqlOptions {
   databaseType?: DatabaseType;
@@ -100,12 +101,14 @@ export interface DuplicateTableStructurePlanOptions extends DuplicateTableStruct
   database: string;
   catalog?: string;
   sourceColumns?: ColumnInfo[];
+  targetSchema?: string;
 }
 
 export interface DuplicateTableStructurePlan {
   sql: string;
   sourceColumns?: ColumnInfo[];
   executeAsScript: boolean;
+  oceanbaseClone?: OceanbaseTableClone;
 }
 
 export function collectDuplicateTableColumnComments(columns: readonly Pick<ColumnInfo, "name" | "comment">[]): Array<{ name: string; comment: string }> {
@@ -242,6 +245,7 @@ export function sqlServerClonePrimaryKeyConstraintName(indexes: IndexInfo[], tar
 }
 
 export async function buildDuplicateTableStructurePlan(options: DuplicateTableStructurePlanOptions): Promise<DuplicateTableStructurePlan> {
+  if (options.databaseType === "oceanbase-oracle") return buildOceanbaseTableClone(options);
   if (options.databaseType === "oracle") {
     const columnsPromise = options.sourceColumns ? Promise.resolve(options.sourceColumns) : api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
     const tableCommentPromise =

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { dataGridBottomScrollTop, dataGridInfiniteScrollAppendCompletion, didDataGridInfiniteScrollContextChange, isDataGridAtScrollBottom, restoredDataGridScrollLeft } from "@/lib/dataGrid/dataGridInfiniteScroll";
-import { dataGridLoadAllInitialTarget, dataGridLoadAllNextSegment } from "@/lib/dataGrid/dataGridPagination";
+import { canStartDataGridLoadAll, dataGridLoadAllInitialTarget, dataGridLoadAllNextSegment } from "@/lib/dataGrid/dataGridPagination";
 
 describe("data grid bottom anchoring", () => {
   it("keeps DOM rows anchored when scrollbar padding increases the scroll height", () => {
@@ -162,5 +162,50 @@ describe("dataGridLoadAllInitialTarget", () => {
   it("advances by chunk increment when total is unknown", () => {
     expect(dataGridLoadAllInitialTarget(100_000, 100_000)).toBe(200_000);
     expect(dataGridLoadAllInitialTarget(200_000, 100_000)).toBe(300_000);
+  });
+});
+
+describe("canStartDataGridLoadAll", () => {
+  const base = { loadedRowCount: 10, pageSize: 10, allRowsLoaded: false, localResultComplete: false };
+
+  it("blocks a re-request on an exhausted result even when the total is unknown (#11321)", () => {
+    // Fully loaded 10-row result (the backend's has_more stays true because the
+    // first page filled the page size), marker set by the short previous chunk.
+    expect(canStartDataGridLoadAll({ ...base, hasMore: true, allRowsLoaded: true })).toBe(false);
+  });
+
+  it("blocks a limit-free result that already holds every row", () => {
+    // A result fetched without a page limit cannot yield more rows; paging it
+    // must never re-request, even when the row count is below the page size.
+    expect(canStartDataGridLoadAll({ loadedRowCount: 5, pageSize: 100, allRowsLoaded: false, localResultComplete: true })).toBe(false);
+    expect(canStartDataGridLoadAll({ loadedRowCount: 5, pageSize: 100, hasMore: true, allRowsLoaded: false, localResultComplete: true })).toBe(false);
+  });
+
+  it("still starts when the marker was set by the result-row cap (#10752)", () => {
+    // The load watcher also sets the marker on a cap hit — a capped result is
+    // not exhausted, and load-all is the only way past the cap. has_more is
+    // still true and no exact total exists, so the run must start; a genuinely
+    // exhausted capped result costs one empty append before terminating.
+    expect(canStartDataGridLoadAll({ loadedRowCount: 100_000, pageSize: 100, hasMore: true, allRowsLoaded: true, localResultComplete: false, resultRowCap: 100_000 })).toBe(true);
+    // Below the cap the marker still blocks (#11321 shape).
+    expect(canStartDataGridLoadAll({ loadedRowCount: 10, pageSize: 10, hasMore: true, allRowsLoaded: true, localResultComplete: false, resultRowCap: 100_000 })).toBe(false);
+  });
+
+  it("blocks when the exact total has already been loaded", () => {
+    expect(canStartDataGridLoadAll({ ...base, hasMore: true, exactTotal: 10 })).toBe(false);
+    expect(canStartDataGridLoadAll({ ...base, hasMore: undefined, exactTotal: 10 })).toBe(false);
+  });
+
+  it("keeps issuing requests while rows may remain", () => {
+    expect(canStartDataGridLoadAll({ ...base, hasMore: true })).toBe(true);
+    expect(canStartDataGridLoadAll({ ...base, hasMore: true, exactTotal: 260_000 })).toBe(true);
+    expect(canStartDataGridLoadAll({ loadedRowCount: 100_000, pageSize: 100, hasMore: true, exactTotal: 260_000, allRowsLoaded: false, localResultComplete: false })).toBe(true);
+  });
+
+  it("falls back to the shared segment heuristic when nothing is known to be complete", () => {
+    // No has_more, no total, loaded below pageSize: nothing suggests more rows.
+    expect(canStartDataGridLoadAll({ loadedRowCount: 10, pageSize: 100, allRowsLoaded: false, localResultComplete: false })).toBe(false);
+    // Either completion marker short-circuits before any heuristic can say yes.
+    expect(canStartDataGridLoadAll({ loadedRowCount: 10, pageSize: 100, hasMore: true, allRowsLoaded: true, localResultComplete: false })).toBe(false);
   });
 });

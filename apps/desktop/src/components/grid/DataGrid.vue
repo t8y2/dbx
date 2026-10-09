@@ -225,6 +225,7 @@ import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid
 import {
   canFetchNextDataGridSegment,
   canGoNextDataGridPage,
+  canStartDataGridLoadAll,
   dataGridLoadAllInitialTarget,
   dataGridLoadAllNextSegment,
   dataGridLoadAllSegment,
@@ -3878,7 +3879,20 @@ function nextLoadAllSegment() {
     return segment && !canFetchNextInfiniteScrollSegment.value ? { offset: segment.offset, limit: Math.min(segment.limit, pageSize.value) } : segment;
   }
   const effectiveTotal = paginationTotalRowCount.value ?? displayedTotalRowCount.value;
-  const canFetchMore = canFetchNextInfiniteScrollSegment.value && (!totalRowCountIsExact.value || effectiveTotal === undefined || props.result.rows.length < effectiveTotal);
+  // The "no more rows" marker must gate a re-request even when the total is
+  // unknown: re-fetching an exhausted result duplicated rows (#11321). The
+  // marker also gets set by the result-row cap; a capped result is not
+  // exhausted, and load-all is the only way past the cap (#10752).
+  const canFetchMore = canStartDataGridLoadAll({
+    hasMore: props.result.has_more,
+    loadedRowCount: props.result.rows.length,
+    pageSize: pageSize.value,
+    totalRowCount: hasKnownPaginationTotalRowCount.value ? paginationTotalRowCount.value : undefined,
+    exactTotal: totalRowCountIsExact.value ? effectiveTotal : undefined,
+    allRowsLoaded: infiniteScrollAllLoaded,
+    localResultComplete: allRowsLoaded.value,
+    resultRowCap: infiniteScrollMaxRows.value,
+  });
   const targetMaxRows = dataGridLoadAllInitialTarget(props.result.rows.length, infiniteScrollMaxRows.value, totalRowCountIsExact.value ? effectiveTotal : undefined);
   return dataGridLoadAllSegment(props.result.rows.length, targetMaxRows, canFetchMore);
 }
@@ -3926,7 +3940,18 @@ function startLoadAllRows(segment: { offset: number; limit: number }) {
 function finishOrContinueLoadAllRun(requestedOffset: number | undefined, requestedLimit: number | undefined): boolean {
   if (!loadAllRowsLoopActive) return false;
   const effectiveTotal = paginationTotalRowCount.value ?? displayedTotalRowCount.value;
-  const canFetchMore = canFetchNextInfiniteScrollSegment.value && (!totalRowCountIsExact.value || effectiveTotal === undefined || props.result.rows.length < effectiveTotal);
+  const canFetchMore = canStartDataGridLoadAll({
+    hasMore: props.result.has_more,
+    loadedRowCount: props.result.rows.length,
+    pageSize: pageSize.value,
+    totalRowCount: hasKnownPaginationTotalRowCount.value ? paginationTotalRowCount.value : undefined,
+    exactTotal: totalRowCountIsExact.value ? effectiveTotal : undefined,
+    allRowsLoaded: infiniteScrollAllLoaded,
+    localResultComplete: allRowsLoaded.value,
+    // The marker also gets set by the result-row cap; a capped result is not
+    // exhausted, and load-all is the only way past the cap (#10752).
+    resultRowCap: infiniteScrollMaxRows.value,
+  });
   const nextSegment = loadsSqlPages.value
     ? nextLoadAllSegment()
     : canFetchMore

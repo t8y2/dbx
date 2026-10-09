@@ -334,6 +334,17 @@ describe("extractSqlParameters", () => {
       expect(substituteSqlParameters(sql, { position: { kind: "raw", value: "FIRST" }, seconds: { kind: "number", value: "5" }, cursor: { kind: "raw", value: "c" } }, { databaseType })).toBe(`SELECT * FROM HR.EMPLOYEES ORDER BY id NULLS FIRST FOR UPDATE WAIT 5;
         BEGIN OPEN c FOR SELECT * FROM HR.EMPLOYEES; END;`);
     });
+
+    it.each([
+      ["SELECT * FROM HR.EMPLOYEES AS OF SCN @value", "7", "SELECT * FROM HR.EMPLOYEES AS OF SCN 7"],
+      ["SELECT * FROM HR.EMPLOYEES AS OF TIMESTAMP @value", "SYSTIMESTAMP", "SELECT * FROM HR.EMPLOYEES AS OF TIMESTAMP SYSTIMESTAMP"],
+      ["BEGIN CLOSE @value; END;", "c", "BEGIN CLOSE c; END;"],
+      ["SELECT * FROM employees WHERE name LIKE 'x' ESCAPE @value", "'!'", "SELECT * FROM employees WHERE name LIKE 'x' ESCAPE '!'"],
+      ["SELECT CURRENT_TIMESTAMP AT TIME ZONE @value FROM DUAL", "'UTC'", "SELECT CURRENT_TIMESTAMP AT TIME ZONE 'UTC' FROM DUAL"],
+    ])("keeps expression parameters in %s", (sql, value, expected) => {
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["value"]);
+      expect(substituteSqlParameters(sql, { value: { kind: "raw", value } }, { databaseType })).toBe(expected);
+    });
   });
 
   it.each(["postgres", "sqlserver", "dameng"] as const)("keeps separated at-sign parameters unchanged for %s", (databaseType) => {

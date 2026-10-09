@@ -89,8 +89,12 @@ impl TextEncoding {
             let significant: Vec<_> =
                 tokens[index + 1..].iter().filter(|t| !matches!(t.token, Token::Whitespace(_))).take(3).collect();
             let json_type = |token: &Token| matches!(token, Token::Word(w) if w.value.eq_ignore_ascii_case("json") || w.value.eq_ignore_ascii_case("jsonb"));
+            let previous_tokens: Vec<_> =
+                tokens[..index].iter().rev().filter(|t| !matches!(t.token, Token::Whitespace(_))).take(2).collect();
+            let in_cast = matches!(previous_tokens.as_slice(), [open, cast] if open.token == Token::LParen && matches!(&cast.token, Token::Word(word) if word.value.eq_ignore_ascii_case("CAST")));
             let json_cast = matches!(significant.as_slice(), [colon, ty, ..] if colon.token == Token::DoubleColon && json_type(&ty.token))
-                || matches!(significant.as_slice(), [as_word, ty, close] if matches!(&as_word.token, Token::Word(w) if w.value.eq_ignore_ascii_case("AS")) && json_type(&ty.token) && close.token == Token::RParen);
+                || (in_cast
+                    && matches!(significant.as_slice(), [as_word, ty, close] if matches!(&as_word.token, Token::Word(w) if w.value.eq_ignore_ascii_case("AS")) && json_type(&ty.token) && close.token == Token::RParen));
             let start = byte_offset(token.span.start)?;
             let end = byte_offset(token.span.end)?;
             result.push_str(&self.encode(&sql[previous..start])?);
@@ -721,6 +725,7 @@ mod tests {
         assert!(encoded.contains("E'\u{81}\\\\\\n'"));
         assert!(encoded.ends_with(&format!("FROM \"{}\"", codec.encode("中文表").unwrap())));
         assert_eq!(codec.encode_sql("select 'plain\\text' as x").unwrap(), "select 'plain\\text' as x");
+        assert!(codec.encode_sql("SELECT * FROM (SELECT 'plain' AS json) 中文别名").is_ok());
     }
 
     #[test]

@@ -295,12 +295,15 @@ function close() {
 
 <template>
   <Dialog :open="open" @update:open="(value: boolean) => emit('update:open', value)">
-    <DialogContent class="dbx-form-dialog dbx-form-dialog--lg max-h-[min(760px,calc(var(--dbx-viewport-height)-32px))] max-w-[min(760px,calc(100vw-32px))] overflow-x-hidden overflow-y-auto pr-8 [scrollbar-gutter:stable]" data-scheduler-editor>
-      <DialogHeader>
+    <!-- Shell mirrors ConnectionDialog's config step: fixed header (the built-in
+         close button lives on it), fixed footer, only the form body scrolls —
+         the old whole-content scroll dragged the X and the save bar out of view. -->
+    <DialogContent class="dbx-form-dialog dbx-form-dialog--lg flex max-h-[min(760px,calc(var(--dbx-viewport-height)-32px))] max-w-[min(760px,calc(100vw-32px))] flex-col" data-scheduler-editor>
+      <DialogHeader class="shrink-0">
         <DialogTitle>{{ isCreate ? t("scheduler.editor.createTitle") : t("scheduler.editor.editTitle") }}</DialogTitle>
       </DialogHeader>
 
-      <div v-if="draft" class="grid gap-5 py-1">
+      <div v-if="draft" class="grid min-h-0 flex-1 content-start gap-5 overflow-y-auto py-1 pr-2">
         <div class="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
           <div class="space-y-2">
             <Label>{{ t("scheduler.editor.name") }}</Label>
@@ -408,13 +411,13 @@ function close() {
         </section>
       </div>
 
-      <p v-if="validationIssues.length > 0 && draft" class="text-xs text-muted-foreground" data-scheduler-editor-validation>{{ validationIssues[0] }}</p>
-      <div v-if="versionConflict" class="flex flex-wrap items-center justify-between gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" data-scheduler-editor-conflict>
+      <p v-if="validationIssues.length > 0 && draft" class="shrink-0 text-xs text-muted-foreground" data-scheduler-editor-validation>{{ validationIssues[0] }}</p>
+      <div v-if="versionConflict" class="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" data-scheduler-editor-conflict>
         <span>{{ t("scheduler.editor.versionConflict") }}</span>
         <Button variant="outline" size="sm" class="h-7" @click="confirmReloadConflict">{{ t("scheduler.editor.versionConflictReload") }}</Button>
       </div>
 
-      <DialogFooter>
+      <DialogFooter class="shrink-0">
         <Button variant="outline" @click="close">{{ t("scheduler.editor.cancel") }}</Button>
         <Button :disabled="!canSave" data-scheduler-editor-save @click="save">
           <Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />

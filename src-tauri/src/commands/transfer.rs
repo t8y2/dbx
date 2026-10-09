@@ -276,6 +276,40 @@ pub async fn start_transfer(
                 }
             }
         }
+        // Overwrite clears each target right before copying it, parents first, which cannot
+        // clear a table another selected table references. Empty those children first now.
+        let overwrite_cleared = match dbx_core::transfer::clear_foreign_key_linked_overwrite_targets(
+            &state,
+            &request,
+            &sorted_tables,
+            target_db_type,
+            &target_pool_key,
+        )
+        .await
+        {
+            Ok(cleared) => cleared,
+            Err(e) => {
+                emit_terminal_progress(
+                    &app,
+                    history.as_ref(),
+                    TransferProgress {
+                        transfer_id: transfer_id.clone(),
+                        table: "overwrite pre-pass".to_string(),
+                        table_index: 0,
+                        total_tables,
+                        rows_transferred: last_rows_transferred,
+                        total_rows: last_total_rows,
+                        status: TransferStatus::Error,
+                        error: Some(e),
+                        terminal: true,
+                    },
+                )
+                .await;
+                dbx_core::transfer::clear_cancelled(&transfer_id).await;
+                return;
+            }
+        };
+
         for (i, table) in sorted_tables.iter().enumerate() {
             if dbx_core::transfer::is_cancelled(&transfer_id).await {
                 emit_terminal_progress(
@@ -320,6 +354,7 @@ pub async fn start_transfer(
                 &known_foreign_keys,
                 &mut pending_fk_alters,
                 backup_names.as_ref(),
+                overwrite_cleared.contains(table),
                 |progress| {
                     last_rows_transferred = progress.rows_transferred;
                     last_total_rows = progress.total_rows;

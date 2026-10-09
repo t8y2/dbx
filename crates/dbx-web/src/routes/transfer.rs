@@ -371,6 +371,36 @@ pub async fn start_transfer(
             }
         }
 
+        // Overwrite clears each target right before copying it, parents first, which cannot
+        // clear a table another selected table references. Empty those children first now.
+        let overwrite_cleared = match transfer::clear_foreign_key_linked_overwrite_targets(
+            &app,
+            &req,
+            &tables,
+            target_db_type,
+            &target_pool_key,
+        )
+        .await
+        {
+            Ok(cleared) => cleared,
+            Err(e) => {
+                let progress = transfer::TransferProgress {
+                    transfer_id: req.transfer_id.clone(),
+                    table: "overwrite pre-pass".to_string(),
+                    table_index: 0,
+                    total_tables: tables.len(),
+                    rows_transferred: 0,
+                    total_rows: None,
+                    status: TransferStatus::Error,
+                    error: Some(e),
+                    terminal: true,
+                };
+                send_transfer_progress(&progress_channel, &progress);
+                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+                return;
+            }
+        };
+
         for (i, table) in tables.iter().enumerate() {
             if transfer::is_cancelled(&req.transfer_id).await {
                 let progress = transfer::TransferProgress {
@@ -413,6 +443,7 @@ pub async fn start_transfer(
                 &known_foreign_keys,
                 &mut pending_fk_alters,
                 backup_names.as_ref(),
+                overwrite_cleared.contains(table),
                 |progress| {
                     last_rows_transferred = progress.rows_transferred;
                     last_total_rows = progress.total_rows;

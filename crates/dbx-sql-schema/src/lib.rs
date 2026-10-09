@@ -4,6 +4,7 @@ pub use dbx_sql_core::sql;
 pub use dbx_sql_dialect::sql_dialect;
 pub use dbx_types::{database_manifest, models, types};
 
+pub mod custom_type_sql;
 pub mod db_admin_sql;
 pub mod native_job_arguments;
 pub mod native_job_changes;

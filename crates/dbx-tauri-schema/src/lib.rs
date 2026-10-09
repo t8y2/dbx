@@ -44,6 +44,12 @@ define_registry![
     build_oracle_type_management_sql,
     verify_oracle_type_data,
     prepare_oracle_type_evolution,
+    get_custom_type_management_capabilities,
+    preview_custom_type_change,
+    apply_custom_type_change,
+    preview_custom_type_drop,
+    apply_custom_type_drop,
+    list_custom_type_dependencies,
     list_schemas,
     list_schema_infos,
     list_data_types,
@@ -103,8 +109,8 @@ mod tests {
     use super::{handles, COMMANDS};
 
     #[test]
-    fn handles_only_schema_commands_including_native_jobs() {
-        assert_eq!(COMMANDS.len(), 68);
+    fn handles_only_schema_commands_including_native_jobs_and_custom_types() {
+        assert_eq!(COMMANDS.len(), 74);
         assert!(handles("list_databases"));
         assert!(handles("load_schema_diff_routines"));
         assert!(handles("prepare_oracle_routine_save"));

@@ -104,6 +104,15 @@ import type {
   OracleTypeDataResult,
   OracleTypeEvolutionRequest,
   OracleTypeEvolutionManifest,
+  ApplyCustomTypeChangeRequest,
+  ApplyCustomTypeDropRequest,
+  CustomTypeChangePreview,
+  CustomTypeChangeRequest,
+  CustomTypeChangeResult,
+  CustomTypeDependency,
+  CustomTypeDropPreview,
+  CustomTypeDropRequest,
+  CustomTypeManagementCapabilities,
   ObjectSource,
   ObjectSourceKind,
   MysqlEventInfo,
@@ -1421,6 +1430,30 @@ export function verifyOracleTypeData(input: OracleTypeDataRequest): Promise<Orac
 }
 export function prepareOracleTypeEvolution(input: OracleTypeEvolutionRequest): Promise<OracleTypeEvolutionManifest> {
   return post("/api/schema/oracle-type-evolution", input);
+}
+
+export async function getCustomTypeManagementCapabilities(connectionId: string, database?: string): Promise<CustomTypeManagementCapabilities> {
+  return get(`/api/schema/custom-types/capabilities?${qs({ connection_id: connectionId, database })}`);
+}
+
+export async function previewCustomTypeChange(connectionId: string, database: string, request: CustomTypeChangeRequest): Promise<CustomTypeChangePreview> {
+  return post("/api/schema/custom-types/preview", { connection_id: connectionId, database, request });
+}
+
+export async function applyCustomTypeChange(connectionId: string, database: string, apply: ApplyCustomTypeChangeRequest): Promise<CustomTypeChangeResult> {
+  return post("/api/schema/custom-types/apply", { connection_id: connectionId, database, apply });
+}
+
+export async function previewCustomTypeDrop(connectionId: string, database: string, request: CustomTypeDropRequest): Promise<CustomTypeDropPreview> {
+  return post("/api/schema/custom-types/drop-preview", { connection_id: connectionId, database, request });
+}
+
+export async function applyCustomTypeDrop(connectionId: string, database: string, apply: ApplyCustomTypeDropRequest): Promise<CustomTypeChangeResult> {
+  return post("/api/schema/custom-types/drop-apply", { connection_id: connectionId, database, apply });
+}
+
+export async function listCustomTypeDependencies(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDependency[]> {
+  return get(`/api/schema/custom-types/dependencies?${qs({ connection_id: connectionId, database, schema, table: name })}`);
 }
 
 export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string, currentSchema?: string, exactIdentity?: boolean): Promise<ColumnInfo[]> {

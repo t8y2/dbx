@@ -454,9 +454,11 @@ where
         }
     }
     Ok(CustomTypeDetails {
+        snapshot_revision: None,
         name: name.to_string(),
         schema: schema.to_string(),
         kind,
+        catalog_id: None,
         comment: None,
         members: Vec::new(),
         properties: CustomTypeProperties::default(),
@@ -487,6 +489,7 @@ where
             methods,
             collection,
         }),
+        owner: None,
     })
 }
 

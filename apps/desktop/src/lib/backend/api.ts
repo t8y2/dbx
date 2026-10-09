@@ -253,6 +253,12 @@ export const getOracleTypeManagementSnapshot = forward("getOracleTypeManagementS
 export const buildOracleTypeManagementSql = forward("buildOracleTypeManagementSql");
 export const verifyOracleTypeData = forward("verifyOracleTypeData");
 export const prepareOracleTypeEvolution = forward("prepareOracleTypeEvolution");
+export const getCustomTypeManagementCapabilities = forward("getCustomTypeManagementCapabilities");
+export const previewCustomTypeChange = forward("previewCustomTypeChange");
+export const applyCustomTypeChange = forward("applyCustomTypeChange");
+export const previewCustomTypeDrop = forward("previewCustomTypeDrop");
+export const applyCustomTypeDrop = forward("applyCustomTypeDrop");
+export const listCustomTypeDependencies = forward("listCustomTypeDependencies");
 export const getColumns = forward("getColumns");
 export const getPluginTableMetadata = forward("getPluginTableMetadata");
 export const getAllColumns = forward("getAllColumns");
@@ -1065,6 +1071,8 @@ export const deleteTableVGroupsForConnection = forward("deleteTableVGroupsForCon
 // ---------------------------------------------------------------------------
 
 export type { AiConfigItem };
+
+export type { ApplyCustomTypeChangeRequest, ApplyCustomTypeDropRequest, CustomTypeChangePreview, CustomTypeChangeRequest, CustomTypeChangeResult, CustomTypeDependency, CustomTypeDropPreview, CustomTypeDropRequest, CustomTypeManagementCapabilities } from "@/types/database";
 
 export type {
   AppSupportInfo,

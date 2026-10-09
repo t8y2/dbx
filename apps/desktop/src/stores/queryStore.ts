@@ -3,6 +3,7 @@ import { createQueryRequestTiming } from "@/lib/queryRequestTiming";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import { executeCursorOffsetPage } from "@/lib/query/queryCursorOffsetPagination";
 import { mergeQueryMessages, queryResultMessages } from "@/lib/query/queryResultMessages";
+import { draftIsDirty } from "@/lib/database/customTypeDraft";
 import { appendNeo4jNodeCells, extractNeo4jNodeCells } from "@/lib/neo4j/neo4jNodeResult";
 import { UPDATE_RESTORE_KEY, assertUpdateAllowsInteraction } from "@/lib/app/updatePreparation";
 import { defineStore } from "pinia";
@@ -3831,7 +3832,7 @@ export const useQueryStore = defineStore("query", () => {
     catalog?: string,
     eventName?: string,
     eventReadOnly = false,
-    initialObjectFilter?: "tables" | "events" | "indexes",
+    initialObjectFilter?: "tables" | "events" | "indexes" | "types",
     eventCreateRequestId?: number,
     indexRequest?: { create?: boolean; view?: import("@/types/database").SchemaIndexIdentity },
   ) {
@@ -3898,6 +3899,81 @@ export const useQueryStore = defineStore("query", () => {
         ...(indexRequest?.create || indexRequest?.view ? { indexRequestSequence: 1 } : {}),
         ...(indexRequest?.create ? { indexCreateRequestId: 1 } : {}),
         ...(indexRequest?.view ? { initialViewTarget: indexRequest.view, initialViewRequestId: 1 } : {}),
+      },
+    };
+    return registerOpenTab(tab);
+  }
+
+  /**
+   * Open (or re-target) the objects tab on the custom type designer.
+   *
+   * The request id is monotonic so clicking "new type" twice on a reused tab
+   * re-enters creation mode instead of being swallowed as an unchanged prop.
+   */
+  /**
+   * Record whether the custom type designer has unsaved work on the objects tab
+   * for this scope. Lets a tab close participate in the shared dirty-tab
+   * confirmation instead of discarding an in-progress type edit.
+   */
+  function setCustomTypeDraftDirty(scope: { connectionId: string; database: string; schema?: string; catalog?: string }, dirty: boolean) {
+    const tab = tabs.value.find(
+      (candidate) => candidate.mode === "objects" && candidate.connectionId === scope.connectionId && candidate.database === scope.database && (candidate.objectBrowser?.catalog || "") === (scope.catalog || "") && (candidate.objectBrowser?.schema || "") === (scope.schema || ""),
+    );
+    if (!tab) return;
+    if (tab.objectBrowser?.customTypeDraftDirty === dirty) return;
+    tab.objectBrowser = { ...tab.objectBrowser, customTypeDraftDirty: dirty };
+  }
+
+  function setCustomTypeSession(tabId: string, session: NonNullable<QueryTab["objectBrowser"]>["customTypeSession"] | null) {
+    const tab = tabs.value.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
+    tab.objectBrowser = {
+      ...tab.objectBrowser,
+      customTypeSession: session ?? undefined,
+      customTypeDraftDirty: !!session && session.mode !== "view" && draftIsDirty(session.originalDraft, session.draft),
+      // Closing the designer consumes its opening request, including on remount.
+      customTypeRequest: session ? tab.objectBrowser?.customTypeRequest : undefined,
+    };
+  }
+
+  function openCustomTypeDesigner(request: { connectionId: string; database: string; schema?: string; catalog?: string; mode: "create" | "edit" | "delete"; name?: string }) {
+    const schema = request.schema;
+    const existing = tabs.value.find((tab) => tab.mode === "objects" && tab.connectionId === request.connectionId && tab.database === request.database && (tab.objectBrowser?.catalog || "") === (request.catalog || "") && (tab.objectBrowser?.schema || "") === (schema || ""));
+    const customTypeRequest = {
+      mode: request.mode,
+      schema,
+      name: request.name,
+      requestId: (existing?.objectBrowser?.customTypeRequest?.requestId ?? 0) + 1,
+    };
+    if (existing) {
+      existing.objectBrowser = {
+        ...existing.objectBrowser,
+        customTypeRequest,
+        initialObjectFilter: "types",
+        // A pending event-editor request would win over the designer, so clear it.
+        eventCreateRequestId: undefined,
+      };
+      switchTab(existing.id);
+      return existing.id;
+    }
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: request.catalog ? `${request.catalog}.${request.database} objects` : schema ? `${schema} objects` : `${request.database} objects`,
+      connectionId: request.connectionId,
+      database: request.database,
+      schema,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "objects",
+      objectBrowser: {
+        catalog: request.catalog,
+        schema,
+        objectType: "tables",
+        initialObjectFilter: "types",
+        customTypeRequest,
       },
     };
     return registerOpenTab(tab);
@@ -4820,6 +4896,11 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.mode === "structure") {
       // Legacy persisted structure drafts predate the dirty flag; treat them as dirty until the editor rehydrates them.
       return !!tab.structureDraft && tab.structureDraft.dirty !== false;
+    }
+    if (tab.mode === "objects") {
+      // Only the custom type designer can hold unsaved work on an objects tab;
+      // the object list itself has nothing to lose.
+      return tab.objectBrowser?.customTypeDraftDirty === true;
     }
     if (tab.mode !== "query") return false;
     if (!tab.externalSqlPath && !tab.sql.trim() && !(tab.savedSqlId && tab.originalSql !== undefined)) return false;
@@ -11833,6 +11914,9 @@ export const useQueryStore = defineStore("query", () => {
     openDriverProfileWorkspace,
     openObjectBrowser,
     openObjectProperties,
+    openCustomTypeDesigner,
+    setCustomTypeDraftDirty,
+    setCustomTypeSession,
     openMongoGridFs,
     openMongoBucket,
     openUserAdmin,

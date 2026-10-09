@@ -1,0 +1,310 @@
+{
+  "description": "Cross-language payload contract for custom type management. Read by BOTH crates/dbx-core/tests/custom_type_payload_contract.rs (Rust: these JSON objects must deserialize into CustomTypeChangeRequest/CustomTypeDropRequest) and apps/desktop/src/lib/__tests__/database/customTypePayloadContract.spec.ts (TypeScript: draftFromDetails/emptyDraft must produce exactly these objects). A field renamed on either side breaks one of the two tests, which is what keeps the serde attribute and the TypeScript interfaces from drifting apart.",
+  "draftCases": [
+    {
+      "name": "create-enum",
+      "target": null,
+      "draft": {
+        "schema": "app",
+        "name": "status",
+        "owner": null,
+        "comment": null,
+        "definition": {
+          "kind": "enum",
+          "values": [
+            { "value": "draft", "originalValue": null },
+            { "value": "published", "originalValue": null }
+          ]
+        }
+      }
+    },
+    {
+      "name": "edit-enum",
+      "target": { "schema": "app", "name": "status", "kind": "enum" },
+      "details": {
+        "snapshotRevision": "snapshot-1",
+        "name": "status",
+        "schema": "app",
+        "kind": "enum",
+        "comment": "order status",
+        "owner": "app_owner",
+        "members": [
+          { "name": "", "dataType": "", "ordinal": 1, "enumValue": "draft" },
+          { "name": "", "dataType": "", "ordinal": 2, "enumValue": "published" }
+        ],
+        "properties": { "domainConstraints": [] },
+        "ddl": null
+      },
+      "draft": {
+        "schema": "app",
+        "name": "status",
+        "owner": "app_owner",
+        "comment": "order status",
+        "definition": {
+          "kind": "enum",
+          "values": [
+            { "value": "draft", "originalValue": "draft" },
+            { "value": "published", "originalValue": "published" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "edit-composite",
+      "target": { "schema": "app", "name": "address", "kind": "composite" },
+      "details": {
+        "snapshotRevision": "snapshot-1",
+        "name": "address",
+        "schema": "app",
+        "kind": "composite",
+        "comment": null,
+        "owner": null,
+        "members": [
+          { "name": "city", "dataType": "text", "ordinal": 1, "comment": "city name" },
+          { "name": "zip", "dataType": "numeric(6)", "ordinal": 2, "comment": null }
+        ],
+        "properties": { "domainConstraints": [] },
+        "ddl": null
+      },
+      "draft": {
+        "schema": "app",
+        "name": "address",
+        "owner": null,
+        "comment": null,
+        "definition": {
+          "kind": "composite",
+          "attributes": [
+            { "name": "city", "originalName": "city", "dataType": "text", "comment": "city name" },
+            { "name": "zip", "originalName": "zip", "dataType": "numeric(6)", "comment": null }
+          ]
+        }
+      }
+    },
+    {
+      "name": "create-domain",
+      "target": null,
+      "emptyDraft": { "kind": "domain", "schema": "app" },
+      "draft": {
+        "schema": "app",
+        "name": "",
+        "owner": null,
+        "comment": null,
+        "definition": {
+          "kind": "domain",
+          "baseType": "text",
+          "collation": null,
+          "default": null,
+          "notNull": false,
+          "constraints": []
+        }
+      }
+    },
+    {
+      "name": "edit-domain",
+      "target": { "schema": "app", "name": "email", "kind": "domain" },
+      "details": {
+        "snapshotRevision": "snapshot-1",
+        "name": "email",
+        "schema": "app",
+        "kind": "domain",
+        "comment": null,
+        "owner": null,
+        "members": [],
+        "properties": {
+          "baseType": "text",
+          "collation": "C",
+          "default": "''::text",
+          "notNull": true,
+          "domainConstraints": [
+            { "name": "email_valid", "definition": "CHECK ((VALUE <> ''::text))", "validated": false }
+          ]
+        },
+        "ddl": null
+      },
+      "draft": {
+        "schema": "app",
+        "name": "email",
+        "owner": null,
+        "comment": null,
+        "definition": {
+          "kind": "domain",
+          "baseType": "text",
+          "collation": "C",
+          "default": "''::text",
+          "notNull": true,
+          "constraints": [
+            {
+              "name": "email_valid",
+              "originalName": "email_valid",
+              "expression": "CHECK ((VALUE <> ''::text))",
+              "validated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "edit-range",
+      "target": { "schema": "app", "name": "price_range", "kind": "range" },
+      "details": {
+        "snapshotRevision": "snapshot-1",
+        "name": "price_range",
+        "schema": "app",
+        "kind": "range",
+        "comment": null,
+        "owner": null,
+        "members": [],
+        "properties": {
+          "rangeSubtype": "numeric",
+          "rangeSubtypeOpclass": "pg_catalog.numeric_ops",
+          "rangeCanonicalFunction": null,
+          "rangeSubtypeDiffFunction": null,
+          "rangeMultirangeName": "price_multirange",
+          "domainConstraints": []
+        },
+        "ddl": null
+      },
+      "draft": {
+        "schema": "app",
+        "name": "price_range",
+        "owner": null,
+        "comment": null,
+        "definition": {
+          "kind": "range",
+          "subtype": "numeric",
+          "subtypeOpclass": "pg_catalog.numeric_ops",
+          "canonicalFunction": null,
+          "subtypeDiffFunction": null,
+          "multirangeName": "price_multirange"
+        }
+      }
+    },
+    {
+      "name": "edit-base",
+      "target": { "schema": "app", "name": "amount_t", "kind": "base" },
+      "details": {
+        "snapshotRevision": "snapshot-1",
+        "name": "amount_t",
+        "schema": "app",
+        "kind": "base",
+        "comment": null,
+        "owner": null,
+        "members": [],
+        "properties": { "domainConstraints": [] },
+        "ddl": null
+      },
+      "draft": {
+        "schema": "app",
+        "name": "amount_t",
+        "owner": null,
+        "comment": null,
+        "definition": { "kind": "none", "typeKind": "base" }
+      }
+    },
+    {
+      "name": "edit-multirange",
+      "target": { "schema": "app", "name": "price_multirange", "kind": "multirange" },
+      "details": {
+        "snapshotRevision": "snapshot-1",
+        "name": "price_multirange",
+        "schema": "app",
+        "kind": "multirange",
+        "comment": null,
+        "owner": null,
+        "members": [],
+        "properties": { "domainConstraints": [] },
+        "ddl": null
+      },
+      "draft": {
+        "schema": "app",
+        "name": "price_multirange",
+        "owner": null,
+        "comment": null,
+        "definition": { "kind": "none", "typeKind": "multirange" }
+      }
+    }
+  ],
+  "createDrafts": [
+    {
+      "kind": "enum",
+      "draft": {
+        "schema": "app",
+        "name": "",
+        "owner": null,
+        "comment": null,
+        "definition": { "kind": "enum", "values": [{ "value": "", "originalValue": null }] }
+      }
+    },
+    {
+      "kind": "composite",
+      "draft": {
+        "schema": "app",
+        "name": "",
+        "owner": null,
+        "comment": null,
+        "definition": {
+          "kind": "composite",
+          "attributes": [{ "name": "", "originalName": null, "dataType": "text", "comment": null }]
+        }
+      }
+    },
+    {
+      "kind": "range",
+      "draft": {
+        "schema": "app",
+        "name": "",
+        "owner": null,
+        "comment": null,
+        "definition": {
+          "kind": "range",
+          "subtype": "",
+          "subtypeOpclass": null,
+          "canonicalFunction": null,
+          "subtypeDiffFunction": null,
+          "multirangeName": null
+        }
+      }
+    }
+  ],
+  "applyRequests": [
+    {
+      "name": "apply-domain-edit",
+      "apply": {
+        "change": {
+          "target": { "schema": "app", "name": "email", "kind": "domain" },
+          "draft": {
+            "schema": "app",
+            "name": "email",
+            "owner": null,
+            "comment": null,
+            "definition": {
+              "kind": "domain",
+              "baseType": "text",
+              "collation": "C",
+              "default": "''::text",
+              "notNull": false,
+              "constraints": []
+            }
+          }
+        },
+        "expectedPlanRevision": "rev-1"
+      }
+    }
+  ],
+  "dropRequests": [
+    {
+      "name": "drop-enum-restrict",
+      "request": {
+        "target": { "schema": "app", "name": "status", "kind": "enum" },
+        "cascade": false
+      },
+      "apply": {
+        "request": {
+          "target": { "schema": "app", "name": "status", "kind": "enum" },
+          "cascade": false
+        },
+        "expectedPlanRevision": "drop-rev-1"
+      }
+    }
+  ]
+}

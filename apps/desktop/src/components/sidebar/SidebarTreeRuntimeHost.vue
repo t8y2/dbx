@@ -6371,6 +6371,33 @@ const canOpenFieldLineage = computed(() => {
   return activeNode.value.type === "column" && !!activeNode.value.database && !!activeNode.value.tableName && supportsFieldLineage(currentDatabaseType());
 });
 
+/**
+ * Whether this connection offers the custom type designer.
+ *
+ * The static per-engine switch decides entry visibility (no async probe in a
+ * menu builder); per-operation truth still comes from the backend capability
+ * call the designer makes.
+ */
+const canManageCustomType = computed(() => {
+  const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+  if (!config || connectionIsEffectivelyReadOnly(config)) return false;
+  const effective = effectiveDatabaseTypeForConnection(config) ?? config.db_type;
+  return customTypeCapabilities(effective).management;
+});
+
+function openCustomTypeDesigner(mode: "create" | "edit" | "delete") {
+  const node = activeNode.value;
+  if (!node.connectionId || !node.database) return;
+  queryStore.openCustomTypeDesigner({
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.schema || node.database,
+    catalog: node.catalog,
+    mode,
+    name: mode === "create" ? undefined : node.objectName || node.label,
+  });
+}
+
 const hasTypeMenu = computed(() => {
   const t = activeNode.value.type;
   return t === "connection" || t === "database" || t === "schema" || t === "table" || t === "view" || t === "column" || t === "procedure" || t === "function" || t === "trigger" || t === "package" || t === "package-body" || t === "type" || t === "type-body" || isGroupLabel(activeNode.value);
@@ -8484,9 +8511,21 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (customTypeCapabilities(currentDatabaseType()).ddl) {
       items.push({ label: t("contextMenu.copyDdl"), action: copyCustomTypeDdl, icon: Copy });
-      items.push({ label: "", separator: true });
     }
+    if (canManageCustomType.value) {
+      items.push({ label: t("contextMenu.editType"), action: () => openCustomTypeDesigner("edit"), icon: Pencil });
+    }
+    items.push({ label: "", separator: true });
     items.push(copyNameMenuItem());
+    if (canManageCustomType.value) {
+      items.push({ label: "", separator: true });
+      items.push({
+        label: t("contextMenu.dropType"),
+        action: () => openCustomTypeDesigner("delete"),
+        icon: Trash2,
+        variant: "destructive" as const,
+      });
+    }
     return true;
   }
   return false;
@@ -8523,7 +8562,8 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     const canCreateTableGroup = isTableVGroupContainerNode(node);
     const canCreateTrigger = canCreateOracleTriggerAt(node);
     const canCreateSchemaIndex = node.type === "group-database-indexes" && supportsSchemaIndexManagement(currentDatabaseType()) && !connectionIsEffectivelyReadOnly(connectionStore.getConfig(node.connectionId || ""));
-    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateTableGroup || canCreateGroupView || canCreateTrigger || !!objectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction || canCreateSchemaIndex;
+    const canCreateCustomType = node.type === "group-types" && canManageCustomType.value;
+    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateTableGroup || canCreateGroupView || canCreateTrigger || canCreateCustomType || !!objectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction || canCreateSchemaIndex;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
@@ -8556,6 +8596,9 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
       if (canPasteTreeClipboardToCurrentNode() || canTransferTreeClipboardToCurrentNode()) {
         items.push({ label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard });
       }
+    }
+    if (canCreateCustomType) {
+      items.push({ label: t("contextMenu.createType"), action: () => openCustomTypeDesigner("create"), icon: Plus });
     }
     if (hasMongoCreateIndexAction) {
       items.push({ label: t("contextMenu.createMongoIndex"), action: openCreateMongoIndexDialog, icon: Plus });

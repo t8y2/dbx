@@ -815,6 +815,12 @@ async fn serve() -> Result<(), String> {
             get(routes::schema::get_oracle_type_management_snapshot)
                 .post(routes::schema::read_oracle_type_management_snapshot),
         )
+        .route("/schema/custom-types/capabilities", get(routes::schema::get_custom_type_management_capabilities))
+        .route("/schema/custom-types/preview", post(routes::schema::preview_custom_type_change))
+        .route("/schema/custom-types/apply", post(routes::schema::apply_custom_type_change))
+        .route("/schema/custom-types/drop-preview", post(routes::schema::preview_custom_type_drop))
+        .route("/schema/custom-types/drop-apply", post(routes::schema::apply_custom_type_drop))
+        .route("/schema/custom-types/dependencies", get(routes::schema::list_custom_type_dependencies))
         .route("/schema/columns", get(routes::schema::list_columns))
         .route("/plugin/table-metadata", post(routes::schema::get_plugin_table_metadata))
         .route("/schema/all-columns", get(routes::schema::get_all_columns))

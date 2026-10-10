@@ -2611,9 +2611,15 @@ fn build_derived_column_aliases(result_columns: &[String]) -> Vec<String> {
 
 fn normalize_alias_base(column: &str, index: usize) -> String {
     let compact = column.split_whitespace().collect::<Vec<_>>().join("_");
+    // A name that is already safe is kept verbatim. Trimming its underscores
+    // would rename the hidden `__DBX_PK_n` key column, so the grid no longer
+    // recognises it as hidden after a database sort (#11623).
+    if !compact.is_empty() && compact.chars().all(is_safe_alias_char) {
+        return compact;
+    }
     let safe = compact
         .chars()
-        .map(|ch| if ch.is_alphanumeric() || matches!(ch, '_' | '$') { ch } else { '_' })
+        .map(|ch| if is_safe_alias_char(ch) { ch } else { '_' })
         .collect::<String>()
         .trim_matches('_')
         .to_string();
@@ -2622,6 +2628,10 @@ fn normalize_alias_base(column: &str, index: usize) -> String {
     } else {
         safe
     }
+}
+
+fn is_safe_alias_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '_' | '$')
 }
 
 fn fallback_alias(index: usize) -> String {
@@ -6375,6 +6385,31 @@ WHERE u.id = picked.id;
         assert_eq!(
             result.sql.unwrap(),
             "SELECT * FROM (SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id) t ORDER BY 2 ASC;"
+        );
+    }
+
+    #[test]
+    fn postgres_sort_keeps_hidden_primary_key_alias() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT name, score, \"id\" AS \"__DBX_PK_0\" FROM t1".to_string(),
+            database_type: Some(DatabaseType::Postgres),
+            result_columns: vec!["name".to_string(), "score".to_string(), "__DBX_PK_0".to_string()],
+            column_index: 1,
+            column: "score".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT name, score, \"id\" AS \"__DBX_PK_0\" FROM t1) t(\"name\", \"score\", \"__DBX_PK_0\") ORDER BY \"score\" ASC;"
+        );
+    }
+
+    #[test]
+    fn derived_column_aliases_keep_underscores_of_safe_names() {
+        assert_eq!(
+            build_derived_column_aliases(&["_id".to_string(), "count(*)".to_string(), "total_".to_string()]),
+            vec!["_id".to_string(), "count".to_string(), "total_".to_string()]
         );
     }
 

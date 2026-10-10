@@ -11131,6 +11131,7 @@ export default withEnglishFallback({
       provider: "Provider attività",
       providerLockedHint: "Non modificabile dopo la creazione.",
       providerTrigger: "Azione del provider",
+      residentHint: "I comandi residenti devono rimanere in esecuzione (ad es. tail -F). Un comando che termina viene considerato un arresto anomalo e viene riavviato; per i comandi una tantum usa l'attivazione a esecuzione singola.",
       risk: {
         high: "Questa azione è contrassegnata come rischio elevato. Conferma che ne sia consentita l'esecuzione automatica.",
         highConfirm: "Comprendo che questa attività verrà eseguita automaticamente",

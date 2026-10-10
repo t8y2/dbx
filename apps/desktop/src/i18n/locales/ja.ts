@@ -11170,6 +11170,7 @@ export default withEnglishFallback({
       provider: "タスクプロバイダー",
       providerLockedHint: "作成後は変更できません。",
       providerTrigger: "プロバイダーアクション",
+      residentHint: "常駐コマンドは実行し続ける必要があります（例：tail -F）。終了するコマンドはクラッシュとみなされて再起動されます。単発のコマンドには「単発実行」トリガーを使用してください。",
       risk: {
         high: "このアクションは高リスクとしてマークされています。自動実行を許可することを確認してください。",
         highConfirm: "このタスクが自動実行されることを理解しました",

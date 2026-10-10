@@ -11575,6 +11575,7 @@ export default withEnglishFallback({
       provider: "Proveedor de tareas",
       providerLockedHint: "No se puede cambiar después de la creación.",
       providerTrigger: "Acción del proveedor",
+      residentHint: "Los comandos residentes deben mantenerse en ejecución (p. ej., tail -F). Un comando que termina se trata como un fallo y se reinicia; para comandos de una sola vez use la activación de ejecución única.",
       risk: {
         high: "Esta acción está marcada como de alto riesgo. Confirme que permite su ejecución automática.",
         highConfirm: "Entiendo que esta tarea se ejecutará automáticamente",

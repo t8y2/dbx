@@ -10611,6 +10611,7 @@ export default withEnglishFallback({
       provider: "작업 제공자",
       providerLockedHint: "생성 후에는 변경할 수 없습니다.",
       providerTrigger: "제공자 동작",
+      residentHint: "상주 명령은 계속 실행되고 있어야 합니다(예: tail -F). 종료되는 명령은 크래시로 간주되어 다시 시작됩니다. 일회성 명령에는 단일 실행 트리거를 사용하세요.",
       risk: {
         high: "이 동작은 높은 위험으로 표시되어 있습니다. 자동 실행을 허용할지 확인하세요.",
         highConfirm: "이 작업이 자동으로 실행됨을 이해했습니다",

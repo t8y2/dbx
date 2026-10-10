@@ -5,7 +5,7 @@ import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, X, FileArchive, Download } from "@lucide/vue";
+import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, Pause, X, FileArchive, Download } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -40,7 +40,6 @@ import {
   parseRedisJsonDetail,
   REDIS_VALUE_FORMAT_DISPLAY_ORDER,
   redisBlobText,
-  redisCollectionPageItems,
   redisJsonValueText,
   normalizeRedisJsonDraft,
   redisClipboardSafeText,
@@ -73,6 +72,7 @@ import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, va
 import { redisKeyRawToText, redisKeyTextToDisplay, redisKeyTextToRaw } from "@/lib/redis/redisCommandSession";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { emptyRedisCollectionSearchState, RedisCollectionSearchController, type RedisCollectionScope } from "@/lib/redis/redisCollectionSearchController";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
@@ -412,6 +412,9 @@ const valueSearchHasNavigated = ref(false);
 const collectionSearchQuery = ref("");
 const activeCollectionSearchQuery = ref("");
 const searchLoading = ref(false);
+const collectionSearchState = shallowRef(emptyRedisCollectionSearchState());
+let collectionBrowseSnapshot: { items: RedisCollectionItem[]; cursor: number | undefined } | undefined;
+let collectionSearchIntentRevision = 0;
 const valueSearchBarRef = ref<{ focusInput: (select?: boolean) => void } | null>(null);
 type JsonEditorHandle = { openSearch: () => boolean; selectRange?: (from: number, to: number, options?: { focus?: boolean }) => boolean };
 const stringJsonEditorRef = ref<JsonEditorHandle | null>(null);
@@ -422,6 +425,7 @@ const memberTextareaRef = ref<HTMLTextAreaElement | null>(null);
 const valueViewerSearchActive = ref(false);
 
 function toggleHashSort(column: "field" | "value") {
+  stopCollectionSearch();
   if (hashSortBy.value === column && hashSortDir.value === "desc") {
     hashSortBy.value = null;
   } else if (hashSortBy.value === column) {
@@ -437,7 +441,7 @@ async function toggleZsetSort() {
   const previousDirection = zsetSortDir.value;
   zsetSortDir.value = previousDirection === "asc" ? "desc" : "asc";
   try {
-    await reloadPreservingCollectionSearch({ notifyParent: false });
+    if (!(await reloadPreservingCollectionSearch({ notifyParent: false }))) zsetSortDir.value = previousDirection;
   } catch (error) {
     zsetSortDir.value = previousDirection;
     toast(errorMessage(error), 3000);
@@ -863,8 +867,6 @@ const canHighlightContentSearch = computed(() => valueSearchOpen.value && Boolea
 const canHighlightStringSurface = computed(() => canHighlightContentSearch.value && !showMemberDetail.value);
 const canHighlightMemberSurface = computed(() => canHighlightContentSearch.value && showMemberDetail.value);
 
-let collectionSearchTimer: ReturnType<typeof setTimeout> | null = null;
-let collectionSearchRequestId = 0;
 let hashResizeStartX = 0;
 let hashResizeStartWidth = 0;
 let zsetResizeStartX = 0;
@@ -1194,53 +1196,103 @@ function collectionCountLabel(kind: "items" | "fields" | "members", loaded: numb
 /** True for the collection kinds whose toolbar offers a server-filtered member search. */
 const collectionSearchSupported = computed(() => redisKind.value === "hash" || redisKind.value === "list" || redisKind.value === "set" || redisKind.value === "zset");
 
-function onCollectionSearchInput() {
-  if (collectionSearchTimer) clearTimeout(collectionSearchTimer);
-  collectionSearchTimer = setTimeout(() => void onCollectionSearch(), 400);
+const collectionSearchController = new RedisCollectionSearchController({
+  fetchPage: ({ scope, cursor, query }) => api.redisLoadMore(scope.connectionId, scope.db, scope.keyRaw, scope.kind, cursor, 200, query || undefined, scope.sortDirection),
+  changed: (state) => {
+    collectionSearchState.value = state;
+    activeCollectionSearchQuery.value = state.query;
+    searchLoading.value = Boolean(state.query) && state.status === "searching";
+    loadingMore.value = !state.query && state.status === "searching";
+    if (state.status !== "idle") {
+      collectionItems.value = state.items;
+      scanCursor.value = state.cursor ?? undefined;
+    }
+  },
+});
+
+function collectionScope(): RedisCollectionScope | undefined {
+  const kind = redisKind.value;
+  if (kind !== "hash" && kind !== "list" && kind !== "set" && kind !== "zset") return;
+  return { connectionId: props.connectionId, db: props.db, keyRaw: props.keyRaw, kind, sortDirection: kind === "zset" ? zsetSortDir.value : undefined };
+}
+
+const collectionSearchStatusText = computed(() => {
+  const state = collectionSearchState.value;
+  if (state.status === "failed") return t("redis.collectionSearchFailed", { error: errorMessage(state.error) });
+  if (state.pauseReason === "stalled") return t("redis.collectionSearchStalled");
+  if (state.status === "complete") return t(state.items.length ? "redis.collectionSearchComplete" : "redis.collectionSearchEmpty");
+  if (state.status === "partial") return t("redis.collectionSearchPartial");
+  if (state.pauseReason === "stopped") return t("redis.collectionSearchStopped");
+  if (state.status === "paused") return t("redis.collectionSearchPaused");
+  return t("redis.collectionSearching");
+});
+
+const collectionSearchPlaceholder = computed(() => t(redisKind.value === "hash" ? "redis.searchFields" : redisKind.value === "list" ? "redis.searchItems" : "redis.searchMembers"));
+const canContinueCollectionSearch = computed(() => Boolean(activeCollectionSearchQuery.value) && collectionSearchState.value.cursor != null && !searchLoading.value);
+
+function resetCollectionSearchResults() {
+  collectionSearchController.cancelSearch();
+  if (collectionBrowseSnapshot) {
+    collectionItems.value = collectionBrowseSnapshot.items;
+    scanCursor.value = collectionBrowseSnapshot.cursor;
+    collectionBrowseSnapshot = undefined;
+  }
+  if (!hasRetainedMemberDraft.value) clearSelectedMember();
+}
+
+function onCollectionSearchInput(event: Event) {
+  // Editing is a draft, not a submitted search. Invalidate any old request now.
+  // Capture before the Input wrapper's passive v-model watcher or a reload unmount.
+  collectionSearchQuery.value = (event.target as HTMLInputElement).value;
+  collectionSearchIntentRevision++;
+  resetCollectionSearchResults();
+}
+
+function cancelCollectionSearch() {
+  collectionSearchIntentRevision++;
+  collectionSearchQuery.value = "";
+  resetCollectionSearchResults();
+}
+
+function stopCollectionSearch() {
+  collectionSearchController.stop();
 }
 
 function onCollectionSearchKeydown(event: KeyboardEvent) {
+  if (event.isComposing) return;
   if (event.key === "Enter") {
-    if (collectionSearchTimer) clearTimeout(collectionSearchTimer);
-    collectionSearchTimer = null;
-    void onCollectionSearch();
+    event.preventDefault();
+    if (!loading.value && !searchLoading.value) void (canContinueCollectionSearch.value ? collectionSearchController.start() : onCollectionSearch());
     return;
   }
   if (event.key === "Escape") {
-    if (collectionSearchTimer) clearTimeout(collectionSearchTimer);
-    collectionSearchTimer = null;
-    collectionSearchQuery.value = "";
-    void onCollectionSearch();
+    event.preventDefault();
+    cancelCollectionSearch();
   }
 }
 
 async function onCollectionSearch() {
+  const scope = collectionScope();
   const query = collectionSearchQuery.value.trim();
-  const keyType = redisKind.value;
-  if (!collectionSearchSupported.value) return;
-  const requestId = ++collectionSearchRequestId;
-  searchLoading.value = true;
-  try {
-    const sortDirection = keyType === "zset" ? zsetSortDir.value : undefined;
-    const result = await api.redisLoadMore(props.connectionId, props.db, props.keyRaw, keyType, 0, 200, query || undefined, sortDirection);
-    if (requestId !== collectionSearchRequestId || result.kind !== keyType) return;
-    activeCollectionSearchQuery.value = query;
-    collectionItems.value = result.items;
-    scanCursor.value = result.scan_cursor ?? undefined;
-    if (!hasRetainedMemberDraft.value) clearSelectedMember();
-  } finally {
-    if (requestId === collectionSearchRequestId) searchLoading.value = false;
-  }
+  if (!scope || loading.value || !query) return;
+  collectionSearchIntentRevision++;
+  if (!activeCollectionSearchQuery.value) collectionBrowseSnapshot = { items: collectionItems.value, cursor: scanCursor.value };
+  collectionSearchController.prepare(scope, query);
+  if (!hasRetainedMemberDraft.value) clearSelectedMember();
+  await collectionSearchController.start();
 }
 
 /** `load()` clears the search box, so anything that reloads mid-search has to re-apply the query. */
 async function reloadPreservingCollectionSearch(options: { notifyParent?: boolean } = {}) {
-  const query = activeCollectionSearchQuery.value || collectionSearchQuery.value.trim();
-  await load({ ...options, selectDefaultMember: false });
+  const query = activeCollectionSearchQuery.value;
+  const draft = collectionSearchQuery.value;
+  const revision = collectionSearchIntentRevision;
+  if (!(await load({ ...options, selectDefaultMember: false, shouldApply: () => revision === collectionSearchIntentRevision }))) return false;
+  collectionSearchQuery.value = draft;
   if (query) {
-    collectionSearchQuery.value = query;
     await onCollectionSearch();
   }
+  return true;
 }
 
 function readRedisJsonWordWrap(): boolean {
@@ -1598,11 +1650,15 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
   const notifyParent = options.notifyParent ?? true;
   const shouldSelectDefaultMember = options.selectDefaultMember ?? true;
   const requestId = ++loadRequestId;
+  if (!background) stopCollectionSearch();
+  const loadScope = { connectionId: props.connectionId, db: props.db, keyRaw: props.keyRaw };
   if (!background) loading.value = true;
   try {
-    let loadedValue = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
+    let loadedValue = await api.redisGetValue(loadScope.connectionId, loadScope.db, loadScope.keyRaw);
+    if (requestId !== loadRequestId || !redisValueViewerIsActive || (options.shouldApply && !options.shouldApply())) return false;
     if (loadedValue.data.kind === "zset" && zsetSortDir.value === "desc") {
-      const sortedPage = await api.redisLoadMore(props.connectionId, props.db, props.keyRaw, "zset", 0, 200, undefined, "desc");
+      const sortedPage = await collectionSearchController.readPage({ ...loadScope, kind: "zset", sortDirection: "desc" }, 0, "", () => requestId === loadRequestId && (!options.shouldApply || options.shouldApply()));
+      if (!sortedPage) return false;
       if (sortedPage.kind === "zset") {
         loadedValue = {
           ...loadedValue,
@@ -1614,7 +1670,7 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
         };
       }
     }
-    if (requestId !== loadRequestId || (options.shouldApply && !options.shouldApply())) return false;
+    if (requestId !== loadRequestId || !redisValueViewerIsActive || (options.shouldApply && !options.shouldApply())) return false;
 
     // Redis reports a key that expired between refreshes as a `none` value.
     // Tell the browser to remove it instead of rendering a stale detail shell.
@@ -1645,9 +1701,8 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
       return false;
     }
 
-    if (collectionSearchTimer) clearTimeout(collectionSearchTimer);
-    collectionSearchTimer = null;
-    collectionSearchRequestId++;
+    collectionBrowseSnapshot = undefined;
+    collectionSearchController.reset();
     collectionSearchQuery.value = "";
     activeCollectionSearchQuery.value = "";
     searchLoading.value = false;
@@ -1717,20 +1772,10 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
 async function loadMore() {
   if (!data.value || !hasMore.value || loadingMore.value || searchLoading.value) return;
   if (!collectionSearchSupported.value) return;
-  const keyType = redisKind.value;
-  const filter = activeCollectionSearchQuery.value || undefined;
-  const requestId = collectionSearchRequestId;
-  loadingMore.value = true;
-  try {
-    const sortDirection = keyType === "zset" ? zsetSortDir.value : undefined;
-    const result = await api.redisLoadMore(props.connectionId, props.db, props.keyRaw, keyType, scanCursor.value!, 200, filter, sortDirection);
-    if (requestId !== collectionSearchRequestId) return;
-    const newItems = redisCollectionPageItems(result);
-    collectionItems.value = [...collectionItems.value, ...newItems];
-    scanCursor.value = result.scan_cursor ?? undefined;
-  } finally {
-    loadingMore.value = false;
-  }
+  const scope = collectionScope();
+  if (!scope) return;
+  if (activeCollectionSearchQuery.value) await collectionSearchController.start();
+  else await collectionSearchController.browse(scope, collectionItems.value, scanCursor.value!);
 }
 
 async function saveString() {
@@ -2754,6 +2799,10 @@ watch(contentSearchText, () => {
 watch(
   () => [props.connectionId, props.db, props.keyRaw],
   () => {
+    loadRequestId++;
+    collectionBrowseSnapshot = undefined;
+    collectionSearchController.reset();
+    collectionSearchQuery.value = "";
     resetValueSearch();
     valueViewerSearchActive.value = false;
     resetStreamEntries();
@@ -2802,20 +2851,24 @@ onMounted(() => {
 });
 onActivated(() => {
   redisValueViewerIsActive = true;
+  collectionSearchController.setActive(true);
+  if (!data.value && !loading.value) void load();
   startRefreshTimers();
 });
 onDeactivated(() => {
   redisValueViewerIsActive = false;
+  collectionSearchController.setActive(false);
   stopRefreshTimers();
 });
 onBeforeUnmount(() => {
+  loadRequestId++;
+  collectionSearchController.dispose();
   window.removeEventListener("pointerdown", handleValueViewerPointerDown, true);
   document.removeEventListener("visibilitychange", handleDocumentVisibilityChange);
   redisValueViewerIsActive = false;
   stopRefreshTimers();
   stopResizeHashColumns();
   stopResizeZsetColumns();
-  if (collectionSearchTimer) clearTimeout(collectionSearchTimer);
 });
 
 defineExpose({ focusSearch });
@@ -2916,6 +2969,33 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <DateTimePicker v-else-if="ttlExpiryMode === 'at'" v-model="ttlExpireAt" compact :locale="locale" :disabled="savingTtl" />
             <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="savingTtl" :title="t('grid.save')" :aria-label="t('grid.save')" @click="saveTtl"><Save class="h-3 w-3" /></Button>
           </div>
+        </div>
+      </div>
+
+      <div v-if="collectionSearchSupported" data-redis-collection-search class="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-2 text-xs">
+        <div class="relative min-w-40 max-w-sm flex-1">
+          <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+          <Input v-model="collectionSearchQuery" class="h-7 w-full pl-6 text-xs" :placeholder="collectionSearchPlaceholder" :aria-label="collectionSearchPlaceholder" :title="t('redis.collectionSearchSubmitHint')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
+        </div>
+        <Button
+          v-if="searchLoading"
+          data-redis-search-stop
+          variant="outline"
+          size="sm"
+          class="h-7 shrink-0 border-amber-600 bg-amber-50 text-xs text-amber-800 hover:bg-amber-100 hover:text-amber-900 active:bg-amber-200 active:text-amber-900 dark:border-amber-400 dark:bg-amber-950 dark:text-amber-300 dark:hover:bg-amber-900 dark:hover:text-amber-200 dark:active:bg-amber-800 dark:active:text-amber-100"
+          @click="stopCollectionSearch"
+          ><Pause class="h-3.5 w-3.5" aria-hidden="true" />{{ t("redis.collectionSearchStop") }}</Button
+        >
+        <Button v-else-if="canContinueCollectionSearch" data-redis-search-continue size="sm" class="h-7 shrink-0 text-xs" :disabled="loading" @click="collectionSearchController.start()">{{
+          t(collectionSearchState.status === "failed" ? "redis.collectionSearchRetry" : "redis.collectionSearchContinue")
+        }}</Button>
+        <Button v-else data-redis-search-submit size="sm" class="h-7 shrink-0 text-xs" :disabled="loading || !collectionSearchQuery.trim()" @click="onCollectionSearch">{{ t("redis.collectionSearchSubmit") }}</Button>
+        <Button v-if="collectionSearchQuery || activeCollectionSearchQuery" data-redis-search-cancel variant="ghost" size="sm" class="h-7 shrink-0 text-xs text-muted-foreground hover:text-foreground" @click="cancelCollectionSearch"
+          ><X class="h-3.5 w-3.5" aria-hidden="true" />{{ t("redis.collectionSearchCancel") }}</Button
+        >
+        <div v-if="activeCollectionSearchQuery" class="flex basis-full items-center gap-1.5 text-muted-foreground">
+          <Loader2 v-if="searchLoading" class="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+          <span role="status" aria-live="polite">{{ collectionSearchStatusText }}</span>
         </div>
       </div>
 
@@ -3096,10 +3176,6 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
       <div v-else-if="redisKind === 'list'" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex items-center gap-2 px-4 py-1.5 border-b shrink-0">
           <span class="text-xs text-muted-foreground shrink-0">{{ collectionCountLabel("items", listRows.length, activeCollectionSearchQuery ? null : collectionTotal) }}</span>
-          <div class="relative flex-1 max-w-60">
-            <Search class="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground/80" />
-            <Input v-model="collectionSearchQuery" class="h-6 w-full pl-5 pr-2 text-xs" :placeholder="t('redis.searchItems')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
-          </div>
           <span class="flex-1" />
           <Input v-model="newValue" class="h-6 w-40 text-xs" :placeholder="t('redis.valuePlaceholder')" @keydown.enter="listPush" />
           <Button variant="ghost" size="sm" class="h-6 text-xs" @click="listPush"><Plus class="w-3 h-3 mr-1" />{{ t("redis.pushAction") }}</Button>
@@ -3130,7 +3206,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             </div>
           </template>
           <template #after>
-            <div v-if="hasMore" class="p-2">
+            <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
                 {{ t("redis.loadMoreKeys") }}
@@ -3144,10 +3220,6 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
       <div v-else-if="redisKind === 'set'" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex items-center gap-2 px-4 py-1.5 border-b shrink-0">
           <span class="text-xs text-muted-foreground shrink-0">{{ collectionCountLabel("items", setRows.length, activeCollectionSearchQuery ? null : collectionTotal) }}</span>
-          <div class="relative flex-1 max-w-60">
-            <Search class="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground/80" />
-            <Input v-model="collectionSearchQuery" class="h-6 w-full pl-5 pr-2 text-xs" :placeholder="t('redis.searchMembers')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
-          </div>
           <span class="flex-1" />
           <Input v-model="newValue" class="h-6 w-40 text-xs" :placeholder="t('redis.memberPlaceholder')" @keydown.enter="setAdd" />
           <Button variant="ghost" size="sm" class="h-6 text-xs" @click="setAdd"><Plus class="w-3 h-3 mr-1" />{{ t("redis.addAction") }}</Button>
@@ -3181,7 +3253,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             </div>
           </template>
           <template #after>
-            <div v-if="hasMore" class="p-2">
+            <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
                 {{ t("redis.loadMoreKeys") }}
@@ -3195,10 +3267,6 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
       <div v-else-if="redisKind === 'hash'" ref="hashTableRef" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex items-center gap-2 px-4 py-1.5 border-b shrink-0">
           <span class="text-xs text-muted-foreground shrink-0">{{ collectionCountLabel("fields", hashCollectionRows.length, activeCollectionSearchQuery ? null : collectionTotal) }}</span>
-          <div class="relative flex-1 max-w-60">
-            <Search class="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground/80" />
-            <Input v-model="collectionSearchQuery" class="h-6 w-full pl-5 pr-2 text-xs" :placeholder="t('redis.searchFields')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
-          </div>
           <span class="flex-1" />
           <Input v-model="newField" class="h-6 w-24 text-xs" :placeholder="t('redis.fieldPlaceholder')" />
           <Input v-model="newValue" class="h-6 w-32 text-xs" :placeholder="t('redis.valuePlaceholder')" @keydown.enter="hashSet" />
@@ -3274,7 +3342,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             </div>
           </template>
           <template #after>
-            <div v-if="hasMore" class="p-2">
+            <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
                 {{ t("redis.loadMoreKeys") }}
@@ -3288,10 +3356,6 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
       <div v-else-if="redisKind === 'zset'" ref="zsetTableRef" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex items-center gap-2 px-4 py-1.5 border-b shrink-0">
           <span class="text-xs text-muted-foreground shrink-0">{{ collectionCountLabel("members", zsetRows.length, activeCollectionSearchQuery ? null : collectionTotal) }}</span>
-          <div class="relative flex-1 max-w-60">
-            <Search class="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground/80" />
-            <Input v-model="collectionSearchQuery" class="h-6 w-full pl-5 pr-2 text-xs" :placeholder="t('redis.searchMembers')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
-          </div>
           <span class="flex-1" />
           <Input v-model="newScore" class="h-6 w-20 text-xs" :placeholder="t('redis.scorePlaceholder')" />
           <Input v-model="newValue" class="h-6 w-32 text-xs" :placeholder="t('redis.memberPlaceholder')" @keydown.enter="zsetAdd" />
@@ -3353,7 +3417,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             </div>
           </template>
           <template #after>
-            <div v-if="hasMore" class="p-2">
+            <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
                 {{ t("redis.loadMoreKeys") }}

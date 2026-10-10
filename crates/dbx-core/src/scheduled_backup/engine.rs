@@ -149,9 +149,7 @@ impl BackupService {
         job.run
     }
 
-    /// Runs one export end-to-end. `pub(crate)` so the scheduler builtin
-    /// backup provider (`scheduler/providers/database_backup.rs`, ADR §8)
-    /// drives the exact same pipeline instead of re-implementing it.
+    /// Runs one export end-to-end.
     pub(crate) async fn export_job(
         &self,
         job: &mut Job,

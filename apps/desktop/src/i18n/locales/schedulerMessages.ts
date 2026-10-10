@@ -232,11 +232,6 @@ export const schedulerEn = {
     never: "Never",
     notAvailable: "—",
   },
-  backupMigration: {
-    migratedHint: "Scheduled database backups now live in the unified task center. Existing schedules keep working; this legacy view stays available during the migration window.",
-    openScheduler: "Open the task center",
-    backToLegacy: "Back to legacy backup settings",
-  },
 };
 
 export const schedulerZhCN = {
@@ -469,11 +464,6 @@ export const schedulerZhCN = {
     never: "从未",
     notAvailable: "—",
   },
-  backupMigration: {
-    migratedHint: "数据库定时备份已迁移到统一计划任务中心。既有计划继续生效；迁移过渡期内此旧版页面仍可使用。",
-    openScheduler: "打开计划任务中心",
-    backToLegacy: "返回旧版备份设置",
-  },
 };
 
 export const schedulerZhTW = {
@@ -705,10 +695,5 @@ export const schedulerZhTW = {
   time: {
     never: "從未",
     notAvailable: "—",
-  },
-  backupMigration: {
-    migratedHint: "資料庫定時備份已遷移到統一排程任務中心。既有排程繼續生效；遷移過渡期內此舊版頁面仍可使用。",
-    openScheduler: "開啟排程任務中心",
-    backToLegacy: "返回舊版備份設定",
   },
 };

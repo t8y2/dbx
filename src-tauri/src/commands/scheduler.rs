@@ -22,10 +22,10 @@ const LOG_MAX_LIMIT: u64 = 5000;
 const RUN_DEFAULT_LIMIT: u32 = 100;
 const RUN_MAX_LIMIT: u32 = 1000;
 
-/// Builds the service per call. The builtin database-backup executor is
-/// registered here as well as in the background worker: without it the UI
-/// process rejects every migrated backup task with `provider_not_found`
-/// (validate/run), even though the worker could run it just fine.
+/// Builds the service per call with the same executor wiring as the
+/// background worker (currently the shared plugin task-provider adapter;
+/// scheduled database backups intentionally stay on the legacy backup
+/// engine and are not task-center providers).
 fn service(state: &Arc<AppState>) -> SchedulerService {
     let registry = Arc::new(TaskExecutorRegistry::new());
     // Same as the worker: one executor serves every plugin task provider.

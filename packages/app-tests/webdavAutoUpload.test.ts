@@ -56,6 +56,8 @@ function installWindow() {
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
+      setTimeout: globalThis.setTimeout.bind(globalThis),
+      clearTimeout: globalThis.clearTimeout.bind(globalThis),
       setInterval: globalThis.setInterval.bind(globalThis),
       clearInterval: globalThis.clearInterval.bind(globalThis),
       addEventListener: (type: string, listener: (event: Event) => void) => {

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["src-tauri", "crates/dbx-core", "crates/dbx-driver-agent", "crates/dbx-driver-support", "crates/dbx-driver-elasticsearch", "crates/dbx-driver-mongodb", "crates/dbx-driver-mysql", "crates/dbx-driver-postgres", "crates/dbx-driver-redis", "crates/dbx-driver-sqlserver", "crates/dbx-drivers", "crates/dbx-sql", "crates/dbx-sql-core", "crates/dbx-sql-data", "crates/dbx-sql-dialect", "crates/dbx-sql-schema", "crates/dbx-plugin-runtime", "crates/dbx-formats", "crates/dbx-types", "crates/dbx-platform", "crates/dbx-ai-provider", "crates/dbx-web", "crates/dbx-mcp", "crates/dbx-cli", "crates/dbx-sqlite-worker", "crates/dbx-tauri-consul", "crates/dbx-tauri-schema"]
-exclude = ["vendor/tauri-plugin-updater", "vendor/ctor", "vendor/dirs-sys", "vendor/pageant", "vendor/rumqttc", "vendor/tiberius", "vendor/webview2-com-sys", "vendor/wry"]
+exclude = ["vendor/tauri-plugin-updater", "vendor/ctor", "vendor/dirs-sys", "vendor/pageant", "vendor/rumqttc", "vendor/tiberius", "vendor/mysql_async", "vendor/webview2-com-sys", "vendor/wry"]
 
 [patch.crates-io]
 # The offline Win7 / Server 2012 R2 bundle links the WebView2 SDK 1.0.902.49
@@ -41,7 +41,10 @@ postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", r
 postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
 # Temporary compatibility patches for deprecated sha256_password accounts and
 # rustls dangerous-mode connections to legacy certificates. Remove after upstream support lands.
-mysql_async = { git = "https://github.com/zipg/mysql_async.git", rev = "4a9e60a62f5a48e35ef9ccc9fc8277d5012b19dd" }
+# Retains the TLS/auth patches above and exposes setup_callback so DBX can
+# validate every setup response on both connection creation and pool reset.
+# Based on zipg/mysql_async revision 4a9e60a62f5a48e35ef9ccc9fc8277d5012b19dd.
+mysql_async = { path = "vendor/mysql_async" }
 # Preserve readable SQL Server result sets when a row contains an unpaired
 # UTF-16 surrogate, or varchar/text bytes that are invalid in the column's
 # collation (replaced with U+FFFD, no BOM sniffing). Remove after the behavior

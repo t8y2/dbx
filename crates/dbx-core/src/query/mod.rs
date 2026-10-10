@@ -1835,6 +1835,10 @@ async fn do_execute_typed(
             .await
             .map(|result| result.result);
 
+            if statement_result.as_ref().is_ok_and(|result| !result.truncated) {
+                db::mysql::record_pooled_conn_response(&p, &conn);
+            }
+
             // Client-session pools hold one connection for the whole tab and
             // skip COM_RESET_CONNECTION on return so session state survives
             // across executions. A single-statement BEGIN / START TRANSACTION
@@ -2933,7 +2937,7 @@ async fn execute_sql_statement_with_options_typed_inner(
     // survives across runs.
     let pool_database = query_pool_database(database, options.catalog.as_deref());
     let pool_key = state
-        .get_or_create_pool_for_session(connection_id, pool_database, options.client_session_id.as_deref())
+        .get_or_create_query_pool_for_session(connection_id, pool_database, options.client_session_id.as_deref())
         .await
         .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
 
@@ -3318,7 +3322,7 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
     }
 
     let pool_key = state
-        .get_or_create_pool_for_session(connection_id, pool_database, options.client_session_id.as_deref())
+        .get_or_create_query_pool_for_session(connection_id, pool_database, options.client_session_id.as_deref())
         .await
         .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
     if let Some(execution_id) = options.execution_id.as_deref() {
@@ -4237,6 +4241,9 @@ async fn execute_multi_mysql(
                 }
                 for result in &mut results {
                     transaction.mark(result);
+                }
+                if status_is_final {
+                    db::mysql::record_pooled_conn_response(pool, &conn);
                 }
             }
             Err(error) => {

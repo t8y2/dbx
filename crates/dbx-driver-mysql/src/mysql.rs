@@ -8,7 +8,7 @@ use sqlparser::ast::{AlterTableOperation, Expr, ObjectNamePart, Statement, Table
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::Parser;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(test)]
 use std::future::Future;
 use std::ops::ControlFlow;
@@ -42,6 +42,9 @@ use crate::mysql_event_sql::MysqlEventInfo;
 pub struct MySqlPool {
     inner: mysql_async::Pool,
     max_connections: usize,
+    /// Shared by setup callbacks and metadata reads in this pool generation.
+    /// A new pool probes again; a later successful batch never clears a rejection.
+    batching_disabled: std::sync::Arc<AtomicBool>,
     checkout_verifications: std::sync::Arc<MySqlCheckoutVerifications>,
 }
 
@@ -54,6 +57,7 @@ impl MySqlPool {
         Self {
             inner: mysql_async::Pool::new(opts),
             max_connections: max_connections.max(1),
+            batching_disabled: Default::default(),
             checkout_verifications: Default::default(),
         }
     }
@@ -98,7 +102,8 @@ pub trait MySqlPoolAccess {
     }
 }
 
-/// Connections that passed a `PING` this recently skip the next liveness
+/// Connections that passed a `PING` or fully consumed a successful response
+/// this recently skip the next liveness
 /// `PING`, like the Tomcat JDBC pool's `validationInterval` (3 s by default).
 /// A burst of checkouts (opening a table, paging a grid, loading metadata) then
 /// pays one liveness round trip instead of one each, while a connection that
@@ -106,7 +111,7 @@ pub trait MySqlPoolAccess {
 const MYSQL_CHECKOUT_VERIFY_INTERVAL: Duration = Duration::from_secs(3);
 
 /// When each pooled connection, keyed by its server connection id, last passed
-/// a liveness `PING` (the checkout health check or the pool reuse probe).
+/// a liveness `PING` or fully consumed a successful response.
 #[doc(hidden)]
 #[derive(Debug, Default)]
 pub struct MySqlCheckoutVerifications {
@@ -128,8 +133,8 @@ impl MySqlCheckoutVerifications {
     }
 }
 
-/// Pings a connection checked out of `pool` unless it passed a `PING` within
-/// the verification interval, and remembers a successful `PING`.
+/// Pings a connection checked out of `pool` unless it has recent liveness
+/// evidence, and remembers a successful `PING`.
 pub async fn verify_pooled_conn<P>(pool: &P, conn: &mut mysql_async::Conn) -> Result<(), mysql_async::Error>
 where
     P: MySqlPoolAccess + ?Sized,
@@ -255,6 +260,32 @@ pub fn session_status_from_last_ok(conn: &mysql_async::Conn) -> Option<MySqlSess
 /// flags may not describe the session once the response finishes.
 pub fn last_ok_ends_response(conn: &mysql_async::Conn) -> bool {
     conn.last_ok_packet().is_some_and(|packet| !packet.status_flags().contains(StatusFlags::SERVER_MORE_RESULTS_EXISTS))
+}
+
+fn metadata_read_can_skip_reset(status: Option<MySqlSessionStatus>, response_ended: bool) -> bool {
+    response_ended && matches!(status, Some(MySqlSessionStatus { in_transaction: false, autocommit: true }))
+}
+
+/// Call only after fully consuming a successful, DBX-owned metadata read that
+/// issued no session-changing statements. Such a read needs no reset/setup
+/// replay. Arbitrary user SQL must still use the pool's normal reset policy.
+/// Keep that policy when a transaction is open, autocommit is off, or the final
+/// server status is unavailable; do not infer transaction state from SQL text.
+fn finish_metadata_read<P: MySqlPoolAccess + ?Sized>(pool: &P, conn: &mut mysql_async::Conn) {
+    record_pooled_conn_response(pool, conn);
+    if metadata_read_can_skip_reset(session_status_from_last_ok(conn), last_ok_ends_response(conn)) {
+        conn.reset_connection(false);
+    }
+}
+
+/// Record liveness only after fully consuming a successful response. This
+/// never changes the reset policy, including for arbitrary user SQL or statistics.
+pub fn record_pooled_conn_response<P: MySqlPoolAccess + ?Sized>(pool: &P, conn: &mysql_async::Conn) {
+    if last_ok_ends_response(conn) {
+        if let Some(verifications) = pool.checkout_verifications() {
+            verifications.record(conn.id(), Instant::now());
+        }
+    }
 }
 
 const MYSQL_TCP_KEEPALIVE_MS: u32 = 30_000;
@@ -689,6 +720,18 @@ pub async fn database_connection_info(
     let product_name = nonblank(product_name.into()).unwrap_or_else(|| "MySQL".to_string());
     let mut conn = get_conn_with_health_check(pool).await?;
 
+    // One result packet sequence instead of five dependent scalar queries.
+    // Compatible servers may lack an individual variable, so retain the
+    // existing per-field fallback (including partial/NULL metadata).
+    const INFO_SQL: &str = "SELECT VERSION() AS product_version, COALESCE(DATABASE(), '') AS current_database, \
+        @@version_comment AS server_comment, @@character_set_server AS server_charset, \
+        @@collation_server AS server_collation";
+    if let Ok(Some(row)) = conn.query_first::<mysql_async::Row, _>(INFO_SQL).await {
+        let result = database_info_from_row(&row, product_name);
+        finish_metadata_read(pool, &mut conn);
+        return Ok(result);
+    }
+
     Ok(DatabaseConnectionInfo {
         product_name: Some(product_name),
         product_version: query_first_nonblank_string(&mut conn, "SELECT VERSION()").await,
@@ -698,6 +741,19 @@ pub async fn database_connection_info(
         server_collation: query_first_nonblank_string(&mut conn, "SELECT @@collation_server").await,
         ..DatabaseConnectionInfo::default()
     })
+}
+
+fn database_info_from_row(row: &mysql_async::Row, product_name: String) -> DatabaseConnectionInfo {
+    let field = |name: &str| get_opt_str(row, name).and_then(nonblank);
+    DatabaseConnectionInfo {
+        product_name: Some(product_name),
+        product_version: field("product_version"),
+        current_database: field("current_database"),
+        server_comment: field("server_comment"),
+        server_charset: field("server_charset"),
+        server_collation: field("server_collation"),
+        ..DatabaseConnectionInfo::default()
+    }
 }
 
 pub fn protocol_product_name(config: &ConnectionConfig) -> String {
@@ -1575,6 +1631,7 @@ async fn connect_pool_attempt_with_keepalive(
         setup_mode,
         eof_mode,
         tcp_keepalive_mode,
+        true,
     )?;
     verify_pool_connection_with_setup_fallback(
         pool,
@@ -1709,6 +1766,7 @@ async fn verify_pool_connection_with_setup_fallback(
             setup_mode,
             eof_mode,
             tcp_keepalive_mode,
+            false,
         )?;
         match verify_pool_connection(&charset_pool, timeout).await {
             Ok(()) => return Ok(charset_pool),
@@ -1751,6 +1809,7 @@ async fn verify_pool_connection_with_setup_fallback(
             mode,
             eof_mode,
             tcp_keepalive_mode,
+            false,
         )?;
         // The rung without dbx's built-in statement is the reliable one, and it reports the
         // value the server uses. The literal rung that follows cannot express the standard
@@ -1826,8 +1885,12 @@ async fn verify_pool_connection_reporting_group_concat_max_len(
 ) -> Result<Option<u64>, String> {
     super::with_connection_timeout("MySQL", timeout, async {
         let mut conn = pool.get_conn().await.map_err(|error| format!("MySQL connection failed: {error}"))?;
-        conn.ping().await.map_err(|error| format!("MySQL ping failed: {error}"))?;
-        Ok(query_first_column::<u64>(&mut conn, "SELECT @@session.group_concat_max_len").await.ok().flatten())
+        verify_pooled_conn(pool, &mut conn).await.map_err(|error| format!("MySQL ping failed: {error}"))?;
+        let value = query_first_column::<u64>(&mut conn, "SELECT @@session.group_concat_max_len").await;
+        if value.is_ok() {
+            finish_metadata_read(pool, &mut conn);
+        }
+        Ok(value.ok().flatten())
     })
     .await
 }
@@ -2022,6 +2085,47 @@ fn mysql_setup_probe_fallback_mode(setup_mode: MySqlSetupMode, url: &str, error:
     error.to_ascii_lowercase().contains("server error").then_some(MySqlSetupMode::Compatible)
 }
 
+fn configure_mysql_setup(
+    builder: mysql_async::OptsBuilder,
+    queries: Vec<String>,
+    batch: bool,
+    batching_disabled: std::sync::Arc<AtomicBool>,
+) -> mysql_async::OptsBuilder {
+    if !batch || queries.len() < 2 {
+        return builder.setup(queries);
+    }
+    // Run on every new physical connection AND every reset/change_user.
+    // An ordinary setup string uses query_drop and cannot prove that all its
+    // statements ran. The callback consumes and counts each result instead.
+    let statements: std::sync::Arc<[String]> = queries.into_iter().rev().collect::<Vec<_>>().into();
+    builder.setup(Vec::<String>::new()).setup_callback(move |conn| {
+        let statements = statements.clone();
+        let batching_disabled = batching_disabled.clone();
+        Box::pin(async move {
+            if !batching_disabled.load(std::sync::atomic::Ordering::Relaxed) {
+                let result = query_metadata_batch(conn, &statements).await?;
+                if result.complete {
+                    return Ok(());
+                }
+                // These built-in SET/USE commands are idempotent. Only learn
+                // a rejection after the exact statements all work separately.
+                // Transport errors escape above; a real setup error escapes
+                // below into the existing charset/group_concat fallback.
+                for sql in statements.iter() {
+                    conn.query_drop(sql).await?;
+                }
+                batching_disabled.store(true, std::sync::atomic::Ordering::Relaxed);
+                return Ok(());
+            }
+            for sql in statements.iter() {
+                conn.query_drop(sql).await?;
+            }
+            Ok(())
+        })
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn create_pool(
     url: &str,
     ca_cert_path: Option<&str>,
@@ -2032,6 +2136,7 @@ fn create_pool(
     setup_mode: MySqlSetupMode,
     eof_mode: MySqlEofMode,
     tcp_keepalive_mode: MySqlTcpKeepaliveMode,
+    batch_setup: bool,
 ) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
     let local_infile_paths = mysql_local_infile_paths(&tls_url.url);
@@ -2059,14 +2164,19 @@ fn create_pool(
         }
         (None, mode) => mysql_setup_queries_with_mode(url, extra_setup_queries, mode),
     };
+    let batched_setup = batch_setup
+        && setup_mode == MySqlSetupMode::Standard
+        && extra_setup_queries.is_empty()
+        && mysql_connection_session_variables(url).is_none();
+    let batching_disabled = std::sync::Arc::new(AtomicBool::new(false));
     let mut builder = mysql_async::OptsBuilder::from_opts(opts)
         .ip_or_hostname(tcp_host)
         .stmt_cache_size(0)
         .prefer_socket(false)
         .pool_opts(Some(pool_opts))
         .tcp_keepalive(tcp_keepalive_mode.duration())
-        .deprecate_eof(eof_mode.deprecate_eof())
-        .setup(setup_queries);
+        .deprecate_eof(eof_mode.deprecate_eof());
+    builder = configure_mysql_setup(builder, setup_queries, batched_setup, batching_disabled.clone());
     if let Some(ssl_opts) = mysql_ssl_opts(base_ssl_opts, url, ca_cert_path, &tls_url.files)? {
         builder = builder.ssl_opts(ssl_opts);
     }
@@ -2075,7 +2185,9 @@ fn create_pool(
         // to paths explicitly supplied by the user instead of enabling arbitrary reads.
         builder = builder.local_infile_handler(Some(mysql_async::WhiteListFsHandler::new(local_infile_paths)));
     }
-    Ok(MySqlPool::new(builder, max_connections))
+    let mut pool = MySqlPool::new(builder, max_connections);
+    pool.batching_disabled = batching_disabled;
+    Ok(pool)
 }
 
 fn mysql_async_tcp_host(host: &str) -> &str {
@@ -2618,7 +2730,10 @@ fn is_safe_mysql_time_zone_name(value: &str) -> bool {
 async fn verify_pool_connection(pool: &MySqlPool, timeout: Duration) -> Result<(), String> {
     super::with_connection_timeout("MySQL", timeout, async {
         let mut conn = pool.get_conn().await.map_err(|e| format!("MySQL connection failed: {e}"))?;
-        conn.ping().await.map_err(|e| format!("MySQL ping failed: {e}"))?;
+        verify_pooled_conn(pool, &mut conn).await.map_err(|e| format!("MySQL ping failed: {e}"))?;
+        // Validation itself changed no session state. Do not immediately reset
+        // the freshly initialized connection and replay all setup statements.
+        finish_metadata_read(pool, &mut conn);
         Ok(())
     })
     .await
@@ -3114,6 +3229,7 @@ pub async fn list_database_metadata(pool: &MySqlPool) -> Result<Vec<DatabaseInfo
             return list_databases(pool).await;
         }
     };
+    finish_metadata_read(pool, &mut conn);
     Ok(rows
         .iter()
         .filter_map(|row| {
@@ -3139,6 +3255,7 @@ async fn list_databases_with_query(
     let mut conn = get_conn_with_timeout(pool, timeout).await?;
     let result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    finish_metadata_read(pool, &mut conn);
     Ok(database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), include_catalogless_when_blank))
 }
 
@@ -3715,10 +3832,12 @@ const MYSQL_FRESH_TABLE_STATUS_SESSION_SQL: &str = "/*!80000 SET SESSION informa
 /// that was read while still empty keeps reporting its old `TABLE_ROWS`
 /// estimate long after rows were inserted (#9736). The version comment turns
 /// the directive into a no-op on MySQL 5.7.
-async fn enable_fresh_table_statistics(conn: &mut mysql_async::Conn, context: &str) {
+async fn enable_fresh_table_statistics(conn: &mut mysql_async::Conn, context: &str) -> bool {
     if let Err(error) = conn.query_drop(MYSQL_FRESH_TABLE_STATUS_SESSION_SQL).await {
         log::debug!("Failed to disable cached MySQL table statistics before {context}: {error}");
+        return false;
     }
+    true
 }
 
 async fn list_table_status_show(pool: &MySqlPool, database: &str) -> Result<HashMap<String, TableStatusMeta>, String> {
@@ -4246,6 +4365,16 @@ async fn query_routine_rows(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Vec<mysql_async::Row>, String> {
+    query_routine_rows_with_source(conn, database, object_types, limit, offset).await.map(|(rows, _)| rows)
+}
+
+async fn query_routine_rows_with_source(
+    conn: &mut mysql_async::Conn,
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<(Vec<mysql_async::Row>, RoutineMetadataQuery), String> {
     let mut last_error = None;
     for query in routine_metadata_queries() {
         let sql = match query {
@@ -4259,7 +4388,7 @@ async fn query_routine_rows(
             Err(error) => Err(error),
         };
         match result {
-            Ok(rows) => return Ok(rows),
+            Ok(rows) => return Ok((rows, query)),
             Err(error) => {
                 if query == RoutineMetadataQuery::Timestamps {
                     log::debug!(
@@ -4365,6 +4494,58 @@ fn logical_table_supplemental_types(object_types: Option<&[String]>) -> Vec<Stri
         .collect()
 }
 
+/// Execute only DBX-owned metadata statements, in their existing order. A
+/// server error stops a MySQL batch; retain the confirmed prefix so callers
+/// can apply their per-source fallbacks and read the unexecuted suffix.
+#[derive(Default)]
+struct MetadataBatch {
+    rows: VecDeque<Vec<mysql_async::Row>>,
+    complete: bool,
+    retryable_rejection: bool,
+}
+
+async fn query_metadata_batch(
+    conn: &mut mysql_async::Conn,
+    statements: &[String],
+) -> Result<MetadataBatch, mysql_async::Error> {
+    let mut batch = MetadataBatch::default();
+    let mut result = match conn.query_iter(statements.join(";\n")).await {
+        Ok(result) => result,
+        Err(mysql_async::Error::Server(error)) => {
+            log::debug!("MySQL metadata batch rejected; using per-source queries: {error}");
+            batch.retryable_rejection = matches!(error.code, 1064 | 1235);
+            return Ok(batch);
+        }
+        Err(error) => return Err(error),
+    };
+    for _ in statements {
+        // columns() is Some([]) for a pending SET/USE OK, unlike is_empty().
+        // It is None for a deferred error too, so always consume the result
+        // before deciding that a server ended the batch early.
+        let response_ended = result.columns().is_none();
+        match result.collect::<mysql_async::Row>().await {
+            Ok(_) if response_ended => {
+                batch.retryable_rejection = true;
+                break;
+            }
+            Ok(rows) => batch.rows.push_back(rows),
+            Err(mysql_async::Error::Server(error)) => {
+                // collect also reads the next result header. On error, its
+                // current set may be complete, but the public API cannot
+                // prove that. Re-read that set instead of returning partial
+                // rows or silently losing the next source.
+                log::debug!("MySQL metadata batch interrupted; resuming per-source queries: {error}");
+                result.drop_result().await?;
+                return Ok(batch);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    batch.complete = batch.rows.len() == statements.len() && result.columns().is_none() && result.is_empty();
+    result.drop_result().await?;
+    Ok(batch)
+}
+
 pub async fn list_objects(
     pool: &MySqlPool,
     database: &str,
@@ -4378,55 +4559,85 @@ pub async fn list_objects(
     let paging_applied = limit.is_some() && object_query_supports_paging(object_types);
     let (query_limit, query_offset) = if paging_applied { (limit, offset) } else { (None, None) };
     let mut objects = Vec::new();
+    let mut statements = Vec::new();
+    if wants_tables {
+        statements.push(list_tables_objects_sql(database, object_types, query_limit, query_offset));
+    }
+    if wants_routines {
+        statements.push(list_routines_sql(database, object_types, query_limit, query_offset));
+    }
+    if wants_trigger_objects(object_types) {
+        statements.push(list_triggers_objects_sql(database));
+    }
+    if wants_event_objects(object_types) {
+        statements.push(list_events_objects_sql(database));
+    }
+    let batch = if statements.len() > 1 && !pool.batching_disabled.load(std::sync::atomic::Ordering::Relaxed) {
+        query_metadata_batch(&mut conn, &statements).await.map_err(|error| error.to_string())?
+    } else {
+        MetadataBatch { complete: true, ..Default::default() }
+    };
+    let mut batched_rows = batch.rows;
+    let mut original_reads_succeeded = true;
+    let mut can_skip_reset = batch.complete;
 
     if wants_tables {
         let tables_sql = list_tables_objects_sql(database, object_types, query_limit, query_offset);
-        let table_rows = match conn.query_iter(&tables_sql).await {
-            Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
-                Ok(rows) if !rows.is_empty() => Some(rows),
-                Ok(_) => {
-                    log::debug!(
+        let table_result = match batched_rows.pop_front() {
+            Some(rows) => Ok(rows),
+            None => conn.query(&tables_sql).await,
+        };
+        let table_rows = match table_result {
+            Ok(rows) if !rows.is_empty() => Some(rows),
+            Ok(_) => {
+                log::debug!(
                         "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES returned no named tables"
                     );
-                    None
-                }
-                Err(err) => {
-                    log::debug!(
+                None
+            }
+            Err(err) => {
+                original_reads_succeeded = false;
+                log::debug!(
                         "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES rows failed: {err}"
                     );
-                    None
-                }
-            },
-            Err(err) => {
-                log::debug!(
-                    "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES failed: {err}"
-                );
                 None
             }
         };
         if let Some(table_rows) = table_rows {
             objects.extend(table_rows.iter().map(|row| row_to_object(row, database)));
         } else {
+            // An empty successful TABLES result still proves the original SQL
+            // works. Keep all fallback leases on their normal reset policy,
+            // independently of whether we can learn a batch rejection.
+            can_skip_reset = false;
             drop(conn);
             objects.extend(
                 list_table_objects_show_filtered(pool, database, object_types, query_limit, query_offset).await?,
             );
-            if !wants_routines {
+            if !wants_routines && !wants_trigger_objects(object_types) && !wants_event_objects(object_types) {
                 return Ok(PagedObjectList { objects, paging_applied });
             }
             conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
         }
     }
 
-    // Routines are queried separately: some MySQL-compatible servers (sharding proxies,
+    // Preserve per-source fallbacks: some MySQL-compatible servers (sharding proxies,
     // OceanBase/TiDB variants, restricted accounts) reject information_schema.ROUTINES with
     // ER_UNKNOWN_ERROR (1105). Degrading gracefully keeps tables/views usable.
     if wants_routines {
-        match query_routine_rows(&mut conn, database, object_types, query_limit, query_offset).await {
-            Ok(routine_rows) => {
+        let routine_result = match batched_rows.pop_front() {
+            Some(rows) => Ok((rows, RoutineMetadataQuery::Timestamps)),
+            None => query_routine_rows_with_source(&mut conn, database, object_types, query_limit, query_offset).await,
+        };
+        match routine_result {
+            Ok((routine_rows, source)) => {
+                // Legacy success does not prove that the original statement
+                // works separately, nor that all reads on this lease succeeded.
+                original_reads_succeeded &= source == RoutineMetadataQuery::Timestamps;
                 objects.extend(routine_rows.iter().map(|row| row_to_object(row, database)));
             }
             Err(e) => {
+                original_reads_succeeded = false;
                 log::warn!("Skipping routines for database `{}` in object browser: {}", database, e);
             }
         }
@@ -4434,16 +4645,16 @@ pub async fn list_objects(
 
     if wants_trigger_objects(object_types) {
         let triggers_sql = list_triggers_objects_sql(database);
-        match conn.query_iter(&triggers_sql).await {
-            Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
-                Ok(trigger_rows) => {
-                    objects.extend(trigger_rows.iter().map(|row| row_to_object(row, database)));
-                }
-                Err(e) => {
-                    log::warn!("Skipping triggers for database `{}` in object browser: {}", database, e);
-                }
-            },
+        let trigger_result = match batched_rows.pop_front() {
+            Some(rows) => Ok(rows),
+            None => conn.query(&triggers_sql).await,
+        };
+        match trigger_result {
+            Ok(trigger_rows) => {
+                objects.extend(trigger_rows.iter().map(|row| row_to_object(row, database)));
+            }
             Err(e) => {
+                original_reads_succeeded = false;
                 log::warn!("Skipping triggers for database `{}` in object browser: {}", database, e);
             }
         }
@@ -4451,21 +4662,27 @@ pub async fn list_objects(
 
     if wants_event_objects(object_types) {
         let events_sql = list_events_objects_sql(database);
-        match conn.query_iter(&events_sql).await {
-            Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
-                Ok(event_rows) => {
-                    objects.extend(event_rows.iter().map(|row| row_to_object(row, database)));
-                }
-                Err(e) => {
-                    log::warn!("Skipping events for database `{}` in object browser: {}", database, e);
-                }
-            },
+        let event_result = match batched_rows.pop_front() {
+            Some(rows) => Ok(rows),
+            None => conn.query(&events_sql).await,
+        };
+        match event_result {
+            Ok(event_rows) => {
+                objects.extend(event_rows.iter().map(|row| row_to_object(row, database)));
+            }
             Err(e) => {
+                original_reads_succeeded = false;
                 log::warn!("Skipping events for database `{}` in object browser: {}", database, e);
             }
         }
     }
 
+    if original_reads_succeeded && batch.retryable_rejection {
+        pool.batching_disabled.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    if original_reads_succeeded && can_skip_reset {
+        finish_metadata_read(pool, &mut conn);
+    }
     Ok(PagedObjectList { objects, paging_applied })
 }
 
@@ -4511,9 +4728,28 @@ pub async fn list_object_statistics(
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     // The session-scoped statistics cache is what makes the tree keep showing
     // a stale row count for tables written after the first read (#9736).
-    enable_fresh_table_statistics(&mut conn, "reading object statistics").await;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let mut batch = if pool.batching_disabled.load(std::sync::atomic::Ordering::Relaxed) {
+        MetadataBatch::default()
+    } else {
+        query_metadata_batch(&mut conn, &[MYSQL_FRESH_TABLE_STATUS_SESSION_SQL.into(), sql.clone()])
+            .await
+            .map_err(|error| error.to_string())?
+    };
+    let rows = if batch.complete {
+        batch.rows.pop_back().unwrap()
+    } else {
+        // Unsupported batches or SET failures must still allow statistics to
+        // load. Keep the original best-effort SET and mandatory SELECT path.
+        let setup_succeeded = enable_fresh_table_statistics(&mut conn, "reading object statistics").await;
+        let rows = conn.query::<mysql_async::Row, _>(&sql).await.map_err(|error| error.to_string())?;
+        if setup_succeeded && batch.retryable_rejection {
+            pool.batching_disabled.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        rows
+    };
+    // Keep reset/setup: enable_fresh_table_statistics changed a session variable.
+    // Reuse only the liveness evidence so the next metadata read need not PING.
+    record_pooled_conn_response(pool, &conn);
     Ok(rows
         .iter()
         .filter_map(|row| {
@@ -5995,7 +6231,11 @@ where
     P: MySqlPoolAccess + ?Sized,
 {
     let mut conn = get_conn_with_health_check(pool).await?;
-    execute_query_on_conn_with_max_rows(&mut conn, sql, bare, max_rows, dialect).await
+    let result = execute_query_on_conn_with_max_rows(&mut conn, sql, bare, max_rows, dialect).await;
+    if result.as_ref().is_ok_and(|result| !result.truncated) {
+        record_pooled_conn_response(pool, &conn);
+    }
+    result
 }
 
 /// Progress-aware variant of [`execute_query_with_max_rows`] for long transfers.

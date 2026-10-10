@@ -2525,6 +2525,7 @@ impl AppState {
             None,
             AgentSessionRole::Workload,
             Some(attempt),
+            false,
         )
         .await
     }
@@ -2552,6 +2553,27 @@ impl AppState {
             client_session_id,
             AgentSessionRole::Workload,
             None,
+            false,
+        )
+        .await
+    }
+
+    /// Only for executors that validate their actual MySQL checkout before
+    /// issuing SQL. Metadata and explicit health checks retain eager probing.
+    pub(crate) async fn get_or_create_query_pool_for_session(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        client_session_id: Option<&str>,
+    ) -> Result<String, String> {
+        self.get_or_create_pool_for_session_inner(
+            connection_id,
+            database,
+            None,
+            client_session_id,
+            AgentSessionRole::Workload,
+            None,
+            true,
         )
         .await
     }
@@ -2574,6 +2596,7 @@ impl AppState {
             client_session_id,
             AgentSessionRole::Metadata,
             None,
+            false,
         )
         .await
     }
@@ -2663,6 +2686,7 @@ impl AppState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn get_or_create_pool_for_session_inner(
         &self,
         connection_id: &str,
@@ -2671,6 +2695,7 @@ impl AppState {
         client_session_id: Option<&str>,
         session_role: AgentSessionRole,
         connection_attempt: Option<u64>,
+        mysql_validated_on_checkout: bool,
     ) -> Result<String, String> {
         let config = {
             let configs = self.configs.read().await;
@@ -2685,7 +2710,12 @@ impl AppState {
 
         loop {
             self.wait_for_pool_drain(&pool_key).await;
-            if self.pool_handle(&pool_key).await.is_some() {
+            if let Some(pool) = self.pool_handle(&pool_key).await {
+                // SQL execution validates the same physical MySQL connection it
+                // will use. A separate probe here could create/check connection A
+                // and then make execution wait for a different connection B.
+                let validate_existing_pool =
+                    validate_existing_pool && !(mysql_validated_on_checkout && matches!(pool, PoolKind::Mysql(_, _)));
                 if self.remove_pool_if_duckdb_isolation_mismatch(&pool_key).await {
                     // Recreate below using the current DuckDB isolation mode.
                 } else if self.pool_credential_owner_mismatch(&config, &pool_key).await {
@@ -4801,6 +4831,7 @@ impl AppState {
             client_session_id,
             session_role,
             None,
+            false,
         )
         .await
     }

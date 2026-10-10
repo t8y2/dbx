@@ -1,0 +1,128 @@
+[package]
+authors = ["blackbeam <aikorsky@gmail.com>"]
+description = "Tokio based asynchronous MySql client library."
+documentation = "https://docs.rs/mysql_async"
+keywords = ["mysql", "database", "asynchronous", "async"]
+license = "MIT OR Apache-2.0"
+name = "mysql_async"
+repository = "https://github.com/blackbeam/mysql_async"
+version = "0.37.0"
+exclude = ["test/*"]
+edition = "2021"
+categories = ["asynchronous", "database"]
+
+[dependencies]
+bytes = "1.4"
+crossbeam-queue = "0.3"
+crossbeam-utils = "0.8.21"
+flate2 = { version = "1.0", default-features = false }
+futures-core = "0.3"
+futures-util = "0.3"
+futures-sink = "0.3"
+keyed_priority_queue = "0.4"
+lru = "0.18"
+# Temporary git pin while mysql_common 0.38.0 is under review in
+# blackbeam/rust_mysql_common#186. Replace with the released version afterwards.
+mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }
+pem = { version = "3.0", optional = true }
+percent-encoding = "2.1.0"
+rand = "0.10"
+serde = "1"
+socket2 = "0.6"
+thiserror = "2"
+tokio = { version = "1.0", features = [
+    "io-util",
+    "fs",
+    "net",
+    "time",
+    "rt",
+    "sync",
+] }
+tokio-util = { version = "0.7.2", features = ["codec", "io"] }
+tracing = { version = "0.1.37", default-features = false, features = [
+    "attributes",
+], optional = true }
+twox-hash = { version = "2", default-features = false, features = ["xxhash64"] }
+url = "2.1"
+hdrhistogram = { version = "7.5", optional = true }
+
+[dependencies.tokio-rustls]
+version = "0.26"
+default-features = false
+optional = true
+
+[dependencies.tokio-native-tls]
+version = "0.3.0"
+optional = true
+
+[dependencies.native-tls]
+version = "0.2"
+optional = true
+
+[dependencies.rustls]
+version = "0.23.14"
+default-features = false
+features = ["std"]
+optional = true
+
+[dependencies.webpki-roots]
+version = "1"
+optional = true
+
+[dev-dependencies]
+waker-fn = "1"
+tempfile = "3.1.0"
+socket2 = { version = "0.6", features = ["all"] }
+tokio = { version = "1.0", features = ["macros", "rt", "rt-multi-thread"] }
+
+[features]
+default = ["flate2/zlib", "derive"]
+
+default-rustls = ["default-rustls-no-provider", "aws-lc-rs"]
+
+default-rustls-ring = ["default-rustls-no-provider", "ring"]
+
+default-rustls-no-provider = [
+    "flate2/rust_backend",
+    "derive",
+    "rustls-tls",
+    "tls12",
+]
+
+# minimal feature set with system flate2 impl
+minimal = ["flate2/zlib"]
+# minimal feature set with rust flate2 impl
+minimal-rust = ["flate2/rust_backend"]
+
+# native-tls based TLS support
+native-tls-tls = ["native-tls", "tokio-native-tls", "pem"]
+
+# rustls based TLS support
+rustls-tls = ["rustls", "tokio-rustls", "webpki-roots"]
+
+aws-lc-rs = ["rustls/aws_lc_rs", "tokio-rustls/aws_lc_rs"]
+ring = ["rustls/ring", "tokio-rustls/ring"]
+tls12 = ["rustls/tls12", "tokio-rustls/tls12"]
+
+binlog = ["mysql_common/binlog"]
+
+# mysql_common features
+derive = ["mysql_common/derive"]
+chrono = ["mysql_common/chrono"]
+time = ["mysql_common/time"]
+bigdecimal = ["mysql_common/bigdecimal"]
+rust_decimal = ["mysql_common/rust_decimal"]
+frunk = ["mysql_common/frunk"]
+client_ed25519 = ["mysql_common/client_ed25519"]
+client_parsec = ["mysql_common/client_parsec"]
+
+# other features
+tracing = ["dep:tracing"]
+nightly = []
+
+[lib]
+name = "mysql_async"
+path = "src/lib.rs"
+
+[profile.bench]
+debug = true

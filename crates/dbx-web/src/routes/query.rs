@@ -842,6 +842,8 @@ pub struct GetExplainInfoRequest {
     pub schema: Option<String>,
     pub sql: String,
     pub mode: Option<String>,
+    pub execution_id: Option<String>,
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -864,13 +866,15 @@ pub async fn get_explain_info(
 ) -> Result<Json<String>, AppError> {
     crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let plan = dbx_core::agent_explain::get_agent_explain_info_core(
+    let plan = dbx_core::agent_explain::get_agent_explain_info_core_with_execution_id(
         &state.app,
         &req.connection_id,
         req.database.as_deref(),
         req.schema.as_deref(),
         &req.sql,
         req.mode.as_deref(),
-        None,
+        req.timeout_secs,
+        req.execution_id.as_deref(),
     )
     .await
     .map_err(AppError::from)?;

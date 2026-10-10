@@ -129,7 +129,7 @@ const rawContent = computed(() => {
 });
 
 const isRawString = computed(() => typeof props.plan?.raw === "string");
-const rawFormatLabel = computed(() => (props.plan?.databaseType === "sqlserver" ? "XML" : isRawString.value ? "TEXT" : "JSON"));
+const rawFormatLabel = computed(() => (props.plan?.databaseType === "sqlserver" ? "XML" : props.plan?.databaseType === "db2" ? "JSON" : isRawString.value ? "TEXT" : "JSON"));
 const nodeCount = computed(() => (props.plan ? flattenExplainPlanNodes(props.plan.nodes).length : 0));
 // Measured rows exist only when the plan was produced by a mode that ran the query:
 // EXPLAIN ANALYZE on Postgres, SET STATISTICS XML on SQL Server.
@@ -221,7 +221,7 @@ function tableCellText(value: unknown): string {
           {{ t("explain.summary") }}
         </Button>
         <Button v-if="plan" size="sm" :variant="activeView === 'raw' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="selectView('raw')">
-          <FileText v-if="isRawString" class="h-3.5 w-3.5" />
+          <FileText v-if="rawFormatLabel !== 'JSON'" class="h-3.5 w-3.5" />
           <Braces v-else class="h-3.5 w-3.5" />
           {{ rawFormatLabel }}
         </Button>

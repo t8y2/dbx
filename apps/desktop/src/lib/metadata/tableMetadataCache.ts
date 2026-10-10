@@ -60,6 +60,7 @@ export interface TableColumnsMetadata {
 }
 
 export interface TableColumnsLoadResult {
+  schema?: string;
   columns: ColumnInfo[];
   tableType?: string;
   cacheStatus: MetadataLoadCacheStatus;
@@ -248,8 +249,9 @@ export async function loadTableColumns(request: TableMetadataRequest): Promise<T
       async () => {
         // Display-only loader: columns only, never index discovery.
         const columns = await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog);
+        const resolvedSchema = (request.databaseType === "vastbase" || request.databaseType === "kingbase") && !request.schema ? columns.find((column) => column.resolved_schema)?.resolved_schema : request.schema;
         return {
-          schema: request.schema || undefined,
+          schema: resolvedSchema || undefined,
           tableName: request.tableName,
           tableType: request.tableType,
           catalog: request.catalog,
@@ -272,7 +274,7 @@ export async function loadTableColumns(request: TableMetadataRequest): Promise<T
     resultCount: metadata.columns.length,
     force: request.force === true,
   });
-  return { columns: metadata.columns, tableType: metadata.tableType, cacheStatus: request.force ? "refresh" : "miss", ageMs: 0, cachedAt: metadata.cachedAt };
+  return { schema: metadata.schema, columns: metadata.columns, tableType: metadata.tableType, cacheStatus: request.force ? "refresh" : "miss", ageMs: 0, cachedAt: metadata.cachedAt };
 }
 
 export function tableMetadataToDataTabMeta(metadata: TableMetadata, overrides?: { schema?: string }): NonNullable<QueryTab["tableMeta"]> {

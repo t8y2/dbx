@@ -3901,6 +3901,29 @@ func TestManualTransactionSkipsPerStatementSetSchema(t *testing.T) {
 	}
 }
 
+func TestManualTransactionCurrentSchemaUsesPinnedSession(t *testing.T) {
+	db, _ := openOracleManualTxTestDB(t)
+	// A second pooled session that never ran ALTER SESSION SET CURRENT_SCHEMA
+	// still reports the login user's schema.
+	db.SetMaxOpenConns(2)
+	s := newServer()
+	s.db = db
+
+	if err := s.beginManualTransaction("APP_TEST"); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	schema, err := s.normalizeSchema("")
+	if err != nil {
+		t.Fatalf("normalizeSchema: %v", err)
+	}
+	if schema != "APP_TEST" {
+		t.Fatalf("normalizeSchema(\"\") during manual tx = %q, want APP_TEST", schema)
+	}
+	if err := s.rollbackManualTransaction(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+}
+
 func TestManualTransactionDisconnectRollsBack(t *testing.T) {
 	db, driver := openOracleManualTxTestDB(t)
 	s := newServer()
@@ -4003,6 +4026,7 @@ func (d *oracleManualTxDriver) Open(string) (driver.Conn, error) {
 type oracleManualTxConn struct {
 	driver *oracleManualTxDriver
 	closed bool
+	schema string
 }
 
 func (c *oracleManualTxConn) Prepare(string) (driver.Stmt, error) {
@@ -4036,6 +4060,9 @@ func (c *oracleManualTxConn) ExecContext(_ context.Context, query string, _ []dr
 	c.driver.mu.Lock()
 	defer c.driver.mu.Unlock()
 	c.driver.execs = append(c.driver.execs, query)
+	if schema, ok := strings.CutPrefix(query, "ALTER SESSION SET CURRENT_SCHEMA = "); ok {
+		c.schema = strings.Trim(schema, `"`)
+	}
 	return driver.RowsAffected(1), nil
 }
 
@@ -4043,6 +4070,16 @@ func (c *oracleManualTxConn) QueryContext(_ context.Context, query string, _ []d
 	c.driver.mu.Lock()
 	defer c.driver.mu.Unlock()
 	c.driver.queries = append(c.driver.queries, query)
+	if strings.Contains(query, "'CURRENT_SCHEMA'") {
+		schema := c.schema
+		if schema == "" {
+			schema = "LOGIN_USER"
+		}
+		return &oracleManualTxRows{
+			columns: []string{"SCHEMA"},
+			values:  [][]driver.Value{{schema}},
+		}, nil
+	}
 	return &oracleManualTxRows{
 		columns: []string{"A"},
 		values:  [][]driver.Value{{int64(1)}},

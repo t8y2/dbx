@@ -1158,14 +1158,17 @@ function tabTitleStyle(tab: QueryTab): CSSProperties | undefined {
   return dirtyTabTitleStyle(isDirtyTab(tab));
 }
 
+let lastDispatchedSwitchTabId: string | null = null;
 function dispatchBeforeTabSwitch(tabId: string) {
-  if (tabId === props.activeTabId) {
+  if (tabId === props.activeTabId || tabId === lastDispatchedSwitchTabId) {
     return;
   }
+  lastDispatchedSwitchTabId = tabId;
   window.dispatchEvent(new CustomEvent("dbx:before-tab-switch", { detail: { tabId, fromTabId: props.activeTabId } }));
 }
 
 function activateTab(tabId: string) {
+  dispatchBeforeTabSwitch(tabId);
   emit("activate-tab", tabId);
 }
 
@@ -1558,6 +1561,7 @@ const tabScrollBehavior = ref<ScrollBehavior>("smooth");
 watch(
   () => props.activeTabId,
   (tabId) => {
+    lastDispatchedSwitchTabId = null;
     // A tab that just became active must be visible: reveal its group if collapsed.
     expandTabGroupForTab(tabId);
     nextTick(() => {

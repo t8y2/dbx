@@ -402,6 +402,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "group-functions":
       return { icon: Braces, colorClass: "text-amber-500" };
+    case "group-internal-functions":
+      return { icon: Braces, colorClass: "text-emerald-500" };
+    case "group-udf-functions":
+      return { icon: Braces, colorClass: "text-orange-500" };
     case "group-sequences":
       return { icon: ListTree, colorClass: "text-emerald-500" };
     case "group-synonyms":
@@ -412,6 +416,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-types":
       return { icon: Braces, colorClass: "text-violet-500" };
+    case "group-database-indexes":
+      return { icon: Key, colorClass: "text-amber-400" };
     case "group-partitions":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "group-extensions":
@@ -1759,6 +1765,8 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-materialized-views' ||
                   node.type === 'group-procedures' ||
                   node.type === 'group-functions' ||
+                  node.type === 'group-internal-functions' ||
+                  node.type === 'group-udf-functions' ||
                   node.type === 'group-columns' ||
                   node.type === 'group-indexes' ||
                   node.type === 'group-fkeys' ||

@@ -319,3 +319,21 @@ test("Oracle: formats byte and code-point function variants with functionCase", 
   assert.match(formattedUpper, /\bINSTRB\(/);
   assert.match(formattedUpper, /\bLENGTHB\(/);
 });
+
+test("formats SQL preserving original keyword case when keywordCase is preserve (#11382)", async () => {
+  const sql = "select id, name as user_name from users where id = 1 and status in (1, 2) order by id desc limit 10";
+  const formatted = await formatSqlText(sql, "generic", { keywordCase: "preserve" });
+  assert.match(formatted, /^select\b/);
+  assert.match(formatted, /\bas\b/);
+  assert.match(formatted, /\bfrom\b/);
+  assert.match(formatted, /\bwhere\b/);
+  assert.match(formatted, /\band\b/);
+  assert.match(formatted, /\bin\b/);
+  assert.match(formatted, /\border by\b/);
+  assert.match(formatted, /\bdesc\b/);
+  assert.match(formatted, /\blimit\b/);
+  assert.doesNotMatch(formatted, /\bSELECT\b/);
+  assert.doesNotMatch(formatted, /\bFROM\b/);
+  assert.doesNotMatch(formatted, /\bWHERE\b/);
+});
+

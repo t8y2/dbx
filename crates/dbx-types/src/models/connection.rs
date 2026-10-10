@@ -155,6 +155,9 @@ pub struct ConnectionConfig {
     /// Frontend navigation preference: exhaust the paginated Tables group when opened.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sidebar_auto_load_all_tables: bool,
+    /// Oracle sidebar preference. Absent means shown; only an explicit opt-out is stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_database_links: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     /// SQL statements executed right after the connection is established
@@ -643,6 +646,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub sidebar_auto_load_all_tables: bool,
     #[serde(default)]
+    pub show_database_links: Option<bool>,
+    #[serde(default)]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     #[serde(default)]
     pub init_script: Option<String>,
@@ -760,6 +765,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             visible_schemas: data.visible_schemas,
             show_system_schemas: data.show_system_schemas,
             sidebar_auto_load_all_tables: data.sidebar_auto_load_all_tables,
+            show_database_links: data.show_database_links,
             attached_databases: data.attached_databases,
             init_script: data.init_script,
             color: data.color,
@@ -3089,6 +3095,26 @@ mod tests {
         assert!(serde_json::to_value(configured).unwrap()["sidebar_auto_load_all_tables"].as_bool().unwrap());
     }
 
+    #[test]
+    fn show_database_links_opt_out_round_trips() {
+        let mut value = serde_json::json!({
+            "id": "id",
+            "name": "Oracle",
+            "db_type": "oracle",
+            "host": "localhost",
+            "port": 1521,
+            "username": "system",
+            "password": "",
+            "database": "FREEPDB1"
+        });
+        let legacy: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(serde_json::to_value(legacy).unwrap().get("show_database_links").is_none());
+
+        value["show_database_links"] = serde_json::json!(false);
+        let hidden: ConnectionConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(serde_json::to_value(hidden).unwrap()["show_database_links"], serde_json::json!(false));
+    }
+
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
@@ -3113,6 +3139,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

@@ -386,3 +386,32 @@ func TestQuoteHiveIdentifierEscapesBackticks(t *testing.T) {
 		t.Fatalf("unexpected quoted identifier: %q", value)
 	}
 }
+
+func TestQuoteIdentifierWithCustomQuote(t *testing.T) {
+	if value := quoteIdentifier(`analytics"prod`, `"`); value != `"analytics""prod"` {
+		t.Fatalf("unexpected quoted identifier: %q", value)
+	}
+	if value := quoteIdentifier("analytics`prod", ""); value != "`analytics``prod`" {
+		t.Fatalf("unexpected default quoted identifier: %q", value)
+	}
+}
+
+func TestConnectConfigurationIdentifierQuote(t *testing.T) {
+	cfg := &connectConfiguration{IdentifierQuote: `"`}
+	if q := cfg.identifierQuote(); q != `"` {
+		t.Fatalf("expected quote %q, got %q", `"`, q)
+	}
+	cfg = &connectConfiguration{
+		HiveConfiguration: map[string]string{"set:hivevar:kyuubi.engine.type": "TRINO"},
+	}
+	if q := cfg.identifierQuote(); q != `"` {
+		t.Fatalf("expected auto-detected Trino quote %q, got %q", `"`, q)
+	}
+	cfg = &connectConfiguration{
+		HiveConfiguration: map[string]string{"set:hivevar:kyuubi.engine.type": "SPARK_SQL"},
+	}
+	if q := cfg.identifierQuote(); q != "`" {
+		t.Fatalf("expected default quote %q, got %q", "`", q)
+	}
+}
+

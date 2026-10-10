@@ -1619,6 +1619,31 @@ html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
   background: var(--dbx-window-top-border);
 }
 
+/* Linux floating frame: the transparent margin, rounded corners and shadow are drawn on
+ * #root from index.html so they exist before the bundle loads. Here: the app root fills
+ * that frame instead of the viewport. */
+html.dbx-linux-floating .dbx-app-root {
+  width: 100%;
+  height: 100%;
+}
+
+html.dbx-linux-floating [data-app-shell] {
+  width: 100%;
+  height: 100%;
+}
+
+/* Full-viewport dialog layers are portaled to <body>; keep them inside the shell so they
+ * do not paint over the transparent margin and square off the rounded corners. */
+html.dbx-linux-floating [data-slot="dialog-overlay"],
+html.dbx-linux-floating [data-slot="dialog-positioner"] {
+  inset: 20px;
+  border-radius: 12px;
+}
+
+html.dbx-linux-floating .dbx-desktop-window-frame::before {
+  display: none;
+}
+
 .dbx-editor-font-family {
   font-family: var(--dbx-editor-font-family, var(--font-mono, monospace));
 }

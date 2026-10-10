@@ -168,6 +168,30 @@ fn linux_appindicator_available() -> bool {
     })
 }
 
+/// Without a compositing manager (XFCE with compositing off, i3, openbox, ...) a transparent
+/// window renders black where it should be see-through.
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_compositing_available() -> bool {
+    gtk::gdk::Screen::default().is_some_and(|screen| screen.is_composited())
+}
+
+/// The Linux config declares the main window with `create: false` so its transparency can
+/// depend on the compositor, which is only known at runtime.
+#[cfg(target_os = "linux")]
+fn create_linux_main_window(app: &tauri::App) -> tauri::Result<()> {
+    let Some(config) = app.config().app.windows.iter().find(|window| window.label == "main").cloned() else {
+        return Ok(());
+    };
+    let compositing = linux_compositing_available();
+    let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.transparent(compositing);
+    if compositing {
+        // Read by index.html before first paint to draw the rounded, shadowed frame.
+        builder = builder.initialization_script("window.__DBX_LINUX_FLOATING__ = true;");
+    }
+    builder.build()?;
+    Ok(())
+}
+
 #[cfg(not(target_os = "linux"))]
 fn linux_appindicator_available() -> bool {
     false
@@ -1579,6 +1603,8 @@ pub fn run() {
         })
         .setup(move |app| {
             let setup_start = Instant::now();
+            #[cfg(target_os = "linux")]
+            create_linux_main_window(app)?;
             eprintln!("[STARTUP] plugins registered in {:?}", startup_begin.elapsed());
             append_startup_probe(format!("setup entered after {:?}", startup_begin.elapsed()));
 
@@ -1906,6 +1932,7 @@ pub fn run() {
             commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,
             commands::window_controls::set_macos_traffic_light_position,
+            commands::window_controls::get_linux_window_control_icons,
             commands::app_settings::set_driver_store_dir,
             commands::app_settings::set_plugin_store_dir,
             commands::app_settings::set_agent_store_dir,
@@ -1914,6 +1941,7 @@ pub fn run() {
             commands::app_settings::save_pinned_tree_node_ids,
             commands::app_settings::load_mcp_global_policy,
             commands::app_settings::save_mcp_global_policy,
+            commands::mcp_bridge::respond_mcp_sql_approval,
             commands::background_image::save_background_image,
             commands::background_image::clear_background_image,
             commands::background_image::read_background_image,

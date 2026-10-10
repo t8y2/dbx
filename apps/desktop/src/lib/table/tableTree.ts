@@ -722,6 +722,8 @@ function simpleObjectNodeType(objectType: DatabaseObjectTreeKind): TreeNodeType 
   if (objectType === "MATERIALIZED_VIEW") return "materialized_view";
   if (objectType === "PROCEDURE") return "procedure";
   if (objectType === "FUNCTION") return "function";
+  if (objectType === "FUNCTION_INTERNAL" || objectType === "FUNCTION_UDF") return "function";
+  if (objectType === "INDEX") return "index";
   if (objectType === "TRIGGER") return "trigger";
   if (objectType === "EVENT") return "event";
   if (objectType === "SEQUENCE") return "sequence";
@@ -770,6 +772,20 @@ const groupDefs: Array<{
     childType: "function",
   },
   {
+    key: "__internal_functions",
+    label: "tree.internalFunctions",
+    objectTypes: ["FUNCTION_INTERNAL"],
+    nodeType: "group-internal-functions",
+    childType: "function",
+  },
+  {
+    key: "__udf_functions",
+    label: "tree.udfFunctions",
+    objectTypes: ["FUNCTION_UDF"],
+    nodeType: "group-udf-functions",
+    childType: "function",
+  },
+  {
     key: "__triggers",
     label: "tree.triggers",
     objectTypes: ["TRIGGER"],
@@ -789,6 +805,13 @@ const groupDefs: Array<{
     objectTypes: ["SEQUENCE"],
     nodeType: "group-sequences",
     childType: "sequence",
+  },
+  {
+    key: "__indexes",
+    label: "tree.indexes",
+    objectTypes: ["INDEX"],
+    nodeType: "group-database-indexes",
+    childType: "index",
   },
   {
     key: "__synonyms",
@@ -820,7 +843,24 @@ const groupDefs: Array<{
   },
 ];
 
-const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-events", "group-sequences", "group-synonyms", "group-jobs", "group-packages", "group-types"]);
+const objectGroupNodeTypes = new Set<TreeNodeType>([
+  "group-tables",
+  "group-dolt-system-tables",
+  "group-views",
+  "group-materialized-views",
+  "group-procedures",
+  "group-functions",
+  "group-internal-functions",
+  "group-udf-functions",
+  "group-triggers",
+  "group-events",
+  "group-sequences",
+  "group-database-indexes",
+  "group-synonyms",
+  "group-jobs",
+  "group-packages",
+  "group-types",
+]);
 
 export function buildObjectGroupPlaceholderNodes({
   nodeId,
@@ -907,7 +947,7 @@ export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, sc
           const objectTypeSuffix = objectType === "PACKAGE" || objectType === "PACKAGE_BODY" || objectType === "TYPE" || objectType === "TYPE_BODY" ? `:${objectType}` : "";
           const signature = obj.signature?.trim() || "";
           const signatureIdPart = signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `:${signature}` : "";
-          const triggerParentName = objectType === "TRIGGER" && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : undefined;
+          const triggerParentName = (objectType === "TRIGGER" || objectType === "INDEX") && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : undefined;
           const triggerParentSchema = objectType === "TRIGGER" && obj.parent_schema ? normalizeDatabaseObjectName(obj.parent_schema) : undefined;
           return {
             id: `${nodeId}:${def.key}:${childSchema ? `${childSchema}:` : ""}${obj.name}${signatureIdPart}${triggerParentName ? `:${triggerParentName}` : ""}${objectTypeSuffix}`,

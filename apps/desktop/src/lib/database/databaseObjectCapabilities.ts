@@ -1,6 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 
-export type SidebarObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+export type SidebarObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "FUNCTION_INTERNAL" | "FUNCTION_UDF" | "TRIGGER" | "EVENT" | "SEQUENCE" | "INDEX" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface DatabaseObjectCapabilities {
   sidebarObjects: SidebarObjectKind[];
@@ -37,6 +37,7 @@ const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW
 const OCEANBASE_ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"];
 const DAMENG_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"];
 const XUGU_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
+const FIREBIRD_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION_INTERNAL", "FUNCTION_UDF", "TRIGGER", "SEQUENCE", "INDEX", "PACKAGE"];
 const PACKAGE_MEMBER_EXPANSION_DATABASES = new Set<DatabaseType>(["oracle", "xugu"]);
 
 const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
@@ -56,6 +57,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["dameng", DAMENG_OBJECTS],
   ["oceanbase-oracle", OCEANBASE_ORACLE_OBJECTS],
   ["xugu", XUGU_OBJECTS],
+  ["firebird", FIREBIRD_OBJECTS],
   ["mysql", MYSQL_OBJECTS],
   // Explicit entry so schema-diff routine gating can opt in without relying on the
   // unknown-type ROUTINE_OBJECTS fallback. Keep the same object set the fallback
@@ -114,7 +116,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
  * family databases list types without a CREATE TYPE getter this cycle.
  */
 function isSourceReadableObjectKind(kind: SidebarObjectKind, dbType?: DatabaseType): boolean {
-  if (kind === "TABLE") return false;
+  if (kind === "TABLE" || kind === "INDEX") return false;
   if (kind === "TYPE" || kind === "TYPE_BODY") return supportsTypeObjectSource(dbType);
   return true;
 }
@@ -215,6 +217,8 @@ export function supportsPackageMemberExpansion(dbType?: DatabaseType, compatibil
 export function normalizeSidebarObjectKind(type: string): SidebarObjectKind {
   const value = type.toUpperCase();
   const normalized = value.replace(/[\s-]+/g, "_");
+  if (normalized.includes("FUNCTION_INTERNAL")) return "FUNCTION_INTERNAL";
+  if (normalized.includes("FUNCTION_UDF")) return "FUNCTION_UDF";
   if (normalized.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
   if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
   if (normalized.includes("PACKAGE")) return "PACKAGE";
@@ -228,5 +232,6 @@ export function normalizeSidebarObjectKind(type: string): SidebarObjectKind {
   if (value.includes("JOB")) return "JOB";
   if (value.includes("PROC")) return "PROCEDURE";
   if (value.includes("FUNC")) return "FUNCTION";
+  if (value.includes("INDEX")) return "INDEX";
   return "TABLE";
 }

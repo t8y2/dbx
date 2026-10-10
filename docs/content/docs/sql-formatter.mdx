@@ -28,7 +28,11 @@ The MongoDB query editor uses a separate Mongo Shell formatter rather than this 
 
 ## Default Style
 
-The default layout keeps a statement that fits the width on one line, puts each clause of a longer one on its own line, and aligns a clause's remaining elements under its first element. Conditions keep their logical operators at the start of the continuation line, and `CREATE TABLE` definitions are aligned on a column grid. The settings below change those rules; **Restore Defaults** returns to this style.
+The default `dbx` layout keeps a statement that fits the width on one line, puts each clause of a longer one on its own line, and aligns a clause's remaining elements under its first element. Conditions keep their logical operators at the start of the continuation line, and `CREATE TABLE` definitions are aligned on a column grid. The settings below change those rules; **Restore Defaults** returns to this style.
+
+Set **Layout style** to `classic` to use sql-formatter's own layout instead — the default DBX shipped before v0.6.16. v0.6.16 also changed two option defaults, so also set **Expression width** to `50` and **FROM clause layout** to the new-line value to reproduce the old output; the JSON equivalent is `"expressionWidth": 50` and `"fromClauseLayout": "newLine"`, next to `"layoutStyle": "classic"`. The result matches v0.6.15 except on Oracle, where the byte/multibyte function variants (`SUBSTRB`, `INSTR2`, `LENGTHB` and the rest of that family) keep the newer fix that normalizes them as functions.
+
+Switching the layout style only changes the engine; it never rewrites the other options. The two indent styles (`tabularLeft`, `tabularRight`) always use sql-formatter's own layout, in either mode.
 
 ## Configure Formatting Options
 
@@ -36,6 +40,7 @@ Open **Settings → SQL Formatter**. Form mode exposes:
 
 | Option | Values or behavior |
 | --- | --- |
+| Layout style | `dbx` (DBX's own layout, default) or `classic` (sql-formatter's upstream layout, as in v0.6.15) |
 | Keyword, data type, function, and identifier case | `upper`, `lower`, or `preserve` |
 | Indent style | `standard`, `tabularLeft`, or `tabularRight` |
 | Indentation | Spaces or tabs |
@@ -57,9 +62,10 @@ JSON mode is useful for exact editing, copying, or moving formatter settings. Th
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "formatter": "sql-formatter",
   "options": {
+    "layoutStyle": "dbx",
     "keywordCase": "upper",
     "dataTypeCase": "preserve",
     "functionCase": "preserve",
@@ -68,6 +74,7 @@ JSON mode is useful for exact editing, copying, or moving formatter settings. Th
     "useTabs": false,
     "tabWidth": 2,
     "logicalOperatorNewline": "before",
+    "commaPosition": "after",
     "fromClauseLayout": "sameLine",
     "expressionWidth": 120,
     "linesBetweenQueries": 1,
@@ -82,7 +89,7 @@ JSON mode is useful for exact editing, copying, or moving formatter settings. Th
 The JSON editor validates the draft continuously. DBX blocks apply or import when:
 
 - the text is not valid JSON;
-- `version` is not `1`;
+- `version` is not `1` or `2`;
 - `formatter` is not `sql-formatter`;
 - `options` contains an unknown field; or
 - a value is outside the range accepted by the current build.

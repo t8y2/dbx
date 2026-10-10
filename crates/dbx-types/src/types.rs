@@ -828,13 +828,13 @@ pub struct ConstraintInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_delete: Option<String>,
     #[serde(default)]
-    pub deferrable: bool,
+    pub deferrable: Option<bool>,
     #[serde(default)]
-    pub initially_deferred: bool,
+    pub initially_deferred: Option<bool>,
     #[serde(default)]
-    pub enabled: bool,
+    pub enabled: Option<bool>,
     #[serde(default)]
-    pub valid: bool,
+    pub valid: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1506,6 +1506,28 @@ mod tests {
         assert!(serialized.get("elasticsearch_raw_body").is_none());
         assert!(serialized.get("messages").is_none());
         assert_eq!(serialized["session_id"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn constraint_states_preserve_unknown_and_known_values_on_the_agent_ui_wire() {
+        for states in [
+            serde_json::json!({}),
+            serde_json::json!({ "enabled": null, "valid": null, "deferrable": null, "initially_deferred": null }),
+            serde_json::json!({ "enabled": true, "valid": false, "deferrable": false, "initially_deferred": true }),
+        ] {
+            let mut payload = serde_json::json!({
+                "name": "O01_UK", "constraint_type": "UNIQUE",
+                "definition": "UNIQUE (\"B\", \"A\")", "columns": ["B", "A"]
+            });
+            payload.as_object_mut().unwrap().extend(states.as_object().unwrap().clone());
+            let constraint: super::ConstraintInfo = serde_json::from_value(payload).unwrap();
+            let wire = serde_json::to_value(constraint).unwrap();
+            for field in ["enabled", "valid", "deferrable", "initially_deferred"] {
+                assert_eq!(wire[field], states[field], "{field}");
+            }
+            assert_eq!(wire["columns"], serde_json::json!(["B", "A"]));
+            assert_eq!(wire["definition"], "UNIQUE (\"B\", \"A\")");
+        }
     }
 
     #[test]

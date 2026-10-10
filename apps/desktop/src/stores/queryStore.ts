@@ -32,7 +32,7 @@ import type {
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
 import { isSqlErrorPositionDebugEnabled, logSqlErrorPosition, sqlErrorHasMessagePosition, sqlErrorMessageText } from "@/lib/sql/errorPosition";
-import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, sqlServerExplainResult, type BuildExplainSqlResult, type ExplainPlanDatabaseType } from "@/lib/diagram/explainPlan";
+import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, parseDb2ExplainText, sqlServerExplainResult, type BuildExplainSqlResult, type ExplainPlanDatabaseType } from "@/lib/diagram/explainPlan";
 import { mysqlExplainCompatibilityHint } from "@/lib/diagram/mysqlExplainCompatibility";
 import {
   allEditableColumnsWriteable,
@@ -903,11 +903,14 @@ function bindColumnsForSource(
       if (!column.sourceName) return column;
       if (column.sourceKey) {
         if (column.sourceKey !== source.key) return column;
-        if (dbType === "oracle" && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID") return column;
+        if ((dbType === "oracle" || dbType === "oceanbase-oracle") && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID") return column;
         const canonicalName = resolveSourceColumnName(dbType, column.sourceName, column.sourceNameQuoted, tableColumns);
         return { ...column, sourceName: canonicalName };
       }
       if (column.sourceQualifier) return column;
+      if (dbType === "oceanbase-oracle" && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID" && editableQuerySources(analysis).length === 1) {
+        return { ...column, sourceKey: source.key };
+      }
       const matchingSources = allSourceColumns.flatMap((entry) => {
         const canonicalName = resolveSourceColumnName(dbType, column.sourceName!, column.sourceNameQuoted, entry.columns);
         return canonicalName ? [{ source: entry.source, canonicalName }] : [];
@@ -5401,10 +5404,12 @@ export const useQueryStore = defineStore("query", () => {
       pendingSqlServerTransactionEnds.set(id, ending);
       return ending;
     }
+    const sessionId = tab.txnSessionId;
     try {
-      await api.commitManualTransaction(tab.txnSessionId);
+      await api.commitManualTransaction(sessionId);
     } finally {
-      clearManualTransactionSession(tab);
+      // A mode or target switch may have started a replacement transaction.
+      if (tab.txnSessionId === sessionId) clearManualTransactionSession(tab);
     }
   }
 
@@ -5763,6 +5768,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateDatabase(id: string, database: string, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.database === database) return;
+    if (tab.isExplaining) void cancelTabExplain(id);
     rollbackTabTransaction(tab);
     void closeResultSession(tab);
     void closeClientConnectionSession(tab);
@@ -5795,6 +5801,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateCatalog(id: string, catalog: string | undefined, database: string, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab || (tab.catalog === catalog && tab.database === database)) return;
+    if (tab.isExplaining) void cancelTabExplain(id);
     rollbackTabTransaction(tab);
     void closeResultSession(tab);
     void closeClientConnectionSession(tab);
@@ -5814,6 +5821,10 @@ export const useQueryStore = defineStore("query", () => {
   function updateSchema(id: string, schema: string | undefined, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.schema === schema) return;
+    if (tab.isExplaining) {
+      void cancelTabExplain(id);
+      clearExplain(tab);
+    }
     rollbackTabTransaction(tab);
     const clearsQuerySchema = tab.mode === "query" && tab.schema && !schema && supportsClearableQuerySchema(useConnectionStore().getConfig(tab.connectionId)?.db_type);
     if (clearsQuerySchema) {
@@ -5832,6 +5843,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateConnection(id: string, connectionId: string, database = "", options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.connectionId === connectionId) return;
+    if (tab.isExplaining) void cancelTabExplain(id);
     rollbackTabTransaction(tab, { resetAutoCommit: true, resetAutoCommitDbType: useConnectionStore().getConfig(connectionId)?.db_type });
     void closeResultSession(tab);
     void closeClientConnectionSession(tab);
@@ -6271,13 +6283,15 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function loadedEditableSourceFromColumns(target: EditableSourceMetadataTarget, loadedColumns: Awaited<ReturnType<typeof loadTableColumns>>): LoadedEditableSource {
+    const usesReportedSchema = target.request.databaseType === "vastbase" || target.request.databaseType === "kingbase";
+    const writeSchema = usesReportedSchema && !target.writeSchema ? loadedColumns.schema : target.writeSchema;
     return {
       source: target.source,
       analysis: target.analysis,
       tableMeta: {
         catalog: target.request.catalog,
         database: target.request.database,
-        schema: target.writeSchema,
+        schema: writeSchema,
         tableName: target.request.tableName,
         tableType: loadedColumns.tableType,
         columns: loadedColumns.columns,
@@ -6320,7 +6334,7 @@ export const useQueryStore = defineStore("query", () => {
     const selectedColumns = new Set(
       analysis.columns.flatMap((column) => {
         if (!column.sourceName || column.sourceKey !== sourceKey) return [];
-        if (databaseType === "oracle" && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID") return [DBX_ROWID_COLUMN, column.sourceName];
+        if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID") return [DBX_ROWID_COLUMN, column.sourceName];
         return [column.sourceName];
       }),
     );
@@ -6346,9 +6360,9 @@ export const useQueryStore = defineStore("query", () => {
   async function resolveOracleRowIdSafety(tab: QueryTab, loaded: LoadedEditableSource, databaseType: DatabaseType): Promise<boolean> {
     if (oracleRowIdIsSafeForQuery(tab, loaded)) return true;
     if (loaded.tableMeta.tableType?.trim()) return false;
-    // Never enumerate an Oracle schema on the query execution path: large
+    // Never enumerate an Oracle/OB schema on the query execution path: large
     // schemas can make this optional editability check take minutes (#8462).
-    if (databaseType === "oracle") return false;
+    if (databaseType === "oracle" || databaseType === "oceanbase-oracle") return false;
 
     const connection = useConnectionStore().getConfig(tab.connectionId!);
     const schema = loaded.tableMeta.schema?.trim() || tab.schema?.trim() || connection?.default_schema?.trim() || "";
@@ -6383,7 +6397,9 @@ export const useQueryStore = defineStore("query", () => {
     const unchanged = { sql, metadataSql: sql, hiddenPrimaryKeys: [], largeValuePreview };
     const missingPrimaryKeys =
       declaredPrimaryKeys.length === 0
-        ? primaryKeys.filter((primaryKey) => !(databaseType === "oracle" && primaryKey === DBX_ROWID_COLUMN && metadataAnalysis.columns.some((column) => column.sourceKey === loaded.source.key && !column.sourceNameQuoted && column.sourceName?.toUpperCase() === "ROWID")))
+        ? primaryKeys.filter(
+            (primaryKey) => !((databaseType === "oracle" || databaseType === "oceanbase-oracle") && primaryKey === DBX_ROWID_COLUMN && metadataAnalysis.columns.some((column) => column.sourceKey === loaded.source.key && !column.sourceNameQuoted && column.sourceName?.toUpperCase() === "ROWID")),
+          )
         : missingPrimaryKeysForSource(databaseType, primaryKeys, metadataAnalysis, loaded.source.key);
     if (missingPrimaryKeys.length === 0) return unchanged;
     const primaryKeySet = new Set(primaryKeys);
@@ -6395,7 +6411,7 @@ export const useQueryStore = defineStore("query", () => {
       databaseType,
       primaryKeys: missingPrimaryKeys,
       existingResultNames: metadataAnalysis.selectStar ? loaded.tableMeta.columns.map((column) => column.name) : metadataAnalysis.columns.map((column) => column.resultName),
-      sourceExpressions: missingPrimaryKeys.includes(DBX_ROWID_COLUMN) && (databaseType === "oracle" || databaseType === "xugu") ? { [DBX_ROWID_COLUMN]: databaseType === "oracle" ? "ROWIDTOCHAR(ROWID)" : "ROWID" } : undefined,
+      sourceExpressions: missingPrimaryKeys.includes(DBX_ROWID_COLUMN) && (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "xugu") ? { [DBX_ROWID_COLUMN]: databaseType === "xugu" ? "ROWID" : "ROWIDTOCHAR(ROWID)" } : undefined,
     });
     if (!rewritten) return unchanged;
     queryExecutionLog("info", "hidden-primary-keys", {
@@ -6438,6 +6454,14 @@ export const useQueryStore = defineStore("query", () => {
           traceLogger: (event) => queryExecutionLog("debug", "metadata:table-trace", { sourceTraceId: traceId, ...event }),
         });
         void fullMetadataPromise.catch((error) => queryExecutionLog("warn", "metadata:table-prefetch:failed", { traceId, error, elapsed: elapsed() }));
+        // Synonyms and views often have no directly reported primary index.
+        // Bound the full metadata wait as well, including named projections,
+        // and start its deadline before waiting for indexes so both share it.
+        // Manual transactions still need their first-run type/LOB metadata.
+        const preparedMetadata = tab.autoCommit !== false ? waitForQueryMetadataPreflight(fullMetadataPromise) : fullMetadataPromise;
+        // The primary-index shortcut can return before this promise is awaited;
+        // the original prefetch already records errors in that background path.
+        void preparedMetadata.catch(() => undefined);
         const wholeSourceAutoCommit = projectsAllColumnsForSource(target.analysis, target.source.key) && tab.autoCommit !== false;
         if (wholeSourceAutoCommit) {
           const indexes = await waitForQueryMetadataPreflight(loadTableIndexes(target.request));
@@ -6452,7 +6476,17 @@ export const useQueryStore = defineStore("query", () => {
           }
           if (primaryKeyIndex(indexes)) return unchanged;
         }
-        loaded = loadedEditableSourceFromMetadata(target, (await fullMetadataPromise).metadata);
+        const metadata = await preparedMetadata;
+        if (metadata === QUERY_METADATA_PREFLIGHT_TIMEOUT) {
+          queryExecutionLog("info", "metadata:preflight:timeout", {
+            traceId,
+            table: target.request.tableName,
+            budgetMs: QUERY_METADATA_PREFLIGHT_BUDGET_MS,
+            elapsed: elapsed(),
+          });
+          return unchanged;
+        }
+        loaded = loadedEditableSourceFromMetadata(target, metadata.metadata);
       }
 
       if (!loaded) {
@@ -6475,9 +6509,9 @@ export const useQueryStore = defineStore("query", () => {
       if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
       const primaryKeys = loaded.tableMeta.primaryKeys;
-      const syntheticRowId = (databaseType === "oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType);
+      const syntheticRowId = (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType);
       // Base tables without a natural identifier use the same ROWID identity
-      // as table-data tabs (Oracle and Xugu). Confirm the object is a base
+      // as table-data tabs (Oracle, OceanBase Oracle and Xugu). Confirm the object is a base
       // table because selecting ROWID from a view can fail with ORA-01445.
       if (syntheticRowId && !(await resolveOracleRowIdSafety(tab, loaded, databaseType))) return unchanged;
       const declaredPrimaryKeys = syntheticRowId ? [] : primaryKeys;
@@ -8603,10 +8637,52 @@ export const useQueryStore = defineStore("query", () => {
       await waitForTabSessionReset(id);
     } catch (e: any) {
       // Do not start an explain with a session whose schema reset did not complete.
-      tab.isExplaining = false;
-      tab.explainExecutionId = undefined;
-      tab.explainError = String(e?.message || e);
-      return { ok: false as const, reason: tab.explainError };
+      const reason = String(e?.message || e);
+      const current = tabs.value.find((t) => t.id === id);
+      if (current?.explainExecutionId === executionId) {
+        current.isExplaining = false;
+        current.explainExecutionId = undefined;
+        current.explainError = reason;
+      }
+      return { ok: false as const, reason };
+    }
+
+    // DB2 writes Explain tables on an isolated backend session and returns native JSON.
+    if (databaseType === "db2") {
+      if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) return { ok: true as const, sql: "" };
+      const { connectionId, database, schema } = tab;
+      let explainSql = sql;
+      try {
+        const built = await buildExplainSql(databaseType, sql);
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId !== executionId) return built;
+        if (!built.ok) {
+          current.explainError = built.reason;
+          return built;
+        }
+        explainSql = built.sql;
+        current.explainSql = explainSql;
+        // Always request an estimate, even if an unrelated UI supplies autotrace.
+        const planText = await api.getExplainInfo(connectionId, database, schema, sql, "explain", executionId, queryTimeoutSecs);
+        const target = tabs.value.find((t) => t.id === id);
+        if (target?.explainExecutionId === executionId) {
+          if (typeof planText === "string" && planText.trim()) target.explainPlan = parseDb2ExplainText(planText);
+          else target.explainError = "No explain plan returned";
+        }
+      } catch (error) {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.explainPlan = undefined;
+          current.explainError = formatError(error);
+        }
+      } finally {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.isExplaining = false;
+          current.explainExecutionId = undefined;
+        }
+      }
+      return { ok: true as const, sql: explainSql };
     }
 
     // DM and Oracle agents expose native text plans. DM also supports autotrace.

@@ -1,4 +1,4 @@
-import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterIndentStyle, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { formatSqlLayout, type SqlLayoutOptions } from "@/lib/sql/layout";
 import { looksLikeXml } from "@/lib/sql/autoFormat";
 import { compressCypherText, formatCypherText } from "@/lib/sql/cypherFormatter";
@@ -449,11 +449,14 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     return emptyLineProtection ? restoreProtectedEmptyLines(laidOut, emptyLineProtection.markers) : laidOut;
   };
 
-  // DBX's own layout printer produces the default style. It needs the AST and
-  // sql-formatter's internal layout machinery, so it can decline an input — an
-  // unparseable statement, an internal shape that moved. `null` means "use the
-  // public formatter", which is also what the tabular indent styles ask for:
-  // those are an alternative layout this printer deliberately does not reproduce.
+  // DBX's own layout printer produces the default `dbx` style. It needs the AST
+  // and sql-formatter's internal layout machinery, so it can decline an input —
+  // an unparseable statement, an internal shape that moved. `null` means "use
+  // the public formatter", which is also what the `classic` layout style asks
+  // for: that style is sql-formatter's own layout, i.e. the pre-v0.6.16 default,
+  // and the applySqlFormatterLayout post-passes exist to serve it. The tabular
+  // indent styles likewise are an alternative layout this printer deliberately
+  // does not reproduce.
   const layoutOptions: Partial<SqlLayoutOptions> = {
     lineWidth: normalizedSettings.expressionWidth,
     indentWidth: normalizedSettings.tabWidth,
@@ -464,7 +467,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     logicalOperatorNewline: normalizedSettings.logicalOperatorNewline,
     commaPosition: normalizedSettings.commaPosition,
   };
-  const usesDefaultStyle = normalizedSettings.indentStyle === "standard";
+  const usesDefaultStyle = normalizedSettings.layoutStyle === "dbx" && normalizedSettings.indentStyle === "standard";
 
   const formatOnce = async (input: string): Promise<string> => {
     const laidOut = usesDefaultStyle ? await formatSqlLayout({ sql: input, language, dialectOptions: resolvedDialect, cfg: formatterOptions, options: layoutOptions }) : null;
@@ -698,7 +701,7 @@ function normalizeLikeOperatorCase(sql: string, settings: SqlFormatterSettings, 
   return restoreSpans(normalized, spans);
 }
 
-function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
+function keepFromClauseAndFirstSourceOnSameLine(sql: string, indentStyle: SqlFormatterIndentStyle): string {
   const lines = sql.split("\n");
   for (let index = 0; index < lines.length - 1; index += 1) {
     const clauseMatch = lines[index].match(/^(\s*)FROM\s*$/i);
@@ -714,7 +717,13 @@ function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
 
     const clauseIndent = clauseMatch[1];
     const sourceIndent = sourceMatch[1];
-    const separator = sourceIndent.startsWith(clauseIndent) ? sourceIndent.slice(clauseIndent.length) : " ";
+    // The source line's indent is the gap to reuse only for the tabular styles:
+    // there it is the column sql-formatter aligned every clause to, and
+    // collapsing it would destroy that alignment (`FROM      t`). Under the
+    // standard indent the same indent is just the clause body's step, so reusing
+    // it doubles the gap (`FROM  t`) — the upstream one-line form is a single
+    // space, and that is what merging is supposed to produce.
+    const separator = indentStyle === "standard" ? " " : sourceIndent.startsWith(clauseIndent) ? sourceIndent.slice(clauseIndent.length) : " ";
     lines[index] = `${lines[index]}${separator || " "}${source}`;
     lines.splice(index + 1, 1);
     index -= 1;
@@ -787,7 +796,7 @@ function formatLeadingCommas(sql: string, dialect: SqlFormatDialect = "generic")
 function applySqlFormatterLayout(sql: string, settings: SqlFormatterSettings, dialect: SqlFormatDialect): string {
   let formatted = normalizeLikeOperatorCase(sql, settings, dialect);
   if (settings.logicalOperatorNewline === "none") formatted = keepLogicalOperatorsOnSameLine(formatted, dialect);
-  if (settings.fromClauseLayout === "sameLine") formatted = keepFromClauseAndFirstSourceOnSameLine(formatted);
+  if (settings.fromClauseLayout === "sameLine") formatted = keepFromClauseAndFirstSourceOnSameLine(formatted, settings.indentStyle);
   if (settings.commaPosition === "before") formatted = formatLeadingCommas(formatted, dialect);
   return formatted;
 }

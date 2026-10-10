@@ -29,9 +29,11 @@ describe("data-grid extractor options", () => {
   it("resolves smart copy to raw for one cell and TSV otherwise", () => {
     expect(normalizeDataGridCopyPreference(undefined)).toBe("smart");
     expect(normalizeDataGridCopyPreference("smart")).toBe("smart");
+    expect(normalizeDataGridCopyPreference("raw")).toBe("raw");
     expect(resolveDataGridCopyPreference("smart", 1)).toBe("raw");
     expect(resolveDataGridCopyPreference("smart", 2)).toBe("tsv");
     expect(resolveDataGridCopyPreference("csv", 1)).toBe("csv");
+    expect(resolveDataGridCopyPreference("raw", 3)).toBe("raw");
   });
 
   it("normalizes persisted values without sharing the default object", () => {

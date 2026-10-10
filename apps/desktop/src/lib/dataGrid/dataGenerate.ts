@@ -2016,7 +2016,7 @@ export function formatGeneratedRowValues(config: TableGenerateConfig, databaseTy
  * on backends that report failures inside the result array instead of throwing.
  */
 export function generateInsertBatches(databaseType: DatabaseType | undefined, state: TableGenerateChunkState, valueRows: string[], forceSingleRow = false): { statements: string[]; rowsPerStatement: number[] } {
-  if (databaseType === "oracle") {
+  if (databaseType === "oracle" || databaseType === "oceanbase-oracle") {
     const statements = buildOracleInsertStatements(state.targetTable, state.columnList, valueRows);
     return { statements, rowsPerStatement: oracleRowsPerStatement(valueRows, statements) };
   }

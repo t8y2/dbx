@@ -1,3 +1,4 @@
+use crate::text_encoding::{Client as EncodingClient, PgError, Row, RowStream, TextEncoding, ValueRow};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use deadpool_postgres::{ManagerConfig, Pool, PoolError, RecyclingMethod, Runtime};
 use futures::{SinkExt, StreamExt};
@@ -27,7 +28,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_postgres::config::{Host, SslMode};
 use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
 use tokio_postgres::types::{FromSql, Kind, Type};
-use tokio_postgres::{AsyncMessage, NoTls, Row, SimpleQueryMessage, Socket};
+use tokio_postgres::{AsyncMessage, NoTls, SimpleQueryMessage, Socket};
 use tokio_util::sync::CancellationToken;
 
 use super::file_validator::validate_file_path;
@@ -50,6 +51,7 @@ pub const GAUSSDB_COMPATIBILITY_SQL: &str =
 pub async fn gaussdb_identifier_quote(pool: &Pool) -> Option<String> {
     let timeout = super::connection_timeout();
     let client = checkout_postgres_client(pool, None, timeout).await.ok()?;
+    let client = &EncodingClient::new(&client);
     let row = tokio::time::timeout(timeout, client.query_opt(GAUSSDB_COMPATIBILITY_SQL, &[])).await.ok()?.ok()??;
     let compatibility_mode = row.try_get::<_, String>(0).ok()?;
     gaussdb_identifier_quote_for_compatibility_mode(&compatibility_mode).map(str::to_string)
@@ -65,7 +67,8 @@ pub fn gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode: &str)
 
 pub async fn opengauss_compatibility_mode(pool: &Pool) -> Result<Option<String>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let row = postgres_query_one_cached(&client, GAUSSDB_COMPATIBILITY_SQL, &[]).await.map_err(|e| e.to_string())?;
+    let client = &EncodingClient::new(&client);
+    let row = postgres_query_one_cached(client, GAUSSDB_COMPATIBILITY_SQL, &[]).await.map_err(|e| e.to_string())?;
     Ok(row.try_get::<_, Option<String>>(0).ok().flatten().filter(|value| !value.trim().is_empty()))
 }
 
@@ -149,7 +152,7 @@ pub struct PostgresTablePartitionLocalObjects {
     pub column_defaults: BTreeMap<String, PostgresColumnDefaultState>,
 }
 
-fn pg_temporal_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
+fn pg_temporal_to_json_value(row: &impl ValueRow, idx: usize) -> Option<serde_json::Value> {
     if let Ok(v) = row.try_get::<_, NaiveDateTime>(idx) {
         return Some(serde_json::Value::String(v.to_string()));
     }
@@ -500,6 +503,26 @@ impl<'a> FromSql<'a> for PgRawBytes {
     }
 }
 
+struct PgJsonText(String);
+
+impl<'a> FromSql<'a> for PgJsonText {
+    fn from_sql(ty: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        let text = if *ty == Type::JSONB {
+            match raw.split_first() {
+                Some((&1, text)) => text,
+                _ => return Err("unsupported PostgreSQL jsonb version".into()),
+            }
+        } else {
+            raw
+        };
+        Ok(PgJsonText(std::str::from_utf8(text)?.to_string()))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(*ty, Type::JSON | Type::JSONB)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PgPoint {
     x: f64,
@@ -699,7 +722,7 @@ fn pg_u32_number(v: u32) -> serde_json::Value {
     serde_json::Value::Number(serde_json::Number::from(v))
 }
 
-fn pg_system_u32_to_json(row: &Row, idx: usize) -> Option<serde_json::Value> {
+fn pg_system_u32_to_json(row: &impl ValueRow, idx: usize) -> Option<serde_json::Value> {
     if let Ok(v) = row.try_get::<_, u32>(idx) {
         return Some(pg_u32_number(v));
     }
@@ -784,28 +807,36 @@ fn decode_pg_bit_string_bytes(raw: &[u8]) -> Option<String> {
     Some(bits)
 }
 
-fn pg_network_address_to_json_value(row: &Row, idx: usize, force_cidr_output: bool) -> Option<serde_json::Value> {
+fn pg_network_address_to_json_value(
+    row: &impl ValueRow,
+    idx: usize,
+    force_cidr_output: bool,
+) -> Option<serde_json::Value> {
     row.try_get::<_, PgRawBytes>(idx)
         .ok()
         .and_then(|raw| decode_pg_network_address_bytes(&raw.0, force_cidr_output))
         .map(serde_json::Value::String)
 }
 
-fn pg_macaddr_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
+fn pg_macaddr_to_json_value(row: &impl ValueRow, idx: usize) -> Option<serde_json::Value> {
     row.try_get::<_, PgRawBytes>(idx)
         .ok()
         .and_then(|raw| decode_pg_macaddr_bytes(&raw.0))
         .map(serde_json::Value::String)
 }
 
-fn pg_bit_string_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
+fn pg_bit_string_to_json_value(row: &impl ValueRow, idx: usize) -> Option<serde_json::Value> {
     row.try_get::<_, PgRawBytes>(idx)
         .ok()
         .and_then(|raw| decode_pg_bit_string_bytes(&raw.0))
         .map(serde_json::Value::String)
 }
 
-fn pg_network_address_array_to_json_value(row: &Row, idx: usize, force_cidr_output: bool) -> Option<serde_json::Value> {
+fn pg_network_address_array_to_json_value(
+    row: &impl ValueRow,
+    idx: usize,
+    force_cidr_output: bool,
+) -> Option<serde_json::Value> {
     row.try_get::<_, Vec<Option<PgRawBytes>>>(idx).ok().map(|values| {
         pg_optional_array_to_json(values, |raw| {
             decode_pg_network_address_bytes(&raw.0, force_cidr_output)
@@ -815,7 +846,7 @@ fn pg_network_address_array_to_json_value(row: &Row, idx: usize, force_cidr_outp
     })
 }
 
-fn pg_macaddr_array_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
+fn pg_macaddr_array_to_json_value(row: &impl ValueRow, idx: usize) -> Option<serde_json::Value> {
     row.try_get::<_, Vec<Option<PgRawBytes>>>(idx).ok().map(|values| {
         pg_optional_array_to_json(values, |raw| {
             decode_pg_macaddr_bytes(&raw.0)
@@ -825,7 +856,7 @@ fn pg_macaddr_array_to_json_value(row: &Row, idx: usize) -> Option<serde_json::V
     })
 }
 
-fn pg_bit_string_array_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
+fn pg_bit_string_array_to_json_value(row: &impl ValueRow, idx: usize) -> Option<serde_json::Value> {
     row.try_get::<_, Vec<Option<PgRawBytes>>>(idx).ok().map(|values| {
         pg_optional_array_to_json(values, |raw| {
             decode_pg_bit_string_bytes(&raw.0)
@@ -835,7 +866,7 @@ fn pg_bit_string_array_to_json_value(row: &Row, idx: usize) -> Option<serde_json
     })
 }
 
-fn pg_array_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
+fn pg_array_to_json_value(row: &impl ValueRow, idx: usize) -> Option<serde_json::Value> {
     if let Ok(values) = row.try_get::<_, Vec<Option<serde_json::Value>>>(idx) {
         return Some(pg_json_array_values_to_json(values));
     }
@@ -1085,13 +1116,16 @@ pub fn classify_pg_column_types(column_types: &[String]) -> Vec<PgColType> {
     column_types.iter().map(|type_name| classify_pg_type(type_name)).collect()
 }
 
-pub fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgColType) -> serde_json::Value {
+pub fn pg_value_to_json_classified(row: &impl ValueRow, idx: usize, col_type: PgColType) -> serde_json::Value {
     match col_type {
         PgColType::Bytea => row
             .try_get::<_, Vec<u8>>(idx)
             .map(|bytes| super::binary_value_to_json(&bytes))
             .unwrap_or(serde_json::Value::Null),
         PgColType::Json => {
+            if let Ok(PgJsonText(text)) = row.try_get::<_, PgJsonText>(idx) {
+                return serde_json::Value::String(text);
+            }
             if let Ok(v) = row.try_get::<_, serde_json::Value>(idx) {
                 return serde_json::Value::String(v.to_string());
             }
@@ -1163,7 +1197,11 @@ pub fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgColType) -
     }
 }
 
-fn pg_value_to_json_with_srid(row: &Row, idx: usize, col_type: PgColType) -> (serde_json::Value, Option<u32>) {
+fn pg_value_to_json_with_srid(
+    row: &impl ValueRow,
+    idx: usize,
+    col_type: PgColType,
+) -> (serde_json::Value, Option<u32>) {
     if col_type != PgColType::Geometry {
         return (pg_value_to_json_classified(row, idx, col_type), None);
     }
@@ -1398,7 +1436,7 @@ fn pg_vector_element_number(v: f32) -> serde_json::Value {
     v.to_string().parse().map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
 }
 
-fn pg_vector_value_to_json(row: &Row, idx: usize) -> serde_json::Value {
+fn pg_vector_value_to_json(row: &impl ValueRow, idx: usize) -> serde_json::Value {
     if let Ok(PgRawBytes(raw)) = row.try_get::<_, PgRawBytes>(idx) {
         if let Some(floats) = decode_pgvector_bytes(&raw) {
             return serde_json::Value::Array(floats.into_iter().map(pg_vector_element_number).collect());
@@ -1407,7 +1445,7 @@ fn pg_vector_value_to_json(row: &Row, idx: usize) -> serde_json::Value {
     serde_json::Value::Null
 }
 
-fn pg_fallback_value_to_json(row: &Row, idx: usize) -> serde_json::Value {
+fn pg_fallback_value_to_json(row: &impl ValueRow, idx: usize) -> serde_json::Value {
     row.try_get::<_, String>(idx)
         .map(serde_json::Value::String)
         .or_else(|e| pg_system_u32_to_json(row, idx).ok_or(e))
@@ -1501,7 +1539,8 @@ fn escape_tsvector_lexeme(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "''")
 }
 
-fn pg_error_to_string(err: tokio_postgres::Error) -> String {
+fn pg_error_to_string(err: impl Into<PgError>) -> String {
+    let err = err.into();
     let Some(db_error) = err.as_db_error() else {
         return err.to_string();
     };
@@ -1520,7 +1559,8 @@ fn pg_error_to_string(err: tokio_postgres::Error) -> String {
 /// Used for infrastructure/setup statements (search_path, BEGIN/ROLLBACK, …)
 /// whose SQL is not the statement the user is editing: a marker from those would
 /// be resolved against the user's SQL and point at the wrong place.
-fn pg_error_to_string_plain(err: tokio_postgres::Error) -> String {
+fn pg_error_to_string_plain(err: impl Into<PgError>) -> String {
+    let err = err.into();
     err.as_db_error().map(ToString::to_string).unwrap_or_else(|| err.to_string())
 }
 
@@ -1542,7 +1582,7 @@ async fn query_with_compat_fallback<T, F, Fut>(
 ) -> Result<T, String>
 where
     F: FnMut(&'static str) -> Fut,
-    Fut: std::future::Future<Output = Result<T, tokio_postgres::Error>>,
+    Fut: std::future::Future<Output = Result<T, PgError>>,
 {
     let mut errors: Vec<String> = Vec::new();
     for sql in tiers {
@@ -1572,7 +1612,7 @@ async fn query_with_useful_compat_fallback<T, F, Fut, P>(
 ) -> Result<T, String>
 where
     F: FnMut(&'static str) -> Fut,
-    Fut: std::future::Future<Output = Result<T, tokio_postgres::Error>>,
+    Fut: std::future::Future<Output = Result<T, PgError>>,
     P: Fn(&T) -> bool,
 {
     let mut unuseful_result = None;
@@ -1759,7 +1799,7 @@ fn pg_pool_error_to_string(err: PoolError) -> String {
     pg_error_from_sources(&err).unwrap_or_else(|| error_with_sources_to_string(&err))
 }
 
-fn should_retry_postgres_text_query(err: &tokio_postgres::Error) -> bool {
+fn should_retry_postgres_text_query(err: &PgError) -> bool {
     let message = err.as_db_error().map(ToString::to_string).unwrap_or_else(|| err.to_string()).to_ascii_lowercase();
     should_retry_postgres_text_query_message(&message)
 }
@@ -1770,7 +1810,7 @@ fn should_retry_postgres_text_query_message(message: &str) -> bool {
         || message.contains("cannot display a value of type")
 }
 
-fn should_retry_postgres_stale_cache(err: &tokio_postgres::Error) -> bool {
+fn should_retry_postgres_stale_cache(err: &PgError) -> bool {
     if let Some(db_error) = err.as_db_error() {
         return should_retry_postgres_stale_cache_fields(
             Some(db_error.code().code()),
@@ -1787,7 +1827,7 @@ fn should_retry_postgres_stale_cache_fields(sqlstate: Option<&str>, routine: Opt
     structured_match || message.to_ascii_lowercase().contains("cached plan must not change result type")
 }
 
-fn should_fallback_postgres_missing_prepared_statement(err: &tokio_postgres::Error) -> bool {
+fn should_fallback_postgres_missing_prepared_statement(err: &PgError) -> bool {
     if let Some(db_error) = err.as_db_error() {
         return should_fallback_postgres_missing_prepared_statement_fields(
             Some(db_error.code().code()),
@@ -1838,10 +1878,8 @@ fn postgres_typed_params<'a>(
     (params.len() == param_types.len()).then(|| params.iter().copied().zip(param_types.iter().cloned()).collect())
 }
 
-async fn postgres_query_unnamed(
-    client: &deadpool_postgres::Client,
-    sql: &str,
-) -> Result<tokio_postgres::RowStream, tokio_postgres::Error> {
+async fn postgres_query_unnamed(client: &deadpool_postgres::Client, sql: &str) -> Result<RowStream, PgError> {
+    let client = &EncodingClient::new(client);
     client.query_typed_raw(sql, std::iter::empty::<(&(dyn tokio_postgres::types::ToSql + Sync), Type)>()).await
 }
 
@@ -1849,7 +1887,8 @@ async fn postgres_query_cached(
     client: &deadpool_postgres::Client,
     sql: &str,
     params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
-) -> Result<Vec<Row>, tokio_postgres::Error> {
+) -> Result<Vec<Row>, PgError> {
+    let client = &EncodingClient::new(client);
     if postgres_client_uses_unnamed_statements(client) && params.is_empty() {
         return client.query_typed(sql, &[]).await;
     }
@@ -1879,7 +1918,7 @@ async fn postgres_query_cached(
             // statement/type metadata instead of surfacing PostgreSQL's stale
             // cached-plan error to the UI.
             log::warn!("[postgres][metadata:stale_cache] evicting cached statement: {}", pg_error_to_string(err));
-            client.statement_cache.remove(sql, &[]);
+            client.statement_cache.remove(&client.encode(sql).map_err(pg_error_to_string)?, &[]);
             client.clear_type_cache();
             let stmt = client.prepare_cached(sql).await?;
             client.query(&stmt, params).await
@@ -1892,7 +1931,8 @@ async fn postgres_query_one_cached(
     client: &deadpool_postgres::Client,
     sql: &str,
     params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
-) -> Result<Row, tokio_postgres::Error> {
+) -> Result<Row, PgError> {
+    let client = &EncodingClient::new(client);
     if postgres_client_uses_unnamed_statements(client) && params.is_empty() {
         return client.query_typed_one(sql, &[]).await;
     }
@@ -1920,7 +1960,7 @@ async fn postgres_query_one_cached(
             // Same stale-cache protection as postgres_query_cached, for scalar
             // catalog probes such as pg_proc feature detection.
             log::warn!("[postgres][metadata:stale_cache] evicting cached statement: {}", pg_error_to_string(err));
-            client.statement_cache.remove(sql, &[]);
+            client.statement_cache.remove(&client.encode(sql).map_err(pg_error_to_string)?, &[]);
             client.clear_type_cache();
             let stmt = client.prepare_cached(sql).await?;
             client.query_one(&stmt, params).await
@@ -1942,47 +1982,55 @@ struct PreparedSelectMetadata {
     unsupported_type: Option<String>,
 }
 
-fn prepared_select_metadata(columns: &[tokio_postgres::Column]) -> PreparedSelectMetadata {
-    let column_names: Vec<String> = columns.iter().map(|c| c.name().to_string()).collect();
+fn prepared_select_metadata(
+    columns: &[tokio_postgres::Column],
+    encoding: Option<TextEncoding>,
+) -> Result<PreparedSelectMetadata, PgError> {
+    let column_names: Vec<String> = columns
+        .iter()
+        .map(|c| encoding.map_or_else(|| Ok(c.name().to_string()), |e| e.decode(c.name())))
+        .collect::<Result<_, _>>()?;
     let column_types: Vec<String> = columns.iter().map(|c| c.type_().name().to_string()).collect();
     let column_classes = classify_pg_column_types(&column_types);
     let unsupported_type = columns.iter().zip(&column_classes).find_map(|(column, col_type)| {
         let pg_type = column.type_();
         pg_type_requires_text_protocol(pg_type, *col_type).then(|| pg_type.name().to_string())
     });
-    PreparedSelectMetadata { columns: column_names, column_types, column_classes, unsupported_type }
+    Ok(PreparedSelectMetadata { columns: column_names, column_types, column_classes, unsupported_type })
 }
 
 async fn prepare_select_with_metadata(
     client: &deadpool_postgres::Client,
     sql: &str,
-) -> Result<(tokio_postgres::Statement, PreparedSelectMetadata), tokio_postgres::Error> {
+) -> Result<(tokio_postgres::Statement, PreparedSelectMetadata), PgError> {
+    let client = &EncodingClient::new(client);
     let mut stmt = client.prepare_cached(sql).await?;
-    let mut metadata = prepared_select_metadata(stmt.columns());
+    let mut metadata = prepared_select_metadata(stmt.columns(), client.encoding)?;
     if metadata.unsupported_type.is_some() {
         stmt = client.prepare(sql).await?;
-        metadata = prepared_select_metadata(stmt.columns());
+        metadata = prepared_select_metadata(stmt.columns(), client.encoding)?;
     }
     Ok((stmt, metadata))
 }
 
 enum PostgresSelectStreamOutcome {
-    Binary { stream: tokio_postgres::RowStream, metadata: PreparedSelectMetadata },
+    Binary { stream: RowStream, metadata: PreparedSelectMetadata },
     TextFallback { column_types: Vec<String>, unsupported_type: String },
 }
 
-fn postgres_select_stream_outcome(stream: tokio_postgres::RowStream) -> PostgresSelectStreamOutcome {
-    let metadata = prepared_select_metadata(stream.columns());
+fn postgres_select_stream_outcome(stream: RowStream) -> Result<PostgresSelectStreamOutcome, PgError> {
+    let metadata = prepared_select_metadata(stream.columns(), stream.encoding)?;
     if let Some(unsupported_type) = metadata.unsupported_type.clone() {
-        return PostgresSelectStreamOutcome::TextFallback { column_types: metadata.column_types, unsupported_type };
+        return Ok(PostgresSelectStreamOutcome::TextFallback { column_types: metadata.column_types, unsupported_type });
     }
-    PostgresSelectStreamOutcome::Binary { stream, metadata }
+    Ok(PostgresSelectStreamOutcome::Binary { stream, metadata })
 }
 
 async fn prepare_unnamed_select_metadata(
     client: &deadpool_postgres::Client,
     sql: &str,
-) -> Result<PreparedSelectMetadata, tokio_postgres::Error> {
+) -> Result<PreparedSelectMetadata, PgError> {
+    let client = &EncodingClient::new(client);
     // query_typed_raw sends Describe and Execute together. If its result has an
     // unknown user-defined type, tokio-postgres then resolves that type with a
     // second query on the same connection before returning the RowStream. A
@@ -1991,14 +2039,15 @@ async fn prepare_unnamed_select_metadata(
     // actual unnamed stream starts. The stream remains unnamed to tolerate
     // server-side prepared statement loss in snapshot/proxy environments.
     let stmt = client.prepare(sql).await?;
-    Ok(prepared_select_metadata(stmt.columns()))
+    prepared_select_metadata(stmt.columns(), client.encoding)
 }
 
 async fn start_postgres_select_stream(
     client: &deadpool_postgres::Client,
     sql: &str,
     force_unnamed: bool,
-) -> Result<PostgresSelectStreamOutcome, tokio_postgres::Error> {
+) -> Result<PostgresSelectStreamOutcome, PgError> {
+    let client = &EncodingClient::new(client);
     if force_unnamed || postgres_client_uses_unnamed_statements(client) {
         let metadata = prepare_unnamed_select_metadata(client, sql).await?;
         if let Some(unsupported_type) = metadata.unsupported_type {
@@ -2007,7 +2056,7 @@ async fn start_postgres_select_stream(
                 unsupported_type,
             });
         }
-        return postgres_query_unnamed(client, sql).await.map(postgres_select_stream_outcome);
+        return postgres_query_unnamed(client, sql).await.and_then(postgres_select_stream_outcome);
     }
 
     let (stmt, metadata) = prepare_select_with_metadata(client, sql).await?;
@@ -2017,7 +2066,7 @@ async fn start_postgres_select_stream(
 
     let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
     match client.query_raw(&stmt, params).await {
-        Ok(stream) => Ok(postgres_select_stream_outcome(stream)),
+        Ok(stream) => postgres_select_stream_outcome(stream),
         Err(err) if should_fallback_postgres_missing_prepared_statement(&err) => {
             // Bind failed before execution. Downgrade this physical connection
             // so later queries do not repeat the named-statement round trip.
@@ -2026,7 +2075,7 @@ async fn start_postgres_select_stream(
                 pg_error_to_string(err)
             );
             mark_postgres_client_unnamed_statements(client);
-            postgres_query_unnamed(client, sql).await.map(postgres_select_stream_outcome)
+            postgres_query_unnamed(client, sql).await.and_then(postgres_select_stream_outcome)
         }
         Err(err) => Err(err),
     }
@@ -2039,7 +2088,8 @@ async fn execute_select_prepared(
     row_limit: usize,
     progress_clock: Option<&StreamProgressClock>,
     force_unnamed: bool,
-) -> Result<PreparedSelectOutcome, tokio_postgres::Error> {
+) -> Result<PreparedSelectOutcome, PgError> {
+    let client = &EncodingClient::new(client);
     let stream_start = Instant::now();
     let stream_outcome = start_postgres_select_stream(client, sql, force_unnamed).await?;
     if let Some(progress_clock) = progress_clock {
@@ -2140,6 +2190,7 @@ async fn execute_select_text(
     prepared_column_types: Option<Vec<String>>,
     progress_clock: Option<&StreamProgressClock>,
 ) -> Result<QueryResult, String> {
+    let client = &EncodingClient::new(client);
     let stream = client.simple_query_raw(sql).await.map_err(pg_error_to_string)?;
     if let Some(progress_clock) = progress_clock {
         progress_clock.mark();
@@ -2164,11 +2215,20 @@ async fn execute_select_text(
         }
         match message {
             Ok(SimpleQueryMessage::RowDescription(cols)) => {
-                columns = cols.iter().map(|c| c.name().to_string()).collect();
+                columns = cols
+                    .iter()
+                    .map(|c| client.decode(c.name()))
+                    .collect::<Result<_, _>>()
+                    .map_err(pg_error_to_string)?;
             }
             Ok(SimpleQueryMessage::Row(row)) => {
                 if columns.is_empty() {
-                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                    columns = row
+                        .columns()
+                        .iter()
+                        .map(|c| client.decode(c.name()))
+                        .collect::<Result<_, _>>()
+                        .map_err(pg_error_to_string)?;
                 }
                 if result_rows.len() >= row_limit {
                     truncated = true;
@@ -2179,8 +2239,10 @@ async fn execute_select_text(
                 for (i, row_srid) in row_srids.iter_mut().enumerate() {
                     match row.try_get(i).map_err(pg_error_to_string)? {
                         Some(value) => {
-                            let (decoded, srid, is_spatial) =
-                                pg_text_fallback_value_with_spatial(value, column_classes.get(i).copied());
+                            let (decoded, srid, is_spatial) = pg_text_fallback_value_with_spatial(
+                                &client.decode(value).map_err(pg_error_to_string)?,
+                                column_classes.get(i).copied(),
+                            );
                             values.push(decoded);
                             if is_spatial {
                                 spatial_columns.observe(i, srid);
@@ -2233,6 +2295,7 @@ async fn finish_prepared_select(
     outcome: PreparedSelectOutcome,
     progress_clock: Option<&StreamProgressClock>,
 ) -> Result<QueryResult, String> {
+    let client = &EncodingClient::new(client);
     match outcome {
         PreparedSelectOutcome::Complete(result) => Ok(*result),
         PreparedSelectOutcome::TextFallback { column_types, unsupported_type } => {
@@ -2251,6 +2314,7 @@ pub async fn execute_select_query(
     start: Instant,
     row_limit: usize,
 ) -> Result<QueryResult, String> {
+    let client = &EncodingClient::new(client);
     execute_select_query_with_progress(client, sql, start, row_limit, None, false).await
 }
 
@@ -2260,6 +2324,7 @@ pub async fn execute_select_query_unnamed(
     start: Instant,
     row_limit: usize,
 ) -> Result<QueryResult, String> {
+    let client = &EncodingClient::new(client);
     execute_select_query_with_progress(client, sql, start, row_limit, None, true).await
 }
 
@@ -2271,6 +2336,7 @@ async fn execute_select_query_with_progress(
     progress_clock: Option<&StreamProgressClock>,
     force_unnamed: bool,
 ) -> Result<QueryResult, String> {
+    let client = &EncodingClient::new(client);
     match execute_select_prepared(client, sql, start, row_limit, progress_clock, force_unnamed).await {
         Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome, progress_clock).await,
         Err(err) if should_retry_postgres_stale_cache(&err) => {
@@ -2278,7 +2344,7 @@ async fn execute_select_query_with_progress(
             // schema changed since the statement was prepared). Evict the
             // stale entry and retry with a fresh server-side prepare.
             log::warn!("[postgres][select:stale_cache] evicting cached statement: {}", pg_error_to_string(err));
-            client.statement_cache.remove(sql, &[]);
+            client.statement_cache.remove(&client.encode(sql).map_err(pg_error_to_string)?, &[]);
             match execute_select_prepared(client, sql, start, row_limit, progress_clock, force_unnamed).await {
                 Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome, progress_clock).await,
                 Err(err) if should_retry_postgres_text_query(&err) => {
@@ -2300,7 +2366,7 @@ pub enum PostgresQueryStreamItem {
 }
 
 enum PostgresQueryStreamError {
-    Postgres { err: tokio_postgres::Error, emitted: bool },
+    Postgres { err: PgError, emitted: bool },
     TextFallback { column_types: Vec<String>, unsupported_type: String },
     Export(String),
 }
@@ -2324,6 +2390,7 @@ async fn stream_select_query_prepared(
     on_item: &mut impl FnMut(PostgresQueryStreamItem) -> Result<(), String>,
     force_unnamed: bool,
 ) -> Result<u64, PostgresQueryStreamError> {
+    let client = &EncodingClient::new(client);
     let stream_outcome = start_postgres_select_stream(client, sql, force_unnamed)
         .await
         .map_err(|err| PostgresQueryStreamError::Postgres { err, emitted: false })?;
@@ -2368,6 +2435,7 @@ async fn stream_select_query_text(
     prepared_column_types: Option<Vec<String>>,
     on_item: &mut impl FnMut(PostgresQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
+    let client = &EncodingClient::new(client);
     let stream = client.simple_query_raw(sql).await.map_err(pg_error_to_string)?;
     tokio::pin!(stream);
     let mut columns: Vec<String> = Vec::new();
@@ -2377,7 +2445,11 @@ async fn stream_select_query_text(
     while let Some(message) = stream.next().await {
         match message.map_err(pg_error_to_string)? {
             SimpleQueryMessage::RowDescription(cols) => {
-                columns = cols.iter().map(|c| c.name().to_string()).collect();
+                columns = cols
+                    .iter()
+                    .map(|c| client.decode(c.name()))
+                    .collect::<Result<_, _>>()
+                    .map_err(pg_error_to_string)?;
                 let column_types = matching_pg_text_column_types(&columns, prepared_column_types.clone());
                 on_item(PostgresQueryStreamItem::Columns { columns: columns.clone(), column_types })?;
             }
@@ -2386,14 +2458,25 @@ async fn stream_select_query_text(
                     break;
                 }
                 if columns.is_empty() {
-                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                    columns = row
+                        .columns()
+                        .iter()
+                        .map(|c| client.decode(c.name()))
+                        .collect::<Result<_, _>>()
+                        .map_err(pg_error_to_string)?;
                     let column_types = matching_pg_text_column_types(&columns, prepared_column_types.clone());
                     on_item(PostgresQueryStreamItem::Columns { columns: columns.clone(), column_types })?;
                 }
                 let mut values = Vec::with_capacity(row.len());
                 for i in 0..row.len() {
                     values.push(match row.try_get(i).map_err(pg_error_to_string)? {
-                        Some(value) => pg_text_fallback_value(value, column_classes.get(i).copied()).0,
+                        Some(value) => {
+                            pg_text_fallback_value(
+                                &client.decode(value).map_err(pg_error_to_string)?,
+                                column_classes.get(i).copied(),
+                            )
+                            .0
+                        }
                         None => serde_json::Value::Null,
                     });
                 }
@@ -2414,6 +2497,7 @@ pub async fn stream_select_query_inner_unnamed(
     row_limit: Option<usize>,
     on_item: &mut impl FnMut(PostgresQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
+    let client = &EncodingClient::new(client);
     stream_select_query_inner_with_mode(client, sql, row_limit, on_item, true).await
 }
 
@@ -2426,6 +2510,7 @@ pub async fn stream_select_query_inner_unnamed_with_cancel(
     budget: &DbOperationBudget,
     cancel_context: Option<&PostgresCancelContext>,
 ) -> Result<u64, String> {
+    let client = &EncodingClient::new(client);
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(crate::execution::canceled_error());
     }
@@ -2475,6 +2560,7 @@ async fn stream_select_query_inner_with_mode(
     on_item: &mut impl FnMut(PostgresQueryStreamItem) -> Result<(), String>,
     force_unnamed: bool,
 ) -> Result<u64, String> {
+    let client = &EncodingClient::new(client);
     match stream_select_query_prepared(client, sql, row_limit, on_item, force_unnamed).await {
         Ok(rows) => Ok(rows),
         Err(PostgresQueryStreamError::TextFallback { column_types, unsupported_type }) => {
@@ -2488,7 +2574,7 @@ async fn stream_select_query_inner_with_mode(
             // The cached prepared statement can become stale after schema changes.
             // Evict and retry once, matching the normal query execution path.
             log::warn!("[postgres][stream:stale_cache] evicting cached statement: {}", pg_error_to_string(err));
-            client.statement_cache.remove(sql, &[]);
+            client.statement_cache.remove(&client.encode(sql).map_err(pg_error_to_string)?, &[]);
             match stream_select_query_prepared(client, sql, row_limit, on_item, force_unnamed).await {
                 Ok(rows) => Ok(rows),
                 Err(PostgresQueryStreamError::Postgres { err, emitted: false })
@@ -2521,10 +2607,11 @@ pub async fn stream_query_rows(
     mut on_row: impl FnMut(&[serde_json::Value]) -> Result<(), String>,
 ) -> Result<u64, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    match stream_query_rows_on_client(&client, sql, max_rows, cancelled, &mut on_row).await {
+    let client = &EncodingClient::new(&client);
+    match stream_query_rows_on_client(client, sql, max_rows, cancelled, &mut on_row).await {
         Ok(rows) => Ok(rows),
         Err(error) if should_retry_postgres_text_query_message(&error.to_ascii_lowercase()) => {
-            stream_query_rows_text_on_client(&client, sql, max_rows, cancelled, None, &mut on_row).await
+            stream_query_rows_text_on_client(client, sql, max_rows, cancelled, None, &mut on_row).await
         }
         Err(error) => Err(error),
     }
@@ -2537,6 +2624,7 @@ async fn stream_query_rows_on_client(
     cancelled: &AtomicBool,
     on_row: &mut impl FnMut(&[serde_json::Value]) -> Result<(), String>,
 ) -> Result<u64, String> {
+    let client = &EncodingClient::new(client);
     let stream_outcome = start_postgres_select_stream(client, sql, false).await.map_err(pg_error_to_string)?;
     let (stream, metadata) = match stream_outcome {
         PostgresSelectStreamOutcome::Binary { stream, metadata } => (stream, metadata),
@@ -2581,6 +2669,7 @@ async fn stream_query_rows_text_on_client(
     column_classes: Option<&[PgColType]>,
     on_row: &mut impl FnMut(&[serde_json::Value]) -> Result<(), String>,
 ) -> Result<u64, String> {
+    let client = &EncodingClient::new(client);
     let stream = client.simple_query_raw(sql).await.map_err(pg_error_to_string)?;
     tokio::pin!(stream);
     let row_limit = max_rows.unwrap_or(usize::MAX);
@@ -2599,7 +2688,11 @@ async fn stream_query_rows_text_on_client(
             for i in 0..row.len() {
                 values.push(match row.try_get(i).map_err(pg_error_to_string)? {
                     Some(value) => {
-                        pg_text_fallback_value(value, column_classes.and_then(|classes| classes.get(i)).copied()).0
+                        pg_text_fallback_value(
+                            &client.decode(value).map_err(pg_error_to_string)?,
+                            column_classes.and_then(|classes| classes.get(i)).copied(),
+                        )
+                        .0
                     }
                     None => serde_json::Value::Null,
                 });
@@ -2659,7 +2752,7 @@ const POSTGRES_CONNECTION_IDENTITY_SQL: &str = "SELECT pg_backend_pid()::text, \
      COALESCE(host(inet_server_addr()), 'unix'), \
      COALESCE(inet_server_port()::text, current_setting('port'))";
 
-fn postgres_connection_key_from_row(row: &Row) -> Option<PostgresConnectionKey> {
+fn postgres_connection_key_from_row(row: &tokio_postgres::Row) -> Option<PostgresConnectionKey> {
     Some((row.try_get::<_, String>(1).ok()?, row.try_get::<_, String>(2).ok()?, row.try_get::<_, String>(0).ok()?))
 }
 
@@ -2921,6 +3014,7 @@ fn cached_postgres_client_key(client: &deadpool_postgres::Client) -> Option<Opti
 /// Best-effort identity resolution. Failures are cached as `None` so the
 /// identity query runs at most once per physical connection.
 async fn resolve_postgres_client_key(client: &deadpool_postgres::Client) -> Option<PostgresConnectionKey> {
+    let client = &EncodingClient::new(client);
     if let Some(key) = cached_postgres_client_key(client) {
         return key;
     }
@@ -2937,6 +3031,7 @@ async fn resolve_postgres_client_key(client: &deadpool_postgres::Client) -> Opti
 }
 
 async fn postgres_client_key(client: &deadpool_postgres::Client) -> Option<PostgresConnectionKey> {
+    let client = &EncodingClient::new(client);
     resolve_postgres_client_key(client).await
 }
 
@@ -2954,6 +3049,7 @@ fn take_notices_for_key(key: &PostgresConnectionKey) -> Vec<QueryMessage> {
 }
 
 async fn drain_postgres_notices(client: &deadpool_postgres::Client) -> Vec<QueryMessage> {
+    let client = &EncodingClient::new(client);
     match postgres_client_key(client).await {
         Some(key) => take_notices_for_key(&key),
         None => Vec::new(),
@@ -3043,7 +3139,39 @@ async fn connect_postgres_pool_attempt(
                 mgr_config,
             )
         };
+        let text_encoding = postgres_url.text_encoding;
         let pool = Pool::builder(mgr)
+            .post_create(deadpool_postgres::Hook::async_fn(move |client, _| {
+                Box::pin(async move {
+                    if let Some(encoding) = text_encoding {
+                        let row = client
+                            .query_one("SHOW server_encoding", &[])
+                            .await
+                            .map_err(deadpool_postgres::HookError::Backend)?;
+                        let actual: String = row.try_get(0).map_err(deadpool_postgres::HookError::Backend)?;
+                        if !actual.eq_ignore_ascii_case("LATIN1") {
+                            return Err(deadpool_postgres::HookError::Message(
+                                format!(
+                                    "serverEncoding=ISO-8859-1 requires a LATIN1 database; server reports {actual}"
+                                )
+                                .into(),
+                            ));
+                        }
+                        let row = client
+                            .query_one("SHOW standard_conforming_strings", &[])
+                            .await
+                            .map_err(deadpool_postgres::HookError::Backend)?;
+                        let standard: String = row.try_get(0).map_err(deadpool_postgres::HookError::Backend)?;
+                        if !standard.eq_ignore_ascii_case("on") {
+                            return Err(deadpool_postgres::HookError::Message(
+                                "clientEncoding requires standard_conforming_strings=on".into(),
+                            ));
+                        }
+                        crate::text_encoding::register(client, encoding);
+                    }
+                    Ok(())
+                })
+            }))
             .max_size(max_connections.max(1))
             .runtime(Runtime::Tokio1)
             .wait_timeout(Some(timeout))
@@ -3107,6 +3235,7 @@ where
 }
 
 async fn set_automatic_postgres_timezone(client: &deadpool_postgres::Client, timezone: &str) -> Result<(), String> {
+    let client = &EncodingClient::new(client);
     let candidates = postgres_timezone_candidates(timezone);
     for (index, candidate) in candidates.iter().enumerate() {
         let sql = format!("SET timezone = '{}'", candidate.replace('\'', "''"));
@@ -3143,7 +3272,7 @@ async fn set_automatic_postgres_timezone(client: &deadpool_postgres::Client, tim
     Ok(())
 }
 
-fn postgres_timezone_error_is_nonfatal(error: &tokio_postgres::Error) -> bool {
+fn postgres_timezone_error_is_nonfatal(error: &PgError) -> bool {
     let Some(db_error) = error.as_db_error() else {
         return false;
     };
@@ -3226,6 +3355,7 @@ struct PostgresConnectionUrl {
     accepts_invalid_certs: bool,
     verifies_hostname: bool,
     legacy_tls: bool,
+    text_encoding: Option<TextEncoding>,
 }
 
 /// Inject TCP keepalive parameters into the PostgreSQL URL (only when the user has not explicitly specified them).
@@ -3259,6 +3389,7 @@ fn postgres_connection_url(url: &str) -> Result<PostgresConnectionUrl, String> {
             accepts_invalid_certs: postgres_sslmode_accepts_invalid_certs(pg_config.get_ssl_mode()),
             verifies_hostname: false,
             legacy_tls: false,
+            text_encoding: None,
         });
     };
 
@@ -3270,6 +3401,8 @@ fn postgres_connection_url(url: &str) -> Result<PostgresConnectionUrl, String> {
     let mut accepts_invalid_certs = true;
     let mut verifies_hostname = false;
     let mut legacy_tls = false;
+    let mut client_encoding = None;
+    let mut server_encoding = None;
 
     for param in query_string.split('&') {
         if param.is_empty() {
@@ -3281,7 +3414,17 @@ fn postgres_connection_url(url: &str) -> Result<PostgresConnectionUrl, String> {
             continue;
         };
 
-        if key.eq_ignore_ascii_case("legacy_tls") {
+        if key.eq_ignore_ascii_case("clientEncoding") || key.eq_ignore_ascii_case("serverEncoding") {
+            let decoded = percent_decode_str(value)
+                .decode_utf8()
+                .map_err(|_| format!("Invalid URL encoding in {key}"))?
+                .into_owned();
+            let target =
+                if key.eq_ignore_ascii_case("clientEncoding") { &mut client_encoding } else { &mut server_encoding };
+            if target.replace(decoded).is_some() {
+                return Err(format!("Duplicate PostgreSQL parameter {key}"));
+            }
+        } else if key.eq_ignore_ascii_case("legacy_tls") {
             legacy_tls = matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
         } else if key.eq_ignore_ascii_case("sslcert")
             || key.eq_ignore_ascii_case("sslkey")
@@ -3345,7 +3488,15 @@ fn postgres_connection_url(url: &str) -> Result<PostgresConnectionUrl, String> {
         sanitized_url.push_str(fragment);
     }
 
-    Ok(PostgresConnectionUrl { url: sanitized_url, ssl_files, accepts_invalid_certs, verifies_hostname, legacy_tls })
+    let text_encoding = TextEncoding::from_params(client_encoding.as_deref(), server_encoding.as_deref())?;
+    Ok(PostgresConnectionUrl {
+        url: sanitized_url,
+        ssl_files,
+        accepts_invalid_certs,
+        verifies_hostname,
+        legacy_tls,
+        text_encoding,
+    })
 }
 
 fn postgres_openssl_connector(
@@ -3659,18 +3810,20 @@ fn database_storage_sql() -> &'static str {
 
 pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, list_databases_sql(), &[]).await.map_err(|e| e.to_string())?;
+    let client = &EncodingClient::new(&client);
+    let rows = postgres_query_cached(client, list_databases_sql(), &[]).await.map_err(|e| e.to_string())?;
 
     Ok(rows.iter().map(|row| DatabaseInfo { name: pg_row_try_string(row, 0), ..Default::default() }).collect())
 }
 
 pub async fn list_opengauss_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = match postgres_query_cached(&client, list_opengauss_databases_sql(), &[]).await {
+    let client = &EncodingClient::new(&client);
+    let rows = match postgres_query_cached(client, list_opengauss_databases_sql(), &[]).await {
         Ok(rows) => rows,
         Err(primary_error) => {
             let primary_error = primary_error.to_string();
-            return postgres_query_cached(&client, list_databases_sql(), &[])
+            return postgres_query_cached(client, list_databases_sql(), &[])
                 .await
                 .map(|rows| {
                     rows.iter()
@@ -3700,7 +3853,8 @@ pub async fn list_opengauss_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, 
 
 pub async fn list_database_metadata(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, database_metadata_sql(), &[]).await.map_err(|e| e.to_string())?;
+    let client = &EncodingClient::new(&client);
+    let rows = postgres_query_cached(client, database_metadata_sql(), &[]).await.map_err(|e| e.to_string())?;
     Ok(rows
         .iter()
         .map(|row| DatabaseInfo {
@@ -3722,8 +3876,9 @@ pub async fn list_database_storage(pool: &Pool, database_names: &[String]) -> Re
         return Ok(Vec::new());
     }
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let rows =
-        postgres_query_cached(&client, database_storage_sql(), &[&database_names]).await.map_err(|e| e.to_string())?;
+        postgres_query_cached(client, database_storage_sql(), &[&database_names]).await.map_err(|e| e.to_string())?;
     Ok(rows
         .iter()
         .map(|row| DatabaseStorageInfo {
@@ -3775,6 +3930,7 @@ async fn list_tables_filtered_by_kind(
     let limit_param = limit.and_then(|value| i64::try_from(value).ok());
     let offset_param = offset.and_then(|value| i64::try_from(value).ok()).unwrap_or(0);
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let sql = if table_objects_only {
         postgres_table_objects_sql(limit_param, offset_param)
     } else {
@@ -3832,11 +3988,12 @@ async fn completion_assistant_search_inner(
     };
     let pattern = postgres_completion_like_pattern(&request.mask, request.match_mode.as_ref());
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let mut candidates = Vec::new();
 
     if kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Schema)) {
         for row in postgres_query_cached(
-            &client,
+            client,
             "SELECT nspname FROM pg_catalog.pg_namespace \
              WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema' \
                AND ($1 = '%%' OR nspname ILIKE $1 ESCAPE '~') \
@@ -3864,7 +4021,7 @@ async fn completion_assistant_search_inner(
     if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_table_like) {
         let relkinds = postgres_completion_relkinds(&kinds);
         let rows = postgres_query_cached(
-            &client,
+            client,
             postgres_completion_tables_sql(),
             &[&schema, &pattern, &relkinds, &((limit - candidates.len()) as i64)],
         )
@@ -3896,7 +4053,7 @@ async fn completion_assistant_search_inner(
         && kinds.iter().any(CompletionAssistantObjectKind::is_routine_like)
     {
         let rows = match postgres_query_cached(
-            &client,
+            client,
             opengauss_completion_packages_sql(),
             &[&routine_schema, &pattern, &((limit - candidates.len()) as i64)],
         )
@@ -3922,7 +4079,7 @@ async fn completion_assistant_search_inner(
     }
 
     if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_routine_like) {
-        let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
+        let has_proc_prokind = postgres_proc_has_prokind(client).await?;
         let rows = if has_proc_prokind {
             let prokinds = postgres_completion_prokinds(&kinds);
             let sql = if exclude_package_members {
@@ -3931,7 +4088,7 @@ async fn completion_assistant_search_inner(
                 postgres_completion_routines_sql(true).to_string()
             };
             postgres_query_cached(
-                &client,
+                client,
                 &sql,
                 &[&routine_schema, &pattern, &prokinds, &((limit - candidates.len()) as i64)],
             )
@@ -3945,7 +4102,7 @@ async fn completion_assistant_search_inner(
             } else {
                 postgres_completion_routines_sql(false).to_string()
             };
-            postgres_query_cached(&client, &sql, &[&routine_schema, &pattern, &((limit - candidates.len()) as i64)])
+            postgres_query_cached(client, &sql, &[&routine_schema, &pattern, &((limit - candidates.len()) as i64)])
                 .await
                 .map_err(|e| e.to_string())?
         } else {
@@ -3973,7 +4130,7 @@ async fn completion_assistant_search_inner(
 
     if candidates.len() < limit && kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Sequence)) {
         let rows = postgres_query_cached(
-            &client,
+            client,
             postgres_completion_sequences_sql(),
             &[&schema, &pattern, &request.case_sensitive, &((limit - candidates.len()) as i64)],
         )
@@ -4001,7 +4158,7 @@ async fn completion_assistant_search_inner(
             // metadata must use the same visible relation instead of assuming public.
             let resolved_schema = match schema {
                 Some(schema) => Some(schema.to_string()),
-                None => postgres_query_cached(&client, postgres_visible_table_schema_sql(), &[&table])
+                None => postgres_query_cached(client, postgres_visible_table_schema_sql(), &[&table])
                     .await
                     .map_err(|e| e.to_string())?
                     .first()
@@ -4011,7 +4168,7 @@ async fn completion_assistant_search_inner(
                 return Ok(CompletionAssistantResponse { incomplete: false, candidates, fallback_used: false });
             };
             let rows = postgres_query_cached(
-                &client,
+                client,
                 postgres_completion_columns_sql(),
                 &[&resolved_schema, &table, &pattern, &((limit - candidates.len()) as i64)],
             )
@@ -4175,7 +4332,8 @@ fn postgres_completion_like_pattern(value: &str, mode: Option<&CompletionAssista
 pub async fn get_table_comment(pool: &Pool, schema: &str, table: &str) -> Result<Option<String>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, postgres_table_comment_sql(), &[&schema, &table])
+    let client = &EncodingClient::new(&client);
+    let rows = postgres_query_cached(client, postgres_table_comment_sql(), &[&schema, &table])
         .await
         .map_err(|e| e.to_string())?;
     Ok(rows.first().and_then(|row| row.try_get::<_, Option<String>>(0).ok().flatten()).filter(|s| !s.is_empty()))
@@ -4188,7 +4346,8 @@ pub async fn get_table_partition_info(
 ) -> Result<PostgresTablePartitionInfo, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let relation_rows = postgres_query_cached(&client, postgres_table_partition_relation_sql(), &[&schema, &table])
+    let client = &EncodingClient::new(&client);
+    let relation_rows = postgres_query_cached(client, postgres_table_partition_relation_sql(), &[&schema, &table])
         .await
         .map_err(|e| e.to_string())?;
     let Some(relation) = relation_rows.first() else {
@@ -4206,12 +4365,12 @@ pub async fn get_table_partition_info(
     let rows = query_with_compat_fallback(
         "get_table_partition_info",
         &[postgres_table_partition_info_sql(), postgres_table_partition_info_compat_sql()],
-        |sql| postgres_query_cached(&client, sql, &params),
+        |sql| postgres_query_cached(client, sql, &params),
     )
     .await?;
     let Some(row) = rows.first() else {
         let inherits_parents = if has_inherits_parent {
-            get_table_inherits_parents_inner(&client, schema, table).await?
+            get_table_inherits_parents_inner(client, schema, table).await?
         } else {
             Vec::new()
         };
@@ -4230,7 +4389,7 @@ pub async fn get_table_partition_info(
     // child can have several `INHERITS` parents, fetched separately so the
     // declarative-partition path stays untouched.
     let inherits_parents =
-        if has_inherits_parent { get_table_inherits_parents_inner(&client, schema, table).await? } else { Vec::new() };
+        if has_inherits_parent { get_table_inherits_parents_inner(client, schema, table).await? } else { Vec::new() };
     Ok(PostgresTablePartitionInfo {
         is_partition,
         parent_schema: row.try_get::<_, Option<String>>(0).ok().flatten().filter(|value| !value.is_empty()),
@@ -4262,7 +4421,8 @@ pub async fn get_table_inherits_parents(
 ) -> Result<Vec<PostgresInheritsParent>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    get_table_inherits_parents_inner(&client, schema, table).await
+    let client = &EncodingClient::new(&client);
+    get_table_inherits_parents_inner(client, schema, table).await
 }
 
 async fn get_table_inherits_parents_inner(
@@ -4270,6 +4430,7 @@ async fn get_table_inherits_parents_inner(
     schema: &str,
     table: &str,
 ) -> Result<Vec<PostgresInheritsParent>, String> {
+    let client = &EncodingClient::new(client);
     let rows = postgres_query_cached(client, postgres_table_inherits_parents_sql(), &[&schema, &table])
         .await
         .map_err(|e| e.to_string())?;
@@ -4326,11 +4487,12 @@ pub async fn get_table_partition_strategy(
 ) -> Result<Option<PostgresPartitionStrategy>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
     let rows = query_with_compat_fallback(
         "get_table_partition_strategy",
         &[postgres_partition_strategy_sql(), postgres_partition_strategy_compat_sql()],
-        |sql| postgres_query_cached(&client, sql, &params),
+        |sql| postgres_query_cached(client, sql, &params),
     )
     .await?;
     Ok(rows.first().and_then(|row| {
@@ -4529,8 +4691,9 @@ pub async fn get_partition_relation_stats(
         return Ok(HashMap::new());
     }
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let owned: Vec<i64> = oids.to_vec();
-    let rows = postgres_query_cached(&client, postgres_partition_relation_stats_sql(), &[&owned])
+    let rows = postgres_query_cached(client, postgres_partition_relation_stats_sql(), &[&owned])
         .await
         .map_err(|e| e.to_string())?;
     Ok(rows
@@ -4548,7 +4711,8 @@ pub async fn get_partition_relation_stats(
 /// 14.19), or `None` when the server does not report it.
 pub async fn get_server_version_num(pool: &Pool) -> Result<Option<i32>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, "SELECT current_setting('server_version_num')::int", &[])
+    let client = &EncodingClient::new(&client);
+    let rows = postgres_query_cached(client, "SELECT current_setting('server_version_num')::int", &[])
         .await
         .map_err(|e| e.to_string())?;
     Ok(rows.first().and_then(|row| row.try_get::<_, i32>(0).ok()))
@@ -4711,7 +4875,8 @@ pub async fn get_table_partition_local_objects(
 ) -> Result<PostgresTablePartitionLocalObjects, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, postgres_table_partition_local_objects_sql(), &[&schema, &table])
+    let client = &EncodingClient::new(&client);
+    let rows = postgres_query_cached(client, postgres_table_partition_local_objects_sql(), &[&schema, &table])
         .await
         .map_err(|e| e.to_string())?;
     let mut result = PostgresTablePartitionLocalObjects::default();
@@ -4803,11 +4968,12 @@ pub async fn fetch_postgres_partition_tree(
 ) -> Result<Vec<PostgresPartitionTreeNode>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
     let rows = query_with_compat_fallback(
         "fetch_postgres_partition_tree",
         &[postgres_partition_tree_sql(), postgres_partition_tree_compat_sql()],
-        |sql| postgres_query_cached(&client, sql, &params),
+        |sql| postgres_query_cached(client, sql, &params),
     )
     .await?;
     Ok(rows
@@ -4865,11 +5031,12 @@ pub async fn get_columns_for_relations(
 ) -> Result<HashMap<i64, Vec<ColumnInfo>>, String> {
     let oids: Vec<i64> = relations.iter().map(|(oid, _, _)| *oid).collect();
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let tiers = postgres_columns_for_relations_query_tiers();
     query_with_useful_compat_fallback(
         "get_columns_for_relations",
         &tiers,
-        |sql| get_columns_for_relations_with_sql(&client, sql, &oids),
+        |sql| get_columns_for_relations_with_sql(client, sql, &oids),
         |columns_by_oid: &HashMap<i64, Vec<ColumnInfo>>| columns_by_oid.values().any(|columns| !columns.is_empty()),
     )
     .await
@@ -4879,7 +5046,8 @@ async fn get_columns_for_relations_with_sql(
     client: &deadpool_postgres::Client,
     sql: &str,
     oids: &[i64],
-) -> Result<HashMap<i64, Vec<ColumnInfo>>, tokio_postgres::Error> {
+) -> Result<HashMap<i64, Vec<ColumnInfo>>, PgError> {
+    let client = &EncodingClient::new(client);
     let rows = postgres_query_cached(client, sql, &[&oids]).await?;
     let mut result: HashMap<i64, Vec<ColumnInfo>> = HashMap::new();
     for row in &rows {
@@ -5080,7 +5248,7 @@ fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
 
 /// Same field layout as `column_info_from_row`, offset by one leading `relid`
 /// column.
-fn column_info_from_row_offset(row: &Row, offset: usize) -> ColumnInfo {
+fn column_info_from_row_offset(row: &impl ValueRow, offset: usize) -> ColumnInfo {
     let full_type = row.try_get::<_, Option<String>>(offset + 1).ok().flatten().unwrap_or_default();
     ColumnInfo {
         name: pg_row_try_string(row, offset),
@@ -5107,9 +5275,10 @@ pub async fn list_indexes_for_relations(
 ) -> Result<HashMap<i64, Vec<IndexInfo>>, String> {
     let oids: Vec<i64> = relations.iter().map(|(oid, _, _)| *oid).collect();
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let tiers = postgres_indexes_for_relations_query_tiers();
     query_with_compat_fallback("list_indexes_for_relations", &tiers, |sql| {
-        list_indexes_for_relations_with_sql(&client, sql, &oids)
+        list_indexes_for_relations_with_sql(client, sql, &oids)
     })
     .await
 }
@@ -5118,7 +5287,8 @@ async fn list_indexes_for_relations_with_sql(
     client: &deadpool_postgres::Client,
     sql: &str,
     oids: &[i64],
-) -> Result<HashMap<i64, Vec<IndexInfo>>, tokio_postgres::Error> {
+) -> Result<HashMap<i64, Vec<IndexInfo>>, PgError> {
+    let client = &EncodingClient::new(client);
     let rows = postgres_query_cached(client, sql, &[&oids]).await?;
     let mut result: HashMap<i64, Vec<IndexInfo>> = HashMap::new();
     for row in &rows {
@@ -5259,11 +5429,12 @@ pub async fn list_foreign_keys_for_relations(
     relations: &[(String, String)],
 ) -> Result<HashMap<(String, String), Vec<ForeignKeyInfo>>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let schemas: Vec<&str> = relations.iter().map(|(schema, _)| schema.as_str()).collect();
     let tables: Vec<&str> = relations.iter().map(|(_, table)| table.as_str()).collect();
     let tiers = postgres_foreign_keys_for_relations_query_tiers();
     query_with_compat_fallback("list_foreign_keys_for_relations", &tiers, |sql| {
-        list_foreign_keys_for_relations_with_sql(&client, sql, &schemas, &tables)
+        list_foreign_keys_for_relations_with_sql(client, sql, &schemas, &tables)
     })
     .await
 }
@@ -5273,7 +5444,8 @@ pub async fn list_foreign_keys_for_relations_with_sql(
     sql: &str,
     schemas: &[&str],
     tables: &[&str],
-) -> Result<HashMap<(String, String), Vec<ForeignKeyInfo>>, tokio_postgres::Error> {
+) -> Result<HashMap<(String, String), Vec<ForeignKeyInfo>>, PgError> {
+    let client = &EncodingClient::new(client);
     let rows = postgres_query_cached(client, sql, &[&schemas, &tables]).await?;
     let mut result: HashMap<(String, String), Vec<ForeignKeyInfo>> = HashMap::new();
     for row in &rows {
@@ -5359,8 +5531,9 @@ pub async fn get_table_comments_for_relations(
     oids: &[i64],
 ) -> Result<HashMap<i64, Option<String>>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let rows = postgres_query_cached(
-        &client,
+        client,
         "SELECT c.oid::bigint AS relid, obj_description(c.oid) AS table_comment \
          FROM pg_catalog.pg_class c WHERE c.oid = ANY($1::bigint[])",
         &[&oids],
@@ -5383,12 +5556,13 @@ pub async fn list_trigger_definitions_for_relations(
     oids: &[i64],
 ) -> Result<HashMap<i64, Vec<String>>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let sql = if postgres_trigger_has_tgparentid(&client).await? {
+    let client = &EncodingClient::new(&client);
+    let sql = if postgres_trigger_has_tgparentid(client).await? {
         postgres_trigger_definitions_for_relations_sql()
     } else {
         postgres_trigger_definitions_for_relations_sql_without_tgparentid()
     };
-    let rows = postgres_query_cached(&client, sql, &[&oids]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(client, sql, &[&oids]).await.map_err(|e| e.to_string())?;
     let mut result: HashMap<i64, Vec<String>> = HashMap::new();
     for row in &rows {
         let Ok(relid) = row.try_get::<_, i64>(0) else { continue };
@@ -5420,8 +5594,9 @@ pub async fn list_check_constraints_for_relations(
     oids: &[i64],
 ) -> Result<HashMap<i64, Vec<(String, String)>>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let rows = postgres_query_cached(
-        &client,
+        client,
         "SELECT con.conrelid::bigint AS relid, con.conname, pg_catalog.pg_get_constraintdef(con.oid, true) AS definition \
          FROM pg_catalog.pg_constraint con \
          WHERE con.conrelid = ANY($1::bigint[]) AND con.contype = 'c' \
@@ -5448,9 +5623,10 @@ pub async fn get_table_partition_local_objects_for_relations(
     oids: &[i64],
 ) -> Result<HashMap<i64, PostgresTablePartitionLocalObjects>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let tiers = postgres_table_partition_local_objects_for_relations_query_tiers();
     query_with_compat_fallback("get_table_partition_local_objects_for_relations", &tiers, |sql| {
-        get_table_partition_local_objects_for_relations_with_sql(&client, sql, oids)
+        get_table_partition_local_objects_for_relations_with_sql(client, sql, oids)
     })
     .await
 }
@@ -5459,7 +5635,8 @@ pub async fn get_table_partition_local_objects_for_relations_with_sql(
     client: &deadpool_postgres::Client,
     sql: &str,
     oids: &[i64],
-) -> Result<HashMap<i64, PostgresTablePartitionLocalObjects>, tokio_postgres::Error> {
+) -> Result<HashMap<i64, PostgresTablePartitionLocalObjects>, PgError> {
+    let client = &EncodingClient::new(client);
     let rows = postgres_query_cached(client, sql, &[&oids]).await?;
     let mut result: HashMap<i64, PostgresTablePartitionLocalObjects> = HashMap::new();
     for row in &rows {
@@ -5556,7 +5733,8 @@ pub fn postgres_table_partition_local_objects_for_relations_compat_sql() -> &'st
 pub async fn list_check_constraints(pool: &Pool, schema: &str, table: &str) -> Result<Vec<(String, String)>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, postgres_check_constraints_sql(), &[&schema, &table])
+    let client = &EncodingClient::new(&client);
+    let rows = postgres_query_cached(client, postgres_check_constraints_sql(), &[&schema, &table])
         .await
         .map_err(|e| e.to_string())?;
     Ok(rows
@@ -5588,10 +5766,11 @@ fn postgres_check_constraints_sql() -> &'static str {
 pub async fn list_constraints(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ConstraintInfo>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let tiers = postgres_constraint_query_tiers();
     let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
     let rows =
-        query_with_compat_fallback("list_constraints", &tiers, |sql| postgres_query_cached(&client, sql, &params))
+        query_with_compat_fallback("list_constraints", &tiers, |sql| postgres_query_cached(client, sql, &params))
             .await?;
 
     Ok(rows
@@ -5607,10 +5786,10 @@ pub async fn list_constraints(pool: &Pool, schema: &str, table: &str) -> Result<
             match_type: postgres_constraint_match_type(row.try_get::<_, Option<String>>(7).ok().flatten()),
             on_update: postgres_fk_action_label(row.try_get::<_, Option<String>>(8).ok().flatten()),
             on_delete: postgres_fk_action_label(row.try_get::<_, Option<String>>(9).ok().flatten()),
-            deferrable: row.try_get::<_, bool>(10).unwrap_or(false),
-            initially_deferred: row.try_get::<_, bool>(11).unwrap_or(false),
-            enabled: true,
-            valid: row.try_get::<_, bool>(12).unwrap_or(true),
+            deferrable: Some(row.try_get::<_, bool>(10).unwrap_or(false)),
+            initially_deferred: Some(row.try_get::<_, bool>(11).unwrap_or(false)),
+            enabled: Some(true),
+            valid: Some(row.try_get::<_, bool>(12).unwrap_or(true)),
         })
         .collect())
 }
@@ -5622,14 +5801,15 @@ pub async fn list_constraints(pool: &Pool, schema: &str, table: &str) -> Result<
 pub async fn list_opengauss_constraints(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ConstraintInfo>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = match postgres_query_cached(&client, opengauss_constraints_sql(true), &[&schema, &table]).await {
+    let client = &EncodingClient::new(&client);
+    let rows = match postgres_query_cached(client, opengauss_constraints_sql(true), &[&schema, &table]).await {
         Ok(rows) => rows,
         Err(error) if is_missing_opengauss_constraint_column(&error, "convalidated") => {
             log::debug!(
                 "[opengauss][constraints] convalidated unavailable; defaulting valid=true: {}",
                 pg_error_to_string(error)
             );
-            postgres_query_cached(&client, opengauss_constraints_sql(false), &[&schema, &table])
+            postgres_query_cached(client, opengauss_constraints_sql(false), &[&schema, &table])
                 .await
                 .map_err(|e| e.to_string())?
         }
@@ -5641,7 +5821,7 @@ pub async fn list_opengauss_constraints(pool: &Pool, schema: &str, table: &str) 
 
     let local_relation_oid =
         pg_row_try_u32(&rows[0], 13).ok_or("OpenGauss constraint metadata did not return a local relation OID")?;
-    let local_attributes = opengauss_relation_attributes(&client, local_relation_oid).await?;
+    let local_attributes = opengauss_relation_attributes(client, local_relation_oid).await?;
     let mut referenced_attributes: HashMap<u32, HashMap<i16, String>> = HashMap::new();
     let mut result = Vec::with_capacity(rows.len());
 
@@ -5656,7 +5836,7 @@ pub async fn list_opengauss_constraints(pool: &Pool, schema: &str, table: &str) 
         let ref_columns = if kind == "f" {
             if let Some(oid) = referenced_relation_oid {
                 if let std::collections::hash_map::Entry::Vacant(entry) = referenced_attributes.entry(oid) {
-                    entry.insert(opengauss_relation_attributes(&client, oid).await?);
+                    entry.insert(opengauss_relation_attributes(client, oid).await?);
                 }
                 map_opengauss_attribute_names(&ref_column_numbers, referenced_attributes.get(&oid).unwrap())
             } else {
@@ -5677,10 +5857,10 @@ pub async fn list_opengauss_constraints(pool: &Pool, schema: &str, table: &str) 
             match_type: postgres_constraint_match_type(pg_row_try_optional_text(&row, 7)),
             on_update: postgres_fk_action_label(pg_row_try_optional_text(&row, 8)),
             on_delete: postgres_fk_action_label(pg_row_try_optional_text(&row, 9)),
-            deferrable: pg_row_try_bool(&row, 10).unwrap_or(false),
-            initially_deferred: pg_row_try_bool(&row, 11).unwrap_or(false),
-            enabled: true,
-            valid: pg_row_try_bool(&row, 12).unwrap_or(true),
+            deferrable: Some(pg_row_try_bool(&row, 10).unwrap_or(false)),
+            initially_deferred: Some(pg_row_try_bool(&row, 11).unwrap_or(false)),
+            enabled: Some(true),
+            valid: Some(pg_row_try_bool(&row, 12).unwrap_or(true)),
         });
     }
     Ok(result)
@@ -5727,9 +5907,10 @@ fn opengauss_constraints_sql(include_validated: bool) -> &'static str {
 }
 
 async fn opengauss_relation_attributes(
-    client: &tokio_postgres::Client,
+    client: &deadpool_postgres::Client,
     relation_oid: u32,
 ) -> Result<HashMap<i16, String>, String> {
+    let client = &EncodingClient::new(client);
     let rows = client
         .query(
             "SELECT a.attnum, a.attname::text FROM pg_catalog.pg_attribute a \
@@ -5757,14 +5938,14 @@ fn map_opengauss_attribute_names(numbers: &[i16], attributes: &HashMap<i16, Stri
     numbers.iter().filter_map(|number| attributes.get(number).cloned()).collect()
 }
 
-fn pg_row_try_u32(row: &Row, idx: usize) -> Option<u32> {
+fn pg_row_try_u32(row: &impl ValueRow, idx: usize) -> Option<u32> {
     row.try_get::<_, u32>(idx)
         .ok()
         .or_else(|| row.try_get::<_, i64>(idx).ok().and_then(|value| u32::try_from(value).ok()))
         .or_else(|| pg_row_try_string(row, idx).parse::<u32>().ok())
 }
 
-fn pg_row_try_optional_text(row: &Row, idx: usize) -> Option<String> {
+fn pg_row_try_optional_text(row: &impl ValueRow, idx: usize) -> Option<String> {
     if let Ok(value) = row.try_get::<_, Option<String>>(idx) {
         return value.filter(|value| !value.is_empty());
     }
@@ -5774,7 +5955,7 @@ fn pg_row_try_optional_text(row: &Row, idx: usize) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn is_missing_opengauss_constraint_column(error: &tokio_postgres::Error, column: &str) -> bool {
+fn is_missing_opengauss_constraint_column(error: &PgError, column: &str) -> bool {
     error.as_db_error().is_some_and(|db_error| {
         db_error.code().code() == "42703" && db_error.message().to_ascii_lowercase().contains(column)
     })
@@ -6394,6 +6575,7 @@ fn postgres_has_function_identity_arguments_sql() -> &'static str {
 }
 
 async fn postgres_has_function_identity_arguments(client: &deadpool_postgres::Client) -> Result<bool, String> {
+    let client = &EncodingClient::new(client);
     let row = postgres_query_one_cached(client, postgres_has_function_identity_arguments_sql(), &[])
         .await
         .map_err(|e| e.to_string())?;
@@ -6411,6 +6593,7 @@ fn postgres_proc_has_prokind_sql() -> &'static str {
 }
 
 async fn postgres_proc_has_prokind(client: &deadpool_postgres::Client) -> Result<bool, String> {
+    let client = &EncodingClient::new(client);
     let row =
         postgres_query_one_cached(client, postgres_proc_has_prokind_sql(), &[]).await.map_err(|e| e.to_string())?;
     Ok(pg_row_try_bool(&row, 0).unwrap_or(false))
@@ -6431,6 +6614,7 @@ fn postgres_trigger_has_tgparentid_sql() -> &'static str {
 /// lack the column (and never clone triggers onto partitions in the first
 /// place, so `tgisinternal` alone is sufficient there).
 async fn postgres_trigger_has_tgparentid(client: &deadpool_postgres::Client) -> Result<bool, String> {
+    let client = &EncodingClient::new(client);
     let row = postgres_query_one_cached(client, postgres_trigger_has_tgparentid_sql(), &[])
         .await
         .map_err(|e| e.to_string())?;
@@ -6448,6 +6632,7 @@ fn postgres_proc_has_prosp_sql() -> &'static str {
 }
 
 async fn postgres_proc_has_prosp(client: &deadpool_postgres::Client) -> Result<bool, String> {
+    let client = &EncodingClient::new(client);
     let row = postgres_query_one_cached(client, postgres_proc_has_prosp_sql(), &[]).await.map_err(|e| e.to_string())?;
     Ok(pg_row_try_bool(&row, 0).unwrap_or(false))
 }
@@ -6464,6 +6649,7 @@ async fn list_objects_rows(
     include_custom_types: bool,
     exclude_package_members: bool,
 ) -> Result<Vec<Row>, String> {
+    let client = &EncodingClient::new(client);
     let sql = list_objects_sql(
         include_timestamps,
         has_proc_prokind,
@@ -6493,22 +6679,23 @@ pub async fn list_objects(
     // types are implementation details and are never custom types.
     let include_custom_types = include_custom_types && !is_postgres_system_schema(schema);
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     // Routine catalog probes are only needed when the routine branch runs.
     // Skipping them for relation/type-only requests avoids three extra
     // pg_proc/pg_attribute round-trips and keeps compatible catalogs that lack
     // prokind/prosp from breaking a plain type listing.
     let (has_proc_prokind, has_proc_prosp, has_function_identity_arguments) = if include_routines {
-        let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
+        let has_proc_prokind = postgres_proc_has_prokind(client).await?;
         // Some GaussDB-compatible catalogs expose prosp alongside, or instead of,
         // PostgreSQL 11's prokind. Treat prosp as an extra procedure signal.
-        let has_proc_prosp = postgres_proc_has_prosp(&client).await?;
-        let has_function_identity_arguments = postgres_has_function_identity_arguments(&client).await?;
+        let has_proc_prosp = postgres_proc_has_prosp(client).await?;
+        let has_function_identity_arguments = postgres_has_function_identity_arguments(client).await?;
         (has_proc_prokind, has_proc_prosp, has_function_identity_arguments)
     } else {
         (false, false, false)
     };
     let rows = match list_objects_rows(
-        &client,
+        client,
         schema,
         true,
         has_proc_prokind,
@@ -6525,7 +6712,7 @@ pub async fn list_objects(
         Err(primary_error) => {
             log::debug!("[postgres][list_objects:timestamp-fallback] primary_error={}", primary_error);
             match list_objects_rows(
-                &client,
+                client,
                 schema,
                 false,
                 has_proc_prokind,
@@ -6561,16 +6748,17 @@ pub async fn list_opengauss_objects(
 ) -> Result<Vec<ObjectInfo>, String> {
     let include_custom_types = include_custom_types && !is_postgres_system_schema(schema);
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let (has_proc_prokind, has_proc_prosp, has_function_identity_arguments) = if include_routines {
-        let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
-        let has_proc_prosp = postgres_proc_has_prosp(&client).await?;
-        let has_function_identity_arguments = postgres_has_function_identity_arguments(&client).await?;
+        let has_proc_prokind = postgres_proc_has_prokind(client).await?;
+        let has_proc_prosp = postgres_proc_has_prosp(client).await?;
+        let has_function_identity_arguments = postgres_has_function_identity_arguments(client).await?;
         (has_proc_prokind, has_proc_prosp, has_function_identity_arguments)
     } else {
         (false, false, false)
     };
     let rows = match list_objects_rows(
-        &client,
+        client,
         schema,
         true,
         has_proc_prokind,
@@ -6587,7 +6775,7 @@ pub async fn list_opengauss_objects(
         Err(primary_error) => {
             log::debug!("[postgres][list_opengauss_objects:timestamp-fallback] primary_error={}", primary_error);
             match list_objects_rows(
-                &client,
+                client,
                 schema,
                 false,
                 has_proc_prokind,
@@ -6625,8 +6813,9 @@ pub async fn list_opengauss_packages(
         Ok(false) | Err(_) => return Ok(Vec::new()),
     }
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let rows = match postgres_query_cached(
-        &client,
+        client,
         "SELECT p.pkgname::text, \
                 (p.pkgbodydeclsrc IS NOT NULL OR p.pkgbodyinitsrc IS NOT NULL) AS has_body \
          FROM pg_catalog.gs_package p \
@@ -6703,9 +6892,10 @@ pub async fn opengauss_package_source(
         Err(_) => {}
     }
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let source_type = if package_body { "package body" } else { "package" };
     let rows = match postgres_query_cached(
-        &client,
+        client,
         "SELECT s.src::text \
          FROM dbe_pldeveloper.gs_source s \
          JOIN pg_catalog.gs_package p ON p.oid = s.id \
@@ -6741,7 +6931,7 @@ pub async fn opengauss_package_source(
     // still be viewed and exported. When the stored shape is unrecognised we
     // fail loudly instead of emitting a broken CREATE statement.
     let meta_rows = postgres_query_cached(
-        &client,
+        client,
         "SELECT p.pkgname::text, n.nspname::text, p.pkgsecdef, \
                 p.pkgspecsrc::text, p.pkgbodydeclsrc::text, p.pkgbodyinitsrc::text \
          FROM pg_catalog.gs_package p \
@@ -6897,21 +7087,19 @@ pub async fn opengauss_package_members(
     }
     let schema = request.parent_schema.as_deref().or(request.schema.as_deref()).unwrap_or("public");
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     // Resolve one package identity before looking up members. Lowercase matching
     // remains useful for ordinary unquoted names, while the exact-name ordering
     // preserves quoted mixed-case package identity when it is available.
-    let identity_rows =
-        match postgres_query_cached(&client, opengauss_package_identity_sql(), &[&schema, &package_name]).await {
-            Ok(rows) => rows,
-            Err(error) if opengauss_optional_package_catalog_error(&error.to_string()) => {
-                return Ok(CompletionAssistantResponse {
-                    candidates: Vec::new(),
-                    incomplete: false,
-                    fallback_used: true,
-                });
-            }
-            Err(error) => return Err(error.to_string()),
-        };
+    let identity_rows = match postgres_query_cached(client, opengauss_package_identity_sql(), &[&schema, &package_name])
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) if opengauss_optional_package_catalog_error(&error.to_string()) => {
+            return Ok(CompletionAssistantResponse { candidates: Vec::new(), incomplete: false, fallback_used: true });
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let Some(identity_row) = identity_rows.first() else {
         return Ok(CompletionAssistantResponse { candidates: Vec::new(), incomplete: false, fallback_used: true });
     };
@@ -6927,7 +7115,7 @@ pub async fn opengauss_package_members(
     // slice and then filters locally).
     let pattern = postgres_completion_like_pattern(&request.mask, request.match_mode.as_ref());
     let rows = match postgres_query_cached(
-        &client,
+        client,
         opengauss_package_members_sql(),
         &[&package_oid, &pattern, &(limit as i64)],
     )
@@ -6974,12 +7162,13 @@ pub async fn list_redshift_objects(
     include_routines: bool,
 ) -> Result<Vec<ObjectInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let mut rows = Vec::new();
 
     if include_relations {
         // Redshift does not support PostgreSQL's generic file, object-location,
         // or transaction-ID helpers, so skip the timestamp variant entirely.
-        rows = list_objects_rows(&client, schema, false, false, false, false, true, false, false, false).await?;
+        rows = list_objects_rows(client, schema, false, false, false, false, true, false, false, false).await?;
     }
 
     if include_routines {
@@ -7099,6 +7288,7 @@ async fn custom_type_general_info(
     schema: &str,
     name: &str,
 ) -> Result<CustomTypeGeneralInfo, String> {
+    let client = &EncodingClient::new(client);
     let rows = postgres_query_cached(client, custom_type_general_info_sql(), &[&schema, &name])
         .await
         .map_err(|e| format!("failed to locate custom type {schema}.{name}: {e}"))?;
@@ -7134,6 +7324,7 @@ async fn custom_type_rendered_domain_default(
     client: &deadpool_postgres::Client,
     oid: u32,
 ) -> Result<Option<String>, String> {
+    let client = &EncodingClient::new(client);
     let rows = postgres_query_cached(
         client,
         "SELECT pg_catalog.pg_get_expr(t.typdefaultbin, 0) \
@@ -7174,6 +7365,7 @@ async fn custom_type_enum_members(
     client: &deadpool_postgres::Client,
     oid: u32,
 ) -> Result<Vec<CustomTypeMember>, String> {
+    let client = &EncodingClient::new(client);
     let rows = postgres_query_cached(
         client,
         "SELECT e.enumlabel, e.enumsortorder \
@@ -7206,6 +7398,7 @@ async fn custom_type_composite_members(
     client: &deadpool_postgres::Client,
     typrelid: u32,
 ) -> Result<Vec<CustomTypeMember>, String> {
+    let client = &EncodingClient::new(client);
     let data_type =
         postgres_qualified_format_type_expression("at", "atn", "elem", "elem_n", "a.atttypid", "a.atttypmod");
     let rows = postgres_query_cached(
@@ -7286,6 +7479,7 @@ async fn custom_type_domain_attributes(
     info: &CustomTypeGeneralInfo,
     properties: &mut CustomTypeProperties,
 ) -> Vec<String> {
+    let client = &EncodingClient::new(client);
     let mut warnings = Vec::new();
     let base_type_expression =
         postgres_qualified_format_type_expression("t", "n", "elem", "elem_n", "t.oid", "$2::int4");
@@ -7369,6 +7563,7 @@ async fn custom_type_range_attributes(
     is_multirange: bool,
     properties: &mut CustomTypeProperties,
 ) -> Vec<String> {
+    let client = &EncodingClient::new(client);
     // pg_range.rngtypid always stores the RANGE oid. A multirange view must
     // first resolve its owning range through rngmultitypid.
     let range_oid_clause = if is_multirange { "WHERE r.rngmultitypid = $1" } else { "WHERE r.rngtypid = $1" };
@@ -7625,7 +7820,8 @@ pub async fn get_custom_type_details(pool: &Pool, schema: &str, name: &str) -> R
         return Err(format!("system schema {schema} is not supported for custom type details"));
     }
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let info = custom_type_general_info(&client, schema, name).await?;
+    let client = &EncodingClient::new(&client);
+    let info = custom_type_general_info(client, schema, name).await?;
     if !info.typisdefined {
         return Err(format!("custom type {schema}.{name} is not fully defined"));
     }
@@ -7648,19 +7844,19 @@ pub async fn get_custom_type_details(pool: &Pool, schema: &str, name: &str) -> R
     let mut warnings = Vec::new();
     match kind {
         CustomTypeKind::Enum => {
-            members = custom_type_enum_members(&client, info.oid).await?;
+            members = custom_type_enum_members(client, info.oid).await?;
         }
         CustomTypeKind::Composite => {
-            members = custom_type_composite_members(&client, info.typrelid).await?;
+            members = custom_type_composite_members(client, info.typrelid).await?;
         }
         CustomTypeKind::Domain => {
-            warnings.extend(custom_type_domain_attributes(&client, &info, &mut properties).await);
+            warnings.extend(custom_type_domain_attributes(client, &info, &mut properties).await);
         }
         CustomTypeKind::Range => {
-            warnings.extend(custom_type_range_attributes(&client, info.oid, false, &mut properties).await);
+            warnings.extend(custom_type_range_attributes(client, info.oid, false, &mut properties).await);
         }
         CustomTypeKind::Multirange => {
-            warnings.extend(custom_type_range_attributes(&client, info.oid, true, &mut properties).await);
+            warnings.extend(custom_type_range_attributes(client, info.oid, true, &mut properties).await);
         }
         CustomTypeKind::Base => {}
     }
@@ -7714,14 +7910,15 @@ const POSTGRES_OBJECT_STATISTICS_FALLBACK_SQL: &str = "SELECT c.relname, \
 pub async fn list_object_statistics(pool: &Pool, schema: &str) -> Result<Vec<ObjectStatistics>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = match postgres_query_cached(&client, POSTGRES_OBJECT_STATISTICS_SQL, &[&schema]).await {
+    let client = &EncodingClient::new(&client);
+    let rows = match postgres_query_cached(client, POSTGRES_OBJECT_STATISTICS_SQL, &[&schema]).await {
         Ok(rows) => rows,
         Err(error) => {
             log::warn!(
                 "[postgres][object-statistics] live tuple estimate unavailable, falling back to reltuples: {}",
                 pg_error_to_string(error)
             );
-            postgres_query_cached(&client, POSTGRES_OBJECT_STATISTICS_FALLBACK_SQL, &[&schema])
+            postgres_query_cached(client, POSTGRES_OBJECT_STATISTICS_FALLBACK_SQL, &[&schema])
                 .await
                 .map_err(|e| e.to_string())?
         }
@@ -7779,7 +7976,8 @@ fn postgres_schema_infos_sql(show_system_schemas: bool) -> &'static str {
 
 pub async fn list_schema_infos_with_system(pool: &Pool, show_system_schemas: bool) -> Result<Vec<SchemaInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, postgres_schema_infos_sql(show_system_schemas), &[])
+    let client = &EncodingClient::new(&client);
+    let rows = postgres_query_cached(client, postgres_schema_infos_sql(show_system_schemas), &[])
         .await
         .map_err(|e| e.to_string())?;
 
@@ -7950,7 +8148,7 @@ const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
              WHERE c.table_schema = $1 AND c.table_name = $2 \
              ORDER BY c.ordinal_position";
 
-fn parse_enum_values_from_row(row: &Row, index: usize) -> Option<Vec<String>> {
+fn parse_enum_values_from_row(row: &impl ValueRow, index: usize) -> Option<Vec<String>> {
     let raw = row.try_get::<_, Option<String>>(index).ok().flatten()?;
     serde_json::from_str::<Vec<String>>(&raw).ok()
 }
@@ -7958,7 +8156,7 @@ fn parse_enum_values_from_row(row: &Row, index: usize) -> Option<Vec<String>> {
 /// Decode a boolean column to JSON, tolerating databases (e.g. GaussDB) that
 /// encode booleans as the ASCII bytes `t` (0x74) / `f` (0x66) in the binary
 /// protocol instead of the standard PostgreSQL 0x00 / 0x01.
-fn pg_bool_value_to_json(row: &Row, idx: usize) -> serde_json::Value {
+fn pg_bool_value_to_json(row: &impl ValueRow, idx: usize) -> serde_json::Value {
     if let Some(v) = pg_row_try_bool(row, idx) {
         return serde_json::Value::Bool(v);
     }
@@ -7997,7 +8195,7 @@ fn parse_pg_bool_text(value: &str) -> Option<bool> {
 /// Read a boolean column from a PostgreSQL row, tolerating databases that
 /// encode booleans as integers (0/1) or text ('t'/'f') instead of the standard
 /// `bool` OID.  Returns `None` when the column is NULL or truly unreadable.
-fn pg_row_try_bool(row: &Row, idx: usize) -> Option<bool> {
+fn pg_row_try_bool(row: &impl ValueRow, idx: usize) -> Option<bool> {
     // GaussDB encodes boolean as ASCII 't' (0x74) / 'f' (0x66) in binary.
     let raw = row.try_get::<_, PgRawBytes>(idx).ok();
     let standard = row.try_get::<_, bool>(idx).ok();
@@ -8018,7 +8216,7 @@ fn pg_row_try_bool(row: &Row, idx: usize) -> Option<bool> {
 
 /// Read a String column from a PostgreSQL row, tolerating databases that
 /// return text as other types.  Falls back to i64/i32/i16/bool formatting.
-fn pg_row_try_string(row: &Row, idx: usize) -> String {
+fn pg_row_try_string(row: &impl ValueRow, idx: usize) -> String {
     if let Ok(v) = row.try_get::<_, String>(idx) {
         return v;
     }
@@ -8037,7 +8235,7 @@ fn pg_row_try_string(row: &Row, idx: usize) -> String {
     String::new()
 }
 
-fn column_info_from_row(row: &Row) -> ColumnInfo {
+fn column_info_from_row(row: &impl ValueRow) -> ColumnInfo {
     column_info_from_row_offset(row, 0)
 }
 
@@ -8046,7 +8244,8 @@ async fn get_columns_with_sql(
     sql: &str,
     schema: &str,
     table: &str,
-) -> Result<Vec<ColumnInfo>, tokio_postgres::Error> {
+) -> Result<Vec<ColumnInfo>, PgError> {
+    let client = &EncodingClient::new(client);
     let rows = postgres_query_cached(client, sql, &[&schema, &table]).await?;
 
     Ok(rows.iter().map(column_info_from_row).collect())
@@ -8078,7 +8277,7 @@ pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<C
         |sql| get_columns_with_sql(&client, sql, schema, table),
         total_started,
         pg_error_to_string,
-        |error: &tokio_postgres::Error| error.as_db_error().map(|db_error| db_error.code().code().to_string()),
+        |error: &PgError| error.as_db_error().map(|db_error| db_error.code().code().to_string()),
         log_get_columns_tier_diagnostic,
     )
     .await
@@ -8145,8 +8344,9 @@ fn redshift_columns_from_query_result(result: QueryResult) -> Vec<ColumnInfo> {
 pub async fn get_redshift_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let result = execute_select_text(
-        &client,
+        client,
         &redshift_columns_sql(schema, table),
         Instant::now(),
         crate::execution::MAX_ROWS,
@@ -8351,6 +8551,7 @@ async fn postgres_search_path_baseline(
     client: &deadpool_postgres::Client,
     timeout_duration: Duration,
 ) -> Result<PostgresSearchPathBaseline, String> {
+    let client = &EncodingClient::new(client);
     if let Some(baseline) = cached_postgres_search_path_baseline(client) {
         return Ok(baseline);
     }
@@ -8380,6 +8581,7 @@ pub async fn set_postgres_search_path(
     context: PostgresSearchPathContext,
     timeout_duration: Duration,
 ) -> Result<u64, String> {
+    let client = &EncodingClient::new(client);
     if postgres_client_uses_single_schema_search_path(client) {
         return execute_postgres_infra_statement(
             client,
@@ -8491,15 +8693,16 @@ pub async fn execute_query_with_max_rows(
     let row_limit = query_result_row_limit(max_rows);
 
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     // Drop stale notices from infrastructure statements so only messages raised
     // by this statement are attached to its result.
-    let _ = drain_postgres_notices(&client).await;
+    let _ = drain_postgres_notices(client).await;
 
     let result = if postgres_statement_returns_rows(sql) {
-        execute_select_query(&client, sql, start, row_limit).await
+        execute_select_query(client, sql, start, row_limit).await
     } else {
         client.execute(sql, &[]).await.map_err(pg_error_to_string).map(|affected| {
-            clear_postgres_caches_after_ddl(pool, Some(&client), sql);
+            clear_postgres_caches_after_ddl(pool, Some(client), sql);
 
             QueryResult {
                 columns: vec![],
@@ -8523,13 +8726,13 @@ pub async fn execute_query_with_max_rows(
 
     match result {
         Ok(mut result) => {
-            result.messages = drain_postgres_notices(&client).await;
+            result.messages = drain_postgres_notices(client).await;
             Ok(result)
         }
         Err(error) => {
             // Drop notices so an errored statement's messages cannot leak into
             // the next query on this pooled connection.
-            let _ = drain_postgres_notices(&client).await;
+            let _ = drain_postgres_notices(client).await;
             Err(error)
         }
     }
@@ -8561,10 +8764,11 @@ pub async fn execute_query_with_max_rows_progress(
     let row_limit = query_result_row_limit(max_rows);
     let timeout_error = format!("Query timed out after {} seconds", timeout.map_or(0, |timeout| timeout.as_secs()));
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let clock_for_select = progress_clock.clone();
     await_stream_with_progress_timeout(
         async move {
-            execute_select_query_with_progress(&client, sql, start, row_limit, Some(&clock_for_select), false).await
+            execute_select_query_with_progress(client, sql, start, row_limit, Some(&clock_for_select), false).await
         },
         timeout,
         progress_clock,
@@ -8584,8 +8788,9 @@ pub async fn execute_query_with_max_rows_and_cancel(
     prefer_text_protocol: bool,
 ) -> Result<QueryResult, String> {
     let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
+    let client = &EncodingClient::new(&client);
     execute_postgres_user_query(
-        &client,
+        client,
         sql,
         max_rows,
         cancel_token,
@@ -8644,16 +8849,17 @@ pub async fn execute_query_in_read_only_transaction_with_rollback(
     cancel_context: Option<PostgresCancelContext>,
 ) -> Result<QueryResult, String> {
     let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
+    let client = &EncodingClient::new(&client);
     let setup = postgres_read_only_transaction_setup();
 
     run_postgres_operation_with_rollback(
         || async {
             for (statement, stage) in setup {
-                execute_postgres_infra_statement(&client, &statement, budget.recycle_timeout, stage).await?;
+                execute_postgres_infra_statement(client, &statement, budget.recycle_timeout, stage).await?;
             }
             if let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) {
                 set_postgres_search_path(
-                    &client,
+                    client,
                     schema,
                     PostgresSearchPathContext::LocalQueryTransaction,
                     budget.recycle_timeout,
@@ -8662,7 +8868,7 @@ pub async fn execute_query_in_read_only_transaction_with_rollback(
             }
 
             execute_postgres_user_query_with_mode(
-                &client,
+                client,
                 sql,
                 max_rows,
                 cancel_token,
@@ -8675,7 +8881,7 @@ pub async fn execute_query_in_read_only_transaction_with_rollback(
             .await
         },
         || async {
-            execute_postgres_infra_statement(&client, "ROLLBACK", budget.cleanup_timeout, "explain_analyze.rollback")
+            execute_postgres_infra_statement(client, "ROLLBACK", budget.cleanup_timeout, "explain_analyze.rollback")
                 .await
                 .map(|_| ())
         },
@@ -8697,6 +8903,7 @@ pub async fn stream_select_query_with_cancel(
 ) -> Result<u64, String> {
     let start = Instant::now();
     let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
+    let client = &EncodingClient::new(&client);
     let mut on_item = on_item;
     let row_limit = max_rows.map(|limit| limit.max(1));
     let schema = schema.map(str::trim).filter(|schema| !schema.is_empty());
@@ -8705,12 +8912,12 @@ pub async fn stream_select_query_with_cancel(
     if let Some(schema) = schema.filter(|_| schema_was_set) {
         // Match normal query execution: export may reference unqualified names
         // in the active schema, so the streaming path must use the same search_path.
-        set_postgres_search_path(&client, schema, PostgresSearchPathContext::Query, budget.recycle_timeout).await?;
+        set_postgres_search_path(client, schema, PostgresSearchPathContext::Query, budget.recycle_timeout).await?;
     }
 
     let setup_transaction_started = !setup_sql.is_empty();
     if setup_transaction_started {
-        execute_postgres_infra_statement(&client, "BEGIN", budget.recycle_timeout, "export_setup.begin").await?;
+        execute_postgres_infra_statement(client, "BEGIN", budget.recycle_timeout, "export_setup.begin").await?;
     }
 
     let query_timeout = budget.query_timeout;
@@ -8747,7 +8954,7 @@ pub async fn stream_select_query_with_cancel(
             };
             let result = await_stream_with_progress_timeout(
                 stream_select_query_inner_with_mode(
-                    &client,
+                    client,
                     sql,
                     row_limit,
                     &mut on_stream_item,
@@ -8770,8 +8977,7 @@ pub async fn stream_select_query_with_cancel(
 
     let result = if setup_transaction_started {
         let rollback_result =
-            execute_postgres_infra_statement(&client, "ROLLBACK", budget.cleanup_timeout, "export_setup.rollback")
-                .await;
+            execute_postgres_infra_statement(client, "ROLLBACK", budget.cleanup_timeout, "export_setup.rollback").await;
         match (result, rollback_result) {
             (Ok(rows), Ok(_)) => Ok(rows),
             (Err(query_err), Ok(_)) => Err(query_err),
@@ -8783,7 +8989,7 @@ pub async fn stream_select_query_with_cancel(
     };
 
     if schema_was_set {
-        let reset_result = reset_postgres_search_path(&client, db_type, budget.cleanup_timeout, start).await;
+        let reset_result = reset_postgres_search_path(client, db_type, budget.cleanup_timeout, start).await;
         match (result, reset_result) {
             (Ok(rows), Ok(())) => Ok(rows),
             (Err(query_err), Ok(())) => Err(query_err),
@@ -8809,6 +9015,7 @@ pub async fn execute_query_with_schema_and_max_rows(
     let start = Instant::now();
     let checkout_start = Instant::now();
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     log::info!(
         "[postgres][execute_with_schema:pool:done] elapsed_ms={} total_ms={} schema={}",
         checkout_start.elapsed().as_millis(),
@@ -8820,11 +9027,11 @@ pub async fn execute_query_with_schema_and_max_rows(
             "[postgres][execute_with_schema:skip-search-path] total_ms={} reason=transaction-recovery",
             start.elapsed().as_millis()
         );
-        return execute_query_with_max_rows_inner(&client, sql, max_rows, false, None, false).await;
+        return execute_query_with_max_rows_inner(client, sql, max_rows, false, None, false).await;
     }
 
     let set_schema_start = Instant::now();
-    set_postgres_search_path(&client, schema, PostgresSearchPathContext::Query, super::connection_timeout()).await?;
+    set_postgres_search_path(client, schema, PostgresSearchPathContext::Query, super::connection_timeout()).await?;
     log::info!(
         "[postgres][execute_with_schema:set-search-path:done] elapsed_ms={} total_ms={}",
         set_schema_start.elapsed().as_millis(),
@@ -8832,9 +9039,9 @@ pub async fn execute_query_with_schema_and_max_rows(
     );
 
     let query_start = Instant::now();
-    let result = execute_query_with_max_rows_inner(&client, sql, max_rows, false, None, false).await;
+    let result = execute_query_with_max_rows_inner(client, sql, max_rows, false, None, false).await;
     if result.is_ok() {
-        clear_postgres_caches_after_ddl(pool, Some(&client), sql);
+        clear_postgres_caches_after_ddl(pool, Some(client), sql);
     }
     log::info!(
         "[postgres][execute_with_schema:query:done] elapsed_ms={} total_ms={} ok={}",
@@ -8843,7 +9050,7 @@ pub async fn execute_query_with_schema_and_max_rows(
         result.is_ok()
     );
 
-    let reset_result = reset_postgres_search_path(&client, db_type, super::connection_timeout(), start).await;
+    let reset_result = reset_postgres_search_path(client, db_type, super::connection_timeout(), start).await;
     merge_postgres_query_and_reset_result(result, reset_result)
 }
 
@@ -8861,6 +9068,7 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
     let start = Instant::now();
     let checkout_start = Instant::now();
     let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
+    let client = &EncodingClient::new(&client);
     log::info!(
         "[postgres][execute_with_schema:pool:done] elapsed_ms={} total_ms={} schema={}",
         checkout_start.elapsed().as_millis(),
@@ -8873,7 +9081,7 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
             start.elapsed().as_millis()
         );
         return execute_postgres_user_query(
-            &client,
+            client,
             sql,
             max_rows,
             cancel_token,
@@ -8886,7 +9094,7 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
     }
 
     let set_schema_start = Instant::now();
-    set_postgres_search_path(&client, schema, PostgresSearchPathContext::Query, budget.recycle_timeout).await?;
+    set_postgres_search_path(client, schema, PostgresSearchPathContext::Query, budget.recycle_timeout).await?;
     log::info!(
         "[postgres][execute_with_schema:set-search-path:done] elapsed_ms={} total_ms={}",
         set_schema_start.elapsed().as_millis(),
@@ -8895,7 +9103,7 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
 
     let query_start = Instant::now();
     let result = execute_postgres_user_query(
-        &client,
+        client,
         sql,
         max_rows,
         cancel_token,
@@ -8906,7 +9114,7 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
     )
     .await;
     if result.is_ok() {
-        clear_postgres_caches_after_ddl(pool, Some(&client), sql);
+        clear_postgres_caches_after_ddl(pool, Some(client), sql);
     }
     log::info!(
         "[postgres][execute_with_schema:query:done] elapsed_ms={} total_ms={} ok={}",
@@ -8915,7 +9123,7 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
         result.is_ok()
     );
 
-    let reset_result = reset_postgres_search_path(&client, db_type, budget.cleanup_timeout, start).await;
+    let reset_result = reset_postgres_search_path(client, db_type, budget.cleanup_timeout, start).await;
     merge_postgres_query_and_reset_result(result, reset_result)
 }
 
@@ -8936,6 +9144,7 @@ async fn reset_postgres_search_path(
     timeout_duration: Duration,
     start: Instant,
 ) -> Result<(), String> {
+    let client = &EncodingClient::new(client);
     let reset_start = Instant::now();
     match execute_postgres_infra_statement(client, reset_search_path_sql(db_type), timeout_duration, "schema.reset")
         .await
@@ -8982,6 +9191,7 @@ pub async fn execute_postgres_infra_statement(
     timeout_duration: Duration,
     stage: &str,
 ) -> Result<u64, String> {
+    let client = &EncodingClient::new(client);
     tokio::time::timeout(timeout_duration, client.execute_typed(sql, &[]))
         .await
         .map_err(|_| format!("PostgreSQL {stage} timed out after {} seconds", timeout_duration.as_secs()))?
@@ -9060,6 +9270,7 @@ async fn execute_postgres_user_query(
     cancel_context: Option<PostgresCancelContext>,
     prefer_text_protocol: bool,
 ) -> Result<QueryResult, String> {
+    let client = &EncodingClient::new(client);
     execute_postgres_user_query_with_mode(
         client,
         sql,
@@ -9085,6 +9296,7 @@ async fn execute_postgres_user_query_with_mode(
     prefer_text_protocol: bool,
     force_unnamed: bool,
 ) -> Result<QueryResult, String> {
+    let client = &EncodingClient::new(client);
     let pg_cancel_token = client.cancel_token();
     // Commands do not expose incremental results, so keep their timeout as a
     // wall-clock deadline. Row-returning queries may spend longer transferring
@@ -9312,6 +9524,7 @@ async fn execute_query_with_max_rows_inner(
     progress_clock: Option<Arc<StreamProgressClock>>,
     force_unnamed: bool,
 ) -> Result<QueryResult, String> {
+    let client = &EncodingClient::new(client);
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
@@ -9507,6 +9720,7 @@ pub fn postgres_owner_object_type(relkind: &str) -> &str {
 /// table/partition/foreign table.
 pub async fn postgres_relation_relkind(pool: &Pool, schema: &str, table: &str) -> Result<Option<String>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let row = client
         .query_opt(
             "SELECT c.relkind::text FROM pg_catalog.pg_class c \
@@ -9534,7 +9748,8 @@ async fn list_indexes_with_sql(
     sql: &str,
     schema: &str,
     table: &str,
-) -> Result<Vec<IndexInfo>, tokio_postgres::Error> {
+) -> Result<Vec<IndexInfo>, PgError> {
+    let client = &EncodingClient::new(client);
     let rows = postgres_query_cached(client, sql, &[&schema, &table]).await?;
 
     Ok(rows
@@ -9578,8 +9793,9 @@ async fn list_indexes_with_sql(
 
 pub async fn list_indexes(pool: &Pool, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let tiers = [POSTGRES_INDEXES_SQL, POSTGRES_INDEXES_COMPAT_SQL];
-    query_with_compat_fallback("list_indexes", &tiers, |sql| list_indexes_with_sql(&client, sql, schema, table)).await
+    query_with_compat_fallback("list_indexes", &tiers, |sql| list_indexes_with_sql(client, sql, schema, table)).await
 }
 
 /// Names of same-table indexes whose `pg_index.indisvalid` is `false`.
@@ -9600,7 +9816,8 @@ const POSTGRES_INVALID_INDEXES_SQL: &str = "SELECT idx.relname \
 pub async fn list_invalid_indexes(pool: &Pool, schema: &str, table: &str) -> Result<Vec<String>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, POSTGRES_INVALID_INDEXES_SQL, &[&schema, &table])
+    let client = &EncodingClient::new(&client);
+    let rows = postgres_query_cached(client, POSTGRES_INVALID_INDEXES_SQL, &[&schema, &table])
         .await
         .map_err(|e| e.to_string())?;
     Ok(rows.iter().map(|row| pg_row_try_string(row, 0)).collect())
@@ -9658,7 +9875,8 @@ async fn list_foreign_keys_with_sql(
     sql: &'static str,
     schema: &str,
     table: &str,
-) -> Result<Vec<ForeignKeyInfo>, tokio_postgres::Error> {
+) -> Result<Vec<ForeignKeyInfo>, PgError> {
+    let client = &EncodingClient::new(client);
     let rows = postgres_query_cached(client, sql, &[&schema, &table]).await?;
     Ok(rows
         .iter()
@@ -9676,9 +9894,10 @@ async fn list_foreign_keys_with_sql(
 
 pub async fn list_foreign_keys(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let tiers = [postgres_foreign_keys_sql(), postgres_foreign_keys_compat_sql()];
     query_with_compat_fallback("list_foreign_keys", &tiers, |sql| {
-        list_foreign_keys_with_sql(&client, sql, schema, table)
+        list_foreign_keys_with_sql(client, sql, schema, table)
     })
     .await
 }
@@ -9694,7 +9913,8 @@ pub async fn list_opengauss_foreign_keys(
 ) -> Result<Vec<ForeignKeyInfo>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, opengauss_foreign_keys_sql(), &[&schema, &table])
+    let client = &EncodingClient::new(&client);
+    let rows = postgres_query_cached(client, opengauss_foreign_keys_sql(), &[&schema, &table])
         .await
         .map_err(|e| e.to_string())?;
     if rows.is_empty() {
@@ -9703,7 +9923,7 @@ pub async fn list_opengauss_foreign_keys(
 
     let local_relation_oid =
         pg_row_try_u32(&rows[0], 7).ok_or("OpenGauss foreign key metadata did not return a local relation OID")?;
-    let local_attributes = opengauss_relation_attributes(&client, local_relation_oid).await?;
+    let local_attributes = opengauss_relation_attributes(client, local_relation_oid).await?;
     let mut referenced_attributes: HashMap<u32, HashMap<i16, String>> = HashMap::new();
     let mut result = Vec::new();
 
@@ -9721,7 +9941,7 @@ pub async fn list_opengauss_foreign_keys(
             continue;
         };
         if let std::collections::hash_map::Entry::Vacant(entry) = referenced_attributes.entry(referenced_relation_oid) {
-            entry.insert(opengauss_relation_attributes(&client, referenced_relation_oid).await?);
+            entry.insert(opengauss_relation_attributes(client, referenced_relation_oid).await?);
         }
         let ref_attributes = referenced_attributes.get(&referenced_relation_oid).unwrap();
         for (fk_number, pk_number) in column_numbers.iter().zip(ref_column_numbers.iter()) {
@@ -9814,11 +10034,12 @@ fn postgres_table_dependencies_compat_sql() -> &'static str {
 /// exports use this instead of issuing one information_schema query per table.
 pub async fn list_table_dependencies(pool: &Pool, schema: &str) -> Result<Vec<(String, String)>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let params: [&(dyn tokio_postgres::types::ToSql + Sync); 1] = [&schema];
     let rows = query_with_compat_fallback(
         "list_table_dependencies",
         &[postgres_table_dependencies_sql(), postgres_table_dependencies_compat_sql()],
-        |sql| postgres_query_cached(&client, sql, &params),
+        |sql| postgres_query_cached(client, sql, &params),
     )
     .await?;
 
@@ -9827,8 +10048,9 @@ pub async fn list_table_dependencies(pool: &Pool, schema: &str) -> Result<Vec<(S
 
 pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let rows = postgres_query_cached(
-        &client,
+        client,
         "SELECT trigger_name, event_manipulation, action_timing \
          FROM information_schema.triggers \
          WHERE trigger_schema = $1 AND event_object_table = $2 \
@@ -9867,12 +10089,13 @@ pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec
 // partitions, so tgisinternal alone is sufficient there.
 pub async fn list_trigger_definitions(pool: &Pool, schema: &str, table: &str) -> Result<Vec<String>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let sql = if postgres_trigger_has_tgparentid(&client).await? {
+    let client = &EncodingClient::new(&client);
+    let sql = if postgres_trigger_has_tgparentid(client).await? {
         postgres_trigger_definitions_sql()
     } else {
         postgres_trigger_definitions_sql_without_tgparentid()
     };
-    let rows = postgres_query_cached(&client, sql, &[&schema, &table]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(client, sql, &[&schema, &table]).await.map_err(|e| e.to_string())?;
 
     Ok(rows.iter().map(|row| pg_row_try_string(row, 0)).filter(|definition| !definition.trim().is_empty()).collect())
 }
@@ -9923,11 +10146,12 @@ fn postgres_functions_sql(has_proc_prokind: bool) -> &'static str {
 
 pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     // Use pg_proc + pg_get_functiondef() instead of information_schema.routines
     // for reliable function definition retrieval (information_schema.routines.routine_definition
     // is NULL for non-SQL functions like plpgsql)
-    let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
-    let rows = postgres_query_cached(&client, postgres_functions_sql(has_proc_prokind), &[&schema])
+    let has_proc_prokind = postgres_proc_has_prokind(client).await?;
+    let rows = postgres_query_cached(client, postgres_functions_sql(has_proc_prokind), &[&schema])
         .await
         .map_err(|e| e.to_string())?;
 
@@ -10015,7 +10239,8 @@ async fn postgres_sequence_last_value_compat(
     client: &deadpool_postgres::Client,
     schema: &str,
     sequence_name: &str,
-) -> Result<Option<String>, tokio_postgres::Error> {
+) -> Result<Option<String>, PgError> {
+    let client = &EncodingClient::new(client);
     let qualified = format!("{}.{}", pg_quote_ident(schema), pg_quote_ident(sequence_name));
     let sql = format!("SELECT last_value::text FROM {qualified}");
     let rows = postgres_query_cached(client, &sql, &[]).await?;
@@ -10037,7 +10262,8 @@ async fn list_sequences_with_sql(
     last_values_sql: &str,
 ) -> Result<Vec<SequenceInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, metadata_sql, &[&schema]).await.map_err(|e| e.to_string())?;
+    let client = &EncodingClient::new(&client);
+    let rows = postgres_query_cached(client, metadata_sql, &[&schema]).await.map_err(|e| e.to_string())?;
 
     let mut sequences: Vec<SequenceInfo> = rows
         .iter()
@@ -10054,7 +10280,7 @@ async fn list_sequences_with_sql(
         .collect();
 
     if with_last_values {
-        if let Ok(rows) = postgres_query_cached(&client, last_values_sql, &[&schema]).await {
+        if let Ok(rows) = postgres_query_cached(client, last_values_sql, &[&schema]).await {
             for row in rows {
                 let name: String = pg_row_try_string(&row, 0);
                 if let Ok(Some(value)) = row.try_get::<_, Option<String>>(1) {
@@ -10071,12 +10297,13 @@ async fn list_sequences_with_sql(
 
 pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -> Result<Vec<SequenceInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
 
     // PostgreSQL 10+ stores sequence properties in pg_sequence; older servers
     // fall back to the portable information_schema.sequences view.
-    let (rows, is_legacy) = match postgres_query_cached(&client, postgres_sequences_sql(), &[&schema]).await {
+    let (rows, is_legacy) = match postgres_query_cached(client, postgres_sequences_sql(), &[&schema]).await {
         Ok(rows) => (rows, false),
-        Err(primary_error) => match postgres_query_cached(&client, postgres_sequences_compat_sql(), &[&schema]).await {
+        Err(primary_error) => match postgres_query_cached(client, postgres_sequences_compat_sql(), &[&schema]).await {
             Ok(rows) => {
                 log::debug!(
                     "[postgres][sequences:compat-used] pg_sequence catalog unavailable ({}); serving sequence metadata from information_schema.sequences",
@@ -10105,11 +10332,11 @@ pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -
     if with_last_values {
         if is_legacy {
             for seq in sequences.iter_mut() {
-                if let Ok(Some(value)) = postgres_sequence_last_value_compat(&client, schema, &seq.name).await {
+                if let Ok(Some(value)) = postgres_sequence_last_value_compat(client, schema, &seq.name).await {
                     seq.last_value = Some(value);
                 }
             }
-        } else if let Ok(rows) = postgres_query_cached(&client, postgres_sequence_last_values_sql(), &[&schema]).await {
+        } else if let Ok(rows) = postgres_query_cached(client, postgres_sequence_last_values_sql(), &[&schema]).await {
             for row in rows {
                 let name: String = pg_row_try_string(&row, 0);
                 if let Ok(Some(value)) = row.try_get::<_, Option<String>>(1) {
@@ -10144,8 +10371,9 @@ pub async fn list_opengauss_sequences(
 
 pub async fn list_rules(pool: &Pool, schema: &str) -> Result<Vec<RuleInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let rows = postgres_query_cached(
-        &client,
+        client,
         "SELECT schemaname, tablename, rulename, definition \
          FROM pg_rules \
          WHERE schemaname = $1 \
@@ -10167,9 +10395,10 @@ pub async fn list_rules(pool: &Pool, schema: &str) -> Result<Vec<RuleInfo>, Stri
 
 pub async fn list_extensions(pool: &Pool, schema: Option<&str>) -> Result<Vec<ExtensionInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let rows = if let Some(schema) = schema.filter(|value| !value.is_empty()) {
         postgres_query_cached(
-            &client,
+            client,
             "SELECT e.extname, COALESCE(e.extversion, '') AS extversion, d.description, n.nspname \
              FROM pg_catalog.pg_extension e \
              JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
@@ -10181,7 +10410,7 @@ pub async fn list_extensions(pool: &Pool, schema: Option<&str>) -> Result<Vec<Ex
         .await
     } else {
         postgres_query_cached(
-            &client,
+            client,
             "SELECT e.extname, COALESCE(e.extversion, '') AS extversion, d.description, n.nspname \
              FROM pg_catalog.pg_extension e \
              JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
@@ -10232,14 +10461,15 @@ fn list_extension_member_objects_sql() -> &'static str {
 
 pub async fn list_extension_member_objects(pool: &Pool, schema: &str) -> Result<Vec<(String, String, String)>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = match postgres_query_cached(&client, list_extension_member_objects_sql(), &[&schema]).await {
+    let client = &EncodingClient::new(&client);
+    let rows = match postgres_query_cached(client, list_extension_member_objects_sql(), &[&schema]).await {
         Ok(rows) => rows,
         Err(primary_error) => {
             // PostgreSQL-compatible servers before the identity-argument
             // formatter can still be filtered using their legacy formatter.
             let fallback_sql = list_extension_member_objects_sql()
                 .replace("pg_get_function_identity_arguments(p.oid)", "pg_get_function_arguments(p.oid)");
-            postgres_query_cached(&client, &fallback_sql, &[&schema])
+            postgres_query_cached(client, &fallback_sql, &[&schema])
                 .await
                 .map_err(|fallback_error| format!("{primary_error}; legacy fallback failed: {fallback_error}"))?
         }
@@ -10253,8 +10483,9 @@ pub async fn list_extension_member_objects(pool: &Pool, schema: &str) -> Result<
 
 pub async fn list_available_extensions(pool: &Pool) -> Result<Vec<ExtensionInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let rows = postgres_query_cached(
-        &client,
+        client,
         "SELECT name, default_version, comment \
          FROM pg_catalog.pg_available_extensions \
          WHERE installed_version IS NULL \
@@ -10284,6 +10515,7 @@ fn postgres_event_trigger_catalog_exists_sql() -> &'static str {
 }
 
 async fn postgres_event_trigger_catalog_exists(client: &deadpool_postgres::Client) -> Result<bool, String> {
+    let client = &EncodingClient::new(client);
     let row = postgres_query_one_cached(client, postgres_event_trigger_catalog_exists_sql(), &[])
         .await
         .map_err(|e| e.to_string())?;
@@ -10329,12 +10561,13 @@ fn postgres_event_triggers_sourceless_sql() -> &'static str {
 /// back to a sourceless listing so the trigger identity is still visible.
 pub async fn list_event_triggers(pool: &Pool) -> Result<Vec<EventTriggerInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    if !postgres_event_trigger_catalog_exists(&client).await.unwrap_or(false) {
+    let client = &EncodingClient::new(&client);
+    if !postgres_event_trigger_catalog_exists(client).await.unwrap_or(false) {
         return Ok(Vec::new());
     }
-    let rows = match postgres_query_cached(&client, postgres_event_triggers_sql(), &[]).await {
+    let rows = match postgres_query_cached(client, postgres_event_triggers_sql(), &[]).await {
         Ok(rows) => rows,
-        Err(primary_error) => postgres_query_cached(&client, postgres_event_triggers_sourceless_sql(), &[])
+        Err(primary_error) => postgres_query_cached(client, postgres_event_triggers_sourceless_sql(), &[])
             .await
             .map_err(|fallback_error| format!("{primary_error}; sourceless fallback failed: {fallback_error}"))?,
     };
@@ -10355,7 +10588,8 @@ pub async fn list_event_triggers(pool: &Pool) -> Result<Vec<EventTriggerInfo>, S
 
 pub async fn list_owners(pool: &Pool, schema: &str) -> Result<Vec<OwnerInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, POSTGRES_OWNERS_SQL, &[&schema]).await.map_err(|e| e.to_string())?;
+    let client = &EncodingClient::new(&client);
+    let rows = postgres_query_cached(client, POSTGRES_OWNERS_SQL, &[&schema]).await.map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
@@ -10372,17 +10606,19 @@ pub async fn list_owners(pool: &Pool, schema: &str) -> Result<Vec<OwnerInfo>, St
 
 pub async fn get_table_owner(pool: &Pool, schema: &str, table: &str) -> Result<Option<String>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
-    let rows = postgres_query_cached(&client, POSTGRES_TABLE_OWNER_SQL, &params).await.map_err(pg_error_to_string)?;
+    let rows = postgres_query_cached(client, POSTGRES_TABLE_OWNER_SQL, &params).await.map_err(pg_error_to_string)?;
 
     Ok(rows.first().map(|row| pg_row_try_string(row, 0)).filter(|owner| !owner.is_empty()))
 }
 
 pub async fn get_table_access(pool: &Pool, schema: &str, table: &str) -> Result<PostgresTableAccessInfo, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
     let owner_rows =
-        postgres_query_cached(&client, POSTGRES_TABLE_OWNER_SQL, &params).await.map_err(pg_error_to_string)?;
+        postgres_query_cached(client, POSTGRES_TABLE_OWNER_SQL, &params).await.map_err(pg_error_to_string)?;
     let owner_row = owner_rows.first().ok_or_else(|| "Table owner not found".to_string())?;
     let owner = pg_row_try_string(owner_row, 0);
     if owner.is_empty() {
@@ -10394,8 +10630,8 @@ pub async fn get_table_access(pool: &Pool, schema: &str, table: &str) -> Result<
     }
 
     let (table_privileges, column_privileges) = tokio::try_join!(
-        postgres_query_cached(&client, POSTGRES_TABLE_ACL_PRIVILEGES_SQL, &params),
-        postgres_query_cached(&client, POSTGRES_COLUMN_ACL_PRIVILEGES_SQL, &params),
+        postgres_query_cached(client, POSTGRES_TABLE_ACL_PRIVILEGES_SQL, &params),
+        postgres_query_cached(client, POSTGRES_COLUMN_ACL_PRIVILEGES_SQL, &params),
     )
     .map_err(pg_error_to_string)?;
 
@@ -10433,13 +10669,15 @@ pub async fn execute_batch(pool: &Pool, statements: &[String]) -> Result<(), Str
         return Ok(());
     }
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     client.batch_execute(&combined).await.map_err(pg_error_to_string)?;
-    clear_postgres_caches_after_ddl(pool, Some(&client), &combined);
+    clear_postgres_caches_after_ddl(pool, Some(client), &combined);
     Ok(())
 }
 
 pub async fn terminate_current_user_database_backends(pool: &Pool, database: &str) -> Result<u64, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
     client
         .execute(
             "SELECT pg_terminate_backend(pid) \
@@ -10474,8 +10712,22 @@ fn invalidates_postgres_statement_cache(sql: &str) -> bool {
 /// Export data via COPY TO STDOUT. `sql` must be a complete COPY statement, e.g.
 /// `COPY table (col1, col2) TO STDOUT (FORMAT CSV, HEADER)`.
 /// Returns the raw COPY output bytes.
+/// Encode user SQL for a native transaction using the connection's text parameters.
+pub fn encode_postgres_sql(client: &deadpool_postgres::Client, sql: &str) -> Result<String, String> {
+    EncodingClient::new(client).encode(sql).map_err(pg_error_to_string)
+}
+
+/// COPY byte piping bypasses value conversion; callers use their INSERT fallback.
+pub fn postgres_client_has_text_encoding(client: &deadpool_postgres::Client) -> bool {
+    crate::text_encoding::for_client(client).is_some()
+}
+
 pub async fn copy_out(pool: &Pool, sql: &str) -> Result<Vec<u8>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
+    if client.encoding.is_some() {
+        return Err("COPY output with clientEncoding must use the row-based export path".into());
+    }
     let stream = client.copy_out(sql).await.map_err(pg_error_to_string)?;
     tokio::pin!(stream);
     let mut result = Vec::new();
@@ -10490,7 +10742,32 @@ pub async fn copy_out(pool: &Pool, sql: &str) -> Result<Vec<u8>, String> {
 /// `data` is the raw input in the format specified by the COPY command.
 pub async fn copy_in(pool: &Pool, sql: &str, data: &[u8]) -> Result<(), String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let sink = client.copy_in::<str, bytes::Bytes>(sql).await.map_err(pg_error_to_string)?;
+    let client = &EncodingClient::new(&client);
+    let encoded_sql = client.encode(sql).map_err(pg_error_to_string)?;
+    let encoded_data;
+    let data = if let Some(encoding) = client.encoding {
+        let parsed = Parser::parse_sql(&PostgreSqlDialect {}, sql).map_err(|e| e.to_string())?;
+        let supported = matches!(parsed.as_slice(), [Statement::Copy { to: false, target: sqlparser::ast::CopyTarget::Stdin, options, legacy_options, .. }]
+        if legacy_options.is_empty() && options.iter().all(|option| match option {
+            sqlparser::ast::CopyOption::Format(format) => format.value.eq_ignore_ascii_case("text"),
+            sqlparser::ast::CopyOption::Delimiter(delimiter) => *delimiter == '\t',
+            sqlparser::ast::CopyOption::Null(null) => null == "\\N",
+            sqlparser::ast::CopyOption::Header(header) => !header,
+            sqlparser::ast::CopyOption::Encoding(encoding) => encoding.eq_ignore_ascii_case("UTF8") || encoding.eq_ignore_ascii_case("UTF-8"),
+            sqlparser::ast::CopyOption::Freeze(_) => true,
+            _ => false,
+        }));
+        if !supported {
+            return Err(
+                "COPY with clientEncoding supports DBX text format; use row-based import for other formats".into()
+            );
+        }
+        encoded_data = encoding.encode_copy_text(data)?;
+        encoded_data.as_slice()
+    } else {
+        data
+    };
+    let sink = client.copy_in::<str, bytes::Bytes>(&encoded_sql).await.map_err(pg_error_to_string)?;
     let mut sink = Box::pin(sink);
     sink.as_mut().send(bytes::Bytes::copy_from_slice(data)).await.map_err(pg_error_to_string)?;
     sink.as_mut().close().await.map_err(pg_error_to_string)
@@ -11251,6 +11528,43 @@ mod tests {
         assert!(Vec::<Option<serde_json::Value>>::accepts(&Type::JSONB_ARRAY));
         assert!(!Vec::<Option<serde_json::Value>>::accepts(&Type::TEXT_ARRAY));
         assert!(!Vec::<Option<serde_json::Value>>::accepts(&Type::INT4_ARRAY));
+    }
+
+    #[test]
+    fn postgres_json_text_keeps_server_formatting() {
+        let json = PgJsonText::from_sql(&Type::JSON, br#"{"k1":      12, "k1": 2}"#).unwrap();
+        let jsonb = PgJsonText::from_sql(&Type::JSONB, &pg_jsonb_binary(br#"{"k1": 12}"#)).unwrap();
+
+        assert_eq!(json.0, r#"{"k1":      12, "k1": 2}"#);
+        assert_eq!(jsonb.0, r#"{"k1": 12}"#);
+        assert!(PgJsonText::from_sql(&Type::JSONB, &[2, b'1']).is_err());
+        assert!(!PgJsonText::accepts(&Type::TEXT));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL database"]
+    async fn postgres_query_json_cells_match_server_text_output() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(10), "UTC")
+            .await
+            .expect("connect PostgreSQL database");
+        let client = pool.get().await.expect("checkout PostgreSQL database");
+        let sql = r#"SELECT '{"k1":      12, "b": [1,2]}'::json AS j, '{"k1":      12, "b": [1,2]}'::jsonb AS jb"#;
+
+        for prefer_text_protocol in [false, true] {
+            let result = execute_query_with_max_rows_inner(&client, sql, None, prefer_text_protocol, None, false)
+                .await
+                .expect("select json values");
+
+            assert_eq!(
+                result.rows[0],
+                vec![
+                    serde_json::json!(r#"{"k1":      12, "b": [1,2]}"#),
+                    serde_json::json!(r#"{"b": [1, 2], "k1": 12}"#),
+                ],
+                "prefer_text_protocol={prefer_text_protocol}"
+            );
+        }
     }
 
     #[test]
@@ -14114,19 +14428,14 @@ mod tests {
     #[tokio::test]
     async fn useful_fallback_reports_the_last_error_when_every_tier_fails() {
         let tiers: [&'static str; 2] = ["attributes", "information-schema"];
-        let error =
-            query_with_useful_compat_fallback(
-                "test",
-                &tiers,
-                |_sql| async move {
-                    Err::<HashMap<i64, Vec<ColumnInfo>>, _>(tokio_postgres::Error::__private_api_timeout())
-                },
-                |columns_by_oid: &HashMap<i64, Vec<ColumnInfo>>| {
-                    columns_by_oid.values().any(|columns| !columns.is_empty())
-                },
-            )
-            .await
-            .expect_err("every tier failed");
+        let error = query_with_useful_compat_fallback(
+            "test",
+            &tiers,
+            |_sql| async move { Err::<HashMap<i64, Vec<ColumnInfo>>, _>(PgError::__private_api_timeout()) },
+            |columns_by_oid: &HashMap<i64, Vec<ColumnInfo>>| columns_by_oid.values().any(|columns| !columns.is_empty()),
+        )
+        .await
+        .expect_err("every tier failed");
 
         assert!(!error.is_empty());
     }
@@ -16447,3 +16756,7 @@ mod tests {
         assert_eq!(pinned.get_hostaddrs().first(), Some(&"127.0.0.1".parse().unwrap()));
     }
 }
+
+#[cfg(test)]
+#[path = "postgres_text_encoding_tests.rs"]
+mod text_encoding_tests;

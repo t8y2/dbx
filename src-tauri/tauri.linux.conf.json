@@ -1,0 +1,20 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "DBX",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false,
+        "transparent": true,
+        "hiddenTitle": true,
+        "acceptFirstMouse": true,
+        "create": false
+      }
+    ]
+  }
+}

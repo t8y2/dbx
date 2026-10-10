@@ -502,6 +502,45 @@ describe("settingsTransfer", () => {
     expect(result.error.detail).toContain("sqlFormatter");
   });
 
+  it("rejects unknown formatter option keys", () => {
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter, layoutEngine: "dbx" } }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("sqlFormatter");
+  });
+
+  it("rejects an invalid value for a formatter option that is present", () => {
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter, layoutStyle: "upstream" } }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("sqlFormatter");
+  });
+
+  it("imports a formatter payload exported before commaPosition existed", () => {
+    // Regression: v0.6.35 made the completeness check require every current
+    // key, so files exported by any earlier version failed to import at all.
+    const legacy: Record<string, unknown> = { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter };
+    delete legacy.commaPosition;
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: legacy }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.sqlFormatter?.commaPosition).toBe("after");
+    expect(result.value.editorSettings.sqlFormatter?.keywordCase).toBe(DEFAULT_EDITOR_SETTINGS.sqlFormatter.keywordCase);
+  });
+
+  it("imports a formatter payload missing both post-transfer keys and defaults them", () => {
+    const legacy: Record<string, unknown> = { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter };
+    delete legacy.commaPosition;
+    delete legacy.layoutStyle;
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: legacy }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.sqlFormatter?.layoutStyle).toBe("dbx");
+    expect(result.value.editorSettings.sqlFormatter?.commaPosition).toBe("after");
+  });
+
   it("rejects malformed sql variable syntax overrides", () => {
     const result = parseSettingsTransferFile(fileWith({ sqlVariableSyntaxOverrides: { mysql: { positional: "yes" } } }));
     expect(result.ok).toBe(false);

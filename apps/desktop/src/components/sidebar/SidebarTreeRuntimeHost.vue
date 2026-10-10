@@ -806,6 +806,8 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-materialized-views",
   "group-procedures",
   "group-functions",
+  "group-internal-functions",
+  "group-udf-functions",
   "group-sequences",
   "group-synonyms",
   "group-jobs",

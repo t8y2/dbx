@@ -83,6 +83,8 @@ export function tableVGroupKindOfContainerNode(node: Pick<TreeNode, "type" | "ta
     case "group-procedures":
       return "procedures";
     case "group-functions":
+    case "group-internal-functions":
+    case "group-udf-functions":
       return "functions";
     case "group-triggers":
       // 双栖 type：库级触发器列表与表结构子组共用；表子级带 tableName。

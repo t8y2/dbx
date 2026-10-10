@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { HelpTooltip } from "@/components/ui/tooltip";
 import { Check, ChevronDown, FolderOpen, Loader2, Search } from "@lucide/vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
-import { databaseBackupFileNamePatternIsValid, type DatabaseBackupExecutionConfig } from "@/lib/backup/scheduledDatabaseBackup";
+import { databaseBackupFileNamePatternHasRunId, databaseBackupFileNamePatternIsValid, type DatabaseBackupExecutionConfig } from "@/lib/backup/scheduledDatabaseBackup";
 import type { ConnectionConfig } from "@/types/database";
 import BackupTableSelector from "./BackupTableSelector.vue";
 import type { DatabaseBackupTableSelectionState } from "@/lib/backup/scheduledDatabaseBackup";
@@ -28,12 +28,16 @@ const props = withDefaults(
     runDirectoryPattern?: string;
     runDirectoryPatternValid?: boolean;
     outputPathPreview?: string;
+    /** Turns the connection picker into a multi-select driven by `selectedConnectionIds`. */
+    multiSelectConnections?: boolean;
+    selectedConnectionIds?: string[];
   }>(),
-  { connections: () => [], selectedDatabases: () => [], databaseOptions: () => [], databaseLoadError: "", runDirectoryPatternValid: true, outputPathPreview: "" },
+  { connections: () => [], selectedDatabases: () => [], databaseOptions: () => [], databaseLoadError: "", runDirectoryPatternValid: true, outputPathPreview: "", multiSelectConnections: false, selectedConnectionIds: () => [] },
 );
 
 const emit = defineEmits<{
   changeConnection: [connectionId: string];
+  toggleConnection: [connectionId: string];
   chooseDestination: [];
   toggleDatabase: [database: string];
   tableSelectionState: [state: DatabaseBackupTableSelectionState];
@@ -51,6 +55,10 @@ const connectionPickerWidth = ref<number>();
 
 const selectedConnectionName = computed(() => props.connections.find((connection) => connection.id === props.draft.connectionId)?.name || props.draft.connectionId);
 const selectedConnectionType = computed(() => props.connections.find((connection) => connection.id === props.draft.connectionId)?.db_type);
+// Database names and exact table lists belong to one connection, so they only apply when a single connection is selected.
+const multipleConnectionsSelected = computed(() => props.multiSelectConnections && props.selectedConnectionIds.length > 1);
+const connectionPickerLabel = computed(() => (multipleConnectionsSelected.value ? t("databaseBackup.connectionsSelected", { count: props.selectedConnectionIds.length }) : selectedConnectionName.value));
+const fileNamePatternNeedsRunId = computed(() => multipleConnectionsSelected.value && !databaseBackupFileNamePatternHasRunId(props.draft.fileNamePattern));
 const filteredConnections = computed(() => {
   const query = connectionSearch.value.trim().toLocaleLowerCase();
   if (!query) return props.connections;
@@ -75,7 +83,15 @@ const fileNameTemplateVariables = computed(() => [
   { token: "{runId}", description: t("databaseBackup.templateVariableRunId") },
 ]);
 
+function isConnectionSelected(connectionId: string): boolean {
+  return props.multiSelectConnections ? props.selectedConnectionIds.includes(connectionId) : connectionId === props.draft.connectionId;
+}
+
 function selectConnection(connectionId: string) {
+  if (props.multiSelectConnections) {
+    emit("toggleConnection", connectionId);
+    return;
+  }
   emit("changeConnection", connectionId);
   connectionPickerOpen.value = false;
 }
@@ -111,7 +127,7 @@ watch(
       <Popover v-model:open="connectionPickerOpen">
         <PopoverTrigger as-child>
           <Button ref="connectionPickerTrigger" data-backup-connection-picker type="button" variant="outline" role="combobox" :aria-expanded="connectionPickerOpen" class="w-full justify-between font-normal" @click="syncConnectionPickerWidth">
-            <span class="truncate">{{ selectedConnectionName }}</span>
+            <span class="truncate">{{ connectionPickerLabel }}</span>
             <ChevronDown class="ml-2 h-4 w-4 shrink-0 opacity-50" />
           </Button>
         </PopoverTrigger>
@@ -126,9 +142,14 @@ watch(
               :key="connection.id"
               type="button"
               class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+              :role="multiSelectConnections ? 'checkbox' : undefined"
+              :aria-checked="multiSelectConnections ? isConnectionSelected(connection.id) : undefined"
               @click="selectConnection(connection.id)"
             >
-              <Check class="h-4 w-4 shrink-0" :class="connection.id === draft.connectionId ? 'opacity-100' : 'opacity-0'" />
+              <span v-if="multiSelectConnections" class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="isConnectionSelected(connection.id) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'">
+                <Check v-if="isConnectionSelected(connection.id)" class="h-3 w-3" />
+              </span>
+              <Check v-else class="h-4 w-4 shrink-0" :class="isConnectionSelected(connection.id) ? 'opacity-100' : 'opacity-0'" />
               <ConnectionGroupBadge :connection-id="connection.id" />
               <span class="min-w-0 flex-1 truncate">{{ connection.name }}</span>
             </button>
@@ -182,9 +203,10 @@ watch(
             </div>
           </HelpTooltip>
         </div>
-        <Input v-model="draft.fileNamePattern" data-backup-file-name-pattern :aria-invalid="!databaseBackupFileNamePatternIsValid(draft.fileNamePattern || '')" />
+        <Input v-model="draft.fileNamePattern" data-backup-file-name-pattern :aria-invalid="!databaseBackupFileNamePatternIsValid(draft.fileNamePattern || '') || fileNamePatternNeedsRunId" />
         <p class="text-xs text-muted-foreground">{{ t("databaseBackup.fileNamePatternHint") }}</p>
         <p v-if="!databaseBackupFileNamePatternIsValid(draft.fileNamePattern || '')" class="text-xs text-destructive">{{ t("databaseBackup.fileNamePatternInvalid") }}</p>
+        <p v-if="fileNamePatternNeedsRunId" data-backup-file-name-run-id-required class="text-xs text-destructive">{{ t("databaseBackup.multiConnectionRunIdRequired") }}</p>
       </div>
 
       <div v-if="outputPathPreview" data-backup-output-path-preview class="backup-output-path-preview space-y-1 rounded-md border border-border/70 bg-muted/30 px-3 py-2">
@@ -201,7 +223,10 @@ watch(
       </label>
     </div>
 
-    <div class="space-y-3">
+    <div v-if="multipleConnectionsSelected" data-backup-multi-connection-hint class="rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+      {{ t("databaseBackup.multiConnectionScopeHint") }}
+    </div>
+    <div v-else class="space-y-3">
       <div class="flex items-center justify-between gap-4">
         <Label>{{ t("databaseBackup.databases") }}</Label>
         <label class="flex items-center gap-2 text-sm">
@@ -238,7 +263,7 @@ watch(
               <SelectItem value="all">{{ t("databaseBackup.allTables") }}</SelectItem>
               <SelectItem value="include">{{ t("databaseBackup.includeTables") }}</SelectItem>
               <SelectItem value="exclude">{{ t("databaseBackup.excludeTables") }}</SelectItem>
-              <SelectItem value="selected">{{ t("databaseBackup.exactTables") }}</SelectItem>
+              <SelectItem v-if="!multipleConnectionsSelected" value="selected">{{ t("databaseBackup.exactTables") }}</SelectItem>
             </SelectContent>
           </Select>
         </div>

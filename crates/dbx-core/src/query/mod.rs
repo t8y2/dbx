@@ -5283,6 +5283,8 @@ async fn exec_tx_pg_statements(
     budget: &DbOperationBudget,
     cancel_context: Option<db::postgres::PostgresCancelContext>,
 ) -> Result<u64, QueryExecutionError> {
+    let statements =
+        statements.iter().map(|sql| db::postgres::encode_postgres_sql(client, sql)).collect::<Result<Vec<_>, _>>()?;
     let tx = tokio::time::timeout(budget.recycle_timeout, client.transaction())
         .await
         .map_err(|_| {
@@ -8174,6 +8176,7 @@ for line in sys.stdin:
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -11211,6 +11214,7 @@ for line in sys.stdin:
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlparser::dialect::{MsSqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{GenericDialect, MsSqlDialect, PostgreSqlDialect};
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::models::connection::DatabaseType;
@@ -85,6 +85,7 @@ enum EstimatedPlanSqlGeneration {
     Plain,
     Xugu,
     Oracle,
+    Db2,
     SqlServer,
     Json,
 }
@@ -127,7 +128,9 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     if source.is_empty() {
         return explain_err("empty");
     }
-    if !is_safe_explain_sql_for_database(&source, options.database_type) {
+    let safety_source =
+        if options.database_type == Some(DatabaseType::Db2) { options.sql.as_str() } else { source.as_str() };
+    if !is_safe_explain_sql_for_database(safety_source, options.database_type) {
         return explain_err("unsafe");
     }
     if options.database_type == Some(DatabaseType::Xugu) {
@@ -159,7 +162,7 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
         EstimatedPlanSqlGeneration::Postgres => format!("EXPLAIN (FORMAT JSON) {source}"),
         EstimatedPlanSqlGeneration::Plain => format!("EXPLAIN {source}"),
         EstimatedPlanSqlGeneration::Xugu => format!("EXPLAIN VERBOSE {source}"),
-        EstimatedPlanSqlGeneration::Oracle => format!("EXPLAIN PLAN FOR {source}"),
+        EstimatedPlanSqlGeneration::Oracle | EstimatedPlanSqlGeneration::Db2 => format!("EXPLAIN PLAN FOR {source}"),
         // STATISTICS XML returns the same ShowPlanXML document plus per-operator
         // runtime counters, at the price of actually running the statement.
         EstimatedPlanSqlGeneration::SqlServer if options.analyze == Some(true) => {
@@ -202,9 +205,10 @@ pub fn build_dropped_file_preview_sql(options: DroppedFilePreviewSqlOptions) -> 
 pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<EstimatedPlanStrategy> {
     use EstimatedPlanAcquisition::{DriverNative, GeneratedSql, SqlServerShowPlanSession};
     use EstimatedPlanFormat::{Json, Text, Xml};
-    use EstimatedPlanSqlGeneration::{Mysql, Oracle, Plain, Postgres, SqlServer, Xugu};
+    use EstimatedPlanSqlGeneration::{Db2, Mysql, Oracle, Plain, Postgres, SqlServer, Xugu};
 
     let strategy = match database_type? {
+        DatabaseType::Db2 => EstimatedPlanStrategy { sql_generation: Db2, acquisition: DriverNative, format: Json },
         DatabaseType::Mysql => EstimatedPlanStrategy { sql_generation: Mysql, acquisition: GeneratedSql, format: Json },
         DatabaseType::Doris => EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text },
         DatabaseType::Xugu => EstimatedPlanStrategy { sql_generation: Xugu, acquisition: GeneratedSql, format: Text },
@@ -251,6 +255,9 @@ pub fn is_safe_explain_sql(sql: &str) -> bool {
 }
 
 pub fn is_safe_explain_sql_for_database(sql: &str, database_type: Option<DatabaseType>) -> bool {
+    if database_type == Some(DatabaseType::Db2) {
+        return is_safe_db2_explain_sql(sql);
+    }
     let source = strip_trailing_semicolons(sql.trim());
     if source.is_empty() || has_extra_statement_after_semicolon(&source) {
         return false;
@@ -258,7 +265,31 @@ pub fn is_safe_explain_sql_for_database(sql: &str, database_type: Option<Databas
     if database_type == Some(DatabaseType::Oracle) && is_safe_oracle_explain_dml_source(&source) {
         return true;
     }
+
     is_safe_explain_source(&source) && !contains_dangerous_sql_keyword(&source)
+}
+
+/// Use the existing lexer so nested DB2 comments are removed before every
+/// safety check; preserve literal escaping while normalizing only for validation.
+fn is_safe_db2_explain_sql(sql: &str) -> bool {
+    let Ok(tokens) = Tokenizer::new(&GenericDialect {}, sql).with_unescape(false).tokenize() else {
+        return false;
+    };
+    let mut tokens: Vec<_> = tokens.into_iter().filter(|token| !matches!(token, Token::Whitespace(_))).collect();
+    if tokens.last() == Some(&Token::SemiColon) {
+        tokens.pop();
+    }
+    if tokens.iter().any(|token| matches!(token, Token::SemiColon)) {
+        return false;
+    }
+    let Some(Token::Word(word)) = tokens.first() else {
+        return false;
+    };
+    if word.quote_style.is_some() || !["SELECT", "WITH", "VALUES"].contains(&word.value.to_ascii_uppercase().as_str()) {
+        return false;
+    }
+    let normalized = tokens.iter().map(ToString::to_string).collect::<Vec<_>>().join(" ");
+    !contains_dangerous_sql_keyword(&normalized)
 }
 
 /// Returns true for databases that support SQL query execution (execute_query / get_sample_data).
@@ -1529,6 +1560,119 @@ mod tests {
     }
 
     #[test]
+    fn db2_explain_uses_native_json_plan_acquisition() {
+        let db_type = Some(DatabaseType::Db2);
+        assert!(supports_explain_plan(db_type));
+        let strategy = estimated_plan_strategy(db_type).unwrap();
+        assert_eq!(strategy.acquisition(), EstimatedPlanAcquisition::DriverNative);
+        assert_eq!(strategy.format(), EstimatedPlanFormat::Json);
+        for sql in [
+            "SELECT * FROM \"APP\".\"ORDERS\"",
+            "WITH q AS (SELECT 1 FROM SYSIBM.SYSDUMMY1) SELECT * FROM q",
+            "VALUES 1",
+            "/* plan */ select * FROM APP.ORDERS",
+            "-- plan\nwith q AS (SELECT 1 FROM SYSIBM.SYSDUMMY1) SELECT * FROM q",
+            "/* plan */ values (1)",
+        ] {
+            let result = build_explain_sql(ExplainSqlOptions {
+                database_type: db_type,
+                format: None,
+                analyze: Some(true),
+                sql: format!("{sql};"),
+            });
+            assert!(result.ok, "{result:?}");
+            assert_eq!(result.sql, Some(format!("EXPLAIN PLAN FOR {sql}")));
+        }
+    }
+
+    #[test]
+    fn db2_explain_handles_nested_comments_without_hiding_writes() {
+        for sql in [
+            "/* outer /* inner */ trailing */ SELECT 1 FROM SYSIBM.SYSDUMMY1",
+            "/* outer /* inner */ DELETE */ VALUES ('a;''b')",
+            "WITH q AS (/* outer /* inner */ UPDATE */ SELECT 1 FROM SYSIBM.SYSDUMMY1) SELECT * FROM q",
+        ] {
+            assert!(is_safe_explain_sql_for_database(sql, Some(DatabaseType::Db2)), "{sql}");
+            assert!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Db2),
+                    format: None,
+                    analyze: None,
+                    sql: sql.into()
+                })
+                .ok,
+                "{sql}"
+            );
+        }
+        for sql in [
+            "/* outer /* inner */ trailing */ DELETE FROM APP.ORDERS",
+            "/* outer /* inner */ trailing */ SELECT 1; DELETE FROM APP.ORDERS",
+            "/* outer /* inner */ trailing */ TABLE APP.ORDERS",
+            "WITH q AS (DELETE FROM APP.ORDERS) SELECT * FROM q",
+            "SELECT 1 /* outer /* inner */",
+            "SELECT 1;;",
+        ] {
+            assert!(!is_safe_explain_sql_for_database(sql, Some(DatabaseType::Db2)), "{sql}");
+            assert!(
+                !build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Db2),
+                    format: None,
+                    analyze: None,
+                    sql: sql.into()
+                })
+                .ok,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn db2_explain_rejects_table_shortcuts_in_all_preflight_paths() {
+        for sql in ["TABLE APP.ORDERS", "table \"APP\".\"ORDERS\";", "/* plan */ TABLE APP.ORDERS"] {
+            assert!(!is_safe_explain_sql_for_database(sql, Some(DatabaseType::Db2)), "{sql}");
+            let result = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Db2),
+                format: None,
+                analyze: None,
+                sql: sql.into(),
+            });
+            assert!(!result.ok, "{sql}: {result:?}");
+            assert_eq!(result.reason.as_deref(), Some("unsafe"));
+            assert!(is_safe_explain_sql(sql), "generic TABLE support must remain: {sql}");
+            assert!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Postgres),
+                    format: None,
+                    analyze: None,
+                    sql: sql.into(),
+                })
+                .ok,
+                "PostgreSQL TABLE support must remain: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn db2_explain_rejects_empty_write_and_multiple_statement_sources() {
+        for (sql, reason) in [
+            ("", "empty"),
+            ("DELETE FROM t", "unsafe"),
+            ("UPDATE t SET n=1", "unsafe"),
+            ("SELECT 1; DROP TABLE t", "unsafe"),
+            ("SELECT 1; SELECT 2", "unsafe"),
+        ] {
+            let result = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Db2),
+                format: None,
+                analyze: None,
+                sql: sql.into(),
+            });
+            assert!(!result.ok);
+            assert_eq!(result.reason.as_deref(), Some(reason));
+        }
+    }
+
+    #[test]
     fn builds_xugu_verbose_text_explain_without_executing_the_query() {
         for sql in [
             "SELECT * FROM \"APP_TEST\".\"ORDERS\" WHERE id = 1",
@@ -1917,6 +2061,7 @@ mod tests {
             (DatabaseType::Questdb, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Dameng, "EXPLAIN SELECT 1", Text, DriverNative),
             (DatabaseType::Oracle, "EXPLAIN PLAN FOR SELECT 1", Text, DriverNative),
+            (DatabaseType::Db2, "EXPLAIN PLAN FOR SELECT 1", Json, DriverNative),
             (DatabaseType::OceanbaseOracle, "EXPLAIN FORMAT=JSON SELECT 1", Json, GeneratedSql),
             (
                 DatabaseType::SqlServer,

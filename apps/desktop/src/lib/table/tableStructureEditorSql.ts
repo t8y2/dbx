@@ -99,6 +99,7 @@ export interface BuildTableStructureChangeSqlOptions {
   tableComment?: string;
   originalTableComment?: string;
   mysqlEngine?: string;
+  mysqlAutoIncrementValue?: string;
   transwarpCreate?: TranswarpCreateTableOptions;
   /** MySQL only: the table's current default collation. Columns whose collation merely
    * matches it inherit the table default, so the backend leaves their redundant

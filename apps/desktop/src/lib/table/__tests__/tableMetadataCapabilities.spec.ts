@@ -31,6 +31,8 @@ describe("tableMetadataCapabilities", () => {
 
   it("exposes structured constraints only for dialects that implement list_constraints", () => {
     expect(getTableMetadataCapabilities("oracle").constraints).toBe(true);
+    expect(getTableMetadataCapabilities("oceanbase-oracle").constraints).toBe(true);
+    expect(getTableMetadataCapabilities("oceanbase-mysql").constraints).toBe(false);
     expect(getTableMetadataCapabilities("postgres").constraints).toBe(true);
     expect(getTableMetadataCapabilities("kingbase").constraints).toBe(true);
     expect(getTableMetadataCapabilities("vastbase").constraints).toBe(true);

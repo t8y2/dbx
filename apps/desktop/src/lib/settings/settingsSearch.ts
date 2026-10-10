@@ -176,6 +176,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "formatter-indent", category: "formatter", titleKey: "settings.sqlFormatterIndent", targetId: "formatter" },
   { id: "formatter-tab-width", category: "formatter", titleKey: "settings.sqlFormatterTabWidth", targetId: "formatter" },
   { id: "formatter-indent-style", category: "formatter", titleKey: "settings.sqlFormatterIndentStyle", targetId: "formatter" },
+  { id: "formatter-layout-style", category: "formatter", titleKey: "settings.sqlFormatterLayoutStyle", targetId: "formatter" },
   { id: "formatter-logical-operator-newline", category: "formatter", titleKey: "settings.sqlFormatterLogicalOperatorNewline", targetId: "formatter" },
   { id: "formatter-comma-position", category: "formatter", titleKey: "settings.sqlFormatterCommaPosition", targetId: "formatter" },
   { id: "formatter-from-clause-layout", category: "formatter", titleKey: "settings.sqlFormatterFromClauseLayout", targetId: "formatter" },

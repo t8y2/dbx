@@ -6,7 +6,7 @@ cassandra-go	shared-fallback	native-go	Uses cassandra-gocql-driver schema metada
 dameng	native-pushdown	java-sql	Uses ALL_OBJECTS with type, filter, stable order, and LIMIT/OFFSET with legacy fallback.
 databend	native-pushdown	java-sql	Uses system procedures for routine pushdown and shared table metadata constraints for table-like objects.
 db2	native-pushdown	java-sql	Uses SYSCAT metadata with type, filter, stable order, and OFFSET/FETCH.
-firebird	shared-fallback	java-jdbc-metadata	Delegates constrained listings to shared JDBC metadata and only applies explicitly configured legacy text decoding to comments.
+firebird	native-pushdown	java-sql	Lists objects natively from RDB$ system tables; constrained listings only apply explicitly configured legacy text decoding to comments.
 gbase8a	native-pushdown	java-sql	Uses information_schema with type, filter, stable order, and LIMIT/OFFSET.
 gbase8s	native-pushdown	java-sql	Uses systables with type, filter, stable order, and SKIP/FIRST.
 goldendb	native-pushdown	java-sql	Uses information_schema with type, filter, stable order, and LIMIT/OFFSET.

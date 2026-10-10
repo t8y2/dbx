@@ -1,4 +1,5 @@
 dependencies {
+    implementation 'com.google.code.gson:gson:2.12.1'
     implementation fileTree(dir: 'libs', include: ['*.jar'])
     implementation 'com.ibm.db2:jcc:11.5.9.0'
 }

@@ -71,6 +71,10 @@ public final class Db2Agent extends AbstractJdbcAgent {
     }
 
     @Override
+    public String getExplainInfo(String sql, String database, String schema, int timeoutSecs, String mode) {
+        return unchecked(() -> Db2ExplainPlan.read(requireConnected(), sql, schema, timeoutSecs, mode));
+    }
+    @Override
     public List<DatabaseInfo> listDatabases() {
         return unchecked(() -> {
             List<DatabaseInfo> result = new ArrayList<>();

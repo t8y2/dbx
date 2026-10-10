@@ -2,7 +2,6 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDownWideNarrow, ArrowRightLeft, ChevronsDownUp, Database, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, KeyRound, Layers, Library, Loader2, LocateFixed, Lock, LockOpen, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
 import {
   ArrowDownAZ,
   ArrowDownWideNarrow,
@@ -22,16 +21,19 @@ import {
   FolderClosed,
   FolderOpen,
   FolderPlus,
+  KeyRound,
   Layers,
   Library,
   Loader2,
   LocateFixed,
+  Lock,
+  LockOpen,
   Pencil,
   Play,
   Search,
   Trash2,
   Upload,
-  X,
+  X
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";

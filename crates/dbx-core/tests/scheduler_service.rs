@@ -202,7 +202,7 @@ async fn service_crud_and_validation_paths() {
     assert!(enabled.enabled);
 
     // Provider validation: unknown provider fails with provider_not_found.
-    let mut unknown = run_definition("t-unknown", "dbx.nope", TaskTrigger::Manual);
+    let unknown = run_definition("t-unknown", "dbx.nope", TaskTrigger::Manual);
     let error = service.validate_task(&unknown).await.unwrap_err();
     assert_eq!(error.code, "provider_not_found");
     assert!(service.validate_task(&created).await.is_ok());

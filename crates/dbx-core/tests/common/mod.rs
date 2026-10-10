@@ -46,9 +46,10 @@ pub async fn save(store: &SchedulerStore, task: TaskDefinition) -> TaskDefinitio
 }
 
 /// Scripted behaviours of the fake run executor.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum Behavior {
     /// Succeed immediately.
+    #[default]
     Succeed,
     /// Fail with a retryable error.
     FailRetryable,
@@ -62,12 +63,6 @@ pub enum Behavior {
     SleepThenSucceed(Duration),
     /// Succeed and emit one artifact file.
     EmitArtifact,
-}
-
-impl Default for Behavior {
-    fn default() -> Self {
-        Self::Succeed
-    }
 }
 
 #[derive(Clone, Default)]

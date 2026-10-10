@@ -44,7 +44,7 @@ async fn a_manual_run_is_claimed_promptly_once_the_service_touches_the_wake_file
 
     // With a 1h poll interval only the wake watcher can claim the run; the
     // executor recording the run proves the wake worked end to end.
-    wait_until(|| executor.execution_count() > 0, "wake-driven claim of the manual run");
+    wait_until(|| executor.execution_count() > 0, "wake-driven claim of the manual run").await;
     shutdown.cancel();
     let _ = run;
 }

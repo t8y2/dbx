@@ -38,6 +38,7 @@ pub const SNAPSHOT_FILE_NAME: &str = "dbx-sync.json";
 /// passphrase is resolved from the host store at run time (ADR §10).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+#[derive(Default)]
 pub struct CloudSyncTaskConfig {
     /// The files-plugin connection the snapshot is written through. Required.
     #[serde(default)]
@@ -55,18 +56,6 @@ pub struct CloudSyncTaskConfig {
     /// side passes them today.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub editor_settings: Option<serde_json::Value>,
-}
-
-impl Default for CloudSyncTaskConfig {
-    fn default() -> Self {
-        Self {
-            files_connection_id: String::new(),
-            remote_dir: String::new(),
-            include_secrets: false,
-            selection: None,
-            editor_settings: None,
-        }
-    }
 }
 
 impl CloudSyncTaskConfig {

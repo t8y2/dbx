@@ -715,7 +715,7 @@ impl SchedulerEngine {
                     .heartbeat_at
                     .as_deref()
                     .and_then(|heartbeat| chrono::DateTime::parse_from_rfc3339(heartbeat).ok())
-                    .map_or(false, |heartbeat| {
+                    .is_some_and(|heartbeat| {
                         (now - heartbeat.with_timezone(&Utc)).num_milliseconds()
                             > self.resident_heartbeat_timeout.as_millis() as i64
                     });

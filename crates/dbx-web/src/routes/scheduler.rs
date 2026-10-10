@@ -124,7 +124,7 @@ pub fn publish_event(event: &serde_json::Value) {
 /// repeated router builds stay single-subscriber. No route or payload shape
 /// changes — add-only per the A8 event-bridge contract.
 pub fn register_engine_event_sink() {
-    dbx_core::scheduler::register_event_sink("dbx-web-sse", Arc::new(|event| publish_event(event)));
+    dbx_core::scheduler::register_event_sink("dbx-web-sse", Arc::new(publish_event));
 }
 
 fn emit_task_changed(task_id: &str) {
@@ -161,10 +161,7 @@ struct LogsQuery {
 }
 
 fn status_matches(run: &TaskRun, wanted: &str) -> bool {
-    serde_json::to_value(&run.status)
-        .ok()
-        .and_then(|value| value.as_str().map(|value| value == wanted))
-        .unwrap_or(false)
+    serde_json::to_value(run.status).ok().and_then(|value| value.as_str().map(|value| value == wanted)).unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------

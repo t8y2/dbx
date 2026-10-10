@@ -4,7 +4,7 @@ import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRest
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
-import type { ResidentSession, SchedulerLogQuery, SchedulerResidentAction, SchedulerResidentActionResult, SchedulerRunListQuery, TaskArtifact, TaskDefinition, TaskLogPage, TaskRun } from "@/lib/backend/schedulerTypes";
+import type { ResidentSession, SchedulerLogQuery, SchedulerResidentAction, SchedulerResidentActionResult, SchedulerRunListQuery, TaskArtifact, TaskDefinition, TaskLogPage, TaskRun as SchedulerTaskRun } from "@/lib/backend/schedulerTypes";
 
 export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
   return invoke("database_backup_command", { command });
@@ -6528,7 +6528,7 @@ export function schedulerDeleteTask(id: string): Promise<void> {
   return invoke("scheduler_delete_task", { id });
 }
 
-export function schedulerRunTask(id: string): Promise<TaskRun> {
+export function schedulerRunTask(id: string): Promise<SchedulerTaskRun> {
   return invoke("scheduler_run_task", { id });
 }
 
@@ -6544,7 +6544,7 @@ export function schedulerDisableTask(id: string): Promise<TaskDefinition> {
   return invoke("scheduler_disable_task", { id });
 }
 
-export function schedulerListRuns(query: SchedulerRunListQuery = {}): Promise<TaskRun[]> {
+export function schedulerListRuns(query: SchedulerRunListQuery = {}): Promise<SchedulerTaskRun[]> {
   return invoke("scheduler_list_runs", {
     taskId: query.taskId,
     status: query.status,
@@ -6554,7 +6554,7 @@ export function schedulerListRuns(query: SchedulerRunListQuery = {}): Promise<Ta
   });
 }
 
-export function schedulerGetRun(id: string): Promise<TaskRun> {
+export function schedulerGetRun(id: string): Promise<SchedulerTaskRun> {
   return invoke("scheduler_get_run", { id });
 }
 

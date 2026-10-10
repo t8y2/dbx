@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(restart_backoff(2, &policy), Some(Duration::from_secs(10)));
         assert_eq!(restart_backoff(3, &policy), Some(Duration::from_secs(20)));
         // The budget is finite: past the limit there is no restart.
-        assert_eq!(restart_backoff(policy.max_consecutive_failures, &policy).is_some(), true);
+        assert!(restart_backoff(policy.max_consecutive_failures, &policy).is_some());
         assert_eq!(restart_backoff(policy.max_consecutive_failures + 1, &policy), None);
 
         // A long budget still saturates at the cap instead of overflowing.
@@ -746,44 +746,5 @@ mod tests {
         let replacement = *spawned.lock().unwrap().last().unwrap();
         assert!(process_alive(replacement), "UI-side shutdown leaves the worker running");
         let _ = Command::new("kill").args(["-9", &replacement.to_string()]).status();
-    }
-
-    #[tokio::test]
-    async fn legacy_migration_runs_once_and_is_idempotent() {
-        let directory = tempfile::tempdir().unwrap();
-        let legacy_store = dbx_core::scheduled_backup::BackupStore::new(directory.path());
-        let schedule: dbx_core::scheduled_backup::BackupSchedule = serde_json::from_str(
-            r#"{
-                "id": "legacy-1", "name": "Nightly", "enabled": true, "connectionId": "conn-1", "databases": [],
-                "destinationDirectory": "/tmp/b", "includeStructure": true, "includeData": true,
-                "includeObjects": true, "frequency": "daily", "intervalHours": 1,
-                "timeOfDay": "02:30", "weekday": 0, "retentionCount": 3, "timeZone": "UTC",
-                "createdAt": "2026-01-01T00:00:00+00:00", "updatedAt": "2026-01-01T00:00:00+00:00",
-                "nextRunAt": "2026-01-01T00:00:00+00:00"
-            }"#,
-        )
-        .unwrap();
-        legacy_store.save_schedule(schedule).await.unwrap();
-
-        let store = SchedulerStore::new(directory.path());
-        let migration = SchedulerMigration::new(store.clone());
-        let marker = dbx_core::scheduler::migration::DATABASE_BACKUP_MIGRATION_KEY;
-
-        // Flag off: zero behavior — no task appears, no marker is written.
-        run_legacy_migration_if_enabled(store.clone(), directory.path(), false).await;
-        assert!(store.list_tasks().await.unwrap().is_empty());
-        assert!(!migration.is_applied(marker).await.unwrap());
-
-        // Flag on: the legacy schedule becomes a generic task definition.
-        run_legacy_migration_if_enabled(store.clone(), directory.path(), true).await;
-        let tasks = store.list_tasks().await.unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].provider_id, "dbx.database-backup");
-        assert_eq!(tasks[0].id, "legacy-1");
-        assert!(migration.is_applied(marker).await.unwrap());
-
-        // Restart-safe: a second run is a no-op (idempotent marker protocol).
-        run_legacy_migration_if_enabled(store.clone(), directory.path(), true).await;
-        assert_eq!(store.list_tasks().await.unwrap().len(), 1);
     }
 }

@@ -61,29 +61,21 @@ impl Default for TaskRetryPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum TaskBackoffStrategy {
+    #[default]
     Fixed,
     Exponential,
 }
 
-impl Default for TaskBackoffStrategy {
-    fn default() -> Self {
-        Self::Fixed
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum TaskMisfirePolicy {
+    #[default]
     Coalesce,
     FireOnce,
     Skip,
-}
-
-impl Default for TaskMisfirePolicy {
-    fn default() -> Self {
-        Self::Coalesce
-    }
 }
 
 /// Bounded resident restart policy: restart must never become an unbounded
@@ -108,17 +100,13 @@ pub enum TaskExecutionMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum TaskConcurrencyPolicy {
+    #[default]
     Forbid,
     Queue,
     Replace,
     Parallel,
-}
-
-impl Default for TaskConcurrencyPolicy {
-    fn default() -> Self {
-        Self::Forbid
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

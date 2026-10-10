@@ -265,7 +265,7 @@ impl PluginTaskExecutor {
                 run_id: context.run.id.clone(),
                 trigger_id,
                 connection_id,
-                config_version: task.config_version.max(1) as u32,
+                config_version: task.config_version.max(1),
                 config,
             },
             run: PluginTaskRunRef { run_id: context.run.id.clone(), attempt: context.run.attempt.max(1) as u64 },
@@ -291,7 +291,7 @@ impl TaskExecutor for PluginTaskExecutor {
             .state
             .plugin_host
             .resolve_task_provider(&plugin_id, &provider_id)
-            .map_err(|error| TaskError::provider_not_found(error))?;
+            .map_err(TaskError::provider_not_found)?;
         // Every bound connection must open, not just the primary one.
         for connection_id in dispatch_targets(&task.target, contribution.allow_multiple_connections) {
             self.ensure_connection(connection_id.as_deref()).await?;
@@ -326,7 +326,7 @@ impl TaskExecutor for PluginTaskExecutor {
             .execution
             .timeout_seconds
             .filter(|seconds| *seconds > 0)
-            .map(|seconds| Duration::from_secs(seconds))
+            .map(Duration::from_secs)
             .unwrap_or(DEFAULT_TASK_TIMEOUT);
         // Serialize once: a config that cannot serialize must fail before the
         // event pump below is spawned (its `?` could not abort the pump).
@@ -522,7 +522,7 @@ impl ResidentExecutor for PluginResidentExecutor {
                 run_id: context.run.id.clone(),
                 trigger_id: local_trigger_id(&task),
                 connection_id: task.target.connection_id.clone(),
-                config_version: task.config_version.max(1) as u32,
+                config_version: task.config_version.max(1),
                 config,
             },
             run: dbx_plugin_runtime::plugins::PluginTaskRunRef {
@@ -545,7 +545,7 @@ impl ResidentExecutor for PluginResidentExecutor {
             .plugin_host
             .start_task(&plugin_id, &provider_id, request, Some(timeout))
             .await
-            .map_err(|error| TaskError::invalid_config(error))?;
+            .map_err(TaskError::invalid_config)?;
         Ok(ResidentSession {
             id: String::new(),
             task_id: task.id,

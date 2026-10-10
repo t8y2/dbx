@@ -230,7 +230,7 @@ pub(crate) fn scan_segments(directory: &Path) -> Result<Vec<SegmentFile>, TaskEr
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if let Ok(segment) = u32::from_str_radix(name.trim_end_matches(".log"), 10) {
+        if let Ok(segment) = name.trim_end_matches(".log").parse::<u32>() {
             if name.ends_with(".log") && name.len() == 10 && format!("{segment:06}.log") == name {
                 segments.push(SegmentFile { segment, path: entry.path() });
             }

@@ -1499,7 +1499,8 @@ fn validate_localizations(localizations: &BTreeMap<String, PluginManifestLocaliz
                 }
             }
             for (trigger_id, trigger) in &contribution.triggers {
-                if !valid_identifier(trigger_id) || trigger.label.as_ref().is_some_and(|value| value.trim().is_empty()) {
+                if !valid_identifier(trigger_id) || trigger.label.as_ref().is_some_and(|value| value.trim().is_empty())
+                {
                     errors.push(format!(
                         "Plugin localization '{locale}' has an invalid trigger entry '{contribution_id}/{trigger_id}'"
                     ));
@@ -1515,7 +1516,8 @@ fn validate_localizations(localizations: &BTreeMap<String, PluginManifestLocaliz
                     }
                 }
                 for (group_id, group) in &trigger.groups {
-                    if !valid_identifier(group_id) || group.label.as_ref().is_some_and(|value| value.trim().is_empty()) {
+                    if !valid_identifier(group_id) || group.label.as_ref().is_some_and(|value| value.trim().is_empty())
+                    {
                         errors.push(format!(
                             "Plugin localization '{locale}' has an invalid trigger group entry '{contribution_id}/{trigger_id}/{group_id}'"
                         ));
@@ -2241,7 +2243,8 @@ fn valid_plugin_method_name(action: &str) -> bool {
 /// Accept entries are file extensions (`.pem`) or MIME types (`text/plain`), so
 /// the browser `<input accept>` attribute and the native dialog filters can use
 /// them directly. Anything else is rejected instead of silently ignored.
-fn valid_picker_filter(filter: &str) -> bool {    if let Some(extension) = filter.strip_prefix('.') {
+fn valid_picker_filter(filter: &str) -> bool {
+    if let Some(extension) = filter.strip_prefix('.') {
         return !extension.is_empty()
             && extension.len() <= 16
             && extension.chars().all(|character| character.is_ascii_alphanumeric());
@@ -3529,14 +3532,26 @@ mod tests {
         assert_eq!(trigger.groups[0].id, "source");
         assert_eq!(trigger.groups[0].label, "Source");
         let mut errors = Vec::new();
-        validate_contributions(std::slice::from_ref(&provider), true, false, std::env::temp_dir().as_path(), &mut errors);
+        validate_contributions(
+            std::slice::from_ref(&provider),
+            true,
+            false,
+            std::env::temp_dir().as_path(),
+            &mut errors,
+        );
         assert!(errors.is_empty(), "declared group references must pass: {errors:?}");
 
         // An undeclared group reference is rejected (the field would strand
         // outside its intended section).
         let provider: PluginContribution = serde_json::from_value(field_json(serde_json::json!("missing"))).unwrap();
         let mut errors = Vec::new();
-        validate_contributions(std::slice::from_ref(&provider), true, false, std::env::temp_dir().as_path(), &mut errors);
+        validate_contributions(
+            std::slice::from_ref(&provider),
+            true,
+            false,
+            std::env::temp_dir().as_path(),
+            &mut errors,
+        );
         assert!(
             errors.iter().any(|error| error.contains("references undeclared group 'missing'")),
             "dangling group references must be rejected: {errors:?}"
@@ -3560,7 +3575,13 @@ mod tests {
         }))
         .unwrap();
         let mut errors = Vec::new();
-        validate_contributions(std::slice::from_ref(&provider), true, false, std::env::temp_dir().as_path(), &mut errors);
+        validate_contributions(
+            std::slice::from_ref(&provider),
+            true,
+            false,
+            std::env::temp_dir().as_path(),
+            &mut errors,
+        );
         assert!(
             errors.iter().any(|error| error.contains("invalid or duplicate id")),
             "duplicate group ids must be rejected: {errors:?}"
@@ -3580,7 +3601,13 @@ mod tests {
         }))
         .unwrap();
         let mut errors = Vec::new();
-        validate_contributions(std::slice::from_ref(&provider), true, false, std::env::temp_dir().as_path(), &mut errors);
+        validate_contributions(
+            std::slice::from_ref(&provider),
+            true,
+            false,
+            std::env::temp_dir().as_path(),
+            &mut errors,
+        );
         assert!(
             errors.iter().any(|error| error.contains("references undeclared group 'source'")),
             "group tags without a groups declaration must be rejected: {errors:?}"
@@ -3607,10 +3634,7 @@ mod tests {
         let mut localizations = std::collections::BTreeMap::new();
         let mut triggers = std::collections::BTreeMap::new();
         let mut groups = std::collections::BTreeMap::new();
-        groups.insert(
-            "source".to_string(),
-            PluginTaskTriggerGroupLocalization { label: Some("Quelle".to_string()) },
-        );
+        groups.insert("source".to_string(), PluginTaskTriggerGroupLocalization { label: Some("Quelle".to_string()) });
         triggers.insert(
             "copy".to_string(),
             super::PluginTaskTriggerLocalization {
@@ -3622,18 +3646,9 @@ mod tests {
         let mut contributions = std::collections::BTreeMap::new();
         contributions.insert(
             "sample.tasks".to_string(),
-            super::PluginContributionLocalization {
-                triggers,
-                ..Default::default()
-            },
+            super::PluginContributionLocalization { triggers, ..Default::default() },
         );
-        localizations.insert(
-            "de-DE".to_string(),
-            PluginManifestLocalization {
-                contributions,
-                ..Default::default()
-            },
-        );
+        localizations.insert("de-DE".to_string(), PluginManifestLocalization { contributions, ..Default::default() });
         let mut errors = Vec::new();
         super::validate_localizations(&localizations, &mut errors);
         assert!(errors.is_empty(), "valid group localizations must pass: {errors:?}");
@@ -3647,27 +3662,14 @@ mod tests {
         );
         triggers.insert(
             "copy".to_string(),
-            super::PluginTaskTriggerLocalization {
-                label: None,
-                fields: std::collections::BTreeMap::new(),
-                groups,
-            },
+            super::PluginTaskTriggerLocalization { label: None, fields: std::collections::BTreeMap::new(), groups },
         );
         let mut contributions = std::collections::BTreeMap::new();
         contributions.insert(
             "sample.tasks".to_string(),
-            super::PluginContributionLocalization {
-                triggers,
-                ..Default::default()
-            },
+            super::PluginContributionLocalization { triggers, ..Default::default() },
         );
-        localizations.insert(
-            "de-DE".to_string(),
-            PluginManifestLocalization {
-                contributions,
-                ..Default::default()
-            },
-        );
+        localizations.insert("de-DE".to_string(), PluginManifestLocalization { contributions, ..Default::default() });
         let mut errors = Vec::new();
         super::validate_localizations(&localizations, &mut errors);
         assert!(
@@ -3702,7 +3704,8 @@ mod tests {
 
         // A text field may declare static options alongside `options_action`
         // (the reserved-value pattern, e.g. files tasks' `local` side).
-        let provider: PluginContribution = serde_json::from_value(field_json(serde_json::json!("host/connections"))).unwrap();
+        let provider: PluginContribution =
+            serde_json::from_value(field_json(serde_json::json!("host/connections"))).unwrap();
         let mut errors = Vec::new();
         validate_contributions(std::slice::from_ref(&provider), true, false, dir.path(), &mut errors);
         assert!(errors.is_empty(), "static+dynamic options must pass: {errors:?}");
@@ -4742,10 +4745,7 @@ mod tests {
         let source = provider.fields[0].picker.as_ref().unwrap();
         assert_eq!(source.source, Some(super::PluginFormFieldPickerSource::Plugin));
         assert_eq!(source.action.as_deref(), Some("files/listDirs"));
-        assert_eq!(
-            source.connection_field.as_ref().unwrap().keys(),
-            &["source_connection_id".to_string()][..]
-        );
+        assert_eq!(source.connection_field.as_ref().unwrap().keys(), &["source_connection_id".to_string()][..]);
         let destination = provider.fields[1].picker.as_ref().unwrap();
         assert_eq!(
             destination.connection_field.as_ref().unwrap().keys(),
@@ -4864,7 +4864,8 @@ mod tests {
         let field = &provider.triggers[0].fields[0];
         assert_eq!(field.empty_label.as_deref(), Some("(task connection)"));
         assert_eq!(
-            manifest.localizations["zh-CN"].contributions["files.tasks"].triggers["copy"].fields["source_connection_id"]
+            manifest.localizations["zh-CN"].contributions["files.tasks"].triggers["copy"].fields
+                ["source_connection_id"]
                 .empty_label
                 .as_deref(),
             Some("（跟随任务连接）")

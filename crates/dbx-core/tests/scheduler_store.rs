@@ -75,7 +75,7 @@ async fn concurrent_save_race_produces_exactly_one_winner() {
     }
     let winners = futures::future::join_all(handles).await.into_iter().filter(|r| matches!(r, Ok(Ok(_)))).count();
     assert_eq!(winners, 1, "exactly one CAS update may win");
-    let final_task = store.get_task("t5".into()).await.unwrap();
+    let final_task = store.get_task("t5").await.unwrap();
     assert_eq!(final_task.version, 2);
 }
 
@@ -162,7 +162,7 @@ async fn finish_run_is_idempotent_and_updates_task_status() {
     // Second finish is a no-op returning the stored row.
     let again = store.finish_run(run.id.clone(), TaskRunStatus::Failed, None, Some("boom".into()), None).await.unwrap();
     assert_eq!(again.status, TaskRunStatus::Success);
-    let task = store.get_task("t1".into()).await.unwrap();
+    let task = store.get_task("t1").await.unwrap();
     assert_eq!(task.last_run_status, Some(TaskRunStatus::Success));
 }
 
@@ -260,7 +260,7 @@ async fn enqueue_due_coalesce_misfire_runs_once_with_current_time() {
         (now - created).num_milliseconds() < 1,
         "coalesce runs at the recovery instant (created {created}, now {now})"
     );
-    let task = store.get_task("t1".into()).await.unwrap();
+    let task = store.get_task("t1").await.unwrap();
     let advanced = task.next_run_at.unwrap().parse::<chrono::DateTime<Utc>>().unwrap();
     assert!(advanced > now, "next_run_at advanced atomically with the enqueue");
     // A second pass does not enqueue again.
@@ -308,7 +308,7 @@ async fn enqueue_due_fires_once_trigger_exactly_once_and_clears_schedule() {
     save(&store, task).await;
     let enqueued = store.enqueue_due(Utc::now()).await.unwrap();
     assert_eq!(enqueued.len(), 1);
-    let task = store.get_task("t1".into()).await.unwrap();
+    let task = store.get_task("t1").await.unwrap();
     assert!(task.next_run_at.is_none(), "once clears next_run_at but keeps the task");
     assert!(task.enabled);
     assert!(store.enqueue_due(Utc::now()).await.unwrap().is_empty());

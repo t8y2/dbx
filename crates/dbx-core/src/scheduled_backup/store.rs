@@ -247,12 +247,6 @@ impl BackupStore {
         .await
     }
 
-    /// Records a run that is executed outside the legacy queue (the scheduler
-    /// builtin backup provider drives it directly). The row is inserted
-    /// straight into the `running` state, so the legacy engine never claims
-    /// it, while history, progress, cancel and retention keep working for the
-    /// old UI. Additive: no existing method or behavior is changed.
-
     pub async fn enqueue(&self, request: RunRequest) -> Result<BackupRun, String> {
         self.access(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql_error)?;

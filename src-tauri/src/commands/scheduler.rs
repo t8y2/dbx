@@ -198,7 +198,7 @@ pub async fn scheduler_list_runs(
     let mut matched: Vec<TaskRun> = runs
         .into_iter()
         .filter(|run| match &status {
-            Some(wanted) => serde_json::to_value(&run.status)
+            Some(wanted) => serde_json::to_value(run.status)
                 .ok()
                 .and_then(|value| value.as_str().map(|value| value == wanted))
                 .unwrap_or(false),

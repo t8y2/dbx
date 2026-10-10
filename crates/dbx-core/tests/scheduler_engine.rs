@@ -35,7 +35,7 @@ async fn manual_run_executes_and_persists_logs() {
     assert_eq!(page.entries[0].seq, 1);
 
     // Task bookkeeping updated.
-    let task = store.get_task("t1".into()).await.unwrap();
+    let task = store.get_task("t1").await.unwrap();
     assert_eq!(task.last_run_status, Some(TaskRunStatus::Success));
 }
 

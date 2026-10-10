@@ -18,7 +18,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::{drive_until_terminal, engine, registry_with, save, temp_store, Behavior, TestExecutor};
-use dbx_core::scheduler::{register_event_sink, SchedulerStore, TaskDefinition, TaskRunStatus, TaskTrigger};
+use dbx_core::scheduler::{register_event_sink, TaskDefinition, TaskRunStatus, TaskTrigger};
 use tempfile::TempDir;
 
 const SECRET_VALUE: &str = "QA-SUPERSECRET-do-not-persist-9f2c1ab7";
@@ -80,7 +80,7 @@ async fn secrets_never_reach_database_logs_or_events_across_a_full_lifecycle() {
     for name in ["state.db", "state.db-wal", "state.db-shm"] {
         let path = dir.path().join("scheduler").join(name);
         if let Ok(bytes) = std::fs::read(&path) {
-            let haystack = String::from_utf8_lossy(&bytes).to_owned();
+            let haystack = String::from_utf8_lossy(&bytes).into_owned();
             assert!(!haystack.contains(SECRET_VALUE), "{name} contains the planted secret value");
         }
     }
@@ -202,7 +202,7 @@ async fn artifacts_belong_to_their_run_and_the_body_never_reaches_sqlite() {
     for db_name in ["state.db", "state.db-wal", "state.db-shm"] {
         let path = dir.path().join("scheduler").join(db_name);
         if let Ok(bytes) = std::fs::read(&path) {
-            let haystack = String::from_utf8_lossy(&bytes).to_owned();
+            let haystack = String::from_utf8_lossy(&bytes).into_owned();
             assert!(!haystack.contains(ARTIFACT_BODY), "{db_name} contains the artifact body");
         }
     }

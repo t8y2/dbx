@@ -819,7 +819,7 @@ impl SchedulerStore {
 
     pub async fn get_run(&self, run_id: String) -> Result<TaskRun, TaskError> {
         self.access(move |conn| {
-            conn.query_row(&format!("{} WHERE id=?", Self::RUN_SELECT), [run_id], |row| Ok(Self::run_from_row(row)?))
+            conn.query_row(&format!("{} WHERE id=?", Self::RUN_SELECT), [run_id], Self::run_from_row)
                 .optional()
                 .map_err(|error| TaskError::unavailable(error.to_string()))?
                 .ok_or_else(|| TaskError::new(super::TaskErrorKind::NonRetryable, "run_not_found", "Run not found"))
@@ -840,7 +840,7 @@ impl SchedulerStore {
             };
             let mut statement = conn.prepare(&sql).map_err(|error| TaskError::unavailable(error.to_string()))?;
             let rows = statement
-                .query_map(rusqlite::params_from_iter(bind.iter()), |row| Ok(Self::run_from_row(row)?))
+                .query_map(rusqlite::params_from_iter(bind.iter()), Self::run_from_row)
                 .map_err(|error| TaskError::unavailable(error.to_string()))?;
             rows.collect::<Result<Vec<_>, _>>().map_err(|error| TaskError::unavailable(error.to_string()))
         })
@@ -856,7 +856,7 @@ impl SchedulerStore {
                 ))
                 .map_err(|error| TaskError::unavailable(error.to_string()))?;
             let rows = statement
-                .query_map([&task_id], |row| Ok(Self::run_from_row(row)?))
+                .query_map([&task_id], Self::run_from_row)
                 .map_err(|error| TaskError::unavailable(error.to_string()))?;
             rows.collect::<Result<Vec<_>, _>>()
                 .map_err(|error| TaskError::unavailable(error.to_string()))
@@ -910,7 +910,7 @@ impl SchedulerStore {
                 .query_row("SELECT payload_json FROM task_runs WHERE id=?", [run_id], |row| row.get(0))
                 .optional()
                 .map_err(|error| TaskError::unavailable(error.to_string()))?;
-            Ok(payload.and_then(|payload| decode::<RunJob>(&payload).ok()).map_or(false, |job| job.cancel_requested))
+            Ok(payload.and_then(|payload| decode::<RunJob>(&payload).ok()).is_some_and(|job| job.cancel_requested))
         })
         .await
     }

@@ -3935,8 +3935,7 @@ impl XlsxStreamRowsState {
             let row_count = end_row.saturating_sub(*start_row).saturating_add(1);
             *start_row <= first_row
                 && first_row <= *end_row
-                && *start_column <= first_column
-                && first_column <= *end_column
+                && *start_column == first_column
                 && column_count <= MAX_FAST_PREVIEW_CELLS
                 && expected_column_count
                     .map_or(column_count.saturating_mul(row_count) <= MAX_FAST_PREVIEW_CELLS, |expected| {
@@ -3944,8 +3943,7 @@ impl XlsxStreamRowsState {
                     })
         });
         self.start_row = Some(first_row);
-        self.start_column =
-            dimension.map(|((_, start_column), _)| start_column.min(first_column)).unwrap_or(first_column);
+        self.start_column = first_column;
         self.declared_column_count = dimension
             .map(|((_, start_column), (_, end_column))| end_column.saturating_sub(start_column).saturating_add(1));
     }
@@ -8721,6 +8719,14 @@ mod tests {
     }
 
     fn build_styled_test_xlsx<S: AsRef<str>>(date1904: bool, cells: &[(S, usize, f64)]) -> Vec<u8> {
+        build_styled_test_xlsx_with_dimension(date1904, None, cells)
+    }
+
+    fn build_styled_test_xlsx_with_dimension<S: AsRef<str>>(
+        date1904: bool,
+        dimension_ref: Option<&str>,
+        cells: &[(S, usize, f64)],
+    ) -> Vec<u8> {
         let cursor = Cursor::new(Vec::new());
         let mut zip = zip::ZipWriter::new(cursor);
         let workbook_pr = if date1904 { r#"<workbookPr date1904="1"/>"# } else { "" };
@@ -8812,14 +8818,16 @@ mod tests {
     <xf numFmtId="175" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
   </cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
-</styleSheet>"##,
+  </styleSheet>"##,
         );
+        let dimension_xml = dimension_ref.map(|d| format!(r#"<dimension ref="{d}"/>"#)).unwrap_or_default();
         write_xlsx_test_entry(
             &mut zip,
             "xl/worksheets/sheet1.xml",
             &format!(
                 r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  {dimension_xml}
   <sheetData>{rows_xml}</sheetData>
 </worksheet>"#
             ),
@@ -9183,6 +9191,147 @@ mod tests {
             }
         }
         assert_eq!(streamed_rows, vec![vec![serde_json::json!(1), serde_json::json!(2)]]);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn xlsx_stream_initialize_range_dimension_column_equality() {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(16);
+        let options = TableImportParseOptions::default();
+        let row_range = effective_import_row_range(&options).unwrap();
+
+        // 1. Dimension ((1, 1), (10, 5)) starts at column 1, but first cell is at column 2 (B).
+        // Since column axis requires equality (*start_column == first_column), the dimension
+        // is rejected so streaming start_column matches first_column without being pulled left.
+        let mut state = XlsxStreamRowsState::new(sender.clone(), row_range, Some(((1, 1), (10, 5))), None, 500);
+        state.initialize_range(2, 2);
+        assert_eq!(state.start_row, Some(2));
+        assert_eq!(state.start_column, 2);
+        assert_eq!(state.declared_column_count, None);
+
+        // 2. Dimension ((1, 2), (10, 5)) starts at column 2, and first cell is at row 3, column 2.
+        // Row axis containment (*start_row <= first_row <= *end_row) holds and column axis matches (*start_column == first_column).
+        // Dimension is accepted: declared_column_count = 5 - 2 + 1 = 4.
+        let mut state = XlsxStreamRowsState::new(sender, row_range, Some(((1, 2), (10, 5))), None, 500);
+        state.initialize_range(3, 2);
+        assert_eq!(state.start_row, Some(3));
+        assert_eq!(state.start_column, 2);
+        assert_eq!(state.declared_column_count, Some(4));
+    }
+
+    #[test]
+    fn xlsx_stream_custom_title_row_with_dimension() {
+        // Covers initialize_range and preview when worksheet contains a <dimension> element.
+        // Row 1 is a banner row, title_row is 2, data_start_row is 3.
+        let path = std::env::temp_dir().join(format!("dbx-excel-dimension-custom-title-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            build_styled_test_xlsx_with_dimension(
+                false,
+                Some("A1:B4"),
+                &[
+                    ("A1", 0, 999.0),
+                    ("A2", 0, 10.0),
+                    ("B2", 0, 20.0),
+                    ("A3", 0, 1.0),
+                    ("B3", 0, 2.0),
+                    ("A4", 0, 3.0),
+                    ("B4", 0, 4.0),
+                ],
+            ),
+        )
+        .unwrap();
+        let options = TableImportParseOptions {
+            title_row: Some(2),
+            data_start_row: Some(3),
+            ..TableImportParseOptions::default()
+        };
+        let (preview, _) = parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &options, 50).unwrap();
+        assert_eq!(preview.columns, vec!["10", "20"]);
+        assert_eq!(
+            preview.rows,
+            vec![vec![serde_json::json!(1), serde_json::json!(2)], vec![serde_json::json!(3), serde_json::json!(4)],]
+        );
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        let stream_result = stream_xlsx_rows_to_channel(
+            &path.to_string_lossy(),
+            &options,
+            500,
+            Some(preview.columns.clone()),
+            HashSet::new(),
+            false,
+            sender,
+        );
+        assert!(stream_result.is_ok(), "stream_xlsx_rows_to_channel failed: {:?}", stream_result.err());
+
+        let mut streamed_header = None;
+        let mut streamed_rows = Vec::new();
+        while let Some(message) = receiver.blocking_recv() {
+            match message.unwrap() {
+                XlsxStreamMessage::Header(header) => streamed_header = Some(header),
+                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                _ => {}
+            }
+        }
+        assert_eq!(streamed_header, Some(preview.columns));
+        assert_eq!(streamed_rows, preview.rows);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn xlsx_stream_leading_empty_column_with_dimension() {
+        // Dimension declares A1:C3, but column A is completely empty across all rows.
+        // Data only occupies columns B and C.
+        // Column equality prevents streaming start_column from being pulled to column A.
+        let path =
+            std::env::temp_dir().join(format!("dbx-excel-dimension-empty-leading-col-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            build_styled_test_xlsx_with_dimension(
+                false,
+                Some("A1:C3"),
+                &[("B1", 0, 10.0), ("C1", 0, 20.0), ("B2", 0, 1.0), ("C2", 0, 2.0), ("B3", 0, 3.0), ("C3", 0, 4.0)],
+            ),
+        )
+        .unwrap();
+        let options = TableImportParseOptions {
+            title_row: Some(1),
+            data_start_row: Some(2),
+            ..TableImportParseOptions::default()
+        };
+        let (preview, _) = parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &options, 50).unwrap();
+        assert_eq!(preview.columns, vec!["10", "20"]);
+        assert_eq!(
+            preview.rows,
+            vec![vec![serde_json::json!(1), serde_json::json!(2)], vec![serde_json::json!(3), serde_json::json!(4)],]
+        );
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        let stream_result = stream_xlsx_rows_to_channel(
+            &path.to_string_lossy(),
+            &options,
+            500,
+            Some(preview.columns.clone()),
+            HashSet::new(),
+            false,
+            sender,
+        );
+        assert!(stream_result.is_ok(), "stream_xlsx_rows_to_channel failed: {:?}", stream_result.err());
+
+        let mut streamed_header = None;
+        let mut streamed_rows = Vec::new();
+        while let Some(message) = receiver.blocking_recv() {
+            match message.unwrap() {
+                XlsxStreamMessage::Header(header) => streamed_header = Some(header),
+                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                _ => {}
+            }
+        }
+        assert_eq!(streamed_header, Some(preview.columns));
+        assert_eq!(streamed_rows, preview.rows);
 
         let _ = std::fs::remove_file(path);
     }

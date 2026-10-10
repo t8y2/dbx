@@ -1103,7 +1103,7 @@ describe("useDataGridExport prepared row statements", () => {
     expect(createExportState(table, ["created_at"], matrix, ["2026-09-30 10:00:00"]).canCopyWithExtractor("sql-inserts")).toBe(true);
   });
 
-  it("keeps a manually-assigned primary key insertable under primary-key exclusion", () => {
+  it("disables INSERT when excluding primary keys removes the only selected manual key", () => {
     const compositeKeyTable: DataGridTableMeta = {
       tableName: "daily_stats",
       primaryKeys: ["id", "stat_date"],
@@ -1120,6 +1120,89 @@ describe("useDataGridExport prepared row statements", () => {
     };
 
     const state = createExportState(compositeKeyTable, ["id", "stat_date", "name"], matrix, [1, "2026-08-18", "Ada"], undefined, undefined, [], excludePrimaryKeys);
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
+  });
+
+  it("keeps a case-distinct PostgreSQL column insertable when excluding a primary key", () => {
+    const table: DataGridTableMeta = {
+      tableName: "quoted_ids",
+      primaryKeys: ["ID"],
+      columns: [
+        { name: "ID", data_type: "text", is_nullable: false, is_primary_key: true },
+        { name: "id", data_type: "text", is_nullable: false },
+      ],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["id"], rows: [["lowercase"]] };
+    const excludePrimaryKeys = {
+      ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+    };
+
+    const state = createExportState(table, ["ID", "id"], matrix, ["key", "lowercase"], undefined, undefined, [], excludePrimaryKeys, false, undefined, false, undefined, undefined, "postgres");
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
+  });
+
+  it("uses exact PostgreSQL primary-key names when column metadata is incomplete", () => {
+    const table: DataGridTableMeta = {
+      tableName: "quoted_ids",
+      primaryKeys: ["ID"],
+      columns: [{ name: "ID", data_type: "integer", is_nullable: false, is_primary_key: true, extra: "identity" }],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [["lowercase"]] };
+    const excludePrimaryKeys = {
+      ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+    };
+
+    const state = createExportState(table, ["id"], matrix, ["lowercase"], undefined, undefined, [], excludePrimaryKeys, false, undefined, false, undefined, undefined, "postgres");
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
+  });
+
+  it("uses the exact column metadata for a case-distinct PostgreSQL identity primary key", () => {
+    const table: DataGridTableMeta = {
+      tableName: "quoted_ids",
+      primaryKeys: ["ID"],
+      columns: [
+        { name: "ID", data_type: "integer", is_nullable: false, is_primary_key: true, extra: "identity" },
+        { name: "id", data_type: "text", is_nullable: false },
+      ],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["id"], rows: [["lowercase"]] };
+
+    const state = createExportState(table, ["ID", "id"], matrix, ["key", "lowercase"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, undefined, undefined, "postgres");
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
+  });
+
+  it("excludes a MySQL primary key when its listed name differs only by case", () => {
+    const table: DataGridTableMeta = {
+      tableName: "users",
+      primaryKeys: ["ID"],
+      columns: [{ name: "id", data_type: "int", is_nullable: false, is_primary_key: false }],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
+    const excludePrimaryKeys = {
+      ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+    };
+
+    const state = createExportState(table, ["id"], matrix, [1], undefined, undefined, [], excludePrimaryKeys, false, undefined, false, undefined, undefined, "mysql");
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
+  });
+
+  it("keeps a MySQL identity primary key when its listed name differs only by case", () => {
+    const table: DataGridTableMeta = {
+      tableName: "users",
+      primaryKeys: ["ID"],
+      columns: [{ name: "id", data_type: "int", is_nullable: false, is_primary_key: false, extra: "auto_increment" }],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
+
+    const state = createExportState(table, ["id"], matrix, [1], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, undefined, undefined, "mysql");
 
     expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
   });

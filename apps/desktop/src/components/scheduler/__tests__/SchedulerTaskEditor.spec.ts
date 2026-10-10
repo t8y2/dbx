@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, type App } from "vue";
+import { createApp, h, nextTick, reactive, type App } from "vue";
 import { createPinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "../../../i18n";
@@ -271,5 +271,63 @@ describe("SchedulerTaskEditor", () => {
     await flush();
     // No declaration → unfiltered single-select picker, no chip board.
     expect(container.querySelector("[data-scheduler-editor-connection-multi]")).toBeNull();
+  });
+
+  // The app reuses ONE mounted editor across open/close cycles (the specs
+  // above mount fresh), so every reopen must reset the ephemeral state —
+  // draft, form values, conflict banner and the connection-chip search.
+  it("resets ephemeral state between sessions on one mounted instance", async () => {
+    const state = reactive<{ open: boolean; task: TaskDefinition | null }>({ open: false, task: null });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const app = createApp({
+      setup() {
+        return () =>
+          h(SchedulerTaskEditor, {
+            open: state.open,
+            task: state.task,
+            providers,
+            connections,
+            "onUpdate:open": (value: boolean) => {
+              state.open = value;
+            },
+            onSaved: () => {},
+          });
+      },
+    });
+    mountedApps.push(app);
+    app.use(createPinia());
+    app.use(i18n);
+    app.mount(container);
+    await flush();
+
+    const nameInput = () => document.body.querySelector<HTMLInputElement>("[data-scheduler-editor-name]")!;
+    const searchInput = () => document.body.querySelector<HTMLInputElement>("[data-scheduler-editor-connection-search]")!;
+
+    // Session 1: edit an SSH task, filter the connection chips.
+    state.task = cronTask();
+    state.open = true;
+    await flush();
+    expect(searchInput()).toBeTruthy();
+    searchInput().value = "ssh-host-2";
+    searchInput().dispatchEvent(new Event("input"));
+    await flush();
+    expect(searchInput().value).toBe("ssh-host-2");
+
+    // Session 2: reopen on another task — the search must come back empty.
+    state.open = false;
+    await flush();
+    state.task = { ...cronTask(), id: "task-2", name: "second" };
+    state.open = true;
+    await flush();
+    expect(searchInput().value).toBe("", "the chip search must reset on reopen");
+
+    // Session 3: create mode on the same instance starts from an empty name.
+    state.open = false;
+    await flush();
+    state.task = null;
+    state.open = true;
+    await flush();
+    expect(nameInput().value).toBe("", "a second create must start from an empty name");
   });
 });

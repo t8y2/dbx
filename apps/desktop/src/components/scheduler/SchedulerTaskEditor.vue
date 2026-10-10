@@ -142,6 +142,7 @@ watch(
   ([open]) => {
     if (!open) return;
     versionConflict.value = false;
+    connectionSearch.value = "";
     // A saved high-risk task stays acknowledged for the session; only a fresh
     // app run confirms again.
     highRiskAcknowledged.value = props.task ? isHighRiskAcknowledged(props.task.id) : false;

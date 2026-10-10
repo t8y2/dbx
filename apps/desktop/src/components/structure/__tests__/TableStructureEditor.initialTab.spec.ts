@@ -402,7 +402,7 @@ describe("TableStructureEditor initial tab", () => {
     expect(root.textContent).toContain("structureEditor.addForeignKey");
   });
 
-  it("restores the fields horizontal scrollbar after visiting triggers", async () => {
+  it.each(["triggers", "ddl", "foreignKeys"])("restores the fields horizontal scrollbar after visiting %s", async (tab) => {
     const scrollWidthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollWidth");
     const clientWidthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
     try {
@@ -424,7 +424,7 @@ describe("TableStructureEditor initial tab", () => {
       const root = await mountStructureEditor();
       await vi.waitFor(() => expect(root.querySelector(".structure-horizontal-scrollbar")).not.toBeNull());
 
-      root.querySelector<HTMLButtonElement>('[data-tab-trigger="triggers"]')?.click();
+      root.querySelector<HTMLButtonElement>(`[data-tab-trigger="${tab}"]`)!.click();
       await settle();
       expect(root.querySelector(".structure-horizontal-scrollbar")).toBeNull();
 

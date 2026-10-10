@@ -29,7 +29,42 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 
 vi.mock("@/lib/backend/api", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/backend/api")>();
-  return { ...original, revealPathInFileManager: vi.fn() };
+  return { ...original, revealPathInFileManager: vi.fn(), loadTaskRuns: vi.fn(), loadTaskRun: vi.fn(), loadTaskRunItems: vi.fn() };
+});
+
+// The history entry point is verified here; the two dialogs have their own specs.
+const historyDialogState = vi.hoisted(() => ({ open: false, detailOpen: false, detailRunId: null as string | null }));
+
+vi.mock("@/components/export/TaskHistoryDialog.vue", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    default: defineComponent({
+      props: { open: Boolean },
+      emits: ["update:open", "open-run"],
+      setup(props, { emit }) {
+        return () => {
+          historyDialogState.open = props.open;
+          return h("div", { "data-testid": "task-history-dialog" }, [h("button", { "data-testid": "task-history-dialog-open-run", onClick: () => emit("open-run", "run-1") })]);
+        };
+      },
+    }),
+  };
+});
+
+vi.mock("@/components/export/TaskRunDetailDialog.vue", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    default: defineComponent({
+      props: { open: Boolean, runId: String },
+      setup(props) {
+        return () => {
+          historyDialogState.detailOpen = props.open;
+          historyDialogState.detailRunId = props.runId ?? null;
+          return h("div", { "data-testid": "task-run-detail-dialog" });
+        };
+      },
+    }),
+  };
 });
 
 import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue";
@@ -735,5 +770,90 @@ describe("ExportProgressPopover file name and reveal action", () => {
     await vi.waitFor(() => {
       expect(useToast().message.value).toContain("Failed to open folder");
     });
+  });
+});
+
+describe("ExportProgressPopover data transfer history entry", () => {
+  function historyRun(runId: string, status: "succeeded" | "partial_failed" = "succeeded", database = "shop") {
+    return {
+      runId,
+      taskType: "transfer" as const,
+      lifecycleOwner: "tauri" as const,
+      status,
+      createdAt: "2025-03-05T10:00:00.000Z",
+      startedAt: "2025-03-05T10:00:00.000Z",
+      finishedAt: "2025-03-05T10:00:04.000Z",
+      ownerInstanceId: "instance-1",
+      errorCode: null,
+      safeErrorSummary: null,
+      historyComplete: true,
+      source: { connectionId: "src", databaseType: "mysql", database, schema: "" },
+      target: { connectionId: "dst", databaseType: "postgres", database: "warehouse", schema: "public" },
+    };
+  }
+
+  function tab(title: string): HTMLButtonElement {
+    const element = [...document.querySelectorAll<HTMLButtonElement>('button[role="tab"]')].find((candidate) => candidate.textContent?.trim() === title);
+    if (!element) throw new Error(`Missing tab ${title}`);
+    return element;
+  }
+
+  it("stays reachable after a restart, loads recent transfers only on demand, and opens the detail of a stored run", async () => {
+    vi.mocked(api.loadTaskRuns).mockReset();
+    vi.mocked(api.loadTaskRuns).mockResolvedValue({ items: [historyRun("run-1", "partial_failed")], nextCursor: null });
+    historyDialogState.open = false;
+    historyDialogState.detailOpen = false;
+    historyDialogState.detailRunId = null;
+
+    await mountPopover();
+
+    // No in-memory task and no request until the user asks for history.
+    expect(document.body.textContent).toContain("Background Tasks");
+    expect(api.loadTaskRuns).not.toHaveBeenCalled();
+
+    tab("History").click();
+    await vi.waitFor(() => expect(api.loadTaskRuns).toHaveBeenCalledWith({ taskType: "transfer", limit: 5, cursor: undefined }));
+    expect(document.body.textContent).toContain("mysql · shop");
+    expect(document.body.textContent).toContain("Partially failed");
+
+    [...document.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.includes("mysql · shop"))?.click();
+    await nextTick();
+
+    expect(historyDialogState.detailOpen).toBe(true);
+    expect(historyDialogState.detailRunId).toBe("run-1");
+  });
+
+  it("opens the full history dialog so every stored run stays browsable", async () => {
+    vi.mocked(api.loadTaskRuns).mockReset();
+    vi.mocked(api.loadTaskRuns).mockResolvedValue({ items: [historyRun("run-1")], nextCursor: null });
+    historyDialogState.open = false;
+
+    await mountPopover();
+    tab("History").click();
+    await vi.waitFor(() => expect(api.loadTaskRuns).toHaveBeenCalled());
+
+    [...document.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.trim() === "View all history")?.click();
+    await nextTick();
+
+    expect(historyDialogState.open).toBe(true);
+  });
+
+  it("keeps in-progress tasks first and reports a history load failure with a retry", async () => {
+    vi.mocked(api.loadTaskRuns).mockReset();
+    vi.mocked(api.loadTaskRuns).mockRejectedValue(new Error("storage offline"));
+    const tracker = useExportTracker();
+    tracker.addTask("running_export", "csv", "C:\\exports\\running.csv");
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("In progress");
+    expect(api.loadTaskRuns).not.toHaveBeenCalled();
+
+    tab("History").click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Could not load task history."));
+
+    vi.mocked(api.loadTaskRuns).mockResolvedValue({ items: [historyRun("run-2", "succeeded", "shop2")], nextCursor: null });
+    [...document.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.trim() === "Retry")?.click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("mysql · shop2"));
   });
 });

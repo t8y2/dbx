@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,10 @@ import { Loader2, Check, CheckCircle2, XCircle, AlertCircle, X, FileDown, Databa
 import { formatDataTransferDuration, useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { dataTransferFailureCopyText, sqlFileFailureCopyText } from "@/components/export/failureDetailCopyText";
 import SqlFileProgressIndicator from "@/components/sql-file/SqlFileProgressIndicator.vue";
+import TaskHistoryDialog from "@/components/export/TaskHistoryDialog.vue";
+import TaskRunDetailDialog from "@/components/export/TaskRunDetailDialog.vue";
+import TaskRunSummary from "@/components/export/TaskRunSummary.vue";
+import { useTaskRunHistory } from "@/composables/useTaskRunHistory";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -23,6 +27,15 @@ const revealingTaskIds = ref<string[]>([]);
 const copiedFailureDetailKey = ref("");
 const currentTime = ref(Date.now());
 const MAX_VISIBLE = 5;
+// The persistent history is the only way to inspect a transfer after the app
+// restarts, so the trigger stays visible even with no in-memory task.
+const view = ref<"current" | "history">("current");
+const historyDialogOpen = ref(false);
+const detailOpen = ref(false);
+const detailRunId = ref<string | null>(null);
+const historyLoaded = ref(false);
+// Destructured so the template reads plain refs instead of `recent.runs.value`.
+const { runs: recentRuns, loading: recentLoading, loadingMore: recentLoadingMore, failed: recentFailed, hasMore: recentHasMore, loadFirstPage: loadRecentPage, loadMore: loadMoreRecent, retry: retryRecent } = useTaskRunHistory(5);
 
 let elapsedTimer: ReturnType<typeof setInterval> | undefined;
 let copiedFailureDetailTimer: ReturnType<typeof setTimeout> | undefined;
@@ -350,10 +363,42 @@ function openTask(task: ExportTask): void {
   open.value = false;
   task.onOpen?.();
 }
+
+async function loadRecentHistory(force = false): Promise<void> {
+  if (historyLoaded.value && !force) return;
+  historyLoaded.value = true;
+  await loadRecentPage({ taskType: "transfer", limit: 5 });
+}
+
+function openHistoryDialog(): void {
+  open.value = false;
+  historyDialogOpen.value = true;
+}
+
+function openHistoryRun(runId: string): void {
+  open.value = false;
+  historyDialogOpen.value = false;
+  detailRunId.value = runId;
+  detailOpen.value = true;
+}
+
+watch(view, (next) => {
+  if (next === "history") void loadRecentHistory();
+});
+
+watch(open, (isOpen) => {
+  if (!isOpen) return;
+  if (hasActive.value) {
+    view.value = "current";
+    return;
+  }
+  view.value = "history";
+  void loadRecentHistory(true);
+});
 </script>
 
 <template>
-  <Popover v-if="tasks.length > 0" v-model:open="open">
+  <Popover v-model:open="open">
     <PopoverTrigger as-child>
       <Button variant="ghost" size="icon" class="relative h-8 w-8" :title="triggerTitle" :class="{ 'bg-destructive/10 text-destructive hover:bg-destructive/15': failedCount > 0, 'bg-accent text-primary': failedCount === 0 && hasActive }">
         <FileDown class="h-4 w-4" />
@@ -365,11 +410,61 @@ function openTask(task: ExportTask): void {
     </PopoverTrigger>
 
     <PopoverContent align="start" class="w-[min(92vw,30rem)] p-0 gap-0 overflow-hidden" :side-offset="8">
-      <div class="border-b bg-muted/40 px-4 py-3">
+      <div class="border-b bg-muted/40 px-4 pt-3">
         <div class="text-sm font-semibold">{{ t("exportProgress.popoverTitle") }}</div>
+        <div class="mt-2 flex gap-1" role="tablist" :aria-label="t('exportProgress.popoverTitle')">
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="view === 'current'"
+            class="-mb-px border-b-2 px-2 pb-2 text-xs font-medium transition-colors"
+            :class="view === 'current' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+            @click="view = 'current'"
+          >
+            {{ t("taskHistory.tabCurrent") }}<span v-if="tasks.length" class="ml-1 tabular-nums">{{ tasks.length }}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="view === 'history'"
+            class="-mb-px border-b-2 px-2 pb-2 text-xs font-medium transition-colors"
+            :class="view === 'history' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+            @click="view = 'history'"
+          >
+            {{ t("taskHistory.tabHistory") }}
+          </button>
+        </div>
       </div>
 
-      <div class="max-h-96 overflow-y-auto">
+      <div v-if="view === 'history'" class="max-h-96 overflow-y-auto">
+        <div v-if="recentLoading" class="px-4 py-6 text-center text-xs text-muted-foreground">{{ t("taskHistory.loading") }}</div>
+        <div v-else-if="recentFailed && recentRuns.length === 0" class="flex flex-col items-center gap-2 px-4 py-6 text-center">
+          <p class="text-xs text-destructive">{{ t("taskHistory.loadFailed") }}</p>
+          <Button size="sm" variant="outline" @click="retryRecent">{{ t("taskHistory.retry") }}</Button>
+        </div>
+        <div v-else-if="recentRuns.length === 0" class="px-4 py-6 text-center">
+          <p class="text-xs font-medium">{{ t("taskHistory.recentEmpty") }}</p>
+          <p class="mt-1 text-[11px] text-muted-foreground">{{ t("taskHistory.demoHint") }}</p>
+        </div>
+        <template v-else>
+          <TaskRunSummary v-for="run in recentRuns" :key="run.runId" :run="run" @open="openHistoryRun" />
+          <div v-if="recentHasMore" class="border-b px-4 py-1.5">
+            <button type="button" class="w-full text-center text-xs text-muted-foreground hover:text-foreground disabled:opacity-50" :disabled="recentLoadingMore" @click="loadMoreRecent()">
+              {{ recentLoadingMore ? t("taskHistory.loading") : t("taskHistory.loadMore") }}
+            </button>
+          </div>
+          <div v-if="recentFailed" class="flex items-center justify-between gap-2 border-b px-4 py-1.5 text-xs">
+            <span class="text-destructive">{{ t("taskHistory.loadFailed") }}</span>
+            <button type="button" class="text-xs font-medium text-primary hover:underline" @click="retryRecent()">{{ t("taskHistory.retry") }}</button>
+          </div>
+        </template>
+        <div class="px-4 py-2">
+          <button type="button" class="w-full text-center text-xs font-medium text-primary hover:underline" @click="openHistoryDialog">{{ t("taskHistory.viewAll") }}</button>
+        </div>
+      </div>
+
+      <div v-if="view === 'current' && tasks.length === 0" class="px-4 py-6 text-center text-xs text-muted-foreground">{{ t("exportProgress.noCurrentTask") }}</div>
+      <div v-else class="max-h-96 overflow-y-auto">
         <div v-for="task in visibleTasks" :key="task.exportId" class="flex items-start gap-3 border-b px-4 py-3 text-xs last:border-b-0">
           <div class="flex-1 min-w-0 flex flex-col gap-1.5">
             <div class="flex items-center gap-1.5">
@@ -492,19 +587,22 @@ function openTask(task: ExportTask): void {
         </div>
       </div>
 
-      <div v-if="hasMore" class="border-t bg-muted/30 px-3 py-1.5">
+      <div v-if="view === 'current' && hasMore" class="border-t bg-muted/30 px-3 py-1.5">
         <button class="w-full text-center text-xs text-muted-foreground hover:text-foreground" @click="toggleShowAll">
           {{ showAll ? t("exportProgress.showLess") : t("exportProgress.showMore", { count: tasks.length - MAX_VISIBLE }) }}
         </button>
       </div>
 
-      <div v-if="finishedCount > 0" class="border-t bg-muted/30 px-3 py-1.5">
+      <div v-if="view === 'current' && finishedCount > 0" class="border-t bg-muted/30 px-3 py-1.5">
         <button class="w-full text-center text-xs text-muted-foreground hover:text-foreground" @click="clearFinished">
           {{ t("exportProgress.clearFinished") }}
         </button>
       </div>
     </PopoverContent>
   </Popover>
+
+  <TaskHistoryDialog v-model:open="historyDialogOpen" @open-run="openHistoryRun" />
+  <TaskRunDetailDialog v-model:open="detailOpen" :run-id="detailRunId" />
 </template>
 
 <style scoped>

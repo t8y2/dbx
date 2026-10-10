@@ -5315,6 +5315,10 @@ export async function loadTaskRuns(query: TaskRunListQuery = {}): Promise<TaskRu
       cursorRunId: query.cursor?.runId,
       taskType: query.taskType,
       status: query.status,
+      startedAtFrom: query.startedAtFrom,
+      startedAtBefore: query.startedAtBefore,
+      sourceQuery: query.sourceQuery,
+      targetQuery: query.targetQuery,
     })}`,
   );
 }

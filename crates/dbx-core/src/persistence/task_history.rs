@@ -506,6 +506,14 @@ pub struct TaskRunListQuery {
     pub cursor: Option<TaskRunCursor>,
     pub task_type: Option<TaskType>,
     pub status: Option<TaskRunStatus>,
+    /// Inclusive lower bound for the run's start timestamp.
+    pub started_at_from: Option<String>,
+    /// Exclusive upper bound for the run's start timestamp.
+    pub started_at_before: Option<String>,
+    /// Case-insensitive literal search across the saved source endpoint snapshot.
+    pub source_query: Option<String>,
+    /// Case-insensitive literal search across the saved target endpoint snapshot.
+    pub target_query: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

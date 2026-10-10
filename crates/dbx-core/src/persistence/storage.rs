@@ -4172,6 +4172,52 @@ impl Storage {
                 predicates.push("status = ?".to_string());
                 values.push(Value::Text(status.as_storage_str().to_string()));
             }
+            if let Some(started_at_from) = query.started_at_from.filter(|value| !value.trim().is_empty()) {
+                predicates.push("started_at >= ?".to_string());
+                values.push(Value::Text(started_at_from));
+            }
+            if let Some(started_at_before) = query.started_at_before.filter(|value| !value.trim().is_empty()) {
+                predicates.push("started_at < ?".to_string());
+                values.push(Value::Text(started_at_before));
+            }
+            for (query, columns) in [
+                (
+                    query.source_query,
+                    [
+                        "source_connection_id",
+                        "source_database_type",
+                        "source_database",
+                        "source_schema",
+                        "source_catalog",
+                    ],
+                ),
+                (
+                    query.target_query,
+                    [
+                        "target_connection_id",
+                        "target_database_type",
+                        "target_database",
+                        "target_schema",
+                        "target_catalog",
+                    ],
+                ),
+            ] {
+                let Some(query) = query.map(|value| value.trim().to_lowercase()).filter(|value| !value.is_empty())
+                else {
+                    continue;
+                };
+                let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+                let pattern = format!("%{escaped}%");
+                predicates.push(format!(
+                    "({})",
+                    columns
+                        .iter()
+                        .map(|column| format!(r#"LOWER(COALESCE({column}, '')) LIKE ? ESCAPE '\'"#))
+                        .collect::<Vec<_>>()
+                        .join(" OR ")
+                ));
+                values.extend(columns.iter().map(|_| Value::Text(pattern.clone())));
+            }
             if let Some(cursor) = query.cursor {
                 predicates.push("(created_at < ? OR (created_at = ? AND run_id < ?))".to_string());
                 values.push(Value::Text(cursor.created_at.clone()));
@@ -14913,6 +14959,28 @@ mod tests {
         assert_eq!(next_page.items.len(), 1);
         assert_eq!(next_page.items[0].run_id, older_run.run_id);
         assert!(next_page.next_cursor.is_none());
+
+        let filtered_page = storage
+            .list_task_runs(TaskRunListQuery {
+                limit: Some(1),
+                status: Some(TaskRunStatus::Succeeded),
+                started_at_from: Some("2025-01-01T00:00:00.000Z".to_string()),
+                started_at_before: Some("2025-01-02T00:00:00.000Z".to_string()),
+                source_query: Some("SOURCE-DB".to_string()),
+                target_query: Some("target-id".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered_page.items.len(), 1);
+        assert_eq!(filtered_page.items[0].run_id, run.run_id);
+        assert!(filtered_page.next_cursor.is_none());
+        let escaped_wildcard_page = storage
+            .list_task_runs(TaskRunListQuery { source_query: Some("source%".to_string()), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(escaped_wildcard_page.items.is_empty());
+
         let item_page = storage
             .list_task_run_items(&run.run_id, TaskRunItemsQuery { limit: Some(1), ..Default::default() })
             .await

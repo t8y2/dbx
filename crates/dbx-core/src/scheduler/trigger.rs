@@ -14,12 +14,27 @@ const CRON_MAX_SCAN_DAYS: i64 = 1461; // 4 years: covers February 29 cycles.
 const DST_GAP_SCAN_MINUTES: u32 = 180;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+// `rename_all_fields` is required alongside the enum-level `rename_all`:
+// the latter renames only the variant names, so variant FIELDS kept their
+// Rust snake_case (`time_zone`) while every UI client sends camelCase —
+// saving any once/cron task failed with "missing field `time_zone`". The
+// snake_case aliases keep already-persisted task JSON readable.
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum TaskTrigger {
     Manual,
-    Once { at: String, time_zone: String },
-    Interval { seconds: u64 },
-    Cron { expression: String, time_zone: String },
+    Once {
+        at: String,
+        #[serde(alias = "time_zone")]
+        time_zone: String,
+    },
+    Interval {
+        seconds: u64,
+    },
+    Cron {
+        expression: String,
+        #[serde(alias = "time_zone")]
+        time_zone: String,
+    },
     Startup,
 }
 

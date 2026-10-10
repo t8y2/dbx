@@ -125,3 +125,26 @@ fn manual_and_startup_triggers_never_schedule() {
     assert_eq!(TaskTrigger::Manual.next_after(Utc::now()).unwrap(), None);
     assert_eq!(TaskTrigger::Startup.next_after(Utc::now()).unwrap(), None);
 }
+
+// UI clients serialize the trigger fields in camelCase (`timeZone`), while
+// task JSON persisted before the wire-format fix used the Rust field name
+// (`time_zone`). Both must deserialize; serialization now emits camelCase.
+#[test]
+fn trigger_json_accepts_camel_case_and_legacy_snake_case_fields() {
+    let camel: TaskTrigger = serde_json::from_str(r#"{"type":"cron","expression":"*/5 * * * *","timeZone":"UTC"}"#)
+        .expect("camelCase trigger");
+    assert_eq!(camel, TaskTrigger::Cron { expression: "*/5 * * * *".into(), time_zone: "UTC".into() });
+
+    let legacy: TaskTrigger = serde_json::from_str(r#"{"type":"cron","expression":"*/5 * * * *","time_zone":"UTC"}"#)
+        .expect("legacy snake_case trigger");
+    assert_eq!(legacy, camel);
+
+    let once_camel: TaskTrigger =
+        serde_json::from_str(r#"{"type":"once","at":"2026-10-05T09:00","timeZone":"Asia/Shanghai"}"#)
+            .expect("camelCase once");
+    assert_eq!(once_camel, TaskTrigger::Once { at: "2026-10-05T09:00".into(), time_zone: "Asia/Shanghai".into() });
+
+    let serialized = serde_json::to_string(&camel).expect("serialize trigger");
+    assert!(serialized.contains(r#""timeZone":"UTC""#), "serialization must emit camelCase: {serialized}");
+    assert!(!serialized.contains("time_zone"), "serialization must not leak snake_case: {serialized}");
+}

@@ -679,8 +679,16 @@ impl SchedulerEngine {
         match probe {
             Ok(status) => match status.state {
                 ResidentState::Starting | ResidentState::Running | ResidentState::Stopping => {
-                    let _ =
-                        self.store.update_session_state(session.id.clone(), status.state, status.restart_count).await;
+                    // A successful probe IS the heartbeat: persist it (the
+                    // plugin's own heartbeat when it sends one, the probe
+                    // time otherwise) so the stale check in the Err branch
+                    // measures silence from the last good probe, not from
+                    // the session's start.
+                    let heartbeat = status.heartbeat_at.clone().unwrap_or_else(|| now.to_rfc3339());
+                    let _ = self
+                        .store
+                        .update_session_probe(session.id.clone(), status.state, status.restart_count, heartbeat)
+                        .await;
                 }
                 ResidentState::Stopped => {
                     let _ = self

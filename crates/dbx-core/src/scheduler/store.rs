@@ -1244,6 +1244,28 @@ impl SchedulerStore {
         .await
     }
 
+    /// Probe-result persistence for a live session: state, restart counter
+    /// AND the liveness heartbeat in one write. Without the heartbeat write,
+    /// the supervisor's stale-heartbeat check judges every session against
+    /// its start time and crashes it on the first probe hiccup.
+    pub async fn update_session_probe(
+        &self,
+        session_id: String,
+        state: ResidentState,
+        restart_count: u32,
+        heartbeat_at: String,
+    ) -> Result<(), TaskError> {
+        self.access(move |conn| {
+            conn.execute(
+                "UPDATE task_runtime_sessions SET state=?, restart_count=?, heartbeat_at=?, updated_at=? WHERE id=?",
+                params![state.as_str(), restart_count, heartbeat_at, rfc3339(Utc::now()), session_id],
+            )
+            .map_err(|error| TaskError::unavailable(error.to_string()))?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn update_session_state(
         &self,
         session_id: String,

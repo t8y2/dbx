@@ -46,6 +46,27 @@ fn split_task_provider(task: &TaskDefinition) -> Result<(String, String), TaskEr
     Ok((plugin_id, task.provider_id.clone()))
 }
 
+/// `task/status` probe for a resident session. The frozen identity
+/// validation requires BOTH `runId` and `sessionId` — a probe without the
+/// run id is rejected before it ever reaches the plugin.
+fn status_request(session: &ResidentSession) -> dbx_plugin_runtime::plugins::PluginTaskStatusRequest {
+    dbx_plugin_runtime::plugins::PluginTaskStatusRequest {
+        task_id: session.task_id.clone(),
+        run_id: Some(session.run_id.clone()),
+        session_id: Some(session.session_id.clone()),
+    }
+}
+
+/// `task/stop` for a resident session: same identity contract as the probe.
+fn stop_request(session: &ResidentSession) -> dbx_plugin_runtime::plugins::PluginTaskStopRequest {
+    dbx_plugin_runtime::plugins::PluginTaskStopRequest {
+        task_id: session.task_id.clone(),
+        run_id: Some(session.run_id.clone()),
+        session_id: Some(session.session_id.clone()),
+        reason: Some("host requested stop".into()),
+    }
+}
+
 /// Opens (or reuses) the plugin connection and returns its lifecycle params
 /// as the request's `runtime` (secrets stay in this process). Shared by the
 /// run and resident adapters. A stored connection opens server-side (config
@@ -562,12 +583,7 @@ impl ResidentExecutor for PluginResidentExecutor {
 
     async fn stop(&self, session: &ResidentSession) -> Result<(), TaskError> {
         let plugin_id = provider_plugin_id(&session.plugin_id);
-        let request = dbx_plugin_runtime::plugins::PluginTaskStopRequest {
-            task_id: session.task_id.clone(),
-            run_id: None,
-            session_id: Some(session.session_id.clone()),
-            reason: Some("host requested stop".into()),
-        };
+        let request = stop_request(session);
         self.state
             .plugin_host
             .stop_task(&plugin_id, &session.plugin_id, request)
@@ -578,11 +594,7 @@ impl ResidentExecutor for PluginResidentExecutor {
 
     async fn status(&self, session: &ResidentSession) -> Result<ResidentStatus, TaskError> {
         let plugin_id = provider_plugin_id(&session.plugin_id);
-        let request = dbx_plugin_runtime::plugins::PluginTaskStatusRequest {
-            task_id: session.task_id.clone(),
-            run_id: None,
-            session_id: Some(session.session_id.clone()),
-        };
+        let request = status_request(session);
         let result = self
             .state
             .plugin_host
@@ -601,9 +613,10 @@ impl ResidentExecutor for PluginResidentExecutor {
 mod tests {
     use super::{
         combine_results, config_connection_keys, dispatch_targets, local_trigger_id, map_session_state,
-        provider_plugin_id, PluginTaskExecutor,
+        provider_plugin_id, status_request, stop_request, PluginTaskExecutor,
     };
     use crate::scheduler::models::{TaskDefinition, TaskTarget};
+    use crate::scheduler::ResidentSession;
     use dbx_plugin_runtime::plugins::{PluginTaskExecuteResult, PluginTaskProviderContribution};
     use std::sync::Arc;
 
@@ -682,6 +695,29 @@ mod tests {
         ] {
             assert_eq!(map_session_state(plugin), resident);
         }
+    }
+
+    #[test]
+    fn resident_probe_and_stop_requests_carry_both_identity_ids() {
+        use super::super::super::resident::ResidentState;
+        let session = ResidentSession {
+            id: "row-1".into(),
+            task_id: "task-1".into(),
+            run_id: "run-1".into(),
+            plugin_id: "io.dbx.ssh.tasks".into(),
+            session_id: "sess-9".into(),
+            state: ResidentState::Running,
+            heartbeat_at: None,
+            restart_count: 2,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let probe = status_request(&session);
+        assert_eq!(probe.run_id.as_deref(), Some("run-1"), "runId is required by validate_task_identity");
+        assert_eq!(probe.session_id.as_deref(), Some("sess-9"));
+        let stop = stop_request(&session);
+        assert_eq!(stop.run_id.as_deref(), Some("run-1"), "stop requests need the run id too");
+        assert_eq!(stop.session_id.as_deref(), Some("sess-9"));
     }
 
     #[test]

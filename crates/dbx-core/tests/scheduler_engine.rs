@@ -8,8 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
+use dbx_core::scheduler::ResidentState;
 use dbx_core::scheduler::{
-    LeaseGuard, TaskConcurrencyPolicy, TaskExecutionMode, TaskRunStatus, TaskRunTrigger, TaskTrigger, SCHEDULER_LEASE,
+    LeaseGuard, TaskConcurrencyPolicy, TaskExecutionMode, TaskRestartPolicy, TaskRunStatus, TaskRunTrigger,
+    TaskTrigger, SCHEDULER_LEASE,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -413,4 +415,42 @@ async fn engine_broadcasts_run_state_events_to_registered_sinks() {
         events.iter().filter_map(|e| Some((e["type"].as_str()?, e["status"].as_str()?))).collect();
     assert_eq!(states, vec![("run-state", "running"), ("run-state", "success")]);
     assert!(events.iter().all(|e| e["runId"] == run.id), "every event carries the run id");
+}
+
+// A successful status probe must persist the liveness heartbeat. Without
+// this write the supervisor's stale-heartbeat check compares against the
+// session's START time forever, so the first probe hiccup after 60s crashes
+// a perfectly healthy session and burns a restart (the production loop).
+#[tokio::test]
+async fn a_successful_probe_refreshes_the_session_heartbeat() {
+    let (_dir, store) = temp_store();
+    let resident = TestResidentExecutor::new();
+    let registry = Arc::new(dbx_core::scheduler::TaskExecutorRegistry::new());
+    registry.register_resident("dbx.test", Arc::new(resident.clone()));
+    let engine = engine(&store, registry.clone(), "hb-worker");
+    let service = dbx_core::scheduler::SchedulerService::new(store.clone(), registry);
+
+    let mut task = run_definition("t1", "dbx.test", TaskTrigger::Manual);
+    task.execution.mode = TaskExecutionMode::Resident;
+    task.execution.restart =
+        Some(TaskRestartPolicy { enabled: true, max_restarts: 5, backoff_seconds: 0, restart_window_seconds: None });
+    save(&store, task).await;
+    let run = service.run_now("t1").await.unwrap();
+    drive_until(&engine, || async { store.list_sessions().await.map(|s| !s.is_empty()).unwrap_or(false) }).await;
+
+    // Age the heartbeat far past the supervision timeout.
+    let session = store.active_session_for_task("t1".to_owned()).await.unwrap().expect("active session");
+    let mut aged = session.clone();
+    aged.heartbeat_at = Some((chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339());
+    store.upsert_session(aged).await.unwrap();
+
+    engine.tick().await.expect("probe tick");
+
+    let refreshed = store.active_session_for_task("t1".to_owned()).await.unwrap().expect("session still there");
+    assert_eq!(refreshed.state, ResidentState::Running);
+    let heartbeat = chrono::DateTime::parse_from_rfc3339(refreshed.heartbeat_at.as_deref().expect("heartbeat written"))
+        .expect("parse heartbeat");
+    let age = chrono::Utc::now() - heartbeat.with_timezone(&chrono::Utc);
+    assert!(age.num_seconds() < 30, "heartbeat must be refreshed by the probe, aged {age}");
+    let _ = run;
 }

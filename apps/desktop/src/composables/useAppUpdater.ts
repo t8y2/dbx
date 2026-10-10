@@ -148,6 +148,10 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const updateReady = computed(() => phase.value === "restart");
   const activeTaskCount = computed(() => Math.max(0, Math.trunc(options.getActiveTaskCount?.() ?? 0)));
   const autoUpdateEnabled = computed(() => settingsStore.editorSettings.autoUpdateApp !== false);
+  // Hiding the toolbar update entry opts the app out of background update
+  // nagging (#11041): silent startup/hourly/retry checks stop, while the
+  // explicit "Check for updates" action in settings keeps working.
+  const updateEntryVisible = computed(() => settingsStore.editorSettings.toolbarItems?.checkUpdates !== false);
   const hasUpdateAvailable = computed(() => (updateDownloaded.value || updateReady.value || updateInfo.value?.update_available === true) && !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion));
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
   let generation = 0;
@@ -224,6 +228,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   }
   async function checkUpdates(checkOptions: { silent?: boolean } = {}) {
     if (disposed || isIgnoringUpdate.value) return;
+    if (checkOptions.silent && !updateEntryVisible.value) return;
     if (!checkOptions.silent) showUpdateDialog.value = true;
     // A downloaded-but-uninstalled update keeps the app in the ready phase; checks
     // continue so a newer release can replace the cached package.
@@ -484,11 +489,28 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       })
       .catch(fail);
   });
+  // Hiding the toolbar entry mid-session must also stop background activity,
+  // and re-showing it resumes the silent checks.
+  const stopUpdateEntryWatch = watch(updateEntryVisible, (visible) => {
+    if (disposed) return;
+    if (!visible) {
+      clearRetry();
+      if (automaticDownload) void cancelDownload().catch(fail);
+      return;
+    }
+    if (!initialized) return;
+    void (cancelOperation ?? Promise.resolve())
+      .then(() => {
+        if (updateEntryVisible.value && !disposed) void checkUpdates({ silent: true });
+      })
+      .catch(fail);
+  });
   function dispose() {
     disposed = true;
     clearRetry();
     clearInterval(hourlyTimer);
     stopSettingsWatch();
+    stopUpdateEntryWatch();
     updatePreparationRelease?.();
     updatePreparationRelease = undefined;
     void cancelDownload().catch(() => {});

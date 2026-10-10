@@ -121,3 +121,24 @@ async fn the_engine_prunes_on_its_first_tick() {
 
     assert!(status_of(&store, &old).await.is_none(), "first tick prunes past-retention runs");
 }
+
+// A run can satisfy BOTH predicates (older than the cutoff AND beyond the
+// per-task cap — an hourly task crosses the cap inside the age window). The
+// candidate table's primary key must absorb the double match instead of
+// failing the whole prune transaction (maintainer review, PR #11658).
+#[tokio::test]
+async fn prune_survives_runs_matching_both_retention_predicates() {
+    let (_dir, store) = temp_store();
+    save(&store, run_definition("t1", "dbx.test", TaskTrigger::Manual)).await;
+    for index in 0..550 {
+        let age =
+            if index < 100 { ChronoDuration::days(40) } else { ChronoDuration::days(1 + ((index - 100) % 29) as i64) };
+        seeded_run(&store, "t1", age, Some(TaskRunStatus::Success)).await;
+    }
+
+    let pruned =
+        store.prune_finished_runs(&RunRetentionPolicy::default()).await.expect("prune must not fail on overlap");
+
+    assert_eq!(pruned, 100, "the 100 aged runs match both predicates and are pruned once");
+    assert_eq!(store.list_runs(Some("t1".into()), 1000).await.unwrap().len(), 450);
+}

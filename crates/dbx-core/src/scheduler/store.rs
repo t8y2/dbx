@@ -1337,12 +1337,14 @@ impl SchedulerStore {
                 tx.execute("CREATE TEMP TABLE IF NOT EXISTS prune_ids(id TEXT PRIMARY KEY)", [])?;
                 tx.execute("DELETE FROM prune_ids", [])?;
                 tx.execute(
-                    &format!("INSERT INTO prune_ids SELECT id FROM task_runs WHERE {TERMINAL} AND created_at < ?1"),
+                    &format!(
+                        "INSERT OR IGNORE INTO prune_ids SELECT id FROM task_runs WHERE {TERMINAL} AND created_at < ?1"
+                    ),
                     params![cutoff],
                 )?;
                 tx.execute(
                     &format!(
-                        "INSERT INTO prune_ids SELECT r.id FROM task_runs r WHERE r.{TERMINAL}
+                        "INSERT OR IGNORE INTO prune_ids SELECT r.id FROM task_runs r WHERE r.{TERMINAL}
                          AND (SELECT COUNT(*) FROM task_runs n WHERE n.task_id = r.task_id
                               AND n.{TERMINAL} AND n.created_at > r.created_at) >= ?1"
                     ),

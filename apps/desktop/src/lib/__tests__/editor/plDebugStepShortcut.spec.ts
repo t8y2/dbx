@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { isQuickOpenShortcut, isToggleAiPanelShortcut, matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
-import { resolvePlDebugStepShortcut, type PlDebugStepCommand } from "@/lib/editor/plDebugStepShortcut";
+import { resolvePlDebugStepShortcut, isPlDebugEditableTarget, type PlDebugStepCommand } from "@/lib/editor/plDebugStepShortcut";
 import { DEFAULT_SHORTCUT_SETTINGS, findCrossScopeShortcutConflicts, findShortcutConflict, normalizeShortcutSettings, SHORTCUT_DEFINITIONS } from "@/lib/editor/shortcutRegistry";
 
 /**
@@ -10,8 +10,12 @@ import { DEFAULT_SHORTCUT_SETTINGS, findCrossScopeShortcutConflicts, findShortcu
  * 本文件把两件容易在重构里悄悄失守的事钉死：
  *  1. **语义**：三个键来自 ODC 客户端源码而非猜测，映射到 store 的
  *     stepIn / stepOut / stepOver。
- *  2. **边界**：它们只在调试标签页被认领。调试页之外 `Mod+P` 必须仍是
- *     quickOpen，`Mod+I` / `Mod+O` 必须什么都不触发 —— 这是本次唯一的行为边界。
+ *  2. **边界**：它们只在调试标签页被认领，且焦点不在对话框/可编辑元素里时才算数。
+ *     调试页之外 `Mod+P` 必须仍是 quickOpen，`Mod+I` / `Mod+O` 必须什么都不触发。
+ *
+ * #9（加严焦点门控）把第 2 条从「对话框」扩到「对话框 + 输入框」：焦点在
+ * INPUT/TEXTAREA/SELECT/contenteditable 里时同样返回 null，键位回到输入框；调试源码
+ * 编辑器不受影响 —— 它的键由 CodeMirror 自己的绑定处理（见本文件末尾的装配契约）。
  */
 
 const appSource = readFileSync(new URL("../../../App.vue", import.meta.url), "utf8");
@@ -99,6 +103,44 @@ describe("resolvePlDebugStepShortcut", () => {
     const context = { isDebugTab: true, canStep: true, platform: "Win32", insideDialog: false };
     expect(resolvePlDebugStepShortcut(modKeyEvent("i", "Win32"), context)).toBe("stepInto");
     expect(resolvePlDebugStepShortcut(modKeyEvent("p", "Win32"), context)).toBe("stepOver");
+  });
+
+  it("yields the key while the focus is in an editable element", () => {
+    // 内联输入框（变量面板的筛选/改值、断点面板的条件/命中次数）拥有自己的按键：
+    // 焦点在其中时三个键都让位，而不是去单步。
+    const context = { isDebugTab: true, canStep: true, platform: "Win32", insideEditable: true };
+    for (const key of ["i", "o", "p"]) {
+      expect(resolvePlDebugStepShortcut(modKeyEvent(key, "Win32"), context)).toBeNull();
+    }
+    // 让位之后事件继续下传，原有的全局分支照旧：Mod+P 仍是 quickOpen（与调试页之外一致）。
+    expect(matchesShortcut(modKeyEvent("p", "Win32"), DEFAULT_SHORTCUT_SETTINGS.quickOpen, "Win32")).toBe(true);
+  });
+
+  it("still claims the key when the target is not editable", () => {
+    const context = { isDebugTab: true, canStep: true, platform: "Win32", insideEditable: false };
+    expect(resolvePlDebugStepShortcut(modKeyEvent("i", "Win32"), context)).toBe("stepInto");
+    expect(resolvePlDebugStepShortcut(modKeyEvent("p", "Win32"), context)).toBe("stepOver");
+  });
+
+  it("names the editable elements by tag or contenteditable, and nothing else", () => {
+    // 判定本身：标签名大写/小写都认；contenteditable 宿主认（含焦点落在 contenteditable
+    // 内部节点、由祖先链认出的情形）；按钮、普通容器、非元素目标一律不认。
+    for (const tagName of ["INPUT", "input", "TEXTAREA", "SELECT"]) {
+      expect(isPlDebugEditableTarget({ tagName })).toBe(true);
+    }
+    expect(isPlDebugEditableTarget({ tagName: "DIV", isContentEditable: true })).toBe(true);
+    expect(isPlDebugEditableTarget({ tagName: "SPAN", closest: (selector: string) => (selector.includes("contenteditable") ? {} : null) })).toBe(true);
+    expect(isPlDebugEditableTarget({ tagName: "DIV", isContentEditable: false, closest: () => null })).toBe(false);
+    expect(isPlDebugEditableTarget({ tagName: "BUTTON" })).toBe(false);
+    expect(isPlDebugEditableTarget(null)).toBe(false);
+    expect(isPlDebugEditableTarget(undefined)).toBe(false);
+    expect(isPlDebugEditableTarget("body")).toBe(false);
+  });
+
+  it("passes the editable verdict in from App.vue, where the event target lives", () => {
+    // 源码断言：窗口级分支必须真的把可编辑目标判定传进来，否则上面的让位语义在真实按键
+    // 路径上没有生效（`insideDialog` 是同一类门控，一起看住）。
+    expect(appSource).toContain("insideEditable: isPlDebugEditableTarget(e.target)");
   });
 
   it("gates the window branch on the event target, as the neighbouring shortcuts do", () => {

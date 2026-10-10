@@ -88,6 +88,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
+import { launchPlDebugAnonymous } from "@/components/debug/plDebugLaunch";
 import { buildSelectStarExpansion, selectStarResultColumnsMatch } from "@/lib/sql/sqlCompletion";
 
 import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSources } from "@/lib/sql/semantic/completion";
@@ -1221,6 +1222,25 @@ function selectCurrentStatementFromContextMenu(): void {
   selectCurrentStatementFromView(currentView);
 }
 
+/**
+ * 右键「调试匿名块」：有选中用选中，否则用编辑器全文（选中优先由 `selectedSql` 承载，
+ * 它在每次打开右键菜单时都已同步）。文本的裁剪与合法性判定、能力门控、启动会话与打开
+ * 调试页都在 `launchPlDebugAnonymous` 里，这里只交出当前标签页的连接/库/schema 与编辑器文本。
+ * 没有连接或库时直接返回（菜单项此时是禁用的）。
+ */
+function debugAnonymousBlockFromContextMenu(): void {
+  const currentView = view.value;
+  if (!currentView || !props.connectionId || props.database == null) return;
+  void launchPlDebugAnonymous({
+    connectionId: props.connectionId,
+    database: props.database,
+    databaseType: props.databaseType,
+    schema: props.schema,
+    selectedText: selectedSql.value,
+    documentText: currentEditorDocText(currentView),
+  });
+}
+
 const contextMenuActions: QueryEditorContextMenuActions = {
   executeFromContextMenu,
   executeInNewResultTabFromContextMenu,
@@ -1245,6 +1265,7 @@ const contextMenuActions: QueryEditorContextMenuActions = {
   deleteEmptyLines,
   selectCurrentStatementFromContextMenu,
   selectAllSqlFromContextMenu,
+  debugAnonymousBlockFromContextMenu,
   emitContextObjectAction,
   openCodeSnapshot,
   sendSelectionToAi: () => {
@@ -1275,6 +1296,7 @@ function getContextMenuState(): QueryEditorContextMenuState {
     expandSelectStar: target ? () => void expandSelectStar(target) : undefined,
     canExplain: props.canExplain ?? (canExecuteContextSql.value && !props.readOnly && !props.hideExecutionControls),
     hasContent: (view.value?.state.doc.length ?? 0) > 0,
+    canDebugAnonymousBlock: !!props.connectionId && props.database != null,
   };
 }
 

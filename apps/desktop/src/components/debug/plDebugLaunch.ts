@@ -2,6 +2,8 @@ import { ref } from "vue";
 import i18n from "@/i18n";
 import { useToast } from "@/composables/useToast";
 import { usePlDebugStore } from "@/stores/plDebugStore";
+import { useQueryStore } from "@/stores/queryStore";
+import { buildPlDebugAnonymousBlockStartRequest, resolvePlDebugAnonymousBlockText } from "@/lib/debug/plDebugAnonymousBlock";
 import type { PlDebugProbeResult } from "@/lib/backend/pl-debug-tauri";
 import type { DatabaseType } from "@/types/database";
 import { supportsPlDebugRoutine } from "@/lib/database/databaseFeatureSupport";
@@ -80,6 +82,33 @@ export async function resolvePlDebugProbe(connectionId: string): Promise<PlDebug
 }
 
 /**
+ * The pre-flight every launch entry point shares: the engine gate and the
+ * capability probe. Resolves the probe on success, null when a toast has already
+ * explained the refusal (a caller with nothing to add just returns false).
+ *
+ * The probe round-trips to the agent, so it is resolved through the per-connection
+ * cache: a second entry point on the same connection neither re-probes the server
+ * nor skips the gate.
+ */
+async function ensurePlDebugCapable(target: { connectionId: string; databaseType?: DatabaseType }): Promise<PlDebugProbeResult | null> {
+  // OceanBase Oracle Mode ships a Java `pl_debug_*` implementation that has never
+  // been exercised against a real instance, so its debugger stays unreachable
+  // through every entry point until that verification exists.
+  if (!supportsPlDebugRoutine(target.databaseType)) {
+    useToast().toast(i18n.global.t("plDebug.launch.unsupported"), 5000);
+    return null;
+  }
+  const probe = await resolvePlDebugProbe(target.connectionId);
+  if (probe.supported !== true) {
+    // The backend's reason is the only accurate explanation (missing grants,
+    // missing subroutines, …); it is displayed as written.
+    useToast().toast(probe.reason || i18n.global.t("plDebug.launch.unsupported"), 5000);
+    return null;
+  }
+  return probe;
+}
+
+/**
  * Opens the PL/SQL debugger for a routine, after the two pre-flight checks the
  * backend capability report and the object's dictionary status allow.
  *
@@ -99,27 +128,56 @@ export async function launchPlDebug(target: PlDebugLaunchTarget): Promise<boolea
     useToast().toast(i18n.global.t("plDebug.launch.invalidObject"), 5000);
     return false;
   }
-  // Backstop for launchers that are not themselves behind
-  // `supportsPlDebugRoutine` (the sidebar one is not): OceanBase Oracle Mode
-  // ships a Java `pl_debug_*` implementation that has never been exercised
-  // against a real instance, so its debugger stays unreachable through every
-  // entry point until that verification exists.
-  if (!supportsPlDebugRoutine(target.databaseType)) {
-    useToast().toast(i18n.global.t("plDebug.launch.unsupported"), 5000);
-    return false;
-  }
   const requestId = ++launchRequestId;
-  const probe = await resolvePlDebugProbe(target.connectionId);
+  const probe = await ensurePlDebugCapable(target);
   // A newer "Debug" click wins: this one must not reopen the dialog for a
   // target the user already moved away from.
   if (requestId !== launchRequestId) return false;
-  if (probe.supported !== true) {
-    // The backend's reason is the only accurate explanation (missing grants,
-    // missing subroutines, …); it is displayed as written.
-    useToast().toast(probe.reason || i18n.global.t("plDebug.launch.unsupported"), 5000);
-    return false;
-  }
+  if (!probe) return false;
   plDebugLaunchTarget.value = target;
   plDebugLaunchOpen.value = true;
+  return true;
+}
+
+/** An anonymous block handed to the debugger straight from the SQL editor. */
+export interface PlDebugAnonymousLaunchTarget {
+  connectionId: string;
+  database: string;
+  databaseType?: DatabaseType;
+  schema?: string;
+  /** Editor selection; wins over `documentText` when it is not blank. */
+  selectedText: string;
+  /** Full editor text, used when nothing is selected. */
+  documentText: string;
+}
+
+/**
+ * Starts debugging an anonymous block.
+ *
+ * An anonymous block has no database-side parameters, so there is no parameter
+ * dialog and no launch state: the text is validated (see
+ * `resolvePlDebugAnonymousBlockText`), the capability gate runs, and the session
+ * starts through the store's normal `start` channel. `PlDebugSourceEditor` then
+ * renders `store.target.source`, which is exactly the text submitted here — so its
+ * gutter breakpoints use the line numbers of the submitted source.
+ *
+ * Resolves true when a session was started and the debug tab was opened.
+ */
+export async function launchPlDebugAnonymous(target: PlDebugAnonymousLaunchTarget): Promise<boolean> {
+  const resolved = resolvePlDebugAnonymousBlockText(target.selectedText, target.documentText);
+  if (!resolved.ok) {
+    useToast().toast(i18n.global.t(resolved.reason === "empty" ? "plDebug.launch.anonymousEmpty" : "plDebug.launch.anonymousInvalid"), 5000);
+    return false;
+  }
+  if (!target.connectionId || !target.database) return false;
+  if (!(await ensurePlDebugCapable(target))) return false;
+  const store = usePlDebugStore();
+  try {
+    await store.start(target.connectionId, target.database, buildPlDebugAnonymousBlockStartRequest({ schema: target.schema, source: resolved.source }));
+  } catch {
+    // The store recorded the failure in `store.error`; the debug toolbar shows it.
+    return false;
+  }
+  useQueryStore().openPlDebugTab({ connectionId: target.connectionId, database: target.database, schema: target.schema, title: i18n.global.t("plDebug.launch.anonymousTitle") });
   return true;
 }

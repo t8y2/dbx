@@ -249,7 +249,8 @@ import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
-import { buildOracleCompileErrorsSql, buildOracleCompileSql, formatOracleCompileErrors } from "@/lib/database/oracleCompileSql";
+import { buildOracleCompileSql } from "@/lib/database/oracleCompileSql";
+import { runOracleCompileAction } from "@/lib/database/oracleCompileAction";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import { collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
@@ -3025,40 +3026,55 @@ async function compileDamengView() {
  * diagnostics live in ALL_ERRORS, not in the DDL's result. So the compile is followed by a
  * read-back and *that* decides between the success toast and the error dialog -- reporting
  * the DDL's own result would always say "compiled", which is exactly the case the dialog
- * exists for.
+ * exists for. Both statements and that decision live in `runOracleCompileAction`; this
+ * wrapper supplies the tree's query channel (DDL guarded, read-back straight to the API) and
+ * refreshes the tree node.
  */
 async function compileOracleObject() {
   const node = activeNode.value;
   if (currentDatabaseType() !== "oracle" || !node.connectionId || !node.database) return;
+  const connectionId = node.connectionId;
+  const database = node.database;
   const objectName = node.objectName || node.label;
-  const sql = buildOracleCompileSql({ objectType: node.type, schema: node.schema, name: objectName });
-  if (!sql) return;
-  try {
-    await connectionStore.ensureConnected(node.connectionId);
-    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
-    if (!executed) return;
-    const errorsSql = buildOracleCompileErrorsSql({ schema: node.schema, name: objectName });
-    // A read-back, so it goes straight to the API rather than through the production guard
-    // (the same way the metadata preflights in this component do).
-    const errors = errorsSql ? await api.executeQuery(node.connectionId, node.database, errorsSql, node.schema) : undefined;
-    const message = formatOracleCompileErrors(errors?.rows ?? []);
-    await connectionStore.refreshObjectListTreeNode(node.connectionId, node.database, node.schema);
-    if (!message) {
-      toast(t("contextMenu.compileObjectSuccess", { name: node.label }), 3000);
-      return;
-    }
+  // An object kind Oracle cannot recompile never opens the connection: the same
+  // early return the Compile menu entry already uses.
+  if (!buildOracleCompileSql({ objectType: node.type, schema: node.schema, name: objectName })) return;
+  await connectionStore.ensureConnected(connectionId);
+  const outcome = await runOracleCompileAction({
+    connectionId,
+    database,
+    schema: node.schema,
+    owner: node.schema,
+    name: objectName,
+    objectType: node.type,
+    runQuery: ({ sql, stage }) =>
+      stage === "compile"
+        ? executeTreeNodeSqlWithProductionGuard(node, sql, { database, schema: node.schema })
+        : // A read-back, so it goes straight to the API rather than through the production
+          // guard (the same way the metadata preflights in this component do).
+          api.executeQuery(connectionId, database, sql, node.schema),
+  });
+  if (outcome.status === "unsupported" || outcome.status === "blocked") return;
+  // A statement that threw is reported before the refresh: the original code showed the
+  // dialog straight from its catch block, without refreshing the tree.
+  if (outcome.status === "failed") {
     compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
-    compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: node.label, message });
+    compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: node.label, message: outcome.message });
     claimTreeItemDialogOwnership();
     routeTreeItemDialogController();
     showCompileErrorDialog.value = true;
-  } catch (e: any) {
-    compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
-    compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: node.label, message: e?.message || String(e) });
-    claimTreeItemDialogOwnership();
-    routeTreeItemDialogController();
-    showCompileErrorDialog.value = true;
+    return;
   }
+  await connectionStore.refreshObjectListTreeNode(connectionId, database, node.schema);
+  if (outcome.status === "success") {
+    toast(t("contextMenu.compileObjectSuccess", { name: node.label }), 3000);
+    return;
+  }
+  compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
+  compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: node.label, message: outcome.message });
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  showCompileErrorDialog.value = true;
 }
 
 /** The Compile entry for an Oracle object, or null when Oracle cannot recompile that kind. */

@@ -19,7 +19,7 @@ const stateLabel = computed(() => {
 });
 
 /** The agent reports an exception stop on the status snapshot. */
-const stoppedOnException = computed(() => (store.status as { stoppedOnException?: boolean } | null)?.stoppedOnException === true);
+const stoppedOnException = computed(() => store.status?.stoppedOnException === true);
 
 /** Restart replays the launch dialog, which needs a named routine to re-resolve. */
 const canRestart = computed(() => store.hasSession && !store.busy && store.connectionId !== null && store.database !== null && !!store.target?.objectName && store.target.objectType.toUpperCase() !== "ANONYMOUS");

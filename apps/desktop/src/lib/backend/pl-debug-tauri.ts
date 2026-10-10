@@ -61,6 +61,54 @@ export interface PlDebugBreakpoint {
   kind?: string | null;
 }
 
+/**
+ * One entry of the call stack the agent derived from DBMS_DEBUG's
+ * PRINT_BACKTRACE listing.
+ *
+ * The array is ordered innermost first: `frames[0]` is the frame the debuggee is
+ * parked in, which is why the frame's **array index** — not `stackDepth` — is the
+ * frame number `DBMS_DEBUG.GET_VALUES` expects. `stackDepth` counts from the
+ * outermost frame instead (the agent numbers frames[0] with the largest depth).
+ */
+export interface PlDebugFrame {
+  /** Depth counted from the outermost frame (1 = outermost/entry), when known. */
+  stackDepth?: number | null;
+  /** 1-based source line of the frame, or null/0 when the server reported none. */
+  line?: number | null;
+  /**
+   * Program identifier of the frame: the routine name, or the package name when
+   * the frame runs inside a package member (see `programOwner`). The agent never
+   * puts source text here — that goes to `source`.
+   */
+  program?: string | null;
+  /** Owner of `program` for a package member; absent when the server did not report it. */
+  programOwner?: string | null;
+  /**
+   * Source text of the frame's line. Oracle prints the source line where a frame
+   * name would go, so the agent keeps it in its own field; it may be absent when
+   * the server printed fewer lines than the listing has frames.
+   */
+  source?: string | null;
+}
+
+/**
+ * One OUT / IN OUT parameter of the debugged routine, captured when the target
+ * runs to completion (see `PlDebugStatus.outParams`).
+ */
+export interface PlDebugOutParam {
+  name: string;
+  /** `OUT` | `IN OUT` */
+  mode: string;
+  type: string;
+  value: string;
+}
+
+/** Function return value, captured when the debugged function runs to completion. */
+export interface PlDebugReturnValue {
+  type?: string | null;
+  value?: string | null;
+}
+
 export interface PlDebugStatus {
   debugId?: string;
   owner?: string;
@@ -81,6 +129,30 @@ export interface PlDebugStatus {
   backtrace?: string;
   dbmsStatus?: number;
   output?: string;
+  /**
+   * Structured call stack, innermost frame first (see `PlDebugFrame`). Always an
+   * array in `pl_debug_get_stack` responses, so the stack panel needs no nil check.
+   */
+  frames?: PlDebugFrame[];
+  /**
+   * The debuggee is parked because it raised (or is handling) an exception rather
+   * than because it hit a breakpoint (`reason` is DBMS_DEBUG's exception/handler).
+   */
+  stoppedOnException?: boolean;
+  /**
+   * The exception-breakpoint resume loop hit its continuation cap without seeing
+   * an exception, so it stopped rather than polling forever; `message` carries the
+   * agent's explanation. Not an error: the session is still usable.
+   */
+  exceptionResumeTruncated?: boolean;
+  /**
+   * OUT / IN OUT parameter values of the completed target. Only present once the
+   * target ran to completion (never while it is parked), so an empty/absent array
+   * means "not finished yet" rather than "no OUT parameters".
+   */
+  outParams?: PlDebugOutParam[];
+  /** Return value of the completed target; only present for a function that finished. */
+  returnValue?: PlDebugReturnValue | null;
 }
 
 export async function plDebugProbe(connectionId: string): Promise<PlDebugProbeResult> {
@@ -190,37 +262,4 @@ export async function plDebugGetLog(debugId: string): Promise<PlDebugStatus> {
 
 export async function plDebugClose(debugId: string): Promise<void> {
   return invoke("pl_debug_close", { debugId });
-}
-
-/**
- * 把 agent 透传的 scalar_values JSON 文本摊平成 name → value 列表。
- *
- * OceanBase 的 `DBMS_DEBUG.GET_VALUES` 输出是 JSON（结构随版本可能不同），
- * 这里做宽松处理：对象按点号路径展开，数组按 [i] 展开，标量直接取值；
- * 解析失败时退化为单条原始文本，保证面板永远有内容可展示。
- */
-export function parsePlDebugVariables(scalarValues: string | null | undefined): Array<{ name: string; value: string }> {
-  const payload = (scalarValues ?? "").trim();
-  if (!payload) return [];
-  const collected: Array<{ name: string; value: string }> = [];
-  const walk = (value: unknown, prefix: string | null): void => {
-    if (value === null || value === undefined) return;
-    if (Array.isArray(value)) {
-      value.forEach((item, index) => walk(item, prefix === null ? `[${index}]` : `${prefix}[${index}]`));
-      return;
-    }
-    if (typeof value === "object") {
-      for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-        walk(nested, prefix === null ? key : `${prefix}.${key}`);
-      }
-      return;
-    }
-    collected.push({ name: prefix ?? "value", value: String(value) });
-  };
-  try {
-    walk(JSON.parse(payload), null);
-    return collected;
-  } catch {
-    return [{ name: "values", value: payload }];
-  }
 }

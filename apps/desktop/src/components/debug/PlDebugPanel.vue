@@ -9,6 +9,7 @@ import DebugLogPanel from "@/components/debug/DebugLogPanel.vue";
 import DebugToolbar from "@/components/debug/DebugToolbar.vue";
 import DebugOutputPanel from "@/components/debug/DebugOutputPanel.vue";
 import PlDebugSourceEditor from "@/components/debug/PlDebugSourceEditor.vue";
+import PlDebugOutcomePanel from "@/components/debug/PlDebugOutcomePanel.vue";
 import StackTracePanel from "@/components/debug/StackTracePanel.vue";
 import VariablesPanel from "@/components/debug/VariablesPanel.vue";
 import { launchPlDebug } from "@/components/debug/plDebugLaunch";
@@ -17,7 +18,7 @@ import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 
 const { t } = useI18n();
 const store = usePlDebugStore();
-const activeTab = ref<"variables" | "stack" | "breakpoints" | "log" | "output">("variables");
+const activeTab = ref<"variables" | "stack" | "breakpoints" | "log" | "output" | "outcome">("variables");
 const sourcePaneSize = ref(58);
 
 /**
@@ -93,6 +94,7 @@ onMounted(() => {
             <TabsTrigger value="breakpoints" class="text-xs">{{ t("plDebug.panel.breakpoints") }}</TabsTrigger>
             <TabsTrigger value="log" class="text-xs">{{ t("plDebug.panel.log") }}</TabsTrigger>
             <TabsTrigger value="output" class="text-xs">{{ t("plDebug.panel.output") }}</TabsTrigger>
+            <TabsTrigger value="outcome" class="text-xs">{{ t("plDebug.outcome.title") }}</TabsTrigger>
           </TabsList>
           <TabsContent value="variables" class="min-h-0 flex-1 overflow-hidden">
             <VariablesPanel />
@@ -108,6 +110,9 @@ onMounted(() => {
           </TabsContent>
           <TabsContent value="output" class="min-h-0 flex-1 overflow-hidden">
             <DebugOutputPanel />
+          </TabsContent>
+          <TabsContent value="outcome" class="min-h-0 flex-1 overflow-hidden">
+            <PlDebugOutcomePanel />
           </TabsContent>
         </Tabs>
       </Pane>

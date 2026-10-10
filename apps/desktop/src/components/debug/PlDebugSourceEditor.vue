@@ -6,11 +6,13 @@ import { EditorView, keymap } from "@codemirror/view";
 import { basicSetup } from "codemirror";
 import * as langSql from "@codemirror/lang-sql";
 import { Loader2 } from "@lucide/vue";
+import { Button } from "@/components/ui/button";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { createPlDebugEditorExtension, refreshPlDebugEditorEffect } from "@/lib/editor/codemirrorPlDebugEditor";
 import { createPlDebugStepKeyBindings, type PlDebugStepCommand } from "@/lib/editor/plDebugStepShortcut";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { routineSourceObject } from "@/lib/debug/oracleRoutineEntryLine";
 import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
 import { useTheme } from "@/composables/useTheme";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -89,14 +91,21 @@ function sessionDatabaseType(): DatabaseType | undefined {
 const sourceRequest = computed<{ name: string; objectType: ObjectSourceKind } | null>(() => {
   const target = store.target;
   if (!target || !store.connectionId) return null;
-  const objectType = target.objectType.toUpperCase();
-  if (objectType === "ANONYMOUS") return null;
-  if (target.packageName) return { name: target.packageName, objectType: "PACKAGE_BODY" };
-  if (!target.objectName) return null;
-  return { name: target.objectName, objectType: objectType as ObjectSourceKind };
+  if (target.objectType.toUpperCase() === "ANONYMOUS") return null;
+  // 与对象浏览器的「设断点（过程入口）」共用同一份对象映射（lib/debug/oracleRoutineEntryLine），
+  // 两处各写一份迟早会漂移。
+  return routineSourceObject({ objectName: target.objectName ?? "", objectType: target.objectType, packageName: target.packageName });
 });
 
+/**
+ * 跨对象 step-in 的只读视图（调用栈面板的「查看该帧源码」）。它压过目标源码：
+ * 只要它在，源码区显示的就是**别的对象**，横幅给出出处，返回目标即清空。
+ */
+const frameView = computed(() => (store.hasSession ? store.frameSourceView : null));
+
 const documentText = computed(() => {
+  const view = frameView.value;
+  if (view) return view.source;
   const target = store.target;
   if (!target) return "";
   if (target.objectType.toUpperCase() === "ANONYMOUS") return target.source ?? "";
@@ -104,6 +113,8 @@ const documentText = computed(() => {
 });
 
 const statusMessage = computed(() => {
+  const view = frameView.value;
+  if (view) return view.source.trim() ? "" : (view.error ?? t("plDebug.source.unavailable"));
   if (loadError.value) return loadError.value;
   if (!store.target) return t("plDebug.source.unavailable");
   if (!documentText.value.trim()) return t("plDebug.source.unavailable");
@@ -125,6 +136,10 @@ function programMatchesTarget(program: string, target: PlDebugSessionTarget): bo
 
 const activeCurrentLine = computed<number | null>(() => {
   if (!store.hasSession) return null;
+  // The frame view highlights exactly the frame the user asked for; the target view
+  // only highlights a stop that is inside the object it shows.
+  const view = frameView.value;
+  if (view) return view.line;
   const line = store.currentLine;
   const target = store.target;
   if (line === null || !target) return null;
@@ -199,8 +214,11 @@ async function mountEditor() {
       editorFontTheme(EditorView, settings.fontSize, settings.fontFamily, { fixedHeight: true, scrollable: true }),
       // 断点/当前行装饰放在主题之后，确保断点圆点与整行高亮不被编辑器主题覆盖。
       createPlDebugEditorExtension({
-        getSnapshot: () => ({ breakpointLines: store.breakpointLines, currentLine: activeCurrentLine.value }),
-        isEnabled: () => store.hasSession && store.target !== null,
+        // 查看别的对象的源码时**不**推断点：断点按「当前调试对象 + 行号」下发，这份源码是
+        // 只读展示，挂上 gutter 只会让人把断点设到错误的对象上。当前行高亮仍然生效
+        // （它就是这一帧停住的位置）。
+        getSnapshot: () => ({ breakpointLines: frameView.value ? [] : store.breakpointLines, currentLine: activeCurrentLine.value }),
+        isEnabled: () => store.hasSession && store.target !== null && frameView.value === null,
         toggleBreakpoint: (lineNum: number) => {
           // applyBreakpoints 已经写进 store.error（工具栏会显示），这里只需吞掉 rejection。
           void store.toggleBreakpoint(lineNum).catch(() => {});
@@ -228,7 +246,7 @@ watch(
 // 断点与当前行只以装饰形式推送：调试期间文档本身不变。
 // 订阅 store.breakpointLines（计算属性）而不是 breakpoints 数组本身，否则
 // applyBreakpoints 的 push 不会改变数组引用，装饰就不会重画。
-watch([() => store.breakpointLines, activeCurrentLine, () => store.currentProgram, () => store.hasSession, () => store.target], refreshEditorDecorations);
+watch([() => store.breakpointLines, activeCurrentLine, () => store.currentProgram, () => store.hasSession, () => store.target, frameView], refreshEditorDecorations);
 
 // 设置里改键后立刻生效（与 QueryEditor 的 runKeymapComp 同一范式），
 // 不必等重新挂载编辑器。
@@ -247,6 +265,14 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="flex h-full min-h-0 flex-col overflow-hidden">
+    <!--
+      跨对象 step-in 的横幅：明确「这不是当前调试目标」，并给出一条返回目标的入口。
+      视图是只读的（没有 gutter 断点），横幅里的对象名就是点击的那一帧报告的 program。
+    -->
+    <div v-if="frameView" class="flex items-center gap-2 border-b bg-muted/40 px-2 py-1 text-xs">
+      <span class="truncate" :title="`${frameView.owner}.${frameView.name}`">{{ t("plDebug.frameSource.banner", { object: frameView.program, frame: frameView.frameIndex }) }}</span>
+      <Button variant="ghost" size="sm" class="ml-auto h-6 shrink-0 px-2 text-xs" @click="store.clearFrameSourceView()">{{ t("plDebug.frameSource.back") }}</Button>
+    </div>
     <div v-if="loading" class="flex flex-1 items-center justify-center gap-1.5 text-xs text-muted-foreground">
       <Loader2 class="h-3.5 w-3.5 animate-spin" />
       {{ t("plDebug.source.loading") }}

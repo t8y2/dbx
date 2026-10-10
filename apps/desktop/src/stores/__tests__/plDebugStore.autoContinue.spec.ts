@@ -211,3 +211,25 @@ describe("plDebugStore breakpoint enablement", () => {
     expect(store.breakpointLocals[30]).toBeUndefined();
   });
 });
+
+describe("plDebugStore exception resume bookkeeping", () => {
+  it("records the truncated exception resume as a warning instead of a plain stop", async () => {
+    // helper 的异常恢复循环有上限；到顶时 agent 会在 message 里说明原因并停下。
+    const store = await startSession();
+    plResume.mockResolvedValue({ line: "30", terminated: false, exceptionResumeTruncated: true, message: "exception breakpoint resume stopped after 200 continuations without an exception" });
+
+    await store.resume();
+
+    expect(store.history.some((entry) => entry.level === "WARN" && entry.message.includes("without an exception"))).toBe(true);
+  });
+
+  it("stops on an exception without recording a warning", async () => {
+    const store = await startSession();
+    plResume.mockResolvedValue({ line: "30", terminated: false, stoppedOnException: true });
+
+    await store.resume();
+
+    expect(store.status?.stoppedOnException).toBe(true);
+    expect(store.history.some((entry) => entry.level === "WARN")).toBe(false);
+  });
+});

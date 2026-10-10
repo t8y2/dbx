@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
+import { findWatchVariable } from "@/lib/debug/plDebugWatch";
 import {
   plDebugAbort,
   plDebugClose,
@@ -78,6 +79,43 @@ export interface PlDebugLocalBreakpoint extends PlDebugBreakpoint {
   hits?: number;
 }
 
+/** One row of the watch window: a name resolved against the current frame. */
+export interface PlDebugWatchRow {
+  /** The name as the user spelled it (variable rows keep DBMS_DEBUG's spelling). */
+  name: string;
+  /** Current value, or null while the name is not in the current scope. */
+  value: string | null;
+  /** Type reported by the server, or null when the name is out of scope. */
+  type: string | null;
+  /** Whether the current frame's variable list contains the name at all. */
+  inScope: boolean;
+}
+
+/**
+ * A read-only view of another object's source, opened from one stack frame.
+ *
+ * The source is loaded by the caller (the stack panel), so the store never holds a
+ * fetch of its own and the view can carry the backend's own error text when the
+ * object could not be loaded -- an empty view would be exactly as bad as a blank
+ * panel. `source` and `error` are mutually exclusive.
+ */
+export interface PlDebugFrameSourceView {
+  /** Frame number in the stack listing (0 = innermost), for the banner. */
+  frameIndex: number;
+  /** The program identifier the frame reported, so the banner names the frame the user clicked. */
+  program: string;
+  /** 1-based line to highlight inside the object's source, when the frame reported one. */
+  line: number | null;
+  /** Owner the source was read from. */
+  owner: string;
+  /** Object name the source belongs to (the package name for a package member). */
+  name: string;
+  /** Source text; empty when `error` is set. */
+  source: string;
+  /** Backend error text shown in place of the source; null on success. */
+  error: string | null;
+}
+
 /**
  * State of one live PL/SQL debugging session (OceanBase Oracle).
  *
@@ -106,13 +144,29 @@ export const usePlDebugStore = defineStore("plDebug", () => {
    * the fallback removed server-side.
    */
   const breakpointLocals = ref<Record<number, PlDebugBreakpointLocals>>({});
-  const variables = ref<Array<{ name: string; value: string }>>([]);
+  const variables = ref<Array<{ name: string; value: string; type?: string }>>([]);
   const backtrace = ref("");
   const output = ref("");
   const error = ref<string | null>(null);
   /** Stack frame the variables panel inspects; 0 is the innermost (stopped) frame. */
   const currentFrame = ref(0);
   const exceptionBreakpoint = ref(false);
+  /**
+   * Watch names, in the order the user added them.
+   *
+   * Deliberately session-independent like `history`: a name typed into the watch
+   * box (or taken from a variable row) should not disappear when the session is
+   * closed and the routine is debugged again. Values are never stored — each row
+   * resolves its name against the current frame's variables on every render, so a
+   * single step or resume keeps the list and refreshes the values in place.
+   */
+  const watchNames = ref<string[]>([]);
+  /**
+   * The other object's source currently on screen, or null while the editor shows
+   * the debug target. Session state, not history: a new session starts on the
+   * target (`reset` clears it), and it never outlives the stack it came from.
+   */
+  const frameSourceView = ref<PlDebugFrameSourceView | null>(null);
   /** Session history (start / continue / step / breakpoints / failures), oldest first. */
   const history = ref<PlDebugHistoryEntry[]>([]);
 
@@ -151,6 +205,25 @@ export const usePlDebugStore = defineStore("plDebug", () => {
       .map((line) => Number(line))
       .filter((line) => Number.isFinite(line) && breakpointLocals.value[line]?.enabled === false)
       .sort((left, right) => left - right),
+  );
+
+  /**
+   * The watch window's rows: one per name, resolved against the current frame.
+   *
+   * `value === null` means the name is not in the current scope (program running,
+   * target finished, or the variable belongs to another frame) — the panel renders
+   * an explicit placeholder for it instead of an empty cell.
+   */
+  const watches = computed<PlDebugWatchRow[]>(() =>
+    watchNames.value.map((name) => {
+      const entry = findWatchVariable(name, variables.value);
+      return {
+        name,
+        value: entry ? entry.value : null,
+        type: entry ? (entry.type ?? "") : null,
+        inScope: entry !== null,
+      };
+    }),
   );
 
   /** Local properties of a line, with defaults for anything never configured. */
@@ -207,6 +280,17 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     if (history.value.length > HISTORY_LIMIT) {
       history.value.splice(0, history.value.length - HISTORY_LIMIT);
     }
+  }
+
+  /**
+   * Forgets the last failure. A caller that recovered from a rejected operation by
+   * retrying with another input (the object browser's entry breakpoint falls back
+   * from the routine header line to the body's first statement) clears the stale
+   * message here, so the toolbar cannot show an error for something that has since
+   * succeeded -- the recovery itself is recorded in the history instead.
+   */
+  function clearError() {
+    error.value = null;
   }
 
   /**
@@ -424,6 +508,12 @@ export const usePlDebugStore = defineStore("plDebug", () => {
       status.value = result;
       terminated.value = result.terminated === true;
       pushHistory("INFO", `${label} → ${result.terminated === true ? "terminated" : `line ${result.line ?? "?"}`}`);
+      // The exception-breakpoint loop is capped so it cannot poll forever; when it
+      // hits the cap the agent says so in `message` and the session stops. Record it
+      // as a warning — the state label alone would look like an ordinary breakpoint.
+      if (result.exceptionResumeTruncated === true) {
+        pushHistory("WARN", `exception breakpoint: ${result.message ?? "resume stopped without an exception"}`);
+      }
       if (applyStopRules && result.terminated !== true) {
         result = await skipAccordingToRules(label, action, result);
       }
@@ -529,11 +619,58 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     const result = await plDebugGetVariables(debugId.value, frame);
     mergeStatusLocator(result);
     // The backend normalizes both GET_VALUES shapes (OceanBase JSON, Oracle
-    // `*name*type*value` text) into a flat variables array.
+    // `*name*type*value` text) into a flat variables array, including the declared
+    // type; the watch window renders that type next to the value.
     variables.value = (result.variables ?? []).map((entry) => ({
       name: entry.name,
       value: entry.value ?? "",
+      type: entry.type ?? "",
     }));
+  }
+
+  /**
+   * Adds a name to the watch window. Blank names and names already watched (case
+   * insensitively — the same rule `findWatchVariable` matches by) are ignored, so a
+   * double click on "Add to watch" cannot produce two identical rows.
+   */
+  function addWatch(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    if (watchNames.value.some((entry) => entry.toUpperCase() === trimmed.toUpperCase())) return;
+    watchNames.value.push(trimmed);
+    pushHistory("INFO", `watch +${trimmed}`);
+  }
+
+  /** Removes one row of the watch window. */
+  function removeWatch(name: string) {
+    const next = watchNames.value.filter((entry) => entry !== name);
+    if (next.length === watchNames.value.length) return;
+    watchNames.value = next;
+    pushHistory("INFO", `watch -${name}`);
+  }
+
+  /**
+   * Assigns a value through the existing SET_VALUE channel and re-reads the frame,
+   * exactly like editing a variable row: the watch window is a second view on the
+   * same primitive, not a second implementation of it.
+   */
+  async function setWatchValue(name: string, value: string, frame = currentFrame.value) {
+    await setValue(name, frame, 0, value);
+  }
+
+  /**
+   * Shows another object's source in the debug source editor (cross-object step-in).
+   * The caller has already loaded it; `error` carries the backend's text when it
+   * could not be loaded, so the editor can show that instead of an empty document.
+   */
+  function showFrameSource(view: PlDebugFrameSourceView) {
+    frameSourceView.value = view;
+    pushHistory("INFO", `frame ${view.frameIndex} source: ${view.owner}.${view.name}${view.error ? ` (${view.error})` : ""}`);
+  }
+
+  /** Returns the source editor to the debug target. */
+  function clearFrameSourceView() {
+    frameSourceView.value = null;
   }
 
   /**
@@ -629,7 +766,12 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     error.value = null;
     currentFrame.value = 0;
     exceptionBreakpoint.value = false;
-    // `history` deliberately survives a reset: it is the record of the session.
+    // A frame-source view belongs to the stack it came from: a new session starts
+    // on its own target.
+    frameSourceView.value = null;
+    // `history` and `watchNames` deliberately survive a reset: they are the record
+    // of the session and the names the user typed, and neither should be lost when
+    // the same routine is debugged again.
   }
 
   return {
@@ -650,6 +792,8 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     error,
     currentFrame,
     exceptionBreakpoint,
+    watchNames,
+    frameSourceView,
     history,
     supported,
     currentLine,
@@ -657,6 +801,7 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     hasSession,
     breakpointLines,
     disabledBreakpointLines,
+    watches,
     runProbe,
     start,
     applyBreakpoints,
@@ -677,7 +822,13 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     setValue,
     selectFrame,
     setExceptionBreakpoint,
+    addWatch,
+    removeWatch,
+    setWatchValue,
+    showFrameSource,
+    clearFrameSourceView,
     pushHistory,
+    clearError,
     close,
     reset,
   };

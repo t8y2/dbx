@@ -51,8 +51,32 @@ export interface PlDebugStepContext {
    * `target?.closest('[role="dialog"], [role="alertdialog"]')`。
    */
   insideDialog?: boolean;
+  /**
+   * 事件目标落在可编辑元素里（输入框/文本域/下拉框，或 contenteditable 宿主）。为 true 时
+   * 本模块让位：这些元素里的字母键属于输入框本身，调试器不该把 `Mod+I/O/P` 当成单步。
+   * 判定用 `isPlDebugEditableTarget(e.target)`（本模块导出，便于单测与复用）。
+   */
+  insideEditable?: boolean;
   shortcuts?: Partial<ShortcutSettings>;
   platform?: string;
+}
+
+/**
+ * 事件目标是否是可编辑元素 —— 「按键属于输入框」的判定。
+ *
+ * 用鸭子类型而不是 `instanceof HTMLInputElement`：本模块要在 node 环境的单测里直接断言，
+ * 而判定本身只需要标签名与 `isContentEditable`。祖先链上再认一次
+ * `[contenteditable='true'], [role='textbox']`，覆盖焦点落在 contenteditable 宿主内部
+ * 节点（富文本/code editor 的 contentDOM）的情形，与仓库既有的对话框/选区辅助函数同惯例。
+ */
+export function isPlDebugEditableTarget(target: unknown): boolean {
+  if (!target || typeof target !== "object") return false;
+  const element = target as { tagName?: unknown; isContentEditable?: unknown; closest?: unknown };
+  const tag = typeof element.tagName === "string" ? element.tagName.toUpperCase() : "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (element.isContentEditable === true) return true;
+  if (typeof element.closest !== "function") return false;
+  return !!(element as Element).closest("[contenteditable='true'], [role='textbox']");
 }
 
 /**
@@ -69,6 +93,13 @@ export function resolvePlDebugStepShortcut(event: ShortcutLikeEvent, context: Pl
   // `openTableStructureEditor` 一类就是这么做目标门控的）。编辑器内的键位不经过这里，
   // 所以调试源码视图的绑定不受影响。
   if (context.insideDialog) return null;
+  // 输入框也拥有其中的按键（`Mod+I/O/P` 是字母键，打字时误触发单步是最烦人的一类 bug）。
+  // 返回 null 就是「交还给后面的分支」：`Mod+P` 照旧是 global 作用域的 quickOpen，
+  // `Mod+I/O` 什么都不触发 —— 与调试页之外的语义逐位一致。
+  // **调试源码编辑器不受影响**：CodeMirror 的 keydown 挂在编辑器 DOM 上、冒泡先于 window，
+  // 且 `PlDebugSourceEditor` 已用 `Prec.highest` 装了自己的单步绑定（见
+  // `createPlDebugStepKeyBindings`），事件在那里就被消费掉了，永远到不了这个判定。
+  if (context.insideEditable) return null;
   if (event.isComposing) return null;
   const platform = context.platform ?? globalThis.navigator?.platform ?? "";
   const shortcuts = normalizeShortcutSettings(context.shortcuts, platform);

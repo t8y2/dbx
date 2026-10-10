@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, Check, Pencil, Search, X } from "@lucide/vue";
+import { AlertTriangle, Check, Eye, Pencil, Plus, Search, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { usePlDebugStore } from "@/stores/plDebugStore";
+import { usePlDebugStore, type PlDebugWatchRow } from "@/stores/plDebugStore";
 
 const { t } = useI18n();
 const store = usePlDebugStore();
@@ -14,6 +14,13 @@ const draft = ref("");
 const savingName = ref<string | null>(null);
 const saveError = ref<string | null>(null);
 const editor = ref<HTMLInputElement | null>(null);
+/** The watch section edits separately from the variable rows (keys can collide). */
+const editingWatch = ref<string | null>(null);
+const watchDraft = ref("");
+const savingWatch = ref<string | null>(null);
+const watchError = ref<string | null>(null);
+const watchEditor = ref<HTMLInputElement | null>(null);
+const watchInput = ref("");
 
 /**
  * Only the probe's `variablesSupported` says the server cannot list variables.
@@ -37,6 +44,9 @@ const filteredVariables = computed(() => {
   if (!needle) return store.variables;
   return store.variables.filter((entry) => entry.name.toLowerCase().includes(needle));
 });
+
+/** Editing and removing a watch both need a live session's SET_VALUE channel. */
+const watchesDisabled = computed(() => store.busy || store.terminated || !store.hasSession);
 
 async function startEditing(name: string, value: string) {
   editingName.value = name;
@@ -66,6 +76,47 @@ async function saveValue(name: string) {
   } finally {
     savingName.value = null;
   }
+}
+
+/** Adds the name typed into the watch box (blank names are ignored by the store). */
+function addTypedWatch() {
+  store.addWatch(watchInput.value);
+  watchInput.value = "";
+}
+
+async function startEditingWatch(name: string, value: string) {
+  editingWatch.value = name;
+  watchDraft.value = value;
+  watchError.value = null;
+  await nextTick();
+  watchEditor.value?.focus();
+  watchEditor.value?.select();
+}
+
+function cancelWatchEditing() {
+  editingWatch.value = null;
+  watchDraft.value = "";
+  watchError.value = null;
+}
+
+/** Same SET_VALUE channel as a variable row: frame = the inspected frame, index 0. */
+async function saveWatchValue(name: string) {
+  watchError.value = null;
+  savingWatch.value = name;
+  try {
+    await store.setWatchValue(name, watchDraft.value);
+    editingWatch.value = null;
+    watchDraft.value = "";
+  } catch (caught) {
+    watchError.value = String(caught);
+  } finally {
+    savingWatch.value = null;
+  }
+}
+
+/** A watch row's value cell: the value, or the explicit out-of-scope placeholder. */
+function watchValueText(row: PlDebugWatchRow): string {
+  return row.inScope ? (row.value ?? "") : t("plDebug.watch.notInScope");
 }
 </script>
 
@@ -112,9 +163,14 @@ async function saveValue(name: string) {
               <template v-else>{{ entry.value }}</template>
             </td>
             <td class="px-2 py-1 align-top">
-              <Button v-if="editingName !== entry.name" variant="ghost" size="sm" class="h-6 w-6 p-0" :disabled="variablesUnsupported || store.busy || store.terminated" :title="t('plDebug.variables.edit')" @click="startEditing(entry.name, entry.value)">
-                <Pencil class="h-3.5 w-3.5" />
-              </Button>
+              <div class="flex items-center">
+                <Button v-if="editingName !== entry.name" variant="ghost" size="sm" class="h-6 w-6 p-0" :disabled="variablesUnsupported || store.busy || store.terminated" :title="t('plDebug.variables.edit')" @click="startEditing(entry.name, entry.value)">
+                  <Pencil class="h-3.5 w-3.5" />
+                </Button>
+                <Button variant="ghost" size="sm" class="h-6 w-6 p-0" :title="t('plDebug.variables.addToWatch')" @click="store.addWatch(entry.name)">
+                  <Eye class="h-3.5 w-3.5" />
+                </Button>
+              </div>
             </td>
           </tr>
           <tr v-if="filteredVariables.length === 0">
@@ -126,5 +182,67 @@ async function saveValue(name: string) {
       </table>
     </div>
     <p v-if="saveError" class="border-t px-2 py-1 text-xs text-destructive">{{ t("plDebug.variables.setFailed", { error: saveError }) }}</p>
+
+    <!--
+      监视区：与变量表分开的一段，名字来自变量行或手输；值每次都从当前帧变量解析，
+      所以单步/续跑之后列表还在、值跟着变（列表本身也不随会话关闭清空）。
+      pause 不在这里做 —— DBMS_DEBUG 没有中断原语（只有断点/步进事件，程序只在解释器
+      入口让出），前端因此也没有 pause 按钮。
+    -->
+    <section class="flex max-h-[48%] min-h-0 shrink-0 flex-col border-t">
+      <div class="flex items-center gap-2 border-b px-2 py-1">
+        <span class="text-xs font-medium">{{ t("plDebug.watch.title") }}</span>
+        <Input v-model="watchInput" class="h-6 flex-1 text-xs" :placeholder="t('plDebug.watch.addPlaceholder')" @keydown.enter.prevent="addTypedWatch" />
+        <Button variant="ghost" size="sm" class="h-6 w-6 p-0" :disabled="!watchInput.trim()" :title="t('plDebug.watch.add')" @click="addTypedWatch">
+          <Plus class="h-3.5 w-3.5" />
+        </Button>
+      </div>
+      <div class="min-h-0 flex-1 overflow-auto">
+        <table class="w-full text-xs">
+          <thead class="sticky top-0 bg-background">
+            <tr class="text-left text-muted-foreground">
+              <th class="px-2 py-1 font-normal">{{ t("plDebug.variables.name") }}</th>
+              <th class="px-2 py-1 font-normal">{{ t("plDebug.variables.value") }}</th>
+              <th class="w-24 px-2 py-1 font-normal">{{ t("plDebug.variables.type") }}</th>
+              <th class="w-16 px-2 py-1 font-normal">{{ t("plDebug.variables.actions") }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in store.watches" :key="row.name" class="border-t">
+              <td class="px-2 py-1 align-top font-mono">{{ row.name }}</td>
+              <td class="whitespace-pre-wrap break-all px-2 py-1 align-top font-mono" :class="row.inScope ? '' : 'text-muted-foreground italic'">
+                <template v-if="editingWatch === row.name">
+                  <div class="flex items-center gap-1">
+                    <Input ref="watchEditor" v-model="watchDraft" class="h-6 text-xs" :disabled="savingWatch === row.name" :placeholder="t('plDebug.watch.valuePlaceholder')" @keydown.enter.prevent="saveWatchValue(row.name)" @keydown.esc.prevent="cancelWatchEditing" />
+                    <Button variant="ghost" size="sm" class="h-6 w-6 p-0" :disabled="savingWatch === row.name" :title="t('plDebug.variables.save')" @click="saveWatchValue(row.name)">
+                      <Check class="h-3.5 w-3.5" />
+                    </Button>
+                    <Button variant="ghost" size="sm" class="h-6 w-6 p-0" :disabled="savingWatch === row.name" :title="t('plDebug.variables.cancel')" @click="cancelWatchEditing">
+                      <X class="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </template>
+                <template v-else>{{ watchValueText(row) }}</template>
+              </td>
+              <td class="px-2 py-1 align-top font-mono text-muted-foreground">{{ row.type || "—" }}</td>
+              <td class="px-2 py-1 align-top">
+                <div class="flex items-center">
+                  <Button v-if="editingWatch !== row.name" variant="ghost" size="sm" class="h-6 w-6 p-0" :disabled="!row.inScope || watchesDisabled" :title="t('plDebug.watch.edit')" @click="startEditingWatch(row.name, row.value ?? '')">
+                    <Pencil class="h-3.5 w-3.5" />
+                  </Button>
+                  <Button v-if="editingWatch !== row.name" variant="ghost" size="sm" class="h-6 w-6 p-0" :title="t('plDebug.watch.remove')" @click="store.removeWatch(row.name)">
+                    <X class="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="store.watches.length === 0">
+              <td colspan="4" class="px-2 py-3 text-center text-muted-foreground">{{ t("plDebug.watch.empty") }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <p v-if="watchError" class="border-t px-2 py-1 text-xs text-destructive">{{ t("plDebug.watch.setFailed", { error: watchError }) }}</p>
   </div>
 </template>

@@ -34,7 +34,7 @@ import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitio
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { usePlDebugStore } from "@/stores/plDebugStore";
-import { resolvePlDebugStepShortcut, type PlDebugStepCommand } from "@/lib/editor/plDebugStepShortcut";
+import { isPlDebugEditableTarget, resolvePlDebugStepShortcut, type PlDebugStepCommand } from "@/lib/editor/plDebugStepShortcut";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
@@ -4296,6 +4296,11 @@ async function handleKeydown(e: KeyboardEvent) {
     // 对话框（设置页等）浮在调试页之上时让位：对话框里的按键属于对话框。判定沿用下方
     // focusWhere / editTableStructure 的同一套目标门控惯例。
     insideDialog: e.target instanceof Element && !!e.target.closest('[role="dialog"], [role="alertdialog"]'),
+    // 内联输入框（变量面板的筛选/改值、断点面板的条件/命中次数等）也拥有自己的按键：
+    // 焦点在可编辑元素里时让位，键位回到输入框（Mod+P 仍是 global 的 quickOpen）。
+    // 调试源码编辑器不经过这里 —— 它的键由 CodeMirror 自己的绑定处理，事件在编辑器 DOM
+    // 上就被消费，不会冒泡到 window。
+    insideEditable: isPlDebugEditableTarget(e.target),
   });
   if (plDebugStep) {
     e.preventDefault();

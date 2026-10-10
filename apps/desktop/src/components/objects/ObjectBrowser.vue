@@ -61,6 +61,7 @@ import {
   X,
   Wrench,
   Bug,
+  CircleDot,
 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import i18n from "@/i18n";
@@ -143,7 +144,11 @@ import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutio
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
-import { buildOracleCompileErrorsSql, buildOracleCompileSql, formatOracleCompileErrors } from "@/lib/database/oracleCompileSql";
+import { buildOracleCompileSql } from "@/lib/database/oracleCompileSql";
+import { runOracleCompileAction } from "@/lib/database/oracleCompileAction";
+import { resolveRoutineEntryLine, routineProgramName, type OracleRoutineEntryLines } from "@/lib/debug/oracleRoutineEntryLine";
+import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
+import { usePlDebugStore } from "@/stores/plDebugStore";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
@@ -1808,6 +1813,55 @@ function openPlDebugRoutine(row: ObjectBrowserRow) {
   });
 }
 
+/**
+ * 「设断点（过程入口）」：断点属于调试会话（`applyBreakpoints` 就挂在 session 上），
+ * 所以没有存活的会话时只报错、不偷偷开会话 —— 开会话要选参数，那一步是调试入口的职责。
+ *
+ * 行号解析见 `resolveRoutineEntryLine`：先试子程序头行，服务器不接受（oracle 侧
+ * entrypointname 臂仍在真机探针验证中）再试子程序体第一条语句；两次都失败时把服务器
+ * 的原话报出来，绝不静默。
+ */
+async function setRoutineEntryBreakpoint(row: ObjectBrowserRow) {
+  if (!supportsPlDebugRoutine(effectiveDatabaseType.value) || (row.type !== "PROCEDURE" && row.type !== "FUNCTION")) return;
+  const debugStore = usePlDebugStore();
+  if (!debugStore.hasSession) {
+    toast(t("contextMenu.setEntryBreakpointNoSession"), 5000);
+    return;
+  }
+  const schema = row.schema || selectedSchema.value || props.database;
+  let resolved: OracleRoutineEntryLines | null = null;
+  try {
+    const { source } = await loadObjectSourceWithRoutineFallback(api.getObjectSource, props.connection.id, props.database, schema, row.name, row.type);
+    resolved = resolveRoutineEntryLine(source.source ?? "", row.name);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+    return;
+  }
+  if (!resolved) {
+    toast(t("contextMenu.setEntryBreakpointUnresolved", { name: row.name }), 5000);
+    return;
+  }
+  const program = routineProgramName({ objectName: row.name });
+  const lines = resolved.candidateLine === null ? [resolved.headLine] : [resolved.headLine, resolved.candidateLine];
+  let lastError = "";
+  for (const line of lines) {
+    try {
+      // 同一个程序的旧断点先摘掉：重设入口断点时不该留下两条。
+      await debugStore.applyBreakpoints([...debugStore.breakpoints.filter((breakpoint) => (breakpoint.name ?? "").toUpperCase() !== program.toUpperCase()), { owner: schema, name: program, line, kind: row.type }]);
+      if (line !== resolved.headLine) {
+        // 头行被服务器拒绝后落到回退行：把上一次失败留在工具栏的错误清掉，并如实说明。
+        debugStore.clearError();
+        debugStore.pushHistory("WARN", `breakpoint on ${program}:${resolved.headLine} rejected (${lastError}); set on line ${line} instead`);
+      }
+      toast(t("contextMenu.setEntryBreakpointSuccess", { name: program, line }), 3000);
+      return;
+    } catch (caught) {
+      lastError = String(caught);
+    }
+  }
+  toast(t("contextMenu.setEntryBreakpointFailed", { name: program, error: lastError }), 5000);
+}
+
 function openProcedureExecutionSql(sql: string) {
   const row = procedureExecutionTarget.value;
   if (!row || !sql) return;
@@ -3024,33 +3078,41 @@ async function compileDamengView(row: ObjectBrowserRow) {
 /**
  * Oracle answers `ALTER ... COMPILE` with success even when the object is left INVALID, so
  * the compile is followed by an ALL_ERRORS read-back and *that* decides between the success
- * toast and the error dialog: the DDL's own result would always say "compiled".
+ * toast and the error dialog: the DDL's own result would always say "compiled". The two
+ * statements and that decision live in `runOracleCompileAction`; this wrapper only supplies
+ * the query channel (DDL through the production guard, the read-back straight to the API,
+ * as before) and refreshes the view.
  */
 async function compileOracleObject(row: ObjectBrowserRow) {
   if (effectiveDatabaseType.value !== "oracle") return;
   const schema = row.schema || selectedSchema.value;
-  const sql = buildOracleCompileSql({ objectType: row.type, schema, name: row.name });
-  if (!sql) return;
-  try {
-    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
-    if (!executed) return;
-    const errorsSql = buildOracleCompileErrorsSql({ schema, name: row.name });
-    const errors = errorsSql ? await api.executeQuery(props.connection.id, props.database, errorsSql, schema) : undefined;
-    const message = formatOracleCompileErrors(errors?.rows ?? []);
-    await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
-    if (!message) {
-      toast(t("contextMenu.compileObjectSuccess", { name: row.name }));
-      return;
-    }
+  const outcome = await runOracleCompileAction({
+    connectionId: props.connection.id,
+    database: props.database,
+    schema,
+    owner: schema,
+    name: row.name,
+    objectType: row.type,
+    runQuery: ({ sql, stage }) => (stage === "compile" ? executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema)) : api.executeQuery(props.connection.id, props.database, sql, schema)),
+  });
+  if (outcome.status === "unsupported" || outcome.status === "blocked") return;
+  // A statement that threw is reported before the reload: the original code showed the
+  // dialog straight from its catch block, without refreshing the list.
+  if (outcome.status === "failed") {
     compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
-    compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: row.name, message });
+    compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: row.name, message: outcome.message });
     showCompileErrorDialog.value = true;
-  } catch (e: any) {
-    compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
-    compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: row.name, message: e?.message || String(e) });
-    showCompileErrorDialog.value = true;
+    return;
   }
+  await reload();
+  await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
+  if (outcome.status === "success") {
+    toast(t("contextMenu.compileObjectSuccess", { name: row.name }));
+    return;
+  }
+  compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
+  compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: row.name, message: outcome.message });
+  showCompileErrorDialog.value = true;
 }
 
 /** The Compile entry for an Oracle object, or null when Oracle cannot recompile that kind. */
@@ -3964,6 +4026,7 @@ function getProcFuncMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
     ...(item.type === "PROCEDURE" ? [{ label: t("contextMenu.executeProcedure"), action: () => openProcedureExecution(item), icon: Play }] : []),
     ...(supportsPlDebugRoutine(effectiveDatabaseType.value) ? [{ label: t("contextMenu.debugRoutine"), action: () => openPlDebugRoutine(item), icon: Bug }] : []),
+    ...(supportsPlDebugRoutine(effectiveDatabaseType.value) ? [{ label: t("contextMenu.setEntryBreakpoint"), action: () => void setRoutineEntryBreakpoint(item), icon: CircleDot }] : []),
     ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),

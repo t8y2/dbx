@@ -246,6 +246,14 @@ impl SqlDialectProfile {
             return Self::sap_hana();
         }
 
+        if matches!(db_type, DatabaseType::DuckDb) {
+            return Self {
+                supports_backslash_escaped_quotes: false,
+                supports_postgres_escape_strings: true,
+                ..Self::default()
+            };
+        }
+
         if Self::is_postgres_string_lexer_database(db_type) {
             return Self {
                 supports_backslash_escaped_quotes: false,
@@ -3778,6 +3786,16 @@ mod tests {
     }
 
     #[test]
+    fn duckdb_plain_strings_keep_windows_paths_and_following_statements_separate() {
+        let sql = r#"SET VARIABLE path = 'C:\path\'; SET VARIABLE next = 'value'; SELECT 1;"#;
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::DuckDb),
+            vec![r#"SET VARIABLE path = 'C:\path\'"#, "SET VARIABLE next = 'value'", "SELECT 1"]
+        );
+    }
+
+    #[test]
     fn postgres_escape_string_keeps_a_backslash_escaped_quote() {
         let sql = r#"SELECT E'it\'s; still one value'; SELECT 1;"#;
 
@@ -4570,9 +4588,9 @@ SELECT 2;";
             assert!(profile.supports_postgres_escape_strings);
         }
 
-        // Engines without PostgreSQL string literals keep the historical escape
-        // rule until their own evidence is recorded.
-        assert!(SqlDialectProfile::for_database_type(DatabaseType::DuckDb).supports_backslash_escaped_quotes);
+        let duckdb = SqlDialectProfile::for_database_type(DatabaseType::DuckDb);
+        assert!(!duckdb.supports_backslash_escaped_quotes);
+        assert!(duckdb.supports_postgres_escape_strings);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::ClickHouse).supports_backslash_escaped_quotes);
 
         for db_type in [

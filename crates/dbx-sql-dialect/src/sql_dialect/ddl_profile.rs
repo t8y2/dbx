@@ -363,6 +363,11 @@ const SQLITE_TYPE_MAP: &[TypeMapEntry] = &[
     TypeMapEntry { source_base: "JSON", target_template: "TEXT" },
 ];
 
+const POSTGRES_TYPE_MAP: &[TypeMapEntry] = &[
+    TypeMapEntry { source_base: "UNIQUEIDENTIFIER", target_template: "UUID" },
+    TypeMapEntry { source_base: "GUID", target_template: "UUID" },
+];
+
 // ---------------------------------------------------------------------------
 // Profile families (shared shapes; registration is the only DatabaseType match)
 // ---------------------------------------------------------------------------
@@ -469,7 +474,7 @@ fn postgres_family(db: DatabaseType) -> DdlDialectProfile {
         owner_alter_template: Some(OWNER_ALTER),
         drop_table_template: DROP_TABLE,
         lock_timeout_sql: Some("SET lock_timeout = '3s';"),
-        type_map: &[],
+        type_map: POSTGRES_TYPE_MAP,
     }
 }
 

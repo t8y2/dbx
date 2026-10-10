@@ -196,6 +196,8 @@ impl TypeInferenceEngine for DefaultTypeInferenceEngine {
             ("boolean", "bool"),
             ("timestamp", "datetime"),
             ("datetime", "timestamp"),
+            ("uniqueidentifier", "uuid"),
+            ("uuid", "uniqueidentifier"),
         ];
         if exact_matches.contains(&(source_lower.as_str(), target_lower.as_str())) {
             return SCORE_ALIAS;

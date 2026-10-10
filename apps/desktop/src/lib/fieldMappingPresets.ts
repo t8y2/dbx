@@ -85,15 +85,61 @@ export const FIELD_MAPPING_PRESETS: FieldMappingPreset[] = [
       { sourceType: "BOOLEAN", targetType: "NUMBER(1)", paramStrategy: "custom", customParams: "(1)" },
     ],
   },
+  {
+    id: "sqlserver-to-postgresql",
+    label: "SQL Server → PostgreSQL",
+    sourceDialect: "sqlserver",
+    targetDialect: "postgresql",
+    mappings: [
+      { sourceType: "VARCHAR", targetType: "VARCHAR", paramStrategy: "preserve" },
+      { sourceType: "NVARCHAR", targetType: "VARCHAR", paramStrategy: "preserve" },
+      { sourceType: "CHAR", targetType: "CHAR", paramStrategy: "preserve" },
+      { sourceType: "NCHAR", targetType: "CHAR", paramStrategy: "preserve" },
+      { sourceType: "TEXT", targetType: "TEXT", paramStrategy: "strip" },
+      { sourceType: "NTEXT", targetType: "TEXT", paramStrategy: "strip" },
+      { sourceType: "INT", targetType: "INTEGER", paramStrategy: "preserve" },
+      { sourceType: "BIGINT", targetType: "BIGINT", paramStrategy: "preserve" },
+      { sourceType: "SMALLINT", targetType: "SMALLINT", paramStrategy: "preserve" },
+      { sourceType: "TINYINT", targetType: "SMALLINT", paramStrategy: "preserve" },
+      { sourceType: "BIT", targetType: "BOOLEAN", paramStrategy: "strip" },
+      { sourceType: "DECIMAL", targetType: "NUMERIC", paramStrategy: "preserve" },
+      { sourceType: "NUMERIC", targetType: "NUMERIC", paramStrategy: "preserve" },
+      { sourceType: "MONEY", targetType: "NUMERIC", paramStrategy: "strip" },
+      { sourceType: "SMALLMONEY", targetType: "NUMERIC", paramStrategy: "strip" },
+      { sourceType: "FLOAT", targetType: "DOUBLE PRECISION", paramStrategy: "strip" },
+      { sourceType: "REAL", targetType: "REAL", paramStrategy: "strip" },
+      { sourceType: "DATE", targetType: "DATE", paramStrategy: "preserve" },
+      { sourceType: "DATETIME", targetType: "TIMESTAMP", paramStrategy: "preserve" },
+      { sourceType: "DATETIME2", targetType: "TIMESTAMP", paramStrategy: "preserve" },
+      { sourceType: "SMALLDATETIME", targetType: "TIMESTAMP", paramStrategy: "strip" },
+      { sourceType: "DATETIMEOFFSET", targetType: "TIMESTAMPTZ", paramStrategy: "preserve" },
+      { sourceType: "TIME", targetType: "TIME", paramStrategy: "preserve" },
+      { sourceType: "UNIQUEIDENTIFIER", targetType: "UUID", paramStrategy: "strip" },
+      { sourceType: "VARBINARY", targetType: "BYTEA", paramStrategy: "strip" },
+      { sourceType: "BINARY", targetType: "BYTEA", paramStrategy: "strip" },
+      { sourceType: "IMAGE", targetType: "BYTEA", paramStrategy: "strip" },
+      { sourceType: "XML", targetType: "XML", paramStrategy: "strip" },
+    ],
+  },
 ];
 
+function normalizeDialect(dialect: string): string {
+  const d = dialect.trim().toLowerCase();
+  if (d === "postgres" || d === "postgresql") return "postgresql";
+  if (d === "sqlserver" || d === "mssql") return "sqlserver";
+  return d;
+}
+
 export function findPreset(sourceDialect: string, targetDialect: string): FieldMappingPreset | undefined {
+  const src = normalizeDialect(sourceDialect);
+  const tgt = normalizeDialect(targetDialect);
+
   // Look for exact forward match
-  const forward = FIELD_MAPPING_PRESETS.find((p) => p.sourceDialect === sourceDialect && p.targetDialect === targetDialect);
+  const forward = FIELD_MAPPING_PRESETS.find((p) => p.sourceDialect === src && p.targetDialect === tgt);
   if (forward) return forward;
 
   // Look for reverse match and auto-generate bidirectional preset
-  const reverse = FIELD_MAPPING_PRESETS.find((p) => p.sourceDialect === targetDialect && p.targetDialect === sourceDialect);
+  const reverse = FIELD_MAPPING_PRESETS.find((p) => p.sourceDialect === tgt && p.targetDialect === src);
   if (reverse) {
     return {
       id: `${reverse.id}-reverse`,

@@ -3219,6 +3219,19 @@ fn column_types_equal_for_dialects(
     if source_type.eq_ignore_ascii_case(target_type) {
         return true;
     }
+    match (source_dialect, target_dialect) {
+        (Some(DialectKind::SqlServer), Some(DialectKind::Postgres))
+            if source_type.eq_ignore_ascii_case("uniqueidentifier") && target_type.eq_ignore_ascii_case("uuid") =>
+        {
+            return true;
+        }
+        (Some(DialectKind::Postgres), Some(DialectKind::SqlServer))
+            if source_type.eq_ignore_ascii_case("uuid") && target_type.eq_ignore_ascii_case("uniqueidentifier") =>
+        {
+            return true;
+        }
+        _ => {}
+    }
     if source_dialect != Some(DialectKind::Mysql) || target_dialect != Some(DialectKind::Mysql) {
         return false;
     }
@@ -3268,6 +3281,8 @@ fn column_type_similarity_score(source_type: &str, target_type: &str) -> f64 {
         ("boolean", "bool"),
         ("timestamp", "datetime"),
         ("datetime", "timestamp"),
+        ("uniqueidentifier", "uuid"),
+        ("uuid", "uniqueidentifier"),
     ];
     if exact_matches.contains(&(s.as_str(), t.as_str())) {
         return 1.0;
@@ -15737,5 +15752,23 @@ mod tests {
 
         assert!(sql.contains("CREATE OR REPLACE FORCE VIEW DBX_TGT.V_NEW"), "{sql}");
         assert!(!sql.contains("DBX_TEST.V_NEW"), "{sql}");
+    }
+
+    #[test]
+    fn uniqueidentifier_and_uuid_cross_dialect_equivalence() {
+        assert!(column_types_equal_for_dialects(
+            "uniqueidentifier",
+            "uuid",
+            Some(DialectKind::SqlServer),
+            Some(DialectKind::Postgres),
+        ));
+        assert!(column_types_equal_for_dialects(
+            "uuid",
+            "uniqueidentifier",
+            Some(DialectKind::Postgres),
+            Some(DialectKind::SqlServer),
+        ));
+        assert_eq!(column_type_similarity_score("uniqueidentifier", "uuid"), 1.0);
+        assert_eq!(column_type_similarity_score("uuid", "uniqueidentifier"), 1.0);
     }
 }

@@ -202,6 +202,27 @@ describe("buildConnectionUrlCopy JDBC URL", () => {
     expect(buildConnectionUrlCopy({ ...oracle, oracle_connection_type: "sid" }, "jdbcUrl")).toBe("jdbc:oracle:thin:@ora.example.com:1521:ORCLPDB1");
   });
 
+  it("keeps Oracle credentials verbatim when they are safe to embed", () => {
+    const oracle = config({ db_type: "oracle", host: "ora.example.com", port: 1521, database: "ORCLPDB1", username: "app_user", password: "p^ss%40#y" });
+    expect(buildConnectionUrlCopy(oracle, "jdbcUrlWithCredentials")).toBe("jdbc:oracle:thin:@//ora.example.com:1521/ORCLPDB1?user=app_user&password=p^ss%40#y");
+    expect(connectionUrlCopyFormats(oracle)).toContain("jdbcUrlWithCredentials");
+  });
+
+  it("omits the Oracle with-credentials item when the password would break the property grammar", () => {
+    const oracle = config({ db_type: "oracle", host: "ora.example.com", port: 1521, database: "ORCLPDB1", username: "app_user", password: "p@ss&word" });
+    expect(buildConnectionUrlCopy(oracle, "jdbcUrlWithCredentials")).toBeNull();
+    expect(connectionUrlCopyFormats(oracle)).not.toContain("jdbcUrlWithCredentials");
+    // The plain JDBC URL without credentials stays available.
+    expect(buildConnectionUrlCopy(oracle, "jdbcUrl")).toBe("jdbc:oracle:thin:@//ora.example.com:1521/ORCLPDB1");
+  });
+
+  it("omits the Oracle with-credentials item when the username would break the property grammar", () => {
+    const oracle = config({ db_type: "oracle", host: "ora.example.com", port: 1521, database: "ORCLPDB1", username: "app@user", password: "secret" });
+    expect(buildConnectionUrlCopy(oracle, "jdbcUrlWithCredentials")).toBeNull();
+    expect(connectionUrlCopyFormats(oracle)).not.toContain("jdbcUrlWithCredentials");
+    expect(buildConnectionUrlCopy(oracle, "jdbcUrl")).toBe("jdbc:oracle:thin:@//ora.example.com:1521/ORCLPDB1");
+  });
+
   it("redacts explicit jdbc: strings for the plain item and keeps them verbatim for the credentials item", () => {
     const jdbcConfig = config({ db_type: "jdbc", host: "", port: 0, username: "", password: "", database: undefined, connection_string: "jdbc:hive2://zk1:2181,zk2:2181/default;serviceDiscoveryMode=zooKeeper;password=s3cret" });
     expect(buildConnectionUrlCopy(jdbcConfig, "jdbcUrl")).toBe("jdbc:hive2://zk1:2181,zk2:2181/default;serviceDiscoveryMode=zooKeeper;password=***");

@@ -46,6 +46,22 @@ export function resolveSidebarSearchDatabaseScope(connectionNode: TreeNode, opti
 }
 
 /**
+ * Database scope the search walker uses for one connected connection, or
+ * undefined when it must not descend into that connection at all.
+ *
+ * The active connection follows the opened-databases setting. Other connected
+ * connections are searched only in the databases the user opened, regardless of
+ * the setting: MySQL-style trees keep one metadata pool per database, so walking
+ * every database of every connected connection would multiply server
+ * connections. A non-active connection with nothing opened, or without
+ * database-level nodes, is not descended into.
+ */
+export function resolveSidebarSearchConnectionScope(connectionNode: TreeNode, options: SidebarSearchDatabaseScopeOptions, isActiveConnection: boolean): ReadonlySet<string> | null | undefined {
+  if (isActiveConnection) return resolveSidebarSearchDatabaseScope(connectionNode, options);
+  return resolveSidebarSearchDatabaseScope(connectionNode, { ...options, enabled: true }) ?? undefined;
+}
+
+/**
  * Whether the search walker must skip a node: a database-level node outside
  * the opened scope. Containers and non-database nodes are never pruned, and a
  * null scope (unrestricted) prunes nothing.

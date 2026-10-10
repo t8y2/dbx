@@ -27,7 +27,7 @@ import {
 import { createSidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
 import { collectSidebarRegexIndexScopes, resolveSidebarRemoteSearchQuery, resolveSidebarSearchDispatchMode, shouldRestoreTrackedSidebarSearchTargetsInRegexMode } from "@/lib/sidebar/sidebarRegexSearchIndex";
 import { needsSidebarObjectGroupDiscovery } from "@/lib/sidebar/sidebarSearchDiscovery";
-import { isSidebarSearchPrunedDatabaseNode, resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
+import { isSidebarSearchPrunedDatabaseNode, resolveSidebarSearchConnectionScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 import { createSidebarSearchExpansionState } from "@/lib/sidebar/sidebarSearchExpansionState";
 import { createSidebarSearchLoadingTracker } from "@/lib/sidebar/sidebarSearchLoadingTracker";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -396,20 +396,27 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
   if (refreshedNodeIds && node.type === "connection" && node.connectionId) {
     // 数据库级节点只有被用户真正打开（树已加载或被打开的页签引用，与侧栏
     // 「打开」高亮同口径）才参与自动搜索；一个都没打开时退回全库搜索。
-    databaseScope = resolveSidebarSearchDatabaseScope(node, {
-      enabled: settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly,
-      isChildrenLoaded: store.isTreeNodeChildrenLoaded,
-      openDatabaseKeys: queryStore.openDatabaseKeys,
-    });
+    const connectionScope = resolveSidebarSearchConnectionScope(
+      node,
+      {
+        enabled: settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly,
+        isChildrenLoaded: store.isTreeNodeChildrenLoaded,
+        openDatabaseKeys: queryStore.openDatabaseKeys,
+      },
+      node.connectionId === store.activeConnectionId,
+    );
     const connectionIsConnected = store.connectedIds.has(node.connectionId);
     if (connectionIsConnected && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
       const connectionId = node.connectionId;
       scheduledNodeIds?.add(node.id);
       tasks.push(() => store.loadConnectedConnectionRootForSidebarSearch(connectionId, { sidebarSearch: true }));
     }
-    // 搜索不得替用户建连：只有连接中的连接（含当前激活的那个）才继续刷新子树。
-    // 断开或连不上的连接直接跳过，后台搜索不会因此弹出凭据输入或写入整段连接错误。
-    if (!connectionIsConnected || node.connectionId !== store.activeConnectionId) return;
+    // Search never opens a connection for the user: disconnected or unreachable connections are skipped,
+    // so a background search cannot prompt for credentials or write a whole connection error on the node.
+    // Connected connections other than the active one are searched only in databases the user opened;
+    // see `resolveSidebarSearchConnectionScope`.
+    if (!connectionIsConnected || connectionScope === undefined) return;
+    databaseScope = connectionScope;
   }
   if (refreshedNodeIds && databaseScope && isSidebarSearchPrunedDatabaseNode(node, databaseScope)) return;
   if (refreshedNodeIds && isSimpleObjectSearchParent(node)) {

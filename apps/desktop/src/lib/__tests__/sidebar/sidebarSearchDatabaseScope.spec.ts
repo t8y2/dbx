@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TreeNode } from "@/types/database";
-import { isSidebarSearchPrunedDatabaseNode, resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
+import { isSidebarSearchPrunedDatabaseNode, resolveSidebarSearchConnectionScope, resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 
 const OPTIONS = {
   enabled: true,
@@ -47,6 +47,30 @@ describe("resolveSidebarSearchDatabaseScope", () => {
   it("treats schema-mode trees without database nodes as unrestricted", () => {
     const schemaNode: TreeNode = { id: "conn-1:public", label: "public", type: "schema", connectionId: "conn-1", database: "main", isExpanded: false, children: [] };
     expect(resolveSidebarSearchDatabaseScope(connectionNode([schemaNode]), OPTIONS)).toEqual(null);
+  });
+});
+
+describe("resolveSidebarSearchConnectionScope", () => {
+  it("follows the opened-databases setting for the active connection", () => {
+    const node = connectionNode([databaseNode("conn-1:a", "a"), databaseNode("conn-1:b", "b")]);
+    expect(resolveSidebarSearchConnectionScope(node, OPTIONS, true)).toEqual(null);
+  });
+
+  it("searches only opened databases of another connected connection", () => {
+    const node = connectionNode([databaseNode("conn-1:a:loaded", "a"), databaseNode("conn-1:tabbed", "tabbed"), databaseNode("conn-1:b", "b")]);
+    expect(resolveSidebarSearchConnectionScope(node, OPTIONS, false)).toEqual(new Set(["conn-1:a:loaded", "conn-1:tabbed"]));
+  });
+
+  it("keeps another connection limited to opened databases when the setting is off", () => {
+    const node = connectionNode([databaseNode("conn-1:a:loaded", "a"), databaseNode("conn-1:b", "b")]);
+    expect(resolveSidebarSearchConnectionScope(node, { ...OPTIONS, enabled: false }, false)).toEqual(new Set(["conn-1:a:loaded"]));
+  });
+
+  it.each([
+    ["has no opened database", connectionNode([databaseNode("conn-1:a", "a")])],
+    ["exposes no database nodes", connectionNode([{ id: "conn-1:public", label: "public", type: "schema", connectionId: "conn-1", database: "main", isExpanded: false, children: [] }])],
+  ] as const)("does not descend into another connection that %s", (_name, node) => {
+    expect(resolveSidebarSearchConnectionScope(node, OPTIONS, false)).toBeUndefined();
   });
 });
 

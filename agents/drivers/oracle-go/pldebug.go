@@ -1089,11 +1089,22 @@ func plDebugEnsureHelperPackage(db *sql.DB, owner string, oci bool) (plDebugProg
 		}
 	}
 	if !bodyValid || !versionCurrent {
-		if err := plDebugBoundedRun(db, "create "+plDebugPackageName+" body", plDebugCallTimeout, func() error {
+		// The head and the body must come from the same build, so the head is replaced
+		// in the same step as the body. Installing the body alone is exactly what lets a
+		// mismatched pair appear: the head check asks whether the installed head declares
+		// the routines this build needs, and an older agent's list is a subset of a newer
+		// head, so that check passes and the older body lands against the newer head with
+		// its extra declaration unimplemented -- PLS-00323, an INVALID body, and every
+		// debug start on the schema fails. Replacing the head first also makes this the
+		// self-healing path for a pair some older agent already broke.
+		if err := plDebugBoundedRun(db, "create "+plDebugPackageName+" head+body", plDebugCallTimeout, func() error {
+			if _, err := db.Exec(fmt.Sprintf(plDebugPackageHeadDDL, schemaIdent)); err != nil {
+				return err
+			}
 			_, err := db.Exec(plDebugPackageBody(schemaIdent, fields))
 			return err
 		}); err != nil {
-			return fields, fmt.Errorf("create %s body failed: %w", plDebugPackageName, err)
+			return fields, fmt.Errorf("create %s head+body failed: %w", plDebugPackageName, err)
 		}
 	}
 	return fields, nil

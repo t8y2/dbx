@@ -1,3 +1,4 @@
+import { sidebarMenuKo as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpKo as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementKo } from "./meilisearchManagement";
@@ -61,6 +62,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  sidebarMenu,
   modelGeneration: {
     title: "모델 생성",
     editTemplate: "템플릿 편집",

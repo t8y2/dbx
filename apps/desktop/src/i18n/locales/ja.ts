@@ -1,3 +1,4 @@
+import { sidebarMenuJa as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpJa as mongoDump } from "./mongodbDatabaseDump";
 import docs from "./docs/ja";
@@ -62,6 +63,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  sidebarMenu,
   modelGeneration: {
     title: "モデルを生成",
     editTemplate: "テンプレートを編集",

@@ -6,6 +6,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSidebarMenuPresentation } from "@/composables/useSidebarMenuPresentation";
 import { useToast } from "@/composables/useToast";
 import type { ColumnInfo, ObjectSourceKind, QueryTab, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
@@ -125,6 +126,7 @@ const sidebarScrollbarTrackRef = ref<HTMLElement | null>(null);
 const sidebarHorizontalScrollbarTrackRef = ref<HTMLElement | null>(null);
 const sidebarContextMenuRef = ref<{ close: () => void } | null>(null);
 const sidebarContextMenuItems = ref<ContextMenuItem[]>([]);
+const { presentMenu, SidebarMenuPreferencesDialog, sidebarMenuPreferencesOpen, sidebarMenuPreferences } = useSidebarMenuPresentation();
 const emit = defineEmits<{
   "open-settings": [initialTab: string];
   "add-to-ai": [nodes: TreeNode | TreeNode[]];
@@ -2001,6 +2003,7 @@ function openSidebarContextMenu(event: MouseEvent, node: TreeNode, openContextMe
   const resolved = sidebarTreeRuntime.resolveContextMenu(node, items);
   const show = (menuItems: ContextMenuItem[]) => {
     if (request !== contextMenuRequest) return;
+    menuItems = presentMenu(menuItems, node.type);
     sidebarContextMenuTarget.value = createSidebarActionTarget(node);
     sidebarContextMenuItems.value = menuItems;
     // Pass the current row's resolved menu atomically, including async plugin items.
@@ -2782,6 +2785,8 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
         </div>
       </div>
     </CustomContextMenu>
+
+    <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
     <div v-if="showConnectedConnectionsOnly && store.connectedIds.size > 0" class="shrink-0 border-t border-border bg-background px-2 py-2">
       <Button type="button" variant="outline" size="sm" class="h-7 w-full justify-center gap-1.5 text-xs" :disabled="isDisconnectingAllActiveConnections" @click="disconnectAllActiveConnections">
         <Loader2 v-if="isDisconnectingAllActiveConnections" class="h-3.5 w-3.5 animate-spin" />

@@ -28,6 +28,7 @@ import { REDIS_DATABASE_DISPLAY_LIMIT_DEFAULT, REDIS_DATABASE_DISPLAY_LIMIT_MIN,
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { normalizeSidebarCopyTableNameSeparator } from "@/lib/sidebar/sidebarTableNameCopy";
 import type { SidebarActivation } from "@/lib/sidebar/treeNodeClick";
+import { normalizeSidebarMenuPinnedActions, normalizeSidebarMenuOrder, type SidebarMenuLayout, type SidebarMenuPinnedActions, type SidebarMenuOrder } from "@/lib/sidebar/sidebarMenuPreferences";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlSnippetTemplates";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { canonicalSqlShortcutSql, DEFAULT_SQL_SHORTCUTS, deriveSqlShortcutDatabaseTypes, mergeDefaultSqlShortcuts, normalizeSqlShortcutDatabaseTypes, normalizeSqlShortcutKind, normalizeSqlShortcutLimit, normalizeSqlShortcutSqlByDatabaseType } from "@/lib/sql/sqlShortcutActions";
@@ -1070,6 +1071,10 @@ export interface EditorSettings {
   shortcuts: ShortcutSettings;
   sqlFormatter: SqlFormatterSettings;
   sidebarActivation: SidebarActivation;
+  sidebarMenuLayout: SidebarMenuLayout;
+  sidebarMenuPinnedActions: SidebarMenuPinnedActions;
+  sidebarMenuHiddenPrimaryActions: SidebarMenuPinnedActions;
+  sidebarMenuOrder: SidebarMenuOrder;
   sidebarConnectionSortMode: ConnectionListSortMode;
   sidebarObjectDisplay: "grouped" | "simple";
   routineSourceOpenMode: "query-tab" | "dialog";
@@ -1392,6 +1397,10 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   shortcuts: normalizeShortcutSettings(),
   sqlFormatter: normalizeSqlFormatterSettings(DEFAULT_SQL_FORMATTER_SETTINGS),
   sidebarActivation: "single",
+  sidebarMenuLayout: "grouped",
+  sidebarMenuPinnedActions: {},
+  sidebarMenuHiddenPrimaryActions: {},
+  sidebarMenuOrder: {},
   sidebarConnectionSortMode: "manual",
   sidebarObjectDisplay: "grouped",
   routineSourceOpenMode: "query-tab",
@@ -2033,6 +2042,10 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     shortcuts: normalizeShortcutSettings(settings.shortcuts),
     sqlFormatter: normalizeSqlFormatterSettings(settings.sqlFormatter),
     sidebarActivation: settings.sidebarActivation === "single" || settings.sidebarActivation === "double" ? settings.sidebarActivation : DEFAULT_EDITOR_SETTINGS.sidebarActivation,
+    sidebarMenuLayout: settings.sidebarMenuLayout === "full" ? "full" : "grouped",
+    sidebarMenuPinnedActions: normalizeSidebarMenuPinnedActions(settings.sidebarMenuPinnedActions),
+    sidebarMenuHiddenPrimaryActions: normalizeSidebarMenuPinnedActions(settings.sidebarMenuHiddenPrimaryActions),
+    sidebarMenuOrder: normalizeSidebarMenuOrder(settings.sidebarMenuOrder),
     sidebarConnectionSortMode: normalizeConnectionListSortMode(settings.sidebarConnectionSortMode),
     sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
     routineSourceOpenMode: settings.routineSourceOpenMode === "query-tab" || settings.routineSourceOpenMode === "dialog" ? settings.routineSourceOpenMode : DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode,
@@ -2914,6 +2927,10 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.shortcuts !== undefined) editorSettings.value.shortcuts = normalizeShortcutSettings(partial.shortcuts);
     if (partial.sqlFormatter !== undefined) editorSettings.value.sqlFormatter = normalizeSqlFormatterSettings(partial.sqlFormatter);
     if (partial.sidebarActivation !== undefined) editorSettings.value.sidebarActivation = partial.sidebarActivation;
+    if (partial.sidebarMenuLayout !== undefined) editorSettings.value.sidebarMenuLayout = partial.sidebarMenuLayout === "full" ? "full" : "grouped";
+    if (partial.sidebarMenuPinnedActions !== undefined) editorSettings.value.sidebarMenuPinnedActions = normalizeSidebarMenuPinnedActions(partial.sidebarMenuPinnedActions);
+    if (partial.sidebarMenuHiddenPrimaryActions !== undefined) editorSettings.value.sidebarMenuHiddenPrimaryActions = normalizeSidebarMenuPinnedActions(partial.sidebarMenuHiddenPrimaryActions);
+    if (partial.sidebarMenuOrder !== undefined) editorSettings.value.sidebarMenuOrder = normalizeSidebarMenuOrder(partial.sidebarMenuOrder);
     if (partial.sidebarConnectionSortMode !== undefined) editorSettings.value.sidebarConnectionSortMode = normalizeConnectionListSortMode(partial.sidebarConnectionSortMode);
     if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
     if (partial.routineSourceOpenMode !== undefined) editorSettings.value.routineSourceOpenMode = partial.routineSourceOpenMode;

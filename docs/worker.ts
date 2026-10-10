@@ -48,7 +48,7 @@ type Env = {
   ISSUE_AI_MODEL?: string;
   ISSUE_RATE_LIMIT_SECRET?: string;
   ISSUE_LIMITER?: DurableObjectNamespaceBinding;
-  ISSUE_IMAGES?: R2BucketBinding;
+ // ISSUE_IMAGES?: R2BucketBinding;
   ISSUE_IMAGE_PUBLIC_BASE_URL?: string;
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;

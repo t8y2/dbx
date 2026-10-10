@@ -117,8 +117,9 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
       options.releaseActiveNodeReference(targets.map((target) => target.id));
       for (const connectionId of connectionIds) {
         // 页签已由 removeConnections 按「删除连接」策略处理，这里只清会话，
-        // 避免再套用「断开连接」策略把刚保留的 SQL 页签关掉。
-        connectionStore.disconnect(connectionId, { skipTabHandling: true }).catch((error) => {
+        // 避免再套用「断开连接」策略把刚保留的 SQL 页签关掉。删除是终态，
+        // 也不写"用户已关闭"标记。
+        connectionStore.disconnect(connectionId, { skipTabHandling: true, markClosedByUser: false }).catch((error) => {
           // Removal has already succeeded; disconnect cleanup must not turn it into a failed delete.
           console.warn("[DBX][connection:delete:disconnect-failed]", { connectionId, error });
         });
@@ -415,7 +416,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
       options.releaseActiveNodeReference(groupIds);
       for (const connectionId of connectionIds) {
         // 页签已由 deleteConnectionGroups 按「删除连接」策略处理，这里只清会话。
-        connectionStore.disconnect(connectionId, { skipTabHandling: true }).catch((error) => {
+        connectionStore.disconnect(connectionId, { skipTabHandling: true, markClosedByUser: false }).catch((error) => {
           console.warn("[DBX][connection-group:delete:disconnect-failed]", { connectionId, error });
         });
       }

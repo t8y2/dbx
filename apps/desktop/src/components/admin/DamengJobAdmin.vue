@@ -95,7 +95,7 @@ const detailColumns = computed(() => {
 const canCreateJob = computed(() => createName.value.trim() && createStepName.value.trim() && createScheduleName.value.trim() && createCommand.value.trim());
 
 async function ensureConnection() {
-  await connectionStore.ensureConnected(props.connection.id);
+  await connectionStore.ensureConnected(props.connection.id, { skipIfClosedByUser: true });
 }
 
 async function loadJobs() {

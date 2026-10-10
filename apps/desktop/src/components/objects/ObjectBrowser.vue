@@ -3544,7 +3544,9 @@ watch(
     sourceEditing.value = false;
     sourceSaving.value = false;
     try {
-      await connectionStore.ensureConnected(props.connection.id);
+      // 被动唤醒（挂载/切上下文）：用户显式关掉的连接交给缓存对象列表与「刷新」按钮，
+      // 不在这里把它连回来。
+      await connectionStore.ensureConnected(props.connection.id, { skipIfClosedByUser: true });
     } catch (e) {
       console.warn("[DBX] ensureConnected failed for", props.connection.id, e);
     }

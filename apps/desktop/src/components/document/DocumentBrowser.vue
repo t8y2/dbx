@@ -2660,7 +2660,7 @@ onMounted(async () => {
   try {
     // A restored tab issues no query, so a blocking health probe here would be
     // the only round trip left on the switch.
-    await connectionStore.ensureConnected(props.connectionId, restoredDocumentData ? { verifyHealth: false } : {});
+    await connectionStore.ensureConnected(props.connectionId, { ...(restoredDocumentData ? { verifyHealth: false } : {}), skipIfClosedByUser: true });
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }

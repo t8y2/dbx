@@ -192,7 +192,7 @@ function userDetail(user: DatabaseUserIdentity): string {
 }
 
 async function ensureConnection() {
-  await connectionStore.ensureConnected(props.connection.id);
+  await connectionStore.ensureConnected(props.connection.id, { skipIfClosedByUser: true });
 }
 
 async function loadUsers() {

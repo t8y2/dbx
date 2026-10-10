@@ -189,7 +189,7 @@ describe("PluginWorkbenchTab restore self-heal", () => {
     app = createApp(PluginWorkbenchTab, { pluginId: "com.example.graph", contributionId: "graph.main", connectionId: "conn-1" });
     app.mount(root);
 
-    await vi.waitFor(() => expect(mocks.ensureConnected).toHaveBeenCalledWith("conn-1", { allowPasswordPrompt: false }));
+    await vi.waitFor(() => expect(mocks.ensureConnected).toHaveBeenCalledWith("conn-1", { allowPasswordPrompt: false, skipIfClosedByUser: true }));
     await vi.waitFor(() => expect(root.querySelector("iframe")).toBeInstanceOf(HTMLIFrameElement));
     expect(root.textContent).not.toContain("pluginPlatform.reloadRequired");
   });

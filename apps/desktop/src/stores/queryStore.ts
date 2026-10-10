@@ -4431,7 +4431,9 @@ export const useQueryStore = defineStore("query", () => {
           // A user-initiated disconnect that closed these tabs already owns
           // the teardown — don't stack a second one on top of it.
           if (connectionStore.hasDisconnectInFlight(connectionId)) return;
-          await connectionStore.disconnect(connectionId);
+          // 系统侧释放（页签关闭触发的回收）不算用户关闭：写标记会让用户重新打开
+          // 这个插件页签时连不上。
+          await connectionStore.disconnect(connectionId, { markClosedByUser: false });
         } catch (error) {
           console.warn("[DBX][plugin-tab-close:disconnect]", connectionId, error);
         } finally {

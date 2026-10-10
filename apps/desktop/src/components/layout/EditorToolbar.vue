@@ -439,22 +439,30 @@ watch(activeDatabaseValue, (database) => {
   if (database) databaseRequiredVisible.value = false;
 });
 
+/**
+ * 用户在侧栏显式关闭过、且还没重新连上的连接。
+ *
+ * 下面三个 watchEffect 是自动预取（挂载工具栏、切页签/切库时拉下拉选项），不代表用户
+ * 想连接；对显式关闭的连接必须跳过，否则残留页签一被激活就把连接连回来。它同时是这些
+ * 效果的响应式依赖：用户重连后标记消失，预取会自然补上。
+ */
+const activeConnectionClosedByUser = computed(() => (props.activeConnection ? connectionStore.isConnectionClosedByUser(props.activeConnection.id) : false));
+
 watchEffect(() => {
   const connection = props.activeConnection;
-  if (connection && showSchemaSelector.value) {
-    loadSchemaOptions(connection.id, schemaDatabaseKey.value).catch(() => {});
-  }
+  if (!connection || activeConnectionClosedByUser.value || !showSchemaSelector.value) return;
+  loadSchemaOptions(connection.id, schemaDatabaseKey.value).catch(() => {});
 });
 watchEffect(() => {
   const connection = props.activeConnection;
-  if (!connection || !connectionIsDorisFamilyCatalogCapable(connection)) return;
+  if (!connection || activeConnectionClosedByUser.value || !connectionIsDorisFamilyCatalogCapable(connection)) return;
   void loadCatalogOptions(connection.id).catch(() => {});
 });
 
 watchEffect(() => {
   const connection = props.activeConnection;
   const catalog = props.activeTab.catalog;
-  if (!connection || !catalog) return;
+  if (!connection || activeConnectionClosedByUser.value || !catalog) return;
   void loadCatalogDatabaseOptions(connection.id, catalog).catch(() => {});
 });
 

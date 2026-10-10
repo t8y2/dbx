@@ -94,7 +94,7 @@ describe("MySqlDashboard session affinity", () => {
     app.mount(root!);
     await flushMountedPolling();
 
-    expect(mocks.ensureConnected).toHaveBeenCalledWith("mysql-1");
+    expect(mocks.ensureConnected).toHaveBeenCalledWith("mysql-1", { skipIfClosedByUser: true });
     expect(mocks.executeQuery).toHaveBeenNthCalledWith(1, "mysql-1", "", GLOBAL_STATUS_SQL, undefined, undefined, { maxRows: 2000, clientSessionId: "tab-dashboard" });
     expect(mocks.executeQuery).toHaveBeenNthCalledWith(2, "mysql-1", "", GLOBAL_VARIABLES_SQL, undefined, undefined, { maxRows: 2000, clientSessionId: "tab-dashboard" });
     expect(mocks.executeQuery).toHaveBeenCalledTimes(2);

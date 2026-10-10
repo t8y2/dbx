@@ -2720,7 +2720,7 @@ watch(
     instancesError.value = "";
     selectedConfigKeys.value = [];
     try {
-      await connectionStore.ensureConnected(props.connectionId);
+      await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
     } catch (e) {
       console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
     }
@@ -2732,7 +2732,7 @@ watch(
 onMounted(async () => {
   stopNacosNamespacesChangedListener = subscribeNacosNamespacesChanged(handleNacosNamespacesChanged);
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }

@@ -166,7 +166,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const trace = options.trace;
 
     console.info("[DBX][reloadData:metadata:ensure-connected:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed() });
-    await connectionStore.ensureConnected(target.connectionId);
+    await connectionStore.ensureConnected(target.connectionId, { skipIfClosedByUser: true });
     console.info("[DBX][reloadData:metadata:ensure-connected:done]", { traceId: trace?.traceId, elapsed: trace?.elapsed() });
     if (metadataRequests.get(tab) !== requestToken || connectionStore.metadataGenerationFor(target.connectionId, target.database) !== metadataGenerationAtStart) {
       console.info("[DBX][reloadData:metadata:superseded-by-connection-generation]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), table: target.tableName });

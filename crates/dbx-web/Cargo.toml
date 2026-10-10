@@ -23,8 +23,11 @@ sqlserver-native-attention = ["dbx-core/sqlserver-native-attention"]
 # and DBX_STATIC_DIR is not set, the embedded files are served by default.
 # Requires the frontend to have been built before invoking cargo.
 embed-static = ["dep:rust-embed", "dep:mime_guess"]
+# Codex artifacts must be self-contained in debug builds as well as release builds.
+codex-plugin = ["embed-static", "rust-embed/debug-embed"]
 
 [dependencies]
+dbx-codex = { path = "../dbx-codex", default-features = false }
 dbx-core = { path = "../dbx-core", default-features = false, features = ["openapi"] }
 dbx-mcp = { path = "../dbx-mcp", default-features = false }
 redis = { version = "0.32", features = ["tokio-comp"] }

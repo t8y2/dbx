@@ -38,6 +38,8 @@ const checkingLocale = ref(Boolean(props.localeReady));
 const localeFailed = ref(false);
 let initialLocaleReady = props.localeReady;
 let authRequest: AbortController | undefined;
+const codexIntent = new URLSearchParams(window.location.search).get("codex_intent");
+const authenticationSearch = codexIntent ? `?${new URLSearchParams({ codex_intent: codexIntent })}` : "";
 
 watch(migration.blocking, (blocked) => {
   if (!blocked) markStartupPhase("migration-ready");
@@ -72,7 +74,7 @@ async function initialize() {
       setupRequired.value = result.setup_required === true;
       loginRequired.value = setupRequired.value || (result.required && !result.authenticated);
       if (loginRequired.value) {
-        history.replaceState(null, "", webPath("/login"));
+        history.replaceState(null, "", webPath("/login") + authenticationSearch);
         return;
       }
     }
@@ -85,7 +87,7 @@ async function initialize() {
   }
 }
 async function authenticated() {
-  history.replaceState(null, "", webPath("/"));
+  history.replaceState(null, "", webPath("/") + authenticationSearch);
   await initialize();
 }
 onMounted(() => {

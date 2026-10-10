@@ -1,0 +1,36 @@
+[package]
+name = "dbx-codex"
+version = "0.6.39"
+edition = "2021"
+license = "Apache-2.0"
+
+[features]
+default = ["gateway"]
+gateway = ["dep:rmcp"]
+
+[[bin]]
+name = "dbx-codex"
+path = "src/main.rs"
+required-features = ["gateway"]
+
+[dependencies]
+rmcp = { version = "3.5.1", optional = true, features = ["client", "transport-io", "transport-streamable-http-client-reqwest"] }
+fs2 = "0.4"
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+uuid = { version = "1", features = ["v4"] }
+url = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+rmcp = { version = "3.5.1", features = ["transport-streamable-http-server"] }
+axum = "0.8"
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_Storage_FileSystem"] }

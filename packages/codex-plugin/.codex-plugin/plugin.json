@@ -1,0 +1,19 @@
+{
+  "name": "dbx",
+  "version": "0.6.39",
+  "description": "A complete local DBX database workbench and MCP server inside Codex.",
+  "author": { "name": "DBX contributors", "url": "https://github.com/t8y2/dbx" },
+  "license": "Apache-2.0",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "DBX",
+    "shortDescription": "Local database workbench and MCP",
+    "longDescription": "Open the full DBX Web workbench in Codex. Connections, queries, results and MCP share one private local service; the DBX desktop app is not required.",
+    "developerName": "DBX contributors",
+    "category": "developer-tools",
+    "capabilities": ["Database queries", "Database management", "Local workbench"],
+    "defaultPrompt": "Open the DBX workbench in Codex.",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/icon.png"
+  }
+}

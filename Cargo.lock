@@ -2236,6 +2236,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbx-codex"
+version = "0.6.39"
+dependencies = [
+ "axum",
+ "dirs",
+ "fs2",
+ "libc",
+ "reqwest 0.13.4",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "url",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "dbx-core"
 version = "0.1.0"
 dependencies = [
@@ -2750,6 +2769,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "dbx-codex",
  "dbx-core",
  "dbx-mcp",
  "futures",

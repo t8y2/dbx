@@ -475,6 +475,12 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection_id, database, client_session_id);
         Err("Session cleanup is not supported by this backend.".to_string())
     }
+    fn workbench_available(&self) -> bool {
+        false
+    }
+    fn publish_workbench(&self, _intent: Value) -> Result<String, String> {
+        Err("Codex workbench is unavailable".into())
+    }
     async fn bridge_request(&self, path: &str, body: Value) -> Result<(), String> {
         let _ = (path, body);
         Err("DBX is not running. Please start DBX first.".to_string())
@@ -527,7 +533,12 @@ pub trait DbxBackend: Send + Sync {
     }
 }
 
+pub trait WorkbenchPublisher: Send + Sync {
+    fn publish(&self, intent: Value) -> Result<String, String>;
+}
+
 pub struct LocalBackend {
+    workbench: Option<Arc<dyn WorkbenchPublisher>>,
     state: Arc<AppState>,
     data_dir: std::path::PathBuf,
     transaction_owners: Arc<TransactionOwnerRegistry>,
@@ -760,6 +771,11 @@ fn plugin_lacks_mcp_surface(err: &str) -> bool {
 const PLUGIN_TOOLS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 impl LocalBackend {
+    pub fn with_workbench(mut self, workbench: Arc<dyn WorkbenchPublisher>) -> Self {
+        self.workbench = Some(workbench);
+        self
+    }
+
     async fn notify_connections_changed(&self) {
         // Persistence has already succeeded. A closed or unresponsive desktop
         // must not turn the mutation into an error (or block headless MCP).
@@ -814,6 +830,7 @@ impl LocalBackend {
             data_dir,
             transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
             transaction_owner_config: TransactionOwnerConfig::from_env(),
+            workbench: None,
         }
     }
 
@@ -873,6 +890,7 @@ impl LocalBackend {
             data_dir,
             transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
             transaction_owner_config: TransactionOwnerConfig::from_env(),
+            workbench: None,
         })
     }
 
@@ -1094,6 +1112,13 @@ fn local_agent_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
 
 #[async_trait]
 impl DbxBackend for LocalBackend {
+    fn workbench_available(&self) -> bool {
+        self.workbench.is_some()
+    }
+    fn publish_workbench(&self, intent: Value) -> Result<String, String> {
+        self.workbench.as_ref().ok_or("Codex workbench is unavailable")?.publish(intent)
+    }
+
     async fn approve_high_risk_sql(&self, connection_id: &str, database: &str, sql: &str) -> Result<String, String> {
         let port = tokio::fs::read_to_string(self.data_dir.join("mcp-bridge-port"))
             .await

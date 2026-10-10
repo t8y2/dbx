@@ -90,6 +90,7 @@ afterEach(() => {
   root.remove();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  history.replaceState(null, "", "/");
 });
 
 async function mountGate(localeReady?: Promise<void>) {
@@ -100,6 +101,23 @@ async function mountGate(localeReady?: Promise<void>) {
 }
 
 describe("startup boundary", () => {
+  it.each(["/", "/login"])("preserves a Codex result link through authentication from %s", async (path) => {
+    const id = "a8865884-631a-4a61-adb2-4bcdbd2b6dde";
+    history.replaceState(null, "", `${path}?codex_intent=${id}&unrelated=discard`);
+    mocks.desktop.mockReturnValue(false);
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ required: true, authenticated: false }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ required: true, authenticated: true }) }));
+    businessReady.resolve();
+    await mountGate();
+    await vi.waitFor(() => expect(root.querySelector("[data-login]")).not.toBeNull());
+    expect(location.pathname).toBe("/login");
+    expect(location.search).toBe(`?codex_intent=${id}`);
+    (root.querySelector("[data-login]") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(root.querySelector("main")).not.toBeNull());
+    expect(location.pathname).toBe("/");
+    expect(location.search).toBe(`?codex_intent=${id}`);
+  });
   it("checks migration while the locale loads and keeps feedback until the app module resolves", async () => {
     const locale = deferred<void>();
     await mountGate(locale.promise);

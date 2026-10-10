@@ -1,0 +1,87 @@
+name: Codex Plugin Native Artifacts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      NODE_OPTIONS: --max-old-space-size=8192
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: codex-plugin-${{ matrix.target }}
+      - name: Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libsecret-1-dev pkg-config libssl-dev
+      - name: Full Perl for vendored OpenSSL on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PERL_ARCHIVE_URL: https://github.com/shogo82148/build-perl/releases/download/perl-5.42.3-20260803012115/perl-5.42.3-thr-win32-x64.zip
+          PERL_ARCHIVE_SHA256: 4f0ac6fe1a4221c1fa1804c2d81999bdecebd505a61d0d04720e9b3925cd6db4
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "openssl-perl.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "openssl-perl"
+          curl.exe --fail --location --retry 5 --retry-all-errors $env:PERL_ARCHIVE_URL --output $archive
+          if ($LASTEXITCODE -ne 0) { throw "Unable to download Perl" }
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:PERL_ARCHIVE_SHA256) { throw "Unexpected Perl checksum" }
+          Expand-Archive $archive -DestinationPath $destination
+          $perl = Get-ChildItem $destination -Filter perl.exe -Recurse | Where-Object { $_.FullName -match '[\\/]bin[\\/]perl\.exe$' } | Select-Object -First 1
+          if (-not $perl) { throw "Perl executable missing" }
+          & $perl.FullName -MParams::Check -e 1
+          if ($LASTEXITCODE -ne 0) { throw "Full Perl modules unavailable" }
+          "OPENSSL_SRC_PERL=$($perl.FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @dbx-app/mongo-shell build
+      - run: pnpm typecheck
+      - run: pnpm exec vitest run
+      - run: pnpm build
+      - name: Native protocol and Web regression
+        run: cargo test --locked --target ${{ matrix.target }} -p dbx-codex -p dbx-mcp -p dbx-web --features dbx-web/codex-plugin
+      - name: Build self-contained native programs
+        run: cargo build --locked --release --target ${{ matrix.target }} -p dbx-codex -p dbx-web --features dbx-web/codex-plugin
+      - run: node --test scripts/package-codex-plugin.test.mjs
+      - run: node scripts/package-codex-plugin.mjs --target ${{ matrix.target }} --output target/codex-plugin/${{ matrix.target }}
+      - name: Packaged native end-to-end acceptance
+        run: node scripts/verify-codex-plugin.mjs --plugin-dir target/codex-plugin/${{ matrix.target }}/plugins/dbx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbx-codex-${{ matrix.target }}
+          path: |
+            target/codex-plugin/${{ matrix.target }}/*.tar.gz
+            target/codex-plugin/${{ matrix.target }}/SHA256SUMS
+          if-no-files-found: error

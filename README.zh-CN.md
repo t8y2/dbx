@@ -309,6 +309,8 @@ SSH 隧道（密钥和密码认证）· 数据库和 AI 代理设置 · 断线�
 
 ## AI 编程助手集成 (MCP)
 
+需要在 Codex 中独立使用完整工作台与 MCP，可参考 [Codex 原生插件](packages/codex-plugin/README.zh-CN.md)，无需启动 DBX 桌面端。
+
 DBX 提供 [MCP Server](packages/mcp-server/)，让 AI 编程助手直接使用 DBX 中已配置的数据库连接查询数据。
 
 ```bash

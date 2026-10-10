@@ -29,6 +29,7 @@ pub struct NacosImportContext {
 }
 
 pub struct WebState {
+    pub codex_workbench: Option<Arc<crate::codex::Workbench>>,
     pub app: Arc<AppState>,
     pub data_dir: PathBuf,
     /// Extra absolute roots allowed for connection-level `docsNotesPath`
@@ -64,6 +65,7 @@ impl WebState {
     #[cfg(test)]
     pub fn for_tests(app: Arc<AppState>, data_dir: PathBuf) -> Self {
         Self {
+            codex_workbench: None,
             app,
             data_dir,
             notes_roots: Vec::new(),

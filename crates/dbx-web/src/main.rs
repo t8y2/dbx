@@ -1,4 +1,5 @@
 mod auth;
+mod codex;
 mod demo;
 mod error;
 mod routes;
@@ -46,6 +47,8 @@ Start the DBX Web browser service.
 
 Options:
   -h, --help, /help  Show this help message and exit.
+  --version         Print the native version and exit.
+  --codex           Start an isolated, private Codex workbench.
 
 Environment variables:
   DBX_PORT              Listen port (default: 4224)
@@ -68,6 +71,8 @@ Start the DBX Web browser service.
 
 Options:
   -h, --help, /help  Show this help message and exit.
+  --version         Print the native version and exit.
+  --codex           Start an isolated, private Codex workbench.
 
 Environment variables:
   DBX_PORT              Listen port (default: 4224)
@@ -366,8 +371,11 @@ fn mount_static_assets(mut app: Router, public_base_path: &str, source: Option<S
 /// until a token is configured.
 fn web_mcp_router(web_state: &Arc<WebState>) -> Result<Router, String> {
     let auth = web_state.web_mcp.auth();
-    let backend: Arc<dyn DbxBackend> =
-        Arc::new(LocalBackend::from_app_state(web_state.app.clone(), web_state.data_dir.clone()));
+    let mut backend = LocalBackend::from_app_state(web_state.app.clone(), web_state.data_dir.clone());
+    if let Some(workbench) = &web_state.codex_workbench {
+        backend = backend.with_workbench(workbench.clone());
+    }
+    let backend: Arc<dyn DbxBackend> = Arc::new(backend);
 
     streamable_http_router(backend, "/mcp", auth, web_state.web_mcp.allowed_hosts(), true)
 }
@@ -457,8 +465,29 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
 }
 
+fn codex_package_capabilities() -> serde_json::Value {
+    #[cfg(feature = "embed-static")]
+    let embedded_frontend = (!cfg!(debug_assertions) || cfg!(feature = "codex-plugin"))
+        && EmbeddedStaticAssets::get("index.html").is_some();
+    #[cfg(not(feature = "embed-static"))]
+    let embedded_frontend = false;
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"), "embedded_frontend": embedded_frontend,
+        "full_features": cfg!(feature = "duckdb-sidecar") && cfg!(feature = "dynamodb")
+            && cfg!(feature = "mq-admin") && cfg!(feature = "sqlite-sqlcipher") && cfg!(feature = "system-fonts"),
+    })
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--codex-package-check") {
+        println!("{}", codex_package_capabilities());
+        return ExitCode::SUCCESS;
+    }
+    if args.iter().any(|arg| arg == "--version") {
+        println!("dbx-web {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     if help_requested(&args) {
         print!("{HELP_TEXT}");
         return ExitCode::SUCCESS;
@@ -488,11 +517,51 @@ async fn serve() -> Result<(), String> {
 
     rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
 
+    let codex_mode = std::env::args().any(|arg| arg == "--codex");
+    // Codex owns its listener and authentication; deployment overrides cannot disable them.
+    if codex_mode {
+        for key in [
+            "DBX_DISABLE_PASSWORD",
+            "DBX_PASSWORD",
+            "DBX_STATIC_DIR",
+            "DBX_PUBLIC_BASE_PATH",
+            "DBX_WEB_MCP_TOKEN",
+            "DBX_WEB_MCP_TOKEN_FILE",
+            "DBX_WEB_MCP_ALLOWED_HOSTS",
+            "DBX_WEB_MCP_ALLOWED_ORIGINS",
+            "DBX_DEMO_MODE",
+            "DBX_AGENT_DIR",
+            "DBX_BACKUP_ROOT",
+            "DBX_WEB_COOKIE_SECURE",
+            "DBX_DOCS_NOTES_ROOTS",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
     // Data directory
     let data_dir = std::env::var("DBX_DATA_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         std::path::PathBuf::from(home).join(".dbx-web")
     });
+    let data_dir = if codex_mode && std::env::var_os("DBX_DATA_DIR").is_none() {
+        dbx_codex::runtime::default_data_dir()?
+    } else {
+        data_dir
+    };
+    let mut codex_runtime = if codex_mode {
+        let lease = dbx_codex::runtime::ServiceLease::acquire(&data_dir).await?;
+        if lease.handle().version != env!("CARGO_PKG_VERSION") {
+            return Err("Plugin launcher and Web backend versions differ; rebuild both binaries together".into());
+        }
+        let port = lease.handle().base_url.port().ok_or("Missing Codex listener port")?;
+        std::env::set_var("DBX_BIND_ADDR", "127.0.0.1");
+        std::env::set_var("DBX_PORT", port.to_string());
+        std::env::set_var("DBX_WEB_MCP_TOKEN_FILE", data_dir.join("mcp-token"));
+        std::env::set_var("DBX_WEB_MCP_ALLOWED_HOSTS", format!("127.0.0.1:{port}"));
+        Some(lease)
+    } else {
+        None
+    };
     std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
 
     let app_state = {
@@ -558,6 +627,9 @@ async fn serve() -> Result<(), String> {
         WebMcpRuntime::disabled()
     });
     let web_state = Arc::new(WebState {
+        codex_workbench: codex_runtime
+            .as_ref()
+            .map(|lease| Arc::new(codex::Workbench::new(lease.handle().base_url.to_string()))),
         app: app_state,
         data_dir,
         notes_roots: routes::docs::notes_roots_from_env(std::env::var_os("DBX_DOCS_NOTES_ROOTS").as_deref()),
@@ -592,6 +664,7 @@ async fn serve() -> Result<(), String> {
 
     // API routes
     let api = Router::new()
+        .route("/codex/intents/{id}", get(codex::intent))
         .route("/migration/status", get(routes::migration::status))
         .route("/migration/start", post(routes::migration::start))
         .route("/migration/retry", post(routes::migration::retry))
@@ -1472,13 +1545,26 @@ async fn serve() -> Result<(), String> {
         .layer(CompressionLayer::new().compress_when(web_compression_predicate()))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
-    let mcp_router = web_mcp_router(&web_state).map_err(web_mcp_startup_error)?;
+    let mut mcp_router = web_mcp_router(&web_state).map_err(web_mcp_startup_error)?;
+    if codex_mode {
+        mcp_router = mcp_router.layer(middleware::from_fn_with_state(web_state.clone(), codex::setup_gate));
+    }
     app = app.merge(
         mcp_router
             .layer(middleware::from_fn_with_state(web_state.clone(), web_mcp_demo_gate))
             .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate)),
     );
     tracing::info!("DBX Web MCP endpoint is available at /mcp when enabled");
+
+    let server_shutdown = tokio_util::sync::CancellationToken::new();
+    if let Some(lease) = &codex_runtime {
+        app = app.merge(codex::control_router(
+            &lease.handle(),
+            &lease.token()?,
+            web_state.app.clone(),
+            server_shutdown.clone(),
+        )?);
+    }
 
     let static_dir = std::env::var_os("DBX_STATIC_DIR").map(std::path::PathBuf::from);
     // DBX_STATIC_DIR always wins (frontend development); otherwise serve the
@@ -1498,6 +1584,9 @@ async fn serve() -> Result<(), String> {
         }
     };
     app = mount_static_assets(app, &public_base_path, static_source);
+    if let Some(workbench) = &web_state.codex_workbench {
+        app = app.layer(middleware::from_fn_with_state(workbench.clone(), codex::browser_gate));
+    }
 
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
@@ -1528,10 +1617,16 @@ async fn serve() -> Result<(), String> {
         tracing::info!("Demo mode is enabled: connection/plugin/AI mutations are blocked");
     }
 
-    let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");
+    let listener = if let Some(lease) = codex_runtime.as_mut() {
+        let listener = lease.take_listener()?;
+        lease.publish()?;
+        listener
+    } else {
+        tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address")
+    };
     let shutdown_state = web_state.app.clone();
-    let server_shutdown = tokio_util::sync::CancellationToken::new();
     let server_shutdown_trigger = server_shutdown.clone();
+    let signal_backup_stop = backup_stop.clone();
     tokio::spawn(async move {
         #[cfg(unix)]
         {
@@ -1571,7 +1666,7 @@ async fn serve() -> Result<(), String> {
                 tracing::info!("Shutdown signal received (Ctrl+C)");
             }
         }
-        backup_stop.cancel();
+        signal_backup_stop.cancel();
         server_shutdown_trigger.cancel();
     });
 
@@ -1598,11 +1693,13 @@ async fn serve() -> Result<(), String> {
             tracing::warn!("Graceful HTTP shutdown timed out after 5s; proceeding with teardown");
         }
     }
+    backup_stop.cancel();
     if tokio::time::timeout(std::time::Duration::from_secs(5), backup_worker).await.is_err() {
         tracing::warn!("Scheduled backup worker did not drain within 5s; exiting with failure status");
         exit_code = 1;
     }
     shutdown_state.shutdown(std::time::Duration::from_secs(3)).await;
+    drop(codex_runtime);
     std::process::exit(exit_code);
 }
 

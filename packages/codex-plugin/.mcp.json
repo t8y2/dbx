@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "./bin/dbx-codex",
+      "args": [],
+      "cwd": ".",
+      "env_vars": ["DBX_CODEX_DATA_DIR"]
+    }
+  }
+}

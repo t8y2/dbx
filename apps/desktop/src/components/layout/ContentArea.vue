@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { computed, inject, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { inlineQueryResultEntries } from "@/lib/editor/inlineQueryResultEntries";
+import { INLINE_QUERY_RESULT_PORTAL, type InlineQueryResultPortal } from "@/lib/editor/inlineQueryResultPortal";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab, restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
@@ -267,6 +269,8 @@ const props = defineProps<
     editorOnly?: boolean;
     /** Render only the shared query result pane (used by QueryResultSurface). */
     resultOnly?: boolean;
+    inlineResult?: boolean;
+    activateResult?: () => void;
     /** Whether the query editor should request focus on mount. */
     autoFocus?: boolean;
   }
@@ -276,6 +280,12 @@ const emit = defineEmits<ContentAreaSurfaceEmits>();
 
 const { t } = useI18n();
 const queryStore = useQueryStore();
+const inlineResultPortal = inject<InlineQueryResultPortal | null>(INLINE_QUERY_RESULT_PORTAL, null);
+const editorInlineResults = computed(() => inlineQueryResultEntries(props.activeTab, inlineResultPortal?.anchors.get(props.activeTab.id)).map((entry) => entry.result));
+function withResultContext<T>(action: () => T): T {
+  props.activateResult?.();
+  return action();
+}
 const connectionStore = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
 /** Clear a consumed editor reveal request so a later normal tab re-visit doesn't re-jump. */
@@ -528,7 +538,9 @@ const includeResultSourceDatabase = computed(() => settingsStore.editorSettings.
 const resultTabNamingMode = computed(() => settingsStore.editorSettings.resultTabNamingMode);
 const preferResultTabComments = computed(() => settingsStore.editorSettings.resultTabPreferComments);
 const visibleResultItems = computed(() =>
-  tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined), { includeSourceDatabase: includeResultSourceDatabase.value, namingMode: resultTabNamingMode.value, preferComments: preferResultTabComments.value }),
+  tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined), { includeSourceDatabase: includeResultSourceDatabase.value, namingMode: resultTabNamingMode.value, preferComments: preferResultTabComments.value }).filter(
+    (item) => !props.inlineResult || item.result === props.activeTab.result,
+  ),
 );
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results, { includeSourceDatabase: includeResultSourceDatabase.value, namingMode: resultTabNamingMode.value, preferComments: preferResultTabComments.value }));
 const allResultExportSheets = computed(() =>
@@ -642,6 +654,7 @@ function sortQueryGrid(column: string, columnIndex: number, direction: "asc" | "
 }
 
 async function fetchGridResultForExport(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, probeRowLimit = false, tabId = props.activeTab.id) {
+  props.activateResult?.();
   const isNeo4j = activeEffectiveDatabaseType.value === "neo4j";
   const result = await queryStore.fetchTabResultForExport(tabId, onProgress, probeRowLimit);
   if (!result || !isNeo4j) return result;
@@ -731,8 +744,8 @@ const resultRunRenameOpen = ref(false);
 const resultRunRenameId = ref<string | null>(null);
 const resultRunRenameTitle = ref("");
 const activeResultIsLoading = computed(() => !props.activeTab.redisMonitorActive && isActiveResultLoading(props.activeTab));
-const showResultRunTabs = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs");
-const showResultRunSelector = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "list");
+const showResultRunTabs = computed(() => !props.inlineResult && resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs");
+const showResultRunSelector = computed(() => !props.inlineResult && resultRuns.value.length > 0 && resultRunDisplayMode.value === "list");
 const canCloseQueryResult = computed(() => props.activeTab.mode === "query" && !props.activeTab.isExecuting && !props.activeTab.activeResultRunId && (!!props.activeTab.result || !!props.activeTab.results?.length || props.activeTab.resultEvicted === true));
 
 function updateResultTabsAfterRender() {
@@ -1989,6 +2002,7 @@ defineExpose({
               :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
               :execution-error="activeQueryError"
               :execution-error-sql="activeTab.lastExecutedSql"
+              :inline-query-results="activeTab.uiState?.resultPaneOpen !== false ? editorInlineResults : []"
               :result-columns="activeTab.result?.columns"
               :result-source-statement="activeTab.result?.sourceStatement"
               :result-source-from="activeTab.result?.sourceFrom"
@@ -2694,7 +2708,7 @@ defineExpose({
                 :executed-page-offset="activeTab.resultExecutedPageOffset"
                 :executed-page-limit="activeTab.resultExecutedPageLimit"
                 :count-sql="activeTab.resultCountSql"
-                :count-total-rows="activeTab.resultCountSql ? () => queryStore.countTabResultRows(activeTab.id) : undefined"
+                :count-total-rows="activeTab.resultCountSql ? () => withResultContext(() => queryStore.countTabResultRows(activeTab.id)) : undefined"
                 :total-row-count="activeTab.resultTotalRowCount"
                 :total-row-count-is-exact="activeTab.resultTotalRowCount !== undefined || activeTab.result.total_is_exact !== false"
                 :total-row-count-loading="activeTab.resultTotalRowCountLoading"
@@ -2715,7 +2729,7 @@ defineExpose({
                         exportColumnTypes?: Array<string | null | undefined>;
                         exportColumnExtras?: Array<string | null | undefined>;
                         insertMode?: SqlInsertMode;
-                      }) => queryStore.buildQueryResultExportRequest(activeTab.id, options)
+                      }) => withResultContext(() => queryStore.buildQueryResultExportRequest(activeTab.id, options))
                 "
                 :all-export-results="allResultExportSheets"
                 :export-file-base-name="activeQueryResultExportBaseName"
@@ -2724,7 +2738,7 @@ defineExpose({
                 :cancel-disabled="!canCancelQueryExecution(activeTab)"
                 @cancel="emit('cancel', activeTab.id)"
                 @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
-                @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
+                @local-column-filters-change="(filters: Record<string, string[]>) => withResultContext(() => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters))"
                 @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', activeTab.id, sql, searchText, whereInput, orderBy, limit, offset, intent)"
                 @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy, appendResult)"
                 @sort="sortQueryGrid"

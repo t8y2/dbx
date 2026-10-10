@@ -12,7 +12,10 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStor
 import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 import { Button } from "@/components/ui/button";
 import EditorGroup from "./EditorGroup.vue";
+import { INLINE_QUERY_RESULT_PORTAL, createInlineQueryResultPortal } from "@/lib/editor/inlineQueryResultPortal";
 import QueryResultSurface from "./QueryResultSurface.vue";
+import InlineQueryResultSurface from "./InlineQueryResultSurface.vue";
+import { inlineQueryResultEntries } from "@/lib/editor/inlineQueryResultEntries";
 import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEvents";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, StatementRange } from "./querySurfaces";
 import type { QueryTab, TableInfoTab } from "@/types/database";
@@ -67,7 +70,7 @@ defineExpose({
     // A data-mode cell-detail dialog is portaled to body too but belongs to
     // the group's grid — indistinguishable in the DOM, hence the gate.
     if (element?.closest("[data-shared-result-surface]") || (showSharedResult.value && element?.closest("[data-cell-detail-editor-root]"))) {
-      return resultSurfaceRef.value?.focusSearch(element) ?? false;
+      return resultSurfaceFor(element)?.focusSearch(element) ?? false;
     }
     const group = groupForElement(element) ?? activeEditorGroup();
     return group?.focusSearch(element) ?? false;
@@ -78,7 +81,7 @@ defineExpose({
   refreshData: (target: Element | null = null) => {
     const element = commandTargetElement(target);
     if (element?.closest("[data-shared-result-surface]")) {
-      return resultSurfaceRef.value?.refreshData() ?? false;
+      return resultSurfaceFor(element)?.refreshData() ?? false;
     }
     const group = groupForElement(element) ?? activeEditorGroup();
     return group?.refreshData() ?? resultSurfaceRef.value?.refreshData() ?? false;
@@ -92,7 +95,7 @@ defineExpose({
     // their cell-detail dialogs are portaled to body just the same, so route
     // those to the group instead of the (unmounted) shared result surface.
     if (showSharedResult.value && target.closest("[data-grid-root], [data-elasticsearch-json-response-root], [data-cell-detail-editor-root]")) {
-      return resultSurfaceRef.value?.handleModRTarget(target) ?? false;
+      return resultSurfaceFor(target)?.handleModRTarget(target) ?? false;
     }
     const group = groupForElement(target) ?? activeEditorGroup();
     return group?.handleModRTarget(target) ?? false;
@@ -141,6 +144,33 @@ function setTabBarTarget(groupId: string, element: unknown) {
   else workspaceTabBarPortal.targets.delete(groupId);
 }
 const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
+const inlineResultPortal = createInlineQueryResultPortal();
+onBeforeUnmount(queryStore.retainInlineQueryResults());
+provide(INLINE_QUERY_RESULT_PORTAL, inlineResultPortal);
+const inlineResultTargets = computed(() => (activeTab.value ? inlineResultPortal.targets.get(activeTab.value.id) : undefined));
+const inlineEntries = computed(() => {
+  const tab = activeTab.value;
+  return tab ? inlineQueryResultEntries(tab, inlineResultPortal.anchors.get(tab.id)) : [];
+});
+const inlineResults = computed(() => {
+  return inlineEntries.value.flatMap((entry) => {
+    const target = inlineResultTargets.value?.get(entry.result);
+    return target ? [{ ...entry, target, key: `${entry.run?.id ?? "current"}:${entry.index}` }] : [];
+  });
+});
+watch(
+  inlineEntries,
+  (entries) => {
+    if (activeTab.value) queryStore.pruneInlineResultRuns(activeTab.value.id, new Set(entries.flatMap((entry) => (entry.run ? [entry.run.id] : []))));
+  },
+  { flush: "post" },
+);
+// Widgets outside CodeMirror's rendered viewport have no DOM host. Their
+// results still belong in the editor, so scrolling must not open a bottom pane.
+const hasInlineResults = computed(() => {
+  const available = activeTab.value && inlineResultPortal.available.get(activeTab.value.id);
+  return available ? available.length > 0 : inlineResults.value.length > 0;
+});
 const showSharedResult = computed(() => activeTab.value?.mode === "query");
 const hasSharedOutput = computed(() => showSharedResult.value && hasQueryOutput(activeTab.value));
 
@@ -160,7 +190,7 @@ const showResultPane = computed({
 const isResultPaneVisible = computed(() => hasSharedOutput.value && showResultPane.value);
 // Keep the pane mounted, but apply its target size immediately so available
 // results never wait for an expansion animation before becoming visible.
-const resultPaneTargetSize = computed(() => (isResultPaneVisible.value ? resultPaneSize.value : 0));
+const resultPaneTargetSize = computed(() => (isResultPaneVisible.value && !hasInlineResults.value ? resultPaneSize.value : 0));
 const editorPaneSize = computed(() => 100 - resultPaneTargetSize.value);
 
 /**
@@ -235,6 +265,11 @@ function onSharedResultResized(payload: { panes: { size: number }[] }) {
 }
 const groupRefs = new Map<string, InstanceType<typeof EditorGroup>>();
 const resultSurfaceRef = ref<InstanceType<typeof QueryResultSurface> | null>(null);
+const inlineSurfaceRefs = new Map<string, InstanceType<typeof InlineQueryResultSurface>>();
+function resultSurfaceFor(element: Element | null) {
+  const key = element?.closest<HTMLElement>("[data-inline-result-key]")?.dataset.inlineResultKey;
+  return inlineSurfaceRefs.get(key ?? `${activeTab.value?.activeResultRunId ?? "current"}:${activeTab.value?.activeResultIndex ?? 0}`) ?? resultSurfaceRef.value;
+}
 function setGroupRef(groupId: string, el: unknown) {
   if (el) {
     groupRefs.set(groupId, el as InstanceType<typeof EditorGroup>);
@@ -366,7 +401,7 @@ function handleFocusErrorOffset(tabId: string, offset: number): boolean {
           </Splitpanes>
         </Pane>
         <Pane class="min-h-0" :size="resultPaneTargetSize" :min-size="resultPaneTargetSize > 0 ? SHARED_RESULT_PANE_MIN_SIZE : 0" :max-size="SHARED_RESULT_PANE_MAX_SIZE">
-          <div v-if="isResultPaneVisible" data-shared-result-surface class="h-full min-h-0 overflow-hidden">
+          <div v-if="isResultPaneVisible && !hasInlineResults" data-shared-result-surface class="h-full min-h-0 min-w-0 overflow-hidden">
             <QueryResultSurface
               ref="resultSurfaceRef"
               v-bind="resultSurfaceBindings"
@@ -389,6 +424,26 @@ function handleFocusErrorOffset(tabId: string, offset: number): boolean {
               "
             />
           </div>
+          <template v-if="isResultPaneVisible">
+            <Teleport v-for="item in inlineResults" :key="`${activeTab?.id}:${item.key}`" :to="item.target">
+              <InlineQueryResultSurface
+                :ref="
+                  (el) => {
+                    if (el) inlineSurfaceRefs.set(item.key, el as InstanceType<typeof InlineQueryResultSurface>);
+                    else inlineSurfaceRefs.delete(item.key);
+                  }
+                "
+                v-bind="resultSurfaceBindings"
+                :result="item.result"
+                :result-index="item.index"
+                :run="item.run"
+                @toggle-results-pane="toggleSharedResultsPane"
+                @preview-statement="handlePreviewStatement"
+                @focus-statement="handleFocusStatement"
+                @focus-error-offset="handleFocusErrorOffset"
+              />
+            </Teleport>
+          </template>
         </Pane>
       </Splitpanes>
       <!-- The shared surface unmounts when collapsed, so the mouse re-show

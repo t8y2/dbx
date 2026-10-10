@@ -22,6 +22,7 @@ export interface QueryEditorProps {
   compressRequestId?: number;
   executionError?: string;
   executionErrorSql?: string;
+  inlineQueryResults?: import("@/types/database").QueryResult[];
   resultColumns?: string[];
   resultSourceStatement?: string;
   resultSourceFrom?: number;

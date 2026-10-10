@@ -355,6 +355,23 @@ pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
     command
 }
 
+/// Run a non-interactive probe outside the GUI launcher's terminal process group.
+pub fn detach_std_command_from_terminal(command: &mut std::process::Command) {
+    #[cfg(all(unix, not(target_os = "redox")))]
+    {
+        use std::os::unix::process::CommandExt;
+
+        unsafe {
+            command.pre_exec(|| {
+                nix::unistd::setsid().map_err(std::io::Error::from)?;
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(all(unix, not(target_os = "redox"))))]
+    let _ = command;
+}
+
 pub fn hide_std_console_window(command: &mut std::process::Command) {
     #[cfg(not(windows))]
     let _ = command;
@@ -379,6 +396,29 @@ pub fn hide_tokio_console_window(command: &mut tokio::process::Command) {
     {
         // Keep async child processes consistent with std::process::Command.
         command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+#[cfg(all(test, unix, not(target_os = "redox")))]
+mod unix_tests {
+    use super::{detach_std_command_from_terminal, new_std_command};
+
+    #[test]
+    fn detached_probe_has_its_own_session() {
+        let mut command = new_std_command("/bin/sh");
+        command.args(["-c", "printf '%s\\n' \"$$\"; ps -o sid= -p $$"]);
+        detach_std_command_from_terminal(&mut command);
+
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let ids: Vec<i32> = String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .map(|id| id.parse().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], ids[1], "probe must be its own session leader");
+        assert_ne!(ids[1], nix::unistd::getsid(None).unwrap().as_raw());
     }
 }
 

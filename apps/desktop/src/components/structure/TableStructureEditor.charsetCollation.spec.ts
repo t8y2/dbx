@@ -336,6 +336,16 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor charset/collation column width", () => {
+  it.each(["starrocks", "mysql"])("hides MySQL charset and collation for StarRocks via %s", async (dbType) => {
+    mocks.connection.db_type = dbType;
+    mocks.connection.driver_profile = "starrocks";
+    const root = await mountEditor();
+    const headers = Array.from(root.querySelectorAll("thead th")).map((cell) => cell.textContent?.trim());
+    expect(headers).not.toContain("structureEditor.characterSet");
+    expect(headers).not.toContain("structureEditor.collation");
+    expect(mocks.executeQuery.mock.calls.some((call) => /SHOW (CHARACTER SET|COLLATION)/.test(String(call[2])))).toBe(false);
+  });
+
   it("lets the charset trigger fill its resizable column instead of a fixed width cap", async () => {
     const root = await mountEditor();
     const charsetSelect = searchableSelectInColumn(root, "structureEditor.characterSet");

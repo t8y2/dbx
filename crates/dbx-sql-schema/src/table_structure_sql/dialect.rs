@@ -98,6 +98,13 @@ pub(super) fn capabilities_for(
     driver_profile: Option<&str>,
 ) -> TableStructureCapabilities {
     let base = TableStructureCapabilities::default();
+    if database_type == Some(DatabaseType::StarRocks)
+        || (database_type == Some(DatabaseType::Mysql) && driver_profile.is_some_and(|p| p.eq_ignore_ascii_case("starrocks"))) {
+        return TableStructureCapabilities {
+            dialect: StructureDialect::Mysql, add_column: true, drop_column: true,
+            rename_column: true, alter_existing_column: true, comment: true, ..base
+        };
+    }
     match database_type {
         Some(
             DatabaseType::Mysql

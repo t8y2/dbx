@@ -4,6 +4,7 @@ import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
 import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { formatStarRocksDdlForDisplay } from "@/lib/sql/starrocksDdlDisplay";
 import { dropsSchemaQualifier, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import type { DatabaseType } from "@/types/database";
 
@@ -570,7 +571,7 @@ export interface DdlDisplayFormatOptions {
 export function applyDdlDisplayPreferences(sql: string, options: DdlDisplayFormatOptions): string {
   const qualified = applyDdlDatabaseQualifier(sql, options.dialect, options.databaseType, options.includeDatabaseName, options.database, options.catalog);
   const quoted = options.quoteIdentifiers ? qualified : omitDdlIdentifierQuotes(qualified, options.dialect);
-  const aligned = alignDdlColumnDefinitions(uppercaseDdlColumnTypes(quoted, options.dialect), options.dialect);
+  const aligned = options.databaseType === "starrocks" ? formatStarRocksDdlForDisplay(quoted) : alignDdlColumnDefinitions(uppercaseDdlColumnTypes(quoted, options.dialect), options.dialect);
   return options.excludeDdlStorage ? applyDdlStoragePreference(aligned, options.databaseType) : aligned;
 }
 
@@ -581,5 +582,5 @@ export function applyDdlDisplayPreferences(sql: string, options: DdlDisplayForma
  * result of the object DDL fetch straight through it.
  */
 export async function formatDdlForDisplay(ddl: string, options: DdlDisplayFormatOptions, formatter: Partial<SqlFormatterSettings> = DEFAULT_SQL_FORMATTER_SETTINGS): Promise<string> {
-  return applyDdlDisplayPreferences(await formatSqlForDisplay(ddl, options.dialect, formatter), options);
+  return applyDdlDisplayPreferences(options.databaseType === "starrocks" ? ddl : await formatSqlForDisplay(ddl, options.dialect, formatter), options);
 }

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { Compartment } from "@codemirror/state";
 import { keymap as codeMirrorKeymap } from "@codemirror/view";
+import { getStarRocksCapabilities } from "@/lib/table/starrocksCapabilities";
+import { starRocksAlterOptionsFromDdl, starRocksColumnDefinitionLocked, type StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
+import { getColumnDefaultValuePresets } from "@/lib/table/columnDefaultPresets";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import StructureIndexColumnPicker from "./StructureIndexColumnPicker.vue";
@@ -47,6 +50,11 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import StarRocksAlterStatus from "@/components/structure/StarRocksAlterStatus.vue";
+import StarRocksSortKeyEditor from "@/components/structure/StarRocksSortKeyEditor.vue";
+import StarRocksLayoutCopyDialog from "@/components/structure/StarRocksLayoutCopyDialog.vue";
+import StarRocksPhysicalOptionsEditor from "@/components/structure/StarRocksPhysicalOptionsEditor.vue";
+import { buildStarRocksDialectOptions, emptyStarRocksPhysicalOptions, hasStarRocksPhysicalOptions, restoreStarRocksPhysicalOptions } from "@/lib/table/starrocksPhysicalOptions";
 import TablePhysicalOptionsEditor from "@/components/structure/TablePhysicalOptionsEditor.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
@@ -524,6 +532,20 @@ async function fetchDdl(force = false) {
 const errorMessage = ref("");
 const secondaryMetadataErrors = ref<Partial<Record<ObjectMetadataFacet, string>>>({});
 const columns = ref<EditableStructureColumn[]>([]);
+const starrocksStatusBusy = ref(false);
+const starrocksStatusRevision = ref(0);
+const starrocksSubmittedSql = ref<{ target: string; sql: string }>();
+const starrocksStatusTarget = computed(() => JSON.stringify([props.connectionId, props.database, props.tableName, props.schema, props.catalog]));
+const starrocksDraftDirty = computed(() => hasPendingStructureChanges() || ddlDirty.value);
+const starrocksAlterContext = ref<StarRocksAlterOptions>();
+const starrocksLayoutCopyOpen = ref(false);
+const starrocksSortColumns = ref<string[]>();
+const pendingStarRocksSort = computed(() => (starrocksSortColumns.value && starrocksAlterContext.value?.sortColumns && JSON.stringify(starrocksSortColumns.value) !== JSON.stringify(starrocksAlterContext.value.sortColumns) ? starrocksSortColumns.value : undefined));
+async function authorizeStarRocksLayoutCopy(sql: string): Promise<boolean> {
+  const config = store.getConfig(props.connectionId);
+  const productionContext = productionContextForDatabase(config, props.database);
+  return !productionContext.active || (await productionSafetyStore.requestConfirmation({ sql, connectionName: config?.name, database: props.database, productionDatabases: productionContext.databases, source: t("starrocksLayout.copyTitle") }));
+}
 const copyColumnsDialogOpen = ref(false);
 const copySourceTables = ref<TableInfo[]>([]);
 const copySourceTableName = ref("");
@@ -929,7 +951,7 @@ function columnChanged(column: EditableStructureColumn, index: number): boolean 
   if (!column.original || column.markedForDrop) return true;
   const original = column.original;
   return (
-    isPhysicalTableColumnOrderChange(databaseType.value, connection.value?.db_type, column.originalPosition, index) ||
+    isPhysicalTableColumnOrderChange(databaseType.value, connection.value?.db_type, column.originalPosition, index, structureCapabilities.value.reorderColumn ? starrocksAlterContext.value?.model : undefined) ||
     column.name !== original.name ||
     column.dataType !== original.data_type ||
     column.isNullable !== original.is_nullable ||
@@ -979,7 +1001,7 @@ function triggerChanged(trigger: EditableStructureTrigger): boolean {
 
 function captureStructureRefreshScope(): TableStructureRefreshScope {
   return {
-    columns: columns.value.some(columnChanged),
+    columns: columns.value.some(columnChanged) || !!pendingStarRocksSort.value,
     indexes: indexes.value.some(indexChanged),
     foreignKeys: foreignKeys.value.some(foreignKeyChanged),
     // Constraints have no editable draft of their own, but column/index/FK
@@ -1370,12 +1392,12 @@ const usesNativeMysqlIndexNames = computed(() => {
 });
 const supportsCharacterLengthUnits = computed(() => databaseType.value === "dameng" || databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle");
 const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
-const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion));
+const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion, starrocksAlterContext.value?.model));
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value));
 const structureDialect = computed(() => structureCapabilities.value.dialect);
-const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment);
+const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment || (!isCreateMode.value && databaseType.value === "starrocks" && !getStarRocksCapabilities(connection.value?.database_info?.productVersion).tableComment));
 const dynamicDataTypeOptions = ref<string[]>([]);
-const dataTypeOptions = computed(() => mergeDataTypeOptions(dynamicDataTypeOptions.value, getDataTypeOptions(databaseType.value)));
+const dataTypeOptions = computed(() => getDataTypeOptions(databaseType.value, dynamicDataTypeOptions.value, connection.value?.database_info?.productVersion));
 const columnEditorControls = computed(() => getColumnEditorControls(databaseType.value));
 
 const indexTypesByDb: Record<string, string[]> = {
@@ -1456,9 +1478,19 @@ const defaultValuePresets = computed((): DefaultValuePreset[] => {
 
   return [...universal, ...(dialectPresets[structureDialect.value] ?? [])];
 });
+function columnDefaultValuePresets(column: EditableStructureColumn): DefaultValuePreset[] {
+  if (databaseType.value !== "starrocks") return defaultValuePresets.value;
+  return getColumnDefaultValuePresets(column, {
+    databaseType: databaseType.value,
+    dialect: structureDialect.value,
+    serverVersion: connection.value?.database_info?.productVersion,
+    unsetLabel: t("structureEditor.unsetDefault"),
+    isCreateMode: isCreateMode.value,
+  }).map((preset) => ({ ...preset, dataType: column.dataType }));
+}
 
 const showExtendedProperties = computed(() => supportsTableStructureExtendedProperties(databaseType.value));
-const showCharacterSet = computed(() => structureDialect.value === "mysql");
+const showCharacterSet = computed(() => structureDialect.value === "mysql" && databaseType.value !== "starrocks");
 
 const serverCharsetMetadata = ref<CreateDatabaseCharsetMetadata>();
 const charsetMetadataLoading = ref(false);
@@ -1867,7 +1899,7 @@ const tableStoresCaseSensitiveIdentifiers = computed(() => {
 });
 const usesSqliteRebuildStrategy = computed(() => !isCreateMode.value && structureCapabilities.value.alterStrategy === "sqlite-rebuild");
 const hasSqliteTypeChange = computed(() => usesSqliteRebuildStrategy.value && hasExistingColumnTypeChange(columns.value));
-const canAddColumn = computed(() => canAddTableStructureColumn(databaseType.value, isCreateMode.value));
+const canAddColumn = computed(() => canAddTableStructureColumn(databaseType.value, isCreateMode.value) && (isCreateMode.value || databaseType.value !== "starrocks" || ["primary", "duplicate"].includes(starrocksAlterContext.value?.model ?? "")));
 const newTableName = ref("");
 const tableComment = ref("");
 const originalTableComment = ref("");
@@ -1878,6 +1910,7 @@ const mysqlAutoIncrementLoadError = ref("");
 const mysqlTableEngine = ref("");
 const originalMysqlTableEngine = ref("");
 const physicalOptions = ref(emptyTablePhysicalOptions());
+const starrocksPhysicalOptions = ref(emptyStarRocksPhysicalOptions());
 watch(
   () => columns.value.filter((column) => !column.markedForDrop).map((column) => column.id),
   (ids) => {
@@ -2265,6 +2298,8 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     mysqlTableEngine: mysqlTableEngine.value,
     originalMysqlTableEngine: originalMysqlTableEngine.value,
     physicalOptions: cloneDraftValue(physicalOptions.value),
+    starrocksPhysicalOptions: cloneDraftValue(starrocksPhysicalOptions.value),
+    starrocksSortColumns: starrocksSortColumns.value ? [...starrocksSortColumns.value] : undefined,
     tableOwner: tableOwner.value,
     originalTableOwner: originalTableOwner.value,
     columns: cloneDraftValue(columns.value),
@@ -2343,6 +2378,8 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   originalTableOwner.value = draft.originalTableOwner || "";
   columns.value = cloneDraftValue(draft.columns || []);
   physicalOptions.value = restoreTablePhysicalOptions(draft);
+  starrocksPhysicalOptions.value = restoreStarRocksPhysicalOptions(draft.starrocksPhysicalOptions);
+  starrocksSortColumns.value = draft.starrocksSortColumns ? [...draft.starrocksSortColumns] : undefined;
   // Existing-index edits never support Concurrent (the checkbox is disabled and
   // the core builder rejects the request), so a stale `concurrently: true`
   // saved in a restored draft must not be submitted or deadlock the save.
@@ -2444,6 +2481,7 @@ function hasPendingStructureChanges(): boolean {
       !!tableComment.value.trim() ||
       mysqlTableEngine.value !== originalMysqlTableEngine.value ||
       hasTablePhysicalOptions(physicalOptions.value) ||
+      (databaseType.value === "starrocks" && hasStarRocksPhysicalOptions(starrocksPhysicalOptions.value)) ||
       columns.value.length > 0 ||
       indexes.value.length > 0 ||
       foreignKeys.value.length > 0 ||
@@ -2574,7 +2612,10 @@ function scheduleSqlPreviewRefresh() {
   }
   sqlPreviewRequestId++;
   deferredSqlPreviewRefresh = false;
-  if (!hasPendingStructureChanges() && !ddlDirty.value) {
+  // Existing StarRocks tables need their model metadata before definition
+  // controls can be enabled, even when no column has been edited yet.
+  const needsStarRocksAlterContext = !isCreateMode.value && databaseType.value === "starrocks" && !starrocksAlterContext.value;
+  if (!hasPendingStructureChanges() && !ddlDirty.value && !needsStarRocksAlterContext) {
     pendingStatements.value = [];
     warnings.value = [];
     sqliteSchemaRevision.value = undefined;
@@ -2681,6 +2722,16 @@ async function refreshSqlPreview() {
     sqlPreviewPending.value = false;
     return;
   }
+  if (!isCreateMode.value && databaseType.value === "starrocks") {
+    try {
+      const { ddl } = await loadObjectDdl(ddlRequest());
+      starrocksAlterContext.value = starRocksAlterOptionsFromDdl(ddl, connection.value?.database_info?.productVersion);
+      if (!starrocksSortColumns.value) starrocksSortColumns.value = [...(starrocksAlterContext.value.sortColumns ?? [])];
+    } catch {
+      starrocksAlterContext.value = starRocksAlterOptionsFromDdl("", connection.value?.database_info?.productVersion);
+    }
+  }
+  if (requestId !== sqlPreviewRequestId) return;
   if (!hasPendingStructureChanges()) {
     pendingStatements.value = [];
     warnings.value = [];
@@ -2699,6 +2750,13 @@ async function refreshSqlPreview() {
     pendingStatements.value = [];
     warnings.value = indexWarnings;
     sqliteSchemaRevision.value = undefined;
+    sqlPreviewLoading.value = false;
+    sqlPreviewPending.value = false;
+    return;
+  }
+  if (pendingStarRocksSort.value && (columns.value.some(columnChanged) || tableComment.value !== originalTableComment.value || indexes.value.some(indexChanged) || foreignKeys.value.some(foreignKeyChanged) || triggers.value.some(triggerChanged))) {
+    pendingStatements.value = [];
+    warnings.value = [t("starrocksLayout.sortSaveSeparately")];
     sqlPreviewLoading.value = false;
     sqlPreviewPending.value = false;
     return;
@@ -2723,10 +2781,12 @@ async function refreshSqlPreview() {
       isCreateMode.value
         ? createPartitioningEnabled.value
           ? api.buildCreatePartitionedTableSql({ options, partitioning: { kind: createPartitioningKind.value, columns: createPartitioningColumns.value, expression: createPartitioningExpression.value } })
-          : api.buildCreateTableSql(options)
+          : api.buildCreateTableSql(options, connection.value?.database_info?.productVersion, databaseType.value === "starrocks" ? buildStarRocksDialectOptions(starrocksPhysicalOptions.value) : undefined)
         : hasSqliteTypeChange.value
           ? api.previewSqliteTableStructureChange(props.connectionId, props.database, options)
-          : api.buildTableStructureChangeSql(options),
+          : databaseType.value === "starrocks"
+            ? api.buildTableStructureChangeSql(options, { ...starrocksAlterContext.value!, reorderColumns: false, positionColumnOrder: structureCapabilities.value.reorderColumn, sortColumnNames: pendingStarRocksSort.value })
+            : api.buildTableStructureChangeSql(options),
       supportsTableOwner.value
         ? api.buildTableOwnerChangeSql({
             databaseType: databaseType.value,
@@ -2771,6 +2831,7 @@ const canApply = computed(
   () =>
     !loading.value &&
     !saving.value &&
+    (databaseType.value !== "starrocks" || !starrocksStatusBusy.value) &&
     !postSaveRefreshing.value &&
     !secondaryMetadataLoading.value &&
     !mysqlTableEngineLoading.value &&
@@ -2841,6 +2902,9 @@ function resetState() {
   mysqlTableEngine.value = "";
   originalMysqlTableEngine.value = "";
   physicalOptions.value = emptyTablePhysicalOptions();
+  starrocksPhysicalOptions.value = emptyStarRocksPhysicalOptions();
+  starrocksAlterContext.value = undefined;
+  starrocksSortColumns.value = undefined;
   mysqlTableEngineOptions.value = [];
   mysqlTableEngineLoadRequestId += 1;
   mysqlTableEngineLoading.value = false;
@@ -2881,6 +2945,8 @@ async function reloadStructureFromDatabase() {
   // Refreshing from the database discards every other draft; pending partition
   // operations must not survive it and still be applied on save.
   partitionOperations.value = [];
+  starrocksAlterContext.value = undefined;
+  starrocksSortColumns.value = undefined;
   const refreshDdl = activeTab.value === "ddl";
   const metadataMatch = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName };
   invalidateTableMetadataCache(metadataMatch);
@@ -3725,12 +3791,27 @@ function canDropColumnAt(sourceIndex: number, insertionIndex: number): boolean {
   if (!sourceColumn) return false;
   const crossedColumns = insertionIndex < sourceIndex ? columns.value.slice(insertionIndex, sourceIndex) : columns.value.slice(sourceIndex + 1, insertionIndex);
   if (crossedColumns.some((column) => column.markedForDrop)) return false;
+  if (!isCreateMode.value && databaseType.value === "starrocks" && structureCapabilities.value.reorderColumn) {
+    const reordered = [...columns.value];
+    reordered.splice(sourceIndex, 1);
+    reordered.splice(insertionIndex > sourceIndex ? insertionIndex - 1 : insertionIndex, 0, sourceColumn);
+    const keys = new Set(starrocksAlterContext.value?.keyColumns.map((name) => name.toLowerCase()) ?? []);
+    let sawValue = false;
+    for (const column of reordered) {
+      if (column.markedForDrop) continue;
+      if (keys.has(column.original?.name.toLowerCase() ?? "")) {
+        if (sawValue) return false;
+      } else {
+        sawValue = true;
+      }
+    }
+  }
   if (canShowColumnDragControls.value) return true;
   if (sourceColumn.original) return false;
   return crossedColumns.every((column) => !column.original);
 }
 
-const usesLocalTableColumnOrder = computed(() => !isCreateMode.value && supportsLocalTableColumnReorder(databaseType.value, connection.value?.db_type));
+const usesLocalTableColumnOrder = computed(() => !isCreateMode.value && (databaseType.value === "starrocks" ? !!starrocksAlterContext.value?.model && starrocksAlterContext.value.model !== "duplicate" : supportsLocalTableColumnReorder(databaseType.value, connection.value?.db_type)));
 const canShowColumnDragControls = computed(() => isCreateMode.value || structureCapabilities.value.reorderColumn || usesLocalTableColumnOrder.value);
 
 function localTableColumnOrderScopeKey(): string {
@@ -4502,6 +4583,7 @@ function commitColumnNameInput(column: EditableStructureColumn) {
 }
 
 function isColumnTypeDisabled(column: EditableStructureColumn): boolean {
+  if (databaseType.value === "starrocks" && starRocksColumnDefinitionLocked(column, starrocksAlterContext.value)) return true;
   return column.markedForDrop || (!!column.original && !structureCapabilities.value.alterType);
 }
 
@@ -4522,10 +4604,12 @@ function isColumnLengthUnitDisabled(column: EditableStructureColumn): boolean {
 }
 
 function isColumnNullableDisabled(column: EditableStructureColumn): boolean {
+  if (databaseType.value === "starrocks" && (starRocksColumnDefinitionLocked(column, starrocksAlterContext.value) || column.original?.is_nullable)) return true;
   return column.markedForDrop || column.isPrimaryKey || (!!column.original && !structureCapabilities.value.alterNullability);
 }
 
 function isColumnDefaultDisabled(column: EditableStructureColumn): boolean {
+  if (databaseType.value === "starrocks" && starRocksColumnDefinitionLocked(column, starrocksAlterContext.value)) return true;
   return column.markedForDrop || (!!column.original && !structureCapabilities.value.alterDefault) || isMysqlGeneratedActive(column);
 }
 
@@ -4547,6 +4631,7 @@ function isPrimaryKeyDisabled(column: EditableStructureColumn): boolean {
 }
 
 function canDropColumn(column: EditableStructureColumn): boolean {
+  if (databaseType.value === "starrocks" && (starRocksColumnDefinitionLocked(column, starrocksAlterContext.value) || starrocksAlterContext.value?.keyColumns.some((name) => name.toLowerCase() === column.original?.name.toLowerCase()))) return false;
   return !!column.original && !column.isPrimaryKey && !isProtectedManticoreIdColumn(databaseType.value, column.original.name) && structureCapabilities.value.dropColumn;
 }
 
@@ -4967,6 +5052,7 @@ async function applyChanges() {
     return false;
   }
   const sql = previewSqlText.value;
+  const submittedStarRocksTarget = starrocksStatusTarget.value;
   const connection = store.getConfig(props.connectionId);
   const productionContext = productionContextForDatabase(connection, props.database);
   if (productionContext.active) {
@@ -4980,11 +5066,13 @@ async function applyChanges() {
     if (!confirmed) return false;
   }
   saving.value = true;
+  if (databaseType.value === "starrocks") starrocksSubmittedSql.value = undefined;
   errorMessage.value = "";
   // A hand-written DDL script can change anything about the table, and the
   // structure draft it was applied from is clean, so the change-derived scope
   // would be empty: reload every facet instead of leaving the tabs stale.
   const refreshScope = ddlDirty.value ? { columns: true, indexes: true, foreignKeys: true, constraints: true, triggers: true, partitions: true, tableComment: true } : captureStructureRefreshScope();
+  const starrocksPhysicalOrderChanged = !ddlDirty.value && databaseType.value === "starrocks" && structureCapabilities.value.reorderColumn && columns.value.some((column, index) => column.original && column.originalPosition !== index);
   // Plan A guard: concurrent builds only run with a long-enough query timeout
   // (a cancelled build leaves an INVALID index behind), and are blocked
   // up-front when a same-name INVALID index already exists.
@@ -5034,6 +5122,7 @@ async function applyChanges() {
       hasSqliteTypeChange.value && !ddlDirty.value
         ? await api.applySqliteTableStructureChange(props.connectionId, props.database, structureChangeOptions(), sqliteSchemaRevision.value!)
         : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, executionTimeoutSecs, useTransaction);
+    if (databaseType.value === "starrocks") starrocksSubmittedSql.value = { target: submittedStarRocksTarget, sql };
     await recordStructureHistory(sql, startedAt, true, result);
     if (!isCreateMode.value && props.tableName) {
       const metadataMatch = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName };
@@ -5042,7 +5131,7 @@ async function applyChanges() {
       await invalidateObjectDdl(ddlRequest());
       loadedMetadataFacets.clear();
     }
-    toast(t(isCreateMode.value ? "structureEditor.created" : "structureEditor.saved"), 2500);
+    toast(t(isCreateMode.value ? "structureEditor.created" : databaseType.value === "starrocks" && refreshScope.columns ? "starrocksLayout.alterSubmitted" : "structureEditor.saved"), 4000);
     sqlPreviewPending.value = false;
     sqlPreviewLoading.value = false;
     pendingStatements.value = [];
@@ -5051,6 +5140,10 @@ async function applyChanges() {
     // Partition operations are applied in place; drop them now so the reload
     // below reflects the new catalog state instead of replaying them.
     partitionOperations.value = [];
+    if (databaseType.value === "starrocks") {
+      starrocksAlterContext.value = undefined;
+      starrocksSortColumns.value = undefined;
+    }
     ddlFetched.value = false;
     rawDdlContent.value = "";
     ddlDraft.value = null;
@@ -5062,6 +5155,12 @@ async function applyChanges() {
       // exact spelling — mirror the DDL generator's quoting rule here.
       emit("saved", tableComment.value !== originalTableComment.value, foldCreatedTableName(newTableName.value, databaseType.value));
     } else {
+      // An old local-only preference must not mask the newly submitted schema order.
+      if (starrocksPhysicalOrderChanged) {
+        const scopeKey = localTableColumnOrderScopeKey();
+        removeTableDataGridColumnOrder(scopeKey);
+        notifyTableDataGridColumnOrderChanged(scopeKey);
+      }
       // Refresh persisted keys after successful renames/additions before metadata reloads.
       persistLocalColumnOrder(false);
       saving.value = false;
@@ -5076,11 +5175,39 @@ async function applyChanges() {
     // A cancelled/errored concurrent build leaves a same-name INVALID index
     // behind; surface that so retries are not silently doomed.
     const invalidIndexHint = hasConcurrentIndexBuild && /already exists/i.test(rawMessage) ? `\n\n${t("structureEditor.invalidIndexRetryHint")}` : "";
-    errorMessage.value = `${rawMessage}${invalidIndexHint}`;
-    await recordStructureHistory(sql, startedAt, false, undefined, errorMessage.value);
+    const starrocksSchemaChangeBusy = databaseType.value === "starrocks" && /a schema change operation is in progress on the table\b/i.test(rawMessage);
+    errorMessage.value = starrocksSchemaChangeBusy ? t("starrocksLayout.schemaChangeBusy", { table: props.tableName }) : `${rawMessage}${invalidIndexHint}`;
+    await recordStructureHistory(sql, startedAt, false, undefined, starrocksSchemaChangeBusy ? rawMessage : errorMessage.value);
     return false;
   } finally {
     saving.value = false;
+    if (databaseType.value === "starrocks") starrocksStatusRevision.value++;
+  }
+}
+
+async function onStarRocksAlterCompleted() {
+  if (saving.value || loading.value || starrocksDraftDirty.value) return;
+  const requestId = structureLoadRequestId;
+  const target = JSON.stringify([props.connectionId, props.database, props.tableName, props.schema, props.catalog]);
+  const metadataRequest = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName!, catalog: props.catalog };
+  try {
+    invalidateTableMetadataCache(metadataRequest);
+    await Promise.all([invalidateObjectMetadataCache(metadataRequest), invalidateObjectDdl(ddlRequest())]);
+    const [nextColumns, ddlResult] = await Promise.all([api.getColumns(props.connectionId, props.database, metadataSchema.value, props.tableName!, props.catalog), loadObjectDdl(ddlRequest(), { force: true })]);
+    const formatted = await formatStructureDdl(ddlResult.ddl);
+    // Editing while the fetch is in flight must preserve the new draft.
+    if (requestId !== structureLoadRequestId || target !== JSON.stringify([props.connectionId, props.database, props.tableName, props.schema, props.catalog]) || saving.value || loading.value || starrocksDraftDirty.value) return;
+    columns.value = applyStoredLocalColumnOrder(createColumnDrafts(nextColumns, databaseType.value));
+    starrocksAlterContext.value = starRocksAlterOptionsFromDdl(ddlResult.ddl, connection.value?.database_info?.productVersion);
+    starrocksSortColumns.value = [...(starrocksAlterContext.value.sortColumns ?? [])];
+    rawDdlContent.value = formatted;
+    ddlFetched.value = true;
+    scheduleSqlPreviewRefresh();
+    syncDraftToParent();
+    skipNextRefreshVersion = true;
+    emit("saved", false);
+  } catch {
+    toast(t("starrocksStatus.structureRefreshFailed"), 5000);
   }
 }
 
@@ -5275,6 +5402,7 @@ onDeactivated(() => {
   destroyDdlEditor();
 });
 onBeforeUnmount(() => {
+  structureLoadRequestId++;
   flushStructureScrollDraftSync();
   if (structureColumnScrollingTimer) clearTimeout(structureColumnScrollingTimer);
   structureColumnScrollingTimer = undefined;
@@ -5394,6 +5522,8 @@ watch([() => props.connectionId, () => props.database, databaseType], () => {
   void loadDynamicDataTypeOptions();
 });
 
+watch(() => connection.value?.database_info?.productVersion, scheduleSqlPreviewRefresh);
+
 watch(
   [
     isCreateMode,
@@ -5412,6 +5542,8 @@ watch(
     mysqlTableEngine,
     originalMysqlTableEngine,
     physicalOptions,
+    starrocksPhysicalOptions,
+    starrocksSortColumns,
     mysqlTableEngineLoading,
     mysqlTableEngineLoadError,
     mysqlTableDefaultCollation,
@@ -5542,6 +5674,19 @@ watch(
 
 <template>
   <div ref="rootRef" class="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-[var(--structure-shell-padding)] text-[length:var(--structure-font-size)]" :data-structure-density="localStructureDensity" :style="structureDensityStyle">
+    <StarRocksLayoutCopyDialog
+      v-if="!isCreateMode && databaseType === 'starrocks' && props.tableName"
+      v-model:open="starrocksLayoutCopyOpen"
+      :connection-id="props.connectionId"
+      :database="props.database"
+      :schema="props.schema"
+      :catalog="props.catalog"
+      :table-name="props.tableName"
+      :server-version="connection?.database_info?.productVersion"
+      :timeout-secs="queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs)"
+      :authorize="authorizeStarRocksLayoutCopy"
+      @created="emit('saved', false)"
+    />
     <div class="flex shrink-0 items-center gap-2 rounded-md border bg-muted/20 px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]">
       <Database :class="[structureIconClass, 'text-muted-foreground']" />
       <span class="min-w-0 flex-1 truncate font-medium">{{ targetLabel || t("editor.noDatabase") }}</span>
@@ -5551,6 +5696,21 @@ watch(
         {{ t("structureEditor.refresh") }}
       </Button>
     </div>
+
+    <StarRocksAlterStatus
+      v-if="!isCreateMode && databaseType === 'starrocks' && props.tableName"
+      :connection-id="props.connectionId"
+      :database="props.database"
+      :table-name="props.tableName"
+      :schema="metadataSchema"
+      :catalog="props.catalog"
+      :paused="saving || loading || postSaveRefreshing"
+      :revision="starrocksStatusRevision"
+      :dirty="starrocksDraftDirty"
+      :submitted-sql="starrocksSubmittedSql?.target === starrocksStatusTarget ? starrocksSubmittedSql.sql : undefined"
+      @busy="starrocksStatusBusy = $event"
+      @completed="onStarRocksAlterCompleted"
+    />
 
     <div v-if="isCreateMode" class="flex shrink-0 items-center gap-2">
       <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.tableName") }}</label>
@@ -5714,6 +5874,18 @@ watch(
                 </TooltipTrigger>
                 <TooltipContent side="bottom" class="font-mono font-medium" data-add-column-shortcut-content>Shift+Enter</TooltipContent>
               </Tooltip>
+              <Button
+                v-if="activeTab === 'columns' && !isCreateMode && databaseType === 'starrocks'"
+                variant="outline"
+                size="sm"
+                :class="structureToolbarButtonClass"
+                :disabled="loading || saving || hasPendingStructureChanges() || ddlDirty"
+                :title="hasPendingStructureChanges() || ddlDirty ? t('starrocksLayout.copySaveFirst') : undefined"
+                @click="starrocksLayoutCopyOpen = true"
+                data-starrocks-layout-copy-button
+              >
+                <SlidersHorizontal :class="structureIconClass" />{{ t("starrocksLayout.copyButton") }}
+              </Button>
               <Button v-if="activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="openCopyColumnsDialog">
                 <Copy :class="structureIconClass" />
                 {{ t("structureEditor.copyColumns") }}
@@ -6032,7 +6204,7 @@ watch(
                                 </Button>
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="end" class="max-h-56 w-max min-w-36 max-w-[calc(100vw-1rem)] overflow-y-auto">
-                                <DropdownMenuItem v-for="preset in defaultValuePresets" :key="preset.value" @click="column.defaultValue = preset.value">
+                                <DropdownMenuItem v-for="preset in columnDefaultValuePresets(column)" :key="preset.value" @click="column.defaultValue = preset.value">
                                   <code :class="['structure-data-type-option block truncate font-mono text-[length:var(--structure-font-size)]', structureDefaultValueToneClass(preset.value, preset.dataType)]">{{ preset.label }}</code>
                                 </DropdownMenuItem>
                               </DropdownMenuContent>
@@ -6818,6 +6990,12 @@ watch(
           </TabsContent>
         </Tabs>
       </div>
+
+      <p v-if="!isCreateMode && databaseType === 'starrocks'" class="shrink-0 px-3 py-2 text-xs text-muted-foreground">
+        {{ t("starrocksLayout.alterHint") }} {{ t(structureCapabilities.reorderColumn ? "starrocksLayout.reorderHint" : starrocksAlterContext?.model === "primary" ? "starrocksLayout.localReorderHint" : "starrocksLayout.reorderMetadataHint") }}
+      </p>
+      <StarRocksSortKeyEditor v-if="!isCreateMode && databaseType === 'starrocks' && activeTab === 'columns' && starrocksSortColumns" v-model="starrocksSortColumns" :context="starrocksAlterContext" :columns="columns" :disabled="saving || loading" />
+      <StarRocksPhysicalOptionsEditor v-if="isCreateMode && databaseType === 'starrocks'" v-model="starrocksPhysicalOptions" :columns="columns" :server-version="connection?.database_info?.productVersion" :disabled="saving" />
 
       <div :class="['flex min-w-0 shrink-0 flex-col overflow-hidden rounded-md border', sqlPreviewCollapsed ? '' : 'h-[28%] min-h-40 max-h-64']">
         <div class="flex shrink-0 items-center justify-between border-b px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)] font-medium">

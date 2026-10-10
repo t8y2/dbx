@@ -759,8 +759,9 @@ pub fn build_view_ddl_sql(input: dbx_core::object_source_sql::BuildViewDdlInput)
 #[tauri::command]
 pub fn build_table_structure_change_sql(
     options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+    starrocks: Option<dbx_core::table_structure_sql::StarRocksAlterOptions>,
 ) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
-    Ok(dbx_core::table_structure_sql::build_table_structure_change_sql(options))
+    Ok(dbx_core::table_structure_sql::build_table_structure_change_sql_with_context(options, starrocks))
 }
 
 #[tauri::command]
@@ -802,8 +803,14 @@ pub async fn apply_sqlite_table_structure_change(
 #[tauri::command]
 pub fn build_create_table_sql(
     options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+    server_version: Option<String>,
+    dialect_options: Option<dbx_core::table_structure_sql::CreateTableDialectOptions>,
 ) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
-    Ok(dbx_core::table_structure_sql::build_create_table_sql(options))
+    Ok(dbx_core::table_structure_sql::build_create_table_sql_with_dialect_options(
+        options,
+        server_version.as_deref(),
+        dialect_options.unwrap_or_default(),
+    ))
 }
 
 #[tauri::command]

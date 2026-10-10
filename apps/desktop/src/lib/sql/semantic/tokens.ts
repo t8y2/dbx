@@ -103,7 +103,7 @@ export function matchDollarQuoteTag(input: string, index: number): string | unde
  * decides string-vs-identifier per token position instead of per dialect (see that function's doc
  * comment) -- but the option stays available as a general tokenizer capability.
  */
-export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?: { mysqlDashCommentRequiresWhitespace?: boolean; mysqlBackslashEscape?: boolean; mysqlDoubleQuoteIsString?: boolean }): SqlSemanticToken[] {
+export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?: { mysqlDashCommentRequiresWhitespace?: boolean; mysqlBackslashEscape?: boolean; mysqlDoubleQuoteIsString?: boolean; squareBracketsAsDelimiters?: boolean }): SqlSemanticToken[] {
   const tokens: SqlSemanticToken[] = [];
   const mysqlDashCommentRequiresWhitespace = !!options?.mysqlDashCommentRequiresWhitespace;
   const mysqlBackslashEscape = !!options?.mysqlBackslashEscape;
@@ -197,7 +197,7 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
       continue;
     }
 
-    if (ch === "[") {
+    if (ch === "[" && !options?.squareBracketsAsDelimiters) {
       const quoted = readQuoted(input, start, "[", "]");
       index = quoted.end;
       tokens.push(token("quoted_identifier", input.slice(start, index), start, index, depth, "[", quoted.closed));
@@ -236,10 +236,10 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
     // Fullwidth （） (U+FF08/U+FF09) are common IME typos in Chinese locales; treat them like
     // ASCII () for nesting depth so commas inside to_date（…, …） stay nested and do not split
     // INSERT ... SELECT projections (insert value column hints).
-    if ("(),.;*".includes(ch) || ch === "\uFF08" || ch === "\uFF09") {
-      if (ch === ")" || ch === "\uFF09") depth = Math.max(0, depth - 1);
+    if ("(),.;*".includes(ch) || ch === "\uFF08" || ch === "\uFF09" || (options?.squareBracketsAsDelimiters && (ch === "[" || ch === "]"))) {
+      if (ch === ")" || ch === "\uFF09" || ch === "]") depth = Math.max(0, depth - 1);
       tokens.push(token("punctuation", ch, start, start + ch.length, depth));
-      if (ch === "(" || ch === "\uFF08") depth += 1;
+      if (ch === "(" || ch === "\uFF08" || ch === "[") depth += 1;
       index += ch.length;
       continue;
     }

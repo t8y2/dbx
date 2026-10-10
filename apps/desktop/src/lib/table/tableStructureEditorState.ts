@@ -1,5 +1,6 @@
 import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
+import { getStarRocksCapabilities, STARROCKS_DATA_TYPES } from "@/lib/table/starrocksCapabilities";
 
 export interface CopySourceColumnDetails {
   /** Column default as shown in the copy-fields dialog, or null when there is none. */
@@ -165,6 +166,8 @@ function withPostgresArrayTypes(types: readonly string[]): string[] {
 }
 
 export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
+  // Use complete nested declarations so selecting a complex type produces valid SQL.
+  starrocks: STARROCKS_DATA_TYPES,
   mysql: [
     "tinyint",
     "tinyint unsigned",
@@ -551,7 +554,6 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
 
 const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   doris: "mysql",
-  starrocks: "mysql",
   goldendb: "mysql",
   sundb: "mysql",
   oscar: "oracle",
@@ -576,9 +578,22 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   access: "h2",
 };
 
-export function getDataTypeOptions(dbType: DatabaseType | undefined): string[] {
+export function getDataTypeOptions(dbType: DatabaseType | undefined, dynamicOptions: readonly string[] = [], productVersion?: string): string[] {
   const key = dbType ? (DATA_TYPE_OPTION_ALIASES[dbType] ?? dbType) : "";
-  return DATA_TYPE_OPTIONS[key] ?? [];
+  const fallback = DATA_TYPE_OPTIONS[key] ?? [];
+  // MySQL-protocol/JDBC metadata may advertise MySQL types for StarRocks.
+  // Keep its editor choices native instead of reintroducing UNSIGNED/TIMESTAMP.
+  if (dbType === "starrocks") return getStarRocksCapabilities(productVersion).dataTypes;
+  if (dynamicOptions.length === 0) return fallback;
+  const seen = new Set<string>();
+  return [...dynamicOptions, ...fallback]
+    .map((type) => type.trim())
+    .filter((type) => {
+      const normalized = type.toLowerCase();
+      if (!type || seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
 }
 
 export function isMysqlEnumDataType(dbType: DatabaseType | undefined, dataType: string): boolean {
@@ -1437,6 +1452,10 @@ function splitPostgresTemporalDataType(raw: string): { baseType: string; params:
 }
 
 function splitDataTypeForDatabase(dbType: DatabaseType | undefined, raw: string): { baseType: string; params: string } {
+  // Parentheses inside nested types belong to the element/field, not the column.
+  if (dbType === "starrocks" && /^(array|map|struct)\s*</i.test(raw.trim())) {
+    return { baseType: raw.trim(), params: "" };
+  }
   if (dbType === "duckdb") {
     const parsed = splitDuckdbScalarDataType(raw);
     if (parsed) return parsed;
@@ -1700,6 +1719,7 @@ export interface DataTypeDefaultOptions {
 
 export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string, options: DataTypeDefaultOptions = {}): string {
   const key = baseType.trim().toLowerCase();
+  if (_dbType === "starrocks" && isDataTypeLengthDisabled(_dbType, baseType)) return "";
   if (_dbType === "duckdb" && (key === "float" || isDataTypeLengthDisabled(_dbType, baseType))) return "";
   if (_dbType === "mysql" && options.omitMysqlDeprecatedDefaults && isMysqlDeprecatedDefaultParameterType(key)) return "";
   if (_dbType === "sqlite" || _dbType === "rqlite" || _dbType === "turso") {
@@ -1778,6 +1798,9 @@ function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {
 
 export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, baseType: string): boolean {
   const key = baseType.trim().toLowerCase();
+  if (_dbType === "starrocks") {
+    return !["tinyint", "smallint", "int", "integer", "bigint", "largeint", "char", "varchar", "binary", "varbinary", "decimal", "decimal32", "decimal64", "decimal128", "decimal256"].includes(key);
+  }
   if (_dbType === "duckdb") {
     return DUCKDB_TYPE_LENGTH_DISABLES.has(key.replace(/\s+/g, " "));
   } else if (_dbType === "questdb") {

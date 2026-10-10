@@ -4,6 +4,8 @@ use super::column_format::{
     mysql_on_update_current_timestamp_clause, strip_inherited_mysql_column_charsets,
 };
 use super::comments::{build_sqlserver_column_comment_sql_for_profile, build_sqlserver_table_comment_sql_for_profile};
+use super::create_dialect::create_table_dialect;
+use super::create_options::CreateTableDialectOptions;
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::foreign_keys::build_foreign_key_sql_for_new_table;
 use super::indexes::{build_create_index_statements, mysql_inline_index_definition, normalized_index_type};
@@ -30,6 +32,22 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
     build_create_table_sql_with_partition_clause(options, None)
 }
 
+/// Optional server context for version-aware dialects; legacy callers retain conservative defaults.
+pub fn build_create_table_sql_for_version(
+    options: TableStructureSqlOptions,
+    server_version: Option<&str>,
+) -> TableStructureSqlResult {
+    build_create_table_sql_with_dialect_options(options, server_version, CreateTableDialectOptions::default())
+}
+
+pub fn build_create_table_sql_with_dialect_options(
+    options: TableStructureSqlOptions,
+    server_version: Option<&str>,
+    dialect_options: CreateTableDialectOptions,
+) -> TableStructureSqlResult {
+    build_create_table_sql_impl(options, None, server_version, dialect_options)
+}
+
 /// Shared implementation for plain and partitioned `CREATE TABLE`.
 ///
 /// `partition_clause` is a ready-made `PARTITION BY ...` body (no leading
@@ -37,9 +55,19 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
 /// entry point means `build_create_table_sql`'s signature — used from ~160 call
 /// sites and integration tests — stays unchanged.
 pub(super) fn build_create_table_sql_with_partition_clause(
-    mut options: TableStructureSqlOptions,
+    options: TableStructureSqlOptions,
     partition_clause: Option<String>,
 ) -> TableStructureSqlResult {
+    build_create_table_sql_impl(options, partition_clause, None, CreateTableDialectOptions::default())
+}
+
+fn build_create_table_sql_impl(
+    mut options: TableStructureSqlOptions,
+    partition_clause: Option<String>,
+    server_version: Option<&str>,
+    dialect_options: CreateTableDialectOptions,
+) -> TableStructureSqlResult {
+    let create_dialect = create_table_dialect(&options, server_version, dialect_options);
     let capabilities;
     let dialect;
     if options.is_gaussdb_m_mode {
@@ -79,7 +107,11 @@ pub(super) fn build_create_table_sql_with_partition_clause(
     if options.table_name.is_empty() {
         warnings.push("Table name is required.".to_string());
     }
-    let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
+    let mut active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
+    if create_dialect.primary_key_columns_first() {
+        // Stable partition of references only: never mutate the editor draft or primary-key membership.
+        active_columns.sort_by_key(|column| !column.is_primary_key);
+    }
     if active_columns.is_empty() {
         warnings.push("At least one column is required.".to_string());
     }
@@ -138,6 +170,7 @@ pub(super) fn build_create_table_sql_with_partition_clause(
     validate_dameng_identity(&options, &active_columns, &mut warnings);
     validate_mysql_literal_defaults(&options, &active_columns, &mut warnings);
     transwarp::validate_create_options(&options, &active_columns, &mut warnings);
+    create_dialect.validate(&options, &active_columns, &mut warnings);
     if !warnings.is_empty() {
         return TableStructureSqlResult { statements: Vec::new(), warnings };
     }
@@ -193,7 +226,10 @@ pub(super) fn build_create_table_sql_with_partition_clause(
             data_type = "INTEGER".to_string();
         }
         let mut parts = vec![quote_new_ident(options.database_type, dialect, &column.name), data_type];
-        if options.database_type == Some(DatabaseType::Mysql) && is_mysql_character_data_type(&column.data_type) {
+        if options.database_type == Some(DatabaseType::Mysql)
+            && create_dialect.supports_column_charset()
+            && is_mysql_character_data_type(&column.data_type)
+        {
             if !column.character_set.trim().is_empty() {
                 parts.push(format!("CHARACTER SET {}", quote_ident(dialect, &column.character_set)));
             }
@@ -225,6 +261,8 @@ pub(super) fn build_create_table_sql_with_partition_clause(
             && column.extra.as_ref().is_some_and(|e| e.auto_increment.unwrap_or(false))
         {
             parts.push("PRIMARY KEY".to_string());
+        } else if column.is_primary_key && create_dialect.explicit_primary_key_not_null() {
+            parts.push("NOT NULL".to_string());
         } else if !column.is_nullable
             && !column.is_primary_key
             && !matches!(dialect, StructureDialect::ClickHouse | StructureDialect::ManticoreSearch)
@@ -269,12 +307,12 @@ pub(super) fn build_create_table_sql_with_partition_clause(
                     && column.extra.as_ref().is_some_and(|e| e.auto_increment.unwrap_or(false)))
         })
         .collect();
-    if !pk_columns.is_empty() {
-        let pk_list = pk_columns
-            .iter()
-            .map(|column| quote_new_ident(options.database_type, dialect, &column.name))
-            .collect::<Vec<_>>()
-            .join(", ");
+    let pk_list = pk_columns
+        .iter()
+        .map(|column| quote_new_ident(options.database_type, dialect, &column.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !pk_list.is_empty() && create_dialect.primary_key_in_column_list() {
         column_definitions.push(format!("PRIMARY KEY ({pk_list})"));
     }
 
@@ -283,11 +321,15 @@ pub(super) fn build_create_table_sql_with_partition_clause(
     }
 
     let mut create_table = format!("CREATE TABLE {table} (\n  {}\n)", column_definitions.join(",\n  "));
+    create_table.push_str(&create_dialect.after_columns(&options, &pk_list));
     create_table.push_str(&transwarp::create_table_suffix(&options, &active_columns, dialect));
-    let create_table = match partition_clause {
+    let mut create_table = match partition_clause {
         Some(clause) => format!("{create_table} {clause}"),
         None => create_table,
     };
+    create_table.push_str(&create_dialect.partition_clause(&active_columns));
+    create_table.push_str(&create_dialect.after_partition(&active_columns, &pk_list));
+    create_table.push_str(&create_dialect.sort_clause(&active_columns));
     statements.push(format!("{create_table};"));
 
     if let Some(engine) = options.mysql_engine.as_deref().map(str::trim).filter(|engine| !engine.is_empty()) {
@@ -304,7 +346,10 @@ pub(super) fn build_create_table_sql_with_partition_clause(
 
     if capabilities.comment {
         let table_comment = clean(options.table_comment.as_deref().unwrap_or(""));
-        if !table_comment.is_empty() && options.database_type != Some(DatabaseType::Transwarp) {
+        if !table_comment.is_empty()
+            && options.database_type != Some(DatabaseType::Transwarp)
+            && !create_dialect.handles_table_comment()
+        {
             if matches!(dialect, StructureDialect::Mysql | StructureDialect::GaussdbM) {
                 if let Some(last) = statements.last_mut() {
                     append_mysql_table_option(last, &format!("COMMENT = {}", quote_string(&table_comment)));

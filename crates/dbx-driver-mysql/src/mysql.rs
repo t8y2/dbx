@@ -689,15 +689,32 @@ pub async fn database_connection_info(
     let product_name = nonblank(product_name.into()).unwrap_or_else(|| "MySQL".to_string());
     let mut conn = get_conn_with_health_check(pool).await?;
 
+    let server_comment = query_first_nonblank_string(&mut conn, "SELECT @@version_comment").await;
+    let version_sql = database_product_version_query(&product_name, server_comment.as_deref());
+    let mut product_version = query_first_nonblank_string(&mut conn, version_sql).await;
+    if product_version.is_none() && version_sql == "SELECT current_version()" {
+        // VERSION() reports MySQL compatibility (often 5.1.0), not StarRocks.
+        product_version = server_comment.clone();
+    }
     Ok(DatabaseConnectionInfo {
         product_name: Some(product_name),
-        product_version: query_first_nonblank_string(&mut conn, "SELECT VERSION()").await,
+        product_version,
         current_database: query_first_nonblank_string(&mut conn, "SELECT COALESCE(DATABASE(), '')").await,
-        server_comment: query_first_nonblank_string(&mut conn, "SELECT @@version_comment").await,
+        server_comment,
         server_charset: query_first_nonblank_string(&mut conn, "SELECT @@character_set_server").await,
         server_collation: query_first_nonblank_string(&mut conn, "SELECT @@collation_server").await,
         ..DatabaseConnectionInfo::default()
     })
+}
+
+fn database_product_version_query(product_name: &str, server_comment: Option<&str>) -> &'static str {
+    if product_name.to_ascii_lowercase().contains("starrocks")
+        || server_comment.is_some_and(|comment| comment.to_ascii_lowercase().contains("starrocks"))
+    {
+        "SELECT current_version()"
+    } else {
+        "SELECT VERSION()"
+    }
 }
 
 pub fn protocol_product_name(config: &ConnectionConfig) -> String {
@@ -7223,6 +7240,13 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn product_version_uses_starrocks_function_only_for_starrocks() {
+        assert_eq!(super::database_product_version_query("StarRocks", None), "SELECT current_version()");
+        assert_eq!(super::database_product_version_query("Custom label", Some("StarRocks version 3.5.0")), "SELECT current_version()");
+        assert_eq!(super::database_product_version_query("MySQL", Some("MySQL Community Server")), "SELECT VERSION()");
+    }
+
     use super::*;
     use mysql_async::{consts::ColumnType, Column, Value};
     use mysql_common::row::new_row;

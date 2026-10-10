@@ -46,20 +46,19 @@ export interface FormattedWebDavAutoUploadInterval {
 export function formatWebDavAutoUploadInterval(value: unknown, locale: string, units: WebDavAutoUploadIntervalUnits): FormattedWebDavAutoUploadInterval {
   const minutes = normalizedWebDavAutoUploadInterval(value);
   const formatNumber = (number: number) => new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(number);
-  const formatHours = (hourMinutes: number) => {
-    const hours = hourMinutes / 60;
-    const roundedHours = Math.round(hours * 100) / 100;
-    return {
-      interval: `${formatNumber(roundedHours)} ${units.hour}`,
-      approximate: Math.abs(hours - roundedHours) > Number.EPSILON,
-    };
+  const formatHourMinutes = (hourMinutes: number) => {
+    const hours = Math.floor(hourMinutes / 60);
+    const remainderMinutes = hourMinutes % 60;
+    if (hours === 0) return { interval: `${formatNumber(remainderMinutes)} ${units.minute}`, approximate: false };
+    if (remainderMinutes === 0) return { interval: `${formatNumber(hours)} ${units.hour}`, approximate: false };
+    return { interval: `${formatNumber(hours)} ${units.hour} ${formatNumber(remainderMinutes)} ${units.minute}`, approximate: false };
   };
 
   if (minutes < 60) {
     return { interval: `${formatNumber(minutes)} ${units.minute}`, approximate: false };
   }
   if (minutes < 24 * 60) {
-    return formatHours(minutes);
+    return formatHourMinutes(minutes);
   }
 
   const days = Math.floor(minutes / (24 * 60));
@@ -67,10 +66,10 @@ export function formatWebDavAutoUploadInterval(value: unknown, locale: string, u
   if (remainingMinutes === 0) {
     return { interval: `${formatNumber(days)} ${units.day}`, approximate: false };
   }
-  const remainingHours = formatHours(remainingMinutes);
+  const remaining = formatHourMinutes(remainingMinutes);
   return {
-    interval: `${formatNumber(days)} ${units.day} ${remainingHours.interval}`,
-    approximate: remainingHours.approximate,
+    interval: `${formatNumber(days)} ${units.day} ${remaining.interval}`,
+    approximate: false,
   };
 }
 

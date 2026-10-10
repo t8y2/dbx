@@ -13,10 +13,12 @@ describe("WebDAV auto-upload interval", () => {
   it.each([
     [30, "30 分钟", false],
     [60, "1 小时", false],
-    [90, "1.5 小时", false],
-    [95, "1.58 小时", true],
+    [90, "1 小时 30 分钟", false],
+    [95, "1 小时 35 分钟", false],
+    [1439, "23 小时 59 分钟", false],
     [1440, "1 天", false],
-    [1530, "1 天 1.5 小时", false],
+    [1441, "1 天 1 分钟", false],
+    [1530, "1 天 1 小时 30 分钟", false],
   ])("formats %i minutes as a readable interval", (minutes, interval, approximate) => {
     expect(formatWebDavAutoUploadInterval(minutes, "zh-CN", zhCnUnits)).toEqual({ interval, approximate });
   });

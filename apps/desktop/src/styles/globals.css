@@ -2879,14 +2879,27 @@ html.theme-pearl .app-layout-classic > .relative.z-30.isolate {
 html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false"] {
   border-color: var(--dbx-tab-outline);
 }
+.app-layout-classic .panel-resize-handle {
+  width: 3px;
+}
+.app-layout-classic .panel-resize-handle--right {
+  right: 0;
+  border-right: 1px solid var(--border);
+}
+.app-layout-classic .panel-resize-handle--left {
+  left: 0;
+  border-left: 1px solid var(--border);
+}
 html.theme-pearl .app-layout-classic .panel-resize-handle {
   width: 6px;
 }
 html.theme-pearl .app-layout-classic .panel-resize-handle--right {
   right: -6px;
+  border-right: 0;
 }
 html.theme-pearl .app-layout-classic .panel-resize-handle--left {
   left: -3px;
+  border-left: 0;
 }
 .app-layout-classic .panel-resize-handle:hover,
 .app-layout-classic .panel-resize-handle:active {

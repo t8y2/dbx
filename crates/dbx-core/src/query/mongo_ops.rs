@@ -864,6 +864,25 @@ pub async fn mongo_insert_documents_core(
         PoolKind::Agent(client) => {
             let documents: serde_json::Value =
                 serde_json::from_str(docs_json).map_err(|error| format!("Invalid JSON: {error}"))?;
+            // A single-document insert()/insertOne() rides the per-document RPC
+            // the legacy agent already serves for grid row inserts (#11656);
+            // only bulk arrays need the MongoInsertDocuments capability.
+            if let Some(document) = documents.as_object() {
+                let doc_json = serde_json::to_string(document).map_err(|error| format!("Invalid JSON: {error}"))?;
+                let mut client = client.lock().await;
+                let result: serde_json::Value = client
+                    .mongo_insert_document(serde_json::json!({
+                        "database": database,
+                        "collection": collection,
+                        "doc_json": doc_json,
+                    }))
+                    .await?;
+                // The single-document RPC fails the whole call on rejection and
+                // reports the resolved _id on success (see the agent's
+                // insertDocument handler).
+                result.get("inserted_id").ok_or_else(|| "MongoDB Legacy Agent returned no inserted id".to_string())?;
+                return Ok(1);
+            }
             let documents = documents.as_array().ok_or_else(|| {
                 "MongoDB legacy agent does not support bulk insertMany/insertOne writes; insertMany requires an array"
                     .to_string()
@@ -2093,24 +2112,67 @@ for line in sys.stdin:
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn mongo_insert_one_keeps_the_existing_legacy_agent_behavior() {
+    async fn mongo_insert_one_routes_single_document_to_the_per_document_rpc() {
+        // #11656: a shell insert()/insertOne() with one document used to be
+        // rejected by the legacy-agent bulk path; it rides the per-document
+        // RPC that grid row inserts already use, without the bulk capability.
         let document = r#"{"name":"Ada"}"#;
+        let (state, _directory) = legacy_mongo_state(
+            "insert_document",
+            serde_json::json!({
+                "database": "app",
+                "collection": "users",
+                "doc_json": document,
+            }),
+            serde_json::json!({ "inserted_id": "507f1f77bcf86cd799439011" }),
+        )
+        .await;
+
+        let affected = mongo_insert_documents_core(&state, "legacy", "app", "users", document).await.unwrap();
+
+        assert_eq!(affected, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_insert_many_keeps_requiring_the_bulk_capability() {
+        let documents = r#"[{"name":"Ada"},{"name":"Grace"}]"#;
         let (state, _directory) = legacy_mongo_state_with_capabilities(
             "insert_documents",
             serde_json::json!({
                 "database": "app",
                 "collection": "users",
-                "docs_json": document,
+                "docs_json": documents,
+            }),
+            serde_json::json!({ "affected_rows": 2 }),
+            &[AgentCapability::MongoInsertDocuments.as_str()],
+        )
+        .await;
+
+        let affected = mongo_insert_documents_core(&state, "legacy", "app", "users", documents).await.unwrap();
+
+        assert_eq!(affected, 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_insert_many_still_rejects_non_object_documents() {
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "insert_documents",
+            serde_json::json!({
+                "database": "app",
+                "collection": "users",
+                "docs_json": r#"[{"name":"Ada"}]"#,
             }),
             serde_json::json!({ "affected_rows": 1 }),
             &[AgentCapability::MongoInsertDocuments.as_str()],
         )
         .await;
 
-        let error = mongo_insert_documents_core(&state, "legacy", "app", "users", document).await.unwrap_err();
+        let error =
+            mongo_insert_documents_core(&state, "legacy", "app", "users", r#"["not an object"]"#).await.unwrap_err();
 
-        assert!(error.contains("insertMany/insertOne"), "{error}");
-        assert!(!error.contains("unexpected MongoDB RPC"), "{error}");
+        assert!(error.contains("insertMany document"), "{error}");
     }
 
     #[cfg(unix)]

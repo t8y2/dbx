@@ -1220,6 +1220,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         timeout_secs: Some(10),
         keyset_optimization_enabled: true,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-sqlserver-export-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),

@@ -21,8 +21,9 @@ use crate::database_export::{
 };
 use crate::models::connection::DatabaseType;
 use crate::query::{
-    await_stream_with_progress_timeout, canceled_error, close_query_session, execute_sql_statement_with_options,
-    operation_budget_for_pool_key, QueryExecutionOptions, StreamProgressClock, QUERY_CANCELED,
+    await_stream_with_progress_timeout, canceled_error, close_query_session,
+    execute_in_manual_transaction_with_options, execute_sql_statement_with_options, operation_budget_for_pool_key,
+    ManualTransactionExecutionOptions, QueryExecutionOptions, StreamProgressClock, QUERY_CANCELED,
 };
 use crate::query_result_sql::{
     build_query_pagination_execution_plan, has_top_level_top, top_level_top_row_count, QueryPagination,
@@ -105,6 +106,12 @@ pub struct QueryResultExportRequest {
     pub keyset_optimization_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_session_id: Option<String>,
+    /// Open manual transaction of the source query tab. When set, every page is
+    /// read through that transaction's connection so the export sees the same
+    /// uncommitted changes as the result grid; a separate session would only
+    /// see committed data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub txn_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -668,6 +675,7 @@ fn streaming_pagination_preflight_error(
     page_size: usize,
     has_keyset_plan: bool,
     has_single_execution_bound: bool,
+    use_agent_cursor: bool,
 ) -> Option<&'static str> {
     if has_keyset_plan || supports_streaming_offset_pagination(request, page_size) || has_single_execution_bound {
         return None;
@@ -675,7 +683,7 @@ fn streaming_pagination_preflight_error(
     if request.database_type == DatabaseType::Highgo {
         return Some(HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR);
     }
-    (!request.use_agent_cursor).then_some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+    (!use_agent_cursor).then_some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
 }
 
 /// Enforceable in-memory row bound for a single-execution export, or `None`
@@ -911,24 +919,34 @@ async fn export_query_result_core_inner(
 
     on_progress(progress(request, 0, ExportStatus::Running, None));
 
-    if try_export_postgres_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
-        return Ok(());
-    }
+    // The streaming fast paths below check out their own pooled connection, which
+    // cannot see an open manual transaction. Inside a transaction the export pages
+    // through the transaction's connection instead, the same way the result grid
+    // pages, and result-session cursors are not opened there.
+    let txn_session_id = request.txn_session_id.as_deref().map(str::trim).filter(|id| !id.is_empty());
+    let use_agent_cursor = request.use_agent_cursor && txn_session_id.is_none();
 
-    if try_export_sqlserver_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
-        return Ok(());
-    }
+    if txn_session_id.is_none() {
+        if try_export_postgres_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
+            return Ok(());
+        }
 
-    // MySQL does not guarantee a stable row order for independent LIMIT/OFFSET
-    // executions without ORDER BY, so query-result export must stream one run.
-    if try_export_mysql_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
-        return Ok(());
-    }
+        if try_export_sqlserver_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
+            return Ok(());
+        }
 
-    // ClickHouse HTTP pagination is unsafe for unsorted result sets; stream one
-    // response so large exports preserve the server's single execution order.
-    if try_export_clickhouse_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
-        return Ok(());
+        // MySQL does not guarantee a stable row order for independent LIMIT/OFFSET
+        // executions without ORDER BY, so query-result export must stream one run.
+        if try_export_mysql_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
+            return Ok(());
+        }
+
+        // ClickHouse HTTP pagination is unsafe for unsorted result sets; stream one
+        // response so large exports preserve the server's single execution order.
+        if try_export_clickhouse_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await?
+        {
+            return Ok(());
+        }
     }
 
     let mut text_file = if format == "csv" || format == "txt" {
@@ -958,6 +976,7 @@ async fn export_query_result_core_inner(
         page_size,
         keyset_plan.is_some(),
         single_execution_bound.is_some(),
+        use_agent_cursor,
     ) {
         return Err(error.to_string());
     }
@@ -1000,7 +1019,7 @@ async fn export_query_result_core_inner(
                     query_base_sql: request.query_base_sql.clone(),
                     database_type: Some(request.database_type),
                     pagination: QueryPagination { limit: this_page, offset, session_id: session_id.clone() },
-                    use_agent_cursor: request.use_agent_cursor,
+                    use_agent_cursor,
                     first_page_uses_actual_sql: true,
                 });
                 if let Some(error) = plan.pagination_error {
@@ -1036,17 +1055,41 @@ async fn export_query_result_core_inner(
             }
         };
 
-        let mut result = match execute_sql_statement_with_options(
-            state,
-            &request.connection_id,
-            &request.database,
-            &sql_to_execute,
-            request.schema.as_deref(),
-            cancel_token.clone(),
-            options,
-        )
-        .await
-        {
+        let page_result = if let Some(txn_session_id) = txn_session_id {
+            execute_in_manual_transaction_with_options(
+                state,
+                txn_session_id,
+                &sql_to_execute,
+                &request.database,
+                request.schema.as_deref(),
+                ManualTransactionExecutionOptions {
+                    max_rows: Some(plan_limit),
+                    execution_id: request.execution_id.clone(),
+                    timeout_secs: request.timeout_secs,
+                    ..Default::default()
+                },
+            )
+            .await
+            .and_then(|results| {
+                results
+                    .into_iter()
+                    .next()
+                    .map(|result| result.result)
+                    .ok_or_else(|| "Manual transaction export returned no result".to_string())
+            })
+        } else {
+            execute_sql_statement_with_options(
+                state,
+                &request.connection_id,
+                &request.database,
+                &sql_to_execute,
+                request.schema.as_deref(),
+                cancel_token.clone(),
+                options,
+            )
+            .await
+        };
+        let mut result = match page_result {
             Ok(result) => result,
             Err(error) => {
                 if error == QUERY_CANCELED
@@ -2239,6 +2282,7 @@ mod tests {
             timeout_secs: None,
             keyset_optimization_enabled: false,
             client_session_id: None,
+            txn_session_id: None,
             execution_id: None,
             date_time_format: None,
             export_table_name: Some("gen_table".to_string()),
@@ -2331,6 +2375,7 @@ mod tests {
             timeout_secs: None,
             keyset_optimization_enabled: false,
             client_session_id: None,
+            txn_session_id: None,
             execution_id: None,
             date_time_format: None,
             export_table_name: Some("users".to_string()),
@@ -2418,6 +2463,7 @@ mod tests {
             timeout_secs: None,
             keyset_optimization_enabled: true,
             client_session_id: None,
+            txn_session_id: None,
             execution_id: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
@@ -2620,7 +2666,7 @@ mod tests {
 
         assert!(!supports_streaming_offset_pagination(&req, 100));
         assert_eq!(
-            streaming_pagination_preflight_error(&req, 100, false, false),
+            streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor),
             Some(HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR)
         );
     }
@@ -2633,7 +2679,7 @@ mod tests {
         req.sql = "SELECT * FROM users; SELECT 1".to_string();
         req.query_base_sql = req.sql.clone();
 
-        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false), None);
+        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor), None);
     }
 
     #[test]
@@ -2647,12 +2693,12 @@ mod tests {
             req.query_base_sql = req.sql.clone();
             req.use_agent_cursor = true;
             assert!(!supports_streaming_offset_pagination(&req, 100));
-            assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false), None);
+            assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor), None);
             assert!(should_fetch_next_page(true, true, 100, 100, 100));
             assert!(!should_fetch_next_page(true, false, 100, 100, 100));
             req.use_agent_cursor = false;
             assert_eq!(
-                streaming_pagination_preflight_error(&req, 100, false, false),
+                streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor),
                 Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
             );
         }

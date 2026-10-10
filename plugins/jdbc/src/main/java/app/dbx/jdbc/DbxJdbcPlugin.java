@@ -108,18 +108,21 @@ public final class DbxJdbcPlugin {
         false,
         false,
         false,
+        false,
         null,
         StatementMaxRowsMode.READ_LOOP_ONLY
     );
     private static final JdbcDriverQuirks USE_CATALOG_QUIRKS = DEFAULT_QUIRKS.withUseCatalogFallbackSql(true);
     private static final JdbcDriverQuirks HIVE_QUIRKS = USE_CATALOG_QUIRKS.withSchemasAsDatabasesFallback(true);
     private static final JdbcDriverQuirks KINGBASE_QUIRKS = DEFAULT_QUIRKS.withIgnoreCatalogForSchemaMetadata(true);
+    private static final JdbcDriverQuirks SQLSERVER_QUIRKS = DEFAULT_QUIRKS.withMergeEmptyCatalogSchemas(true);
     private static final JdbcDriverQuirks TAOS_QUIRKS = DEFAULT_QUIRKS
         .withPreferExecuteQueryForResultSetSql(true)
         .withDatabaseClientInfoProperty("dbname");
     private static final JdbcDriverQuirks YASHAN_QUIRKS = new JdbcDriverQuirks(
         true,
         true,
+        false,
         false,
         false,
         false,
@@ -136,12 +139,14 @@ public final class DbxJdbcPlugin {
         false,
         false,
         false,
+        false,
         null,
         StatementMaxRowsMode.READ_LOOP_ONLY
     );
     private static final JdbcDriverQuirks ORACLE_QUIRKS = new JdbcDriverQuirks(
         false,
         true,
+        false,
         false,
         false,
         false,
@@ -157,6 +162,8 @@ public final class DbxJdbcPlugin {
         new JdbcDriverQuirkRule("jdbc:doris:", USE_CATALOG_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:hive2:", HIVE_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:kingbase", KINGBASE_QUIRKS),
+        new JdbcDriverQuirkRule("jdbc:sqlserver:", SQLSERVER_QUIRKS),
+        new JdbcDriverQuirkRule("jdbc:jtds:sqlserver:", SQLSERVER_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:yasdb:", YASHAN_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:iris:", IRIS_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:oracle:", ORACLE_QUIRKS),
@@ -197,6 +204,7 @@ public final class DbxJdbcPlugin {
         boolean ignoreCatalogForSchemaMetadata,
         boolean preferExecuteQueryForResultSetSql,
         boolean schemasAsDatabasesFallback,
+        boolean mergeEmptyCatalogSchemas,
         String databaseClientInfoProperty,
         StatementMaxRowsMode statementMaxRowsMode
     ) {
@@ -209,6 +217,7 @@ public final class DbxJdbcPlugin {
                 ignoreCatalogForSchemaMetadata,
                 preferExecuteQueryForResultSetSql,
                 schemasAsDatabasesFallback,
+                mergeEmptyCatalogSchemas,
                 databaseClientInfoProperty,
                 statementMaxRowsMode
             );
@@ -223,6 +232,7 @@ public final class DbxJdbcPlugin {
                 value,
                 preferExecuteQueryForResultSetSql,
                 schemasAsDatabasesFallback,
+                mergeEmptyCatalogSchemas,
                 databaseClientInfoProperty,
                 statementMaxRowsMode
             );
@@ -237,6 +247,7 @@ public final class DbxJdbcPlugin {
                 ignoreCatalogForSchemaMetadata,
                 value,
                 schemasAsDatabasesFallback,
+                mergeEmptyCatalogSchemas,
                 databaseClientInfoProperty,
                 statementMaxRowsMode
             );
@@ -250,6 +261,22 @@ public final class DbxJdbcPlugin {
                 useCatalogFallbackSql,
                 ignoreCatalogForSchemaMetadata,
                 preferExecuteQueryForResultSetSql,
+                value,
+                mergeEmptyCatalogSchemas,
+                databaseClientInfoProperty,
+                statementMaxRowsMode
+            );
+        }
+
+        JdbcDriverQuirks withMergeEmptyCatalogSchemas(boolean value) {
+            return new JdbcDriverQuirks(
+                skipExecutionContext,
+                useOracleMetadata,
+                caseInsensitiveSchemaMetadata,
+                useCatalogFallbackSql,
+                ignoreCatalogForSchemaMetadata,
+                preferExecuteQueryForResultSetSql,
+                schemasAsDatabasesFallback,
                 value,
                 databaseClientInfoProperty,
                 statementMaxRowsMode
@@ -265,6 +292,7 @@ public final class DbxJdbcPlugin {
                 ignoreCatalogForSchemaMetadata,
                 preferExecuteQueryForResultSetSql,
                 schemasAsDatabasesFallback,
+                mergeEmptyCatalogSchemas,
                 value,
                 statementMaxRowsMode
             );
@@ -744,7 +772,7 @@ public final class DbxJdbcPlugin {
         if (connectionState() != DEFAULT_CONNECTION_STATE) logicalDriverKey = driverKey;
         String driverClass = optionalText(connection, "jdbc_driver_class");
         if (driverKey.equals(registeredDriverKey) && registeredDriver != null) {
-            if (driverClass != null) {
+            if (driverClass != null && LegacyJdbcDriverClass.isLegacyAlias(driverClass)) {
                 LegacyJdbcDriverClass.load(
                     driverClass,
                     optionalText(connection, "connection_string"),
@@ -2271,10 +2299,26 @@ public final class DbxJdbcPlugin {
                 return rule.quirks();
             }
         }
+        if (isSqlServerConnection(connection)) {
+            return SQLSERVER_QUIRKS;
+        }
         if (isKyuubiDriver(connection)) {
             return HIVE_QUIRKS;
         }
         return DEFAULT_QUIRKS;
+    }
+
+    private static boolean isSqlServerConnection(JsonNode connection) {
+        String url = optionalText(connection, "connection_string");
+        if (urlMatchesPrefix(url, "jdbc:sqlserver:") || urlMatchesPrefix(url, "jdbc:jtds:sqlserver:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        if (driverClass == null) {
+            return false;
+        }
+        String normalized = driverClass.toLowerCase(Locale.ROOT);
+        return normalized.contains("sqlserver") || normalized.contains("jtds");
     }
 
     private static boolean isKyuubiDriver(JsonNode connection) {
@@ -2406,6 +2450,12 @@ public final class DbxJdbcPlugin {
                 try (ResultSet rs = meta.getSchemas()) {
                     appendSchemas(result, rs, false);
                 } catch (AbstractMethodError ignored2) {
+                }
+            }
+            if (quirks.mergeEmptyCatalogSchemas() && catalog != null && !catalog.isEmpty()) {
+                try (ResultSet rs = meta.getSchemas("", null)) {
+                    appendSchemas(result, rs, false);
+                } catch (SQLException | UnsupportedOperationException ignored) {
                 }
             }
             if (result.isEmpty() && catalog != null) {

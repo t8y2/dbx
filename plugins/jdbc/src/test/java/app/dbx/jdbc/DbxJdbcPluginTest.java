@@ -1829,8 +1829,27 @@ final class DbxJdbcPluginTest {
         assertEquals(true, DbxJdbcPlugin.driverQuirks(hive).schemasAsDatabasesFallback());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kingbase).ignoreCatalogForSchemaMetadata());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kyuubi).useCatalogFallbackSql());
-        assertEquals(true, DbxJdbcPlugin.driverQuirks(kyuubi).schemasAsDatabasesFallback());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(taos).preferExecuteQueryForResultSetSql());
+
+        JsonNode sqlserver = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:sqlserver://127.0.0.1:1433;databaseName=appdb"
+            }
+            """);
+        JsonNode jtds = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:jtds:sqlserver://127.0.0.1:1433/appdb"
+            }
+            """);
+        JsonNode sqlserverClass = MAPPER.readTree("""
+            {
+              "jdbc_driver_class": "com.microsoft.sqlserver.jdbc.SQLServerDriver"
+            }
+            """);
+        assertEquals(true, DbxJdbcPlugin.driverQuirks(sqlserver).mergeEmptyCatalogSchemas());
+        assertEquals(true, DbxJdbcPlugin.driverQuirks(jtds).mergeEmptyCatalogSchemas());
+        assertEquals(true, DbxJdbcPlugin.driverQuirks(sqlserverClass).mergeEmptyCatalogSchemas());
+        assertEquals(false, DbxJdbcPlugin.driverQuirks(h2).mergeEmptyCatalogSchemas());
     }
 
     @Test
@@ -2329,6 +2348,93 @@ final class DbxJdbcPluginTest {
                   }
                 }
                 """);
+        }
+    }
+
+    @Test
+    void listSchemasMergesBuiltinSchemasForSqlServerWithCustomSchemas() throws Exception {
+        String url = "jdbc:sqlserver://sqlserver-mock.example.test:1433;databaseName=appdb";
+        Driver driver = new SqlServerSchemaMockDriver(
+            url,
+            List.of("sales", "custom"),
+            List.of("dbo", "guest", "INFORMATION_SCHEMA", "sys")
+        );
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("listSchemas", """
+                {
+                  "connection": {
+                    "connection_string": "%s",
+                    "username": "sa",
+                    "password": "secret"
+                  },
+                  "database": "appdb"
+                }
+                """.formatted(url));
+
+            assertFalse(response.has("error"), response.toString());
+            List<String> schemaNames = new ArrayList<>();
+            for (JsonNode item : response.path("result")) {
+                schemaNames.add(item.path("name").asText(item.asText()));
+            }
+            assertTrue(schemaNames.contains("sales"), schemaNames.toString());
+            assertTrue(schemaNames.contains("custom"), schemaNames.toString());
+            assertTrue(schemaNames.contains("dbo"), schemaNames.toString());
+            assertTrue(schemaNames.contains("sys"), schemaNames.toString());
+        } finally {
+            DriverManager.deregisterDriver(driver);
+            request("close", """
+                {
+                  "connection": {
+                    "connection_string": "%s",
+                    "username": "sa",
+                    "password": "secret"
+                  }
+                }
+                """.formatted(url));
+        }
+    }
+
+    @Test
+    void listSchemasMergesBuiltinSchemasForSqlServerWithoutCustomSchemas() throws Exception {
+        String url = "jdbc:sqlserver://sqlserver-empty-mock.example.test:1433;databaseName=appdb";
+        Driver driver = new SqlServerSchemaMockDriver(
+            url,
+            List.of(),
+            List.of("dbo", "guest", "INFORMATION_SCHEMA", "sys")
+        );
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("listSchemas", """
+                {
+                  "connection": {
+                    "connection_string": "%s",
+                    "username": "sa",
+                    "password": "secret"
+                  },
+                  "database": "appdb"
+                }
+                """.formatted(url));
+
+            assertFalse(response.has("error"), response.toString());
+            List<String> schemaNames = new ArrayList<>();
+            for (JsonNode item : response.path("result")) {
+                schemaNames.add(item.path("name").asText(item.asText()));
+            }
+            assertFalse(schemaNames.contains("sales"), schemaNames.toString());
+            assertTrue(schemaNames.contains("dbo"), schemaNames.toString());
+            assertTrue(schemaNames.contains("sys"), schemaNames.toString());
+        } finally {
+            DriverManager.deregisterDriver(driver);
+            request("close", """
+                {
+                  "connection": {
+                    "connection_string": "%s",
+                    "username": "sa",
+                    "password": "secret"
+                  }
+                }
+                """.formatted(url));
         }
     }
 
@@ -5756,6 +5862,122 @@ final class DbxJdbcPluginTest {
                     }
                 }
             );
+        }
+    }
+
+    private static final class SqlServerSchemaMockDriver implements Driver {
+        private final String url;
+        private final List<String> catalogSchemas;
+        private final List<String> emptyCatalogSchemas;
+
+        private SqlServerSchemaMockDriver(String url, List<String> catalogSchemas, List<String> emptyCatalogSchemas) {
+            this.url = url;
+            this.catalogSchemas = catalogSchemas;
+            this.emptyCatalogSchemas = emptyCatalogSchemas;
+        }
+
+        @Override
+        public Connection connect(String connectUrl, Properties info) throws SQLException {
+            if (!acceptsURL(connectUrl)) {
+                return null;
+            }
+            return (Connection) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { Connection.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "isClosed" -> false;
+                    case "isValid" -> true;
+                    case "close" -> null;
+                    case "getMetaData" -> sqlServerMetaData();
+                    case "getCatalog" -> "appdb";
+                    case "getSchema" -> "dbo";
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        private DatabaseMetaData sqlServerMetaData() {
+            return (DatabaseMetaData) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { DatabaseMetaData.class },
+                (proxy, method, args) -> {
+                    if ("getSchemas".equals(method.getName())) {
+                        if (args != null && args.length == 2) {
+                            String catalog = (String) args[0];
+                            if ("appdb".equals(catalog)) {
+                                return stringColumnResultSet("TABLE_SCHEM", catalogSchemas);
+                            }
+                            if ("".equals(catalog)) {
+                                return stringColumnResultSet("TABLE_SCHEM", emptyCatalogSchemas);
+                            }
+                            if (catalog == null) {
+                                List<String> all = new ArrayList<>(catalogSchemas);
+                                all.addAll(emptyCatalogSchemas);
+                                return stringColumnResultSet("TABLE_SCHEM", all);
+                            }
+                        }
+                    }
+                    return defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        private static ResultSet stringColumnResultSet(String columnLabel, List<String> values) {
+            return (ResultSet) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { ResultSet.class },
+                new java.lang.reflect.InvocationHandler() {
+                    private int index = -1;
+
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) {
+                        return switch (method.getName()) {
+                            case "next" -> ++index < values.size();
+                            case "getString" -> {
+                                if (args != null && args.length > 0 && columnLabel.equals(args[0])) {
+                                    yield values.get(index);
+                                }
+                                if (args != null && args.length > 0 && Integer.valueOf(1).equals(args[0])) {
+                                    yield values.get(index);
+                                }
+                                yield null;
+                            }
+                            case "close" -> null;
+                            default -> defaultValue(method.getReturnType());
+                        };
+                    }
+                }
+            );
+        }
+
+        @Override
+        public boolean acceptsURL(String connectUrl) {
+            return url.equals(connectUrl);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String connectUrl, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
         }
     }
 

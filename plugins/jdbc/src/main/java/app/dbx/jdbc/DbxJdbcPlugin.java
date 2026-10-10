@@ -3560,7 +3560,7 @@ public final class DbxJdbcPlugin {
         String effectiveSchema = kingbaseEffectiveSchema(conn, schema);
         Set<String> primaryKeys = kingbasePrimaryKeys(conn, effectiveSchema, table);
         String sql = "SELECT a.attname AS column_name, " +
-            "format_type(a.atttypid, a.atttypmod) AS data_type, " +
+            "CASE WHEN t.typname = 'json' THEN 'json' WHEN t.typname = '_json' THEN 'json[]' ELSE format_type(a.atttypid, a.atttypmod) END AS data_type, " +
             "NOT a.attnotnull AS is_nullable, " +
             "sys_get_expr(ad.adbin, ad.adrelid) AS column_default, " +
             "d.description AS column_comment, " +

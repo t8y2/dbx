@@ -624,12 +624,16 @@ type customTypeCatalogQueries struct {
 // for built-in pg_catalog types.
 func qualifiedCatalogTypeExpression(typeAlias, namespaceAlias, elementAlias, elementNamespaceAlias, oidExpression, typmodExpression string) string {
 	return fmt.Sprintf(`CASE
-  WHEN %s.typelem <> 0 AND %s.nspname <> 'pg_catalog'
+  WHEN %s.typelem <> 0 AND %s.nspname NOT IN ('pg_catalog', 'sys_catalog')
     THEN quote_ident(%s.nspname) || '.' || quote_ident(%s.typname) || '[]'
-  WHEN %s.nspname <> 'pg_catalog'
+  WHEN %s.nspname NOT IN ('pg_catalog', 'sys_catalog')
     THEN quote_ident(%s.nspname) || '.' || quote_ident(%s.typname)
+  WHEN %s.typname = 'json'
+    THEN 'json'
+  WHEN %s.typname = '_json'
+    THEN 'json[]'
   ELSE format_type(%s, %s)
-END`, typeAlias, elementNamespaceAlias, elementNamespaceAlias, elementAlias, namespaceAlias, namespaceAlias, typeAlias, oidExpression, typmodExpression)
+END`, typeAlias, elementNamespaceAlias, elementNamespaceAlias, elementAlias, namespaceAlias, namespaceAlias, typeAlias, typeAlias, typeAlias, oidExpression, typmodExpression)
 }
 
 func customTypeCatalogQueriesFor(catalog, prefix, schema, name string) customTypeCatalogQueries {
@@ -1893,7 +1897,12 @@ func (s *server) queryCatalogColumns(
 		visibilityFunction := kingbaseCatalogFunction(catalog, "sys_table_is_visible", "pg_table_is_visible")
 		relationPredicate = fmt.Sprintf("c.relname = %s AND %s(c.oid)", quoteLiteral(table), visibilityFunction)
 	}
-	query := fmt.Sprintf(`SELECT n.nspname, a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
+	query := fmt.Sprintf(`SELECT n.nspname, a.attname,
+	CASE
+		WHEN t.typname = 'json' THEN 'json'
+		WHEN t.typname = '_json' THEN 'json[]'
+		ELSE format_type(a.atttypid, a.atttypmod)
+	END, NOT a.attnotnull,
 	%s(ad.adbin, ad.adrelid), col_description(a.attrelid, a.attnum),
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN ((a.atttypmod - 4) >> 16) & 65535 END,
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN (a.atttypmod - 4) & 65535 END,

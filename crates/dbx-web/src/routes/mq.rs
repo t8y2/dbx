@@ -1605,6 +1605,7 @@ mod tests {
         let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let state = Arc::new(WebState {
+            codex_workbench: None,
             app,
             data_dir: dir.clone(),
             notes_roots: Vec::new(),

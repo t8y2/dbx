@@ -912,6 +912,10 @@ impl DbxMcpServer {
             tool_router.disable_route("dbx_open_table");
             tool_router.disable_route("dbx_execute_and_show");
         }
+        if !backend.workbench_available() || scope.enabled() {
+            tool_router.disable_route("dbx_codex_open_table");
+            tool_router.disable_route("dbx_codex_execute_and_show");
+        }
         #[cfg(not(feature = "mq-admin"))]
         {
             tool_router.disable_route("dbx_send_message");
@@ -2827,6 +2831,91 @@ impl DbxMcpServer {
             Ok(false) => tool_error("CONNECTION_NOT_FOUND", format!("Connection \"{}\" not found.", target.name)),
             Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", error),
         }
+    }
+
+    #[tool(
+        name = "dbx_codex_open_table",
+        description = "Open a table in the embedded Codex workbench. Returns a workbench URL; DBX desktop is not required."
+    )]
+    async fn codex_open_table(&self, Parameters(request): Parameters<OpenTableRequest>) -> CallToolResult {
+        if !self.backend.workbench_available() || self.scope.enabled() {
+            return tool_error("WORKBENCH_UNAVAILABLE", "Codex workbench is unavailable in this session");
+        }
+        if let Err(error) = self.ensure_tool_allowed("dbx_codex_open_table").await {
+            return error;
+        }
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let database = match self.resolve_database(request.database, &resolved) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        let schema = match self.resolve_schema(request.schema) {
+            Ok(schema) => schema,
+            Err(error) => return error,
+        };
+        match self.backend.publish_workbench(json!({
+            "kind": "table", "connection_id": resolved.connection.id,
+            "database": database, "schema": schema, "table": request.table,
+        })) {
+            Ok(url) => text(url),
+            Err(error) => backend_tool_error("WORKBENCH_UNAVAILABLE", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_codex_execute_and_show",
+        description = "Execute SQL once using the MCP batch executor and display those exact results in the embedded Codex workbench. Returns results and a workbench URL valid for five minutes. Uses dbx_execute_batch permissions and limits; never retry a write just to display its results."
+    )]
+    async fn codex_execute_and_show(&self, Parameters(request): Parameters<ExecuteAndShowRequest>) -> CallToolResult {
+        if !self.backend.workbench_available() || self.scope.enabled() {
+            return tool_error("WORKBENCH_UNAVAILABLE", "Codex workbench is unavailable in this session");
+        }
+        if let Err(error) = self.ensure_tool_allowed("dbx_codex_execute_and_show").await {
+            return error;
+        }
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let database = match self.resolve_database(request.database.clone(), &resolved) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        let sql = request.sql.clone();
+        let mut result = self
+            .execute_batch_request(ExecuteBatchQueryRequest {
+                selector: request.selector,
+                database: request.database,
+                sql: request.sql,
+                cell_window: CellWindowArgs::default(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: None,
+            })
+            .await;
+        if let Some(structured) = &mut result.structured_content {
+            if let Some(results) = structured.get("results") {
+                match self.backend.publish_workbench(json!({
+                    "kind": "result", "connection_id": resolved.connection.id,
+                    "database": database, "sql": sql, "results": results,
+                })) {
+                    Ok(url) => {
+                        structured["workbench_url"] = json!(url);
+                        result.content.push(ContentBlock::text(format!("Workbench: {url}")));
+                    }
+                    Err(error) => {
+                        structured["display_error"] = json!(error);
+                        result
+                            .content
+                            .push(ContentBlock::text(format!("Query completed; display unavailable: {error}")));
+                    }
+                }
+            }
+        }
+        result
     }
 
     #[tool(name = "dbx_open_table", description = "Open a table in DBX desktop app. Requires DBX to be running.")]
@@ -5361,6 +5450,9 @@ mod tests {
     type RecordedPluginToolCalls = std::sync::Mutex<Vec<(String, String, Option<String>, serde_json::Value)>>;
 
     struct FakeBackend {
+        workbench: bool,
+        workbench_full: bool,
+        intents: std::sync::Mutex<Vec<serde_json::Value>>,
         connections: Vec<ConnectionConfig>,
         policy: McpGlobalPolicy,
         recorded_arguments: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
@@ -5388,6 +5480,9 @@ mod tests {
     impl Default for FakeBackend {
         fn default() -> Self {
             Self {
+                workbench: false,
+                workbench_full: false,
+                intents: Default::default(),
                 connections: Vec::new(),
                 policy: McpGlobalPolicy::default(),
                 recorded_arguments: std::sync::Mutex::new(Vec::new()),
@@ -5532,6 +5627,17 @@ mod tests {
 
     #[async_trait]
     impl DbxBackend for FakeBackend {
+        fn workbench_available(&self) -> bool {
+            self.workbench
+        }
+        fn publish_workbench(&self, intent: serde_json::Value) -> Result<String, String> {
+            if self.workbench_full {
+                return Err("Cache full".into());
+            }
+            self.intents.lock().unwrap().push(intent);
+            Ok("http://127.0.0.1:1234/?codex_intent=test".into())
+        }
+
         async fn approve_high_risk_sql(
             &self,
             _connection_id: &str,
@@ -8647,6 +8753,95 @@ mod tests {
             !result_text(&with_session).contains("TRANSACTION_WITH_SESSION_UNSUPPORTED"),
             "single-statement use_transaction + session_id must not be rejected as a transaction/session conflict"
         );
+    }
+
+    #[tokio::test]
+    async fn codex_display_reuses_batch_results_and_rejects_blocked_sql() {
+        let backend = Arc::new(FakeBackend {
+            workbench: true,
+            connections: vec![connection("pg", "pg", "postgres", "app")],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), true);
+        let request =
+            |sql: &str| Parameters(ExecuteAndShowRequest { selector: selector("pg"), database: None, sql: sql.into() });
+        let result = server.codex_execute_and_show(request("SELECT 1")).await;
+        assert!(!result.is_error.unwrap_or(false));
+        let intents = backend.intents.lock().unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0]["results"], result.structured_content.as_ref().unwrap()["results"]);
+        drop(intents);
+        let denied = server.codex_execute_and_show(request("DROP TABLE users")).await;
+        assert!(denied.is_error.unwrap_or(false));
+        assert_eq!(backend.intents.lock().unwrap().len(), 1);
+        assert_eq!(backend.recorded_arguments.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn codex_display_failure_keeps_completed_query_results() {
+        let backend = Arc::new(FakeBackend {
+            workbench: true,
+            workbench_full: true,
+            connections: vec![connection("pg", "pg", "postgres", "app")],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), true);
+        let result = server
+            .codex_execute_and_show(Parameters(ExecuteAndShowRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT 1".into(),
+            }))
+            .await;
+        assert!(!result.is_error.unwrap_or(false));
+        let structured = result.structured_content.unwrap();
+        assert!(structured["results"].is_array());
+        assert_eq!(structured["display_error"], "Cache full");
+        assert_eq!(backend.recorded_arguments.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn codex_table_navigation_checks_target_and_keeps_schema() {
+        let backend = Arc::new(FakeBackend {
+            workbench: true,
+            connections: vec![connection("pg", "pg", "postgres", "app")],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), true);
+        let request = |id: &str| {
+            Parameters(OpenTableRequest {
+                selector: selector(id),
+                database: Some("app".into()),
+                schema: Some("sales".into()),
+                table: "orders".into(),
+            })
+        };
+        assert!(server.codex_open_table(request("unknown")).await.is_error.unwrap_or(false));
+        assert!(backend.intents.lock().unwrap().is_empty());
+        let result = server.codex_open_table(request("pg")).await;
+        assert!(!result.is_error.unwrap_or(false));
+        assert_eq!(
+            backend.intents.lock().unwrap()[0],
+            json!({"kind":"table", "connection_id":"pg", "database":"app", "schema":"sales", "table":"orders"})
+        );
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn codex_tools_only_exist_for_an_unscoped_workbench() {
+        for (available, scoped) in [(false, false), (true, false), (true, true)] {
+            let backend = Arc::new(FakeBackend { workbench: available, ..Default::default() });
+            let scope = if scoped {
+                McpScope { connection_ids: vec!["pg".into()], ..Default::default() }
+            } else {
+                McpScope::default()
+            };
+            let server = DbxMcpServer::with_runtime_options(backend, scope, true);
+            let tools = server.tool_router.list_all();
+            for name in ["dbx_codex_open_table", "dbx_codex_execute_and_show"] {
+                assert_eq!(tools.iter().any(|tool| tool.name == name), available && !scoped);
+            }
+        }
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createCodexIntentHandler } from "@/composables/useCodexWorkbench";
 import { blockingDesktopAiRunsForUpdate } from "@/lib/ai/desktopAiRunRegistry";
 import { setupUpdatePreparation, prepareUpdateWithDraftRecovery, isUpdatePreparationActive } from "@/lib/app/updatePreparation";
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent, provide } from "vue";
@@ -4440,6 +4441,14 @@ async function handleWebLogout() {
   }
 }
 
+const handleCodexIntent = createCodexIntentHandler({
+  openTable: openTableTarget,
+  showResults: (connectionId, database, sql, results) => {
+    connectionStore.activeConnectionId = connectionId;
+    queryStore.showExecutedQueryResults(connectionId, database, sql, results);
+  },
+});
+
 async function initApp() {
   const t0 = performance.now();
   console.log("[STARTUP] initApp begin");
@@ -4522,6 +4531,7 @@ async function initApp() {
     void promptTemplateStore.init();
 
     restoreActiveConnectionContext();
+    if (!isDesktop) await handleCodexIntent(window.location.href);
   } catch (e: any) {
     toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
   }

@@ -371,8 +371,11 @@ fn mount_static_assets(mut app: Router, public_base_path: &str, source: Option<S
 /// until a token is configured.
 fn web_mcp_router(web_state: &Arc<WebState>) -> Result<Router, String> {
     let auth = web_state.web_mcp.auth();
-    let backend: Arc<dyn DbxBackend> =
-        Arc::new(LocalBackend::from_app_state(web_state.app.clone(), web_state.data_dir.clone()));
+    let mut backend = LocalBackend::from_app_state(web_state.app.clone(), web_state.data_dir.clone());
+    if let Some(workbench) = &web_state.codex_workbench {
+        backend = backend.with_workbench(workbench.clone());
+    }
+    let backend: Arc<dyn DbxBackend> = Arc::new(backend);
 
     streamable_http_router(backend, "/mcp", auth, web_state.web_mcp.allowed_hosts(), true)
 }
@@ -607,6 +610,9 @@ async fn serve() -> Result<(), String> {
         WebMcpRuntime::disabled()
     });
     let web_state = Arc::new(WebState {
+        codex_workbench: codex_runtime
+            .as_ref()
+            .map(|lease| Arc::new(codex::Workbench::new(lease.handle().base_url.to_string()))),
         app: app_state,
         data_dir,
         notes_roots: routes::docs::notes_roots_from_env(std::env::var_os("DBX_DOCS_NOTES_ROOTS").as_deref()),
@@ -641,6 +647,7 @@ async fn serve() -> Result<(), String> {
 
     // API routes
     let api = Router::new()
+        .route("/codex/intents/{id}", get(codex::intent))
         .route("/migration/status", get(routes::migration::status))
         .route("/migration/start", post(routes::migration::start))
         .route("/migration/retry", post(routes::migration::retry))
@@ -1554,6 +1561,9 @@ async fn serve() -> Result<(), String> {
         }
     };
     app = mount_static_assets(app, &public_base_path, static_source);
+    if let Some(workbench) = &web_state.codex_workbench {
+        app = app.layer(middleware::from_fn_with_state(workbench.clone(), codex::browser_gate));
+    }
 
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);

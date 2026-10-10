@@ -11,6 +11,76 @@ use dbx_codex::runtime::RuntimeHandle;
 use dbx_mcp::{http_auth::authorize_request, HttpAuth};
 use std::sync::{atomic::Ordering, Arc};
 
+const MAX_INTENT_BYTES: usize = 16 * 1024 * 1024;
+const INTENT_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+pub struct Workbench {
+    base_url: String,
+    entries: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, serde_json::Value, usize)>>,
+}
+
+impl Workbench {
+    pub fn new(base_url: String) -> Self {
+        Self { base_url, entries: Default::default() }
+    }
+
+    fn insert(&self, intent: serde_json::Value) -> Result<String, String> {
+        let size = serde_json::to_vec(&intent).map_err(|e| e.to_string())?.len();
+        let mut entries = self.entries.lock().map_err(|_| "Workbench cache is unavailable")?;
+        entries.retain(|_, (created, _, _)| created.elapsed() < INTENT_TTL);
+        if size > MAX_INTENT_BYTES || entries.values().map(|entry| entry.2).sum::<usize>() + size > MAX_INTENT_BYTES {
+            return Err(
+                "Workbench result cache is full; the query was executed and must not be retried just to display it"
+                    .into(),
+            );
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        entries.insert(id.clone(), (std::time::Instant::now(), intent, size));
+        Ok(format!("{}?codex_intent={id}", self.base_url))
+    }
+
+    fn get(&self, id: &str) -> Option<serde_json::Value> {
+        uuid::Uuid::parse_str(id).ok()?;
+        let mut entries = self.entries.lock().ok()?;
+        entries.retain(|_, (created, _, _)| created.elapsed() < INTENT_TTL);
+        entries.get(id).map(|entry| entry.1.clone())
+    }
+}
+
+impl dbx_mcp::backend::WorkbenchPublisher for Workbench {
+    fn publish(&self, intent: serde_json::Value) -> Result<String, String> {
+        self.insert(intent)
+    }
+}
+
+pub async fn intent(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match state.codex_workbench.as_ref().and_then(|workbench| workbench.get(&id)) {
+        Some(intent) => ([(axum::http::header::CACHE_CONTROL, "no-store")], Json(intent)).into_response(),
+        None => (StatusCode::NOT_FOUND, "Workbench link expired or unavailable").into_response(),
+    }
+}
+
+fn browser_request_allowed(workbench: &Workbench, headers: &axum::http::HeaderMap) -> bool {
+    let origin = workbench.base_url.trim_end_matches('/');
+    let host = origin.trim_start_matches("http://");
+    headers.get(axum::http::header::HOST).and_then(|value| value.to_str().ok()) == Some(host)
+        && headers.get(axum::http::header::ORIGIN).is_none_or(|value| value.to_str().ok() == Some(origin))
+}
+
+pub async fn browser_gate(
+    State(workbench): State<Arc<Workbench>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if !browser_request_allowed(&workbench, request.headers()) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    next.run(request).await
+}
+
 pub fn control_router(handle: &RuntimeHandle, token: &str) -> Result<Router, String> {
     let host = handle.base_url.as_str().trim_start_matches("http://").trim_end_matches('/').to_string();
     let auth = HttpAuth::new_with_hosts(Some(token.into()), vec![host], Vec::<String>::new(), false)?;
@@ -45,6 +115,87 @@ pub async fn setup_gate(
 mod tests {
     use super::*;
     use dbx_codex::runtime::ServiceLease;
+
+    #[test]
+    fn browser_rejects_dns_rebinding_and_foreign_origins() {
+        let workbench = Workbench::new("http://127.0.0.1:1234/".into());
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("host", "evil.example:1234".parse().unwrap());
+        assert!(!browser_request_allowed(&workbench, &headers));
+        headers.insert("host", "127.0.0.1:1234".parse().unwrap());
+        assert!(browser_request_allowed(&workbench, &headers));
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        assert!(!browser_request_allowed(&workbench, &headers));
+        headers.insert("origin", "http://127.0.0.1:1234".parse().unwrap());
+        assert!(browser_request_allowed(&workbench, &headers));
+        headers.insert("origin", "null".parse().unwrap());
+        assert!(!browser_request_allowed(&workbench, &headers));
+    }
+
+    #[test]
+    fn intents_expire_and_keep_data_out_of_urls() {
+        let workbench = Workbench::new("http://127.0.0.1:1234/".into());
+        let secret =
+            serde_json::json!({"kind":"result", "sql":"SELECT private_value", "results":[{"rows":[["private cell"]]}]});
+        let url = workbench.insert(secret.clone()).unwrap();
+        assert!(!url.contains("private"));
+        let id = url.split("codex_intent=").nth(1).unwrap();
+        assert_eq!(workbench.get(id), Some(secret.clone()));
+        assert_eq!(workbench.get(id), Some(secret));
+        assert_eq!(workbench.get("bad-id"), None);
+        workbench.entries.lock().unwrap().get_mut(id).unwrap().0 =
+            std::time::Instant::now() - std::time::Duration::from_secs(301);
+        assert_eq!(workbench.get(id), None);
+    }
+
+    #[test]
+    fn oversized_intent_does_not_remove_previous_result() {
+        let workbench = Workbench::new("http://127.0.0.1:1234/".into());
+        let url = workbench.insert(serde_json::json!({"kind":"table"})).unwrap();
+        assert!(workbench.insert(serde_json::json!("x".repeat(MAX_INTENT_BYTES))).is_err());
+        assert!(workbench.get(url.split("codex_intent=").nth(1).unwrap()).is_some());
+    }
+
+    #[tokio::test]
+    async fn intent_results_require_browser_login_and_are_not_consumed() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage =
+            dbx_core::persistence::test_storage::open_unmigrated(&directory.path().join("dbx.db")).await.unwrap();
+        let mut state =
+            WebState::for_tests(Arc::new(dbx_core::connection::AppState::new(storage)), directory.path().to_path_buf());
+        let workbench = Arc::new(Workbench::new("http://127.0.0.1/".into()));
+        let payload =
+            serde_json::json!({"kind":"result", "sql":"SELECT secret", "results":[{"rows":[["original cell"]]}]});
+        let url = workbench.insert(payload.clone()).unwrap();
+        let id = url.split("codex_intent=").nth(1).unwrap();
+        state.codex_workbench = Some(workbench);
+        *state.password_hash.write().await = Some("configured".into());
+        state.sessions.write().await.insert("browser-session".into());
+        let state = Arc::new(state);
+        let router = Router::new()
+            .route("/api/codex/intents/{id}", get(intent))
+            .layer(middleware::from_fn_with_state(state.clone(), setup_gate))
+            .layer(middleware::from_fn_with_state(state.clone(), crate::auth::auth_middleware))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api/codex/intents/{id}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::new();
+        assert_eq!(client.get(&url).send().await.unwrap().status(), 401);
+        assert_eq!(client.get(&url).bearer_auth("private-mcp-token").send().await.unwrap().status(), 401);
+        for _ in 0..2 {
+            let response = client.get(&url).header("Cookie", "dbx_session=browser-session").send().await.unwrap();
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(response.json::<serde_json::Value>().await.unwrap(), payload);
+        }
+        state.migration_ready.store(false, Ordering::Release);
+        assert_eq!(
+            client.get(&url).header("Cookie", "dbx_session=browser-session").send().await.unwrap().status(),
+            423
+        );
+        server.abort();
+    }
 
     #[tokio::test]
     async fn status_requires_bearer_and_rejects_foreign_hosts_and_origins() {

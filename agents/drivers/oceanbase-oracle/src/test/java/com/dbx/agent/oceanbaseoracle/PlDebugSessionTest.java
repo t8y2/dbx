@@ -135,8 +135,9 @@ class PlDebugSessionTest {
         // to be replaced, without bumping the shared V6 identity the Go agent also
         // asserts. The Go driver writes this exact literal (plDebugBodyFixNote).
         Assertions.assertEquals(
-            "-- DBX PL Debug Package Fix: V6.2 program_info.entrypointname arm for package subprograms"
-                + " (V6.1 namespace-aware set_breakpoint + explicit run_info mask retained)",
+            "-- DBX PL Debug Package Fix: V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain"
+                + " (V6.2 program_info.entrypointname arm for package subprograms, V6.1"
+                + " namespace-aware set_breakpoint + explicit run_info mask retained)",
             DbxPlDebugPackage.BODY_FIX_NOTE
         );
         Assertions.assertTrue(
@@ -146,6 +147,24 @@ class PlDebugSessionTest {
         Assertions.assertFalse(
             DbxPlDebugPackage.VERSION_NOTE.contains("V6.1"),
             "the fix note must not be folded into the shared V6 literal"
+        );
+        // V6.3 parity: the body must carry the same drain routine the Go agent calls. If the
+        // marker were bumped without these, the Go side would see "V6.3" and stop
+        // reinstalling a body whose routine is missing, and pl_debug_get_log would fail at
+        // runtime with PLS-00302 while nothing repaired it.
+        Assertions.assertTrue(body.contains("-- V6.3 (real Oracle 19c EE verified): DBX_FETCH_OUTPUT added"));
+        Assertions.assertTrue(body.contains(
+            "FUNCTION " + DbxPlDebugPackage.FUNCTION_FETCH_OUTPUT
+                + "(max_chars IN BINARY_INTEGER) RETURN VARCHAR2 IS"
+        ));
+        Assertions.assertTrue(body.contains(DbxPlDebugPackage.PENDING_LINE_VARIABLE + " VARCHAR2(32767) := NULL;"));
+        Assertions.assertTrue(body.contains("<<dbx_drain>> LOOP") && body.contains("EXIT dbx_drain;"));
+        Assertions.assertTrue(
+            DbxPlDebugPackage.HEAD_REQUIRED_DECLARATIONS.contains(
+                "FUNCTION " + DbxPlDebugPackage.FUNCTION_FETCH_OUTPUT
+                    + "(max_chars IN BINARY_INTEGER) RETURN VARCHAR2"
+            ),
+            "the drain routine's head declaration must be pinned, so a head installed before V6.3 is replaced"
         );
         Assertions.assertTrue(body.contains("-- V6.2 (real Oracle 19c EE verified): DBX_SET_BREAKPOINT_ENTRY added"));
         Assertions.assertTrue(body.contains("-- V6: DBX_SET_VALUE now matches the real DBMS_DEBUG.SET_VALUE overloads"));
@@ -662,6 +681,7 @@ class PlDebugSessionTest {
         Assertions.assertEquals(
             List.of(
                 DbxPlDebugPackage.PROCEDURE_SET_VALUE,
+                DbxPlDebugPackage.FUNCTION_FETCH_OUTPUT,
                 DbxPlDebugPackage.PROCEDURE_SET_BREAKPOINT_EX,
                 DbxPlDebugPackage.PROCEDURE_SET_BREAKPOINT_ENTRY,
                 DbxPlDebugPackage.PROCEDURE_SET_BREAKPOINT_ANONYMOUS,

@@ -62,27 +62,17 @@ final class DbxPlDebugPackage {
      * only) and whose {@code get_runtime_info} ignores the request mask.
      */
     static final String BODY_FIX_NOTE =
-        "-- DBX PL Debug Package Fix: V6.2 program_info.entrypointname arm for package subprograms"
-            + " (V6.1 namespace-aware set_breakpoint + explicit run_info mask retained)";
-
-    /**
-     * The Go agent's V6.3 body fix note, exactly as the Go side renders and installs it.
-     *
-     * <p>V6.3 is a strict superset of the body this class renders: it keeps every routine
-     * this agent calls and only adds {@code DBX_FETCH_OUTPUT}, the one-call DBMS_OUTPUT
-     * drain the Go agent uses while a debug session is parked. A body carrying this note is
-     * therefore current for this agent too, and treating it as stale would make the two
-     * agents rebuild each other's body forever -- the Go side already requires V6.3, so the
-     * Java side has to accept it (see {@code PlDebugSession.packageVersionCurrent}).
-     */
-    static final String GO_V6_3_BODY_FIX_NOTE =
         "-- DBX PL Debug Package Fix: V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain"
             + " (V6.2 program_info.entrypointname arm for package subprograms, V6.1"
             + " namespace-aware set_breakpoint + explicit run_info mask retained)";
 
     /** Version history, written after the header line so it never hides the marker. */
     private static final String VERSION_NOTE_DETAIL =
-        "\n-- V6.2 (real Oracle 19c EE verified): DBX_SET_BREAKPOINT_ENTRY added. It fills"
+        "\n-- V6.3 (real Oracle 19c EE verified): DBX_FETCH_OUTPUT added, the one-call"
+            + "\n-- DBMS_OUTPUT drain the Go agent calls from the target's own anonymous block."
+            + "\n-- DBX_PL_DEBUG_PACKAGE_PENDING_LINE holds the line a chunk boundary could not"
+            + "\n-- return yet. See BODY_FIX_NOTE."
+            + "\n-- V6.2 (real Oracle 19c EE verified): DBX_SET_BREAKPOINT_ENTRY added. It fills"
             + "\n-- dbms_debug.program_info.entrypointname (and tries namespace_pkg_body first),"
             + "\n-- which is the only arm a breakpoint on a subprogram INSIDE a package body"
             + "\n-- accepts: measured on 19c EE, name=<package> + namespace_pkg_body +"
@@ -217,6 +207,83 @@ final class DbxPlDebugPackage {
     static final String PROCEDURE_GET_RUNTIME_INFO = "DBX_GET_RUNTIME_INFO";
     static final String PROCEDURE_SYNCHRONIZE = "DBX_SYNCHRONIZE";
     static final String PROCEDURE_GET_LINE = "DBX_GET_LINE";
+
+    /**
+     * V6.3: the one-call DBMS_OUTPUT drain. It is a {@code FUNCTION} on purpose, so the
+     * debuggee's own anonymous block can invoke it as its trailing statement -- the only
+     * moment after {@code DEBUG_ON} when such a call does not park for the whole
+     * {@code DBMS_DEBUG.SET_TIMEOUT}. This agent never calls it; it renders the body so
+     * both agents install the same package.
+     */
+    static final String FUNCTION_FETCH_OUTPUT = "DBX_FETCH_OUTPUT";
+
+    /**
+     * Package-level variable holding the one line a {@link #FUNCTION_FETCH_OUTPUT} chunk
+     * boundary could not return yet. The identifier is shared with the Go agent's copy of
+     * the routine, so both sides must render the same name.
+     */
+    static final String PENDING_LINE_VARIABLE = PACKAGE_NAME + "_PENDING_LINE";
+
+    /**
+     * Body declaration of {@link #PENDING_LINE_VARIABLE}, substituted for
+     * {@link #PENDING_LINE_DECLARATION_MARKER}. Rendered from the Go agent's own text
+     * ({@code agents/drivers/oracle-go/pldebug.go:508}).
+     */
+    static final String PENDING_LINE_DECLARATION = PENDING_LINE_VARIABLE + " VARCHAR2(32767) := NULL;\n";
+
+    /**
+     * The V6.3 routine, byte-for-byte the Go agent's rendering
+     * ({@code agents/drivers/oracle-go/pldebug.go:550-591}).
+     */
+    static final String FETCH_OUTPUT_ROUTINE =
+        "\n-- V6.3 (real Oracle 19c EE verified): DBX_FETCH_OUTPUT added. After DEBUG_ON every"
+            + "\n-- PL/SQL call in the debuggee session parks for the whole DBMS_DEBUG.SET_TIMEOUT"
+            + "\n-- (measured: SET_TIMEOUT(5) -> the first post-DEBUG_ON statement answered after"
+            + "\n-- 5070ms; SET_TIMEOUT(1) -> 1066ms; a plain SQL SELECT stayed at 25ms), so a"
+            + "\n-- DBMS_OUTPUT drain split over several calls can never finish inside one RPC."
+            + "\n-- DBX_GET_LINE is kept unchanged for the Java agent; DBX_FETCH_OUTPUT is the"
+            + "\n-- chunked, single-call drain the Go agent uses, and it is a FUNCTION so the"
+            + "\n-- debuggee's own anonymous block can call it as its trailing statement -- while the"
+            + "\n-- debugger still drives the program, which is the only moment such a call does not"
+            + "\n-- park."
+            + "\nFUNCTION " + FUNCTION_FETCH_OUTPUT + "(max_chars IN BINARY_INTEGER) RETURN VARCHAR2 IS"
+            + "\n  buffer VARCHAR2(32767) := NULL;"
+            + "\n  fetched VARCHAR2(32767);"
+            + "\n  status INTEGER;"
+            + "\n  limit_chars PLS_INTEGER;"
+            + "\n  ignored BINARY_INTEGER;"
+            + "\nBEGIN"
+            + "\n  limit_chars := max_chars;"
+            + "\n  IF limit_chars IS NULL OR limit_chars <= 0 OR limit_chars > 32767 THEN limit_chars := 32767; END IF;"
+            + "\n  -- Best effort, and deliberately an assignment: DBMS_DEBUG.SET_TIMEOUT is a"
+            + "\n  -- FUNCTION on 19c EE (\"CALL DBMS_DEBUG.SET_TIMEOUT(120)\" answers PLS-00221), and"
+            + "\n  -- this call is what turns the debuggee's own post-program park from the whole"
+            + "\n  -- SET_TIMEOUT into one second for every later drain call. A server without the"
+            + "\n  -- primitive keeps the long park and the Go-side bound, which is why the failure"
+            + "\n  -- is swallowed."
+            + "\n  BEGIN ignored := dbms_debug.set_timeout(1); EXCEPTION WHEN OTHERS THEN NULL; END;"
+            + "\n  <<dbx_drain>> LOOP"
+            + "\n    IF " + PENDING_LINE_VARIABLE + " IS NOT NULL THEN"
+            + "\n      fetched := " + PENDING_LINE_VARIABLE + ";"
+            + "\n      " + PENDING_LINE_VARIABLE + " := NULL;"
+            + "\n    ELSE"
+            + "\n      dbms_output.get_line(fetched, status);"
+            + "\n      IF status <> 0 THEN EXIT dbx_drain; END IF;"
+            + "\n    END IF;"
+            + "\n    IF buffer IS NOT NULL AND LENGTH(buffer) + 1 + LENGTH(fetched) > limit_chars THEN"
+            + "\n      " + PENDING_LINE_VARIABLE + " := fetched;"
+            + "\n      EXIT dbx_drain;"
+            + "\n    END IF;"
+            + "\n    IF buffer IS NULL THEN buffer := fetched; ELSE buffer := buffer || chr(10) || fetched; END IF;"
+            + "\n  END LOOP dbx_drain;"
+            + "\n  RETURN buffer;"
+            + "\nEND;";
+
+    /** Marker the body template replaces with {@link #PENDING_LINE_DECLARATION}. */
+    private static final String PENDING_LINE_DECLARATION_MARKER = "--{{DBX_PENDING_LINE}}";
+
+    /** Marker the body template replaces with {@link #FETCH_OUTPUT_ROUTINE}. */
+    private static final String FETCH_OUTPUT_MARKER = "--{{DBX_FETCH_OUTPUT}}";
 
     /**
      * The diagnostic line the {@code DBX_CNT_*} wrappers build from
@@ -602,6 +669,9 @@ final class DbxPlDebugPackage {
      */
     static final List<String> HEAD_REQUIRED_ROUTINES = List.of(
         PROCEDURE_SET_VALUE,
+        // V6.3: a body that calls DBX_FETCH_OUTPUT fails with PLS-00302 unless the head
+        // declares it, so the head is replaced whenever that declaration is missing.
+        FUNCTION_FETCH_OUTPUT,
         PROCEDURE_SET_BREAKPOINT_EX,
         // The package-subprogram arm: a head installed before it declares no
         // DBX_SET_BREAKPOINT_ENTRY, and a body that calls it would fail with
@@ -622,6 +692,9 @@ final class DbxPlDebugPackage {
      * Entries are matched as case-insensitive substrings of ALL_SOURCE.
      */
     static final List<String> HEAD_REQUIRED_DECLARATIONS = List.of(
+        // V6.3: the drain routine is a FUNCTION, so its signature is pinned the same way the
+        // Go agent pins it; a head installed before V6.3 declares nothing to match.
+        "FUNCTION " + FUNCTION_FETCH_OUTPUT + "(max_chars IN BINARY_INTEGER) RETURN VARCHAR2",
         PROCEDURE_SET_VALUE + "(frame# IN BINARY_INTEGER, assignment_statement IN VARCHAR2",
         PROCEDURE_ENABLE_BREAKPOINT + "(breakpoint# IN BINARY_INTEGER",
         PROCEDURE_DISABLE_BREAKPOINT + "(breakpoint# IN BINARY_INTEGER"
@@ -674,6 +747,8 @@ final class DbxPlDebugPackage {
         + " PROCEDURE " + PROCEDURE_SYNCHRONIZE + "(result OUT BINARY_INTEGER, message OUT VARCHAR2);"
         + " PROCEDURE " + PROCEDURE_GET_LINE
         + "(line OUT VARCHAR2, status OUT INTEGER);"
+        + " FUNCTION " + FUNCTION_FETCH_OUTPUT
+        + "(max_chars IN BINARY_INTEGER) RETURN VARCHAR2;"
         + "END " + PACKAGE_NAME + ";";
 
     private static final String WRAPPED_PACKAGE_BODY = "CREATE OR REPLACE PACKAGE BODY "
@@ -681,6 +756,7 @@ final class DbxPlDebugPackage {
         + VERSION_NOTE
         + " " + BODY_FIX_NOTE
         + VERSION_NOTE_DETAIL + "\n"
+        + PENDING_LINE_DECLARATION_MARKER
         + SET_BREAKPOINT
         + SET_BREAKPOINT_ANONYMOUS
         + SET_BREAKPOINT_EX
@@ -701,6 +777,7 @@ final class DbxPlDebugPackage {
         + GET_RUNTIME_INFO
         + SYNCHRONIZE
         + GET_LINE
+        + FETCH_OUTPUT_MARKER
         + "END " + PACKAGE_NAME + ";";
 
     private DbxPlDebugPackage() {
@@ -723,8 +800,8 @@ final class DbxPlDebugPackage {
     /**
      * CREATE statement for the package body, filling the overload attribute
      * assignments only for the {@code DBMS_DEBUG.PROGRAM_INFO} fields this server
-     * actually declares. The markers are always consumed, so an executed DDL statement
-     * never carries one.
+     * actually declares, plus the V6.3 pending-line declaration and drain routine. The
+     * markers are always consumed, so an executed DDL statement never carries one.
      */
     static String packageBody(String owner, ProgramInfoFields fields) {
         StringBuilder extra = new StringBuilder();
@@ -739,7 +816,9 @@ final class DbxPlDebugPackage {
             : "";
         return String.format(WRAPPED_PACKAGE_BODY, ownerPrefix(owner))
             .replace(PROGRAM_INFO_EXTRA_MARKER, extra.toString())
-            .replace(PROGRAM_INFO_ENTRY_MARKER, entry);
+            .replace(PROGRAM_INFO_ENTRY_MARKER, entry)
+            .replace(PENDING_LINE_DECLARATION_MARKER, PENDING_LINE_DECLARATION)
+            .replace(FETCH_OUTPUT_MARKER, FETCH_OUTPUT_ROUTINE);
     }
 
     /** Which optional {@code DBMS_DEBUG.PROGRAM_INFO} attributes a server declares. */

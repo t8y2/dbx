@@ -1784,14 +1784,12 @@ final class PlDebugSession implements AutoCloseable {
                     return false;
                 }
                 String header = result.getString(1);
-                // This agent's own V6.2 body and the Go agent's V6.3 superset both count as
-                // current: they share the V6 identity, and V6.3 only adds DBX_FETCH_OUTPUT
-                // (the Go agent's debug-time output drain, which this agent never calls).
-                // Rejecting V6.3 here is what would make the two agents rebuild each other's
-                // body forever, because the Go side already requires V6.3.
+                // Both agents now render the same V6.3 body, so this agent's own note is the
+                // single requirement. A body left behind by an older build carries the V6.2
+                // note (or no note at all) and is replaced, which is what keeps the two
+                // agents from rebuilding each other's body forever.
                 return header.contains(DbxPlDebugPackage.VERSION_NOTE)
-                    && (header.contains(DbxPlDebugPackage.BODY_FIX_NOTE)
-                        || header.contains(DbxPlDebugPackage.GO_V6_3_BODY_FIX_NOTE));
+                    && header.contains(DbxPlDebugPackage.BODY_FIX_NOTE);
             }
         }
     }

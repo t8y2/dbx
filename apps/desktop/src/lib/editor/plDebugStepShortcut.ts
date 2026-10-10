@@ -45,6 +45,12 @@ export interface PlDebugStepContext {
    * 键盘和按钮必须给出同一套可用性，否则排队第二次 `continue` 会让两侧状态分叉。
    */
   canStep: boolean;
+  /**
+   * 事件发生在已打开的对话框/警示框内部。为 true 时本模块让位 —— 否则调试标签页上浮着
+   * 设置页时按 `Mod+P` 会去单步，而不是走它原本的分支。调用方按仓库既有惯例判定：
+   * `target?.closest('[role="dialog"], [role="alertdialog"]')`。
+   */
+  insideDialog?: boolean;
   shortcuts?: Partial<ShortcutSettings>;
   platform?: string;
 }
@@ -57,6 +63,12 @@ export interface PlDebugStepContext {
  */
 export function resolvePlDebugStepShortcut(event: ShortcutLikeEvent, context: PlDebugStepContext): PlDebugStepCommand | null {
   if (!context.isDebugTab || !context.canStep) return null;
+  // 对话框拥有其中的按键：调试标签页上浮着设置页（或任何对话框）时，Mod+I/O/P 必须回到
+  // 它们原本的分支，而不能去单步。判定由调用方提供 —— 它手上有事件目标，并沿用仓库既有
+  // 的 `closest('[role="dialog"], [role="alertdialog"]')` 惯例（`App.vue` 对
+  // `openTableStructureEditor` 一类就是这么做目标门控的）。编辑器内的键位不经过这里，
+  // 所以调试源码视图的绑定不受影响。
+  if (context.insideDialog) return null;
   if (event.isComposing) return null;
   const platform = context.platform ?? globalThis.navigator?.platform ?? "";
   const shortcuts = normalizeShortcutSettings(context.shortcuts, platform);

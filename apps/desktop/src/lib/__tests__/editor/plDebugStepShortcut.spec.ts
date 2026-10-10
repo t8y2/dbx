@@ -85,6 +85,30 @@ describe("resolvePlDebugStepShortcut", () => {
     }
   });
 
+  it("yields the key while a dialog owns the focus", () => {
+    // 对话框拥有其中的按键：调试标签页上浮着设置页（或任何对话框）时，Mod+I/O/P 必须
+    // 回到它们原本的分支，而不能去单步。判定由 App.vue 提供 —— 它手上有事件目标，并沿用
+    // 仓库既有的 `closest('[role="dialog"], [role="alertdialog"]')` 惯例。
+    const context = { isDebugTab: true, canStep: true, platform: "Win32", insideDialog: true };
+    for (const key of ["i", "o", "p"]) {
+      expect(resolvePlDebugStepShortcut(modKeyEvent(key, "Win32"), context)).toBeNull();
+    }
+  });
+
+  it("still claims the key when no dialog is open", () => {
+    const context = { isDebugTab: true, canStep: true, platform: "Win32", insideDialog: false };
+    expect(resolvePlDebugStepShortcut(modKeyEvent("i", "Win32"), context)).toBe("stepInto");
+    expect(resolvePlDebugStepShortcut(modKeyEvent("p", "Win32"), context)).toBe("stepOver");
+  });
+
+  it("gates the window branch on the event target, as the neighbouring shortcuts do", () => {
+    // 源码断言：App.vue 的调试分支必须真的把对话框判定传进来，否则上面两条语义在窗口级
+    // 路径上没有生效（这是本次新增的门控，容易在重构里悄悄丢掉）。
+    expect(appSource).toMatch(/insideDialog:\s*e\.target instanceof Element[^;]*closest\('\[role="dialog"\], \[role="alertdialog"\]'\)/);
+    // 仍需排在 quickOpen 之前（D1 的既有边界）。
+    expect(appSource.indexOf("resolvePlDebugStepShortcut(e, {")).toBeLessThan(appSource.indexOf("isQuickOpenShortcut(e, shortcuts)"));
+  });
+
   it("claims nothing while the session cannot accept a step", () => {
     // 与工具栏按钮的 disabled 条件同源：没有停住的会话（或一次续跑在途中）时不抢键。
     for (const platform of ["Win32", "MacIntel"]) {
@@ -178,7 +202,10 @@ describe("App.vue dispatch order", () => {
     // 这里是要保证窗口级分支**不**被限制在编辑器焦点上 —— 焦点在工具栏/变量面板/
     // 调用栈时同样生效，这正是它相对编辑器内绑定的不可替代之处。
     const branch = appSource.slice(appSource.indexOf("const plDebugStep = resolvePlDebugStepShortcut(e, {"), appSource.indexOf("if (isFocusWhereShortcut(e, shortcuts)"));
-    expect(branch).not.toContain("e.target");
+    // 焦点无关：绝不按"焦点是否在编辑器里"决定放行（面板与工具栏也要能单步）。唯一允许的
+    // 目标判定是对话框门控（§1-2 新增的边界）：对话框里的按键属于对话框，不能拿去单步。
+    expect(branch).not.toMatch(/e\.target[^;]*(cm-editor|data-query-editor-root)/);
+    expect(branch).toContain(`e.target.closest('[role="dialog"], [role="alertdialog"]')`);
     expect(branch).not.toContain("data-query-editor-root");
   });
 });

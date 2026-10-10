@@ -4293,6 +4293,9 @@ async function handleKeydown(e: KeyboardEvent) {
     isDebugTab: activeTab.value?.mode === "debug",
     canStep: plDebugStore.hasSession && !plDebugStore.busy,
     shortcuts,
+    // 对话框（设置页等）浮在调试页之上时让位：对话框里的按键属于对话框。判定沿用下方
+    // focusWhere / editTableStructure 的同一套目标门控惯例。
+    insideDialog: e.target instanceof Element && !!e.target.closest('[role="dialog"], [role="alertdialog"]'),
   });
   if (plDebugStep) {
     e.preventDefault();

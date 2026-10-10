@@ -31,6 +31,13 @@ fn private_dir(path: &Path) -> Result<()> {
     // Refuse symlink components before opening credentials or persistent storage.
     for ancestor in path.ancestors() {
         if let Ok(meta) = std::fs::symlink_metadata(ancestor) {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if meta.file_attributes() & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return Err("Codex data directory must not traverse reparse points".into());
+                }
+            }
             if meta.file_type().is_symlink() {
                 return Err("Codex data directory must not traverse symlinks".into());
             }
@@ -53,6 +60,19 @@ fn private_dir(path: &Path) -> Result<()> {
         }
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL, WRITE_DAC,
+        };
+        let file = OpenOptions::new()
+            .access_mode(READ_CONTROL | WRITE_DAC)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(|e| e.to_string())?;
+        crate::windows_privacy::restrict(&file, true)?;
+    }
     Ok(())
 }
 
@@ -69,6 +89,17 @@ fn private_file(path: &Path, create: bool) -> Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::{
+            Foundation::{GENERIC_READ, GENERIC_WRITE},
+            Storage::FileSystem::WRITE_DAC,
+        };
+        options
+            .access_mode(GENERIC_READ | GENERIC_WRITE | WRITE_DAC)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let file = options.open(path).map_err(|e| format!("Cannot open private Codex runtime file: {e}"))?;
     #[cfg(unix)]
     {
@@ -78,6 +109,8 @@ fn private_file(path: &Path, create: bool) -> Result<File> {
             return Err("Codex runtime files must belong to the current user and have mode 0600".into());
         }
     }
+    #[cfg(windows)]
+    crate::windows_privacy::restrict(&file, false)?;
     Ok(file)
 }
 

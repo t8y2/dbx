@@ -1,3 +1,5 @@
+#![cfg(feature = "gateway")]
+
 use dbx_codex::{gateway::Gateway, runtime::RuntimeHandle};
 use rmcp::{model::*, service::RunningService, RoleClient, ServiceExt};
 

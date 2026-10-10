@@ -52,6 +52,7 @@ export type ShortcutActionId =
   | "openSettings"
   | "closeTab"
   | "closeOtherTabs"
+  | "closeAllTabs"
   | "closeWindow"
   | "focusSearch"
   | "quickOpen"
@@ -476,6 +477,14 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "contextMenu.closeOtherTabs",
     scope: "global",
     defaultShortcut: closeOtherTabsDefaultShortcut(),
+  },
+  {
+    // VS Code's close-all-tabs chord (Cmd/Ctrl+K W) needs chord support the
+    // registry doesn't have, so this action ships unbound and stays optional.
+    id: "closeAllTabs",
+    labelKey: "contextMenu.closeAllTabs",
+    scope: "global",
+    defaultShortcut: "",
   },
   {
     id: "closeWindow",

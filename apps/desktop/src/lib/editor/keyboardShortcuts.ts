@@ -188,6 +188,10 @@ export function isCloseOtherTabsShortcut(event: ShortcutLikeEvent, shortcuts?: P
   return matchesShortcut(event, actionShortcut("closeOtherTabs", shortcuts), platform);
 }
 
+export function isCloseAllTabsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("closeAllTabs", shortcuts), platform);
+}
+
 export function isCloseWindowShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("closeWindow", shortcuts));
 }

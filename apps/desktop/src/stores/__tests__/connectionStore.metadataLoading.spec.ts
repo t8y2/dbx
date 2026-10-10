@@ -1543,7 +1543,7 @@ describe("connectionStore metadata loading", () => {
     await store.loadSchemas(connection.id, "app", { force: true });
 
     expect(store.connectionErrors[connection.id]).toBeUndefined();
-    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public", "tree.extensions", "tree.eventTriggers", "tree.queries"]);
+    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public", "tree.extensions", "tree.eventTriggers", "tree.foreignDataWrappers", "tree.foreignServers", "tree.userMappings", "tree.queries"]);
   });
 
   it("preserves the last successful tree snapshot when a forced metadata refresh fails", async () => {
@@ -1660,7 +1660,7 @@ describe("connectionStore metadata loading", () => {
     await olderRefresh;
 
     expect(listSchemaInfos).toHaveBeenCalledTimes(2);
-    expect(databaseNode.children?.map((node) => node.label)).toEqual(["latest", "tree.extensions", "tree.eventTriggers", "tree.queries"]);
+    expect(databaseNode.children?.map((node) => node.label)).toEqual(["latest", "tree.extensions", "tree.eventTriggers", "tree.foreignDataWrappers", "tree.foreignServers", "tree.userMappings", "tree.queries"]);
   });
 
   it("does not let an older refresh failure overwrite a newer successful refresh", async () => {
@@ -1716,7 +1716,7 @@ describe("connectionStore metadata loading", () => {
     rejectOlderMetadata(new Error("connection closed"));
     await expect(olderRefresh).rejects.toThrow("connection closed");
 
-    expect(databaseNode.children?.map((node) => node.label)).toEqual(["latest", "tree.extensions", "tree.eventTriggers", "tree.queries"]);
+    expect(databaseNode.children?.map((node) => node.label)).toEqual(["latest", "tree.extensions", "tree.eventTriggers", "tree.foreignDataWrappers", "tree.foreignServers", "tree.userMappings", "tree.queries"]);
     expect(store.connectionErrors[connection.id]).toBeUndefined();
     expect(store.connectedIds.has(connection.id)).toBe(true);
   });

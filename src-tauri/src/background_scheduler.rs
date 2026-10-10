@@ -11,11 +11,14 @@
 //! Process model:
 //! - Worker mode: `--scheduler-worker` (or `DBX_PROCESS_ROLE=scheduler-worker`).
 //!   The legacy backup worker arguments stay untouched and keep working.
-//! - Feature flags (ADR §12), both default OFF for zero behavior change:
-//!   `DBX_SCHEDULER_BACKGROUND_ENABLED=1` → `scheduler.background.enabled`
-//!   (the UI spawns and supervises the worker child),
-//!   `DBX_SCHEDULER_GENERIC_ENABLED=1` → `scheduler.generic.enabled`
-//!   (the worker migrates legacy database backup schedules before looping).
+//! - The worker is **on by default**: the task center enqueues runs that only
+//!   this process claims, so an install without it would leave every manual
+//!   run queued forever. Consequences an installer should know about: a
+//!   detached `dbx --scheduler-worker` child process runs scheduled tasks
+//!   unattended (it keeps running after the UI closes, ADR §1.4) and it loads
+//!   the stored connection credentials it needs to execute them. Opt out with
+//!   `DBX_SCHEDULER_BACKGROUND_ENABLED=0` — queued runs then stay queued and
+//!   the task center shows an explanatory banner.
 //! - Lifecycle (ADR §3.4): startup → acquire lease → recover → migration →
 //!   loop { heartbeat → enqueue_due → claim → dispatch → reconcile } →
 //!   shutdown { cancel → stop active work → persist → release lease → exit }.

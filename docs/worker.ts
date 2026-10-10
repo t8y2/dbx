@@ -48,7 +48,7 @@ type Env = {
   ISSUE_AI_MODEL?: string;
   ISSUE_RATE_LIMIT_SECRET?: string;
   ISSUE_LIMITER?: DurableObjectNamespaceBinding;
- // ISSUE_IMAGES?: R2BucketBinding;
+  ISSUE_IMAGES?: R2BucketBinding;
   ISSUE_IMAGE_PUBLIC_BASE_URL?: string;
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
@@ -452,7 +452,9 @@ async function handleIssueDraft(request: Request, env: Env): Promise<Response> {
     const form = await request.formData();
     const description = validateIssueDescription(form.get("description"));
     const language = normalizeIssueLanguage(form.get("language"));
-    const images = await readIssueImages(form.getAll("images"));
+  //  const images = await readIssueImages(form.getAll("images"));
+    const images = env.ISSUE_IMAGES ? await readIssueImages(form.getAll("images")) : [];
+
     const preview = await createIssuePreview(
       { apiBase: env.ISSUE_AI_API_BASE, apiKey: env.ISSUE_AI_API_KEY, model: env.ISSUE_AI_MODEL },
       description,
@@ -513,7 +515,9 @@ async function handleIssueSubmit(request: Request, env: Env): Promise<Response> 
     claimed = true;
     if (countIssueImageEntries(imageEntries) !== claim.draft.imageCount) throw new IssueSubmissionError("DRAFT_IMAGES_CHANGED");
     const editable = validateEditableIssue({ type: form.get("type"), title: form.get("title"), body: form.get("body") });
-    const images = await readIssueImages(imageEntries);
+   // const images = await readIssueImages(imageEntries);
+    const images = env.ISSUE_IMAGES ? await readIssueImages(imageEntries) : [];
+
     const uploaded = await uploadIssueImages(env, draftId, images);
     imageKeys = uploaded.keys;
     const issue = await createPublicGitHubIssue(

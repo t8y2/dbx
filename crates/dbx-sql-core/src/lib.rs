@@ -8,6 +8,8 @@ pub mod dml_preview_sql;
 pub mod mysql_ddl_normalize;
 pub mod mysql_event_sql;
 pub mod object_source_sql;
+pub mod oracle_program_compatibility;
+pub mod package_rename;
 pub mod query_execution_sql;
 pub mod sql;
 pub mod sql_analysis;

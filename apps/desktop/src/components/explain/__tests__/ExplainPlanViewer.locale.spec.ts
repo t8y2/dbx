@@ -17,6 +17,26 @@ afterEach(() => {
 });
 
 describe("OceanBase estimated time localization", () => {
+  it("labels an OceanBase DML plan and its rows as estimates", async () => {
+    const plan = parseExplainResult("oceanbase-oracle", {
+      columns: ["Query Plan"],
+      rows: [[JSON.stringify({ ID: 0, OPERATOR: "UPDATE", NAME: "O14_TEST", "EST.ROWS": 1, "EST.TIME(us)": 7 })]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    app = createApp(ExplainPlanViewer, { plan, defaultView: "summary" });
+    app.use(createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } }));
+    app.mount(container);
+    await nextTick();
+
+    expect(container.textContent).toContain("估算执行计划");
+    expect([...container.querySelectorAll("th")].map((cell) => cell.textContent)).toContain("预估行数");
+    expect(container.textContent).toContain("预计耗时: 7 µs");
+    expect(container.textContent).not.toContain("实际行数");
+  });
+
   it.each(["canvas", "tree", "summary"] as const)("updates the existing %s view when the locale changes", async (view) => {
     const plan = parseExplainResult("oceanbase-oracle", {
       columns: ["Query Plan"],

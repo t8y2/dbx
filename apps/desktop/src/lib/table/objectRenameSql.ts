@@ -24,7 +24,7 @@ export function supportsObjectRename(databaseType: DatabaseType | undefined, obj
   }
   if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1" || databaseType === "duckdb") return objectType === "TABLE";
   if (databaseType === "transwarp" || databaseType === "starrocks") return objectType === "TABLE";
-  if (databaseType === "oceanbase-oracle") return objectType === "TABLE";
+  if (databaseType === "oceanbase-oracle") return objectType === "TABLE" || objectType === "VIEW";
   if (databaseType === "mysql" || databaseType === "goldendb") return objectType === "TABLE" || objectType === "VIEW";
   if (postgresLikeRenameTypes.has(databaseType)) return objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW";
   if (oracleLikeRenameTypes.has(databaseType)) return objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW";
@@ -33,6 +33,25 @@ export function supportsObjectRename(databaseType: DatabaseType | undefined, obj
 
 export function buildRenameObjectSql(options: BuildRenameObjectSqlOptions): Promise<string> {
   return api.buildRenameObjectSql(options);
+}
+
+export function notifyViewRenameReadback(connectionId: string, database: string, schema: string, oldName: string, state: "pending" | "renamed" | "unchanged" | "unknown") {
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("dbx:view-rename-readback", { detail: { connectionId, database, schema, oldName, state } }));
+}
+
+export async function readOceanBaseViewRenameState(connectionId: string, database: string, schema: string, oldName: string, newName: string): Promise<"renamed" | "unchanged" | "unknown"> {
+  const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  let state: "renamed" | "unchanged" | "unknown" = "unknown";
+  try {
+    const result = await api.executeQuery(connectionId, database, `SELECT VIEW_NAME FROM SYS.ALL_VIEWS WHERE OWNER = ${literal(schema)} AND VIEW_NAME IN (${literal(oldName)}, ${literal(newName)})`, schema);
+    const names = result.rows.map((row) => row[0]);
+    if (names.length === 1 && names[0] === newName) state = "renamed";
+    if (names.length === 1 && names[0] === oldName) state = "unchanged";
+  } catch {
+    // A missing response or unreadable dictionary cannot establish DDL outcome.
+  }
+  notifyViewRenameReadback(connectionId, database, schema, oldName, state);
+  return state;
 }
 
 // ── Database rename (PostgreSQL family) ──

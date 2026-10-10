@@ -11,6 +11,11 @@ final class OceanBaseSchemaObjects {
 
     static String synonymSource(Connection connection, String owner, String name) throws SQLException {
         String sql = "SELECT TABLE_OWNER, TABLE_NAME, DB_LINK FROM ALL_SYNONYMS WHERE OWNER = ? AND SYNONYM_NAME = ?";
+        if ("PUBLIC".equals(owner)) {
+            sql = "SELECT TABLE_OWNER, TABLE_NAME, DB_LINK FROM ALL_SYNONYMS "
+                + "WHERE (OWNER = ? OR OWNER = '__public') AND SYNONYM_NAME = ? "
+                + "ORDER BY CASE WHEN OWNER = 'PUBLIC' THEN 0 ELSE 1 END";
+        }
         try (var statement = connection.prepareStatement(sql)) {
             statement.setString(1, owner);
             statement.setString(2, name);

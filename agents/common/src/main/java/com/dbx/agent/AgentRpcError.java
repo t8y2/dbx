@@ -57,6 +57,11 @@ final class AgentRpcError extends RuntimeException {
         );
     }
 
+    static AgentRpcError rollbackConfirmedSql(SQLException error) {
+        return new AgentRpcError(message(error), "sql", false, "keep", "execute", "unknown",
+            safeSqlState(error.getSQLState()), error.getErrorCode(), safeClassName(error), error);
+    }
+
     static AgentRpcError backpressure(String stage, Throwable cause) {
         return new AgentRpcError(
             "Agent request capacity is temporarily exhausted",
@@ -70,6 +75,17 @@ final class AgentRpcError extends RuntimeException {
             cause == null ? null : cause.getClass().getName(),
             cause
         );
+    }
+
+    static AgentRpcError sqlExecutionErrorPreservingDisposition(Throwable error) {
+        AgentRpcError original = classify(error, AgentProtocol.METHOD_EXECUTE_QUERY);
+        if (!"connection".equals(original.category) || !"execute".equals(original.stage)
+            || !"unknown".equals(original.operationOutcome)) {
+            return original;
+        }
+        return new AgentRpcError(message(error), "sql", original.retryable, original.disposition,
+            original.stage, original.operationOutcome, original.sqlState, original.vendorCode,
+            original.exceptionClass, error);
     }
 
     static JsonObject toJson(Throwable error, String method, String agentSessionId) {

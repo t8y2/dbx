@@ -464,6 +464,7 @@ mod tests {
             diffs: vec![sample_table_diff("added", "users"), sample_table_diff("modified", "orders")],
             sync_sql: "-- Schema sync SQL for users\n-- Schema sync SQL for orders".to_string(),
             function_diffs: Vec::new(),
+            routine_steps: Vec::new(),
             sequence_diffs: Vec::new(),
             rule_diffs: Vec::new(),
             owner_diffs: Vec::new(),

@@ -82,7 +82,7 @@ import { BackendErrorException, type BackendError } from "@/lib/backend/errorUti
 import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
 import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchCreateIndexInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
 import type { CollectionInfo } from "@/types/database";
-import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, SchemaSyncSqlPlan, SelectedSchemaDiffInput, GenerateSchemaSyncPlanOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
+import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, SchemaSyncSqlPlan, SelectedSchemaDiffInput, GenerateSchemaSyncPlanOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff, SchemaDiffRoutineValidation } from "@/lib/schema/schemaDiff";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import type { AiConfig, AiTestConnectionResult } from "@/stores/settingsStore";
 import type { AiChatSelectionState, AiEffortCapability } from "@/types/ai";
@@ -161,6 +161,7 @@ import type {
   SqlFileTable,
   SqlFileProgress,
   TransferRequest,
+  TransferDatabaseLinkCredential,
   TransferProgress,
   TransferOwnershipPreview,
   TableImportPreviewRequest,
@@ -269,7 +270,7 @@ import type {
   PluginTrustedKey,
   PluginUiAssetPayload,
 } from "@/types/database";
-import type { DataGridSavePreparation } from "@/lib/backend/tauri";
+import type { BlobBoundStatement, DataGridSavePreparation } from "@/lib/backend/tauri";
 import type {
   NacosBatchPreview,
   NacosBatchReport,
@@ -1233,6 +1234,14 @@ export async function getObjectSource(connectionId: string, database: string, sc
   return get(`/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType, signature, relation_name: relationName })}`);
 }
 
+export async function oracleUserAdmin(connectionId: string, database: string, request: import("@/lib/database/oracleUserAdmin").OracleUserRequest): Promise<import("@/lib/database/oracleUserAdmin").OracleUserResponse> {
+  return post("/api/oracle-user-admin", { connection_id: connectionId, database, request });
+}
+
+export async function oracleRoleAdmin(connectionId: string, database: string, request: import("@/lib/database/oracleRoleAdmin").OracleRoleRequest): Promise<import("@/lib/database/oracleRoleAdmin").OracleRoleResponse> {
+  return post("/api/oracle-role-admin", { connection_id: connectionId, database, request });
+}
+
 export async function getEventInfo(connectionId: string, database: string, schema: string, name: string): Promise<MysqlEventInfo> {
   return get(`/api/schema/event-info?${qs({ connection_id: connectionId, database, schema, table: name })}`);
 }
@@ -1241,8 +1250,12 @@ export async function getCustomTypeDetails(connectionId: string, database: strin
   return get(`/api/schema/custom-type-details?${qs({ connection_id: connectionId, database, schema, table: name })}`);
 }
 
-export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
-  return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table, catalog, client_session_id: clientSessionId })}`);
+export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string, currentSchema?: string): Promise<ColumnInfo[]> {
+  return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table, catalog, client_session_id: clientSessionId, current_schema: currentSchema })}`);
+}
+
+export async function getOracleTypeDetails(connectionId: string, database: string, schema: string, name: string, objectType: "TYPE" | "TYPE_BODY", executionId?: string): Promise<import("@/types/oracleTypes").OracleTypeDetails> {
+  return get(`/api/schema/oracle-type-details?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType, execution_id: executionId })}`);
 }
 
 export async function getPluginTableMetadata(request: PluginTableMetadataRequest): Promise<PluginTableMetadata> {
@@ -1355,6 +1368,10 @@ export async function generateSchemaSyncPlan(input: SelectedSchemaDiffInput, opt
 
 export async function listFunctions(connectionId: string, database: string, schema: string): Promise<FunctionInfo[]> {
   return get(`/api/schema/functions?${qs({ connection_id: connectionId, database, schema })}`);
+}
+
+export async function validateSchemaDiffRoutines(connectionId: string, database: string, schema: string, expected: FunctionDiff[], preflight = false): Promise<SchemaDiffRoutineValidation[]> {
+  return post("/api/schema-diff/validate-routines", { connectionId, database, schema, expected, preflight });
 }
 
 export async function listSequences(connectionId: string, database: string, schema: string, withLastValues: boolean): Promise<SequenceInfo[]> {
@@ -1587,6 +1604,63 @@ export async function executeMultiWithProgress(
   return results;
 }
 
+export interface LargeValueRequest {
+  connectionId: string;
+  database: string;
+  valueRef: string;
+  offset?: number;
+  limit?: number;
+  executionId?: string;
+  clientSessionId?: string;
+  catalog?: string;
+  txnSessionId?: string;
+  downloadEncoding?: "binary" | "utf8" | "gbk";
+}
+
+export interface LargeValueChunk {
+  status: string;
+  data: string;
+  next_offset: number;
+  eof: boolean;
+  value_kind: "text" | "binary";
+}
+
+export async function readLargeValueChunk(request: LargeValueRequest): Promise<LargeValueChunk> {
+  return post("/api/query/large-value/chunk", request);
+}
+
+export async function releaseLargeValue(request: LargeValueRequest): Promise<boolean> {
+  return post("/api/query/large-value/release", request);
+}
+
+export async function downloadLargeValue(request: LargeValueRequest, filePath: string): Promise<void> {
+  const fileName = filePath.split(/[\\/]/).pop() || "lob.txt";
+  const prepared = await post<{ downloadId: string }>("/api/query/large-value/download", { request, fileName });
+  const anchor = document.createElement("a");
+  anchor.href = apiUrl(`/api/query/large-value/download/${encodeURIComponent(prepared.downloadId)}`);
+  anchor.download = fileName;
+  anchor.click();
+}
+
+export interface SnapshotExportRequest {
+  context: LargeValueRequest;
+  format: "csv" | "json";
+  columns: string[];
+  rows: unknown[][];
+  cells: Array<{ rowIndex: number; columnIndex: number; valueRef: string }>;
+  quoteMode?: "all" | "necessary";
+  nullLiteral?: string | null;
+}
+
+export async function exportSnapshotResult(request: SnapshotExportRequest, filePath: string): Promise<void> {
+  const fileName = filePath.split(/[\\/]/).pop() || `result.${request.format}`;
+  const prepared = await post<{ downloadId: string }>("/api/query/large-value/export", { request, fileName });
+  const anchor = document.createElement("a");
+  anchor.href = apiUrl(`/api/query/large-value/download/${encodeURIComponent(prepared.downloadId)}`);
+  anchor.download = fileName;
+  anchor.click();
+}
+
 export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string): Promise<boolean> {
   return post("/api/query/close-session", {
     connectionId,
@@ -1606,7 +1680,7 @@ export async function closeClientConnectionSession(connectionId: string, databas
   });
 }
 
-export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string, timeoutSecs?: number, useTransaction?: boolean): Promise<QueryResult> {
+export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string, timeoutSecs?: number, useTransaction?: boolean, boundStatements?: BlobBoundStatement[]): Promise<QueryResult> {
   return post("/api/query/execute-batch", {
     connectionId,
     database,
@@ -1614,6 +1688,7 @@ export async function executeBatch(connectionId: string, database: string, state
     schema,
     timeoutSecs,
     useTransaction,
+    boundStatements,
   });
 }
 
@@ -1636,13 +1711,14 @@ export async function executeScriptWith2pc(connectionId: string, database: strin
   });
 }
 
-export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string, catalog?: string): Promise<QueryResult> {
+export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string, catalog?: string, boundStatements?: BlobBoundStatement[]): Promise<QueryResult> {
   return post("/api/query/execute-in-transaction", {
     connectionId,
     database,
     statements,
     schema,
     catalog,
+    boundStatements,
   });
 }
 
@@ -1662,6 +1738,7 @@ export async function executeInManualTransaction(
   _classificationSql?: string,
   _executionId?: string,
   _timeoutSecs?: number,
+  _boundStatements?: BlobBoundStatement[],
 ): Promise<QueryResult[]> {
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
@@ -1901,6 +1978,38 @@ export async function buildTablePartitionOperationSql(options: TablePartitionSql
 
 export async function buildCreatePartitionedTableSql(options: BuildCreatePartitionedTableSqlOptions): Promise<TableStructureChangeSql> {
   return post("/api/query/build-create-partitioned-table-sql", { options: options.options, partitioning: options.partitioning });
+}
+
+export async function previewCheckChange(connectionId: string, database: string, change: import("@/types/constraintChange").CheckChange): Promise<import("@/types/constraintChange").CheckChangePreview> {
+  return post("/api/query/preview-check-change", { connectionId, database, change });
+}
+
+export async function applyCheckChange(connectionId: string, database: string, change: import("@/types/constraintChange").CheckChange, revision: string): Promise<import("@/types/constraintChange").CheckChangeResult> {
+  return post("/api/query/apply-check-change", { connectionId, database, change, revision });
+}
+
+export async function previewUniqueChange(connectionId: string, database: string, change: import("@/types/constraintChange").UniqueChange): Promise<import("@/types/constraintChange").UniqueChangePreview> {
+  return post("/api/query/preview-unique-change", { connectionId, database, change });
+}
+
+export async function applyUniqueChange(connectionId: string, database: string, change: import("@/types/constraintChange").UniqueChange, revision: string): Promise<import("@/types/constraintChange").UniqueChangeResult> {
+  return post("/api/query/apply-unique-change", { connectionId, database, change, revision });
+}
+
+export async function previewForeignKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").ForeignKeyChange): Promise<import("@/types/constraintChange").ForeignKeyChangePreview> {
+  return post("/api/query/preview-foreign-key-change", { connectionId, database, change });
+}
+
+export async function applyForeignKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").ForeignKeyChange, revision: string): Promise<import("@/types/constraintChange").ForeignKeyChangeResult> {
+  return post("/api/query/apply-foreign-key-change", { connectionId, database, change, revision });
+}
+
+export async function previewPrimaryKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").PrimaryKeyChange): Promise<import("@/types/constraintChange").ConstraintChangePreview> {
+  return post("/api/query/preview-primary-key-change", { connectionId, database, change });
+}
+
+export async function applyPrimaryKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").PrimaryKeyChange, revision: string): Promise<import("@/types/constraintChange").ConstraintChangeResult> {
+  return post("/api/query/apply-primary-key-change", { connectionId, database, change, revision });
 }
 
 export async function previewSqliteTableStructureChange(connectionId: string, database: string, options: BuildTableStructureChangeSqlOptions): Promise<SqliteTableStructureChangePreview> {
@@ -2453,6 +2562,10 @@ export async function completeAppClose(_action: "quit" | "hide"): Promise<void> 
   return undefined;
 }
 
+export async function oracleJobs(connectionId: string, database: string, request: import("@/lib/database/oracleJobs").OracleJobsRequest): Promise<import("@/lib/database/oracleJobs").OracleJobsResponse> {
+  return post("/api/oracle-jobs", { connection_id: connectionId, database, request });
+}
+
 export async function requestAppClose(): Promise<void> {
   return undefined;
 }
@@ -2897,13 +3010,19 @@ export async function saveGlobalSearchSettings(settings: GlobalSearchSettings): 
 // Data Transfer
 // ---------------------------------------------------------------------------
 
-export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void): Promise<void> {
+export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void, databaseLinkCredentials?: TransferDatabaseLinkCredential[]): Promise<void> {
   // 1. POST to start the transfer
-  const res = await fetch(apiUrl("/api/transfer/start"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ request }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(apiUrl("/api/transfer/start"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request, databaseLinkCredentials }),
+    });
+  } finally {
+    for (const credential of databaseLinkCredentials ?? []) credential.password = "";
+    databaseLinkCredentials = undefined;
+  }
   if (!res.ok) throw await backendResponseError(res);
   onStarted?.();
 

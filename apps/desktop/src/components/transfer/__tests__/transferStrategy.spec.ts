@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TransferOwnershipPreview, TransferRequest } from "@/lib/backend/api";
 import type { ConnectionConfig } from "@/types/database";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
-import { confirmTransferWithProductionSafety, createTransferSubmission, rebuildUnavailableReason, resolveTransferStrategy, supportsTransferUpsert, transferStrategyOptions } from "../transferStrategy";
+import { confirmTransferWithProductionSafety, createTransferSubmission, rebuildUnavailableReason, resolveTransferStrategy, supportsTransferUpsert, transferStrategyOptions, transferPreviewSql } from "../transferStrategy";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -92,6 +92,207 @@ describe("transfer strategies", () => {
 });
 
 describe("transfer submission", () => {
+  it.each(["create", "replace"] as const)("requires credentials only for the %s link in a mixed skip plan", async (action) => {
+    const execute = vi.fn();
+    const configs = ["SKIP", "WRITE"].map((name) => ({ objectType: "DB_LINK" as const, name, sourceOwner: "SOURCE", targetName: name, targetScope: "private" as const, authentication: "fixedUser" as const, username: "REMOTE", host: "connect-string", credentialAvailable: false }));
+    const plan: TransferOwnershipPreview = {
+      missingOwners: [],
+      targetOwner: "TARGET",
+      schemaObjects: {
+        canExecute: true,
+        items: [
+          { objectType: "DB_LINK", name: "SKIP", sourceSchema: "SOURCE", targetSchema: "TARGET", action: "skip", ddl: "", credentialRequired: false, dependencies: [], warnings: [], errors: [] },
+          { objectType: "DB_LINK", name: "WRITE", sourceSchema: "SOURCE", targetSchema: "TARGET", action, ddl: "", credentialRequired: true, dependencies: [], warnings: [], errors: [] },
+        ],
+      },
+    };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm: async () => true, execute });
+    const input = request({ tables: [], objects: [{ objectType: "DB_LINK", names: ["SKIP", "WRITE"] }], dropTargetBeforeCreate: false, databaseLinks: configs });
+    await expect(submission.start(input)).resolves.toBe(false);
+    expect(execute).not.toHaveBeenCalled();
+    configs[1]!.credentialAvailable = true;
+    await expect(submission.start(input)).resolves.toBe(true);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0]![0].databaseLinks[0].credentialAvailable).toBe(false);
+  });
+
+  it("dispatches a credential-free skip-only link plan", async () => {
+    const execute = vi.fn();
+    const plan: TransferOwnershipPreview = {
+      missingOwners: [],
+      targetOwner: "TARGET",
+      schemaObjects: { canExecute: true, items: [{ objectType: "PUBLIC_DB_LINK", name: "L", sourceSchema: "PUBLIC", targetSchema: "PUBLIC", action: "skip", ddl: "", credentialRequired: false, dependencies: [], warnings: [], errors: [] }] },
+    };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm: async () => true, execute });
+    await expect(
+      submission.start(
+        request({
+          tables: [],
+          objects: [{ objectType: "PUBLIC_DB_LINK", names: ["L"] }],
+          dropTargetBeforeCreate: false,
+          databaseLinks: [{ objectType: "PUBLIC_DB_LINK", name: "L", sourceOwner: "PUBLIC", targetName: "L", targetScope: "public", authentication: "fixedUser", username: "REMOTE", host: "connect-string", credentialAvailable: false }],
+        }),
+      ),
+    ).resolves.toBe(true);
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("reviews type prerequisites before referencing table DDL and deferred bodies after programs", () => {
+    const common = { sourceSchema: "SOURCE", targetSchema: "TARGET", action: "create" as const, dependencies: [], warnings: [], errors: [] };
+    const plan: TransferOwnershipPreview = {
+      missingOwners: [],
+      targetOwner: "TARGET",
+      structure: { sql: 'CREATE TABLE "TARGET"."PAYLOAD" (value "TARGET"."T");', tables: [], operations: [] },
+      schemaObjects: {
+        canExecute: true,
+        items: [
+          { ...common, objectType: "DB_LINK", name: "L", ddl: "-- Create DBLink L using supplied credentials" },
+          { ...common, objectType: "TYPE", name: "T", executionPhase: "beforeTables", ddl: 'CREATE TYPE "TARGET"."T" AS OBJECT (n NUMBER);' },
+          { ...common, objectType: "PACKAGE", name: "P", ddl: 'CREATE PACKAGE "TARGET"."P" AS PROCEDURE p; END;' },
+          { ...common, objectType: "TYPE_BODY", name: "T", executionPhase: "afterObjects", ddl: 'CREATE TYPE BODY "TARGET"."T" AS MEMBER PROCEDURE p IS BEGIN "TARGET"."P".p; END; END;' },
+        ],
+      },
+    };
+    expect(transferPreviewSql(plan)).toBe([plan.schemaObjects!.items[0]!.ddl, plan.schemaObjects!.items[1]!.ddl, plan.structure!.sql, plan.schemaObjects!.items[2]!.ddl, plan.schemaObjects!.items[3]!.ddl].join("\n\n"));
+  });
+  it("cannot dispatch a DBLink with missing credentials even if a confirmation accepts it", async () => {
+    const execute = vi.fn();
+    const plan: TransferOwnershipPreview = {
+      missingOwners: [],
+      targetOwner: "TARGET",
+      schemaObjects: { canExecute: true, items: [{ objectType: "DB_LINK", name: "L", sourceSchema: "SOURCE", targetSchema: "TARGET", action: "create", ddl: "-- Create DBLink L using credentials supplied for this run", credentialRequired: true, dependencies: [], warnings: [], errors: [] }] },
+    };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm: async () => true, execute });
+    await expect(
+      submission.start(
+        request({
+          tables: [],
+          objects: [{ objectType: "DB_LINK", names: ["L"] }],
+          dropTargetBeforeCreate: false,
+          databaseLinks: [{ objectType: "DB_LINK", name: "L", sourceOwner: "SOURCE", targetName: "L", targetScope: "private", authentication: "fixedUser", username: "REMOTE", host: "connect-string", credentialAvailable: false }],
+        }),
+      ),
+    ).resolves.toBe(false);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("freezes the target DBLink scope before asynchronous confirmation", async () => {
+    const decision = deferred<boolean>();
+    const execute = vi.fn();
+    const confirm = vi.fn(() => decision.promise);
+    const config = { objectType: "PUBLIC_DB_LINK" as const, name: "L", sourceOwner: "PUBLIC", targetName: "L", targetScope: "tenant" as const, authentication: "fixedUser" as const, username: "REMOTE", host: "connect-string", credentialAvailable: true };
+    const plan: TransferOwnershipPreview = {
+      missingOwners: [],
+      targetOwner: "TARGET",
+      schemaObjects: { canExecute: true, items: [{ objectType: "PUBLIC_DB_LINK", name: "L", sourceSchema: "PUBLIC", targetSchema: "PUBLIC", action: "create", ddl: "-- Create tenant-visible DBLink L", dependencies: [], warnings: [], errors: [] }] },
+    };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm, execute });
+    const pending = submission.start(request({ tables: [], objects: [{ objectType: "PUBLIC_DB_LINK", names: ["L"] }], dropTargetBeforeCreate: false, databaseLinks: [config] }));
+    config.targetName = "UNREVIEWED";
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalled());
+    decision.resolve(true);
+    await expect(pending).resolves.toBe(true);
+    expect(execute.mock.calls[0]![0].databaseLinks[0].targetName).toBe("L");
+  });
+  it("does not accept a private synonym plan for a same-named selected public synonym", async () => {
+    const execute = vi.fn();
+    const confirm = vi.fn();
+    const plan: TransferOwnershipPreview = {
+      missingOwners: [],
+      targetOwner: "TARGET",
+      schemaObjects: { canExecute: true, items: [{ objectType: "SYNONYM", name: "S", sourceSchema: "SOURCE", targetSchema: "TARGET", action: "create", ddl: 'CREATE SYNONYM "TARGET"."S" FOR "TARGET"."T"', dependencies: [], warnings: [], errors: [] }] },
+    };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm, execute });
+    await expect(submission.start(request({ tables: [], objects: [{ objectType: "PUBLIC_SYNONYM", names: ["S"] }], dropTargetBeforeCreate: false }))).rejects.toThrow("TRANSFER_OBJECT_PREVIEW_UNAVAILABLE");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("reviews the original remote synonym reference without expanding it to a table transfer", async () => {
+    const execute = vi.fn();
+    const plan: TransferOwnershipPreview = {
+      missingOwners: [],
+      targetOwner: "TARGET",
+      schemaObjects: {
+        canExecute: true,
+        items: [
+          {
+            objectType: "PUBLIC_SYNONYM",
+            name: "Remote S",
+            sourceSchema: "PUBLIC",
+            targetSchema: "PUBLIC",
+            action: "create",
+            ddl: 'CREATE PUBLIC SYNONYM "Remote S" FOR "REMOTE_OWNER"."T"@"REMOTE_LINK"',
+            dependencies: [{ owner: "TARGET", name: "REMOTE_LINK", objectType: "DB_LINK", available: true }],
+            warnings: ["Remote object not validated"],
+            errors: [],
+          },
+        ],
+      },
+    };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm: async () => true, execute });
+    const input = request({ tables: [], objects: [{ objectType: "PUBLIC_SYNONYM", names: ["Remote S"] }], dropTargetBeforeCreate: false });
+    await expect(submission.start(input)).resolves.toBe(true);
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ tables: [], objects: input.objects }));
+    expect(transferPreviewSql(plan)).toBe(plan.schemaObjects!.items[0]!.ddl);
+  });
+  it("requires a complete package plan without adding an unselected body", async () => {
+    const execute = vi.fn();
+    const confirm = vi.fn().mockResolvedValue(true);
+    const plan: TransferOwnershipPreview = {
+      missingOwners: [],
+      targetOwner: "TARGET",
+      schemaObjects: { canExecute: true, items: [{ objectType: "PACKAGE", name: "Keep Case", sourceSchema: "SOURCE", targetSchema: "TARGET", action: "replace", ddl: 'CREATE OR REPLACE PACKAGE "TARGET"."Keep Case" AS PROCEDURE p; END;', dependencies: [], warnings: [], errors: [] }] },
+    };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm, execute });
+    const input = request({ tables: [], objects: [{ objectType: "PACKAGE", names: ["Keep Case"] }], dropTargetBeforeCreate: false, objectConflictPolicy: "replace" });
+    await expect(submission.start(input)).resolves.toBe(true);
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ objects: input.objects, objectConflictPolicy: "replace" }));
+    expect(transferPreviewSql(plan)).toBe(plan.schemaObjects!.items[0]!.ddl);
+    expect(confirm).toHaveBeenCalledWith(expect.anything(), plan);
+  });
+
+  it.each(["PACKAGE_BODY", "TYPE", "TYPE_BODY"] as const)("refuses a selected %s missing from the backend plan", async (objectType) => {
+    const execute = vi.fn();
+    const confirm = vi.fn();
+    const submission = createTransferSubmission({ preview: async () => ({ missingOwners: [], targetOwner: "TARGET", schemaObjects: { canExecute: true, items: [] } }), confirmOwnership: async () => "preserve", confirm, execute });
+    await expect(submission.start(request({ tables: [], objects: [{ objectType, names: ["P"] }], dropTargetBeforeCreate: false }))).rejects.toThrow("TRANSFER_OBJECT_PREVIEW_UNAVAILABLE");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not accept a type definition plan for the same-named type body", async () => {
+    const execute = vi.fn();
+    const confirm = vi.fn();
+    const plan: TransferOwnershipPreview = {
+      missingOwners: [],
+      targetOwner: "TARGET",
+      schemaObjects: { canExecute: true, items: [{ objectType: "TYPE", name: "Case T", sourceSchema: "SOURCE", targetSchema: "TARGET", action: "create", ddl: 'CREATE TYPE "TARGET"."Case T" AS OBJECT (n NUMBER)', dependencies: [], warnings: [], errors: [] }] },
+    };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm, execute });
+    await expect(submission.start(request({ tables: [], objects: [{ objectType: "TYPE_BODY", names: ["Case T"] }], dropTargetBeforeCreate: false }))).rejects.toThrow("TRANSFER_OBJECT_PREVIEW_UNAVAILABLE");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("shows blocked package dependencies but cannot execute even if confirmation returns true", async () => {
+    const execute = vi.fn();
+    const confirm = vi.fn().mockResolvedValue(true);
+    const plan: TransferOwnershipPreview = {
+      missingOwners: [],
+      targetOwner: "TARGET",
+      schemaObjects: {
+        canExecute: false,
+        items: [{ objectType: "PACKAGE_BODY", name: "P", sourceSchema: "SOURCE", targetSchema: "TARGET", action: "blocked", ddl: "", dependencies: [{ owner: "TARGET", name: "P", objectType: "PACKAGE", available: false }], warnings: [], errors: ["Package specification missing"] }],
+      },
+    };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm, execute });
+    await expect(submission.start(request({ tables: [], objects: [{ objectType: "PACKAGE_BODY", names: ["P"] }], dropTargetBeforeCreate: false }))).resolves.toBe(false);
+    expect(confirm).toHaveBeenCalledWith(expect.anything(), plan);
+    expect(execute).not.toHaveBeenCalled();
+    expect(transferPreviewSql(plan)).toBe("");
+  });
+
   it("reviews backend SQL and executes the frozen request only after confirmation", async () => {
     const decision = deferred<boolean>();
     const reviewed: Array<{ request: TransferRequest; preview: TransferOwnershipPreview }> = [];

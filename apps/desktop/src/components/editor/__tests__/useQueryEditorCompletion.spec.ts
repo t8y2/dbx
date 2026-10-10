@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
-import { CompletionContext, insertCompletionText, snippetCompletion } from "@codemirror/autocomplete";
-import { EditorState } from "@codemirror/state";
+import { acceptCompletion, autocompletion, CompletionContext, currentCompletions, insertCompletionText, snippetCompletion, startCompletion } from "@codemirror/autocomplete";
+import { EditorState, StateEffect } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { computed, reactive, shallowRef } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,7 +9,7 @@ import { useQueryEditorCompletion } from "../useQueryEditorCompletion";
 import { useQueryEditorCompletionMetadata } from "../useQueryEditorCompletionMetadata";
 import type { QueryEditorProps } from "../queryEditorTypes";
 import type { RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
-import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import type { SqlCompletionColumn, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { analyzeSqlCompletion, type SqlCompletionAnalysisResult } from "@/lib/sql/sqlCompletionAnalysis";
 
 vi.mock("@/stores/connectionStore", () => ({ COMPLETION_METADATA_CONCURRENCY: 4 }));
@@ -41,19 +41,19 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
   const store = {
     getConfig: vi.fn(() => undefined),
     lookupLocalCompletionTables: vi.fn((): SqlCompletionTable[] => []),
-    lookupLocalCompletionColumns: vi.fn(() => []),
+    lookupLocalCompletionColumns: vi.fn((): SqlCompletionColumn[] => []),
     lookupLocalCompletionColumnsByPrefix: vi.fn(() => []),
     lookupLocalCompletionObjects: vi.fn(() => []),
     lookupLocalCompletionDatabases: vi.fn((): string[] => []),
     lookupLocalCompletionSchemas: vi.fn((): string[] => []),
     lookupLocalCompletionForeignKeys: vi.fn(() => []),
     listCompletionTables: vi.fn(async (): Promise<SqlCompletionTable[]> => []),
-    listCompletionObjects: vi.fn(async () => []),
+    listCompletionObjects: vi.fn(async (): Promise<SqlCompletionObject[]> => []),
     listCompletionColumns: vi.fn(async (): Promise<SqlCompletionColumn[]> => []),
     listCompletionSchemas: vi.fn(async (): Promise<string[]> => []),
     listCompletionDatabases: vi.fn(async (): Promise<string[]> => []),
     refreshCompletionTables: vi.fn(async () => []),
-    refreshCompletionColumns: vi.fn(async () => []),
+    refreshCompletionColumns: vi.fn(async (): Promise<SqlCompletionColumn[]> => []),
     refreshCompletionSchemas: vi.fn(async () => []),
     refreshCompletionDatabases: vi.fn(async () => []),
     listRedisCompletionCommandDocs: vi.fn(async () => commands),
@@ -103,6 +103,122 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
   const provide = (explicit = true) => completion.provideSqlCompletions(new CompletionContext(currentView.state, currentView.state.selection.main.head, explicit));
   return { props, currentView, view, store, settings, runtime, completion, provide, startCompletion };
 }
+
+describe("OceanBase INSERT completion", () => {
+  beforeEach(() => vi.useRealTimers());
+
+  it.each([
+    ["Alias", undefined],
+    ["APP.Alias", "APP"],
+    ['"Alias"', undefined],
+    ['"MixedOwner"."Alias"', "MixedOwner"],
+  ])("resolves %s with the selected schema kept as context", async (source, explicitSchema) => {
+    const { provide, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP", modelValue: `INSERT INTO ${source} (` });
+    store.listCompletionColumns.mockImplementation(async (...args: unknown[]) => (args[3] === explicitSchema ? [{ name: "ID", table: "Alias", schema: explicitSchema }] : []));
+    expect((await provide())?.options.map((option) => option.label)).toContain("ID");
+    expect(store.listCompletionColumns).toHaveBeenCalledWith("connection", "demo", "Alias", explicitSchema, expect.objectContaining({ currentSchema: "APP" }), undefined);
+    if (source.startsWith('"')) expect(store.listCompletionColumns).toHaveBeenCalledWith("connection", "demo", "Alias", explicitSchema, expect.objectContaining({ tableQuoted: true }), undefined);
+  });
+
+  it("keeps synchronous INSERT lookup and background refresh unqualified", async () => {
+    const { provide, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP", modelValue: "INSERT INTO Alias (" });
+    store.lookupLocalCompletionColumns.mockImplementation((...args: unknown[]) => (args[3] === undefined ? [{ name: "ID", table: "Alias" }] : []));
+    store.refreshCompletionColumns.mockResolvedValue([{ name: "ID", table: "Alias" }]);
+    expect((await provide(false))?.options.map((option) => option.label)).toContain("ID");
+    expect(store.lookupLocalCompletionColumns).toHaveBeenCalledWith("connection", "demo", "Alias", undefined, undefined, expect.objectContaining({ currentSchema: "APP" }));
+    expect(store.refreshCompletionColumns).toHaveBeenCalledWith("connection", "demo", "Alias", undefined, expect.objectContaining({ currentSchema: "APP" }), undefined);
+  });
+});
+
+describe.each([false, true])("OceanBase standalone routine completion (semantic=%s)", (semanticCompletionEnabled) => {
+  beforeEach(() => vi.useRealTimers());
+
+  it("loads a quoted owner exactly and inserts a case-sensitive routine identifier", async () => {
+    const sql = 'CALL "Mixed.Owner".';
+    const { provide, store, currentView } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: sql }, undefined, semanticCompletionEnabled);
+    store.listCompletionObjects.mockResolvedValue([{ name: "Do.Work", schema: "Mixed.Owner", type: "procedure", signature: "" }]);
+    const result = await provide();
+    expect(store.listCompletionObjects).toHaveBeenCalledWith("connection", "OB", "", 100, "Mixed.Owner", undefined, false, "APP", expect.any(Array), false);
+    const option = result!.options.find((candidate) => candidate.label === "Do.Work")!;
+    expect(option).toBeDefined();
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe('CALL "Mixed.Owner"."Do.Work"()');
+  });
+
+  it.each(['CALL "Wild%_', 'CALL "APP"."Wild%_'])("shows and accepts a quoted wildcard routine after %s", async (sql) => {
+    const { provide, store, currentView } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: sql }, undefined, semanticCompletionEnabled);
+    store.listCompletionObjects.mockResolvedValue([{ name: "Wild%_Proc", schema: "APP", type: "procedure", signature: "" }]);
+    currentView.dispatch({ effects: StateEffect.appendConfig.of(autocompletion({ override: [() => provide()] })) });
+    startCompletion(currentView);
+    await vi.waitFor(() => expect(currentCompletions(currentView.state).some((option) => (option.displayLabel ?? option.label) === "Wild%_Proc")).toBe(true));
+    expect(store.listCompletionObjects).toHaveBeenCalledWith("connection", "OB", "Wild%_", 100, "APP", undefined, expect.any(Boolean), "APP", expect.any(Array), true);
+    expect(document.querySelector('[role="listbox"]')).not.toBeNull();
+    await vi.waitFor(() => expect(acceptCompletion(currentView)).toBe(true));
+    expect(currentView.state.doc.toString()).toBe(sql.startsWith('CALL "APP".') ? 'CALL "APP"."Wild%_Proc"()' : 'CALL "Wild%_Proc"()');
+  });
+
+  it.each([
+    ["CALL pkg.", "APP", "PKG", 'CALL pkg."Do.Work"()'],
+    ['CALL "Mixed.Owner"."Mixed.Package".', "Mixed.Owner", "Mixed.Package", 'CALL "Mixed.Owner"."Mixed.Package"."Do.Work"()'],
+  ])("loads package members for %s and inserts only the member", async (sql, owner, packageName, expected) => {
+    const { provide, store, currentView } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: sql }, undefined, semanticCompletionEnabled);
+    store.listCompletionObjects.mockImplementation(async (...args: unknown[]) => (args[5] === packageName ? [{ name: "Do.Work", schema: owner, parentSchema: owner, parentName: packageName, type: "procedure", signature: "", routineId: "101:1" }] : []));
+    const result = await provide();
+    expect(store.listCompletionObjects).toHaveBeenCalledWith("connection", "OB", "", 100, owner, packageName, false, "APP", expect.any(Array), false);
+    const option = result!.options.find((candidate) => candidate.label === "Do.Work")!;
+    expect(option).toBeDefined();
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(expected);
+  });
+
+  it("keeps unknown overloads separate and does not invent empty argument lists", async () => {
+    const { provide, store, currentView } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: "CALL APP.PKG." }, undefined, semanticCompletionEnabled);
+    store.listCompletionObjects.mockResolvedValue([1, 2].map((id) => ({ name: "RUN", schema: "APP", parentSchema: "APP", parentName: "PKG", type: "procedure", routineId: `101:${id}` })));
+    const result = await provide();
+    const options = result!.options.filter((candidate) => candidate.label === "RUN");
+    expect(options).toHaveLength(2);
+    const option = options[0]!;
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe("CALL APP.PKG.RUN");
+  });
+
+  it("drops a routine response when the request is invalidated", async () => {
+    const { provide, store, completion } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: "CALL P" }, undefined, semanticCompletionEnabled);
+    let resolve!: (objects: SqlCompletionObject[]) => void;
+    store.listCompletionObjects.mockReturnValue(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const pending = provide();
+    await vi.waitFor(() => expect(store.listCompletionObjects).toHaveBeenCalled());
+    completion.invalidateRequests();
+    resolve([{ name: "P_OLD", schema: "APP", type: "procedure" }]);
+    const result = await pending;
+    expect(result?.options.some((option) => option.label === "P_OLD") ?? false).toBe(false);
+  });
+
+  it.each(["schema", "database", "catalog", "connectionId"] as const)("drops a held routine response after %s changes", async (scopeKey) => {
+    const { provide, props, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "B", modelValue: "SELECT 函数" }, undefined, semanticCompletionEnabled);
+    let release!: (objects: SqlCompletionObject[]) => void;
+    store.listCompletionObjects.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    const pending = provide();
+    await vi.waitFor(() => expect(store.listCompletionObjects).toHaveBeenCalled());
+    props[scopeKey] = "A";
+    release([{ name: "函数.Mixed", schema: "A", type: "function" }]);
+    expect(await pending).toBeNull();
+    if (scopeKey === "catalog") props.catalog = undefined;
+    store.listCompletionObjects.mockResolvedValue([{ name: "函数.Mixed", schema: "A", type: "function" }]);
+    expect((await provide())?.options.some((option) => (option.displayLabel ?? option.label) === "函数.Mixed")).toBe(true);
+  });
+});
 
 describe.each([false, true])("Snowflake namespace completion (semantic=%s)", (semanticCompletionEnabled) => {
   beforeEach(() => vi.useRealTimers());

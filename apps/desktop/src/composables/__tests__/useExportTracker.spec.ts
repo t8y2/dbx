@@ -98,6 +98,17 @@ afterEach(() => {
 });
 
 describe("data transfer task duration", () => {
+  it("retains completed DDL and residual details on a cancelled schema transfer", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("partial-cancel", "schema objects", 0);
+    const detail = "cancelled before statement 2/2 after 1 completed DDL statements; target retained for inspection; no rollback was attempted";
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "cancelled"), table: "schema objects", error: detail });
+    expect(task.status).toBe("Cancelled");
+    expect(task.errorMessage).toBe(detail);
+    expect(task.currentTable).toBe("schema objects");
+    expect(tracker.activeCount.value).toBe(0);
+  });
+
   it("freezes the first successful terminal duration", () => {
     const tracker = useExportTracker();
     now = 1_000;

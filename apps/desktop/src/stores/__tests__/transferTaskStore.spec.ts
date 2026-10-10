@@ -67,6 +67,25 @@ describe("transferTaskStore", () => {
     expect(store.listTasks("folder-1").map((task) => task.id)).toEqual(["task-1"]);
   });
 
+  it("never persists database-link passwords or a previous credential-ready flag", async () => {
+    const config = makeConfig({
+      objects: { DB_LINK: ["L"] },
+      databaseLinks: [{ objectType: "DB_LINK", name: "L", sourceOwner: "SRC", targetName: "L", targetScope: "private", authentication: "fixedUser", username: "REMOTE", host: "connect-string", credentialAvailable: true, password: "nested-secret" } as any],
+    });
+    Object.assign(config, { databaseLinkCredentials: [{ password: "top-level-secret" }] });
+    const store = useTransferTaskStore();
+    const task = await store.saveTask({ name: "links", config });
+    const persisted = vi.mocked(api.saveTransferTaskLibrary).mock.calls.at(-1)?.[0];
+    expect(JSON.stringify(persisted)).not.toContain("secret");
+    expect(task.config.databaseLinks?.[0]?.credentialAvailable).toBe(false);
+    expect(task.config.databaseLinks?.[0]?.targetScope).toBe("private");
+    vi.mocked(api.loadTransferTaskLibrary).mockResolvedValue(persisted!);
+    setActivePinia(createPinia());
+    const restored = useTransferTaskStore();
+    await restored.initFromStorage();
+    expect(restored.getTask(task.id)?.config.databaseLinks?.[0]?.credentialAvailable).toBe(false);
+  });
+
   it("normalizes a legacy task with no object selection to an empty modern selection map", async () => {
     const legacyConfig = makeConfig() as Partial<TransferTaskConfig>;
     delete legacyConfig.objects;
@@ -98,6 +117,21 @@ describe("transferTaskStore", () => {
 
     expect(reloadedStore.getTask(tableOnly.id)?.config.objects).toEqual({ TABLE: ["orders"] });
     expect(reloadedStore.getTask(tableAndView.id)?.config.objects).toEqual({ TABLE: ["orders"], VIEW: ["v_orders"] });
+  });
+
+  it.each([
+    { name: "packages", objects: { PACKAGE: ["Quoted Package"], PACKAGE_BODY: ["P"] } },
+    { name: "types", objects: { TYPE: ["Case T"], TYPE_BODY: ["Case T"] } },
+    { name: "synonyms", objects: { SYNONYM: ["Case S"], PUBLIC_SYNONYM: ["Case S"] } },
+  ])("round-trips separate $name identities and their explicit conflict policy", async ({ name, objects }) => {
+    const store = useTransferTaskStore();
+    const saved = await store.saveTask({ name, config: makeConfig({ objects, objectConflictPolicy: "replace" }) });
+    const persisted = vi.mocked(api.saveTransferTaskLibrary).mock.calls.at(-1)?.[0] as TransferTaskLibrary;
+    vi.mocked(api.loadTransferTaskLibrary).mockResolvedValue(persisted);
+    setActivePinia(createPinia());
+    const reloaded = useTransferTaskStore();
+    await reloaded.initFromStorage();
+    expect(reloaded.getTask(saved.id)?.config).toMatchObject({ objects, objectConflictPolicy: "replace", dropTargetConfirmed: false });
   });
 
   it("keeps target column quoting enabled for saved tasks created before the option existed", async () => {

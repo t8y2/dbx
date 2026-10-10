@@ -246,6 +246,11 @@ pub(super) async fn prepare_table_ddl(
     // has no valid CREATE TABLE order at all). The rebuild path above guarantees the
     // metadata behind `foreign_keys` is trustworthy before anything is stripped.
     let mut ddl = ddl;
+    if matches!(source_db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+        && matches!(target_db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+    {
+        ddl = oracle_types::map_table_type_references(state, request, source_pool_key, table, ddl).await?;
+    }
     let mut deferred_fk_alters = Vec::new();
     let mut deferred_fk_names = Vec::new();
     if supports_deferred_mysql_foreign_keys(target_db_type) && !foreign_keys.is_empty() {

@@ -973,6 +973,9 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     let Some(database_type) = database_type else {
         return false;
     };
+    if database_type == DatabaseType::OceanbaseOracle && object_type == DatabaseObjectType::MaterializedView {
+        return false;
+    }
     if database_type == DatabaseType::SqlServer {
         return true;
     }
@@ -995,6 +998,9 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     if matches!(database_type, DatabaseType::Mysql | DatabaseType::Goldendb) {
         return matches!(object_type, DatabaseObjectType::Table | DatabaseObjectType::View);
     }
+    if database_type == DatabaseType::OceanbaseOracle {
+        return matches!(object_type, DatabaseObjectType::Table | DatabaseObjectType::View);
+    }
     if is_postgres_like_rename(database_type) || is_oracle_like_rename(database_type) {
         return matches!(
             object_type,
@@ -1006,6 +1012,11 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
 
 pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String, String> {
     let database_type = options.database_type;
+    if database_type == Some(DatabaseType::OceanbaseOracle)
+        && options.object_type == DatabaseObjectType::MaterializedView
+    {
+        return Err("DBX has not enabled OceanBase Oracle materialized view rename: the server version, patch level and schema capability have not been verified. No rename SQL was generated.".into());
+    }
     if !supports_object_rename(database_type, options.object_type) {
         return Err(format!(
             "Renaming {} is not supported for {}.",
@@ -1060,6 +1071,45 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
             "ALTER TABLE {} RENAME TO {};",
             qualified_name(database_type, options.schema.as_deref(), &options.old_name),
             quote_rename_identifier(database_type, &options.new_name)
+        ));
+    }
+
+    if database_type == Some(DatabaseType::OceanbaseOracle) && options.object_type == DatabaseObjectType::View {
+        let schema = options
+            .schema
+            .as_deref()
+            .filter(|schema| !schema.is_empty())
+            .ok_or_else(|| "A target schema is required to rename an OceanBase Oracle view.".to_string())?;
+        let rename = format!(
+            "RENAME {} TO {}",
+            quote_rename_identifier(database_type, &options.old_name),
+            quote_rename_identifier(database_type, &options.new_name)
+        );
+        // RENAME rejects owner qualifiers. Check the actual execution context before
+        // issuing DDL; 4.2.5 also permits cross-owner RENAME without ALTER ANY TABLE.
+        // Its role catalogs cannot establish which role privileges are enabled.
+        return Ok(format!(
+            "DECLARE
+  v_count PLS_INTEGER;
+BEGIN
+  IF SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') <> {schema} THEN
+    RAISE_APPLICATION_ERROR(-20001, 'DBX view rename: execution schema does not match the target schema.');
+  END IF;
+  IF SYS_CONTEXT('USERENV', 'SESSION_USER') NOT IN ({schema}, 'SYS') THEN
+    SELECT COUNT(*) INTO v_count FROM SYS.USER_SYS_PRIVS WHERE PRIVILEGE = 'ALTER ANY TABLE';
+    IF v_count = 0 THEN
+      RAISE_APPLICATION_ERROR(-20002, 'DBX view rename: connect as the owner or use a direct ALTER ANY TABLE grant; effective role privileges cannot be verified.');
+    END IF;
+  END IF;
+  SELECT COUNT(*) INTO v_count FROM SYS.ALL_VIEWS WHERE OWNER = {schema} AND VIEW_NAME = {old_name};
+  IF v_count <> 1 THEN
+    RAISE_APPLICATION_ERROR(-20003, 'DBX view rename: the target view does not exist or is not accessible.');
+  END IF;
+  EXECUTE IMMEDIATE {rename};
+END;",
+            schema = quote_sql_string(schema),
+            old_name = quote_sql_string(&options.old_name),
+            rename = quote_sql_string(&rename),
         ));
     }
 
@@ -3111,6 +3161,7 @@ mod tests {
                 transwarp_create: None,
                 partitioned: false,
                 foreign_table: false,
+                database_version: None,
                 is_gaussdb_m_mode: false,
                 table_collation: None,
             });
@@ -3356,6 +3407,73 @@ mod tests {
             .unwrap(),
             "ALTER TABLE \"APP\".\"ORDERS\" RENAME TO \"ORDERS__DBX_BAK\";"
         );
+    }
+
+    #[test]
+    fn oceanbase_view_rename_uses_current_schema_rename_syntax() {
+        let sql = build_rename_object_sql(RenameObjectSqlOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            object_type: DatabaseObjectType::View,
+            schema: Some("App'Owner".to_string()),
+            old_name: "Old 'View".to_string(),
+            new_name: "New \"View\"".to_string(),
+        })
+        .unwrap();
+        assert!(sql.starts_with("DECLARE\n"));
+        assert!(sql.contains("SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') <> 'App''Owner'"));
+        assert!(sql.contains("EXECUTE IMMEDIATE 'RENAME \"Old ''View\" TO \"New \"\"View\"\"\"'"));
+        assert!(sql.ends_with("END;"));
+    }
+
+    #[test]
+    fn oceanbase_view_rename_requires_an_explicit_target_schema() {
+        for schema in [None, Some(String::new())] {
+            let result = build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                object_type: DatabaseObjectType::View,
+                schema,
+                old_name: "OLD_VIEW".to_string(),
+                new_name: "NEW_VIEW".to_string(),
+            });
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn oceanbase_materialized_view_rename_requires_verified_capability() {
+        assert!(!supports_object_rename(Some(DatabaseType::OceanbaseOracle), DatabaseObjectType::MaterializedView));
+        for schema in [None, Some("APP".to_string()), Some("Mixed Owner".to_string())] {
+            let error = build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                object_type: DatabaseObjectType::MaterializedView,
+                schema,
+                old_name: "Mixed\"View".into(),
+                new_name: "Existing Name".into(),
+            })
+            .unwrap_err();
+            assert!(error.contains("DBX has not enabled"));
+            assert!(error.contains("have not been verified"));
+            assert!(error.contains("No rename SQL was generated"));
+        }
+        // Ordinary VIEW is owned by O10; this guard must not alter that path.
+        assert!(supports_object_rename(Some(DatabaseType::OceanbaseOracle), DatabaseObjectType::View));
+        for database_type in [DatabaseType::Postgres, DatabaseType::Oracle, DatabaseType::Dameng] {
+            assert!(supports_object_rename(Some(database_type), DatabaseObjectType::MaterializedView));
+        }
+    }
+
+    #[test]
+    fn oceanbase_view_rename_does_not_enable_unverified_materialized_views() {
+        assert!(supports_object_rename(Some(DatabaseType::OceanbaseOracle), DatabaseObjectType::View));
+        assert!(!supports_object_rename(Some(DatabaseType::OceanbaseOracle), DatabaseObjectType::MaterializedView));
+        assert!(build_rename_object_sql(RenameObjectSqlOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            object_type: DatabaseObjectType::MaterializedView,
+            schema: Some("APP".to_string()),
+            old_name: "OLD_MV".to_string(),
+            new_name: "NEW_MV".to_string(),
+        })
+        .is_err());
     }
 
     #[test]

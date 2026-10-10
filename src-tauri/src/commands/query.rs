@@ -335,6 +335,36 @@ pub async fn close_query_session(
 }
 
 #[tauri::command]
+pub async fn read_large_value_chunk(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::query::LargeValueRequest,
+) -> Result<serde_json::Value, String> {
+    dbx_core::query::request_large_value(&state, request, false).await
+}
+
+#[tauri::command]
+pub async fn release_large_value(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::query::LargeValueRequest,
+) -> Result<serde_json::Value, String> {
+    dbx_core::query::request_large_value(&state, request, true).await
+}
+
+#[tauri::command]
+pub async fn download_large_value(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::query::LargeValueRequest,
+    file_path: String,
+) -> Result<u64, String> {
+    let path = std::path::Path::new(&file_path);
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    let written = dbx_core::query::write_large_value_snapshot(&state, request, temporary.as_file_mut()).await?;
+    temporary.persist(path).map_err(|error| error.to_string())?;
+    Ok(written)
+}
+
+#[tauri::command]
 pub async fn close_client_connection_session(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -344,6 +374,20 @@ pub async fn close_client_connection_session(
 ) -> Result<bool, String> {
     let database = query_session_database(&database, catalog.as_deref());
     state.close_client_session_pool(&connection_id, database, &client_session_id).await
+}
+
+#[tauri::command]
+pub async fn export_snapshot_result(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::query::snapshot_export::SnapshotExportRequest,
+    file_path: String,
+) -> Result<(), String> {
+    let path = std::path::Path::new(&file_path);
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    dbx_core::query::snapshot_export::write_snapshot_export(&state, request, temporary.as_file_mut()).await?;
+    temporary.persist(path).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn query_session_database<'a>(database: &'a str, catalog: Option<&str>) -> Option<&'a str> {
@@ -363,7 +407,21 @@ pub async fn execute_batch(
     schema: Option<String>,
     timeout_secs: Option<u64>,
     use_transaction: Option<bool>,
+    bound_statements: Option<Vec<db::BlobBoundStatement>>,
 ) -> Result<db::QueryResult, String> {
+    if let Some(bound) = bound_statements.as_ref() {
+        return dbx_core::query::execute_blob_bound_statements(
+            &state,
+            &connection_id,
+            &database,
+            &statements,
+            bound,
+            schema.as_deref(),
+            use_transaction == Some(true),
+            timeout_secs,
+        )
+        .await;
+    }
     dbx_core::query::execute_statements_with_transaction_option(
         &state,
         &connection_id,
@@ -411,7 +469,21 @@ pub async fn execute_in_transaction(
     statements: Vec<String>,
     schema: Option<String>,
     catalog: Option<String>,
+    bound_statements: Option<Vec<db::BlobBoundStatement>>,
 ) -> Result<db::QueryResult, String> {
+    if let Some(bound) = bound_statements.as_ref() {
+        return dbx_core::query::execute_blob_bound_statements(
+            &state,
+            &connection_id,
+            &database,
+            &statements,
+            bound,
+            schema.as_deref(),
+            true,
+            None,
+        )
+        .await;
+    }
     dbx_core::query::execute_statements_in_transaction(
         &state,
         &connection_id,
@@ -496,6 +568,7 @@ pub async fn execute_in_manual_transaction(
     classification_sql: Option<String>,
     execution_id: Option<String>,
     timeout_secs: Option<u64>,
+    bound_statements: Option<Vec<db::BlobBoundStatement>>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, ManualTransactionCommandError> {
     dbx_core::query::execute_in_manual_transaction_with_options(
         &state,
@@ -504,6 +577,7 @@ pub async fn execute_in_manual_transaction(
         &database,
         schema.as_deref(),
         dbx_core::query::ManualTransactionExecutionOptions {
+            bound_statements,
             max_rows,
             table_data_preview: table_data_preview.unwrap_or(false),
             page_size,
@@ -779,6 +853,112 @@ pub async fn preview_sqlite_table_structure_change(
 ) -> Result<dbx_core::table_structure_sql::SqliteTableStructurePreview, String> {
     dbx_core::table_structure_sql::preview_sqlite_table_structure_change(&state, &connection_id, &database, options)
         .await
+}
+
+#[tauri::command]
+pub async fn preview_check_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::CheckChange,
+) -> Result<dbx_core::schema::oracle_constraint_change::CheckChangePreview, String> {
+    dbx_core::schema::oracle_constraint_change::preview_check_change(&state, &connection_id, &database, change).await
+}
+
+#[tauri::command]
+pub async fn apply_check_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::CheckChange,
+    revision: String,
+) -> Result<dbx_core::schema::oracle_constraint_change::CheckChangeResult, String> {
+    dbx_core::schema::oracle_constraint_change::apply_check_change(&state, &connection_id, &database, change, &revision)
+        .await
+}
+
+#[tauri::command]
+pub async fn preview_unique_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::UniqueChange,
+) -> Result<dbx_core::schema::oracle_constraint_change::UniqueChangePreview, String> {
+    dbx_core::schema::oracle_constraint_change::preview_unique_change(&state, &connection_id, &database, change).await
+}
+#[tauri::command]
+pub async fn apply_unique_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::UniqueChange,
+    revision: String,
+) -> Result<dbx_core::schema::oracle_constraint_change::UniqueChangeResult, String> {
+    dbx_core::schema::oracle_constraint_change::apply_unique_change(
+        &state,
+        &connection_id,
+        &database,
+        change,
+        &revision,
+    )
+    .await
+}
+#[tauri::command]
+pub async fn preview_foreign_key_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::ForeignKeyChange,
+) -> Result<dbx_core::schema::oracle_constraint_change::ForeignKeyChangePreview, String> {
+    dbx_core::schema::oracle_constraint_change::preview_foreign_key_change(&state, &connection_id, &database, change)
+        .await
+}
+
+#[tauri::command]
+pub async fn apply_foreign_key_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::ForeignKeyChange,
+    revision: String,
+) -> Result<dbx_core::schema::oracle_constraint_change::ForeignKeyChangeResult, String> {
+    dbx_core::schema::oracle_constraint_change::apply_foreign_key_change(
+        &state,
+        &connection_id,
+        &database,
+        change,
+        &revision,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn preview_primary_key_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::PrimaryKeyChange,
+) -> Result<dbx_core::schema::oracle_constraint_change::ConstraintChangePreview, String> {
+    dbx_core::schema::oracle_constraint_change::preview_primary_key_change(&state, &connection_id, &database, change)
+        .await
+}
+
+#[tauri::command]
+pub async fn apply_primary_key_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    change: dbx_core::schema::oracle_constraint_change::PrimaryKeyChange,
+    revision: String,
+) -> Result<dbx_core::schema::oracle_constraint_change::ConstraintChangeResult, String> {
+    dbx_core::schema::oracle_constraint_change::apply_primary_key_change(
+        &state,
+        &connection_id,
+        &database,
+        change,
+        &revision,
+    )
+    .await
 }
 
 #[tauri::command]

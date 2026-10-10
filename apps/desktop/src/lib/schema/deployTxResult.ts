@@ -1,3 +1,6 @@
+import type { FunctionDiff, SchemaDiffRoutineStep, SchemaDiffRoutineValidation } from "@/lib/schema/schemaDiff";
+import { schemaDiffRoutineType } from "@/lib/schema/schemaDiffRoutine";
+
 export interface DeployTxResult {
   success: boolean;
   status?: string;
@@ -6,6 +9,87 @@ export interface DeployTxResult {
   error?: string;
   executedCount?: number;
   statementCount?: number;
+  routineValidations?: SchemaDiffRoutineValidation[];
+  executedSteps?: string[];
+}
+
+/** Keep each PL/SQL body whole; trigger state changes are separate statements. */
+export function schemaDiffRoutineExecutionStatements(steps: SchemaDiffRoutineStep[]): string[] {
+  if (steps.some((step) => step.blockedReason || !step.sql?.trim())) throw new Error("Program object plan is blocked or incomplete");
+  return [...steps.map((step) => step.sql!), ...steps.flatMap((step) => step.postSql ?? [])];
+}
+
+export function schemaDiffRoutineExecutedSteps(steps: SchemaDiffRoutineStep[], executedCount: number): string[] {
+  return [...steps.map((step) => `${step.routineType} ${step.targetSchema ? `${step.targetSchema}.` : ""}${step.name}${step.trigger ? ` · ${step.trigger.tableOwner}.${step.trigger.tableName}` : ""}`), ...steps.flatMap((step) => step.postSql ?? [])].slice(0, Math.max(0, executedCount));
+}
+
+/** Create triggers disabled, verify complete source and identity, then enable only reviewed targets. */
+export async function executeSchemaDiffRoutineDeployment(
+  steps: SchemaDiffRoutineStep[],
+  expected: FunctionDiff[],
+  execute: (statements: string[]) => Promise<any>,
+  validate: (expected: FunctionDiff[]) => Promise<SchemaDiffRoutineValidation[]>,
+  t: (key: string, params?: Record<string, any>) => string,
+  rollback = false,
+  targetSchema?: string,
+): Promise<DeployTxResult> {
+  schemaDiffRoutineExecutionStatements(steps);
+  const mapped = schemaDiffRoutineExpectedDefinitions(expected, steps, rollback);
+  const disabled = mapped.map((diff) => {
+    const key = rollback ? "target" : "source";
+    const info = diff[key];
+    return info?.trigger ? { ...diff, [key]: { ...info, trigger: { ...info.trigger, status: "DISABLED" } } } : diff;
+  });
+  const txLog = await execute(steps.map((step) => step.sql!));
+  let result = await finishSchemaDiffDeployment(txLog, disabled, validate, t, rollback, targetSchema);
+  const createdCount = result.executedCount ?? (result.success ? steps.length : 0);
+  result.executedSteps = schemaDiffRoutineExecutedSteps(steps, createdCount);
+  if (!result.success) return result;
+  const activation = steps.flatMap((step) => step.postSql ?? []);
+  if (activation.length === 0) return result;
+  let activationLog;
+  try {
+    activationLog = await execute(activation);
+  } catch (error) {
+    return { ...result, success: false, status: "mixed", message: t("diff.routineRecoveryHint"), error: error instanceof Error ? error.message : String(error), executedCount: createdCount, statementCount: steps.length + activation.length };
+  }
+  result = await finishSchemaDiffDeployment(activationLog, mapped, validate, t, rollback, targetSchema);
+  const activatedCount = result.executedCount ?? (result.success ? activation.length : 0);
+  return { ...result, executedCount: createdCount + activatedCount, statementCount: steps.length + activation.length, executedSteps: schemaDiffRoutineExecutedSteps(steps, createdCount + activatedCount) };
+}
+
+/** Validate the generated target definition, including reviewed owner/edition conversion. */
+export function schemaDiffRoutineExpectedDefinitions(expected: FunctionDiff[], steps: SchemaDiffRoutineStep[], rollback = false): FunctionDiff[] {
+  return expected.map((diff) => {
+    const info = rollback ? diff.target : diff.source;
+    const step = steps.find((step) => step.name === diff.name && step.routineType === schemaDiffRoutineType(info?.function_type));
+    if (!info || !step?.sql || step.operation === "removed") return diff;
+    const mapped = { ...info, definition: step.sql };
+    return rollback ? { ...diff, target: mapped } : { ...diff, source: mapped };
+  });
+}
+
+/** Oracle DDL can commit while leaving an INVALID routine. Readback is part of deployment. */
+export async function finishSchemaDiffDeployment(txLog: any, expected: FunctionDiff[], validate: (expected: FunctionDiff[]) => Promise<SchemaDiffRoutineValidation[]>, t: (key: string, params?: Record<string, any>) => string, rollback = false, targetSchema?: string): Promise<DeployTxResult> {
+  const result = buildDeployTxResult(txLog, t);
+  if (expected.length > 0 && result.status === "rolled_back") return { ...result, message: t("diff.routineRecoveryHint") };
+  if (!result.success || expected.length === 0) return result;
+  const validationInput = rollback ? expected.map((diff): FunctionDiff => ({ ...diff, type: diff.type === "added" ? "removed" : diff.type === "removed" ? "added" : "modified", source: diff.target, target: diff.source })) : expected;
+  try {
+    const validations = await validate(validationInput);
+    const complete = validationInput.every((diff) => {
+      const fn = diff.source ?? diff.target;
+      const routineType = schemaDiffRoutineType(fn?.function_type);
+      const trigger = fn?.trigger;
+      const tableOwner = trigger && trigger.tableOwner === fn?.schema ? (targetSchema ?? trigger.tableOwner) : trigger?.tableOwner;
+      const matches = validations.filter((item) => (!targetSchema || item.schema === undefined || item.schema === targetSchema) && item.name === diff.name && item.routineType === routineType && item.trigger?.tableName === trigger?.tableName && item.trigger?.tableOwner === tableOwner);
+      return matches.length === 1 && matches[0]!.success;
+    });
+    if (complete && validations.every((item) => item.success)) return { ...result, routineValidations: validations };
+    return { ...result, success: false, status: "validation_failed", message: t("diff.routineValidationFailed"), routineValidations: validations };
+  } catch (error) {
+    return { ...result, success: false, status: "validation_failed", message: t("diff.routineValidationFailed"), error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export function buildDeployTxResult(txLog: any, t: (key: string, params?: Record<string, any>) => string): DeployTxResult {

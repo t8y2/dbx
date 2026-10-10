@@ -89,6 +89,13 @@ public final class JsonRpcServer {
     }
 
     Object dispatchForRuntime(String method, JsonObject params) throws Exception {
+        if ("create_database_link_secure_v1".equals(method)) {
+            try {
+                return dispatchWithConnection(method, params);
+            } catch (Throwable ignored) {
+                return java.util.Map.of("ok", false, "errorCode", "DBLINK_OUTCOME_UNKNOWN");
+            }
+        }
         boolean timedQuery = agent.supportsQueryTiming()
             && (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)
                 || AgentProtocol.METHOD_EXECUTE_QUERY_PAGE.equals(method)
@@ -152,6 +159,7 @@ public final class JsonRpcServer {
 
     void cancelActiveStatements() {
         jdbcExecutor.cancelActiveStatements();
+        agent.invalidateLargeValues();
         AbstractJdbcAgent jdbcAgent = pooledJdbcAgent();
         if (jdbcAgent != null) {
             jdbcAgent.releaseIdlePooledConnection(jdbcExecutor);
@@ -265,7 +273,9 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_GET_COLUMNS.equals(method)) {
             switchCatalog(params);
-            return agent.getColumns(params.get("schema").getAsString(), params.get("table").getAsString());
+            String currentSchema = params.has("current_schema") && !params.get("current_schema").isJsonNull()
+                ? params.get("current_schema").getAsString() : null;
+            return agent.getColumnsInContext(params.get("schema").getAsString(), params.get("table").getAsString(), currentSchema);
         }
         if (AgentProtocol.METHOD_LIST_INDEXES.equals(method)) {
             switchCatalog(params);
@@ -290,6 +300,16 @@ public final class JsonRpcServer {
         if (AgentProtocol.METHOD_LIST_SUBPARTITIONS.equals(method)) {
             switchCatalog(params);
             return agent.listSubpartitions(params.get("schema").getAsString(), params.get("table").getAsString());
+        }
+        if ("database_link_secure_v1_info".equals(method)) {
+            return java.util.Map.of("supported", agent.supportsSecureDatabaseLink());
+        }
+        if ("create_database_link_secure_v1".equals(method)) {
+            try {
+                return agent.createDatabaseLinkSecure(params);
+            } catch (Throwable ignored) {
+                return java.util.Map.of("ok", false, "errorCode", "DBLINK_OUTCOME_UNKNOWN");
+            }
         }
         if (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)) {
             ExecuteQueryOptions options = new ExecuteQueryOptions(
@@ -322,6 +342,13 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_CLOSE_QUERY_SESSION.equals(method)) {
             return agent.closeQuerySession(params.get("sessionId").getAsString());
+        }
+        if (AgentProtocol.METHOD_READ_LARGE_VALUE_CHUNK.equals(method)) {
+            return agent.readLargeValueChunk(params.get("valueRef").getAsString(),
+                params.get("offset").getAsLong(), intOrDefault(params, "limit", 4096));
+        }
+        if (AgentProtocol.METHOD_RELEASE_LARGE_VALUE.equals(method)) {
+            return agent.releaseLargeValue(params.get("valueRef").getAsString());
         }
         if (AgentProtocol.METHOD_START_TABLE_READ.equals(method)) {
             return agent.startTableRead(
@@ -359,22 +386,33 @@ public final class JsonRpcServer {
             return result;
         }
         if (AgentProtocol.METHOD_EXECUTE_TRANSACTION.equals(method)) {
+            agent.invalidateLargeValues();
             Type statementsType = new TypeToken<List<String>>() {}.getType();
             List<String> statements = gson.fromJson(params.get("statements"), statementsType);
+            if (params.has("boundStatements")) {
+                return executeBlobBoundStatements(params, statements, true);
+            }
             return agent.executeTransaction(statements, stringOrNull(params, "schema"));
         }
         if (AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION.equals(method)) {
+            agent.invalidateLargeValues();
             return agent.beginManualTransaction(stringOrNull(params, "schema"));
         }
         if (AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION.equals(method)) {
+            agent.invalidateLargeValues();
             return agent.commitManualTransaction();
         }
         if (AgentProtocol.METHOD_ROLLBACK_MANUAL_TRANSACTION.equals(method)) {
+            agent.invalidateLargeValues();
             return agent.rollbackManualTransaction();
         }
         if (AgentProtocol.METHOD_EXECUTE_BATCH.equals(method)) {
+            agent.invalidateLargeValues();
             Type statementsType = new TypeToken<List<String>>() {}.getType();
             List<String> statements = gson.fromJson(params.get("statements"), statementsType);
+            if (params.has("boundStatements")) {
+                return executeBlobBoundStatements(params, statements, false);
+            }
             return agent.executeBatch(statements, stringOrNull(params, "schema"));
         }
         if (AgentProtocol.METHOD_DISCONNECT.equals(method)) {
@@ -392,6 +430,38 @@ public final class JsonRpcServer {
             return Collections.singletonMap("ok", true);
         }
         throw new IllegalArgumentException("Unknown method: " + method);
+    }
+
+    private QueryResult executeBlobBoundStatements(JsonObject params, List<String> previews, boolean transaction) {
+        if (!agent.supportsBlobBindStatements()) {
+            throw new UnsupportedOperationException("Agent does not support blob_bind_statements_v1");
+        }
+        if (!params.get("boundStatements").isJsonArray()) {
+            throw new IllegalArgumentException("BLOB bound statements must be an array");
+        }
+        for (com.google.gson.JsonElement entry : params.getAsJsonArray("boundStatements")) {
+            if (!entry.isJsonObject()) throw new IllegalArgumentException("BLOB bound statement must be an object");
+            JsonObject item = entry.getAsJsonObject();
+            for (String field : java.util.Arrays.asList("previewSql", "sql")) {
+                if (!item.has(field) || !item.get(field).isJsonPrimitive()
+                    || !item.get(field).getAsJsonPrimitive().isString()) {
+                    throw new IllegalArgumentException("BLOB bound statement text fields must be strings");
+                }
+            }
+            if (!item.has("blobParameters") || !item.get("blobParameters").isJsonArray()) {
+                throw new IllegalArgumentException("BLOB parameters must be an array of hexadecimal strings");
+            }
+            for (com.google.gson.JsonElement value : item.getAsJsonArray("blobParameters")) {
+                if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) {
+                    throw new IllegalArgumentException("BLOB parameter must be a hexadecimal string");
+                }
+            }
+        }
+        Type boundType = new TypeToken<List<BlobBoundStatement>>() {}.getType();
+        List<BlobBoundStatement> statements = gson.fromJson(params.get("boundStatements"), boundType);
+        BlobBoundStatement.validate(previews, statements);
+        return agent.executeBlobBoundStatements(previews, statements, stringOrNull(params, "schema"),
+            intOrDefault(params, "queryTimeoutSecs", 0), transaction);
     }
 
     private void switchCatalog(JsonObject params) throws Exception {

@@ -25,6 +25,10 @@ public abstract class ConfiguredJdbcAgent extends AbstractJdbcAgent {
         return profile;
     }
 
+    protected final RuntimeException sqlExecutionErrorPreservingDisposition(RuntimeException error) {
+        return AgentRpcError.sqlExecutionErrorPreservingDisposition(error);
+    }
+
     @Override
     protected String driverClass() {
         return profile.getDriverClass();

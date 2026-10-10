@@ -332,6 +332,14 @@ mod tests {
         let opts = SchemaDiffPreparationOptions {
             source_functions: vec![
                 FunctionInfo {
+                    type_info: None,
+                    trigger: None,
+                    dependency_objects: Vec::new(),
+                    incoming_dependencies: Vec::new(),
+                    paired_object_present: None,
+                    schema: None,
+                    status: None,
+                    dependencies: Vec::new(),
                     name: "f1".into(),
                     definition: "CREATE FUNCTION f1() RETURNS INT BEGIN RETURN 1; END".into(),
                     function_type: "FUNCTION".into(),
@@ -339,6 +347,14 @@ mod tests {
                     arguments: "".into(),
                 },
                 FunctionInfo {
+                    type_info: None,
+                    trigger: None,
+                    dependency_objects: Vec::new(),
+                    incoming_dependencies: Vec::new(),
+                    paired_object_present: None,
+                    schema: None,
+                    status: None,
+                    dependencies: Vec::new(),
                     name: "p1".into(),
                     definition: "CREATE PROCEDURE p1() BEGIN SELECT 1; END".into(),
                     function_type: "PROCEDURE".into(),

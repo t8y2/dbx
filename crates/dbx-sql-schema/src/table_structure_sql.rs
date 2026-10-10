@@ -7,6 +7,7 @@ mod dialect;
 mod foreign_keys;
 mod indexes;
 mod mysql_engine;
+mod oceanbase_indexes;
 mod owner;
 mod partitions;
 mod transwarp;
@@ -43,6 +44,10 @@ use validation::validate_concurrent_index_scope;
 pub use validation::validate_draft;
 
 pub fn build_table_structure_change_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
+    let index_errors = oceanbase_indexes::validate(&options);
+    if !index_errors.is_empty() {
+        return TableStructureSqlResult { statements: Vec::new(), warnings: index_errors };
+    }
     let mysql_engine_errors = validate_mysql_engine(&options);
     if !mysql_engine_errors.is_empty() {
         return TableStructureSqlResult { statements: Vec::new(), warnings: mysql_engine_errors };

@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useQueryEditorCompletionMetadata } from "../useQueryEditorCompletionMetadata";
 import type { QueryEditorProps } from "../queryEditorTypes";
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import { buildSelectStarExpansion, buildSqlCompletionItems, getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
+import { buildSqlSemanticDiagnostics } from "@/lib/sql/semantic/diagnostics";
 
 vi.mock("@/stores/connectionStore", () => ({ COMPLETION_METADATA_CONCURRENCY: 4 }));
 vi.mock("@/lib/backend/api", () => ({}));
@@ -42,6 +44,89 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
 }
 
 describe("QueryEditor completion metadata ownership", () => {
+  it.each([
+    ["Alias", "PUBLIC_ID"],
+    ["APP.Alias", "PRIVATE_ID"],
+    ['"Alias"', "QUOTED_ID"],
+  ])("uses only the cached OceanBase reference %s for star and column completion", async (source, column) => {
+    const { metadata, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP" });
+    store.listCompletionColumns
+      .mockResolvedValueOnce([{ name: "PUBLIC_ID", table: "Alias" }])
+      .mockResolvedValueOnce([{ name: "PRIVATE_ID", table: "Alias", schema: "APP" }])
+      .mockResolvedValueOnce([{ name: "QUOTED_ID", table: "Alias" }]);
+    await metadata.ensureColumnsForTable({ name: "Alias" }, { nameQuoted: false });
+    await metadata.ensureColumnsForTable({ name: "Alias", schema: "APP" });
+    await metadata.ensureColumnsForTable({ name: "Alias" }, { nameQuoted: true });
+    expect(store.listCompletionColumns).toHaveBeenCalledTimes(3);
+    const sql = `SELECT s. FROM ${source} s`;
+    const context = getSqlCompletionContext(sql, 9, { databaseType: "oceanbase-oracle" });
+    expect(buildSelectStarExpansion(context, metadata.cachedColumnsByTable, "oracle", context.qualifier, "oceanbase-oracle")).toBe(column);
+    const items = buildSqlCompletionItems(sql, 9, { tables: [], columnsByTable: metadata.cachedColumnsByTable, databaseType: "oceanbase-oracle", currentSchema: "APP" });
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual([column]);
+    expect(items.find((item) => item.label === "s.*")?.apply).toBe(column);
+  });
+
+  it.each([
+    ["MiXeD", '"MiXeD"'],
+    ["With.Dot", '"With.Dot"'],
+    ['A"B', '"A""B"'],
+    ["SELECT", '"SELECT"'],
+  ])("preserves the exact OceanBase column identifier %s in scoped star expansion", async (column, expected) => {
+    const { metadata, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP" });
+    store.listCompletionColumns.mockResolvedValue([{ name: column, table: "Alias" }]);
+    await metadata.ensureColumnsForTable({ name: "Alias" }, { nameQuoted: true });
+    const sql = 'SELECT s. FROM "Alias" s';
+    const context = getSqlCompletionContext(sql, 9, { databaseType: "oceanbase-oracle" });
+    expect(buildSelectStarExpansion(context, metadata.cachedColumnsByTable, "oracle", context.qualifier, "oceanbase-oracle")).toBe(expected);
+    const items = buildSqlCompletionItems(sql, 9, { tables: [], columnsByTable: metadata.cachedColumnsByTable, databaseType: "oceanbase-oracle", currentSchema: "APP", quoteIdentifiers: false });
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual([column]);
+    expect(items.find((item) => item.label === "s.*")?.apply).toBe(expected);
+  });
+
+  it.each(["Alias", "APP.Alias", '"Alias"'])("uses the same OceanBase cache identity for diagnostics on %s", async (source) => {
+    const { metadata, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP" });
+    store.listCompletionColumns.mockResolvedValue([{ name: "ID", table: "Alias" }]);
+    const sql = `SELECT s.MISSING FROM ${source} s`;
+    const reference = getSqlCompletionContext(sql, 9, { databaseType: "oceanbase-oracle" }).referencedTables[0]!;
+    await metadata.ensureColumnsForTable(reference);
+    const tableStart = sql.indexOf(source);
+    const diagnostics = buildSqlSemanticDiagnostics(
+      {
+        tables: [{ name: reference.name, schema: reference.schema, alias: "s", span: { start_line: 1, start_column: tableStart + 1, end_line: 1, end_column: tableStart + source.length } }],
+        columns: [{ name: "MISSING", qualifier: "s", span: { start_line: 1, start_column: 8, end_line: 1, end_column: 16 } }],
+      },
+      { tables: [], columnsByTable: metadata.cachedColumnsByTable, loadedColumnTables: metadata.loadedColumnsByTable, sql, databaseType: "oceanbase-oracle", currentSchema: "APP" },
+    );
+    expect(diagnostics.map((diagnostic) => diagnostic.message)).toEqual(["Unknown column s.MISSING"]);
+  });
+
+  it("uses scoped synonym columns for JOIN condition completion", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP" });
+    store.listCompletionColumns.mockResolvedValue([{ name: "TENANT_ID", table: "Alias" }]);
+    await metadata.ensureColumnsForTable({ name: "Alias" });
+    await metadata.ensureColumnsForTable({ name: "Alias", schema: "APP" });
+    const sql = "SELECT * FROM Alias a JOIN APP.Alias b ON ";
+    const items = buildSqlCompletionItems(sql, sql.length, { tables: [], columnsByTable: metadata.cachedColumnsByTable, databaseType: "oceanbase-oracle" });
+    expect(items.map((item) => item.label)).toContain("a.TENANT_ID = b.TENANT_ID");
+  });
+
+  it("keeps foreign-key JOIN suggestions available under the same scoped cache keys", () => {
+    const { metadata } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP" });
+    metadata.cachedForeignKeysByTable.set(metadata.completionCacheKey({ name: "Alias" }), [{ name: "FK_PARENT", column: "PARENT", ref_table: "OtherAlias", ref_column: "ID" }]);
+    const sql = "SELECT * FROM Alias a JOIN OtherAlias b ON ";
+    const items = buildSqlCompletionItems(sql, sql.length, { tables: [], columnsByTable: metadata.cachedColumnsByTable, foreignKeysByTable: metadata.cachedForeignKeysByTable, databaseType: "oceanbase-oracle" });
+    expect(items.map((item) => item.label)).toContain("a.PARENT = b.ID");
+  });
+
+  it("keeps an OceanBase selected schema separate from an explicitly qualified synonym", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "MixedOwner" });
+    store.listCompletionColumns.mockResolvedValue(columns);
+    await metadata.ensureColumnsForTable({ name: "Alias" });
+    expect(store.listCompletionColumns).toHaveBeenLastCalledWith("connection", "demo", "Alias", undefined, expect.objectContaining({ currentSchema: "MixedOwner" }), undefined);
+    await metadata.ensureColumnsForTable({ name: "Alias", schema: "MixedOwner" });
+    expect(store.listCompletionColumns).toHaveBeenLastCalledWith("connection", "demo", "Alias", "MixedOwner", expect.objectContaining({ currentSchema: "MixedOwner" }), undefined);
+  });
+
   it.each(["getEditorSqlCompletionContext", "getEditorSemanticModel"] as const)("keys %s by document, editor state, position and dialect", (method) => {
     const { metadata, props } = createHarness();
     const state = EditorState.create({ doc: props.modelValue });

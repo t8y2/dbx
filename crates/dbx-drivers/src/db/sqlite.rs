@@ -1718,6 +1718,7 @@ fn sqlite_completion_schemas(
             parent_name: None,
             comment: None,
             data_type: None,
+            routine_id: None,
             signature: None,
         })
         .collect())
@@ -1772,6 +1773,7 @@ fn sqlite_completion_tables(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                routine_id: None,
                 signature: None,
             })
         })
@@ -1811,6 +1813,7 @@ fn sqlite_completion_columns(
             parent_name: Some(table.to_string()),
             comment: None,
             data_type: Some(data_type),
+            routine_id: None,
             signature: None,
         });
         if candidates.len() >= limit {
@@ -2666,6 +2669,7 @@ pub async fn list_triggers(pool: &SqliteHandle, schema: &str, table: &str) -> Re
                     "DELETE"
                 };
                 TriggerInfo {
+                    owner: None,
                     name: json_cell_text(&row, 0),
                     event: event.to_string(),
                     timing: timing.to_string(),
@@ -2711,6 +2715,7 @@ pub async fn list_triggers(pool: &SqliteHandle, schema: &str, table: &str) -> Re
                         "DELETE"
                     };
                     Ok(TriggerInfo {
+                        owner: None,
                         name: row.get("name")?,
                         event: event.to_string(),
                         timing: timing.to_string(),

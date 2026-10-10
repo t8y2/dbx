@@ -2,13 +2,13 @@ import { computed, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridExport, type UseDataGridExportOptions } from "@/composables/useDataGridExport";
-import type { DatabaseType } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
 import { buildDataGridCopyUpdateStatements } from "@/lib/dataGrid/dataGridSql";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import type { CellSelectionMatrix, SelectionData } from "@/lib/dataGrid/gridSelection";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
-import { extractDataGridSelection, exportQueryResultCsv, exportQueryResultJson } from "@/lib/backend/api";
+import { extractDataGridSelection, exportQueryResultCsv, exportQueryResultJson, exportQueryResultMarkdown, exportSnapshotResult, readLargeValueChunk } from "@/lib/backend/api";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { clearDataGridClipboardCopy, parseDataGridClipboard } from "@/lib/dataGrid/dataGridClipboard";
 import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridExternalValue } from "@/lib/mongo/mongoDocumentValues";
@@ -52,6 +52,10 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     extractDataGridSelection: vi.fn(),
     exportQueryResultCsv: vi.fn(),
     exportQueryResultJson: vi.fn(),
+    exportQueryResultMarkdown: vi.fn(),
+    exportSnapshotResult: vi.fn(),
+    readLargeValueChunk: vi.fn(),
+    cancelQuery: vi.fn(),
   };
 });
 
@@ -143,6 +147,7 @@ function createExportState(
   contextColumn?: number,
   databaseType: DatabaseType = "mysql",
   displayValue?: (value: CellValue, columnIndex: number) => string,
+  overrides: Partial<UseDataGridExportOptions> = {},
 ) {
   const rows = (rowDataList ?? [rowData ?? columns.map((column, index) => (column === "id" ? 1 : `value-${index}`))]).map((data, index) => ({ ...row(data), id: index + 1 }));
   const resolvedContextRowId = contextRowId === undefined ? (rows[0]?.id ?? null) : contextRowId;
@@ -175,8 +180,70 @@ function createExportState(
     selectedRowIds,
     hasRowSelection: computed(() => selectedRowIds.value.size > 0),
   };
-  return useDataGridExport(options);
+  const resolvedOptions = { ...options, ...overrides };
+  return { ...useDataGridExport(resolvedOptions), contextCell: resolvedOptions.contextCell };
 }
+
+describe("original LOB result exports", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+    vi.mocked(exportSnapshotResult).mockResolvedValue(undefined);
+  });
+  function snapshotState() {
+    const original = {
+      columns: ["id", "name"],
+      rows: [[1, "preview"]],
+      column_types: ["NUMBER", "CLOB"],
+      large_value_context: { connectionId: "original-connection", database: "original-database", clientSessionId: "original-session" },
+      large_value_cells: [{ row_index: 0, column_index: 1, value_ref: "original-locator", value_kind: "text" }],
+    } as QueryResult;
+    return {
+      original,
+      state: createExportState(editableTable, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "oracle", undefined, {
+        snapshotResult: computed(() => original),
+        hasCompleteLocalResult: computed(() => true),
+        completeLocalResult: computed(() => original),
+      }),
+    };
+  }
+  it.each(["csv", "json"] as const)("streams export-all %s from captured locators without frontend hydration or requery", async (format) => {
+    const { state } = snapshotState();
+    await (format === "csv" ? state.exportCsv() : state.exportJson());
+    expect(exportSnapshotResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        format,
+        context: expect.objectContaining({ connectionId: "original-connection", clientSessionId: "original-session" }),
+        cells: [{ rowIndex: 0, columnIndex: 1, valueRef: "original-locator" }],
+      }),
+      expect.any(String),
+    );
+    expect(readLargeValueChunk).not.toHaveBeenCalled();
+    expect(exportQueryResultCsv).not.toHaveBeenCalled();
+    expect(exportQueryResultJson).not.toHaveBeenCalled();
+  });
+  it("does not publish a legacy preview export when the snapshot backend fails", async () => {
+    const { state, original } = snapshotState();
+    vi.mocked(exportSnapshotResult).mockRejectedValue(new Error("LOB snapshot expired"));
+    await state.exportJson();
+    expect(exportQueryResultJson).not.toHaveBeenCalled();
+    expect(original.rows[0]![1]).toBe("preview");
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("LOB snapshot expired"), 5000);
+  });
+  it("materializes export-all for bounded formats rather than passing preview rows", async () => {
+    const { original } = snapshotState();
+    const localState = createExportState(editableTable, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "oracle", undefined, {
+      context: computed(() => "results"),
+      snapshotResult: computed(() => original),
+      hasCompleteLocalResult: computed(() => true),
+      completeLocalResult: computed(() => original),
+    });
+    vi.mocked(readLargeValueChunk).mockResolvedValue({ status: "ok", data: "complete original text", next_offset: 22, eof: true, value_kind: "text" });
+    await localState.exportMarkdown();
+    expect(exportQueryResultMarkdown).toHaveBeenCalledWith(expect.any(String), original.columns, [[1, "complete original text"]]);
+    expect(original.rows[0]![1]).toBe("preview");
+  });
+});
 
 const editableTable: DataGridTableMeta = {
   tableName: "users",
@@ -192,6 +259,19 @@ describe("useDataGridExport prepared row statements", () => {
     vi.clearAllMocks();
     clearDataGridClipboardCopy();
     vi.mocked(saveTextFile).mockResolvedValue(true);
+  });
+
+  it.each(["closed", "retargeted"] as const)("copies the clicked cell when the context menu is %s before its async callback finishes", async (menuState) => {
+    const state = createExportState(editableTable, ["id", "name"], undefined, [1, "clicked cell"]);
+    state.contextCell.value = { rowId: 1, rowIndex: 0, col: 1 };
+
+    const pendingCopy = state.copyCell();
+    // The menu starts the action, then clears or replaces its target on close.
+    state.contextCell.value = menuState === "closed" ? null : { rowId: 1, rowIndex: 0, col: 0 };
+
+    await expect(pendingCopy).resolves.toBeUndefined();
+    expect(copyToClipboard).toHaveBeenCalledWith("clicked cell");
+    expect(parseDataGridClipboard("clicked cell")).toEqual([["clicked cell"]]);
   });
 
   it("disables row copy when the result has no rows", () => {
@@ -1187,7 +1267,7 @@ describe("useDataGridExport prepared row statements", () => {
     const request = vi.mocked(extractDataGridSelection).mock.calls[0]?.[0];
     expect(request).toEqual(
       expect.objectContaining({
-        columns: [{ displayName: "name", sourceName: "name", sourceIndex: 0 }],
+        columns: [{ displayName: "name", sourceName: "name", sourceIndex: 0, dataType: "varchar" }],
         selectedColumnIndexes: [0],
         rows: [["Ada"]],
         selectionKind: "columns",

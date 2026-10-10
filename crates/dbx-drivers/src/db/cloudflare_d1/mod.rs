@@ -246,6 +246,7 @@ pub async fn list_triggers(
             let statement = value_as_string(row.get(1));
             let metadata = trigger::metadata_from_sql(statement.as_deref().unwrap_or_default());
             TriggerInfo {
+                owner: None,
                 name: value_as_string(row.first()).unwrap_or_default(),
                 event: metadata.event.to_string(),
                 timing: metadata.timing.to_string(),

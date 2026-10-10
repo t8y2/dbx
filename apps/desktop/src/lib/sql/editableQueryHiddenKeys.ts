@@ -61,7 +61,9 @@ function appendSelectProjections(sql: string, expressions: string[], databaseTyp
 
   const projectionTokens = tokens.slice(selectIndex + 1, fromIndex).filter((token) => token.kind !== "comment");
   const bareWildcard = projectionTokens.length === 1 && projectionTokens[0]?.text === "*" ? projectionTokens[0] : undefined;
-  const sourceReference = bareWildcard && databaseType === "oracle" ? singleOracleSourceReference(sql, bareWildcard.span.start) : undefined;
+  const oracleWildcard = bareWildcard && (databaseType === "oracle" || databaseType === "oceanbase-oracle");
+  const sourceReference = oracleWildcard ? singleOracleSourceReference(sql, bareWildcard.span.start) : undefined;
+  if (oracleWildcard && !sourceReference) return undefined;
   if (!sourceReference || !bareWildcard) {
     return `${sql.slice(0, projectionEnd)}, ${expressions.join(", ")}${sql.slice(projectionEnd)}`;
   }

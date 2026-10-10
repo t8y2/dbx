@@ -512,10 +512,21 @@ fn unexpanded_schema_object_notes(
         TransferObjectSelectionMode::LegacyUnspecified => return vec![UNEXPANDED_OBJECTS_NOTE.to_string()],
         TransferObjectSelectionMode::Explicit(selections) => selections,
     };
-    let mut notes = vec![UNEXPANDED_OBJECTS_NOTE.to_string()];
+    let mut notes = Vec::new();
     for selection in selections {
-        if selection.object_type == TransferObjectKind::Table || selection.names.is_empty() {
+        if matches!(
+            selection.object_type,
+            TransferObjectKind::Table
+                | TransferObjectKind::Package
+                | TransferObjectKind::PackageBody
+                | TransferObjectKind::Synonym
+                | TransferObjectKind::PublicSynonym
+        ) || selection.names.is_empty()
+        {
             continue;
+        }
+        if notes.is_empty() {
+            notes.push(UNEXPANDED_OBJECTS_NOTE.to_string());
         }
         notes.push(format!("-- {}: {}", preview_object_kind_label(&selection.object_type), selection.names.join(", ")));
     }
@@ -532,6 +543,14 @@ fn preview_object_kind_label(kind: &TransferObjectKind) -> &'static str {
         TransferObjectKind::Trigger => "Triggers",
         TransferObjectKind::Sequence => "Sequences",
         TransferObjectKind::Event => "Events",
+        TransferObjectKind::Package => "Package specifications",
+        TransferObjectKind::PackageBody => "Package bodies",
+        TransferObjectKind::Synonym => "Private synonyms",
+        TransferObjectKind::PublicSynonym => "Public synonyms",
+        TransferObjectKind::DbLink => "Private database links",
+        TransferObjectKind::PublicDbLink => "Public database links",
+        TransferObjectKind::Type => "Type specifications",
+        TransferObjectKind::TypeBody => "Type bodies",
     }
 }
 

@@ -153,6 +153,8 @@ pub struct DataGridExtractColumn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_name: Option<String>,
     pub source_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

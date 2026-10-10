@@ -56,6 +56,7 @@ interface UseDataGridExtractorOptions {
   allSourceColumns: ComputedRef<Array<string | undefined> | undefined>;
   visibleColumnIndexes: ComputedRef<number[]>;
   columnTypes: ComputedRef<Array<string | undefined> | undefined>;
+  allColumnTypes?: ComputedRef<Array<string | undefined> | undefined>;
   extractorOptions?: ComputedRef<DataGridExtractorOptions>;
   databaseType: ComputedRef<DatabaseType | undefined>;
   identifierQuote?: ComputedRef<string | undefined>;
@@ -214,6 +215,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     }
     const compactIndexBySource = new Map(requiredSourceIndexes.map((sourceIndex, compactIndex) => [sourceIndex, compactIndex]));
     const columnTypesBySource = new Map(visibleIndexes.map((sourceIndex, visibleIndex) => [sourceIndex, options.columnTypes.value?.[visibleIndex]]));
+    const columnType = (sourceIndex: number) => options.allColumnTypes?.value?.[sourceIndex] ?? columnTypesBySource.get(sourceIndex);
     const columns = requiredSourceIndexes.map((sourceIndex, compactIndex) => ({
       displayName: fullColumns[sourceIndex],
       // Query results without source metadata still expose their database column
@@ -221,10 +223,11 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       // availability check so SQL SELECT can use that safe fallback.
       sourceName: sourceNames?.[sourceIndex] ?? fullColumns[sourceIndex],
       sourceIndex: compactIndex,
+      dataType: columnType(sourceIndex),
     }));
     const descriptor = DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor];
     const selectedColumnIndexes = selectedSourceIndexes.map((sourceIndex) => compactIndexBySource.get(sourceIndex)).filter((index): index is number => index !== undefined);
-    const columnTypes = requiredSourceIndexes.map((sourceIndex) => columnTypesBySource.get(sourceIndex));
+    const columnTypes = requiredSourceIndexes.map(columnType);
     const normalizeValues = descriptor.category === "json" || descriptor.category === "sql";
     const keepUnsafeJsonText = descriptor.category === "sql";
     const presentBinaryText = descriptor.category !== "sql";

@@ -194,10 +194,12 @@ pub async fn get_columns(pool: &mysql_async::Pool, schema: &str, table: &str) ->
 fn format_oracle_type(data_type: &str, precision: Option<i32>, scale: Option<i32>, length: Option<i32>) -> String {
     match data_type.to_uppercase().as_str() {
         "NUMBER" => match (precision, scale) {
-            (Some(p), Some(s)) if s > 0 => format!("NUMBER({p},{s})"),
+            (Some(p), Some(s)) if s != 0 => format!("NUMBER({p},{s})"),
             (Some(p), _) => format!("NUMBER({p})"),
+            (None, Some(s)) => format!("NUMBER(*,{s})"),
             _ => "NUMBER".to_string(),
         },
+        "FLOAT" => precision.map_or_else(|| "FLOAT".to_string(), |p| format!("FLOAT({p})")),
         "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" | "RAW" => match length {
             Some(l) => format!("{data_type}({l})"),
             None => data_type.to_string(),
@@ -293,10 +295,10 @@ fn list_foreign_keys_sql(schema: &str, table: &str) -> String {
 
 fn list_triggers_sql(schema: &str, table: &str) -> String {
     format!(
-        "SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE \
+        "SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE, OWNER \
          FROM ALL_TRIGGERS \
          WHERE TABLE_OWNER = {s} AND TABLE_NAME = {t} \
-         ORDER BY TRIGGER_NAME",
+         ORDER BY OWNER, TRIGGER_NAME",
         s = metadata_owner_sql(schema),
         t = quote_value(table),
     )
@@ -320,6 +322,7 @@ pub async fn list_triggers(pool: &mysql_async::Pool, schema: &str, table: &str) 
                 "INSTEAD OF"
             };
             TriggerInfo {
+                owner: Some(get_str(row, 3)),
                 name: get_str(row, 0),
                 event: get_str(row, 1),
                 timing: timing.to_string(),
@@ -339,6 +342,28 @@ pub async fn list_triggers(pool: &mysql_async::Pool, schema: &str, table: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trigger_metadata_uses_parent_owner_and_returns_catalog_trigger_owner() {
+        let sql = list_triggers_sql("APP", "MixedTable");
+        assert!(sql.contains("SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE, OWNER"));
+        assert!(sql.contains("WHERE TABLE_OWNER = 'APP' AND TABLE_NAME = 'MixedTable'"));
+        assert!(sql.contains("ORDER BY OWNER, TRIGGER_NAME"));
+        assert!(!sql.contains("WHERE OWNER ="));
+    }
+
+    #[test]
+    fn numeric_metadata_keeps_binary_precision_and_star_scale() {
+        for precision in [1, 24, 126] {
+            assert_eq!(format_oracle_type("FLOAT", Some(precision), Some(-127), None), format!("FLOAT({precision})"));
+        }
+        for scale in [-2, 0, 2] {
+            assert_eq!(format_oracle_type("NUMBER", None, Some(scale), None), format!("NUMBER(*,{scale})"));
+        }
+        assert_eq!(format_oracle_type("NUMBER", Some(10), Some(-2), None), "NUMBER(10,-2)");
+        assert_eq!(format_oracle_type("NUMBER", None, None, None), "NUMBER");
+        assert_eq!(format_oracle_type("FLOAT", None, None, None), "FLOAT");
+    }
 
     #[test]
     fn ob_oracle_list_objects_sql_includes_routines() {

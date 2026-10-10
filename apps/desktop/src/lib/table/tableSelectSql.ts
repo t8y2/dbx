@@ -443,6 +443,7 @@ export function normalizeWhereInput(whereInput?: string): string {
  * so the columns must be awaited before the statement is generated rather than
  * refreshed in the background.
  *
+ * * OceanBase Oracle: LOB preview selection needs column types before execution.
  * * MySQL / PostgreSQL: the large-value preview projection is derived from the
  *   column types and primary keys.
  * * Salesforce: SOQL has no `SELECT *`. With no known fields the backend builder
@@ -452,7 +453,7 @@ export function normalizeWhereInput(whereInput?: string): string {
  *   vertex/edge value instead of separate property columns.
  */
 export function requiresEagerTableMetadataForDataOpen(databaseType: DatabaseType | undefined): boolean {
-  return databaseType === "mysql" || databaseType === "postgres" || databaseType === "salesforce" || databaseType === "neo4j" || databaseType === "nebula";
+  return databaseType === "oceanbase-oracle" || databaseType === "mysql" || databaseType === "postgres" || databaseType === "salesforce" || databaseType === "neo4j" || databaseType === "nebula";
 }
 
 export async function buildTableSelectSql(options: BuildTableSelectSqlOptions): Promise<string> {

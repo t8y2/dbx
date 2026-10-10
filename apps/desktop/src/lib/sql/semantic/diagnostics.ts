@@ -1,5 +1,6 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
-import { getSqlCompletionContext, isOraclePseudoColumnName, isOracleSystemValueName } from "@/lib/sql/sqlCompletion";
+import { getSqlCompletionContext, isOraclePseudoColumnName, isOracleSystemValueName, matchesOceanBaseCompletionCacheKey } from "@/lib/sql/sqlCompletion";
+import { tokenizeSqlSemantic, tokenIsIdentifier } from "@/lib/sql/semantic/tokens";
 import { executableStatementRanges, keepsOracleStyleBlockTogether, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { DBX_TDENGINE_TBNAME_COLUMN, isTdengineStableTableType } from "@/lib/table/tableEditing";
 import type { DatabaseType, SqlColumnReference, SqlGroupByViolation, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan } from "@/types/database";
@@ -17,6 +18,7 @@ export interface SqlSemanticDiagnosticSchema {
   loadedColumnTables?: Set<string>;
   sql?: string;
   databaseType?: DatabaseType;
+  currentSchema?: string;
 }
 
 export interface SqlSemanticDiagnosticVisibleRange {
@@ -265,7 +267,7 @@ function sqlServerStatementNeedsBatchContext(sql: string): boolean {
 
 export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, schema: SqlSemanticDiagnosticSchema): SqlSemanticDiagnostic[] {
   const diagnostics: SqlSemanticDiagnostic[] = [];
-  const tables = analysis.tables.filter((table) => table.name.trim());
+  const tables = analysis.tables.filter((table) => table.name.trim()).map((table) => (schema.databaseType === "oceanbase-oracle" && schema.sql ? oceanBaseDiagnosticTableReference(table, schema.sql) : table));
   const knownTables = new Map<string, SqlTableReference>();
   const scopesById = scopesByIdMap(analysis.scopes);
   let tdengineStableTables: Set<string> | undefined;
@@ -292,7 +294,7 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
     if (!table) continue;
     if (schema.missingTables?.has(tableReferenceKey(table))) continue;
 
-    const columns = columnsForTable(table, schema.columnsByTable, schema.loadedColumnTables);
+    const columns = columnsForTable(table, schema.columnsByTable, schema.loadedColumnTables, schema.currentSchema);
     if (!columns) continue;
 
     const columnNames = new Set(columns.map((item) => normalizeName(item.name)));
@@ -592,7 +594,13 @@ function statementIndexAt(sql: string, offset: number): number {
   return statementIndex;
 }
 
-function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, SqlCompletionColumn[]>, loadedColumnTables?: Set<string>): SqlCompletionColumn[] | null {
+export function oceanBaseDiagnosticTableReference(table: SqlTableReference, sql: string) {
+  const range = sqlTextSpanToOffsetRange(sql, table.span);
+  const identifiers = range ? tokenizeSqlSemantic(sql.slice(range.from, range.to), "oracle").filter(tokenIsIdentifier) : [];
+  return { ...table, nameQuoted: !!identifiers[table.schema ? 1 : 0]?.quote, schemaQuoted: !!table.schema && !!identifiers[0]?.quote };
+}
+
+function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, SqlCompletionColumn[]>, loadedColumnTables?: Set<string>, currentSchema?: string): SqlCompletionColumn[] | null {
   const inlineColumns = (table as SqlTableReference & { columns?: string[] }).columns;
   if (inlineColumns && inlineColumns.length > 0) {
     return inlineColumns.map((name) => ({
@@ -601,6 +609,8 @@ function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, S
       schema: table.schema ?? undefined,
     }));
   }
+  const scopedColumns = [...columnsByTable].filter(([key]) => matchesOceanBaseCompletionCacheKey(key, table, currentSchema));
+  if (scopedColumns.length > 0) return scopedColumns.length === 1 ? scopedColumns[0]![1] : null;
   const keys = table.schema ? [table.database ? `${table.database}.${table.schema}.${table.name}` : undefined, `${table.schema}.${table.name}`, table.name].filter((key): key is string => !!key) : [table.name, ...keysWithTableName(columnsByTable, table.name)];
   for (const key of keys) {
     const normalizedKey = normalizeName(key);

@@ -4,6 +4,11 @@ import { keymap as codeMirrorKeymap } from "@codemirror/view";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import StructureIndexColumnPicker from "./StructureIndexColumnPicker.vue";
+import OracleTriggerDefinitionDialog from "./OracleTriggerDefinitionDialog.vue";
+import { oracleTriggerOwner } from "@/lib/table/oracleTriggerDefinition";
+import OracleObjectGrantsButton from "@/components/admin/OracleObjectGrantsButton.vue";
+import OceanbaseIndexExpressions from "./OceanbaseIndexExpressions.vue";
+import { oceanbaseIndexCapabilities, oceanbasePhysicalIndexColumns, quoteOceanbaseIndexColumn } from "@/lib/table/oceanbaseIndexCapabilities";
 
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
@@ -54,6 +59,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import OraclePrimaryKeyEditor from "./OraclePrimaryKeyEditor.vue";
+import OracleForeignKeyEditor from "./OracleForeignKeyEditor.vue";
+import OracleCheckEditor from "./OracleCheckEditor.vue";
+import OracleUniqueEditor from "./OracleUniqueEditor.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -1386,8 +1395,10 @@ const indexTypesByDb: Record<string, string[]> = {
   sqlite: ["BTREE"],
   "gaussdb-m": ["UBTREE"],
 };
+const obIndexCapabilities = computed(() => oceanbaseIndexCapabilities(connection.value?.database_info?.productVersion));
 const indexTypeOptions = computed(() => {
   if (!structureCapabilities.value.indexType) return [];
+  if (databaseType.value === "oceanbase-oracle") return [...obIndexCapabilities.value.types];
   if (connection.value?.driver_profile?.toLowerCase() === "gaussdb-m") {
     return indexTypesByDb["gaussdb-m"];
   }
@@ -2601,6 +2612,7 @@ function scheduleSqlPreviewRefresh() {
 
 function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
   return {
+    databaseVersion: connection.value?.database_info?.productVersion,
     databaseType: databaseType.value,
     driverProfile: connection.value?.driver_profile,
     schema: props.schema,
@@ -4539,6 +4551,31 @@ function isColumnCharsetDisabled(column: EditableStructureColumn): boolean {
   return !isMysqlCharacterDataType(column.dataType);
 }
 
+async function confirmPrimaryKeyChange(sql: string): Promise<boolean> {
+  const config = store.getConfig(props.connectionId);
+  const context = productionContextForDatabase(config, props.database);
+  return (
+    !context.active ||
+    (await productionSafetyStore.requestConfirmation({
+      sql,
+      connectionName: config?.name,
+      database: props.database,
+      productionDatabases: context.databases,
+      source: t("production.sourceStructure"),
+    }))
+  );
+}
+
+async function primaryKeyChanged(result: { success: boolean }) {
+  const match = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName };
+  invalidateTableMetadataCache(match);
+  await invalidateObjectMetadataCache(match);
+  await invalidateObjectDdl(ddlRequest());
+  loadedMetadataFacets.clear();
+  await loadStructure(true, { columns: true, indexes: true, constraints: true, foreignKeys: true, triggers: false, partitions: false, tableComment: false }, true, { forceMetadata: true, forceDdl: true });
+  if (result.success) emit("saved", false);
+}
+
 function isPrimaryKeyDisabled(column: EditableStructureColumn): boolean {
   if (column.markedForDrop) return true;
   if (isCreateMode.value || structureCapabilities.value.alterPrimaryKey) return false;
@@ -4670,6 +4707,7 @@ function canToggleIndexColumn(index: EditableStructureIndex, name: string): bool
 }
 
 function canAddColumnsToIndex(index: EditableStructureIndex, targets: EditableStructureColumn[]): boolean {
+  if (isOceanbaseFunctionIndex(index)) return false;
   const names = [...index.columns, ...targets.filter((column) => !indexContainsColumn(index, column)).map((column) => column.name.trim())];
   return !indexColumnsIssue(index, names);
 }
@@ -4683,9 +4721,25 @@ function onIndexUniqueChange(index: EditableStructureIndex, unique: boolean) {
 function onIndexTypeChange(index: EditableStructureIndex, value: unknown) {
   const type = String(value ?? "");
   if (!canEditIndexDraft(index) || indexColumnsIssue(index, index.columns, type, false)) return;
+  if (databaseType.value === "oceanbase-oracle") {
+    if (!indexTypeOptions.value.includes(type) || !canChangeOceanbaseIndexType(index, type)) return;
+    if (type === "FUNCTION-BASED NORMAL" && !isOceanbaseFunctionIndex(index)) {
+      index.columns = index.columns.map(quoteOceanbaseIndexColumn);
+    } else if (type === "NORMAL" && isOceanbaseFunctionIndex(index)) {
+      index.columns = oceanbasePhysicalIndexColumns(index.columns, availableColumnNames.value)!;
+    }
+  }
   index.indexType = type;
   if (structureIndexKind({ indexType: type }) === "fulltext" || structureIndexKind({ indexType: type }) === "spatial") index.isUnique = false;
   refreshAutoIndexName(index, true);
+}
+
+function isOceanbaseFunctionIndex(index: EditableStructureIndex): boolean {
+  return databaseType.value === "oceanbase-oracle" && index.indexType.trim().toUpperCase() === "FUNCTION-BASED NORMAL";
+}
+
+function canChangeOceanbaseIndexType(index: EditableStructureIndex, type: string): boolean {
+  return !isOceanbaseFunctionIndex(index) || type !== "NORMAL" || oceanbasePhysicalIndexColumns(index.columns, availableColumnNames.value) !== undefined;
 }
 
 function toggleIncludedColumn(index: EditableStructureIndex, col: string) {
@@ -4707,6 +4761,7 @@ function toggleDropIndex(index: EditableStructureIndex) {
 function canEditIndexDraft(index: EditableStructureIndex): boolean {
   if (indexesLoading.value) return false;
   if (index.markedForDrop || index.isPrimary) return false;
+  if (databaseType.value === "oceanbase-oracle" && index.indexType && !obIndexCapabilities.value.types.includes(index.indexType)) return false;
   if (!index.original) return structureCapabilities.value.createIndex;
   return structureCapabilities.value.rebuildIndex && structureCapabilities.value.createIndex && structureCapabilities.value.dropIndex;
 }
@@ -4810,6 +4865,32 @@ function canDropIndex(index: EditableStructureIndex): boolean {
 const canEditForeignKeys = computed(() => structureCapabilities.value.foreignKey);
 const canEditTriggers = computed(() => structureDialect.value === "mysql" || structureDialect.value === "oracle" || structureDialect.value === "sqlserver");
 const isOracleTriggerEditor = computed(() => structureDialect.value === "oracle");
+const triggerDefinitionOpen = ref(false);
+const triggerDefinitionName = ref("");
+const triggerDefinitionSchema = ref("");
+const canEditFullTriggerDefinition = computed(() => databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle");
+function openTriggerDefinition(trigger: EditableStructureTrigger) {
+  if (!trigger.original || trigger.markedForDrop || triggersLoading.value) return;
+  if (triggers.value.some(triggerChanged)) {
+    errorMessage.value = t("structureEditor.triggerPendingDrafts");
+    return;
+  }
+  const owner = oracleTriggerOwner(trigger.original);
+  if (!owner) {
+    errorMessage.value = t("structureEditor.triggerOwnerUnknown");
+    return;
+  }
+  triggerDefinitionName.value = trigger.original.name;
+  triggerDefinitionSchema.value = owner;
+  triggerDefinitionOpen.value = true;
+}
+async function refreshAfterTriggerDefinitionSave() {
+  if (triggers.value.some(triggerChanged)) {
+    errorMessage.value = t("structureEditor.triggerPendingDrafts");
+    return;
+  }
+  await loadStructure(true, visibleTableStructureRefreshScope("triggers"), false, { forceDdl: true, forceMetadata: true });
+}
 const isSqlServerTriggerEditor = computed(() => structureDialect.value === "sqlserver");
 
 function generatedForeignKeyName(column = ""): string {
@@ -5400,6 +5481,7 @@ watch(
     () => props.connectionId,
     () => props.database,
     databaseType,
+    () => connection.value?.database_info?.productVersion,
     () => props.schema,
     () => props.tableName,
     newTableName,
@@ -5649,6 +5731,7 @@ watch(
               <TabsTrigger v-if="showPartitionsTab" value="partitions">{{ t("structureEditor.partitions") }}</TabsTrigger>
             </TabsList>
             <div class="flex shrink-0 items-center gap-1.5">
+              <OracleObjectGrantsButton v-if="!isCreateMode" :connection="connection" :owner="metadataSchema" :object-name="tableName" />
               <Button v-if="!isCreateMode" size="sm" variant="outline" :class="structureToolbarButtonClass" data-structure-view-data @click="emit('viewData')">
                 <Rows3 :class="structureIconClass" />
                 {{ t("contextMenu.viewData") }}
@@ -6328,6 +6411,7 @@ watch(
           </TabsContent>
 
           <TabsContent ref="indexesScrollerRef" v-if="tableMetadataCapabilities.indexes" value="indexes" class="col-start-1 row-start-2 structure-table-scroller m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('indexes', $event)">
+            <p v-if="databaseType === 'oceanbase-oracle'" class="px-3 py-2 text-xs text-muted-foreground" data-oceanbase-index-capability>{{ t(`structureEditor.obIndexVersion_${obIndexCapabilities.status}`) }}</p>
             <div v-if="indexesLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -6382,7 +6466,8 @@ watch(
                     </div>
                   </td>
                   <td :class="[structureCellClass, 'overflow-hidden']">
-                    <StructureIndexColumnPicker v-if="canEditIndexDraft(index)" :selected="index.columns" :options="indexColumnPickerOptions(index)" :placeholder="t('structureEditor.indexColumnsPlaceholder')" :trigger-class="structureMonoControlClass" @toggle="toggleIndexColumn(index, $event)">
+                    <OceanbaseIndexExpressions v-if="canEditIndexDraft(index) && isOceanbaseFunctionIndex(index)" v-model="index.columns" />
+                    <StructureIndexColumnPicker v-else-if="canEditIndexDraft(index)" :selected="index.columns" :options="indexColumnPickerOptions(index)" :placeholder="t('structureEditor.indexColumnsPlaceholder')" :trigger-class="structureMonoControlClass" @toggle="toggleIndexColumn(index, $event)">
                       <template #type="{ column }">
                         <span :class="[structureDataTypeToneClass(column.dataType), 'structure-data-type-option']">{{ column.dataType }}</span>
                       </template>
@@ -6401,12 +6486,12 @@ watch(
                     />
                   </td>
                   <td :class="structureCellClass">
-                    <Select v-if="indexTypeOptions.length > 0" :model-value="index.indexType || 'BTREE'" :disabled="!canEditIndexDraft(index)" data-index-type @update:model-value="(value: unknown) => onIndexTypeChange(index, value)">
+                    <Select v-if="indexTypeOptions.length > 0" :model-value="index.indexType || (databaseType === 'oceanbase-oracle' ? 'NORMAL' : 'BTREE')" :disabled="!canEditIndexDraft(index)" data-index-type @update:model-value="(value: unknown) => onIndexTypeChange(index, value)">
                       <SelectTrigger class="structure-grid-control h-[var(--structure-control-height)] w-full rounded-[6px] px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem v-for="opt in indexTypeOptions" :key="opt" :value="opt" :disabled="!!indexColumnsIssue(index, index.columns, opt, false)">{{ opt }}</SelectItem>
+                        <SelectItem v-for="opt in indexTypeOptions" :key="opt" :value="opt" :disabled="!!indexColumnsIssue(index, index.columns, opt, false) || !canChangeOceanbaseIndexType(index, opt)">{{ opt }}</SelectItem>
                       </SelectContent>
                     </Select>
                     <Input v-else :model-value="index.indexType" :class="structureMonoControlClass" placeholder="BTREE" :disabled="!canEditIndexDraft(index) || !structureCapabilities.indexType" @update:model-value="(value: unknown) => onIndexTypeChange(index, value)" />
@@ -6475,6 +6560,20 @@ watch(
             class="col-start-1 row-start-2 structure-card-scroller m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]"
             @scroll.passive="onStructureContentScroll('foreignKeys', $event)"
           >
+            <OracleForeignKeyEditor
+              v-if="(databaseType === 'oracle' || databaseType === 'oceanbase-oracle') && !isCreateMode && !connection?.read_only"
+              :connection-id="connectionId"
+              :database="database"
+              :schema="metadataSchema || database"
+              :table-name="tableName || ''"
+              :columns="columns.map((column) => column.name)"
+              :names="[...new Set(foreignKeys.map((key) => key.original?.name ?? key.name))]"
+              :oceanbase="databaseType === 'oceanbase-oracle'"
+              :disabled="saving || loading || foreignKeysLoading || hasPendingStructureChanges() || ddlDirty"
+              :confirm="confirmPrimaryKeyChange"
+              @busy="saving = $event"
+              @changed="primaryKeyChanged"
+            />
             <div v-if="foreignKeysLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -6534,6 +6633,46 @@ watch(
             class="col-start-1 row-start-2 structure-card-scroller m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]"
             @scroll.passive="onStructureContentScroll('constraints', $event)"
           >
+            <OracleCheckEditor
+              v-if="(databaseType === 'oracle' || databaseType === 'oceanbase-oracle') && !isCreateMode && !connection?.read_only"
+              :connection-id="connectionId"
+              :database="database"
+              :schema="metadataSchema"
+              :table-name="tableName"
+              :names="constraints.filter((item) => item.constraint_type.toUpperCase() === 'CHECK').map((item) => item.name)"
+              :oceanbase="databaseType === 'oceanbase-oracle'"
+              :disabled="saving || loading || constraintsLoading || hasPendingStructureChanges() || ddlDirty"
+              :confirm="confirmPrimaryKeyChange"
+              @busy="saving = $event"
+              @changed="primaryKeyChanged"
+            />
+            <OracleUniqueEditor
+              v-if="(databaseType === 'oracle' || databaseType === 'oceanbase-oracle') && !isCreateMode && !connection?.read_only"
+              :connection-id="connectionId"
+              :database="database"
+              :schema="metadataSchema"
+              :table-name="tableName"
+              :columns="columns.map((column) => column.name)"
+              :names="constraints.filter((item) => item.constraint_type.toUpperCase() === 'UNIQUE').map((item) => item.name)"
+              :oceanbase="databaseType === 'oceanbase-oracle'"
+              :disabled="saving || loading || constraintsLoading || hasPendingStructureChanges() || ddlDirty"
+              :confirm="confirmPrimaryKeyChange"
+              @busy="saving = $event"
+              @changed="primaryKeyChanged"
+            />
+            <OraclePrimaryKeyEditor
+              v-if="(databaseType === 'oracle' || databaseType === 'oceanbase-oracle') && !isCreateMode && !connection?.read_only"
+              :oceanbase="databaseType === 'oceanbase-oracle'"
+              :connection-id="connectionId"
+              :database="database"
+              :schema="metadataSchema || database"
+              :table-name="tableName || ''"
+              :columns="columns.filter((column) => column.original).map((column) => column.original!.name)"
+              :disabled="saving || loading || constraintsLoading || hasPendingStructureChanges() || ddlDirty"
+              :confirm="confirmPrimaryKeyChange"
+              @busy="saving = $event"
+              @changed="primaryKeyChanged"
+            />
             <div v-if="constraintsLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -6592,7 +6731,9 @@ watch(
                       @blur="renamingTriggerId = null"
                     />
                   </template>
-                  <span v-else class="min-w-0 flex-1 truncate font-mono" :class="trigger.name ? '' : 'italic text-muted-foreground'" :title="trigger.name || t('structureEditor.triggerName')">{{ trigger.name || t("structureEditor.triggerName") }}</span>
+                  <span v-else class="min-w-0 flex-1 truncate font-mono" :class="trigger.name ? '' : 'italic text-muted-foreground'" :title="trigger.original?.owner ? `${trigger.original.owner}.${trigger.name}` : trigger.name || t('structureEditor.triggerName')">{{
+                    trigger.original?.owner ? `${trigger.original.owner}.${trigger.name}` : trigger.name || t("structureEditor.triggerName")
+                  }}</span>
                   <Button v-if="renamingTriggerId === trigger.id" variant="ghost" size="sm" :class="structureToolbarButtonClass" :title="t('structureEditor.triggerName')" @click.stop="renamingTriggerId = null">
                     <Check :class="structureIconClass" />
                   </Button>
@@ -6624,7 +6765,8 @@ watch(
                     <Trash2 :class="structureIconClass" />
                     {{ trigger.markedForDrop ? t("structureEditor.restore") : t("structureEditor.drop") }}
                   </Button>
-                  <Button v-else variant="ghost" size="sm" :class="structureToolbarButtonClass" @click.stop="removeNewTrigger(trigger)">
+                  <Button v-if="trigger.original && canEditFullTriggerDefinition" variant="outline" size="sm" :disabled="trigger.markedForDrop || triggersLoading" @click.stop="openTriggerDefinition(trigger)">{{ t("structureEditor.editTriggerDefinition") }}</Button>
+                  <Button v-else-if="!trigger.original" variant="ghost" size="sm" :class="structureToolbarButtonClass" @click.stop="removeNewTrigger(trigger)">
                     <X :class="structureIconClass" />
                     {{ t("structureEditor.remove") }}
                   </Button>
@@ -7063,6 +7205,16 @@ watch(
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    <OracleTriggerDefinitionDialog
+      v-model:open="triggerDefinitionOpen"
+      :connection-id="connectionId"
+      :database="database"
+      :schema="triggerDefinitionSchema"
+      :name="triggerDefinitionName"
+      :table-schema="metadataSchema || database"
+      :table-name="tableName || ''"
+      @changed="refreshAfterTriggerDefinitionSave"
+    />
   </div>
 </template>
 

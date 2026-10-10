@@ -39,9 +39,30 @@ fn build_trigger_sql_with_mode(
     let mut statements = Vec::new();
 
     for trigger in &options.triggers {
+        if dialect == StructureDialect::Oracle && trigger.original.is_some() && for_new_table {
+            if has_trigger_edit(trigger) {
+                warnings.push(format!(
+                    "Cloning existing Oracle trigger \"{}\" requires its complete source and explicit owner mapping.",
+                    trigger.name
+                ));
+            }
+            continue;
+        }
         if trigger.marked_for_drop {
             if let Some(original) = &trigger.original {
-                statements.push(drop_trigger_sql(dialect, options.schema.as_deref(), &original.name));
+                let schema = if dialect == StructureDialect::Oracle {
+                    let Some(owner) = original.owner.as_deref().filter(|owner| !owner.trim().is_empty()) else {
+                        warnings.push(format!(
+                            "Cannot drop Oracle trigger \"{}\": its catalog owner is unknown.",
+                            original.name
+                        ));
+                        continue;
+                    };
+                    Some(owner)
+                } else {
+                    options.schema.as_deref()
+                };
+                statements.push(drop_trigger_sql(dialect, schema, &original.name));
             }
             continue;
         }
@@ -479,6 +500,47 @@ fn normalize_statement(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oracle_drop_requires_catalog_owner_and_clone_never_drops_originals() {
+        for database_type in
+            [crate::models::connection::DatabaseType::Oracle, crate::models::connection::DatabaseType::OceanbaseOracle]
+        {
+            let mut options: TableStructureSqlOptions = serde_json::from_value(serde_json::json!({
+                "schema": "APP", "tableName": "T",
+                "triggers": [
+                    {"id":"a", "name":"AUDIT", "markedForDrop":true, "original":{"name":"AUDIT", "owner":"A", "event":"INSERT", "timing":"AFTER"}},
+                    {"id":"b", "name":"AUDIT", "markedForDrop":true, "original":{"name":"AUDIT", "owner":"B\"Owner", "event":"INSERT", "timing":"AFTER"}},
+                    {"id":"legacy", "name":"AUDIT", "markedForDrop":true, "original":{"name":"AUDIT", "event":"INSERT", "timing":"AFTER"}}
+                ]
+            })).unwrap();
+            options.database_type = Some(database_type);
+            assert_eq!(options.triggers[2].original.as_ref().unwrap().owner, None);
+            let mut warnings = Vec::new();
+            assert_eq!(
+                build_trigger_sql(&options, &mut warnings),
+                vec!["DROP TRIGGER \"A\".\"AUDIT\";", "DROP TRIGGER \"B\"\"Owner\".\"AUDIT\";"]
+            );
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("catalog owner is unknown"));
+            warnings.clear();
+            assert!(build_trigger_sql_for_new_table(&options, &mut warnings).is_empty());
+            assert_eq!(warnings.len(), 3);
+        }
+    }
+
+    #[test]
+    fn mysql_drop_keeps_table_schema_when_owner_is_absent() {
+        let mut options: TableStructureSqlOptions = serde_json::from_value(serde_json::json!({
+            "schema":"APP", "tableName":"T", "triggers":[
+                {"id":"legacy", "name":"AUDIT", "markedForDrop":true, "original":{"name":"AUDIT", "event":"INSERT", "timing":"AFTER"}}
+            ]
+        })).unwrap();
+        options.database_type = Some(crate::models::connection::DatabaseType::Mysql);
+        let mut warnings = Vec::new();
+        assert_eq!(build_trigger_sql(&options, &mut warnings), vec!["DROP TRIGGER `APP`.`AUDIT`;"]);
+        assert!(warnings.is_empty());
+    }
 
     #[test]
     fn sqlserver_trigger_body_splits_after_event_list_not_execute_as() {

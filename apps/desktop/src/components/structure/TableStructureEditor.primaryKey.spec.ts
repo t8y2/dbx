@@ -2,6 +2,7 @@
 
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { EditableStructureIndex } from "@/lib/table/tableStructureEditorSql";
 
 const mocks = vi.hoisted(() => ({
   connection: {
@@ -9,6 +10,7 @@ const mocks = vi.hoisted(() => ({
     name: "Dameng",
     db_type: "dameng",
     driver_label: "Dameng",
+    database_info: { productVersion: undefined as string | undefined },
   },
   ensureConnected: vi.fn(),
   executeQuery: vi.fn(),
@@ -25,6 +27,8 @@ const mocks = vi.hoisted(() => ({
   getTablePartitionStatus: vi.fn(),
   getTableOwner: vi.fn(),
   buildTableOwnerChangeSql: vi.fn(),
+  previewForeignKeyChange: vi.fn(),
+  applyForeignKeyChange: vi.fn(),
   editorSettings: {
     structureEditorDensity: "compact",
     sqlFormatter: {},
@@ -34,7 +38,10 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async () => {
+  const { ref } = await import("vue");
+  return { useI18n: () => ({ t: (key: string) => key, locale: ref("en-US") }) };
+});
 
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -200,7 +207,8 @@ vi.mock("@/components/ui/searchable-select", async () => {
   };
 });
 vi.mock("@/components/ui/select", async () => {
-  const { defineComponent, h } = await import("vue");
+  const { defineComponent, h, provide, inject } = await import("vue");
+  const selection = Symbol("selection");
   const Div = defineComponent({
     inheritAttrs: false,
     setup:
@@ -208,15 +216,36 @@ vi.mock("@/components/ui/select", async () => {
       () =>
         h("div", attrs, slots.default?.()),
   });
-  return { Select: Div, SelectContent: Div, SelectItem: Div, SelectTrigger: Div, SelectValue: Div };
+  const Select = defineComponent({
+    props: { disabled: Boolean },
+    emits: ["update:modelValue"],
+    setup(props, { emit, slots }) {
+      provide(selection, (value: string) => {
+        if (!props.disabled) emit("update:modelValue", value);
+      });
+      return () => h("div", slots.default?.());
+    },
+  });
+  const SelectItem = defineComponent({
+    props: { value: { type: String, required: true }, disabled: Boolean },
+    setup(props, { slots }) {
+      const select = inject<(value: string) => void>(selection)!;
+      return () => h("button", { "data-select-option": props.value, disabled: props.disabled, onClick: () => select(props.value) }, slots.default?.());
+    },
+  });
+  return { Select, SelectContent: Div, SelectItem, SelectTrigger: Div, SelectValue: Div };
 });
 
-vi.mock("@/stores/connectionStore", () => ({
-  useConnectionStore: () => ({
-    ensureConnected: mocks.ensureConnected,
-    getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
-  }),
-}));
+vi.mock("@/stores/connectionStore", async () => {
+  const { reactive } = await import("vue");
+  mocks.connection = reactive(mocks.connection);
+  return {
+    useConnectionStore: () => ({
+      ensureConnected: mocks.ensureConnected,
+      getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
+    }),
+  };
+});
 vi.mock("@/stores/productionSafetyStore", () => ({ useProductionSafetyStore: () => ({ requestConfirmation: vi.fn() }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ tableStructureRefreshVersion: () => 0 }) }));
 vi.mock("@/stores/historyStore", () => ({ useHistoryStore: () => ({ add: vi.fn() }) }));
@@ -246,6 +275,8 @@ vi.mock("@/lib/backend/api", () => ({
   buildTableOwnerChangeSql: mocks.buildTableOwnerChangeSql,
   getTablePartitionStatus: mocks.getTablePartitionStatus,
   getTableOwner: mocks.getTableOwner,
+  previewForeignKeyChange: mocks.previewForeignKeyChange,
+  applyForeignKeyChange: mocks.applyForeignKeyChange,
 }));
 
 import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
@@ -256,7 +287,7 @@ function draft(isPrimaryKey = false, identity?: { seed: number; increment: numbe
   const isNullable = identity ? false : !isPrimaryKey;
   return {
     initialized: true,
-    activeTab: "columns" as const,
+    activeTab: "columns" as "columns" | "foreignKeys" | "indexes",
     newTableName: "",
     tableComment: "",
     originalTableComment: "",
@@ -283,7 +314,7 @@ function draft(isPrimaryKey = false, identity?: { seed: number; increment: numbe
         markedForDrop: false,
       },
     ],
-    indexes: [],
+    indexes: [] as EditableStructureIndex[],
     foreignKeys: foreignKeyRefTable
       ? [
           {
@@ -341,7 +372,7 @@ function draftWithColumns(count: number) {
 async function mountEditor(
   databaseType: "mysql" | "sqlserver" | "postgres" | "sqlite" | "oracle" | "oceanbase-oracle" | "iris" | "dameng" | "duckdb" | "informix" | "clickhouse",
   isPrimaryKey = false,
-  options: { database?: string; dynamicTypes?: string[]; identity?: { seed: number; increment: number }; tableName?: string; columnName?: string; foreignKeyRefTable?: string; draftOverride?: ReturnType<typeof draft>; onDraftUpdate?: (value: unknown) => void } = {},
+  options: { database?: string; schema?: string; dynamicTypes?: string[]; identity?: { seed: number; increment: number }; tableName?: string; columnName?: string; foreignKeyRefTable?: string; draftOverride?: ReturnType<typeof draft>; onDraftUpdate?: (value: unknown) => void } = {},
 ) {
   mocks.connection.db_type = databaseType;
   mocks.connection.name = databaseType;
@@ -355,7 +386,7 @@ async function mountEditor(
   const app = createApp(TableStructureEditor, {
     connectionId: mocks.connection.id,
     database: options.database ?? "test",
-    schema: "SYSDBA",
+    schema: "schema" in options ? options.schema : "SYSDBA",
     tableName: options.tableName ?? "users",
     draft: options.draftOverride ?? draft(isPrimaryKey, options.identity, options.columnName, options.foreignKeyRefTable),
     "onUpdate:draft": options.onDraftUpdate,
@@ -419,6 +450,7 @@ function buttonWithText(root: HTMLElement, text: string): HTMLButtonElement {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.connection.database_info.productVersion = undefined;
   mocks.editorSettings.generateSqlQuoteIdentifiers = true;
   mocks.previewSqliteTableStructureChange.mockResolvedValue({ statements: [], warnings: [], schemaRevision: "sqlite-revision" });
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
@@ -447,6 +479,90 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor primary key editing", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("opens the actual %s foreign-key editor with complete identity and blocks a dirty parent draft", async (databaseType) => {
+    const value = draft();
+    value.activeTab = "foreignKeys";
+    mocks.previewForeignKeyChange.mockResolvedValue({ statements: [], revision: "preview", currentConstraint: null, affectedObjects: [], recoveryStatements: [] });
+    const root = await mountEditor(databaseType, false, { database: "Owner", schema: undefined, draftOverride: value });
+    const section = root.querySelector<HTMLElement>('[aria-label="foreignKeyEditor.title"]')!;
+    const add = buttonWithText(section, "foreignKeyEditor.add");
+    await vi.waitFor(() => expect(add.disabled).toBe(false));
+    add.click();
+    await nextTick();
+    expect(section.querySelector<HTMLInputElement>("[data-ref-schema]")?.value).toBe("Owner");
+    expect(section.querySelector<HTMLSelectElement>("[data-source-column]")?.value).toBe("id");
+    buttonWithText(section, "constraintEditor.preview").click();
+    await vi.waitFor(() => expect(mocks.previewForeignKeyChange).toHaveBeenCalledWith(mocks.connection.id, "Owner", expect.objectContaining({ schema: "Owner", tableName: "users", originalName: null })));
+    await vi.waitFor(() => expect(buttonWithText(section, "common.cancel").disabled).toBe(false));
+    buttonWithText(section, "common.cancel").click();
+    await nextTick();
+    const comment = root.querySelector<HTMLInputElement>('input[placeholder="structureEditor.tableCommentPlaceholder"]')!;
+    comment.value = "unsaved parent change";
+    comment.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    const dirtySection = await vi.waitFor(() => {
+      const current = root.querySelector<HTMLElement>('[aria-label="foreignKeyEditor.title"]')!;
+      expect(buttonWithText(current, "foreignKeyEditor.add").disabled).toBe(true);
+      return current;
+    });
+    buttonWithText(dirtySection, "foreignKeyEditor.add").click();
+    await nextTick();
+    expect(dirtySection.querySelector("[data-name]")).toBeNull();
+    expect(mocks.applyForeignKeyChange).not.toHaveBeenCalled();
+  });
+
+  it("binds OceanBase version and expression mode through the actual parent editor", async () => {
+    mocks.connection.database_info.productVersion = "4.2.5.7";
+    const value = draft(false, undefined, 'Mixed"Column');
+    value.activeTab = "indexes";
+    value.indexes = [{ id: "new:IX", name: "IX", columns: ['Mixed"Column'], indexType: "NORMAL", isUnique: true, isPrimary: false, filter: "", includedColumns: [], comment: "", markedForDrop: false }];
+    const root = await mountEditor("oceanbase-oracle", false, { draftOverride: value });
+    expect(root.querySelector('[data-select-option="BITMAP"]')).toBeNull();
+    root.querySelector<HTMLButtonElement>('[data-select-option="FUNCTION-BASED NORMAL"]')!.click();
+    await nextTick();
+    const input = root.querySelector<HTMLTextAreaElement>("[data-oceanbase-index-expressions] textarea")!;
+    expect(input.value).toBe('"Mixed""Column"');
+    const expression = 'SUBSTR(\n"Mixed""Column", 1, 3)';
+    input.value = expression;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() =>
+      expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          databaseType: "oceanbase-oracle",
+          databaseVersion: "4.2.5.7",
+          indexes: [expect.objectContaining({ indexType: "FUNCTION-BASED NORMAL", columns: [expression], isUnique: true })],
+        }),
+      ),
+    );
+    expect(root.querySelector<HTMLButtonElement>('[data-select-option="NORMAL"]')!.disabled).toBe(true);
+    mocks.connection.database_info.productVersion = undefined;
+    await nextTick();
+    expect(root.querySelector("[data-oceanbase-index-expressions] textarea")).toBeNull();
+    expect(root.textContent).toContain(expression);
+    expect(root.querySelector('[data-select-option="FUNCTION-BASED NORMAL"]')).toBeNull();
+    await vi.waitFor(() =>
+      expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          databaseVersion: undefined,
+          indexes: [expect.objectContaining({ indexType: "FUNCTION-BASED NORMAL", columns: [expression] })],
+        }),
+      ),
+    );
+  });
+
+  it.each([undefined, "4.3.5.1"])("limits unknown OceanBase version %s without changing native Oracle choices", async (version) => {
+    mocks.connection.database_info.productVersion = version;
+    const value = draft();
+    value.activeTab = "indexes";
+    value.indexes = [{ id: "new:IX", name: "IX", columns: ["id"], indexType: "NORMAL", isUnique: false, isPrimary: false, filter: "", includedColumns: [], comment: "", markedForDrop: false }];
+    const root = await mountEditor("oceanbase-oracle", false, { draftOverride: value });
+    expect(root.querySelector('[data-select-option="NORMAL"]')).not.toBeNull();
+    expect(root.querySelector('[data-select-option="FUNCTION-BASED NORMAL"]')).toBeNull();
+    expect(root.querySelector('[data-select-option="BITMAP"]')).toBeNull();
+    const oracle = await mountEditor("oracle", false, { draftOverride: value });
+    expect(oracle.querySelector('[data-select-option="BITMAP"]')).not.toBeNull();
+  });
+
   it("allows enabling identity on an existing Dameng integer column", async () => {
     const root = await mountEditor("dameng");
     const identity = columnPropertyCheckbox(root, "structureEditor.identity");

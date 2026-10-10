@@ -1,4 +1,14 @@
+pub mod oracle_constraint_change;
+pub mod oracle_jobs;
+pub mod oracle_role_admin;
+mod oracle_routines;
+mod oracle_security_write;
+pub mod oracle_types;
+pub mod oracle_user_admin;
 pub mod table_structure_sql;
+pub use oracle_routines::{
+    prepare_schema_diff_core, schema_diff_routine_context, validate_schema_diff_routines, RoutineValidation,
+};
 
 pub use dbx_drivers::metadata::sqlite_ddl;
 
@@ -24,6 +34,8 @@ mod agent_pg_sequences;
 mod external_table_filter_tests;
 mod kingbase;
 mod mongodb_columns;
+mod oceanbase_oracle_space;
+mod oceanbase_oracle_statistics;
 pub mod plugin_metadata;
 #[cfg(test)]
 mod plugin_metadata_tests;
@@ -998,6 +1010,13 @@ pub async fn list_tables_core(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
+    let db_config = connection_config(state, connection_id).await;
+    if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
+        validate_oceanbase_metadata_page(limit, offset)?;
+        if limit == Some(0) {
+            return Ok(vec![]);
+        }
+    }
     let metadata_session = EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "tables").await;
     let result = retry_metadata_connection_for_session(
         state,
@@ -1515,10 +1534,12 @@ fn oracle_synonym_target_from_query_result(result: db::QueryResult) -> Option<Or
 fn oracle_column_type(data_type: &str, precision: Option<i32>, scale: Option<i32>, length: Option<i32>) -> String {
     match data_type.to_ascii_uppercase().as_str() {
         "NUMBER" => match (precision, scale) {
-            (Some(precision), Some(scale)) if scale > 0 => format!("NUMBER({precision},{scale})"),
+            (Some(precision), Some(scale)) if scale != 0 => format!("NUMBER({precision},{scale})"),
             (Some(precision), _) => format!("NUMBER({precision})"),
+            (None, Some(scale)) => format!("NUMBER(*,{scale})"),
             _ => "NUMBER".to_string(),
         },
+        "FLOAT" => precision.map_or_else(|| "FLOAT".to_string(), |precision| format!("FLOAT({precision})")),
         "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" | "RAW" => match length {
             Some(length) => format!("{data_type}({length})"),
             None => data_type.to_string(),
@@ -2416,6 +2437,7 @@ async fn list_tables_once(
         if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
             let use_mongodb_collection_listing = uses_mongodb_agent_collection_listing(db_config.as_ref());
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
+            let is_oceanbase = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle);
             let is_tdengine = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Tdengine);
             let use_agent_table_paging = db_config.as_ref().is_some_and(supports_agent_table_paging);
             let filter_locally_after_oracle_comments =
@@ -2501,7 +2523,7 @@ async fn list_tables_once(
                     }
                     let final_offset = if filter_locally_after_comments || force_local_table_name_filter {
                         offset
-                    } else if agent_paging_likely_applied(use_agent_table_paging, limit, tables.len()) {
+                    } else if is_oceanbase || agent_paging_likely_applied(use_agent_table_paging, limit, tables.len()) {
                         Some(0)
                     } else {
                         offset
@@ -5497,6 +5519,39 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn routine_completion_wire_distinguishes_legacy_agents_from_empty_searches() {
+        let legacy: super::AgentCompletionAssistantResponse = serde_json::from_value(serde_json::json!({
+            "candidates": [], "incomplete": false, "fallback_used": false
+        }))
+        .unwrap();
+        assert!(!legacy.routine_search_supported);
+        let current: super::AgentCompletionAssistantResponse = serde_json::from_value(serde_json::json!({
+            "candidates": [], "incomplete": false, "fallback_used": false, "routine_search_supported": true
+        }))
+        .unwrap();
+        assert!(current.routine_search_supported);
+        assert!(current.response.candidates.is_empty());
+        assert!(!current.response.incomplete);
+    }
+
+    #[test]
+    fn package_completion_wire_preserves_overload_identity_and_unknown_signatures() {
+        let wire = serde_json::json!({
+            "candidates": [
+                {"name":"RUN", "kind":"procedure", "schema":"APP", "parent_schema":"APP", "parent_name":"PKG", "signature":"", "routine_id":"3:APP:101:1"},
+                {"name":"RUN", "kind":"function", "schema":"APP", "parent_schema":"APP", "parent_name":"PKG", "signature":null, "routine_id":"3:APP:101:2", "data_type":"NUMBER"}
+            ], "incomplete":false, "fallback_used":false, "routine_search_supported":true
+        });
+        let response: super::AgentCompletionAssistantResponse = serde_json::from_value(wire).unwrap();
+        let result = serde_json::to_value(response.response).unwrap();
+        assert_eq!(result["candidates"][0]["signature"], "");
+        assert!(result["candidates"][1]["signature"].is_null());
+        assert_eq!(result["candidates"][0]["routine_id"], "3:APP:101:1");
+        assert_eq!(result["candidates"][1]["routine_id"], "3:APP:101:2");
+        assert_eq!(result["candidates"][1]["data_type"], "NUMBER");
+    }
+
+    #[test]
     fn detects_unsupported_agent_completion_assistant_errors() {
         assert!(super::is_agent_completion_assistant_unsupported(
             "Agent RPC error (-1): Unknown method: completion_assistant_search_v1"
@@ -5881,6 +5936,37 @@ for line in sys.stdin:
         assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, None));
         assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, Some("  ")));
         assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Postgres, Some("tab-1")));
+    }
+
+    #[test]
+    fn oracle_numeric_query_metadata_keeps_precision_scale_and_nulls() {
+        for (data_type, precision, scale, expected) in [
+            ("FLOAT", Some(24), Some(-127), "FLOAT(24)"),
+            ("FLOAT", None, None, "FLOAT"),
+            ("NUMBER", None, Some(0), "NUMBER(*,0)"),
+            ("NUMBER", None, Some(-2), "NUMBER(*,-2)"),
+            ("NUMBER", Some(10), Some(-2), "NUMBER(10,-2)"),
+            ("NUMBER", None, None, "NUMBER"),
+        ] {
+            let result = oracle_current_schema_result(
+                &[],
+                vec![vec![
+                    serde_json::json!("VALUE"),
+                    serde_json::json!(data_type),
+                    serde_json::json!("Y"),
+                    serde_json::Value::Null,
+                    serde_json::json!(22),
+                    serde_json::json!(precision),
+                    serde_json::json!(scale),
+                    serde_json::Value::Null,
+                    serde_json::json!(0),
+                ]],
+            );
+            let columns = oracle_columns_from_query_result(result);
+            assert_eq!(columns[0].data_type, expected);
+            assert_eq!(columns[0].numeric_precision, precision);
+            assert_eq!(columns[0].numeric_scale, scale);
+        }
     }
 
     #[test]
@@ -6571,6 +6657,12 @@ pub async fn list_objects_core(
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
     let db_config = connection_config(state, connection_id).await;
+    if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
+        validate_oceanbase_metadata_page(limit, offset)?;
+        if limit == Some(0) {
+            return Ok(vec![]);
+        }
+    }
     let filter_locally_after_oracle_comments = db_config.as_ref().is_some_and(|config| {
         config.db_type == DatabaseType::Oracle && filter.is_some_and(|filter| !filter.trim().is_empty())
     });
@@ -6682,6 +6774,14 @@ async fn close_ephemeral_agent_metadata_session(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct AgentCompletionAssistantResponse {
+    #[serde(flatten)]
+    response: db::CompletionAssistantResponse,
+    #[serde(default)]
+    routine_search_supported: bool,
+}
+
 pub async fn completion_assistant_search_core(
     state: &AppState,
     request: db::CompletionAssistantRequest,
@@ -6769,13 +6869,25 @@ pub async fn completion_assistant_search_core(
                 let db_config = connection_config(state, &request.connection_id).await;
                 let mut client = client.lock().await;
                 match client
-                    .completion_assistant_search::<db::CompletionAssistantResponse>(
+                    .completion_assistant_search::<AgentCompletionAssistantResponse>(
                         &request,
                         agent_metadata_timeout(db_config.as_ref()),
                     )
                     .await
                 {
-                    Ok(mut response) => {
+                    Ok(agent_response) => {
+                        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle)
+                            && request.object_kinds.iter().any(db::CompletionAssistantObjectKind::is_routine_like)
+                            && !agent_response.routine_search_supported
+                        {
+                            // Older JDBC agents return a successful empty list for routine requests.
+                            // Let the frontend retain its existing schema-list fallback only there.
+                            return Err(
+                                "OceanBase agent does not support filtered routine completion; update the agent"
+                                    .to_string(),
+                            );
+                        }
+                        let mut response = agent_response.response;
                         response.fallback_used = false;
                         return Ok(response);
                     }
@@ -6849,6 +6961,7 @@ async fn completion_assistant_fallback_core(
                     parent_name: None,
                     comment: None,
                     data_type: None,
+                    routine_id: None,
                     signature: None,
                 });
             }
@@ -6887,6 +7000,7 @@ async fn completion_assistant_fallback_core(
                 parent_name: table.parent_name,
                 comment: table.comment,
                 data_type: None,
+                routine_id: None,
                 signature: None,
             });
             if candidates.len() >= limit {
@@ -6939,6 +7053,7 @@ async fn completion_assistant_fallback_core(
                         parent_name: Some(table.to_string()),
                         comment: column.comment,
                         data_type: Some(column.data_type),
+                        routine_id: None,
                         signature: None,
                     });
                 }
@@ -7019,6 +7134,7 @@ async fn oracle_external_driver_completion_synonyms(
                 parent_name: None,
                 comment: None,
                 data_type: Some("SYNONYM".to_string()),
+                routine_id: None,
                 signature: None,
             })
         })
@@ -7089,6 +7205,15 @@ async fn list_object_statistics_once(
     if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
             return crate::mongo_ops::mongo_agent_list_object_statistics(&client, database).await;
+        }
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
+            return oceanbase_oracle_space::load_statistics(
+                client,
+                database,
+                schema,
+                agent_metadata_timeout(db_config.as_ref()),
+            )
+            .await;
         }
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle) {
             return oracle_agent_list_object_statistics(
@@ -7248,7 +7373,9 @@ async fn list_objects_once(
         }
         if let Some(agent_client) = extract_pool!(pool_handle.as_ref(), Agent) {
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
+            let is_oceanbase = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle);
             let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config);
+            let use_agent_paging = use_oracle_agent_paging || is_oceanbase;
             let filter_locally_after_oracle_comments =
                 is_oracle && filter.is_some_and(|filter| !filter.trim().is_empty());
             let timeout_duration = agent_metadata_timeout(db_config.as_ref());
@@ -7272,14 +7399,14 @@ async fn list_objects_once(
             let agent_filter = if filter_locally_after_oracle_comments { None } else { filter };
             let agent_limit = if filter_locally_after_oracle_comments || force_local_table_name_filter {
                 None
-            } else if use_oracle_agent_paging {
+            } else if use_agent_paging {
                 limit
             } else {
                 None
             };
             let agent_offset = if filter_locally_after_oracle_comments || force_local_table_name_filter {
                 None
-            } else if use_oracle_agent_paging {
+            } else if use_agent_paging {
                 offset
             } else {
                 None
@@ -7296,6 +7423,9 @@ async fn list_objects_once(
                 )
                 .await
             {
+                Ok(objects) if is_oceanbase => {
+                    return Ok(ObjectListOutcome { objects, paging_applied: !force_local_table_name_filter });
+                }
                 Ok(mut objects) if !objects.is_empty() => {
                     if is_oracle {
                         load_oracle_table_comments_for_objects(
@@ -7859,6 +7989,20 @@ pub async fn get_columns_core_for_session(
     table: &str,
     client_session_id: Option<&str>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
+    get_columns_core_for_session_in_context(state, connection_id, database, schema, table, client_session_id, None)
+        .await
+}
+
+/// Keep the selected OceanBase schema separate from an explicitly qualified object schema.
+pub async fn get_columns_core_for_session_in_context(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+    current_schema: Option<&str>,
+) -> Result<Vec<db::ColumnInfo>, String> {
     if connection_config(state, connection_id).await.is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
         return Box::pin(mongodb_columns::get_columns(state, connection_id, database, table)).await;
     }
@@ -7866,7 +8010,7 @@ pub async fn get_columns_core_for_session(
         let metadata_session =
             EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "columns").await;
         if metadata_session.client_session_id().is_some() {
-            let result = get_columns_core_for_session_inner(
+            let result = get_columns_core_for_session_inner_in_context(
                 state,
                 connection_id,
                 database,
@@ -7874,13 +8018,36 @@ pub async fn get_columns_core_for_session(
                 table,
                 metadata_session.client_session_id(),
                 false,
+                current_schema,
             )
             .await;
             metadata_session.finish(state, connection_id, Some(database)).await;
             return result;
         }
     }
-    get_columns_core_for_session_inner(state, connection_id, database, schema, table, client_session_id, true).await
+    if current_schema.is_none() {
+        return get_columns_core_for_session_inner(
+            state,
+            connection_id,
+            database,
+            schema,
+            table,
+            client_session_id,
+            true,
+        )
+        .await;
+    }
+    get_columns_core_for_session_inner_in_context(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        client_session_id,
+        true,
+        current_schema,
+    )
+    .await
 }
 
 async fn get_columns_core_for_session_inner(
@@ -7892,6 +8059,29 @@ async fn get_columns_core_for_session_inner(
     client_session_id: Option<&str>,
     use_client_session_context: bool,
 ) -> Result<Vec<db::ColumnInfo>, String> {
+    get_columns_core_for_session_inner_in_context(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        client_session_id,
+        use_client_session_context,
+        None,
+    )
+    .await
+}
+
+async fn get_columns_core_for_session_inner_in_context(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+    use_client_session_context: bool,
+    current_schema: Option<&str>,
+) -> Result<Vec<db::ColumnInfo>, String> {
     get_columns_core_for_session_inner_with_pool(
         state,
         connection_id,
@@ -7902,6 +8092,7 @@ async fn get_columns_core_for_session_inner(
         use_client_session_context,
         None,
         true,
+        current_schema,
     )
     .await
 }
@@ -7924,6 +8115,7 @@ async fn get_columns_core_for_existing_pool(
         true,
         Some(pool_key),
         false,
+        None,
     )
     .await
 }
@@ -7938,6 +8130,7 @@ async fn get_columns_core_for_session_inner_with_pool(
     use_client_session_context: bool,
     existing_pool_key: Option<&str>,
     allow_recovery: bool,
+    current_schema: Option<&str>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
     let context_session_id = if use_client_session_context { client_session_id } else { None };
     let existing_pool_key = existing_pool_key.map(str::to_owned);
@@ -8106,10 +8299,13 @@ async fn get_columns_core_for_session_inner_with_pool(
                     }
                 }
                 match client
-                    .get_columns::<Vec<db::ColumnInfo>>(
+                    .get_columns_in_context::<Vec<db::ColumnInfo>>(
                         database,
                         schema,
                         table,
+                        current_schema.filter(|_| {
+                            db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle)
+                        }),
                         agent_metadata_timeout(db_config.as_ref()),
                     )
                     .await
@@ -8902,6 +9098,12 @@ pub async fn list_functions_core(
     database: &str,
     schema: &str,
 ) -> Result<Vec<db::FunctionInfo>, String> {
+    if connection_config(state, connection_id)
+        .await
+        .is_some_and(|config| crate::schema_diff::is_oracle_routine_database(config.db_type))
+    {
+        return oracle_routines::list_routines(state, connection_id, database, schema).await;
+    }
     let postgres_functions = retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
@@ -8951,7 +9153,17 @@ async fn list_functions_via_objects(
 
 fn schema_diff_routine_kind(object_type: &str) -> Option<(&'static str, db::ObjectSourceKind)> {
     let object_type_upper = object_type.to_ascii_uppercase();
-    if object_type_upper.contains("PROC") {
+    if object_type_upper == "PACKAGE" {
+        Some(("PACKAGE", db::ObjectSourceKind::Package))
+    } else if matches!(object_type_upper.as_str(), "PACKAGE BODY" | "PACKAGE_BODY") {
+        Some(("PACKAGE BODY", db::ObjectSourceKind::PackageBody))
+    } else if object_type_upper == "TRIGGER" {
+        Some(("TRIGGER", db::ObjectSourceKind::Trigger))
+    } else if object_type_upper == "TYPE" {
+        Some(("TYPE", db::ObjectSourceKind::Type))
+    } else if matches!(object_type_upper.as_str(), "TYPE BODY" | "TYPE_BODY") {
+        Some(("TYPE BODY", db::ObjectSourceKind::TypeBody))
+    } else if object_type_upper.contains("PROC") {
         Some(("PROCEDURE", db::ObjectSourceKind::Procedure))
     } else if object_type_upper.contains("FUNC") {
         Some(("FUNCTION", db::ObjectSourceKind::Function))
@@ -9009,6 +9221,14 @@ async fn load_function_info_via_object(
     };
 
     Some(db::FunctionInfo {
+        type_info: None,
+        trigger: None,
+        dependency_objects: Vec::new(),
+        incoming_dependencies: Vec::new(),
+        paired_object_present: None,
+        schema: None,
+        status: None,
+        dependencies: Vec::new(),
         name: object.name,
         function_type: function_type.to_string(),
         data_type: String::new(),
@@ -9838,6 +10058,15 @@ fn object_types_only_custom_types(object_types: Option<&[String]>) -> bool {
     })
 }
 
+fn validate_oceanbase_metadata_page(limit: Option<usize>, offset: Option<usize>) -> Result<(), String> {
+    for (name, value) in [("limit", limit), ("offset", offset)] {
+        if value.is_some_and(|value| value > i32::MAX as usize) {
+            return Err(format!("OceanBase metadata {name} must not exceed {}", i32::MAX));
+        }
+    }
+    Ok(())
+}
+
 fn is_default_oracle_agent_config(config: &ConnectionConfig) -> bool {
     // Only the default go-oracle agent handles filtered/paged metadata; legacy profiles keep Rust fallback paging.
     matches!(config.db_type, DatabaseType::Oracle)
@@ -9854,7 +10083,7 @@ fn uses_oracle_metadata_object_source(config: Option<&ConnectionConfig>, object_
 
 fn supports_agent_table_paging(config: &ConnectionConfig) -> bool {
     // Keep paging opt-in until each legacy agent is known to apply metadata constraints server-side.
-    matches!(config.db_type, DatabaseType::Tdengine)
+    matches!(config.db_type, DatabaseType::Tdengine | DatabaseType::OceanbaseOracle)
         || crate::agent_catalog::agent_key(&config.db_type, config.driver_profile.as_deref()) == Some("cache")
         || is_default_oracle_agent_config(config)
 }
@@ -11044,7 +11273,21 @@ async fn get_object_source_once(
             }
             first_string_cell(result?)?
         } else if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
-            if uses_oracle_metadata_object_source(db_config.as_ref(), &object_type) {
+            if db_config
+                .as_ref()
+                .is_some_and(|config| matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
+                && matches!(object_type, db::ObjectSourceKind::Type | db::ObjectSourceKind::TypeBody)
+            {
+                return oracle_types::source(
+                    client,
+                    database,
+                    schema,
+                    name,
+                    &object_type,
+                    agent_metadata_timeout(db_config.as_ref()),
+                )
+                .await;
+            } else if uses_oracle_metadata_object_source(db_config.as_ref(), &object_type) {
                 oracle_agent_object_source(
                     client,
                     database,
@@ -11214,11 +11457,13 @@ fn oracle_owner_filter(schema: &str) -> String {
 
 pub fn oracle_list_objects_sql(schema: &str) -> String {
     format!(
-        "SELECT object_name, CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE object_type END AS object_type, owner \
-         FROM all_objects \
-         WHERE owner = {} AND object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY') \
+        "SELECT object_name, CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' WHEN 'TYPE BODY' THEN 'TYPE_BODY' ELSE object_type END AS object_type, owner, status \
+         FROM all_objects o \
+         WHERE owner = {} AND object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'TYPE', 'TYPE BODY') \
+         AND (object_type NOT IN ('TYPE', 'TYPE BODY') OR (NVL(generated, 'N') = 'N' AND owner NOT IN ('SYS', 'SYSTEM') \
+         AND EXISTS (SELECT 1 FROM all_types t WHERE t.owner = o.owner AND t.type_name = o.object_name AND t.predefined = 'NO'))) \
          ORDER BY CASE object_type WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 WHEN 'SEQUENCE' THEN 4 WHEN 'PACKAGE' THEN 5 ELSE 6 END, object_name",
-        oracle_owner_filter(schema)
+        if schema.is_empty() { "USER".into() } else { sql_string(schema) }
     )
 }
 
@@ -11298,7 +11543,11 @@ async fn oracle_agent_list_objects(
                 name,
                 object_type,
                 schema,
-                valid: None,
+                valid: match row.get(3).and_then(|value| value.as_str()) {
+                    Some("VALID") => Some(true),
+                    Some("INVALID") => Some(false),
+                    _ => None,
+                },
                 signature: None,
                 custom_type_kind: None,
                 has_members: None,
@@ -12333,13 +12582,34 @@ mod object_source_tests {
 
     #[test]
     fn builds_oracle_list_objects_sql_with_packages() {
-        let sql = oracle_list_objects_sql("hr");
+        let sql = oracle_list_objects_sql("HR");
 
         assert!(sql.contains("'PACKAGE'"));
         assert!(sql.contains("'PACKAGE BODY'"));
         assert!(sql.contains("'SEQUENCE'"));
         assert!(sql.contains("CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY'"));
-        assert!(sql.contains("owner = 'HR'"));
+        let (owner_query, object_filter) = sql.split_once(" AND object_type IN ").unwrap();
+        assert_eq!(
+            owner_query,
+            "SELECT object_name, CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' WHEN 'TYPE BODY' THEN 'TYPE_BODY' ELSE object_type END AS object_type, owner, status FROM all_objects o WHERE owner = 'HR'"
+        );
+        assert_eq!(
+            object_filter.split_once(" AND ").unwrap().0,
+            "('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'TYPE', 'TYPE BODY')"
+        );
+        assert!(sql.contains("NVL(generated, 'N') = 'N' AND owner NOT IN ('SYS', 'SYSTEM')"));
+        assert!(sql.contains("t.owner = o.owner AND t.type_name = o.object_name AND t.predefined = 'NO'"));
+    }
+
+    #[test]
+    fn oracle_list_objects_preserves_exact_owner_identity() {
+        for (schema, expected_owner) in
+            [("", "USER"), ("HR", "'HR'"), ("hr", "'hr'"), ("Mixed Owner", "'Mixed Owner'"), ("O'wner", "'O''wner'")]
+        {
+            let sql = oracle_list_objects_sql(schema);
+            let owner_filter = sql.split_once("WHERE ").unwrap().1.split_once(" AND object_type IN ").unwrap().0;
+            assert_eq!(owner_filter, format!("owner = {expected_owner}"), "{schema}");
+        }
     }
 
     #[test]

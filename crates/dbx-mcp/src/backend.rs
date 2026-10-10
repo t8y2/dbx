@@ -2870,6 +2870,8 @@ fn infer_document_columns(documents: &[Value]) -> Vec<ColumnInfo> {
             name,
             data_type,
             resolved_schema: None,
+            resolved_table: None,
+            resolved_object_type: None,
             is_nullable: true,
             column_default: None,
             is_primary_key: false,

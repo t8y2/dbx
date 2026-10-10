@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { triggerDisplayName, triggerIdentity } from "@/lib/table/triggerIdentity";
 import DatabaseActionsMenu from "@/components/objects/DatabaseActionsMenu.vue";
 import FirebirdObjectManager from "@/components/objects/FirebirdObjectManager.vue";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 
-import { computed, createApp, nextTick, onActivated, onBeforeUnmount, ref, watch, type Component } from "vue";
+import { computed, createApp, nextTick, onActivated, onBeforeUnmount, onMounted, onUnmounted, ref, watch, type Component } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import {
@@ -84,6 +85,8 @@ import { supportsAiAssistantContext, supportsDataDictionary, supportsSchemaDiagr
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
+import { estimatedRowsDetails, estimatedRowsText, loadOceanBaseRowStatistics, oceanBaseTableStatistics } from "@/lib/dataGrid/oceanBaseRowStatistics";
+import { oceanbaseSpaceHint, oceanbaseSpaceRows, oceanbaseSpaceText } from "@/lib/table/oceanbaseSpaceStatistics";
 import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
 import { buildTableSelectSql, dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import { PARTITION_TREE_INDENT_PX } from "@/lib/table/pgPartitionPresentation";
@@ -98,10 +101,14 @@ import {
   supportsDropTableCascade,
   supportsTruncateTableCascade,
   type TableAdminSqlOptions,
+  type DuplicateTableStructurePlan,
 } from "@/lib/database/dbAdminSql";
+import { confirmOceanbaseTableClone, executeOceanbaseTableClone, showOceanbaseTableCloneFailure, OceanbaseTableCloneError } from "@/lib/database/oceanbaseTableClone";
 import { useToast } from "@/composables/useToast";
-import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
-import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
+import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeOceanBaseRoutineRenameSteps, RoutineRenameStepError, executeObjectSourceSave, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { buildRenameObjectSql, notifyViewRenameReadback, readOceanBaseViewRenameState, supportsObjectRename } from "@/lib/table/objectRenameSql";
+import OracleTypeMetadataPanel from "@/components/objects/OracleTypeMetadataPanel.vue";
+import { executePackageCleanup, executePackageRename, PackageRenameCleanupError, PackageRenameStepError, preparePackageRename, supportsPackageRename } from "@/lib/table/packageRename";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { autoRevealExportedPathIfConfigured, promptExportSavePath } from "@/lib/export/exportPath";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
@@ -135,6 +142,7 @@ import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { applyDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
+import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
@@ -166,7 +174,7 @@ import {
 } from "@/lib/table/objectBrowserRows";
 import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, singleClickRowAction, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
 import { objectBrowserTableSelectionAnchor, objectBrowserTableSelectionRange } from "@/lib/table/objectBrowserSelection";
-import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
+import { customTypeCapabilities, supportsTypeObjectSource, type SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { visibleMongoCollections } from "@/lib/sidebar/mongoCollectionMutation";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
@@ -229,12 +237,16 @@ const selectedSchema = ref<string | undefined>(props.schema);
 const rows = ref<ObjectBrowserRow[]>([]);
 const rootRef = ref<HTMLElement>();
 const search = ref(props.initialSearchQuery ?? "");
-const objectFilter = ref<ObjectFilter>("all");
+const objectFilter = ref<ObjectFilter>(props.connection.db_type === "oceanbase-oracle" ? (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables") : "all");
 const userHasSelectedFilter = ref(false);
 const sortKey = ref<ObjectBrowserSortKey>("name");
 const sortDirection = ref<ObjectBrowserSortDirection>("asc");
 const loadingSchemas = ref(false);
 const loadingObjects = ref(false);
+const loadingMoreObjects = ref(false);
+const hasMoreObjects = ref(false);
+let objectPageOffset = 0;
+let objectSearchTimer: ReturnType<typeof setTimeout> | undefined;
 const refreshingObjects = ref(false);
 const scaffoldRefreshError = ref("");
 const sourceLoading = ref(false);
@@ -317,6 +329,8 @@ const sidePanelGuard = createSidePanelRequestGuard();
 const sidePanelRef = ref<InstanceType<typeof CustomTypeInfoPanel> | null>(null);
 const tableMetadataCapabilities = computed<TableMetadataCapabilities>(() => getTableMetadataCapabilities(effectiveDatabaseType.value));
 const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
+const usesServerObjectPaging = computed(() => props.connection.db_type === "oceanbase-oracle");
+const objectPageSize = computed(() => Math.max(1, Math.min(10_000, Math.floor(settingsStore.desktopSettings?.sidebar_table_page_size || 500))));
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
 const isVictoriaMetrics = computed(() => effectiveDatabaseType.value === "victoriametrics");
 const isMongodb = computed(() => props.connection.db_type === "mongodb");
@@ -325,9 +339,9 @@ const supportsObjectSizeStats = computed(() => !isVictoriaMetrics.value && effec
 // The batch table toolbar (export/copy/truncate/empty/drop selected) is SQL-only:
 // MongoDB collections are not dropped or truncated through it.
 const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !isMongodb.value && effectiveDatabaseType.value !== "nebula");
-const showTableStatistics = computed(() => effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
-const showObjectRowStats = computed(() => showTableStatistics.value);
-const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
+const showTableStatistics = computed(() => !usesServerObjectPaging.value && effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
+const showObjectRowStats = computed(() => showTableStatistics.value || (effectiveDatabaseType.value === "oceanbase-oracle" && (objectFilter.value === "all" || objectFilter.value === "tables")));
+const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showObjectRowStats.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
 
 function toggleTableDdlWordWrap() {
@@ -358,6 +372,7 @@ const renameTarget = ref<ObjectBrowserRow | null>(null);
 const renameInput = ref("");
 const renameError = ref("");
 const renamePreviewSqlText = ref("");
+const packageCleanupReviewed = ref(false);
 const showTruncateConfirm = ref(false);
 const truncateTarget = ref<ObjectBrowserRow | null>(null);
 const truncatePreviewSql = ref("");
@@ -374,6 +389,7 @@ const emptyPreviewSql = ref("");
 const showDuplicateDialog = ref(false);
 const duplicateTarget = ref<ObjectBrowserRow | null>(null);
 const duplicateTableName = ref("");
+const duplicateTableSchema = ref("");
 const showProcedureExecutionConfirm = ref(false);
 const procedureExecutionTarget = ref<ObjectBrowserRow | null>(null);
 const selectedTableIds = ref<Set<string>>(new Set());
@@ -431,23 +447,25 @@ const vacuumRiskMessage = computed(() => (vacuumExecuting.value ? t("contextMenu
 const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(effectiveDatabaseType.value));
 const objectFilters = computed<ObjectFilter[]>(() =>
-  (
-    [
-      ["all", objectCounts.value.all],
-      ["tables", objectCounts.value.tables],
-      ["views", objectCounts.value.views],
-      ["materializedViews", objectCounts.value.materializedViews],
-      ["procedures", objectCounts.value.procedures],
-      ["functions", objectCounts.value.functions],
-      ["triggers", objectCounts.value.triggers],
-      ["events", objectCounts.value.events],
-      ["sequences", objectCounts.value.sequences],
-      ["packages", objectCounts.value.packages],
-      ["types", objectCounts.value.types],
-    ] as Array<[ObjectFilter, number]>
-  )
-    .filter(([filter, count]) => filter === "all" || count > 0)
-    .map(([filter]) => filter),
+  usesServerObjectPaging.value
+    ? ["all", "tables", "views", "procedures", "functions", "sequences", "packages", "types"]
+    : (
+        [
+          ["all", objectCounts.value.all],
+          ["tables", objectCounts.value.tables],
+          ["views", objectCounts.value.views],
+          ["materializedViews", objectCounts.value.materializedViews],
+          ["procedures", objectCounts.value.procedures],
+          ["functions", objectCounts.value.functions],
+          ["triggers", objectCounts.value.triggers],
+          ["events", objectCounts.value.events],
+          ["sequences", objectCounts.value.sequences],
+          ["packages", objectCounts.value.packages],
+          ["types", objectCounts.value.types],
+        ] as Array<[ObjectFilter, number]>
+      )
+        .filter(([filter, count]) => filter === "all" || count > 0)
+        .map(([filter]) => filter),
 );
 const showObjectFilter = computed(() => objectFilters.value.length > 2);
 // A scope that holds a single object kind makes "全部 14" and "表 14" the same number, so the
@@ -611,10 +629,24 @@ watch([sortKey, sortDirection], () => scrollObjectsToTop());
 
 // Also jump to the top when the search query or object-type filter changes —
 // filtered results bear no relation to the previous scroll position.
-watch(search, (value) => {
-  scrollObjectsToTop();
-  emit("searchChange", value);
-});
+watch(
+  search,
+  (value) => {
+    scrollObjectsToTop();
+    emit("searchChange", value);
+    if (usesServerObjectPaging.value) {
+      clearTimeout(objectSearchTimer);
+      objectBrowserRowsLoadGuard.invalidate();
+      rows.value = [];
+      hasMoreObjects.value = false;
+      loadingMoreObjects.value = false;
+      loadingObjects.value = true;
+      if (!value.trim()) void loadObjects();
+      else objectSearchTimer = setTimeout(() => void loadObjects(), 300);
+    }
+  },
+  { flush: "sync" },
+);
 watch(objectFilter, () => {
   if (preserveObjectFilterScrollOnce) {
     preserveObjectFilterScrollOnce = false;
@@ -804,11 +836,13 @@ function typeLabel(row: ObjectBrowserRow) {
 }
 
 function sortIconFor(key: ObjectBrowserSortKey) {
+  if (usesServerObjectPaging.value) return null;
   if (sortKey.value !== key) return null;
   return sortDirection.value === "asc" ? ArrowUp : ArrowDown;
 }
 
 function toggleSort(key: ObjectBrowserSortKey) {
+  if (usesServerObjectPaging.value) return;
   if (sortKey.value === key) {
     sortDirection.value = sortDirection.value === "asc" ? "desc" : "asc";
     return;
@@ -838,7 +872,7 @@ function sortKeyLabel(key: ObjectBrowserSortKey): string {
   if (key === "name") return t("objects.name");
   if (key === "type") return t("objects.type");
   if (key === "estimatedRows") return objectRowsLabel.value;
-  if (key === "totalBytes") return t("objects.size");
+  if (key === "totalBytes") return t(effectiveDatabaseType.value === "oceanbase-oracle" ? "objects.spaceAllocated" : "objects.size");
   if (key === "created_at") return t("objects.createdAt");
   if (key === "updated_at") return t("objects.updatedAt");
   if (key === "comment") return t("objects.comment");
@@ -960,6 +994,7 @@ function removePinnedObjectBrowserRows(rows: readonly ObjectBrowserRow[]) {
 }
 
 function groupedFilteredRows() {
+  if (usesServerObjectPaging.value) return { rows: rows.value, depths: new Map<string, number>() };
   return groupObjectBrowserRows({
     rows: rows.value.filter(rowMatchesObjectFilter),
     matchingRows: objectSearchSummary.value.matchingRows.filter(rowMatchesObjectFilter),
@@ -1007,7 +1042,7 @@ function togglePartitionParent(row: ObjectBrowserRow) {
 }
 
 function canRename(row: ObjectBrowserRow) {
-  return supportsObjectRename(effectiveDatabaseType.value, row.type) || supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind);
+  return supportsPackageRename(effectiveDatabaseType.value, row.type) || supportsObjectRename(effectiveDatabaseType.value, row.type) || supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind);
 }
 
 function sourceTitle(row: ObjectBrowserRow | null) {
@@ -1132,7 +1167,8 @@ const tableOverviewRows = computed(() => {
     { label: t("common.database"), value: props.database },
     ...(sidePanelRow.value?.valid != null ? [{ label: t("objects.validity"), value: t(sidePanelRow.value.valid ? "objects.validStatus" : "objects.invalidStatus") }] : []),
     { label: t("structureEditor.comment"), value: tableOverviewComment.value ?? "" },
-    { label: t("grid.tableInfoEstimatedRows"), value: formatObjectBrowserCount(stats?.estimated_rows) },
+    { label: t("grid.tableInfoEstimatedRows"), value: estimatedRowsText(stats, t) },
+    ...estimatedRowsDetails(stats, t),
     { label: t("grid.tableInfoTotalSize"), value: formatObjectBrowserBytes(stats?.total_bytes) },
     { label: t("grid.tableInfoDataLength"), value: formatObjectBrowserBytes(stats?.data_length) },
     { label: t("grid.tableInfoEngine"), value: stats?.engine ?? "" },
@@ -1146,6 +1182,7 @@ const tableOverviewRows = computed(() => {
     { label: t("grid.tableInfoIndexLength"), value: formatObjectBrowserBytes(stats?.index_length) },
     { label: t("grid.tableInfoAutoIncrement"), value: stats?.auto_increment ?? "" },
     { label: t("grid.tableInfoDataFree"), value: formatObjectBrowserBytes(stats?.data_free) },
+    ...oceanbaseSpaceRows(stats?.space, t),
   ];
   const query = tableInfoSearchQuery.value.trim().toLowerCase();
   return rows.filter((row) => row.value && (!query || row.label.toLowerCase().includes(query) || row.value.toLowerCase().includes(query)));
@@ -1252,7 +1289,12 @@ async function fetchTableOverview(force = false) {
   const schema = row.schema || selectedSchema.value || props.database;
   tableOverviewLoading.value = true;
   try {
-    const [statistics, comment] = await Promise.all([api.listObjectStatistics(props.connection.id, props.database, schema).catch(() => [] as ObjectStatistics[]), api.getTableComment(props.connection.id, props.database, schema, row.name, props.catalog).catch(() => null)]);
+    const [statistics, comment] = await Promise.all([
+      effectiveDatabaseType.value === "oceanbase-oracle"
+        ? loadOceanBaseRowStatistics(props.connection.id, props.database, schema, force).then((snapshot) => [oceanBaseTableStatistics(snapshot, row.name, schema)])
+        : api.listObjectStatistics(props.connection.id, props.database, schema).catch(() => [] as ObjectStatistics[]),
+      api.getTableComment(props.connection.id, props.database, schema, row.name, props.catalog).catch(() => null),
+    ]);
     if (sidePanelGuard.isStale(epoch)) return;
     tableOverviewStats.value = findTableStatistics(statistics, row.name, schema) ?? null;
     tableOverviewComment.value = comment;
@@ -1624,7 +1666,7 @@ async function loadSourcePanel(row: ObjectBrowserRow, options?: { preserveEditin
   sourceContent.value = "";
   sourceError.value = "";
   sourceEditing.value = false;
-  sourceCanEdit.value = true;
+  sourceCanEdit.value = false;
   sourceEditableText.value = "";
   sourceDraft.value = "";
   sourceSaveError.value = "";
@@ -1676,6 +1718,32 @@ async function refreshActiveSource() {
   if (sourceEditing.value && !window.confirm(t("objects.refreshDiscardConfirm"))) return;
   await loadSourcePanel(row, { preserveEditing: true });
 }
+
+let sourceBeforeRenameReadback: { rowId: string; canEdit: boolean; editing: boolean } | null = null;
+function onViewRenameReadback(event: Event) {
+  const target = (event as CustomEvent<{ connectionId: string; database: string; schema: string; oldName: string; state: string }>).detail;
+  const row = sourceRow.value;
+  if (!row || row.type !== "VIEW" || target.connectionId !== props.connection.id || target.database !== props.database || target.schema !== (row.schema || selectedSchema.value || props.database) || target.oldName !== row.name) return;
+  if (target.state === "pending") {
+    sourceBeforeRenameReadback = { rowId: row.id, canEdit: sourceCanEdit.value, editing: sourceEditing.value };
+    sidePanelGuard.start();
+    sourceCanEdit.value = false;
+    sourceEditing.value = false;
+    sourceContent.value = sourceDraft.value;
+    sourceLoading.value = false;
+    sourceSaving.value = false;
+    sourceSaveError.value = t("contextMenu.viewRenameStateUnknown");
+  } else if (target.state === "unchanged" && sourceBeforeRenameReadback?.rowId === row.id) {
+    sourceCanEdit.value = sourceBeforeRenameReadback.canEdit;
+    sourceEditing.value = sourceBeforeRenameReadback.editing;
+    sourceSaveError.value = "";
+    sourceBeforeRenameReadback = null;
+  } else {
+    sourceSaveError.value = t(target.state === "renamed" ? "contextMenu.viewRenameResponseLost" : "contextMenu.viewRenameStateUnknown");
+  }
+}
+onMounted(() => window.addEventListener("dbx:view-rename-readback", onViewRenameReadback));
+onUnmounted(() => window.removeEventListener("dbx:view-rename-readback", onViewRenameReadback));
 
 function openEventEditor(row: ObjectBrowserRow) {
   sidePanelGuard.start();
@@ -1753,6 +1821,7 @@ function requestDrop(row: ObjectBrowserRow) {
 }
 
 function requestRename(row: ObjectBrowserRow) {
+  packageCleanupReviewed.value = false;
   renameTarget.value = row;
   renameInput.value = row.name;
   renameError.value = "";
@@ -1770,8 +1839,37 @@ async function refreshRenamePreviewSql() {
     renamePreviewSqlText.value = "";
     return;
   }
+  if (supportsPackageRename(effectiveDatabaseType.value, row.type)) {
+    try {
+      const plan = await preparePackageRename(
+        { connectionId: props.connection.id, database: props.database, databaseType: effectiveDatabaseType.value, schema: row.schema || selectedSchema.value || props.database, name: row.name, newName },
+        { cleanup: packageCleanupReviewed.value, callersMigrated: packageCleanupReviewed.value },
+      );
+      if (requestId === renamePreviewRequestId) renamePreviewSqlText.value = plan.statements.join("\n\n");
+    } catch (error: any) {
+      if (requestId === renamePreviewRequestId) {
+        renamePreviewSqlText.value = "";
+        renameError.value = error?.message || String(error);
+      }
+    }
+    return;
+  }
   if (supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind)) {
-    renamePreviewSqlText.value = `-- Recreate ${row.type} from source, then drop the original object.`;
+    if (effectiveDatabaseType.value !== "oceanbase-oracle") {
+      renamePreviewSqlText.value = `-- Recreate ${row.type} from source, then drop the original object.`;
+      return;
+    }
+    try {
+      const schema = row.schema || selectedSchema.value || props.database;
+      const source = await api.getObjectSource(props.connection.id, props.database, schema, row.name, row.type as ObjectSourceKind, row.signature ?? undefined);
+      const steps = await buildRoutineRenameObjectSourceStatements({ databaseType: "oceanbase-oracle", objectType: row.type as ObjectSourceKind, schema, name: row.name, newName, source: source.source });
+      if (requestId === renamePreviewRequestId) renamePreviewSqlText.value = steps.join("\n\n");
+    } catch (error: any) {
+      if (requestId === renamePreviewRequestId) {
+        renamePreviewSqlText.value = "";
+        renameError.value = error?.message || String(error);
+      }
+    }
     return;
   }
   try {
@@ -1788,7 +1886,10 @@ async function refreshRenamePreviewSql() {
   }
 }
 
-watch([showRenameDialog, renameTarget, renameInput, selectedSchema], () => {
+watch([renameTarget, renameInput, selectedSchema], () => {
+  packageCleanupReviewed.value = false;
+});
+watch([showRenameDialog, renameTarget, renameInput, selectedSchema, packageCleanupReviewed], () => {
   void refreshRenamePreviewSql();
 });
 
@@ -1797,47 +1898,120 @@ async function confirmRename() {
   const newName = renameInput.value.trim();
   if (!row || !newName || newName === row.name) return;
   renameError.value = "";
+  const connection = props.connection;
+  const database = props.database;
+  const databaseType = effectiveDatabaseType.value;
+  const initialSchema = selectedSchema.value;
+  const isCurrent = () => props.connection.id === connection.id && props.database === database && selectedSchema.value === initialSchema;
+  const executeRenameWithProductionGuard = async <T>(sql: string, execute: () => Promise<T>): Promise<T | undefined> => {
+    if (!isCurrent()) return;
+    return executeWithProductionSqlGuard({
+      connection,
+      database,
+      sql,
+      source: t("production.sourceObjectBrowser"),
+      execute: async () => (isCurrent() ? execute() : undefined),
+    });
+  };
   const oldPinnedNode = pinnedTreeNodeForObjectBrowserRow(row);
   const oldLegacyPinnedNodes = legacyPinnedTreeNodesForObjectBrowserRow(row);
   let renameApplied = false;
+  const schema = row.schema || initialSchema || database;
+  let renameRequestSent = false;
   try {
-    const schema = row.schema || selectedSchema.value || props.database;
-    if (supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind)) {
-      const source = await api.getObjectSource(props.connection.id, props.database, schema, row.name, row.type as ObjectSourceKind, row.signature ?? undefined);
+    if (supportsPackageRename(databaseType, row.type)) {
+      const cleanup = packageCleanupReviewed.value;
+      const plan = await preparePackageRename({ connectionId: connection.id, database: database, databaseType: databaseType, schema, name: row.name, newName }, { cleanup, callersMigrated: cleanup });
+      let recoveryId: string | undefined;
+      let attempted = false;
+      try {
+        const executed = await executeRenameWithProductionGuard(plan.statements.join("\n\n"), async () => {
+          attempted = true;
+          const saveRecovery = (sql: string) => {
+            if (recoveryId) queryStore.updateSql(recoveryId, sql);
+            else recoveryId = queryStore.openSourceRecoverySnapshot({ connectionId: connection.id, database: database, schema, title: t("contextMenu.packageRenameRecoveryTitle", { name: row.name }), sql });
+          };
+          if (cleanup) await executePackageCleanup(plan, cleanup, saveRecovery);
+          else await executePackageRename(plan, saveRecovery);
+          return true;
+        });
+        if (!executed) return;
+        if (cleanup) {
+          renameApplied = true;
+          for (const objectType of ["PACKAGE", "PACKAGE_BODY"] as const) queryStore.invalidateRenamedObjectTabs({ connectionId: connection.id, database: database, schema, name: row.name, objectType });
+          if (isCurrent() && sourceRow.value?.id === row.id) closeSource();
+        }
+        toast(t(cleanup ? "contextMenu.renameObjectSuccess" : "contextMenu.packageRenameIncomplete", { oldName: row.name, newName }));
+        showRenameDialog.value = false;
+      } finally {
+        if (attempted) {
+          invalidateObjectBrowserRowsCache({ connectionId: connection.id, database: database, schema });
+          await Promise.allSettled([row.name, newName].flatMap((tableName) => [invalidateObjectMetadataCache({ connectionId: connection.id, database: database, schema, tableName }), invalidateObjectDdl({ connectionId: connection.id, database: database, schema, tableName })]));
+          await Promise.allSettled([reload(), connectionStore.refreshObjectListTreeNode(connection.id, database, schema)]);
+        }
+      }
+      if (cleanup && renameApplied) {
+        const renamedTarget = { ...oldPinnedNode, label: newName, objectName: newName, tableName: newName };
+        const renamedRow = isCurrent() && rows.value.find((candidate) => objectBrowserRowMatchesPinnedTreeNode(candidate, treeNodePinIdentity(renamedTarget), objectBrowserPinnedTreeNodeContext()));
+        if (renamedRow)
+          connectionStore.replacePinnedTreeNode(
+            oldPinnedNode,
+            pinnedTreeNodeForObjectBrowserRow(renamedRow),
+            canonicalizeObjectBrowserPinnedIdentity,
+            oldLegacyPinnedNodes.map((node) => node.id),
+          );
+        else connectionStore.removePinnedTreeNodes([oldPinnedNode, ...oldLegacyPinnedNodes], canonicalizeObjectBrowserPinnedIdentity);
+      }
+      return;
+    }
+    if (supportsSourceBackedRoutineRename(databaseType, row.type as ObjectSourceKind)) {
+      const source = await api.getObjectSource(connection.id, database, schema, row.name, row.type as ObjectSourceKind, row.signature ?? undefined);
       const statements = await buildRoutineRenameObjectSourceStatements({
-        databaseType: effectiveDatabaseType.value,
+        databaseType: databaseType,
         objectType: row.type as ObjectSourceKind,
         schema,
         name: row.name,
         newName,
         source: source.source,
       });
-      const executed = await executeObjectBrowserSqlWithProductionGuard(statements.join(";\n"), async () => {
-        for (const sql of statements) {
-          await api.executeQuery(props.connection.id, props.database, sql, schema);
+      const executed = await executeRenameWithProductionGuard(statements.join(";\n"), async () => {
+        if (databaseType === "oceanbase-oracle") {
+          queryStore.openSourceRecoverySnapshot({ connectionId: connection.id, database: database, schema, title: t("contextMenu.routineRenameRecoveryTitle", { name: row.name }), sql: source.source });
+          await executeOceanBaseRoutineRenameSteps(statements, (sql) => api.executeQuery(connection.id, database, sql, schema));
+        } else {
+          for (const sql of statements) await api.executeQuery(connection.id, database, sql, schema);
         }
         return true;
       });
       if (!executed) return;
     } else {
       const sql = await buildRenameObjectSql({
-        databaseType: effectiveDatabaseType.value,
+        databaseType: databaseType,
         objectType: row.type,
         schema,
         oldName: row.name,
         newName,
       });
-      const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
+      const executed = await executeRenameWithProductionGuard(sql, () => {
+        renameRequestSent = true;
+        return api.executeQuery(connection.id, database, sql, schema);
+      });
       if (!executed) return;
     }
     renameApplied = true;
+    if (databaseType === "oceanbase-oracle" && (row.type === "VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION")) {
+      queryStore.invalidateRenamedObjectTabs({ connectionId: connection.id, database: database, schema, name: row.name, objectType: row.type });
+      if (isCurrent() && sourceRow.value?.id === row.id) closeSource();
+      invalidateObjectBrowserRowsCache({ connectionId: connection.id, database: database, schema });
+      await Promise.all([row.name, newName].flatMap((tableName) => [invalidateObjectMetadataCache({ connectionId: connection.id, database: database, schema, tableName }), invalidateObjectDdl({ connectionId: connection.id, database: database, schema, tableName })]));
+    }
     toast(t("contextMenu.renameObjectSuccess", { oldName: row.name, newName }));
     showRenameDialog.value = false;
-    if (sourceRow.value?.id === row.id) closeSource();
+    if (isCurrent() && sourceRow.value?.id === row.id) closeSource();
     const renamedTarget = { ...oldPinnedNode, label: newName, objectName: newName, tableName: newName };
     await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
-    const renamedRow = rows.value.find((candidate) => objectBrowserRowMatchesPinnedTreeNode(candidate, treeNodePinIdentity(renamedTarget), objectBrowserPinnedTreeNodeContext()));
+    await connectionStore.refreshObjectListTreeNode(connection.id, database, row.schema || initialSchema);
+    const renamedRow = isCurrent() && rows.value.find((candidate) => objectBrowserRowMatchesPinnedTreeNode(candidate, treeNodePinIdentity(renamedTarget), objectBrowserPinnedTreeNodeContext()));
     if (renamedRow) {
       connectionStore.replacePinnedTreeNode(
         oldPinnedNode,
@@ -1851,12 +2025,52 @@ async function confirmRename() {
       connectionStore.removePinnedTreeNodes([oldPinnedNode, ...oldLegacyPinnedNodes], canonicalizeObjectBrowserPinnedIdentity);
     }
   } catch (e: any) {
+    if (renameRequestSent && !renameApplied && databaseType === "oceanbase-oracle" && row.type === "VIEW") {
+      const schema = row.schema || initialSchema || database;
+      notifyViewRenameReadback(connection.id, database, schema, row.name, "pending");
+      // Freeze saved identities before awaiting a readback of possibly committed DDL.
+      queryStore.invalidateRenamedObjectTabs({ connectionId: connection.id, database: database, schema, name: row.name, objectType: "VIEW" });
+      invalidateObjectBrowserRowsCache({ connectionId: connection.id, database: database, schema });
+      await Promise.allSettled([row.name, newName].flatMap((tableName) => [invalidateObjectMetadataCache({ connectionId: connection.id, database: database, schema, tableName }), invalidateObjectDdl({ connectionId: connection.id, database: database, schema, tableName })]));
+      const state = await readOceanBaseViewRenameState(connection.id, database, schema, row.name, newName);
+      if (state !== "unchanged") connectionStore.removePinnedTreeNodes([oldPinnedNode, ...oldLegacyPinnedNodes], canonicalizeObjectBrowserPinnedIdentity);
+      if (state !== "unchanged") {
+        const message = t(state === "renamed" ? "contextMenu.viewRenameResponseLost" : "contextMenu.viewRenameStateUnknown");
+        if (isCurrent() && sourceRow.value?.id === row.id) sourceSaveError.value = message;
+        renameError.value = `${e?.message || String(e)}\n${message}`;
+        await Promise.allSettled([reload(), connectionStore.refreshObjectListTreeNode(connection.id, database, schema)]);
+        return;
+      }
+    }
     if (renameApplied) {
       // The database mutation succeeded even when metadata refresh did not;
       // remove the old pin instead of allowing it to revive later.
       connectionStore.removePinnedTreeNodes([oldPinnedNode, ...oldLegacyPinnedNodes], canonicalizeObjectBrowserPinnedIdentity);
     }
-    renameError.value = e?.message || String(e);
+    if (e instanceof PackageRenameCleanupError && (e.oldObjects == null || e.oldObjects === 0)) {
+      for (const objectType of ["PACKAGE", "PACKAGE_BODY"] as const) queryStore.invalidateRenamedObjectTabs({ connectionId: connection.id, database: database, schema, name: row.name, objectType });
+      if (isCurrent() && sourceRow.value?.id === row.id) closeSource();
+      if (e.oldObjects === 0) connectionStore.removePinnedTreeNodes([oldPinnedNode, ...oldLegacyPinnedNodes], canonicalizeObjectBrowserPinnedIdentity);
+    }
+    renameError.value =
+      e instanceof PackageRenameCleanupError
+        ? t("contextMenu.packageCleanupFailed", { message: e.message, state: t(e.oldObjects == null ? "contextMenu.packageCleanupStateUnknown" : e.oldObjects === 0 ? "contextMenu.packageCleanupStateRemoved" : "contextMenu.packageCleanupStateRetained") })
+        : e instanceof PackageRenameStepError
+          ? t("contextMenu.packageRenameFailed", { step: e.step, message: e.message })
+          : e instanceof RoutineRenameStepError
+            ? t("contextMenu.routineRenameStepFailed", { step: e.step, oldName: row.name, newName, message: e.message }) + " " + t(e.step < 5 ? "contextMenu.routineRenameOriginalNotDropped" : "contextMenu.routineRenameFinalStateUnknown")
+            : e?.message || String(e);
+    if (e instanceof RoutineRenameStepError && e.step >= 2) {
+      // CREATE may have succeeded even if the response was lost. Refresh both
+      // identities without replacing the old pin or masking the original error.
+      if (e.step === 5 && (row.type === "PROCEDURE" || row.type === "FUNCTION")) {
+        queryStore.invalidateRenamedObjectTabs({ connectionId: connection.id, database: database, schema, name: row.name, objectType: row.type });
+        if (isCurrent() && sourceRow.value?.id === row.id) closeSource();
+      }
+      invalidateObjectBrowserRowsCache({ connectionId: connection.id, database: database, schema });
+      await Promise.allSettled([row.name, newName].flatMap((tableName) => [invalidateObjectMetadataCache({ connectionId: connection.id, database: database, schema, tableName }), invalidateObjectDdl({ connectionId: connection.id, database: database, schema, tableName })]));
+      await Promise.allSettled([reload(), connectionStore.refreshObjectListTreeNode(connection.id, database, schema)]);
+    }
   }
 }
 
@@ -2606,10 +2820,11 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
 function requestDuplicateStructure(row: ObjectBrowserRow) {
   duplicateTarget.value = row;
   duplicateTableName.value = `${row.name}_copy`;
+  duplicateTableSchema.value = row.schema || selectedSchema.value || "";
   showDuplicateDialog.value = true;
 }
 
-async function buildDuplicateStructurePlan(sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, sourceColumns?: ColumnInfo[]) {
+async function buildDuplicateStructurePlan(sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, sourceColumns?: ColumnInfo[], targetSchema?: string) {
   return buildSharedDuplicateTableStructurePlan({
     connectionId: props.connection.id,
     database: props.database,
@@ -2620,11 +2835,13 @@ async function buildDuplicateStructurePlan(sourceName: string, targetName: strin
     targetName,
     tableComment,
     sourceColumns,
+    targetSchema,
     identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
   });
 }
 
-function executeDuplicateStructurePlan(plan: { sql: string; executeAsScript: boolean }, schema: string | undefined) {
+function executeDuplicateStructurePlan(plan: DuplicateTableStructurePlan, schema: string | undefined) {
+  if (plan.oceanbaseClone) return executeOceanbaseTableClone(plan.oceanbaseClone, (sql) => api.executeQuery(props.connection.id, props.database, sql, plan.oceanbaseClone!.targetSchema));
   return plan.executeAsScript ? api.executeScript(props.connection.id, props.database, plan.sql, schema) : api.executeQuery(props.connection.id, props.database, plan.sql, schema);
 }
 
@@ -2635,13 +2852,15 @@ async function confirmDuplicateStructure() {
   showDuplicateDialog.value = false;
   try {
     const schema = row.schema || selectedSchema.value;
-    const plan = await buildDuplicateStructurePlan(row.name, newName, schema, row.comment);
+    const plan = await buildDuplicateStructurePlan(row.name, newName, schema, row.comment, undefined, effectiveDatabaseType.value === "oceanbase-oracle" ? duplicateTableSchema.value : undefined);
+    if (!confirmOceanbaseTableClone(plan, t)) return;
     const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
     if (!executed) return;
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }));
     await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, plan.oceanbaseClone?.targetSchema ?? schema);
   } catch (e: any) {
+    showOceanbaseTableCloneFailure(e);
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
 }
@@ -2818,6 +3037,10 @@ async function confirmPasteTable() {
       if (mode === "structure-and-data" || mode === "structure-only") {
         const plan = await buildDuplicateStructurePlan(entry.sourceName, targetName, schema, entry.tableComment, sourceColumns);
         sourceColumns = plan.sourceColumns;
+        if (!confirmOceanbaseTableClone(plan, t)) {
+          pasteCancelled = true;
+          break;
+        }
         const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
         if (!executed) {
           pasteCancelled = true;
@@ -2850,6 +3073,8 @@ async function confirmPasteTable() {
       successCount++;
     } catch (e: any) {
       pasteFailCount++;
+      showOceanbaseTableCloneFailure(e);
+      if (e instanceof OceanbaseTableCloneError) hasMutatedTable = true;
       firstPasteError ??= e;
       console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
     }
@@ -3252,7 +3477,7 @@ function openInitialEventIfNeeded() {
 function finishObjectBrowserRowsLoad() {
   loadingObjects.value = false;
   const preferredFilter = props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables");
-  if (!userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
+  if (!usesServerObjectPaging.value && !userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
     // The default table filter is a presentation choice, not a user query
     // change, so preserve the tab's saved scroll offset across remounts.
     preserveObjectFilterScrollOnce = objectFilter.value !== "tables";
@@ -3275,6 +3500,8 @@ watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () =
 // (#8301)。经 objectListSchemaForConnection 回退到连接用户名（大写），仅限
 // 达梦；oracle/oceanbase-oracle 维持空 schema 由后端解析当前 schema。
 async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean }) {
+  clearTimeout(objectSearchTimer);
+  if (usesServerObjectPaging.value) return loadObjectPage(false);
   error.value = "";
   // A new load supersedes any in-flight one, so reset the transient refresh flags
   // on entry. A superseded request's finally() can no longer run (the guard's
@@ -3347,6 +3574,71 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
       loadingObjects.value = false;
       refreshingObjects.value = false;
       finishOnce();
+    }
+  }
+}
+
+async function loadObjectPage(append: boolean) {
+  if (append && (loadingObjects.value || loadingMoreObjects.value || !hasMoreObjects.value)) return;
+  const schema = needsSchema.value ? objectListSchemaForConnection(props.connection, selectedSchema.value) : props.database;
+  const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));
+  const offset = append ? objectPageOffset : 0;
+  const pageSize = objectPageSize.value;
+  const filter = search.value.trim();
+  const typeFilter = objectFilter.value;
+  const objectTypes: Partial<Record<ObjectFilter, (SidebarObjectKind | "EVENT")[]>> = {
+    tables: ["TABLE"],
+    views: ["VIEW"],
+    materializedViews: ["MATERIALIZED_VIEW"],
+    procedures: ["PROCEDURE"],
+    functions: ["FUNCTION"],
+    triggers: ["TRIGGER"],
+    events: ["EVENT"],
+    sequences: ["SEQUENCE"],
+    packages: ["PACKAGE", "PACKAGE_BODY"],
+    types: ["TYPE", "TYPE_BODY"],
+  };
+  const isCurrent = () => objectBrowserRowsLoadGuard.isCurrent(request) && search.value.trim() === filter && objectFilter.value === typeFilter;
+  error.value = "";
+  scaffoldRefreshError.value = "";
+  loadingObjects.value = !append;
+  loadingMoreObjects.value = append;
+  if (!append) {
+    rows.value = [];
+    hasMoreObjects.value = false;
+    objectPageOffset = 0;
+  }
+  try {
+    if (parseSlashDelimitedRegexQuery(filter)) {
+      error.value = t("objects.pagedRegexUnsupported");
+      return;
+    }
+    const objects = await api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, objectTypes[typeFilter], filter || undefined, pageSize + 1, offset, request.scope.catalog);
+    if (!isCurrent()) return;
+    const page = objects.slice(0, pageSize);
+    const pageRows = buildObjectBrowserRows({ objects: page, database: request.scope.database, fallbackSchema: request.scope.schema, rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value) });
+    applyObjectBrowserRows(append ? [...rows.value, ...pageRows] : pageRows);
+    objectPageOffset = offset + page.length;
+    hasMoreObjects.value = objects.length > pageSize;
+    if (effectiveDatabaseType.value === "oceanbase-oracle" && rows.value.some((row) => row.type === "TABLE")) {
+      void loadOceanBaseRowStatistics(request.scope.connectionId, request.scope.database, request.scope.schema, !append).then((snapshot) => {
+        if (!isCurrent()) return;
+        rows.value = rows.value.map((row) => {
+          if (row.type !== "TABLE") return row;
+          const statistics = oceanBaseTableStatistics(snapshot, row.name, row.schema || request.scope.schema);
+          return { ...row, estimatedRows: statistics.estimated_rows, totalBytes: statistics.space?.allocated_bytes, rowStatistics: statistics };
+        });
+      });
+    }
+  } catch (e: unknown) {
+    if (!isCurrent()) return;
+    if (append) scaffoldRefreshError.value = translateBackendError(t, e);
+    else error.value = translateBackendError(t, e);
+  } finally {
+    if (isCurrent()) {
+      loadingObjects.value = false;
+      loadingMoreObjects.value = false;
+      if (!append) finishObjectBrowserRowsLoad();
     }
   }
 }
@@ -3451,7 +3743,7 @@ function onSchemaChange(value: any) {
   selectedSchema.value = typeof value === "string" && value ? value : undefined;
   emit("schemaChange", selectedSchema.value);
   userHasSelectedFilter.value = false;
-  objectFilter.value = "all";
+  objectFilter.value = usesServerObjectPaging.value ? (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables") : "all";
   void loadObjects();
 }
 
@@ -3484,13 +3776,15 @@ function filterLabel(filter: ObjectFilter) {
                       : filter === "types"
                         ? "tree.types"
                         : "objects.all";
-  return `${t(key)} ${filterCount(filter)}`;
+  return usesServerObjectPaging.value ? t(key) : `${t(key)} ${filterCount(filter)}`;
 }
 
 function selectObjectFilter(filter: ObjectFilter) {
+  if (filter === objectFilter.value) return;
   userHasSelectedFilter.value = true;
   objectFilter.value = filter;
   emit("filterChange", filter);
+  if (usesServerObjectPaging.value) void loadObjects();
 }
 
 function getSearchInput(): HTMLInputElement | null {
@@ -3532,6 +3826,7 @@ function matchesRefreshScope(scope: { schema?: string; catalog?: string }): bool
 defineExpose({ focusSearch, refresh, matchesRefreshScope });
 
 onBeforeUnmount(() => {
+  clearTimeout(objectSearchTimer);
   objectBrowserRowsLoadGuard.invalidate();
   schemaListLoadGuard.invalidate();
   stopColumnResize?.();
@@ -3544,7 +3839,7 @@ watch(
     const contextEpoch = schemaListLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
-    objectFilter.value = "all";
+    objectFilter.value = usesServerObjectPaging.value ? (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables") : "all";
     clearTableSelection();
     // Close side panel and invalidate any pending source/table-info requests
     // so stale results from the old context don't overwrite new state.
@@ -3781,6 +4076,7 @@ function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
     ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
+    ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: "", separator: true },
     { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
   ];
@@ -3892,7 +4188,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         @update:model-value="onSchemaChange"
       />
       <!-- Sort selector -->
-      <div v-if="showInlineSortAndView" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
+      <div v-if="showInlineSortAndView && !usesServerObjectPaging" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
         <select
           class="h-6 cursor-pointer appearance-none rounded-sm bg-transparent px-1.5 text-xs text-muted-foreground outline-none hover:text-foreground focus:text-foreground"
           :value="sortKey"
@@ -3928,7 +4224,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         {{ t("objects.pasteTableSelected") }}
       </Button>
       <ToolbarOverflowMenu v-if="showToolbarOverflow" :label="t('toolbar.moreActions')" button-class="h-7 w-7">
-        <DropdownMenuSub>
+        <DropdownMenuSub v-if="!usesServerObjectPaging">
           <DropdownMenuSubTrigger>
             <ArrowDown class="h-3.5 w-3.5" />
             {{ t("objects.sortBy") }}
@@ -3940,7 +4236,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             </DropdownMenuItem>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
-        <DropdownMenuItem @select="sortDirection = sortDirection === 'asc' ? 'desc' : 'asc'">
+        <DropdownMenuItem v-if="!usesServerObjectPaging" @select="sortDirection = sortDirection === 'asc' ? 'desc' : 'asc'">
           <ArrowUp v-if="sortDirection === 'asc'" class="h-3.5 w-3.5" />
           <ArrowDown v-else class="h-3.5 w-3.5" />
           {{ sortDirection === "asc" ? t("objects.sortDesc") : t("objects.sortAsc") }}
@@ -4024,7 +4320,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('name')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('name')">
                   <span class="truncate">{{ t("objects.name") }}</span>
                   <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4033,7 +4329,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('type')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('type')">
                   <span class="truncate">{{ t("objects.type") }}</span>
                   <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4042,7 +4338,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div v-if="showObjectRowStats" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
                   <span class="truncate">{{ objectRowsLabel }}</span>
                   <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4055,8 +4351,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div v-if="showObjectSizeStats" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
-                  <span class="truncate">{{ t("objects.size") }}</span>
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
+                  <span class="truncate">{{ t(effectiveDatabaseType === "oceanbase-oracle" ? "objects.spaceAllocated" : "objects.size") }}</span>
                   <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
                 </button>
                 <div
@@ -4068,7 +4364,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div v-if="hasCreatedAt" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('created_at')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('created_at')">
                   <span class="truncate">{{ t("objects.createdAt") }}</span>
                   <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4081,7 +4377,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div v-if="hasUpdatedAt" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('updated_at')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('updated_at')">
                   <span class="truncate">{{ t("objects.updatedAt") }}</span>
                   <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4094,7 +4390,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('comment')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('comment')">
                   <span class="truncate">{{ t("objects.comment") }}</span>
                   <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4154,10 +4450,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     </span>
                   </div>
                   <div v-if="showObjectRowStats" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
-                    {{ formatObjectBrowserCount(item.estimatedRows) }}
+                    {{ item.rowStatistics ? estimatedRowsText(item.rowStatistics, t) : formatObjectBrowserCount(item.estimatedRows) }}
                   </div>
-                  <div v-if="showObjectSizeStats" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
-                    {{ formatObjectBrowserBytes(item.totalBytes) }}
+                  <div v-if="showObjectSizeStats" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.rowStatistics?.space ? oceanbaseSpaceHint(item.rowStatistics.space, t) : item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
+                    {{ item.rowStatistics?.space ? oceanbaseSpaceText(item.rowStatistics.space, t) : formatObjectBrowserBytes(item.totalBytes) }}
                   </div>
                   <div v-if="hasCreatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
                     {{ formatObjectBrowserTimestamp(item.created_at) }}
@@ -4202,12 +4498,15 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <span v-if="item.valid != null" class="rounded border px-1 py-px text-[10px] font-medium" :class="item.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
                         {{ t(item.valid ? "objects.validStatus" : "objects.invalidStatus") }}
                       </span>
-                      <span v-if="showObjectRowStats && item.estimatedRows != null && item.estimatedRows > 0" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
-                        formatObjectBrowserCount(item.estimatedRows)
+                      <span v-if="showObjectRowStats && (item.rowStatistics || (item.estimatedRows != null && item.estimatedRows > 0))" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
+                        item.rowStatistics ? estimatedRowsText(item.rowStatistics, t) : formatObjectBrowserCount(item.estimatedRows)
                       }}</span>
-                      <span v-if="showObjectSizeStats && item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{
-                        formatObjectBrowserBytes(item.totalBytes)
-                      }}</span>
+                      <span
+                        v-if="showObjectSizeStats && (item.rowStatistics?.space || (item.totalBytes != null && item.totalBytes > 0))"
+                        :title="item.rowStatistics?.space ? oceanbaseSpaceHint(item.rowStatistics.space, t) : undefined"
+                        class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground"
+                        >{{ item.rowStatistics?.space ? oceanbaseSpaceText(item.rowStatistics.space, t) : formatObjectBrowserBytes(item.totalBytes) }}</span
+                      >
                     </div>
                     <!-- Always reserve timestamp/comment slots when the dataset has them so every card shares one height. -->
                     <div v-if="hasCreatedAt || hasUpdatedAt" class="flex min-h-[15px] items-center gap-1 text-[10px] leading-[15px] text-muted-foreground/70">
@@ -4223,6 +4522,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </div>
             </template>
           </RecycleScroller>
+        </div>
+        <div v-if="usesServerObjectPaging" class="flex shrink-0 items-center justify-between gap-2 border-t px-3 py-2 text-xs text-muted-foreground">
+          <span>{{ t("objects.pagedOrder", { count: rows.length }) }}</span>
+          <Button v-if="hasMoreObjects" data-object-load-more variant="outline" size="sm" :disabled="loadingMoreObjects" @click="loadObjectPage(true)">
+            <Loader2 v-if="loadingMoreObjects" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            {{ t("tree.loadMore") }}
+          </Button>
         </div>
       </div>
       <!-- Right-side panel: table info or source -->
@@ -4416,8 +4722,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               {{ t("grid.tableInfoEmpty") }}
             </div>
             <div v-else class="divide-y">
-              <div v-for="trigger in filteredTableTriggers" :key="trigger.name" class="p-3 text-xs">
-                <div class="font-medium truncate">{{ trigger.name }}</div>
+              <div v-for="trigger in filteredTableTriggers" :key="triggerIdentity(trigger)" class="p-3 text-xs">
+                <div class="font-medium truncate">{{ triggerDisplayName(trigger) }}</div>
                 <div class="mt-1 text-[11px] text-muted-foreground">{{ trigger.timing }} {{ trigger.event }}</div>
               </div>
             </div>
@@ -4472,6 +4778,17 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               <X class="h-3 w-3" />
             </Button>
           </div>
+          <div v-if="!sourceCanEdit && sourceSaveError" class="shrink-0 whitespace-pre-wrap break-words border-b px-3 py-2 text-xs text-destructive">
+            {{ sourceSaveError }}
+          </div>
+          <OracleTypeMetadataPanel
+            v-if="!sourceLoading && sourceRow && ['TYPE', 'TYPE_BODY'].includes(sourceRow.type) && ['oracle', 'oceanbase-oracle'].includes(effectiveDatabaseType)"
+            :connection-id="props.connection.id"
+            :database="props.database"
+            :schema="sourceRow.schema || selectedSchema || props.database"
+            :name="sourceRow.name"
+            :object-type="sourceRow.type === 'TYPE_BODY' ? 'TYPE_BODY' : 'TYPE'"
+          />
           <div v-if="sourceLoading" class="flex flex-1 items-center justify-center">
             <Loader2 class="h-4 w-4 animate-spin text-muted-foreground" />
           </div>
@@ -4592,13 +4909,19 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </DialogHeader>
       <div class="grid gap-3">
         <Input v-model="renameInput" :placeholder="t('contextMenu.renameObjectNamePlaceholder')" @keydown.enter.prevent="confirmRename" />
+        <label v-if="renameTarget && supportsPackageRename(effectiveDatabaseType, renameTarget.type)" class="flex items-start gap-2 text-sm">
+          <input v-model="packageCleanupReviewed" type="checkbox" class="mt-1" />
+          <span>{{ t("contextMenu.packageCleanupAcknowledgement", { oldName: renameTarget.name, newName: renameInput }) }}</span>
+        </label>
+        <p v-if="effectiveDatabaseType === 'oceanbase-oracle' && renameTarget?.type === 'VIEW'" class="text-sm text-muted-foreground">{{ t("contextMenu.oceanbaseViewRenameWarning") }}</p>
+        <p v-if="effectiveDatabaseType === 'oceanbase-oracle' && (renameTarget?.type === 'PROCEDURE' || renameTarget?.type === 'FUNCTION')" class="text-sm text-muted-foreground">{{ t("contextMenu.oceanbaseRoutineRenameWarning") }}</p>
         <pre v-if="renamePreviewSqlText" class="max-h-32 min-w-0 max-w-full overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(renamePreviewSqlText)"></pre>
         <p v-if="renameError" class="min-w-0 max-w-full overflow-x-auto text-sm text-destructive">{{ renameError }}</p>
       </div>
       <DialogFooter>
         <Button variant="outline" @click="showRenameDialog = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button :disabled="!renameInput.trim() || renameInput.trim() === renameTarget?.name" @click="confirmRename">
-          {{ t("contextMenu.renameObject") }}
+          {{ t(packageCleanupReviewed ? "contextMenu.packageCleanupAction" : "contextMenu.renameObject") }}
         </Button>
       </DialogFooter>
     </DialogContent>
@@ -4679,6 +5002,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <DialogHeader>
         <DialogTitle>{{ t("contextMenu.duplicateNameTitle") }}</DialogTitle>
       </DialogHeader>
+      <Input v-if="effectiveDatabaseType === 'oceanbase-oracle'" v-model="duplicateTableSchema" :aria-label="t('contextMenu.oceanbaseCloneTargetSchema')" :placeholder="t('contextMenu.oceanbaseCloneTargetSchema')" />
       <Input v-model="duplicateTableName" :placeholder="t('contextMenu.duplicateNamePlaceholder')" @keydown.enter.prevent="confirmDuplicateStructure" />
       <DialogFooter>
         <Button variant="outline" @click="showDuplicateDialog = false">{{ t("dangerDialog.cancel") }}</Button>

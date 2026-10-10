@@ -1,5 +1,5 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
-import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
+import type { TransferContent, TransferDatabaseLinkConfig, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
@@ -83,6 +83,7 @@ export interface CompletionAssistantCandidate {
   comment?: string | null;
   data_type?: string | null;
   signature?: string | null;
+  routine_id?: string | null;
 }
 
 export interface CompletionAssistantResponse {
@@ -1010,10 +1011,24 @@ export interface ObjectInfo {
   xugu_package_body_valid?: boolean | null;
 }
 
+export interface ObjectSpaceStatistics {
+  status: string;
+  source: string;
+  replica_scope: string;
+  data_bytes: number | null;
+  allocated_bytes: number | null;
+  components_status: string;
+  components: { kind: string; data_bytes: number | null; allocated_bytes: number | null }[];
+}
+
 export interface ObjectStatistics {
   name: string;
   schema?: string | null;
   estimated_rows?: number | null;
+  rows_status?: "available" | "not_collected" | "permission_denied" | "unsupported" | "error" | "unknown" | null;
+  rows_source?: string | null;
+  rows_last_analyzed?: string | null;
+  rows_stale?: boolean | null;
   total_bytes?: number | null;
   data_length?: number | null;
   engine?: string | null;
@@ -1027,6 +1042,7 @@ export interface ObjectStatistics {
   index_length?: number | null;
   auto_increment?: string | null;
   data_free?: number | null;
+  space?: ObjectSpaceStatistics | null;
 }
 
 export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
@@ -1136,6 +1152,8 @@ export interface ColumnInfo {
   name: string;
   data_type: string;
   resolved_schema?: string;
+  resolved_table?: string;
+  resolved_object_type?: string;
   is_nullable: boolean;
   column_default: string | null;
   is_primary_key: boolean;
@@ -1194,6 +1212,8 @@ export interface ForeignKeyInfo {
 
 export interface TriggerInfo {
   name: string;
+  /** Catalog-reported trigger owner, independent of the parent table schema. */
+  owner?: string | null;
   event: string;
   timing: string;
   level?: string | null;
@@ -1242,12 +1262,43 @@ export interface SubpartitionInfo {
   partition_key: string;
 }
 
+export interface SchemaDiffDependencyObject {
+  owner: string;
+  name: string;
+  objectType: string;
+}
+
+export interface SchemaDiffTriggerInfo {
+  tableOwner: string;
+  tableName: string;
+  timing: string;
+  event: string;
+  status: string;
+  baseObjectType: string;
+}
+
+export interface SchemaDiffTypeInfo {
+  pairingState: import("@/types/oracleTypes").OracleMetadataReadState;
+  dependencyState: import("@/types/oracleTypes").OracleMetadataReadState;
+  incomingState: import("@/types/oracleTypes").OracleMetadataReadState;
+  referencedColumns: { owner: string; tableName: string; columnName: string }[];
+  metadataMessage?: string;
+}
+
 export interface FunctionInfo {
   name: string;
   function_type: string;
   data_type: string;
   definition: string;
   arguments: string;
+  schema?: string;
+  status?: string;
+  dependencies?: string[];
+  trigger?: SchemaDiffTriggerInfo;
+  dependencyObjects?: SchemaDiffDependencyObject[];
+  incomingDependencies?: SchemaDiffDependencyObject[];
+  pairedObjectPresent?: boolean;
+  typeInfo?: SchemaDiffTypeInfo;
 }
 
 export interface SequenceInfo {
@@ -1389,7 +1440,11 @@ export interface QueryResult {
   total_is_exact?: boolean;
   truncated?: boolean;
   /** Variable-length cells represented by bounded previews in `rows`. */
-  large_value_cells?: Array<{ row_index: number; column_index: number; original_bytes: number }>;
+  large_value_cells?: Array<{ row_index: number; column_index: number; original_bytes: number; value_ref?: string }>;
+  /** Frontend-only original result connection, independent of the currently active tab. */
+  large_value_context?: { connectionId: string; database: string; clientSessionId?: string; txnSessionId?: string; catalog?: string };
+  /** Retained result refs also cover cells already hydrated into complete local values. */
+  large_value_refs?: string[];
   session_id?: string | null;
   has_more?: boolean;
   /** For Elasticsearch REST search results parsed into a _source table,
@@ -1785,6 +1840,9 @@ export interface TreeNode {
     parentId: string;
     offset: number;
     pageSize: number;
+    /** Backend filter and global-search identity for OceanBase metadata pages. */
+    searchFilter?: string;
+    searchQuery?: string;
     /**
      * Identity of the row that was expected to open this page: the peek row the
      * previous page fetched but did not display. Offset paging is not snapshot
@@ -2139,6 +2197,9 @@ export interface QueryTab {
     | "dameng-users"
     | "dameng-roles"
     | "dameng-jobs"
+    | "oracle-type-editor"
+    | "oracle-jobs"
+    | "oracle-invalid-objects"
     | "processlist"
     | "sqlserver-trace"
     | "mysql-dashboard"
@@ -2198,6 +2259,8 @@ export interface QueryTab {
   };
   /** Opened to view object source, including objects without editable source metadata. */
   sourceView?: boolean;
+  /** Preserved source text whose object identity is no longer valid after rename. */
+  sourceSnapshot?: boolean;
   ddlViewer?: {
     schema?: string;
     tableName: string;
@@ -2223,6 +2286,8 @@ export interface QueryTab {
     objectType: ObjectSourceKind;
     signature?: string;
   };
+  /** Exact identity retained for read-only Oracle type source tabs. */
+  oracleTypeIdentity?: import("./oracleTypes").OracleTypeIdentity;
   /**
    * 「先出 UI 再加载」的中间态：源码 tab 已经可见，但源码还在路上
    * （ensureConnected + getObjectSource）。让 tab 栏与编辑区在等待期间就有反馈，
@@ -2438,6 +2503,8 @@ export interface TransferTaskConfig {
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;
   quoteTargetColumnNames: boolean;
+  objectConflictPolicy?: "skip" | "replace";
+  databaseLinks?: TransferDatabaseLinkConfig[];
   batchSize: number;
   /** Optional per-source-table transfer filter (bare WHERE or a full SELECT). */
   tableFilters?: Record<string, string>;

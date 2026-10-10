@@ -1,3 +1,4 @@
+import { functionInfoRequestArguments, functionInfoResponse } from "@/lib/backend/functionInfoTransport";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type * as TauriModule from "@/lib/backend/tauri";
 import { appendDebugLog } from "@/lib/backend/debugLog";
@@ -32,12 +33,12 @@ function forward<K extends keyof Backend>(name: K): Backend[K] {
     appendDebugLog("debug", "[DBX][api:start]", operation);
     const b = await getBackend();
     try {
-      const result = await (b[name] as (...a: unknown[]) => unknown)(...args);
+      const result = await (b[name] as (...a: unknown[]) => unknown)(...functionInfoRequestArguments(operation, args));
       appendDebugLog("debug", "[DBX][api:success]", {
         operation,
         elapsedMs: Math.round(performance.now() - startedAt),
       });
-      return result;
+      return functionInfoResponse(operation, result);
     } catch (error) {
       appendDebugLog("error", "[DBX][api:error]", {
         operation,
@@ -55,6 +56,10 @@ function forward<K extends keyof Backend>(name: K): Backend[K] {
 
 // Connection
 export const testConnection = forward("testConnection");
+// Job actions and arguments are memory-only and must not enter diagnostic logs.
+export async function oracleJobs(...args: Parameters<Backend["oracleJobs"]>): ReturnType<Backend["oracleJobs"]> {
+  return (await getBackend()).oracleJobs(...args);
+}
 export const testSshTunnel = forward("testSshTunnel");
 export const testConnectionWithInfo = forward("testConnectionWithInfo");
 export const salesforceOauthBrowserAuthorize = forward("salesforceOauthBrowserAuthorize");
@@ -218,10 +223,13 @@ export const listTables = forward("listTables");
 export const getTableComment = forward("getTableComment");
 export const getMysqlTableAutoIncrement = forward("getMysqlTableAutoIncrement");
 export const listObjects = forward("listObjects");
+export const getOracleTypeDetails = forward("getOracleTypeDetails");
 export const listObjectStatistics = forward("listObjectStatistics");
 export const listCompletionObjects = forward("listCompletionObjects");
 export const completionAssistantSearch = forward("completionAssistantSearch");
 export const getObjectSource = forward("getObjectSource");
+export const oracleUserAdmin = forward("oracleUserAdmin");
+export const oracleRoleAdmin = forward("oracleRoleAdmin");
 export const getEventInfo = forward("getEventInfo");
 export const getCustomTypeDetails = forward("getCustomTypeDetails");
 export const getColumns = forward("getColumns");
@@ -254,6 +262,7 @@ export const listEventTriggers = forward("listEventTriggers");
 export const prepareSchemaDiff = forward("prepareSchemaDiff");
 export const generateSchemaSyncSql = forward("generateSchemaSyncSql");
 export const generateSchemaSyncPlan = forward("generateSchemaSyncPlan");
+export const validateSchemaDiffRoutines = forward("validateSchemaDiffRoutines");
 export const listDialectDataTypes = forward("listDialectDataTypes");
 
 // Docs
@@ -281,6 +290,10 @@ export const cancelQuery = forward("cancelQuery");
 export const cancelQueryAndWait = forward("cancelQueryAndWait");
 export const cancelConditionalUpdate = forward("cancelConditionalUpdate");
 export const closeQuerySession = forward("closeQuerySession");
+export const readLargeValueChunk = forward("readLargeValueChunk");
+export const releaseLargeValue = forward("releaseLargeValue");
+export const downloadLargeValue = forward("downloadLargeValue");
+export const exportSnapshotResult = forward("exportSnapshotResult");
 export const closeClientConnectionSession = forward("closeClientConnectionSession");
 export const analyzeSqlReferences = forward("analyzeSqlReferences");
 export const findStatementAtCursor = forward("findStatementAtCursor");
@@ -327,6 +340,14 @@ export const buildTableOwnerChangeSql = forward("buildTableOwnerChangeSql");
 export const buildTablePartitionOperationSql = forward("buildTablePartitionOperationSql");
 export const buildCreatePartitionedTableSql = forward("buildCreatePartitionedTableSql");
 export const previewSqliteTableStructureChange = forward("previewSqliteTableStructureChange");
+export const previewPrimaryKeyChange = forward("previewPrimaryKeyChange");
+export const previewForeignKeyChange = forward("previewForeignKeyChange");
+export const previewCheckChange = forward("previewCheckChange");
+export const applyCheckChange = forward("applyCheckChange");
+export const previewUniqueChange = forward("previewUniqueChange");
+export const applyUniqueChange = forward("applyUniqueChange");
+export const applyForeignKeyChange = forward("applyForeignKeyChange");
+export const applyPrimaryKeyChange = forward("applyPrimaryKeyChange");
 export const applySqliteTableStructureChange = forward("applySqliteTableStructureChange");
 export const buildCreateTableSql = forward("buildCreateTableSql");
 export const buildSingleColumnAlterSql = forward("buildSingleColumnAlterSql");
@@ -1112,6 +1133,12 @@ export type {
   TransferMode,
   TransferContent,
   TransferObjectKind,
+  TransferObjectConflictPolicy,
+  TransferDatabaseLinkConfig,
+  TransferDatabaseLinkCredential,
+  TransferSchemaObjectPlan,
+  TransferSchemaObjectPreview,
+  TransferObjectResult,
   TransferObjectSelection,
   TransferTableNameCase,
   TransferOwnershipPolicy,

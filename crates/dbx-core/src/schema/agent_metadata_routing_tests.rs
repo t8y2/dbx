@@ -1,6 +1,6 @@
 use super::{
-    get_table_comment_core, get_table_ddl_core, list_databases_core, list_object_statistics_core, AppState,
-    ConnectionConfig, DatabaseType, PoolKind,
+    completion_assistant_search_core, get_table_comment_core, get_table_ddl_core, list_databases_core,
+    list_object_statistics_core, AppState, ConnectionConfig, DatabaseType, PoolKind,
 };
 use crate::db::agent_driver::{AgentDriverClient, PooledAgentClient};
 use serde_json::{json, Value};
@@ -8,10 +8,362 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[tokio::test]
+async fn oceanbase_row_statistics_preserve_zero_unknown_collection_time_and_quoted_names() {
+    let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+    std::fs::write(fixture.control_path("statistics"), "ob-rows").unwrap();
+    let rows = list_object_statistics_core(&fixture.state, "conn", "configured", "Mixed Owner").await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].name, "Empty");
+    assert_eq!(rows[0].schema.as_deref(), Some("Mixed Owner"));
+    assert_eq!(rows[0].estimated_rows, Some(0));
+    assert_eq!(rows[0].rows_status.as_deref(), Some("available"));
+    assert_eq!(rows[0].rows_last_analyzed.as_deref(), Some("2026-10-08 10:00:00"));
+    assert_eq!(rows[1].estimated_rows, Some(125));
+    assert_eq!(rows[1].rows_stale, Some(true));
+    assert_eq!(rows[2].estimated_rows, None);
+    assert_eq!(rows[2].rows_status.as_deref(), Some("not_collected"));
+    assert_eq!(rows[2].rows_last_analyzed, None);
+    assert!(rows.iter().all(|row| row.total_bytes.is_none()));
+    let requests = fixture.requests("execute_query");
+    assert_eq!(requests.len(), 3);
+    let sql = requests[0]["params"]["sql"].as_str().unwrap();
+    assert!(sql.contains("OWNER = 'Mixed Owner'"));
+    assert!(sql.contains("OBJECT_TYPE = 'TABLE'"));
+    assert!(sql.contains("PARTITION_NAME IS NULL"));
+    assert!(sql.contains("SUBPARTITION_NAME IS NULL"));
+    assert!(!sql.contains("COUNT(") && !sql.contains("DBMS_STATS") && !sql.contains("ALL_OBJECTS"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oceanbase_row_statistics_page_the_dictionary_without_truncating_large_schemas() {
+    let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+    std::fs::write(fixture.control_path("statistics"), "ob-pages").unwrap();
+    let rows = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await.unwrap();
+    assert_eq!(rows.len(), 1001);
+    assert_eq!(rows.last().unwrap().estimated_rows, Some(1000));
+    let requests = fixture.requests("execute_query");
+    assert_eq!(requests.len(), 4);
+    assert!(requests[1]["params"]["sql"].as_str().unwrap().contains("TABLE_NAME > 'T0999'"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oceanbase_row_statistics_do_not_turn_permission_errors_or_truncation_into_empty_estimates() {
+    for (mode, message) in [("ob-error", "ORA-01031"), ("ob-truncated", "truncated")] {
+        let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+        std::fs::write(fixture.control_path("statistics"), mode).unwrap();
+        let error = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await.unwrap_err();
+        assert!(error.contains(message), "{error}");
+        assert_eq!(fixture.requests("execute_query").len(), 3);
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn native_oracle_statistics_keep_the_existing_space_and_rows_path() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    let rows = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await.unwrap();
+    assert_eq!(rows[0].estimated_rows, Some(12));
+    assert_eq!(rows[0].total_bytes, Some(4096));
+    assert_eq!(rows[0].rows_status, None);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oceanbase_statistics_route_space_over_agent_without_oracle_segments() {
+    for mode in ["ob-space", "ob-space-legacy"] {
+        let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+        std::fs::write(fixture.control_path("statistics"), mode).unwrap();
+        let rows = list_object_statistics_core(&fixture.state, "conn", "configured", "Mixed Owner").await.unwrap();
+        let empty = rows.iter().find(|row| row.name == "Empty").unwrap();
+        assert_eq!(empty.space.as_ref().unwrap().allocated_bytes, Some(0));
+        let stale = rows.iter().find(|row| row.name == "STALE").unwrap();
+        assert_eq!(stale.estimated_rows, Some(125));
+        assert_eq!(stale.space.as_ref().unwrap().allocated_bytes, Some(8192));
+        assert_eq!(stale.space.as_ref().unwrap().components[1].allocated_bytes, Some(4096));
+        assert_eq!(stale.space.as_ref().unwrap().components[2].allocated_bytes, None);
+        assert_eq!(stale.total_bytes, None);
+        let requests = fixture.requests("execute_query");
+        assert_eq!(requests.len(), 3);
+        let sql = requests[2]["params"]["sql"].as_str().unwrap();
+        assert!(sql.starts_with("WITH loc AS"), "Oracle CTEs must stay outside the paging subquery: {sql}");
+        for required in [
+            "DATABASE_NAME = 'Mixed Owner'",
+            "l.ROLE = 'LEADER'",
+            "r.SVR_PORT = l.SVR_PORT",
+            "r.SVR_IP = l.SVR_IP",
+            "r.LS_ID = l.LS_ID",
+            "r.TABLET_ID = l.TABLET_ID",
+        ] {
+            assert!(sql.contains(required), "{sql}");
+        }
+        assert!(!requests.iter().any(|request| request["params"]["sql"].as_str().unwrap().contains("SEGMENTS")));
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn oceanbase_space_and_row_dictionary_permissions_are_independent() {
+    for mode in ["ob-space-denied", "ob-space-no-rows"] {
+        let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+        std::fs::write(fixture.control_path("statistics"), mode).unwrap();
+        let rows = list_object_statistics_core(&fixture.state, "conn", "configured", "Mixed Owner").await.unwrap();
+        let row = rows.iter().find(|row| row.name == "STALE").unwrap();
+        if mode == "ob-space-denied" {
+            assert_eq!(row.estimated_rows, Some(125));
+            assert_eq!(row.space.as_ref().unwrap().status, "permission_denied");
+            assert_eq!(row.space.as_ref().unwrap().allocated_bytes, None);
+        } else {
+            assert_eq!(row.estimated_rows, None);
+            assert_eq!(row.rows_status.as_deref(), Some("permission_denied"));
+            assert_eq!(row.space.as_ref().unwrap().allocated_bytes, Some(8192));
+        }
+        fixture.shutdown().await;
+    }
+}
+
 struct AgentFixture {
     state: Arc<AppState>,
     directory: tempfile::TempDir,
     _listener: tokio::net::TcpListener,
+}
+
+fn object_transfer_request(objects: serde_json::Value) -> crate::data::transfer::TransferRequest {
+    serde_json::from_value(json!({
+        "transferId": "ob-source-fallback", "sourceConnectionId": "conn", "sourceDatabase": "configured",
+        "sourceSchema": "SRC", "targetConnectionId": "conn", "targetDatabase": "configured", "targetSchema": "DST",
+        "tables": [], "createTable": true, "content": "structureOnly", "batchSize": 100, "objects": objects
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn oceanbase_transfer_uses_editor_source_rpc_when_get_ddl_is_unavailable() {
+    use crate::data::transfer::transfer_schema_objects;
+    let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+    std::fs::write(fixture.control_path("transfer-sources"), json!({
+        "S": {"source": "CREATE SEQUENCE \"SRC\".\"S\" START WITH 7;"},
+        "V": {"source": "SELECT 1 FROM DUAL"},
+        "M": {"source": "CREATE MATERIALIZED VIEW \"SRC\".\"M\" REFRESH COMPLETE ON DEMAND AS SELECT 1 X FROM DUAL;"},
+        "F": {"source": "CREATE OR REPLACE FUNCTION F RETURN NUMBER AS BEGIN RETURN 1; END;\n/"},
+        "P": {"source": "CREATE OR REPLACE PROCEDURE P AS BEGIN NULL; END;\n/"},
+        "T": {"source": "CREATE OR REPLACE TRIGGER \"SRC\".\"T\" BEFORE INSERT ON \"SRC\".\"BASE\" BEGIN NULL; END;\n/\nALTER TRIGGER \"SRC\".\"T\" DISABLE;"}
+    }).to_string()).unwrap();
+    std::fs::write(fixture.control_path("transfer-targets"), json!({
+        "S": {"object_type": "SEQUENCE", "source": "CREATE SEQUENCE \"DST\".\"S\" START WITH 7;"},
+        "V": {"object_type": "VIEW", "source": "SELECT 1 FROM DUAL"},
+        "M": {"object_type": "MATERIALIZED VIEW", "source": "CREATE MATERIALIZED VIEW \"DST\".\"M\" REFRESH COMPLETE ON DEMAND AS SELECT 1 X FROM DUAL;"},
+        "F": {"object_type": "FUNCTION", "source": "CREATE OR REPLACE FUNCTION \"DST\".\"F\" RETURN NUMBER AS BEGIN RETURN 1; END;\n/"},
+        "P": {"object_type": "PROCEDURE", "source": "CREATE OR REPLACE PROCEDURE \"DST\".\"P\" AS BEGIN NULL; END;\n/"},
+        "T": {"object_type": "TRIGGER", "source": "CREATE OR REPLACE TRIGGER \"DST\".\"T\" BEFORE INSERT ON \"DST\".\"BASE\" BEGIN NULL; END;\n/\nALTER TRIGGER \"DST\".\"T\" DISABLE;"}
+    }).to_string()).unwrap();
+    std::fs::write(
+        fixture.control_path("transfer-sequences"),
+        json!({
+            "SRC": {"S": [1, 999999, 1, "N", "N", 20]},
+            "DST": {"S": [1, 999999, 1, "N", "N", 20]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let request = object_transfer_request(json!([
+        {"objectType": "TRIGGER", "names": ["T"]}, {"objectType": "PROCEDURE", "names": ["P"]},
+        {"objectType": "FUNCTION", "names": ["F"]}, {"objectType": "MATERIALIZED_VIEW", "names": ["M"]},
+        {"objectType": "VIEW", "names": ["V"]}, {"objectType": "SEQUENCE", "names": ["S"]}
+    ]));
+    let key = fixture.state.get_or_create_pool_for_session("conn", Some("configured"), None).await.unwrap();
+    let outcome = transfer_schema_objects(&fixture.state, &request, &key, &key, |_| {}).await.unwrap();
+    assert_eq!(outcome.transferred.len(), 6);
+    assert!(outcome.failed.is_empty());
+    assert!(outcome.skipped.is_empty());
+    let sources = fixture.requests("get_object_source");
+    for schema in ["SRC", "DST"] {
+        let identities = sources
+            .iter()
+            .filter(|request| request["params"]["schema"] == schema)
+            .map(|request| {
+                (request["params"]["name"].as_str().unwrap(), request["params"]["object_type"].as_str().unwrap())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            identities,
+            std::collections::BTreeSet::from([
+                ("S", "SEQUENCE"),
+                ("V", "VIEW"),
+                ("M", "MATERIALIZED_VIEW"),
+                ("F", "FUNCTION"),
+                ("P", "PROCEDURE"),
+                ("T", "TRIGGER")
+            ])
+        );
+        assert_eq!(sources.iter().filter(|request| request["params"]["schema"] == schema).count(), 6);
+    }
+    assert_eq!(sources.len(), 12);
+    let sqls = fixture
+        .requests("execute_query")
+        .into_iter()
+        .map(|request| request["params"]["sql"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(sqls.iter().all(|sql| !sql.contains("DBMS_METADATA")));
+    let ddl = sqls.iter().filter(|sql| sql.starts_with("CREATE") || sql.starts_with("ALTER")).collect::<Vec<_>>();
+    assert_eq!(ddl.len(), 7);
+    assert!(ddl[0].starts_with("CREATE SEQUENCE \"DST\".\"S\""));
+    assert!(ddl.iter().any(|sql| sql.contains("VIEW \"DST\".\"V\" (\"Alias\")")));
+    assert!(ddl.last().unwrap().contains("ALTER TRIGGER \"DST\".\"T\" DISABLE"));
+    assert_eq!(sqls.iter().filter(|sql| sql.starts_with("SELECT 1 FROM ALL_OBJECTS")).count(), 6);
+    assert_eq!(sqls.iter().filter(|sql| sql.starts_with("SELECT OBJECT_NAME, OBJECT_TYPE, STATUS")).count(), 6);
+    let error_queries = sqls.iter().filter(|sql| sql.contains("FROM ALL_ERRORS")).collect::<Vec<_>>();
+    assert_eq!(error_queries.len(), 3);
+    for (name, kind) in [("F", "FUNCTION"), ("P", "PROCEDURE"), ("T", "TRIGGER")] {
+        assert!(error_queries
+            .iter()
+            .any(|sql| sql.contains(&format!("OWNER='DST' AND NAME='{name}' AND TYPE='{kind}'"))));
+    }
+    assert_eq!(sqls.iter().filter(|sql| sql.contains("FROM ALL_SEQUENCES")).count(), 2);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oceanbase_transfer_rejects_invalid_missing_or_different_target_after_successful_ddl() {
+    for (override_target, expected) in [
+        (json!({"status": "INVALID"}), "not VALID"),
+        (json!({"missing": true}), "identity is missing"),
+        (json!({"object_type": "PROCEDURE"}), "identity is missing"),
+        (json!({"errors": [[3, 1, "PLS-00201"]]}), "compiler errors"),
+        (
+            json!({"source": "CREATE OR REPLACE FUNCTION \"DST\".\"F\" RETURN NUMBER AS BEGIN RETURN 2; END;\n/"}),
+            "definition differs",
+        ),
+    ] {
+        let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+        std::fs::write(
+            fixture.control_path("transfer-sources"),
+            json!({
+                "F": {"source": "CREATE OR REPLACE FUNCTION F RETURN NUMBER AS BEGIN RETURN 1; END;\n/"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut target = json!({"object_type": "FUNCTION", "status": "VALID",
+            "source": "CREATE OR REPLACE FUNCTION \"DST\".\"F\" RETURN NUMBER AS BEGIN RETURN 1; END;\n/"});
+        target.as_object_mut().unwrap().extend(override_target.as_object().unwrap().clone());
+        std::fs::write(fixture.control_path("transfer-targets"), json!({"F": target}).to_string()).unwrap();
+        let request = object_transfer_request(json!([{"objectType": "FUNCTION", "names": ["F"]}]));
+        let key = fixture.state.get_or_create_pool_for_session("conn", Some("configured"), None).await.unwrap();
+        let mut errors = vec![];
+        let outcome =
+            crate::data::transfer::transfer_schema_objects(&fixture.state, &request, &key, &key, |progress| {
+                if let Some(error) = progress.error {
+                    errors.push(error);
+                }
+            })
+            .await
+            .unwrap();
+        assert!(outcome.transferred.is_empty());
+        assert!(outcome.skipped.is_empty());
+        assert_eq!(outcome.failed, vec!["Function:F"]);
+        assert!(
+            errors.iter().any(|error| error.contains(expected)
+                && error.contains("after 1 completed DDL statements")
+                && error.contains("target retained for inspection")),
+            "{errors:?}"
+        );
+        assert_eq!(
+            fixture
+                .requests("execute_query")
+                .iter()
+                .filter(|request| request["params"]["sql"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("CREATE OR REPLACE FUNCTION \"DST\".\"F\""))
+                .count(),
+            1
+        );
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn oceanbase_transfer_does_not_count_empty_denied_or_partially_applied_sources_as_success() {
+    use crate::data::transfer::transfer_schema_objects;
+    for (source, fail_sql, expected) in [
+        (json!({"source": ""}), None, "No complete source"),
+        (json!({"error": "ORA-01031 source unavailable"}), None, "ORA-01031"),
+        (
+            json!({"source": "CREATE OR REPLACE TRIGGER \"SRC\".\"T\" BEFORE INSERT ON \"SRC\".\"BASE\" BEGIN NULL; END;\n/\nALTER TRIGGER \"SRC\".\"T\" DISABLE;"}),
+            Some("ALTER TRIGGER"),
+            "after 1 completed DDL statements",
+        ),
+    ] {
+        let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+        std::fs::write(fixture.control_path("transfer-sources"), json!({"T": source}).to_string()).unwrap();
+        if let Some(sql) = fail_sql {
+            std::fs::write(fixture.control_path("transfer-fail-sql"), sql).unwrap();
+        }
+        let request = object_transfer_request(json!([{"objectType": "TRIGGER", "names": ["T"]}]));
+        let key = fixture.state.get_or_create_pool_for_session("conn", Some("configured"), None).await.unwrap();
+        let mut errors = vec![];
+        let outcome = transfer_schema_objects(&fixture.state, &request, &key, &key, |progress| {
+            if let Some(error) = progress.error {
+                errors.push(error);
+            }
+        })
+        .await
+        .unwrap();
+        assert!(outcome.transferred.is_empty());
+        assert_eq!(outcome.failed, vec!["Trigger:T"]);
+        assert!(errors.iter().any(|error| error.contains(expected)), "{errors:?}");
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn native_oracle_transfer_keeps_get_ddl_path() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    std::fs::write(fixture.control_path("transfer-sources"), "{}").unwrap();
+    std::fs::write(fixture.control_path("transfer-native-ddl"), "CREATE SEQUENCE \"SRC\".\"S\" START WITH 9;").unwrap();
+    let request = object_transfer_request(json!([{"objectType": "SEQUENCE", "names": ["S"]}]));
+    let key = fixture.state.get_or_create_pool_for_session("conn", Some("configured"), None).await.unwrap();
+    let outcome =
+        crate::data::transfer::transfer_schema_objects(&fixture.state, &request, &key, &key, |_| {}).await.unwrap();
+    assert_eq!(outcome.transferred, vec!["Sequence:S"]);
+    assert!(fixture.requests("get_object_source").is_empty());
+    assert!(fixture
+        .requests("execute_query")
+        .iter()
+        .any(|request| request["params"]["sql"].as_str().unwrap().contains("DBMS_METADATA.GET_DDL")));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oceanbase_cross_family_sequence_keeps_existing_conversion_with_editor_source() {
+    let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+    std::fs::write(
+        fixture.control_path("transfer-sources"),
+        json!({"S": {"source": "CREATE SEQUENCE \"SRC\".\"S\" START WITH 7 INCREMENT BY 2 NOCYCLE;"}}).to_string(),
+    )
+    .unwrap();
+    let mut target = fixture.state.configs.read().await.get("conn").unwrap().clone();
+    target.id = "target".into();
+    target.db_type = DatabaseType::SqlServer;
+    fixture.state.configs.write().await.insert("target".into(), target);
+    let mut request = object_transfer_request(json!([{"objectType": "SEQUENCE", "names": ["S"]}]));
+    request.target_connection_id = "target".into();
+    request.target_schema = "dbo".into();
+    // The fixture captures target SQL; SQL Server execution is a separate acceptance step.
+    let key = fixture.state.get_or_create_pool_for_session("conn", Some("configured"), None).await.unwrap();
+    let outcome =
+        crate::data::transfer::transfer_schema_objects(&fixture.state, &request, &key, &key, |_| {}).await.unwrap();
+    assert_eq!(outcome.transferred, vec!["Sequence:S"]);
+    assert_eq!(fixture.requests("get_object_source").len(), 1);
+    let requests = fixture.requests("execute_query");
+    assert!(requests.iter().all(|request| !request["params"]["sql"].as_str().unwrap().contains("DBMS_METADATA")));
+    assert!(requests
+        .iter()
+        .any(|request| request["params"]["sql"].as_str().unwrap().contains("CREATE SEQUENCE [dbo].[S]")));
+    fixture.shutdown().await;
 }
 
 impl AgentFixture {
@@ -101,6 +453,245 @@ impl AgentFixture {
         self.state.shutdown(Duration::from_secs(2)).await;
         drop(self.directory);
     }
+}
+
+fn completion_request() -> crate::db::CompletionAssistantRequest {
+    serde_json::from_value(json!({
+        "connection_id":"conn", "database":"configured", "schema":"Mixed.Owner",
+        "object_kinds":["routine"], "mask":"中文_%\\", "case_sensitive":true,
+        "global_search":false, "max_results":2, "search_in_comments":false,
+        "search_in_definitions":false, "parent_schema":"Mixed.Owner",
+        "parent_name":null, "match_mode":"prefix"
+    }))
+    .unwrap()
+}
+
+fn completion_candidate(kind: &str, identity: &str, signature: Value) -> Value {
+    json!({
+        "name":"Do.Work中文", "kind":kind, "database":"configured", "schema":"Mixed.Owner",
+        "parent_schema":null, "parent_name":null, "comment":"public routine",
+        "data_type":if kind == "function" { json!("NUMBER") } else { Value::Null },
+        "routine_id":identity, "signature":signature
+    })
+}
+
+fn completion_reply(fixture: &AgentFixture, reply: Value) {
+    std::fs::write(fixture.control_path("completion-reply.json"), serde_json::to_vec(&reply).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn completion_forwards_oracle_and_oceanbase_routine_filters_through_the_metadata_agent() {
+    for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+        let fixture = AgentFixture::new(database_type).await;
+        for (index, (kind, mode, case_sensitive)) in
+            [("procedure", "prefix", true), ("function", "contains", false)].into_iter().enumerate()
+        {
+            let mut request = serde_json::to_value(completion_request()).unwrap();
+            request["object_kinds"] = json!([kind]);
+            request["match_mode"] = json!(mode);
+            request["case_sensitive"] = json!(case_sensitive);
+            request["global_search"] = json!(index == 1);
+            let expected = completion_candidate(kind, "Mixed.Owner:101:1", json!(""));
+            completion_reply(
+                &fixture,
+                json!({"result":{
+                    "candidates":[expected.clone()], "incomplete":true, "fallback_used":true,
+                    "routine_search_supported":true
+                }}),
+            );
+
+            let response =
+                completion_assistant_search_core(&fixture.state, serde_json::from_value(request.clone()).unwrap())
+                    .await
+                    .unwrap();
+
+            assert_eq!(serde_json::to_value(&response.candidates).unwrap(), json!([expected]));
+            assert!(response.incomplete);
+            assert!(!response.fallback_used, "a real Agent response must not become Core fallback");
+            let calls = fixture.requests("completion_assistant_search_v1");
+            assert_eq!(calls.len(), index + 1);
+            for (field, value) in request.as_object().unwrap() {
+                assert_eq!(&calls[index]["params"][field], value, "forwarded field {field}");
+            }
+            let opens = fixture.requests("open_session");
+            assert_eq!(opens.len(), 1, "completion must reuse the metadata session");
+            assert_eq!(opens[0]["params"]["sessionRole"], "metadata");
+            assert_eq!(calls[index]["params"]["agentSessionId"], opens[0]["params"]["agentSessionId"]);
+            assert!(fixture.requests("list_objects").is_empty());
+            assert!(
+                fixture.requests("execute_query").is_empty(),
+                "Core must not replace filtered completion with a catalog scan"
+            );
+        }
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn completion_preserves_quoted_package_identity_overloads_and_unknown_parameters() {
+    for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+        let fixture = AgentFixture::new(database_type).await;
+        let mut request = completion_request();
+        request.parent_name = Some("Mixed.Package".into());
+        request.max_results = Some(3);
+        let mut candidates = vec![
+            completion_candidate("procedure", "Mixed.Owner:101:1", json!("")),
+            completion_candidate(
+                "function",
+                "Mixed.Owner:101:2",
+                json!("INPUT IN NUMBER DEFAULT, RESULT IN/OUT PL/SQL RECORD"),
+            ),
+            completion_candidate("function", "Mixed.Owner:101:3", Value::Null),
+        ];
+        for candidate in &mut candidates {
+            candidate["parent_schema"] = json!("Mixed.Owner");
+            candidate["parent_name"] = json!("Mixed.Package");
+        }
+        completion_reply(
+            &fixture,
+            json!({"result":{
+                "candidates":candidates, "incomplete":true, "fallback_used":false, "routine_search_supported":true
+            }}),
+        );
+
+        let response = completion_assistant_search_core(&fixture.state, request.clone()).await.unwrap();
+
+        assert_eq!(response.candidates.len(), 3);
+        assert_eq!(serde_json::to_value(&response.candidates).unwrap(), json!(candidates));
+        assert!(response.incomplete);
+        assert!(!response.fallback_used);
+        assert_eq!(response.candidates[0].signature.as_deref(), Some(""));
+        assert!(response.candidates[2].signature.is_none());
+        assert_ne!(response.candidates[1].routine_id, response.candidates[2].routine_id);
+        let calls = fixture.requests("completion_assistant_search_v1");
+        assert_eq!(calls.len(), 1);
+        for (field, value) in serde_json::to_value(request).unwrap().as_object().unwrap() {
+            assert_eq!(&calls[0]["params"][field], value, "package request field {field}");
+        }
+        assert!(fixture.requests("list_objects").is_empty());
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn completion_rejects_legacy_oceanbase_capability_but_accepts_a_current_empty_search() {
+    let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+    for parent_name in [None, Some("Mixed.Package".to_string())] {
+        let mut request = completion_request();
+        request.parent_name = parent_name;
+        completion_reply(&fixture, json!({"result":{"candidates":[], "incomplete":false, "fallback_used":false}}));
+
+        let error = completion_assistant_search_core(&fixture.state, request.clone()).await.unwrap_err();
+
+        assert!(error.contains("does not support filtered routine completion"), "{error}");
+        completion_reply(
+            &fixture,
+            json!({"result":{
+                "candidates":[], "incomplete":false, "fallback_used":false, "routine_search_supported":true
+            }}),
+        );
+        let response = completion_assistant_search_core(&fixture.state, request).await.unwrap();
+        assert!(response.candidates.is_empty());
+        assert!(!response.incomplete);
+        assert!(!response.fallback_used, "a supported empty search must not trigger schema-list fallback");
+    }
+    assert_eq!(fixture.requests("completion_assistant_search_v1").len(), 4);
+    assert!(fixture.requests("list_objects").is_empty());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn completion_does_not_require_the_oceanbase_capability_from_existing_oracle_agents() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    let candidate = completion_candidate("procedure", "101:1", json!(""));
+    completion_reply(
+        &fixture,
+        json!({"result":{"candidates":[candidate.clone()], "incomplete":false, "fallback_used":false}}),
+    );
+
+    let response = completion_assistant_search_core(&fixture.state, completion_request()).await.unwrap();
+
+    assert_eq!(serde_json::to_value(response.candidates).unwrap(), json!([candidate]));
+    assert!(!response.fallback_used);
+    assert_eq!(fixture.requests("completion_assistant_search_v1").len(), 1);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn completion_marks_missing_assistant_methods_as_fallback_without_fabricating_package_members() {
+    for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+        let fixture = AgentFixture::new(database_type).await;
+        for parent_name in [None, Some("Mixed.Package".to_string())] {
+            let mut request = completion_request();
+            request.parent_name = parent_name;
+            completion_reply(
+                &fixture,
+                json!({"error":{"code":-32601, "message":"unknown method: completion_assistant_search_v1"}}),
+            );
+
+            let response = completion_assistant_search_core(&fixture.state, request).await.unwrap();
+
+            assert!(
+                response.fallback_used,
+                "the frontend must distinguish an unsupported Agent from a legitimate empty search"
+            );
+            assert!(response.candidates.is_empty());
+            assert!(!response.incomplete);
+        }
+        assert_eq!(fixture.requests("completion_assistant_search_v1").len(), 2);
+        assert!(
+            fixture.requests("list_objects").is_empty(),
+            "Core has no routine catalog fallback; the frontend owns the standalone fallback"
+        );
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn completion_propagates_agent_permission_errors_without_empty_success_or_catalog_fallback() {
+    for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+        let fixture = AgentFixture::new(database_type).await;
+        for parent_name in [None, Some("Mixed.Package".to_string())] {
+            let mut request = completion_request();
+            request.parent_name = parent_name;
+            let mut error = json!({"code":-1, "message":"fixture metadata permission denied", "data":{
+                "category":"sql", "retryable":false, "sessionDisposition":"keep", "stage":"execute"
+            }});
+            error["data"]["vendorCode"] = json!(1031);
+            completion_reply(&fixture, json!({"error":error}));
+
+            let error = completion_assistant_search_core(&fixture.state, request).await.unwrap_err();
+
+            assert!(error.contains("metadata permission denied"), "{error}");
+        }
+        assert_eq!(
+            fixture.requests("completion_assistant_search_v1").len(),
+            2,
+            "SQL errors must not be retried or converted to successful empty results"
+        );
+        assert!(fixture.requests("list_objects").is_empty());
+        assert!(fixture.requests("execute_query").is_empty());
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn oceanbase_table_ddl_preserves_trigger_script_and_propagates_incomplete_export() {
+    let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+    let ddl = "-- Export scope: table and all visible table triggers (count: 1).\n\
+CREATE TABLE \"APP\".\"EVENTS\" (ID INTEGER);\n\
+CREATE OR REPLACE TRIGGER \"APP\".\"AUDIT\" BEFORE INSERT ON \"APP\".\"EVENTS\"\n\
+FOR EACH ROW WHEN (new.id > 0)\nBEGIN\n :new.id := :new.id + 1;\n NULL;\nEND;\n/\n\
+ALTER TRIGGER \"APP\".\"AUDIT\" DISABLE;";
+    std::fs::write(fixture.control_path("table-ddl"), ddl).unwrap();
+    assert_eq!(get_table_ddl_core(&fixture.state, "conn", "configured", "APP", "EVENTS", None).await.unwrap(), ddl);
+    assert!(fixture.requests("execute_query").is_empty(), "DDL retrieval must not execute the exported script");
+    std::fs::write(fixture.control_path("table-ddl-error"), "Table DDL export incomplete: insufficient privileges")
+        .unwrap();
+    let error = get_table_ddl_core(&fixture.state, "conn", "configured", "APP", "EVENTS", None).await.unwrap_err();
+    assert!(error.contains("export incomplete"), "{error}");
+    assert!(error.contains("insufficient privileges"), "{error}");
+    fixture.shutdown().await;
 }
 
 #[tokio::test]

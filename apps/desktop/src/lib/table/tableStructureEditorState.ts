@@ -1,4 +1,5 @@
 import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
+import { triggerIdentity } from "@/lib/table/triggerIdentity";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
 
 export interface CopySourceColumnDetails {
@@ -1049,6 +1050,15 @@ function columnDataTypeForEditor(column: ColumnInfo, databaseType?: DatabaseType
 
   const baseType = parsed.baseType.trim().replace(/\s+/g, " ");
   const normalized = baseType.toLowerCase();
+  if (databaseType === "oracle" || databaseType === "oceanbase-oracle") {
+    const precision = Number.isInteger(column.numeric_precision) && Number(column.numeric_precision) > 0 ? String(column.numeric_precision) : undefined;
+    if (normalized === "float" && precision) return combineDataTypeForDatabase(databaseType, baseType, precision);
+    if (normalized === "number") {
+      const scale = Number.isInteger(column.numeric_scale) ? String(column.numeric_scale) : undefined;
+      if (scale !== undefined && (precision || column.numeric_precision == null)) return combineDataTypeForDatabase(databaseType, baseType, `${precision ?? "*"},${scale}`);
+      if (precision) return combineDataTypeForDatabase(databaseType, baseType, precision);
+    }
+  }
   if (CHARACTER_LENGTH_METADATA_TYPES.has(normalized) && Number.isInteger(column.character_maximum_length) && Number(column.character_maximum_length) > 0) {
     return combineDataTypeForDatabase(databaseType, baseType, String(column.character_maximum_length));
   }
@@ -1267,7 +1277,7 @@ export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[]): EditableS
 
 export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureTrigger[] {
   return triggers.map((trigger) => ({
-    id: `existing:${trigger.name}`,
+    id: `existing:${triggerIdentity(trigger)}`,
     name: trigger.name,
     timing: trigger.timing,
     event: trigger.event,
@@ -1278,7 +1288,7 @@ export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureT
 }
 
 export function canEditStructuredTriggerDraft(databaseType: DatabaseType | undefined, trigger: EditableStructureTrigger): boolean {
-  return !trigger.original || (databaseType !== undefined && databaseType !== "oracle");
+  return !trigger.original || (databaseType !== undefined && databaseType !== "oracle" && databaseType !== "oceanbase-oracle");
 }
 
 export function toColumnNames(columns: string[]): string {
@@ -1791,6 +1801,7 @@ export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, base
     // placement; a generic TYPE(length) editor would emit invalid DDL for them.
     return key.endsWith("[]") || key.startsWith("interval ") || XUGU_TYPE_LENGTH_DISABLES.has(key);
   } else if (isOracleLikeStructureType(_dbType)) {
+    if ((_dbType === "oracle" || _dbType === "oceanbase-oracle") && key === "float") return false;
     // Dameng/Oracle integer aliases have fixed precision; MySQL-style display widths generate invalid DDL.
     return ORACLE_LIKE_TYPE_LENGTH_DISABLES.includes(key);
   } else if (_dbType === "sqlserver") {

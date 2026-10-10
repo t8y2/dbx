@@ -8,7 +8,17 @@ export enum TransferObjectFamily {
   SqlServer = "sqlserver",
 }
 
-export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT";
+export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "PACKAGE_BODY" | "SYNONYM" | "PUBLIC_SYNONYM" | "DB_LINK" | "PUBLIC_DB_LINK" | "TYPE" | "TYPE_BODY";
+
+export function requiresTransferSchemaObjectPlan(kind: TransferObjectKind): boolean {
+  return kind === "TYPE" || kind === "TYPE_BODY" || kind === "PACKAGE" || kind === "PACKAGE_BODY" || kind === "SYNONYM" || kind === "PUBLIC_SYNONYM" || kind === "DB_LINK" || kind === "PUBLIC_DB_LINK";
+}
+
+export function transferObjectMetadataTarget(kind: TransferObjectKind, schema: string): { objectType: Exclude<TransferObjectKind, "PUBLIC_SYNONYM" | "DB_LINK" | "PUBLIC_DB_LINK">; schema: string } | undefined {
+  if (kind === "DB_LINK" || kind === "PUBLIC_DB_LINK") return undefined;
+  if (kind === "SYNONYM" && (schema === "PUBLIC" || schema === "__public")) return undefined;
+  return kind === "PUBLIC_SYNONYM" ? { objectType: "SYNONYM", schema: "PUBLIC" } : { objectType: kind, schema };
+}
 
 const MYSQL_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"];
 const POSTGRES_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE"];
@@ -47,6 +57,7 @@ export function isTransferPairSupported(source?: DatabaseType, target?: Database
 }
 
 export function transferObjectKindsForDatabase(dbType?: DatabaseType): TransferObjectKind[] {
+  if (dbType === "oracle" || dbType === "oceanbase-oracle") return [...ORACLE_KINDS, "TYPE", "TYPE_BODY", "PACKAGE", "PACKAGE_BODY", "SYNONYM", "PUBLIC_SYNONYM", "DB_LINK", "PUBLIC_DB_LINK"];
   switch (transferObjectFamily(dbType)) {
     case TransferObjectFamily.Mysql:
       return [...MYSQL_KINDS];
@@ -63,7 +74,7 @@ export function transferObjectKindsForDatabase(dbType?: DatabaseType): TransferO
 
 /**
  * Kinds selectable for a transfer between the two databases. Within one
- * family every kind of the source is allowed; across families only
+ * family only kinds supported by both databases are allowed; across families only
  * sequences are allowed (plain DDL without a query body), and only when
  * both sides support the type. Views are excluded: the backend rewrites
  * only the DDL wrapper, quoting and schema qualifiers, not the view
@@ -72,7 +83,8 @@ export function transferObjectKindsForDatabase(dbType?: DatabaseType): TransferO
  */
 export function crossFamilyTransferableKinds(a?: DatabaseType, b?: DatabaseType): TransferObjectKind[] {
   if (isSameTransferFamily(a, b)) {
-    return transferObjectKindsForDatabase(a);
+    const targetKinds = transferObjectKindsForDatabase(b);
+    return transferObjectKindsForDatabase(a).filter((kind) => targetKinds.includes(kind));
   }
   const aFam = transferObjectFamily(a);
   const bFam = transferObjectFamily(b);

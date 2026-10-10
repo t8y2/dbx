@@ -132,8 +132,10 @@ const DoltVersionControl = defineAsyncComponent(() => import("@/components/dolt/
 const DatabaseSearchPanel = defineAsyncComponent(() => import("@/components/search/DatabaseSearchPanel.vue"));
 const DatabaseBrowser = defineAsyncComponent(() => import("@/components/objects/DatabaseBrowser.vue"));
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
+const OracleTypeMetadataPanel = defineAsyncComponent(() => import("@/components/objects/OracleTypeMetadataPanel.vue"));
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
 const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseUserAdmin.vue"));
+const OracleSecurityAdmin = defineAsyncComponent(() => import("@/components/admin/OracleSecurityAdmin.vue"));
 const XuguUserPermissions = defineAsyncComponent(() => import("@/components/admin/XuguUserPermissions.vue"));
 const ProcessListPanel = defineAsyncComponent(() => import("@/components/admin/ProcessListPanel.vue"));
 const SqlServerActivityTracePanel = defineAsyncComponent(() => import("@/components/admin/SqlServerActivityTracePanel.vue"));
@@ -141,6 +143,9 @@ const MySqlDashboard = defineAsyncComponent(() => import("@/components/admin/MyS
 const PostgresDashboard = defineAsyncComponent(() => import("@/components/admin/PostgresDashboard.vue"));
 const XuguServerDashboard = defineAsyncComponent(() => import("@/components/admin/XuguServerDashboard.vue"));
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
+const OracleTypeEditor = defineAsyncComponent(() => import("@/components/admin/OracleTypeEditor.vue"));
+const OracleJobAdmin = defineAsyncComponent(() => import("@/components/admin/OracleJobAdmin.vue"));
+const OracleInvalidObjects = defineAsyncComponent(() => import("@/components/admin/OracleInvalidObjects.vue"));
 
 const DamengUserAdmin = defineAsyncComponent(() => import("@/components/admin/DamengUserAdmin.vue"));
 const DamengRoleAdmin = defineAsyncComponent(() => import("@/components/admin/DamengRoleAdmin.vue"));
@@ -1938,6 +1943,7 @@ defineExpose({
       <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resize="onResultsSplitResize" @resized="onResultsResized">
         <Pane v-if="!resultOnly" class="min-h-0" :size="editorPaneSize" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
+            <p v-if="activeTab.sourceSnapshot" class="shrink-0 border-b px-3 py-2 text-sm text-muted-foreground">{{ t("contextMenu.renamedSourceSnapshot") }}</p>
             <div v-if="activeTab.ddlViewer" class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
               <Button variant="outline" size="sm" :disabled="ddlRefreshInProgress" @click="refreshDdlViewer">
                 <RefreshCcw class="h-4 w-4" :class="ddlRefreshInProgress ? 'animate-spin' : ''" />
@@ -1949,6 +1955,14 @@ defineExpose({
               </Button>
             </div>
             <ProductionWatermark v-if="activeProductionContext.active" />
+            <OracleTypeMetadataPanel
+              v-if="activeTab.oracleTypeIdentity && activeTab.connectionId"
+              :connection-id="activeTab.connectionId"
+              :database="activeTab.database"
+              :schema="activeTab.oracleTypeIdentity.schema"
+              :name="activeTab.oracleTypeIdentity.name"
+              :object-type="activeTab.oracleTypeIdentity.object_type"
+            />
             <!-- issue #9035：源码 tab 先出现再加载。pending 期间不挂载编辑器
                  （还没有内容可编辑，也省下一次 Monaco 初始化），失败则就地重试。
                  issue #9387：DDL 新标签同样先出 tab 再加载，失败就地显示错误。 -->
@@ -1998,8 +2012,8 @@ defineExpose({
               :initial-selection="activeTab.editorSelection"
               :reveal-request="activeTab.editorRevealRequest"
               :force-word-wrap="activeTab.forceWordWrap"
-              :read-only="!!activeTab.ddlViewer"
-              :hide-execution-controls="!!activeTab.ddlViewer"
+              :read-only="!!activeTab.ddlViewer || !!activeTab.sourceSnapshot"
+              :hide-execution-controls="!!activeTab.ddlViewer || !!activeTab.sourceSnapshot"
               enable-explain-shortcut
               :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && !!executableSql.trim()"
               @update:model-value="emit('editorUpdate', activeTab.id, $event)"
@@ -3492,7 +3506,8 @@ defineExpose({
     </template>
 
     <template v-else-if="activeTab.mode === 'users' && activeConnection">
-      <DatabaseUserAdmin :key="activeTab.id" :connection="activeConnection" />
+      <OracleSecurityAdmin v-if="activeEffectiveDatabaseType === 'oracle' || activeEffectiveDatabaseType === 'oceanbase-oracle'" :key="activeTab.id" :connection="activeConnection" />
+      <DatabaseUserAdmin v-else :key="activeTab.id" :connection="activeConnection" />
     </template>
 
     <template v-else-if="activeTab.mode === 'xugu-users' && activeConnection">
@@ -3541,6 +3556,18 @@ defineExpose({
       <div class="min-h-0 flex-1">
         <DoltVersionControl :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :initial-branch="activeTab.workspaceBranch" />
       </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'oracle-type-editor' && activeConnection">
+      <OracleTypeEditor :key="activeTab.id" :connection="activeConnection" :database="activeTab.database" :initial-schema="activeTab.oracleTypeIdentity?.schema" :initial-name="activeTab.oracleTypeIdentity?.name" />
+    </template>
+
+    <template v-else-if="activeTab.mode === 'oracle-jobs' && activeConnection">
+      <OracleJobAdmin :key="activeTab.id" :connection="activeConnection" :database="activeTab.database" />
+    </template>
+
+    <template v-else-if="activeTab.mode === 'oracle-invalid-objects' && activeConnection">
+      <OracleInvalidObjects :key="activeTab.id" :connection="activeConnection" />
     </template>
 
     <template v-else-if="activeTab.mode === 'dameng-jobs' && activeConnection">

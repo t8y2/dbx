@@ -1429,6 +1429,61 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.result?.hidden_column_indexes).toBeUndefined();
   });
 
+  it.each([
+    { sourceSchema: undefined, synonym: true },
+    { sourceSchema: "ExplicitOwner", synonym: true },
+    { sourceSchema: undefined, synonym: false },
+  ])("keeps OceanBase current schema separate from explicit source schema $sourceSchema with synonym=$synonym", async ({ sourceSchema, synonym }) => {
+    getConnectionConfig.mockReturnValue({ id: "ob-1", name: "OceanBase", db_type: "oceanbase-oracle", database: "service", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([{ name: "ItemId", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null, ...(synonym ? { resolved_schema: "TargetOwner", resolved_table: "Items", resolved_object_type: "TABLE" } : {}) }]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: sourceSchema,
+        schemaQuoted: true,
+        tableName: "ItemsAlias",
+        tableNameQuoted: true,
+        selectStar: false,
+        columns: [{ sourceName: "ItemId", sourceNameQuoted: true, resultName: "ItemId", expression: '"ItemId"' }],
+      },
+    });
+    executeMulti.mockResolvedValue([{ columns: ["ItemId"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("ob-1", "service", "Query", "query", "SelectedOwner");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, sourceSchema ? 'SELECT "ItemId" FROM "ExplicitOwner"."ItemsAlias"' : 'SELECT "ItemId" FROM "ItemsAlias"');
+
+    if (sourceSchema) expect(getColumns).toHaveBeenCalledWith("ob-1", "service", "ExplicitOwner", "ItemsAlias", undefined);
+    else expect(getColumns).toHaveBeenCalledWith("ob-1", "service", "", "ItemsAlias", undefined, undefined, "SelectedOwner");
+    expect(listIndexes).toHaveBeenCalledWith("ob-1", "service", synonym ? "TargetOwner" : "SelectedOwner", synonym ? "Items" : "ItemsAlias", undefined);
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta).toMatchObject({ schema: synonym ? "TargetOwner" : "SelectedOwner", tableName: synonym ? "Items" : "ItemsAlias" }));
+    if (synonym) expect(tab.tableMeta?.tableType).toBe("TABLE");
+    expect(tab.queryAnalysis?.tableName).toBe("ItemsAlias");
+  });
+
+  it.each(["VIEW", undefined])("does not treat a synonym target of type %s as an Oracle base table", async (objectType) => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null, resolved_schema: "TargetOwner", resolved_table: "ActualItems", resolved_object_type: objectType }]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "ITEMS_ALIAS", type: "table", schema: "APP" }]);
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: true, analysis: { schema: "APP", tableName: "ITEMS_ALIAS", selectStar: true, columns: [] } });
+    executeMulti.mockResolvedValue([{ columns: ["ID"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "SELECT * FROM APP.ITEMS_ALIAS");
+
+    expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM APP.ITEMS_ALIAS", undefined, expect.any(String), expect.any(Object));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.result?.columns).toEqual(["ID"]));
+    expect(tab.result?.hidden_column_indexes).toBeUndefined();
+    expect(tab.queryAnalysis).toBeUndefined();
+  });
+
   it.each(["CLOB", "XMLTYPE", "SYS.XMLTYPE"])("enables deferred Oracle %s values only when a base-table query has a stable key", async (dataType) => {
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
     getColumns.mockResolvedValue([

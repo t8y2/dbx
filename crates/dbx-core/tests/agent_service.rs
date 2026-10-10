@@ -1479,7 +1479,9 @@ fn write_test_agent_jar(path: &std::path::Path) {
 fn test_agent_jar_bytes() -> Vec<u8> {
     let cursor = std::io::Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(cursor);
-    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::from_date_and_time(2000, 1, 1, 0, 0, 0).unwrap());
     // The production validator rejects corrupt driver artifacts by requiring a real JAR manifest.
     zip.start_file("META-INF/MANIFEST.MF", options).unwrap();
     std::io::Write::write_all(&mut zip, b"Manifest-Version: 1.0\nMain-Class: com.dbx.agent.TestAgent\n\n").unwrap();

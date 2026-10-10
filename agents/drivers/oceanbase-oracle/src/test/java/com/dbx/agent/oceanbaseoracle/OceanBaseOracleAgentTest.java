@@ -1,6 +1,7 @@
 package com.dbx.agent.oceanbaseoracle;
 
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.CompletionAssistantCandidateKind;
 import com.dbx.agent.CompletionAssistantMatchMode;
 import com.dbx.agent.CompletionAssistantObjectKind;
 import com.dbx.agent.CompletionAssistantRequest;
@@ -37,6 +38,53 @@ import java.util.List;
 import java.util.Locale;
 
 class OceanBaseOracleAgentTest {
+    @Test
+    void readsFunctionIndexExpressionsAndQuotedCompositeKeysInDictionaryOrder() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceConnection(sql, params, resultSet(
+            new String[]{"INDEX_NAME", "COLUMN_NAME", "COLUMN_POSITION", "UNIQUENESS", "CONSTRAINT_TYPE", "INDEX_TYPE", "COLUMN_EXPRESSION"},
+            new Object[][]{
+                {"FnIndex", "SYS_NC1$", 1, "UNIQUE", null, "FUNCTION-BASED NORMAL", "LOWER(\"Name\")"},
+                {"FnIndex", "Mixed\"Column", 2, "UNIQUE", null, "FUNCTION-BASED NORMAL", null},
+                {"NormalIndex", "Name", 1, "NONUNIQUE", null, "NORMAL", null}
+            }
+        )));
+        var indexes = agent.listIndexes("APP", "ITEMS");
+        Assertions.assertEquals(List.of("LOWER(\"Name\")", "\"Mixed\"\"Column\""), indexes.get(0).getColumns());
+        Assertions.assertEquals(List.of(true, true), indexes.get(0).getKey_is_expression());
+        Assertions.assertTrue(indexes.get(0).getIs_unique());
+        Assertions.assertEquals(List.of("Name"), indexes.get(1).getColumns());
+        Assertions.assertEquals(List.of(false), indexes.get(1).getKey_is_expression());
+        Assertions.assertEquals(List.of("APP", "ITEMS"), params);
+        Assertions.assertTrue(sql.get(0).contains("ic.COLUMN_POSITION = e.COLUMN_POSITION"));
+        Assertions.assertTrue(sql.get(0).contains("ic.TABLE_OWNER = e.TABLE_OWNER"));
+        Assertions.assertTrue(sql.get(0).endsWith("ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION"));
+    }
+
+    @Test
+    void missingFunctionExpressionIsNotReturnedAsAnEditableHiddenColumn() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceConnection(new ArrayList<>(), new ArrayList<>(), resultSet(
+            new String[]{"INDEX_NAME", "COLUMN_NAME", "INDEX_TYPE", "COLUMN_EXPRESSION"},
+            new Object[][]{{"FnIndex", "SYS_NC1$", "FUNCTION-BASED NORMAL", null}}
+        )));
+        var failure = Assertions.assertThrows(RuntimeException.class, () -> agent.listIndexes("APP", "ITEMS"));
+        Assertions.assertTrue(failure.toString().contains("expressions are unavailable"));
+    }
+
+    @Test
+    void indexDictionaryPermissionFailureDoesNotBecomeUnsupportedOrEmptyMetadata() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) throw new SQLException("ORA-01031: insufficient privileges");
+            return defaultValue(method.getReturnType());
+        }));
+        var failure = Assertions.assertThrows(RuntimeException.class, () -> agent.listIndexes("APP", "ITEMS"));
+        Assertions.assertTrue(failure.toString().contains("ORA-01031"));
+    }
+
     @Test
     void buildsOceanBaseJdbcUrl() {
         ConnectParams params = new ConnectParams();
@@ -430,9 +478,9 @@ class OceanBaseOracleAgentTest {
         List<String> sql = new ArrayList<>();
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
         TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
-            new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS"},
+            new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "STATUS"},
             new Object[][]{
-                {"FORMAT_USER", "FUNCTION", null}
+                {"FORMAT_USER", "FUNCTION", null, "VALID"}
             }
         )));
 
@@ -443,9 +491,40 @@ class OceanBaseOracleAgentTest {
 
         Assertions.assertEquals(1, objects.size());
         Assertions.assertEquals("FORMAT_USER", objects.get(0).getName());
+        Assertions.assertEquals(Boolean.TRUE, objects.get(0).getValid());
         Assertions.assertEquals("FUNCTION", objects.get(0).getObject_type());
         Assertions.assertTrue(sql.get(0).contains("OBJECT_TYPE IN (?)"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("ROWNUM <= ?"), sql.get(0));
+    }
+
+    @Test
+    void objectValidityPreservesTrueFalseAndUnknownThroughTheAgentWire() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), resultSet(
+            new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "STATUS"},
+            new Object[][]{{"GOOD", "PROCEDURE", null, "VALID"}, {"BAD", "PACKAGE BODY", null, "INVALID"},
+                {"UNKNOWN", "FUNCTION", null, null}, {"OTHER", "FUNCTION", null, "N/A"}}
+        )));
+        List<ObjectInfo> objects = agent.listObjects("APP");
+        Assertions.assertEquals(Boolean.TRUE, objects.get(0).getValid());
+        Assertions.assertEquals(Boolean.FALSE, objects.get(1).getValid());
+        Assertions.assertEquals("PACKAGE_BODY", objects.get(1).getObject_type());
+        Assertions.assertNull(objects.get(2).getValid());
+        Assertions.assertNull(objects.get(3).getValid());
+        var wire = new com.google.gson.Gson().toJsonTree(objects).getAsJsonArray();
+        Assertions.assertTrue(wire.get(0).getAsJsonObject().get("valid").getAsBoolean());
+        Assertions.assertFalse(wire.get(1).getAsJsonObject().get("valid").getAsBoolean());
+        Assertions.assertFalse(wire.get(2).getAsJsonObject().has("valid"));
+    }
+
+    @Test
+    void objectValidityIsReadAgainAfterAnInvalidObjectIsReplaced() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "STATUS"}, new Object[][]{{"P", "PROCEDURE", null, "INVALID"}}),
+            resultSet(new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "STATUS"}, new Object[][]{{"P", "PROCEDURE", null, "VALID"}})));
+        Assertions.assertEquals(Boolean.FALSE, agent.listObjects("APP").get(0).getValid());
+        Assertions.assertEquals(Boolean.TRUE, agent.listObjects("APP").get(0).getValid());
     }
 
     @Test
@@ -483,6 +562,202 @@ class OceanBaseOracleAgentTest {
         Assertions.assertTrue(query.sql.contains("UPPER(o.OWNER) = ?"), query.sql);
         Assertions.assertTrue(query.sql.contains("UPPER(s.OWNER) = ?"), query.sql);
         Assertions.assertEquals(List.of("ORD%", "STAGING", "ORD%", "STAGING", "DWD", "ORD", 21), query.args);
+    }
+
+    @Test
+    void completionAssistantSearchReturnsBoundedStandaloneRoutines() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"OWNER", "OBJECT_NAME", "OBJECT_TYPE"},
+            new Object[][]{{"APP", "CALC", "PROCEDURE"}, {"APP", "CALCULATE", "FUNCTION"}, {"OTHER", "CALCULATE", "FUNCTION"}}
+        )));
+        CompletionAssistantRequest request = completionRequest("APP", null, "CAL", true);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "max_results", 2);
+
+        CompletionAssistantResponse response = agent.completionAssistantSearch(request);
+
+        Assertions.assertEquals(List.of("CALC", "CALCULATE"), response.getCandidates().stream().map(candidate -> candidate.getName()).toList());
+        Assertions.assertEquals(List.of("procedure", "function"), response.getCandidates().stream().map(candidate -> candidate.getKind().name().toLowerCase(Locale.ROOT)).toList());
+        Assertions.assertEquals("APP", response.getCandidates().get(0).getSchema());
+        Assertions.assertNull(response.getCandidates().get(0).getParent_name());
+        Assertions.assertTrue(response.getIncomplete());
+        Assertions.assertFalse(response.getFallback_used());
+        Assertions.assertTrue(sql.get(0).contains("ROWNUM <= ?"));
+        Assertions.assertTrue(new com.google.gson.Gson().toJsonTree(response).getAsJsonObject().has("routine_search_supported"));
+    }
+
+    @Test
+    void mixedRoutineSearchPreservesRequestedSequences() {
+        for (CompletionAssistantObjectKind routineKind : List.of(CompletionAssistantObjectKind.ROUTINE, CompletionAssistantObjectKind.FUNCTION)) {
+            List<String> sql = new ArrayList<>();
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+                new String[]{"OWNER", "OBJECT_NAME", "OBJECT_TYPE"},
+                new Object[][]{{"APP", "ORDER_SEQ", "SEQUENCE"}}
+            )));
+            CompletionAssistantRequest request = completionRequest("APP", null, "ORDER", false);
+            setField(request, "object_kinds", List.of(routineKind, CompletionAssistantObjectKind.SEQUENCE));
+            CompletionAssistantResponse response = agent.completionAssistantSearch(request);
+            Assertions.assertTrue(sql.get(0).contains("'SEQUENCE'"));
+            Assertions.assertEquals(CompletionAssistantCandidateKind.SEQUENCE, response.getCandidates().get(0).getKind());
+        }
+    }
+
+    @Test
+    void routineSearchPreservesQuotedOwnersAndEscapesLiteralMasks() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, params, resultSet(
+            new String[]{"OWNER", "OBJECT_NAME", "OBJECT_TYPE"},
+            new Object[][]{{"Mixed.Owner", "中文_%", "PROCEDURE"}}
+        )));
+        CompletionAssistantRequest request = completionRequest("APP", "Mixed.Owner", "中文_%", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.PROCEDURE));
+        setField(request, "case_sensitive", true);
+        setField(request, "match_mode", CompletionAssistantMatchMode.CONTAINS);
+        setField(request, "max_results", 1);
+        CompletionAssistantResponse response = agent.completionAssistantSearch(request);
+        Assertions.assertEquals(List.of("%中文\\_\\%%", "Mixed.Owner", "APP"), params);
+        Assertions.assertTrue(sql.get(0).contains("OBJECT_TYPE IN ('PROCEDURE')"));
+        Assertions.assertTrue(sql.get(0).contains("OWNER = ?"));
+        Assertions.assertFalse(sql.get(0).contains("UPPER(OBJECT_NAME)"));
+        Assertions.assertEquals("中文_%", response.getCandidates().get(0).getName());
+        Assertions.assertFalse(response.getIncomplete(), "Exactly the requested count is complete");
+    }
+
+    @Test
+    void routineSearchDoesNotReturnStandaloneCandidatesForAPackageRequest() {
+        CompletionAssistantRequest request = completionRequest("APP", null, "P", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "PKG");
+        Assertions.assertThrows(RuntimeException.class, () -> new OceanBaseOracleAgent().completionAssistantSearch(request));
+    }
+
+    @Test
+    void packageCompletionKeepsNoArgumentMembersAndBoundedOverloadsWithCompleteSignatures() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, params,
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{{101}}),
+            resultSet(new String[]{"PROCEDURE_NAME", "SUBPROGRAM_ID", "ROUTINE_KIND"},
+                new Object[][]{{"RUN", 1, "PROCEDURE"}, {"RUN", 2, "FUNCTION"}, {"RUN", 3, "FUNCTION"}}),
+            resultSet(new String[]{"SUBPROGRAM_ID", "POSITION", "ARGUMENT_NAME", "IN_OUT", "DATA_TYPE", "TYPE_OWNER", "TYPE_NAME", "TYPE_SUBNAME", "DEFAULTED"},
+                new Object[][]{
+                    {2, 0, null, "OUT", "NUMBER", null, null, null, "N"},
+                    {2, 1, "INPUT", "IN", "NUMBER", null, null, null, "Y"},
+                    {2, 2, "RESULT", "IN/OUT", "PL/SQL RECORD", "Mixed.Owner", "Types", "Payload", "N"}
+                })
+        ));
+        CompletionAssistantRequest request = completionRequest("APP", "Mixed.Owner", "Ru_%", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "Mixed.Package");
+        setField(request, "case_sensitive", true);
+        setField(request, "max_results", 2);
+        CompletionAssistantResponse response = agent.completionAssistantSearch(request);
+
+        Assertions.assertTrue(response.getIncomplete());
+        Assertions.assertEquals(2, response.getCandidates().size());
+        var procedure = response.getCandidates().get(0);
+        var function = response.getCandidates().get(1);
+        Assertions.assertEquals("", procedure.getSignature());
+        Assertions.assertEquals("INPUT IN NUMBER DEFAULT, RESULT IN/OUT \"Mixed.Owner\".\"Types\".\"Payload\"", function.getSignature());
+        Assertions.assertEquals("NUMBER", function.getData_type());
+        Assertions.assertEquals("Mixed.Owner", function.getParent_schema());
+        Assertions.assertEquals("Mixed.Package", function.getParent_name());
+        Assertions.assertNotEquals(procedure.getRoutine_id(), function.getRoutine_id());
+        Assertions.assertTrue(sql.get(0).contains("OBJECT_TYPE = 'PACKAGE'"));
+        Assertions.assertTrue(sql.get(1).contains("p.OBJECT_ID = ?"));
+        Assertions.assertTrue(sql.get(1).contains("ROWNUM <= ?"));
+        Assertions.assertTrue(sql.get(2).contains("DATA_LEVEL = 0"));
+        Assertions.assertTrue(sql.get(2).contains("SUBPROGRAM_ID IN (?,?)"));
+        Assertions.assertFalse(sql.get(2).contains("ROWNUM"));
+        Assertions.assertTrue(params.contains("Ru\\_\\%%"));
+        var wire = new com.google.gson.Gson().toJsonTree(response).getAsJsonObject().getAsJsonArray("candidates");
+        Assertions.assertEquals("", wire.get(0).getAsJsonObject().get("signature").getAsString());
+        Assertions.assertEquals(function.getRoutine_id(), wire.get(1).getAsJsonObject().get("routine_id").getAsString());
+    }
+
+    @Test
+    void packageCompletionResolvesInternalTypeOwnerThroughDatabaseIdentity() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql,
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{{101}}),
+            resultSet(new String[]{"PROCEDURE_NAME", "SUBPROGRAM_ID", "ROUTINE_KIND"}, new Object[][]{{"OBJ", 6, "PROCEDURE"}}),
+            resultSet(new String[]{"SUBPROGRAM_ID", "POSITION", "ARGUMENT_NAME", "IN_OUT", "DATA_TYPE", "TYPE_OWNER", "TYPE_NAME", "TYPE_SUBNAME", "DEFAULTED", "TYPE_SCHEMA"},
+                new Object[][]{{6, 1, "X", "IN", "EXT", "514099   ", "Base.Type", null, "N", " Actual.Owner "}})
+        ));
+        CompletionAssistantRequest request = completionRequest("APP", "APP", "", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "PKG");
+        Assertions.assertEquals("X IN \" Actual.Owner \".\"Base.Type\"", agent.completionAssistantSearch(request).getCandidates().get(0).getSignature());
+        Assertions.assertTrue(sql.get(2).contains("type_owner_object.OBJECT_TYPE = 'DATABASE'"));
+        Assertions.assertTrue(sql.get(2).contains("TO_CHAR(type_owner_object.OBJECT_ID) = TRIM(a.TYPE_OWNER)"));
+    }
+
+    @Test
+    void packageCompletionKeepsLiteralNumericTypeOwner() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{{101}}),
+            resultSet(new String[]{"PROCEDURE_NAME", "SUBPROGRAM_ID", "ROUTINE_KIND"}, new Object[][]{{"OBJ", 6, "PROCEDURE"}}),
+            resultSet(new String[]{"SUBPROGRAM_ID", "POSITION", "ARGUMENT_NAME", "IN_OUT", "DATA_TYPE", "TYPE_OWNER", "TYPE_NAME", "TYPE_SUBNAME", "DEFAULTED"},
+                new Object[][]{{6, 1, "X", "IN", "EXT", "514099", "Base.Type", null, "N"}})
+        ));
+        CompletionAssistantRequest request = completionRequest("APP", "APP", "", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "PKG");
+        Assertions.assertEquals("X IN \"514099\".\"Base.Type\"", agent.completionAssistantSearch(request).getCandidates().get(0).getSignature());
+    }
+
+    @Test
+    void packageCompletionDoesNotInventUnresolvedInternalTypeOwner() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{{101}}),
+            resultSet(new String[]{"PROCEDURE_NAME", "SUBPROGRAM_ID", "ROUTINE_KIND"}, new Object[][]{{"OBJ", 6, "PROCEDURE"}}),
+            resultSet(new String[]{"SUBPROGRAM_ID", "POSITION", "ARGUMENT_NAME", "IN_OUT", "DATA_TYPE", "TYPE_OWNER", "TYPE_NAME", "TYPE_SUBNAME", "DEFAULTED", "TYPE_SCHEMA"},
+                new Object[][]{{6, 1, "X", "IN", "EXT", "514099   ", "Base.Type", null, "N", null}})
+        ));
+        CompletionAssistantRequest request = completionRequest("APP", "APP", "", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "PKG");
+        Assertions.assertNull(agent.completionAssistantSearch(request).getCandidates().get(0).getSignature());
+    }
+
+    @Test
+    void packageCompletionDoesNotInventMissingParameterMetadata() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{{101}}),
+            resultSet(new String[]{"PROCEDURE_NAME", "SUBPROGRAM_ID", "ROUTINE_KIND"}, new Object[][]{{"RUN", 1, "PROCEDURE"}}),
+            resultSet(new String[]{"SUBPROGRAM_ID", "POSITION", "ARGUMENT_NAME", "IN_OUT", "DATA_TYPE", "TYPE_OWNER", "TYPE_NAME", "TYPE_SUBNAME", "DEFAULTED"},
+                new Object[][]{{1, 1, "P", "IN", null, null, null, null, "N"}})
+        ));
+        CompletionAssistantRequest request = completionRequest("APP", "APP", "", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "PKG");
+        Assertions.assertNull(agent.completionAssistantSearch(request).getCandidates().get(0).getSignature());
+    }
+
+    @Test
+    void packageCompletionDistinguishesVisibleEmptyPackageFromInvisiblePackage() {
+        CompletionAssistantRequest request = completionRequest("APP", "APP", "", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "PKG");
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{{101}}),
+            resultSet(new String[]{"PROCEDURE_NAME", "SUBPROGRAM_ID", "ROUTINE_KIND"}, new Object[][]{})));
+        Assertions.assertTrue(agent.completionAssistantSearch(request).getCandidates().isEmpty());
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{})));
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class, () -> agent.completionAssistantSearch(request));
+        Assertions.assertTrue(error.toString().contains("Package is not visible"));
     }
 
     @Test
@@ -786,6 +1061,27 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void getColumnsPreservesBinaryPrecisionAndUnspecifiedNumberPrecision() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), columnResultSet(new Object[][]{
+            {"F1", "FLOAT", "Y", 1, -127, 22, null, null, null, 0},
+            {"F24", "FLOAT", "Y", 24, -127, 22, null, null, null, 0},
+            {"F126", "FLOAT", "Y", 126, -127, 22, null, null, null, 0},
+            {"FU", "FLOAT", "Y", null, null, 22, null, null, null, 0},
+            {"N0", "NUMBER", "Y", null, 0, 22, null, null, null, 0},
+            {"N2", "NUMBER", "Y", null, 2, 22, null, null, null, 0},
+            {"NN2", "NUMBER", "Y", null, -2, 22, null, null, null, 0},
+            {"NU", "NUMBER", "Y", null, null, 22, null, null, null, 0}
+        })));
+        List<ColumnInfo> columns = agent.getColumns("APP", "NUMBERS");
+        Assertions.assertEquals(List.of("FLOAT(1)", "FLOAT(24)", "FLOAT(126)", "FLOAT", "NUMBER(*,0)", "NUMBER(*,2)", "NUMBER(*,-2)", "NUMBER"), columns.stream().map(ColumnInfo::getData_type).toList());
+        Assertions.assertEquals(Integer.valueOf(24), columns.get(1).getNumeric_precision());
+        Assertions.assertNull(columns.get(4).getNumeric_precision());
+        Assertions.assertEquals(Integer.valueOf(-2), columns.get(6).getNumeric_scale());
+        Assertions.assertNull(columns.get(7).getNumeric_scale());
+    }
+
+    @Test
     void getColumnsPreservesCharacterUnitsAndNegativeScale() {
         List<String> sql = new ArrayList<>();
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
@@ -1027,7 +1323,7 @@ class OceanBaseOracleAgentTest {
             resultSet(new String[]{"GRANTEE", "COLUMN_NAME", "PRIVILEGE", "GRANTABLE"}, new Object[][]{})
         ));
         String ddl = agent.getTableDdl("APP", "T");
-        Assertions.assertTrue(ddl.startsWith(nativeTable.replace("CREATE TABLE \"T\"", "CREATE TABLE \"APP\".\"T\"") + ";"), ddl);
+        Assertions.assertTrue(ddl.contains(nativeTable.replace("CREATE TABLE \"T\"", "CREATE TABLE \"APP\".\"T\"") + ";"), ddl);
         Assertions.assertTrue(ddl.contains(nativeIndex), ddl);
         Assertions.assertTrue(ddl.contains("COMMENT ON TABLE \"APP\".\"T\" IS 'Owner''s table';"), ddl);
     }
@@ -1038,6 +1334,99 @@ class OceanBaseOracleAgentTest {
         TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
             resultSet(new String[]{"DDL"}, new Object[][]{{" "}})));
         Assertions.assertThrows(RuntimeException.class, () -> agent.getTableDdl("APP", "T"));
+    }
+
+    @Test
+    void tableDdlIncludesCompleteSourcesFromEachTriggerOwnerAfterTheTable() {
+        var agent = new OceanBaseOracleAgent();
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, triggerExportConnection(sql, params, false,
+            new Object[][]{{"A", "AUDIT", "ENABLED"}, {"B", "AUDIT", "DISABLED"}},
+            "TRIGGER audit BEFORE UPDATE OF id ON t\nREFERENCING NEW AS n OLD AS o\nFOR EACH ROW WHEN (n.id > 0)\nBEGIN\n :n.id := :o.id + 1;\n NULL;\nEND;",
+            "TRIGGER audit AFTER INSERT ON app.t\nBEGIN NULL; END;"));
+        String ddl = agent.getTableDdl("APP", "T");
+        Assertions.assertTrue(ddl.contains("visible table triggers (count: 2)"), ddl);
+        Assertions.assertTrue(ddl.indexOf("CREATE TABLE") < ddl.indexOf("CREATE OR REPLACE TRIGGER"), ddl);
+        Assertions.assertTrue(ddl.indexOf("TRIGGER \"A\".\"AUDIT\"") < ddl.indexOf("TRIGGER \"B\".\"AUDIT\""), ddl);
+        Assertions.assertTrue(ddl.contains("ON \"APP\".\"T\"\nREFERENCING NEW AS n OLD AS o\nFOR EACH ROW WHEN (n.id > 0)\nBEGIN\n :n.id := :o.id + 1;\n NULL;\nEND;\n/"), ddl);
+        Assertions.assertTrue(ddl.contains("ALTER TRIGGER \"A\".\"AUDIT\" ENABLE;"), ddl);
+        Assertions.assertTrue(ddl.endsWith("ALTER TRIGGER \"B\".\"AUDIT\" DISABLE;"), ddl);
+        Assertions.assertTrue(params.contains("A: AUDIT: TRIGGER"), params.toString());
+        Assertions.assertTrue(params.contains("B: AUDIT: TRIGGER"), params.toString());
+        Assertions.assertTrue(sql.stream().anyMatch(s -> s.contains("WHERE TABLE_OWNER = ? AND TABLE_NAME = ? ORDER BY OWNER, TRIGGER_NAME")));
+        Assertions.assertTrue(sql.stream().allMatch(s -> s.stripLeading().startsWith("SELECT")), sql.toString());
+    }
+
+    @Test
+    void triggerListUsesTableOwnerAndKeepsRealTriggerOwners() {
+        var agent = new OceanBaseOracleAgent();
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, params,
+            resultSet(new String[]{"TRIGGER_NAME", "TRIGGERING_EVENT", "TRIGGER_TYPE", "OWNER"},
+                new Object[][]{{"AUDIT", "INSERT", "AFTER", "A"}, {"AUDIT", "UPDATE", "BEFORE", "B"}})));
+        var triggers = agent.listTriggers("APP", "MixedTable");
+        Assertions.assertEquals(2, triggers.size());
+        Assertions.assertEquals("A", triggers.get(0).getOwner());
+        Assertions.assertEquals("B", triggers.get(1).getOwner());
+        Assertions.assertEquals("AUDIT", triggers.get(0).getName());
+        Assertions.assertEquals("AUDIT", triggers.get(1).getName());
+        Assertions.assertNotEquals(triggers.get(0), triggers.get(1));
+        Assertions.assertTrue(sql.get(0).contains("WHERE TABLE_OWNER = ? AND TABLE_NAME = ?"));
+        Assertions.assertTrue(sql.get(0).contains("ORDER BY OWNER, TRIGGER_NAME"));
+        Assertions.assertFalse(sql.get(0).contains("WHERE OWNER = ?"));
+        Assertions.assertEquals(List.of("APP", "MixedTable"), params);
+    }
+
+    @Test
+    void tableDdlDistinguishesNoVisibleTriggersFromUnreadableMetadata() {
+        var agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, triggerExportConnection(new ArrayList<>(), new ArrayList<>(), false, new Object[][]{}));
+        Assertions.assertTrue(agent.getTableDdl("APP", "T").contains("visible table triggers (count: 0)"));
+        TestSupport.setPrivateConnection(agent, triggerExportConnection(new ArrayList<>(), new ArrayList<>(), true, new Object[][]{}));
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class, () -> agent.getTableDdl("APP", "T"));
+        Assertions.assertTrue(error.getMessage().contains("export incomplete"), error.getMessage());
+        Assertions.assertTrue(error.getMessage().contains("insufficient privileges"), error.getMessage());
+    }
+
+    @Test
+    void tableDdlRejectsEmptyTriggerSourceInsteadOfReturningPartialScript() {
+        var agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, triggerExportConnection(new ArrayList<>(), new ArrayList<>(), false,
+            new Object[][]{{"APP", "AUDIT", "ENABLED"}}, ""));
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class, () -> agent.getTableDdl("APP", "T"));
+        Assertions.assertTrue(error.getMessage().contains("export incomplete"), error.getMessage());
+    }
+
+    private static Connection triggerExportConnection(List<String> sql, List<String> bindings, boolean denied,
+        Object[][] triggers, String... sources) {
+        int[] sourceIndex = {0};
+        return proxy(Connection.class, (method, args) -> {
+            if ("isClosed".equals(method.getName())) return false;
+            if (!"prepareStatement".equals(method.getName())) return defaultValue(method.getReturnType());
+            String query = (String) args[0];
+            sql.add(query);
+            List<String> parameters = new ArrayList<>();
+            return proxy(PreparedStatement.class, (call, values) -> {
+                if ("setString".equals(call.getName())) { parameters.add((String) values[1]); return null; }
+                if (!"executeQuery".equals(call.getName())) return defaultValue(call.getReturnType());
+                bindings.add(String.join(": ", parameters));
+                if (query.contains("FROM ALL_TRIGGERS")) {
+                    if (denied) throw new SQLException("insufficient privileges");
+                    return resultSet(new String[]{"OWNER", "TRIGGER_NAME", "STATUS"}, triggers);
+                }
+                if (query.contains("FROM ALL_SOURCE")) {
+                    Object[][] lines = Arrays.stream(sources[sourceIndex[0]++].split("(?<=\\n)", -1))
+                        .map(line -> new Object[]{line}).toArray(Object[][]::new);
+                    return resultSet(new String[]{"TEXT"}, lines);
+                }
+                if (query.contains("DBMS_METADATA.GET_DDL")) {
+                    return resultSet(new String[]{"DDL"}, new Object[][]{{parameters.get(0).equals("TABLE") ? "CREATE TABLE \"T\" (\"ID\" NUMBER)" : ""}});
+                }
+                return resultSet(new String[]{"EMPTY"}, new Object[][]{});
+            });
+        });
     }
 
     @Test
@@ -1266,6 +1655,32 @@ class OceanBaseOracleAgentTest {
             }
             return defaultValue(method.getReturnType());
         });
+    }
+
+    @Test
+    void triggerSourceUsesCompleteDictionaryFallbackAndStateWithoutDbmsMetadata() {
+        for (String status : new String[]{"ENABLED", "DISABLED"}) {
+            List<String> sql = new ArrayList<>();
+            List<String> params = new ArrayList<>();
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) -> {
+                if ("prepareStatement".equals(method.getName())) {
+                    String query = String.valueOf(args[0]);
+                    sql.add(query);
+                    if (query.contains("DBMS_METADATA")) throw new SQLException("DBMS_METADATA is unavailable");
+                    ResultSet rows = query.contains("ALL_SOURCE")
+                        ? resultSet(new String[]{"TEXT"}, new Object[][]{{"TRIGGER audit BEFORE INSERT ON events\nBEGIN NULL; END;"}})
+                        : resultSet(new String[]{"TABLE_OWNER", "TABLE_NAME", "STATUS"}, new Object[][]{{"APP", "EVENTS", status}});
+                    return objectSourceStatement(params, rows, false);
+                }
+                return defaultValue(method.getReturnType());
+            }));
+            String ddl = agent.getObjectSource("APP", "AUDIT", "TRIGGER").getSource();
+            Assertions.assertTrue(ddl.contains("TRIGGER \"APP\".\"AUDIT\" BEFORE INSERT ON \"APP\".\"EVENTS\""));
+            Assertions.assertTrue(ddl.endsWith("ALTER TRIGGER \"APP\".\"AUDIT\" " + (status.equals("ENABLED") ? "ENABLE;" : "DISABLE;")));
+            Assertions.assertEquals(2, sql.size());
+            Assertions.assertEquals(List.of("APP", "AUDIT", "TRIGGER", "APP", "AUDIT"), params);
+        }
     }
 
     private static Connection objectSourceConnection(List<String> sql, List<String> params, ResultSet resultSet) {

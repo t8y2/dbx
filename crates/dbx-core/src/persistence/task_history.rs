@@ -295,6 +295,10 @@ pub enum TaskItemKind {
     Trigger,
     Sequence,
     Event,
+    Package,
+    PackageBody,
+    Synonym,
+    PublicSynonym,
     Object,
 }
 
@@ -309,6 +313,10 @@ impl TaskItemKind {
             Self::Trigger => "trigger",
             Self::Sequence => "sequence",
             Self::Event => "event",
+            Self::Package => "package",
+            Self::PackageBody => "package_body",
+            Self::Synonym => "synonym",
+            Self::PublicSynonym => "public_synonym",
             Self::Object => "object",
         }
     }
@@ -323,6 +331,10 @@ impl TaskItemKind {
             "trigger" => Some(Self::Trigger),
             "sequence" => Some(Self::Sequence),
             "event" => Some(Self::Event),
+            "package" => Some(Self::Package),
+            "package_body" => Some(Self::PackageBody),
+            "synonym" => Some(Self::Synonym),
+            "public_synonym" => Some(Self::PublicSynonym),
             "object" => Some(Self::Object),
             _ => None,
         }
@@ -341,6 +353,10 @@ impl TaskItemKind {
             "Trigger" => Self::Trigger,
             "Sequence" => Self::Sequence,
             "Event" => Self::Event,
+            "Package" => Self::Package,
+            "PackageBody" => Self::PackageBody,
+            "Synonym" => Self::Synonym,
+            "PublicSynonym" => Self::PublicSynonym,
             _ => return (Self::Object, value.to_string()),
         };
         (kind, name.to_string())
@@ -553,6 +569,7 @@ pub struct TransferTaskJournal {
     history_complete: std::sync::Arc<AtomicBool>,
     successful_items: std::sync::Arc<AtomicUsize>,
     observed_rows: std::sync::Arc<Mutex<HashMap<usize, ObservedRows>>>,
+    object_indices: std::sync::Arc<Mutex<HashMap<Option<String>, usize>>>,
 }
 
 static UNPERSISTED_RUN_ID_CLAIMS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -625,7 +642,14 @@ impl TransferTaskJournal {
             target,
         };
         let details = transfer_details(request);
-        let items = tables
+        let mut object_indices = HashMap::new();
+        for selection in request.objects.as_deref().unwrap_or(&[]) {
+            for name in &selection.names {
+                let next_index = tables.len() + object_indices.len();
+                object_indices.entry(Some(format!("{:?}:{name}", selection.object_type))).or_insert(next_index);
+            }
+        }
+        let mut items = tables
             .iter()
             .enumerate()
             .map(|(index, table)| TaskRunItem {
@@ -647,6 +671,25 @@ impl TransferTaskJournal {
                 safe_error_summary: None,
             })
             .collect::<Vec<_>>();
+        for (identity, index) in &object_indices {
+            let Some(identity) = identity else { continue };
+            let (item_kind, source_object) = TaskItemKind::from_transfer(identity);
+            items.push(TaskRunItem {
+                run_id: request.transfer_id.clone(),
+                item_index: *index as i64,
+                item_kind,
+                target_object: source_object.clone(),
+                source_object,
+                status: TaskItemStatus::Pending,
+                source_row_count: None,
+                moved_row_count: None,
+                target_row_count: None,
+                row_count_state: RowCountState::NotApplicable,
+                has_table_filter: false,
+                safe_error_summary: None,
+            });
+        }
+        items.sort_by_key(|item| item.item_index);
 
         match storage.create_task_run(&run, &details, &items).await {
             Ok(()) => {
@@ -660,6 +703,7 @@ impl TransferTaskJournal {
                     history_complete: std::sync::Arc::new(AtomicBool::new(true)),
                     successful_items: std::sync::Arc::new(AtomicUsize::new(0)),
                     observed_rows: std::sync::Arc::new(Mutex::new(HashMap::new())),
+                    object_indices: std::sync::Arc::new(Mutex::new(object_indices)),
                 }))
             }
             Err(TaskHistoryStorageError::RunIdConflict) => {
@@ -771,7 +815,6 @@ impl TransferTaskJournal {
     }
 
     pub async fn record_object_outcome(&self, outcome: &TransferObjectOutcome) {
-        let mut next_index = self.tables.len();
         for (items, status) in [
             (&outcome.transferred, TaskItemStatus::Succeeded),
             (&outcome.skipped, TaskItemStatus::Skipped),
@@ -779,9 +822,22 @@ impl TransferTaskJournal {
         ] {
             for raw in items {
                 let (item_kind, source_object) = TaskItemKind::from_transfer(raw);
+                let object_result = outcome
+                    .object_results
+                    .iter()
+                    .find(|result| format!("{:?}:{}", result.object_type, result.name) == *raw);
+                let safe_summary = object_result.map(|result| {
+                    format!(
+                        "Object result: {}; compile status: {}; source verified: {}. {}",
+                        result.status,
+                        result.compile_status.as_deref().unwrap_or("not checked"),
+                        result.source_verified.map_or("not checked", |verified| if verified { "yes" } else { "no" }),
+                        result.recovery.as_deref().unwrap_or("")
+                    )
+                });
                 self.persist_item(TaskRunItem {
                     run_id: self.run_id.clone(),
-                    item_index: next_index as i64,
+                    item_index: self.object_item_index(Some(raw)) as i64,
                     item_kind,
                     source_object: source_object.clone(),
                     target_object: source_object,
@@ -791,11 +847,84 @@ impl TransferTaskJournal {
                     target_row_count: None,
                     row_count_state: RowCountState::NotApplicable,
                     has_table_filter: false,
-                    safe_error_summary: safe_item_summary(status),
+                    safe_error_summary: safe_summary.or_else(|| safe_item_summary(status)),
                 })
                 .await;
-                next_index += 1;
             }
+        }
+        for result in &outcome.object_results {
+            let identity = format!("{:?}:{}", result.object_type, result.name);
+            if outcome.transferred.iter().chain(&outcome.skipped).chain(&outcome.failed).any(|raw| raw == &identity) {
+                continue;
+            }
+            let status = match result.status.as_str() {
+                "transferred" | "created" | "replaced" => TaskItemStatus::Succeeded,
+                "skipped" => TaskItemStatus::Skipped,
+                "failed" => TaskItemStatus::Failed,
+                "not_started" => TaskItemStatus::NotStarted,
+                _ => continue,
+            };
+            let (item_kind, source_object) = TaskItemKind::from_transfer(&identity);
+            self.persist_item(TaskRunItem {
+                run_id: self.run_id.clone(),
+                item_index: self.object_item_index(Some(&identity)) as i64,
+                item_kind,
+                target_object: source_object.clone(),
+                source_object,
+                status,
+                source_row_count: None,
+                moved_row_count: None,
+                target_row_count: None,
+                row_count_state: RowCountState::NotApplicable,
+                has_table_filter: false,
+                safe_error_summary: if status == TaskItemStatus::NotStarted {
+                    Some("Not executed because an earlier transfer stage did not complete.".into())
+                } else {
+                    safe_item_summary(status)
+                },
+            })
+            .await;
+        }
+    }
+
+    /// Legacy executors may stop without an exact result event. Once their stage starts,
+    /// keep such objects unconfirmed rather than asserting they were never reached.
+    pub async fn start_legacy_schema_objects(&self) {
+        let identities = self
+            .object_indices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|(identity, index)| identity.as_ref().map(|identity| (identity.clone(), *index)))
+            .collect::<Vec<_>>();
+        for (identity, index) in identities {
+            let (item_kind, source_object) = TaskItemKind::from_transfer(&identity);
+            if matches!(
+                item_kind,
+                TaskItemKind::Table
+                    | TaskItemKind::Package
+                    | TaskItemKind::PackageBody
+                    | TaskItemKind::Synonym
+                    | TaskItemKind::PublicSynonym
+                    | TaskItemKind::Object
+            ) {
+                continue;
+            }
+            self.persist_item(TaskRunItem {
+                run_id: self.run_id.clone(),
+                item_index: index as i64,
+                item_kind,
+                target_object: source_object.clone(),
+                source_object,
+                status: TaskItemStatus::Running,
+                source_row_count: None,
+                moved_row_count: None,
+                target_row_count: None,
+                row_count_state: RowCountState::NotApplicable,
+                has_table_filter: false,
+                safe_error_summary: None,
+            })
+            .await;
         }
     }
 
@@ -803,7 +932,7 @@ impl TransferTaskJournal {
         let status = if cancelled { TaskItemStatus::Cancelled } else { TaskItemStatus::Failed };
         self.persist_item(TaskRunItem {
             run_id: self.run_id.clone(),
-            item_index: self.tables.len() as i64,
+            item_index: self.object_item_index(None) as i64,
             item_kind: TaskItemKind::Object,
             source_object: "schema objects".to_string(),
             target_object: "schema objects".to_string(),
@@ -816,6 +945,12 @@ impl TransferTaskJournal {
             safe_error_summary: safe_item_summary(status),
         })
         .await;
+    }
+
+    fn object_item_index(&self, identity: Option<&str>) -> usize {
+        let mut indices = self.object_indices.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next_index = self.tables.len() + indices.len();
+        *indices.entry(identity.map(str::to_string)).or_insert(next_index)
     }
 
     pub async fn finish(&self, progress: &TransferProgress) {
@@ -936,83 +1071,407 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn journal_drops_raw_filters_and_driver_errors_from_persistent_history() {
+    async fn journal_preserves_two_stage_object_identities_and_error_after_reopening_storage() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("dbx.db");
         let storage = crate::persistence::test_storage::open_unmigrated(&db_path).await.unwrap();
         let app = AppState::new_with_plugin_dir(storage.clone(), dir.path().join("plugins"));
-        let filter_secret = "task_history_filter_secret_marker";
-        let driver_secret = "task_history_driver_error_secret_marker";
-        let request = TransferRequest {
-            transfer_id: format!("task-history-test-{}", uuid::Uuid::new_v4()),
-            source_connection_id: "source-id".to_string(),
-            source_database: "source-db".to_string(),
-            source_schema: "main".to_string(),
-            source_catalog: None,
-            target_connection_id: "target-id".to_string(),
-            target_database: "target-db".to_string(),
-            target_schema: "main".to_string(),
-            target_catalog: None,
-            tables: vec!["orders".to_string()],
-            create_table: false,
-            content: TransferContent::DataOnly,
-            objects: Some(vec![TransferObjectSelection::default()]),
-            mode: TransferMode::Append,
-            target_table_name_case: TransferTableNameCase::Preserve,
-            quote_target_column_names: true,
-            ownership_policy: TransferOwnershipPolicy::Preserve,
-            batch_size: 500,
-            table_filters: HashMap::from([
-                ("orders".to_string(), format!("WHERE note = '{filter_secret}'")),
-                ("unselected_table".to_string(), format!("WHERE note = '{filter_secret}'")),
-            ]),
-            drop_target_before_create: false,
-            drop_target_confirmed: false,
-        };
+        let request: TransferRequest = serde_json::from_value(serde_json::json!({
+            "transferId": format!("staged-history-{}", uuid::Uuid::new_v4()),
+            "sourceConnectionId": "s", "sourceDatabase": "S", "sourceSchema": "S",
+            "targetConnectionId": "t", "targetDatabase": "T", "targetSchema": "T", "tables": ["TABLE_A"],
+            "createTable": true, "batchSize": 10, "content": "structureOnly",
+            "objects": [
+                {"objectType": "PACKAGE", "names": ["PRE"]},
+                {"objectType": "DB_LINK", "names": ["L"]},
+                {"objectType": "PACKAGE", "names": ["P"]},
+                {"objectType": "PACKAGE_BODY", "names": ["PRE"]},
+                {"objectType": "SYNONYM", "names": ["SAME"]},
+                {"objectType": "PUBLIC_SYNONYM", "names": ["SAME"]}
+            ]
+        }))
+        .unwrap();
         let journal =
             TransferTaskJournal::accept(&storage, &app, &request, TaskLifecycleOwner::Web).await.unwrap().unwrap();
-        assert!(matches!(
-            TransferTaskJournal::accept(&storage, &app, &request, TaskLifecycleOwner::Web).await,
-            Err(TaskHistoryStorageError::RunIdConflict)
-        ));
-
-        journal.start_table(0).await;
-        journal.observe_source_count(0, None);
-        journal.observe_table_progress(0, 2);
-        journal.finish_table(0, TaskItemStatus::Failed, None, None).await;
+        let prerequisites =
+            TransferObjectOutcome { transferred: vec!["DbLink:L".into(), "Package:PRE".into()], ..Default::default() };
+        journal.record_object_outcome(&prerequisites).await;
+        journal
+            .record_object_outcome(&TransferObjectOutcome {
+                transferred: vec!["Synonym:SAME".into()],
+                failed: vec!["Package:P".into(), "PublicSynonym:SAME".into()],
+                ..Default::default()
+            })
+            .await;
+        // An update to the same result is an UPSERT of that identity, not another item.
+        journal.clone().record_object_outcome(&prerequisites).await;
+        // Storage keeps terminal results immutable even if a later phase repeats the identity.
+        journal
+            .record_object_outcome(&TransferObjectOutcome { skipped: vec!["Package:PRE".into()], ..Default::default() })
+            .await;
+        journal.record_schema_objects_error(true).await;
+        journal.record_schema_objects_error(false).await;
+        let pending = storage.list_task_run_items(&request.transfer_id, TaskRunItemsQuery::default()).await.unwrap();
+        let body = pending
+            .items
+            .iter()
+            .find(|item| item.item_kind == TaskItemKind::PackageBody && item.source_object == "PRE")
+            .unwrap();
+        assert_eq!(body.status, TaskItemStatus::Pending);
+        assert_eq!(body.safe_error_summary, None);
         journal
             .finish(&TransferProgress {
                 transfer_id: request.transfer_id.clone(),
-                table: "orders".to_string(),
-                table_index: 0,
+                table: "schema objects".into(),
+                table_index: 1,
                 total_tables: 1,
-                rows_transferred: 2,
+                rows_transferred: 0,
                 total_rows: None,
                 status: TransferStatus::Error,
-                error: Some(driver_secret.to_string()),
+                error: Some("Prerequisite failed".into()),
                 terminal: true,
+                object_result: None,
             })
             .await;
+        let before = storage.list_task_run_items(&request.transfer_id, TaskRunItemsQuery::default()).await.unwrap();
+        assert_eq!(before.items.len(), 8);
+        let expected = [
+            (0, TaskItemKind::Table, "TABLE_A", TaskItemStatus::NotStarted),
+            (1, TaskItemKind::Package, "PRE", TaskItemStatus::Succeeded),
+            (2, TaskItemKind::Object, "DbLink:L", TaskItemStatus::Succeeded),
+            (3, TaskItemKind::Package, "P", TaskItemStatus::Failed),
+            (4, TaskItemKind::PackageBody, "PRE", TaskItemStatus::NotStarted),
+            (5, TaskItemKind::Synonym, "SAME", TaskItemStatus::Succeeded),
+            (6, TaskItemKind::PublicSynonym, "SAME", TaskItemStatus::Failed),
+            (7, TaskItemKind::Object, "schema objects", TaskItemStatus::Cancelled),
+        ];
+        for (item, (index, kind, name, status)) in before.items.iter().zip(expected) {
+            assert_eq!(
+                (item.item_index, item.item_kind, item.source_object.as_str(), item.status),
+                (index, kind, name, status)
+            );
+        }
+        drop(journal);
+        drop(app);
+        drop(storage);
+        let reopened = crate::persistence::test_storage::open_unmigrated(&db_path).await.unwrap();
+        let after = reopened.list_task_run_items(&request.transfer_id, TaskRunItemsQuery::default()).await.unwrap();
+        assert_eq!(after, before);
+    }
 
-        let detail = storage.get_task_run_detail(&request.transfer_id).await.unwrap().unwrap();
-        assert_eq!(detail.run.status, TaskRunStatus::Failed);
-        assert!(detail.run.history_complete);
-        assert_eq!(detail.run.error_code.as_deref(), Some("TRANSFER_FAILED"));
-        assert_eq!(detail.transfer.as_ref().unwrap().filtered_table_count, 1);
+    #[tokio::test]
+    async fn implicit_object_indices_are_shared_by_clones_and_isolated_between_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db")).await.unwrap();
+        let app = AppState::new_with_plugin_dir(storage.clone(), dir.path().join("plugins"));
+        let mut request: TransferRequest = serde_json::from_value(serde_json::json!({
+            "transferId": format!("implicit-history-{}", uuid::Uuid::new_v4()),
+            "sourceConnectionId": "s", "sourceDatabase": "S", "sourceSchema": "S",
+            "targetConnectionId": "t", "targetDatabase": "T", "targetSchema": "T", "tables": [],
+            "createTable": true, "batchSize": 10, "content": "structureOnly"
+        }))
+        .unwrap();
+        let journal =
+            TransferTaskJournal::accept(&storage, &app, &request, TaskLifecycleOwner::Web).await.unwrap().unwrap();
+        let clone = journal.clone();
+        let first = TransferObjectOutcome { transferred: vec!["View:Mixed Name".into()], ..Default::default() };
+        let second = TransferObjectOutcome {
+            transferred: vec![
+                "View:Mixed Name".into(),
+                "View:mixed name".into(),
+                "Type:Mixed Name".into(),
+                "TypeBody:Mixed Name".into(),
+            ],
+            ..Default::default()
+        };
+        tokio::join!(journal.record_object_outcome(&first), clone.record_object_outcome(&second));
+        journal.record_schema_objects_error(false).await;
         let items = storage.list_task_run_items(&request.transfer_id, TaskRunItemsQuery::default()).await.unwrap();
-        assert_eq!(items.items[0].source_row_count, None);
-        assert_eq!(items.items[0].moved_row_count, Some(2));
-        assert_eq!(items.items[0].target_row_count, None);
-        assert_eq!(items.items[0].row_count_state, RowCountState::Incomplete);
-        assert_eq!(items.items[0].safe_error_summary.as_deref(), Some(ITEM_FAILED_SUMMARY));
+        assert_eq!(items.items.len(), 5);
+        assert_eq!(items.items.iter().map(|item| item.item_index).collect::<HashSet<_>>().len(), 5);
+        for name in ["Mixed Name", "mixed name", "Type:Mixed Name", "TypeBody:Mixed Name", "schema objects"] {
+            assert_eq!(items.items.iter().filter(|item| item.source_object == name).count(), 1);
+        }
+        request.transfer_id = format!("independent-history-{}", uuid::Uuid::new_v4());
+        let independent =
+            TransferTaskJournal::accept(&storage, &app, &request, TaskLifecycleOwner::Web).await.unwrap().unwrap();
+        independent.record_object_outcome(&first).await;
+        let separate = storage.list_task_run_items(&request.transfer_id, TaskRunItemsQuery::default()).await.unwrap();
+        assert_eq!(separate.items.len(), 1);
+        assert_eq!(separate.items[0].item_index, 0);
+        assert_eq!(separate.items[0].source_object, "Mixed Name");
+    }
 
-        let serialized = serde_json::to_string(&(detail, items)).unwrap();
-        assert!(!serialized.contains(filter_secret));
-        assert!(!serialized.contains(driver_secret));
-        for path in [db_path.clone(), db_path.with_extension("db-wal"), db_path.with_extension("db-shm")] {
-            let bytes = std::fs::read(path).unwrap_or_default();
-            assert!(!bytes.windows(filter_secret.len()).any(|window| window == filter_secret.as_bytes()));
-            assert!(!bytes.windows(driver_secret.len()).any(|window| window == driver_secret.as_bytes()));
+    #[tokio::test]
+    async fn interrupted_legacy_stage_keeps_observed_success_and_unknown_progress_separate_from_unexecuted_body() {
+        for body in [crate::transfer::TransferObjectKind::PackageBody, crate::transfer::TransferObjectKind::TypeBody] {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("dbx.db");
+            let storage = crate::persistence::test_storage::open_unmigrated(&db_path).await.unwrap();
+            let app = AppState::new_with_plugin_dir(storage.clone(), dir.path().join("plugins"));
+            let request: TransferRequest = serde_json::from_value(serde_json::json!({
+            "transferId": format!("interrupted-history-{}", uuid::Uuid::new_v4()),
+            "sourceConnectionId": "s", "sourceDatabase": "S", "sourceSchema": "S",
+            "targetConnectionId": "t", "targetDatabase": "T", "targetSchema": "T", "tables": [],
+            "createTable": true, "batchSize": 10, "content": "structureOnly",
+            "objects": [{"objectType": "VIEW", "names": ["DONE", "UNKNOWN"]}, {"objectType": body, "names": ["LATE"]}]
+        })).unwrap();
+            let journal =
+                TransferTaskJournal::accept(&storage, &app, &request, TaskLifecycleOwner::Web).await.unwrap().unwrap();
+            journal.start_legacy_schema_objects().await;
+            let outcome = TransferObjectOutcome {
+                object_results: vec![
+                    crate::transfer::TransferSchemaObjectResult {
+                        object_type: crate::transfer::TransferObjectKind::View,
+                        name: "DONE".into(),
+                        schema: "T".into(),
+                        status: "transferred".into(),
+                        compile_status: None,
+                        source_verified: None,
+                        error: None,
+                        recovery: None,
+                    },
+                    crate::transfer::TransferSchemaObjectResult {
+                        object_type: body,
+                        name: "LATE".into(),
+                        schema: "T".into(),
+                        status: "not_started".into(),
+                        compile_status: None,
+                        source_verified: None,
+                        error: Some("Earlier stage did not complete".into()),
+                        recovery: None,
+                    },
+                ],
+                ..Default::default()
+            };
+            journal.record_object_outcome(&outcome).await;
+            journal
+                .finish(&TransferProgress {
+                    transfer_id: request.transfer_id.clone(),
+                    table: String::new(),
+                    table_index: 0,
+                    total_tables: 0,
+                    rows_transferred: 0,
+                    total_rows: None,
+                    status: TransferStatus::Error,
+                    error: Some("Earlier stage did not complete".into()),
+                    terminal: true,
+                    object_result: None,
+                })
+                .await;
+            let before = storage.list_task_run_items(&request.transfer_id, TaskRunItemsQuery::default()).await.unwrap();
+            assert_eq!(before.items.len(), 3);
+            assert_eq!(before.items[0].status, TaskItemStatus::Succeeded);
+            assert_eq!(before.items[0].safe_error_summary, None);
+            assert_eq!(before.items[1].status, TaskItemStatus::Incomplete);
+            assert_eq!(before.items[2].status, TaskItemStatus::NotStarted);
+            assert!(before.items[2].safe_error_summary.as_deref().unwrap().contains("Not executed"));
+            assert!(!serde_json::to_string(&before).unwrap().contains("INVALID"));
+            drop(journal);
+            drop(app);
+            drop(storage);
+            let reopened = crate::persistence::test_storage::open_unmigrated(&db_path).await.unwrap();
+            assert_eq!(
+                reopened.list_task_run_items(&request.transfer_id, TaskRunItemsQuery::default()).await.unwrap(),
+                before
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn journal_keeps_private_and_public_synonym_results_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db")).await.unwrap();
+        let app = AppState::new_with_plugin_dir(storage.clone(), dir.path().join("plugins"));
+        let request: TransferRequest = serde_json::from_value(serde_json::json!({
+            "transferId": "synonym-history", "sourceConnectionId": "s", "sourceDatabase": "S", "sourceSchema": "S",
+            "targetConnectionId": "t", "targetDatabase": "T", "targetSchema": "T", "tables": [],
+            "createTable": true, "batchSize": 10, "content": "structureOnly",
+            "objects": [{"objectType": "SYNONYM", "names": ["SAME"]}, {"objectType": "PUBLIC_SYNONYM", "names": ["SAME"]}]
+        })).unwrap();
+        let journal =
+            TransferTaskJournal::accept(&storage, &app, &request, TaskLifecycleOwner::Web).await.unwrap().unwrap();
+        journal
+            .record_object_outcome(&TransferObjectOutcome {
+                transferred: vec!["Synonym:SAME".into()],
+                skipped: Vec::new(),
+                failed: vec!["PublicSynonym:SAME".into()],
+                object_results: vec![
+                    crate::transfer::TransferSchemaObjectResult {
+                        object_type: crate::transfer::TransferObjectKind::Synonym,
+                        name: "SAME".into(),
+                        schema: "T".into(),
+                        status: "transferred".into(),
+                        compile_status: None,
+                        source_verified: Some(true),
+                        error: None,
+                        recovery: None,
+                    },
+                    crate::transfer::TransferSchemaObjectResult {
+                        object_type: crate::transfer::TransferObjectKind::PublicSynonym,
+                        name: "SAME".into(),
+                        schema: "PUBLIC".into(),
+                        status: "failed".into(),
+                        compile_status: None,
+                        source_verified: Some(false),
+                        error: Some("raw_synonym_driver_secret".into()),
+                        recovery: Some("Target synonym restored and verified".into()),
+                    },
+                ],
+            })
+            .await;
+        let items = storage.list_task_run_items(&request.transfer_id, TaskRunItemsQuery::default()).await.unwrap();
+        assert_eq!(items.items.len(), 2);
+        assert_eq!(items.items[0].item_kind, TaskItemKind::Synonym);
+        assert_eq!(items.items[0].status, TaskItemStatus::Succeeded);
+        assert_eq!(items.items[1].item_kind, TaskItemKind::PublicSynonym);
+        assert_eq!(items.items[1].status, TaskItemStatus::Failed);
+        assert!(items.items[1].safe_error_summary.as_deref().unwrap().contains("restored and verified"));
+        assert!(!serde_json::to_string(&items).unwrap().contains("raw_synonym_driver_secret"));
+    }
+
+    #[tokio::test]
+    async fn journal_drops_raw_filters_and_driver_errors_from_persistent_history() {
+        use crate::transfer::TransferObjectKind;
+        for (spec, body, spec_item_kind, body_item_kind, spec_name, body_name) in [
+            (
+                TransferObjectKind::Package,
+                TransferObjectKind::PackageBody,
+                TaskItemKind::Package,
+                TaskItemKind::PackageBody,
+                "P",
+                "P",
+            ),
+            (
+                TransferObjectKind::Type,
+                TransferObjectKind::TypeBody,
+                TaskItemKind::Object,
+                TaskItemKind::Object,
+                "Type:P",
+                "TypeBody:P",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("dbx.db");
+            let storage = crate::persistence::test_storage::open_unmigrated(&db_path).await.unwrap();
+            let app = AppState::new_with_plugin_dir(storage.clone(), dir.path().join("plugins"));
+            let filter_secret = "task_history_filter_secret_marker";
+            let driver_secret = "task_history_driver_error_secret_marker";
+            let request = TransferRequest {
+                transfer_id: format!("task-history-test-{}", uuid::Uuid::new_v4()),
+                source_connection_id: "source-id".to_string(),
+                source_database: "source-db".to_string(),
+                source_schema: "main".to_string(),
+                source_catalog: None,
+                target_connection_id: "target-id".to_string(),
+                target_database: "target-db".to_string(),
+                target_schema: "main".to_string(),
+                target_catalog: None,
+                tables: vec!["orders".to_string()],
+                create_table: false,
+                content: TransferContent::DataOnly,
+                objects: Some(vec![TransferObjectSelection::default()]),
+                mode: TransferMode::Append,
+                target_table_name_case: TransferTableNameCase::Preserve,
+                quote_target_column_names: true,
+                ownership_policy: TransferOwnershipPolicy::Preserve,
+                object_conflict_policy: Default::default(),
+                database_links: Vec::new(),
+                database_link_credentials: Vec::new(),
+                batch_size: 500,
+                table_filters: HashMap::from([
+                    ("orders".to_string(), format!("WHERE note = '{filter_secret}'")),
+                    ("unselected_table".to_string(), format!("WHERE note = '{filter_secret}'")),
+                ]),
+                drop_target_before_create: false,
+                drop_target_confirmed: false,
+            };
+            let journal =
+                TransferTaskJournal::accept(&storage, &app, &request, TaskLifecycleOwner::Web).await.unwrap().unwrap();
+            assert!(matches!(
+                TransferTaskJournal::accept(&storage, &app, &request, TaskLifecycleOwner::Web).await,
+                Err(TaskHistoryStorageError::RunIdConflict)
+            ));
+
+            journal.start_table(0).await;
+            journal.observe_source_count(0, None);
+            journal.observe_table_progress(0, 2);
+            journal.finish_table(0, TaskItemStatus::Failed, None, None).await;
+            journal
+                .record_object_outcome(&TransferObjectOutcome {
+                    transferred: vec![format!("{spec:?}:P")],
+                    skipped: Vec::new(),
+                    failed: vec![format!("{body:?}:P")],
+                    object_results: vec![
+                        crate::transfer::TransferSchemaObjectResult {
+                            object_type: spec,
+                            name: "P".into(),
+                            schema: "main".into(),
+                            status: "transferred".into(),
+                            compile_status: Some("VALID".into()),
+                            source_verified: Some(true),
+                            error: None,
+                            recovery: None,
+                        },
+                        crate::transfer::TransferSchemaObjectResult {
+                            object_type: body,
+                            name: "P".into(),
+                            schema: "main".into(),
+                            status: "failed".into(),
+                            compile_status: Some("INVALID".into()),
+                            source_verified: Some(false),
+                            error: Some(driver_secret.into()),
+                            recovery: Some("Target definitions restored and verified".into()),
+                        },
+                    ],
+                })
+                .await;
+            journal
+                .finish(&TransferProgress {
+                    transfer_id: request.transfer_id.clone(),
+                    table: "orders".to_string(),
+                    table_index: 0,
+                    total_tables: 1,
+                    rows_transferred: 2,
+                    total_rows: None,
+                    status: TransferStatus::Error,
+                    error: Some(driver_secret.to_string()),
+                    terminal: true,
+                    object_result: None,
+                })
+                .await;
+
+            let detail = storage.get_task_run_detail(&request.transfer_id).await.unwrap().unwrap();
+            assert_eq!(detail.run.status, TaskRunStatus::PartialFailed);
+            assert!(detail.run.history_complete);
+            assert_eq!(detail.run.error_code.as_deref(), Some("TRANSFER_PARTIAL_FAILURE"));
+            assert_eq!(detail.transfer.as_ref().unwrap().filtered_table_count, 1);
+            let items = storage.list_task_run_items(&request.transfer_id, TaskRunItemsQuery::default()).await.unwrap();
+            assert_eq!(items.items[0].source_row_count, None);
+            assert_eq!(items.items[0].moved_row_count, Some(2));
+            assert_eq!(items.items[0].target_row_count, None);
+            assert_eq!(items.items[0].row_count_state, RowCountState::Incomplete);
+            assert_eq!(items.items[0].safe_error_summary.as_deref(), Some(ITEM_FAILED_SUMMARY));
+            assert_eq!(items.items[1].item_kind, spec_item_kind);
+            assert_eq!(items.items[1].source_object, spec_name);
+            assert_eq!(items.items[1].status, TaskItemStatus::Succeeded);
+            assert!(items.items[1].safe_error_summary.as_deref().unwrap().contains("source verified: yes"));
+            assert_eq!(items.items[2].item_kind, body_item_kind);
+            assert_eq!(items.items[2].source_object, body_name);
+            assert_eq!(items.items[2].status, TaskItemStatus::Failed);
+            let package_summary = items.items[2].safe_error_summary.as_deref().unwrap();
+            assert!(package_summary.contains("compile status: INVALID"));
+            assert!(package_summary.contains("source verified: no"));
+            assert!(package_summary.contains("restored and verified"));
+
+            let serialized = serde_json::to_string(&(detail, items)).unwrap();
+            assert!(!serialized.contains(filter_secret));
+            assert!(!serialized.contains(driver_secret));
+            for path in [db_path.clone(), db_path.with_extension("db-wal"), db_path.with_extension("db-shm")] {
+                let bytes = std::fs::read(path).unwrap_or_default();
+                assert!(!bytes.windows(filter_secret.len()).any(|window| window == filter_secret.as_bytes()));
+                assert!(!bytes.windows(driver_secret.len()).any(|window| window == driver_secret.as_bytes()));
+            }
         }
     }
 }

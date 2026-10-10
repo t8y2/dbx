@@ -24,6 +24,26 @@ describe("countTransferObjects", () => {
 });
 
 describe("buildTransferObjectSelections", () => {
+  it("keeps type definitions and bodies explicit without adding paired objects", () => {
+    expect(buildTransferObjectSelections({ TYPE: setOf(["Case T"]) }, [])).toEqual([{ objectType: "TYPE", names: ["Case T"] }]);
+    expect(buildTransferObjectSelections({ TYPE_BODY: setOf(["Case T"]) }, [])).toEqual([{ objectType: "TYPE_BODY", names: ["Case T"] }]);
+    expect(buildTransferObjectSelections({ TYPE: setOf(["Case T"]), TYPE_BODY: setOf(["Case T"]) }, ["TYPE", "TYPE_BODY"])).toEqual([]);
+  });
+  it("preserves same-named private and public synonyms as two selected objects", () => {
+    expect(buildTransferObjectSelections({ SYNONYM: setOf(["Case S"]), PUBLIC_SYNONYM: setOf(["Case S"]) }, [])).toEqual([
+      { objectType: "SYNONYM", names: ["Case S"] },
+      { objectType: "PUBLIC_SYNONYM", names: ["Case S"] },
+    ]);
+  });
+  it("keeps package specification and body selections separate", () => {
+    expect(buildTransferObjectSelections({ PACKAGE: setOf(["Case P"]) }, [])).toEqual([{ objectType: "PACKAGE", names: ["Case P"] }]);
+    expect(buildTransferObjectSelections({ PACKAGE_BODY: setOf(["Case P"]) }, [])).toEqual([{ objectType: "PACKAGE_BODY", names: ["Case P"] }]);
+  });
+
+  it("drops stale package selections when the mode or target disables them", () => {
+    expect(buildTransferObjectSelections({ TABLE: setOf(["T"]), PACKAGE: setOf(["P"]), PACKAGE_BODY: setOf(["P"]) }, ["PACKAGE", "PACKAGE_BODY"])).toEqual([]);
+  });
+
   it("serializes non-table selections in request order", () => {
     const result = buildTransferObjectSelections(
       {

@@ -15,6 +15,9 @@ public final class ColumnInfo {
     private Integer character_maximum_length;
     private String character_set;
     private String collation;
+    private String resolved_schema;
+    private String resolved_table;
+    private String resolved_object_type;
 
     public ColumnInfo() {
         this("", "", true, null, false);
@@ -128,6 +131,18 @@ public final class ColumnInfo {
         return collation;
     }
 
+    public String getResolved_schema() {
+        return resolved_schema;
+    }
+
+    public String getResolved_table() {
+        return resolved_table;
+    }
+
+    public String getResolved_object_type() {
+        return resolved_object_type;
+    }
+
     public void setName(String name) {
         this.name = name;
     }
@@ -176,6 +191,18 @@ public final class ColumnInfo {
         this.collation = collation;
     }
 
+    public void setResolved_schema(String resolved_schema) {
+        this.resolved_schema = resolved_schema;
+    }
+
+    public void setResolved_table(String resolved_table) {
+        this.resolved_table = resolved_table;
+    }
+
+    public void setResolved_object_type(String resolved_object_type) {
+        this.resolved_object_type = resolved_object_type;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -192,7 +219,10 @@ public final class ColumnInfo {
             && Objects.equals(numeric_scale, that.numeric_scale)
             && Objects.equals(character_maximum_length, that.character_maximum_length)
             && Objects.equals(character_set, that.character_set)
-            && Objects.equals(collation, that.collation);
+            && Objects.equals(collation, that.collation)
+            && Objects.equals(resolved_schema, that.resolved_schema)
+            && Objects.equals(resolved_table, that.resolved_table)
+            && Objects.equals(resolved_object_type, that.resolved_object_type);
     }
 
     @Override
@@ -209,7 +239,10 @@ public final class ColumnInfo {
             numeric_scale,
             character_maximum_length,
             character_set,
-            collation
+            collation,
+            resolved_schema,
+            resolved_table,
+            resolved_object_type
         );
     }
 
@@ -227,6 +260,9 @@ public final class ColumnInfo {
             + ", character_maximum_length=" + character_maximum_length
             + ", character_set=" + character_set
             + ", collation=" + collation
+            + ", resolved_schema=" + resolved_schema
+            + ", resolved_table=" + resolved_table
+            + ", resolved_object_type=" + resolved_object_type
             + ")";
     }
 }

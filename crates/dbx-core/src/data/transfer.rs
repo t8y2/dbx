@@ -24,8 +24,16 @@ mod iris_tests;
 
 mod db2;
 mod ddl_plan;
+mod oracle_database_links;
+mod oracle_packages;
+mod oracle_synonyms;
+mod oracle_types;
+pub use oracle_database_links::{TransferDatabaseLinkConfig, TransferDatabaseLinkCredential};
+#[path = "transfer/oceanbase_source.rs"]
+pub(crate) mod oceanbase_source;
 mod overwrite_clear;
 mod structure_plan;
+pub use oracle_packages::{TransferObjectConflictPolicy, TransferSchemaObjectPlan, TransferSchemaObjectResult};
 
 pub use overwrite_clear::clear_foreign_key_linked_overwrite_targets;
 
@@ -206,6 +214,14 @@ pub enum TransferObjectKind {
     Trigger,
     Sequence,
     Event,
+    Package,
+    PackageBody,
+    Synonym,
+    PublicSynonym,
+    DbLink,
+    PublicDbLink,
+    Type,
+    TypeBody,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -257,6 +273,18 @@ pub fn transfer_object_kinds_for_family(family: &TransferObjectFamily) -> Vec<Tr
 }
 
 pub fn transfer_object_kinds(db_type: &DatabaseType) -> Vec<TransferObjectKind> {
+    if matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+        let mut kinds = transfer_object_kinds_for_family(&TransferObjectFamily::Oracle);
+        kinds.extend([
+            TransferObjectKind::Package,
+            TransferObjectKind::PackageBody,
+            TransferObjectKind::Synonym,
+            TransferObjectKind::PublicSynonym,
+        ]);
+        kinds.extend([TransferObjectKind::DbLink, TransferObjectKind::PublicDbLink]);
+        kinds.extend([TransferObjectKind::Type, TransferObjectKind::TypeBody]);
+        return kinds;
+    }
     match transfer_object_family(db_type) {
         Some(family) => transfer_object_kinds_for_family(&family),
         None => Vec::new(),
@@ -289,6 +317,12 @@ pub struct TransferRequest {
     pub quote_target_column_names: bool,
     #[serde(default)]
     pub ownership_policy: TransferOwnershipPolicy,
+    #[serde(default)]
+    pub object_conflict_policy: TransferObjectConflictPolicy,
+    #[serde(default)]
+    pub database_links: Vec<TransferDatabaseLinkConfig>,
+    #[serde(skip)]
+    pub database_link_credentials: Vec<TransferDatabaseLinkCredential>,
     pub batch_size: usize,
     /// Optional per-table source filter for this transfer.
     ///
@@ -326,6 +360,8 @@ pub struct TransferOwnershipPreview {
     /// re-reads source and target metadata before executing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structure: Option<TransferStructurePreview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_objects: Option<TransferSchemaObjectPlan>,
 }
 
 /// SQL plan preview for a `drop_target_before_create` (rebuild) transfer.
@@ -507,6 +543,8 @@ pub struct TransferProgress {
     pub status: TransferStatus,
     pub error: Option<String>,
     pub terminal: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_result: Option<TransferSchemaObjectResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -647,7 +685,8 @@ pub fn validate_transfer_target_table_names(request: &TransferRequest) -> Result
 pub fn cross_family_transferable_object_kinds(source: &DatabaseType, target: &DatabaseType) -> Vec<TransferObjectKind> {
     use TransferObjectKind::*;
     if is_same_transfer_family(source, target) {
-        return transfer_object_kinds(source);
+        let target_kinds = transfer_object_kinds(target);
+        return transfer_object_kinds(source).into_iter().filter(|kind| target_kinds.contains(kind)).collect();
     }
     // Narrow the matrix to validated directions: MySQL, SQL Server and
     // Oracle/Dameng may act as either side. Postgres (and anything else) is
@@ -8350,6 +8389,13 @@ pub fn ordered_transfer_object_kinds(kinds: Vec<TransferObjectKind>) -> Vec<Tran
         TransferObjectKind::Procedure => 4,
         TransferObjectKind::Trigger => 5,
         TransferObjectKind::Event => 6,
+        TransferObjectKind::Package => 3,
+        TransferObjectKind::PackageBody => 4,
+        TransferObjectKind::Synonym => 7,
+        TransferObjectKind::PublicSynonym => 8,
+        TransferObjectKind::DbLink | TransferObjectKind::PublicDbLink => 0,
+        TransferObjectKind::Type => 1,
+        TransferObjectKind::TypeBody => 2,
     };
     let mut kinds = kinds;
     kinds.sort_by_key(rank);
@@ -8362,6 +8408,161 @@ pub struct TransferObjectOutcome {
     pub transferred: Vec<String>,
     pub skipped: Vec<String>,
     pub failed: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub object_results: Vec<TransferSchemaObjectResult>,
+}
+
+pub fn has_transfer_object_blockers(outcome: &TransferObjectOutcome) -> bool {
+    !outcome.failed.is_empty() || outcome.object_results.iter().any(|result| result.status == "not_started")
+}
+
+/// Describe selected objects that were never reached without claiming DDL or verification ran.
+pub fn mark_unexecuted_transfer_objects(
+    request: &TransferRequest,
+    outcome: &mut TransferObjectOutcome,
+    reason: &str,
+    all_selected_are_accounted_for: bool,
+) -> Vec<TransferSchemaObjectResult> {
+    if request.content == TransferContent::DataOnly {
+        return Vec::new();
+    }
+    let mut reported: HashSet<_> =
+        outcome.transferred.iter().chain(&outcome.skipped).chain(&outcome.failed).cloned().collect();
+    reported.extend(outcome.object_results.iter().map(|result| format!("{:?}:{}", result.object_type, result.name)));
+    let mut added = Vec::new();
+    for selection in request.objects.as_deref().unwrap_or(&[]) {
+        if selection.object_type == TransferObjectKind::Table {
+            continue;
+        }
+        // Legacy executors may return an error after writes without an object-result event.
+        // In that case only the staged executors' exact result events prove what was reached.
+        if !all_selected_are_accounted_for
+            && !matches!(
+                selection.object_type,
+                TransferObjectKind::Type
+                    | TransferObjectKind::TypeBody
+                    | TransferObjectKind::Package
+                    | TransferObjectKind::PackageBody
+                    | TransferObjectKind::DbLink
+                    | TransferObjectKind::PublicDbLink
+                    | TransferObjectKind::Synonym
+                    | TransferObjectKind::PublicSynonym
+            )
+        {
+            continue;
+        }
+        for name in &selection.names {
+            if !reported.insert(format!("{:?}:{name}", selection.object_type)) {
+                continue;
+            }
+            let result = TransferSchemaObjectResult {
+                object_type: selection.object_type,
+                name: name.clone(),
+                schema: if matches!(
+                    selection.object_type,
+                    TransferObjectKind::PublicSynonym | TransferObjectKind::PublicDbLink
+                ) {
+                    "PUBLIC".into()
+                } else {
+                    resolve_oracle_schema(&request.target_schema, &request.target_database)
+                },
+                status: "not_started".into(),
+                compile_status: None,
+                source_verified: None,
+                error: Some(reason.into()),
+                recovery: None,
+            };
+            outcome.object_results.push(result.clone());
+            added.push(result);
+        }
+    }
+    added
+}
+
+#[cfg(test)]
+mod unexecuted_object_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn blocked_database_link_does_not_start_type_prerequisites() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        for id in ["s", "t"] {
+            let config = serde_json::from_value(serde_json::json!({"id":id,"name":id,"db_type":"oracle","host":"unused","port":1521,"username":"APP","password":""})).unwrap();
+            state.configs.write().await.insert(id.into(), config);
+        }
+        let request: TransferRequest = serde_json::from_value(serde_json::json!({
+            "transferId":"blocked-link", "sourceConnectionId":"s", "sourceDatabase":"S", "sourceSchema":"S",
+            "targetConnectionId":"t", "targetDatabase":"T", "targetSchema":"T", "tables":[], "createTable":true, "batchSize":10,
+            "objects":[{"objectType":"DB_LINK","names":["REMOTE"]},{"objectType":"TYPE","names":["T"]}]
+        })).unwrap();
+        // The link's execution-time configuration is unavailable. No pool is
+        // installed: even a metadata read for the later TYPE must not occur.
+        let outcome = transfer_schema_prerequisites(&state, &request, "source", "target", |_| {}).await.unwrap();
+        assert!(outcome.failed.is_empty());
+        assert_eq!(outcome.object_results.len(), 1);
+        assert_eq!(outcome.object_results[0].status, "not_started");
+        assert!(has_transfer_object_blockers(&outcome));
+    }
+
+    #[test]
+    fn unexecuted_results_preserve_exact_identity_and_success_without_fake_failure() {
+        for (spec, body) in [
+            (TransferObjectKind::Type, TransferObjectKind::TypeBody),
+            (TransferObjectKind::Package, TransferObjectKind::PackageBody),
+        ] {
+            let mut request: TransferRequest = serde_json::from_value(serde_json::json!({
+                "transferId": "blocked-results", "sourceConnectionId": "s", "sourceDatabase": "S", "sourceSchema": "S",
+                "targetConnectionId": "t", "targetDatabase": "T", "targetSchema": "Mixed Owner", "tables": [],
+                "createTable": true, "batchSize": 10, "content": "structureOnly",
+                "objects": [
+                    {"objectType": spec, "names": ["a\"b"]},
+                    {"objectType": body, "names": ["a\"b", "a\"b", "A\"B"]},
+                    {"objectType": "VIEW", "names": ["V"]}
+                ]
+            }))
+            .unwrap();
+            let mut outcome = TransferObjectOutcome {
+                object_results: vec![TransferSchemaObjectResult {
+                    object_type: spec,
+                    name: "a\"b".into(),
+                    schema: "Mixed Owner".into(),
+                    status: "created".into(),
+                    compile_status: Some("VALID".into()),
+                    source_verified: Some(true),
+                    error: None,
+                    recovery: None,
+                }],
+                ..Default::default()
+            };
+            let added = mark_unexecuted_transfer_objects(&request, &mut outcome, "Prerequisite did not complete", true);
+            assert_eq!(added.len(), 3);
+            assert_eq!(
+                added.iter().map(|result| (result.object_type, result.name.as_str())).collect::<Vec<_>>(),
+                vec![(body, "a\"b"), (body, "A\"B"), (TransferObjectKind::View, "V")]
+            );
+            assert!(added.iter().all(|result| result.status == "not_started"
+                && result.compile_status.is_none()
+                && result.source_verified.is_none()));
+            assert!(outcome.failed.is_empty());
+            assert_eq!(outcome.object_results[0].status, "created");
+            assert!(has_transfer_object_blockers(&outcome));
+            assert!(mark_unexecuted_transfer_objects(&request, &mut outcome, "Repeated report", true).is_empty());
+
+            let mut uncertain_legacy = TransferObjectOutcome::default();
+            let added = mark_unexecuted_transfer_objects(&request, &mut uncertain_legacy, "Stage interrupted", false);
+            assert!(!added.iter().any(|result| result.object_type == TransferObjectKind::View));
+            request.content = TransferContent::DataOnly;
+            assert!(mark_unexecuted_transfer_objects(
+                &request,
+                &mut TransferObjectOutcome::default(),
+                "Data only",
+                true
+            )
+            .is_empty());
+        }
+    }
 }
 
 pub fn selected_object_names(selections: &[TransferObjectSelection], kind: &TransferObjectKind) -> Vec<String> {
@@ -8513,8 +8714,8 @@ where
     // types at the request boundary, but requests can also arrive from older
     // clients or be crafted directly).
     let mut filtered_request = request.clone();
-    if let Some(family) = transfer_object_family(&source_db_type) {
-        let supported = transfer_object_kinds_for_family(&family);
+    if transfer_object_family(&source_db_type).is_some() {
+        let supported = transfer_object_kinds(&source_db_type);
         filtered_request.objects = request.object_selection_mode().filter_supported(&supported);
     }
     match transfer_object_family(&source_db_type) {
@@ -8556,6 +8757,56 @@ where
     }
 }
 
+/// Run selected package preflight before any table or object is mutated.
+pub async fn ensure_transfer_schema_objects_ready(
+    state: &AppState,
+    request: &TransferRequest,
+    source_pool_key: &str,
+    target_pool_key: &str,
+) -> Result<(), String> {
+    oracle_database_links::ensure_ready(state, request, source_pool_key, target_pool_key).await?;
+    oracle_types::ensure_ready(state, request, source_pool_key, target_pool_key).await?;
+    oracle_packages::ensure_ready(state, request, source_pool_key, target_pool_key).await?;
+    oracle_packages::execution_order(state, request, source_pool_key).await?;
+    oracle_synonyms::ensure_ready(state, request, source_pool_key, target_pool_key).await
+}
+
+/// Explicit type specifications and independent bodies must exist before selected
+/// table DDL/data. Bodies depending on selected tables/programs run after those objects.
+pub async fn transfer_schema_prerequisites<F: FnMut(TransferProgress)>(
+    state: &AppState,
+    request: &TransferRequest,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    mut progress: F,
+) -> Result<TransferObjectOutcome, String> {
+    if !oracle_types::has_selection(request) {
+        return Ok(TransferObjectOutcome::default());
+    }
+    let mut outcome =
+        oracle_database_links::execute(state, request, source_pool_key, target_pool_key, &mut progress).await?;
+    if has_transfer_object_blockers(&outcome) {
+        return Ok(outcome);
+    }
+    let types = oracle_types::execute(
+        state,
+        request,
+        source_pool_key,
+        target_pool_key,
+        oracle_types::Phase::BeforeTables,
+        &mut progress,
+    )
+    .await?;
+    outcome.transferred.extend(types.transferred);
+    outcome.skipped.extend(types.skipped);
+    outcome.failed.extend(types.failed);
+    outcome.object_results.extend(types.object_results);
+    Ok(outcome)
+}
+pub fn has_transfer_type_prerequisites(request: &TransferRequest) -> bool {
+    oracle_types::has_selection(request)
+}
+
 async fn transfer_mysql_schema_objects<F>(
     state: &AppState,
     request: &TransferRequest,
@@ -8590,6 +8841,7 @@ where
                     status,
                     error,
                     terminal: false,
+                    object_result: None,
                 });
             };
             // skip if the target already has it
@@ -8638,64 +8890,204 @@ async fn transfer_oracle_schema_objects<F>(
 where
     F: FnMut(TransferProgress),
 {
-    let mut outcome = TransferObjectOutcome::default();
+    let order = oracle_packages::execution_order(state, request, source_pool_key).await?;
+    oracle_packages::ensure_ready(state, request, source_pool_key, target_pool_key).await?;
+    let mut outcome = if oracle_types::has_selection(request) {
+        TransferObjectOutcome::default()
+    } else {
+        oracle_database_links::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await?
+    };
+    if has_transfer_object_blockers(&outcome) {
+        return Ok(outcome);
+    }
+    let oceanbase_source = get_db_type(state, &request.source_connection_id).await? == DatabaseType::OceanbaseOracle;
     let source_schema = resolve_oracle_schema(&request.source_schema, &request.source_database);
-    let target_schema = resolve_oracle_schema(&request.target_schema, &request.target_database);
-    let order = ordered_transfer_object_kinds(
-        request.object_selection_mode().selections().iter().map(|s| s.object_type).collect(),
-    );
-    for kind in order {
-        for name in selected_object_names(request.object_selection_mode().selections(), &kind) {
-            if is_cancelled(&request.transfer_id).await {
-                return Err("Cancelled".to_string());
+    let target_schema = if oceanbase_source && request.target_schema.trim().is_empty() {
+        let result =
+            execute_on_pool(state, target_pool_key, "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")
+                .await?;
+        result
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|value| value.as_str())
+            .filter(|schema| !schema.is_empty())
+            .ok_or("Target current schema is unavailable for OceanBase object transfer")?
+            .to_string()
+    } else {
+        resolve_oracle_schema(&request.target_schema, &request.target_database)
+    };
+    for (kind, name) in order {
+        if matches!(kind, TransferObjectKind::Package | TransferObjectKind::PackageBody) {
+            if has_transfer_object_blockers(&outcome) {
+                return Ok(outcome);
             }
-            let table = format!("schema object: {name}");
-            let mut progress = |outcome: &mut TransferObjectOutcome, status: TransferStatus, error: Option<String>| {
-                progress_callback(TransferProgress {
-                    transfer_id: request.transfer_id.clone(),
-                    table: table.clone(),
-                    table_index: request.tables.len(),
-                    total_tables: request.tables.len(),
-                    rows_transferred: (outcome.transferred.len() + outcome.skipped.len()) as u64,
-                    total_rows: None,
-                    status,
-                    error,
-                    terminal: false,
-                });
+            let mut package_request = request.clone();
+            package_request.objects = Some(
+                request
+                    .object_selection_mode()
+                    .selections()
+                    .iter()
+                    .filter_map(|selection| {
+                        if matches!(
+                            selection.object_type,
+                            TransferObjectKind::Package | TransferObjectKind::PackageBody
+                        ) {
+                            (selection.object_type == kind && selection.names.contains(&name))
+                                .then(|| TransferObjectSelection { object_type: kind, names: vec![name.clone()] })
+                        } else {
+                            Some(selection.clone())
+                        }
+                    })
+                    .collect(),
+            );
+            let packages = oracle_packages::execute(
+                state,
+                &package_request,
+                source_pool_key,
+                target_pool_key,
+                &mut progress_callback,
+            )
+            .await?;
+            outcome.transferred.extend(packages.transferred);
+            outcome.skipped.extend(packages.skipped);
+            outcome.failed.extend(packages.failed);
+            outcome.object_results.extend(packages.object_results);
+            if has_transfer_object_blockers(&outcome) {
+                return Ok(outcome);
+            }
+            continue;
+        }
+        if matches!(
+            kind,
+            TransferObjectKind::Package
+                | TransferObjectKind::PackageBody
+                | TransferObjectKind::Synonym
+                | TransferObjectKind::PublicSynonym
+                | TransferObjectKind::DbLink
+                | TransferObjectKind::PublicDbLink
+                | TransferObjectKind::Type
+                | TransferObjectKind::TypeBody
+        ) {
+            continue;
+        }
+        if is_cancelled(&request.transfer_id).await {
+            return Err("Cancelled".to_string());
+        }
+        let table = format!("schema object: {name}");
+        let mut progress = |outcome: &mut TransferObjectOutcome, status: TransferStatus, error: Option<String>| {
+            let key = format!("{kind:?}:{name}");
+            let result = TransferSchemaObjectResult {
+                object_type: kind,
+                name: name.clone(),
+                schema: target_schema.clone(),
+                status: if outcome.skipped.contains(&key) {
+                    "skipped"
+                } else if outcome.failed.contains(&key) {
+                    "failed"
+                } else {
+                    "transferred"
+                }
+                .into(),
+                compile_status: None,
+                source_verified: None,
+                error: error.clone(),
+                recovery: None,
             };
-            // skip if the target already has it (ALL_OBJECTS works for both Oracle and Dameng)
-            let exists_sql = target_object_exists_sql(&DatabaseType::Oracle, &target_schema, &name, &kind)?;
-            let exists = !execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.is_empty();
-            if exists {
-                outcome.skipped.push(format!("{kind:?}:{name}"));
-                progress(&mut outcome, TransferStatus::Running, None);
-                continue;
-            }
-            let query = oracle_object_source_query(&kind, &source_schema, &name)?;
-            let result = execute_on_pool(state, source_pool_key, &query).await?;
-            // DBMS_METADATA.GET_DDL resolves against the session's current
-            // schema; if the pool session is not the owner schema the query
-            // may return no row and the object is reported as failed (v1).
-            let ddl = result
-                .rows
-                .first()
-                .and_then(|row| row.first())
-                .and_then(|value| value.as_str())
-                .ok_or_else(|| format!("No DDL returned for Oracle {:?} {name}", kind))?
-                .to_string();
-            let ddl = rewrite_oracle_schema_qualifier(&ddl, &source_schema, &target_schema);
-            match execute_on_pool(state, target_pool_key, &ddl).await {
-                Ok(_) => {
+            outcome.object_results.push(result.clone());
+            progress_callback(TransferProgress {
+                transfer_id: request.transfer_id.clone(),
+                table: table.clone(),
+                table_index: request.tables.len(),
+                total_tables: request.tables.len(),
+                rows_transferred: (outcome.transferred.len() + outcome.skipped.len()) as u64,
+                total_rows: None,
+                status,
+                error,
+                terminal: false,
+                object_result: Some(result),
+            });
+        };
+        // skip if the target already has it (ALL_OBJECTS works for both Oracle and Dameng)
+        let exists_sql = target_object_exists_sql(&DatabaseType::Oracle, &target_schema, &name, &kind)?;
+        let exists = !execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.is_empty();
+        if exists {
+            outcome.skipped.push(format!("{kind:?}:{name}"));
+            progress(&mut outcome, TransferStatus::Running, None);
+            continue;
+        }
+        if oceanbase_source {
+            match oceanbase_source::execute(
+                state,
+                request,
+                source_pool_key,
+                target_pool_key,
+                &target_schema,
+                &name,
+                kind,
+            )
+            .await
+            {
+                Ok(()) => {
                     outcome.transferred.push(format!("{kind:?}:{name}"));
                     progress(&mut outcome, TransferStatus::Running, None);
                 }
-                Err(e) => {
+                Err(error) => {
+                    if is_cancelled(&request.transfer_id).await {
+                        return Err(error);
+                    }
                     outcome.failed.push(format!("{kind:?}:{name}"));
-                    progress(&mut outcome, TransferStatus::Error, Some(e));
+                    progress(&mut outcome, TransferStatus::Error, Some(error));
                 }
+            }
+            continue;
+        }
+        let query = oracle_object_source_query(&kind, &source_schema, &name)?;
+        let result = execute_on_pool(state, source_pool_key, &query).await?;
+        // DBMS_METADATA.GET_DDL resolves against the session's current
+        // schema; if the pool session is not the owner schema the query
+        // may return no row and the object is reported as failed (v1).
+        let ddl = result
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| format!("No DDL returned for Oracle {:?} {name}", kind))?
+            .to_string();
+        let ddl = rewrite_oracle_schema_qualifier(&ddl, &source_schema, &target_schema);
+        match execute_on_pool(state, target_pool_key, &ddl).await {
+            Ok(_) => {
+                outcome.transferred.push(format!("{kind:?}:{name}"));
+                progress(&mut outcome, TransferStatus::Running, None);
+            }
+            Err(e) => {
+                outcome.failed.push(format!("{kind:?}:{name}"));
+                progress(&mut outcome, TransferStatus::Error, Some(e));
             }
         }
     }
+    let synonyms =
+        oracle_synonyms::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await?;
+    outcome.transferred.extend(synonyms.transferred);
+    outcome.skipped.extend(synonyms.skipped);
+    outcome.failed.extend(synonyms.failed);
+    outcome.object_results.extend(synonyms.object_results);
+    if !outcome.failed.is_empty() {
+        return Ok(outcome);
+    }
+    let types = oracle_types::execute(
+        state,
+        request,
+        source_pool_key,
+        target_pool_key,
+        oracle_types::Phase::AfterObjects,
+        &mut progress_callback,
+    )
+    .await?;
+    outcome.transferred.extend(types.transferred);
+    outcome.skipped.extend(types.skipped);
+    outcome.failed.extend(types.failed);
+    outcome.object_results.extend(types.object_results);
     Ok(outcome)
 }
 
@@ -8734,6 +9126,7 @@ where
                     status,
                     error,
                     terminal: false,
+                    object_result: None,
                 });
             };
             let exists_sql = target_object_exists_sql(&DatabaseType::SqlServer, &target_schema, &name, &kind)?;
@@ -8828,6 +9221,7 @@ where
                     status,
                     error,
                     terminal: false,
+                    object_result: None,
                 });
             };
             let exists_sql = target_object_exists_sql(&target_db_type, &target_schema, &name, &kind)?;
@@ -8837,29 +9231,43 @@ where
                 progress(&mut outcome, TransferStatus::Running, None);
                 continue;
             }
-            let query = match source_family {
-                TransferObjectFamily::Mysql => mysql_object_source_query(&kind, &source_schema, &name)?,
-                TransferObjectFamily::SqlServer => sqlserver_object_source_query(&kind, &source_schema, &name)?,
-                TransferObjectFamily::Oracle => oracle_object_source_query(&kind, &source_schema, &name)?,
-                TransferObjectFamily::Postgres => {
-                    return Err(format!("跨库传输暂不支持 Postgres 源: {name}"));
+            let raw_ddl = if source_db_type == DatabaseType::OceanbaseOracle {
+                match oceanbase_source::load(state, request, &source_schema, &name, kind).await {
+                    Ok(statements) => statements.join("\n"),
+                    Err(error) => {
+                        if is_cancelled(&request.transfer_id).await {
+                            return Err("Cancelled".into());
+                        }
+                        outcome.failed.push(format!("{kind:?}:{name}"));
+                        progress(&mut outcome, TransferStatus::Error, Some(error));
+                        continue;
+                    }
                 }
-            };
-            let result = execute_on_pool(state, source_pool_key, &query).await?;
-            let raw_ddl = match source_family {
-                TransferObjectFamily::Mysql => mysql_object_ddl_from_result(&kind, &source_schema, &result.rows)?,
-                TransferObjectFamily::SqlServer => {
-                    sqlserver_object_ddl_from_result(&result, &source_schema, &name, &kind)?
-                }
-                TransferObjectFamily::Oracle => result
-                    .rows
-                    .first()
-                    .and_then(|row| row.first())
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| format!("No DDL returned for Oracle {:?} {name}", kind))?
-                    .to_string(),
-                TransferObjectFamily::Postgres => {
-                    return Err(format!("跨库传输暂不支持 Postgres 源: {name}"));
+            } else {
+                let query = match source_family {
+                    TransferObjectFamily::Mysql => mysql_object_source_query(&kind, &source_schema, &name)?,
+                    TransferObjectFamily::SqlServer => sqlserver_object_source_query(&kind, &source_schema, &name)?,
+                    TransferObjectFamily::Oracle => oracle_object_source_query(&kind, &source_schema, &name)?,
+                    TransferObjectFamily::Postgres => {
+                        return Err(format!("跨库传输暂不支持 Postgres 源: {name}"));
+                    }
+                };
+                let result = execute_on_pool(state, source_pool_key, &query).await?;
+                match source_family {
+                    TransferObjectFamily::Mysql => mysql_object_ddl_from_result(&kind, &source_schema, &result.rows)?,
+                    TransferObjectFamily::SqlServer => {
+                        sqlserver_object_ddl_from_result(&result, &source_schema, &name, &kind)?
+                    }
+                    TransferObjectFamily::Oracle => result
+                        .rows
+                        .first()
+                        .and_then(|row| row.first())
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| format!("No DDL returned for Oracle {:?} {name}", kind))?
+                        .to_string(),
+                    TransferObjectFamily::Postgres => {
+                        return Err(format!("跨库传输暂不支持 Postgres 源: {name}"));
+                    }
                 }
             };
             let ddl = convert_cross_family_object_ddl(
@@ -9680,7 +10088,33 @@ pub async fn preview_transfer_ownership(
         None
     };
 
-    Ok(TransferOwnershipPreview { missing_owners, target_owner, rebuild, structure })
+    let mut schema_objects = oracle_packages::preview(state, request, source_pool_key, target_pool_key).await?;
+    if let Some(mut types) = oracle_types::preview(state, request, source_pool_key, target_pool_key).await? {
+        if let Some(objects) = schema_objects.take() {
+            types.can_execute &= objects.can_execute;
+            types.items.extend(objects.items);
+        }
+        schema_objects = Some(types);
+    }
+    if let Some(mut links) = oracle_database_links::preview(state, request, source_pool_key, target_pool_key).await? {
+        if let Some(objects) = schema_objects.take() {
+            links.can_execute &= objects.can_execute;
+            links.items.extend(objects.items);
+        }
+        schema_objects = Some(links);
+    }
+    if let Some(synonyms) = oracle_synonyms::preview(state, request, source_pool_key, target_pool_key).await? {
+        if let Some(objects) = &mut schema_objects {
+            objects.can_execute &= synonyms.can_execute;
+            objects.items.extend(synonyms.items);
+        } else {
+            schema_objects = Some(synonyms);
+        }
+    }
+    if let Some(objects) = &mut schema_objects {
+        oracle_types::order_preview_phases(objects, request);
+    }
+    Ok(TransferOwnershipPreview { missing_owners, target_owner, rebuild, structure, schema_objects })
 }
 
 fn postgres_transfer_grant_statements_sql(
@@ -10270,6 +10704,7 @@ where
             status: TransferStatus::Running,
             error: None,
             terminal: false,
+            object_result: None,
         });
 
         if row_count < batch_size {
@@ -10760,6 +11195,7 @@ where
                 status: TransferStatus::Running,
                 error: None,
                 terminal: false,
+                object_result: None,
             });
 
             log::info!("[transfer] rename pre-pass: renaming {target_table} to backup {backup_name}");
@@ -11612,6 +12048,7 @@ where
             status: TransferStatus::Running,
             error: None,
             terminal: false,
+            object_result: None,
         });
         return Ok(TransferTableResult { moved_rows: copied, source_row_count: total_rows });
     }
@@ -11666,6 +12103,7 @@ where
                     status: TransferStatus::Running,
                     error: None,
                     terminal: false,
+                    object_result: None,
                 });
             },
         )
@@ -11685,6 +12123,7 @@ where
                     status: TransferStatus::Running,
                     error: None,
                     terminal: false,
+                    object_result: None,
                 });
             }
             Err(error) if error == "Cancelled" => return Err(error),
@@ -11957,6 +12396,7 @@ where
                 status: TransferStatus::Running,
                 error: None,
                 terminal: false,
+                object_result: None,
             });
 
             if ctid_pager.is_some() {
@@ -12546,6 +12986,7 @@ where
             status: TransferStatus::Running,
             error: None,
             terminal: false,
+            object_result: None,
         });
         execute_on_pool(state, target_pool_key, &generate_postgres_extension_ddl(&extension, &request.target_schema))
             .await
@@ -12567,6 +13008,7 @@ where
             status: TransferStatus::Running,
             error: None,
             terminal: false,
+            object_result: None,
         });
         execute_on_pool(state, target_pool_key, &generate_postgres_enum_ddl(&enum_type, &request.target_schema))
             .await
@@ -12588,6 +13030,7 @@ where
             status: TransferStatus::Running,
             error: None,
             terminal: false,
+            object_result: None,
         });
         execute_on_pool(state, target_pool_key, &generate_postgres_domain_ddl(&domain, &request.target_schema))
             .await
@@ -12614,6 +13057,7 @@ where
             status: TransferStatus::Running,
             error: None,
             terminal: false,
+            object_result: None,
         });
         execute_on_pool(
             state,
@@ -12749,6 +13193,7 @@ where
             status: TransferStatus::Running,
             error: None,
             terminal: false,
+            object_result: None,
         });
 
         let rewritten_source = match object.object_type {
@@ -12809,6 +13254,7 @@ where
                 status: TransferStatus::Running,
                 error: None,
                 terminal: false,
+                object_result: None,
             });
             execute_on_pool(state, target_pool_key, &statement)
                 .await
@@ -12843,6 +13289,7 @@ where
             status: TransferStatus::Running,
             error: None,
             terminal: false,
+            object_result: None,
         });
         let full_table = qualified_table(&trigger.table_name, &request.target_schema, &DatabaseType::Postgres, None);
         let drop_sql = format!(
@@ -12863,6 +13310,7 @@ where
             status: TransferStatus::Running,
             error: None,
             terminal: false,
+            object_result: None,
         });
         let create_sql = rewrite_postgres_trigger_table_schema(
             &ensure_sql_statement_terminated(&trigger.source),
@@ -12891,6 +13339,7 @@ where
             status: TransferStatus::Running,
             error: None,
             terminal: false,
+            object_result: None,
         });
         execute_on_pool(state, target_pool_key, &statement)
             .await
@@ -12912,6 +13361,7 @@ where
             status: TransferStatus::Running,
             error: None,
             terminal: false,
+            object_result: None,
         });
         let ownership_owner = if matches!(request.ownership_policy, TransferOwnershipPolicy::ReassignMissing)
             && !ownership_existing_roles.contains(&statement.owner)
@@ -12943,6 +13393,7 @@ where
             status: TransferStatus::Running,
             error: None,
             terminal: false,
+            object_result: None,
         });
         execute_on_pool(state, target_pool_key, &statement)
             .await
@@ -13917,6 +14368,9 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             target_table_name_case: TransferTableNameCase::Preserve,
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
+            object_conflict_policy: Default::default(),
+            database_links: Vec::new(),
+            database_link_credentials: Vec::new(),
             batch_size: 1000,
             drop_target_before_create: false,
             drop_target_confirmed: false,
@@ -14004,6 +14458,9 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 target_table_name_case: TransferTableNameCase::Preserve,
                 quote_target_column_names: true,
                 ownership_policy: TransferOwnershipPolicy::Preserve,
+                object_conflict_policy: Default::default(),
+                database_links: Vec::new(),
+                database_link_credentials: Vec::new(),
                 batch_size: 1000,
                 table_filters: std::collections::HashMap::new(),
                 drop_target_before_create: false,
@@ -14074,6 +14531,9 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 target_table_name_case: TransferTableNameCase::Preserve,
                 quote_target_column_names: true,
                 ownership_policy: TransferOwnershipPolicy::Preserve,
+                object_conflict_policy: Default::default(),
+                database_links: Vec::new(),
+                database_link_credentials: Vec::new(),
                 batch_size: 1000,
                 content: TransferContent::DataOnly,
                 objects: Some(Vec::new()),
@@ -14115,6 +14575,9 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 target_table_name_case: TransferTableNameCase::Preserve,
                 quote_target_column_names: true,
                 ownership_policy: TransferOwnershipPolicy::Preserve,
+                object_conflict_policy: Default::default(),
+                database_links: Vec::new(),
+                database_link_credentials: Vec::new(),
                 batch_size: 1000,
                 content: TransferContent::StructureAndData,
                 objects: Some(Vec::new()),
@@ -15278,6 +15741,9 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             target_table_name_case: TransferTableNameCase::Preserve,
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
+            object_conflict_policy: Default::default(),
+            database_links: Vec::new(),
+            database_link_credentials: Vec::new(),
             batch_size: 1000,
             drop_target_before_create: false,
             drop_target_confirmed: false,
@@ -20952,6 +21418,7 @@ CREATE INDEX items_name_idx ON public.items (id);"#;
                     status: TransferStatus::Running,
                     error: None,
                     terminal: false,
+                    object_result: None,
                 },
             );
         }

@@ -847,7 +847,7 @@ function projectsAllColumnsForSource(analysis: EditableQueryInfo, sourceKey: str
 }
 
 function queryProjectsDeferredLob(databaseType: DatabaseType, analysis: EditableQueryInfo, sourceKey: string, columns: readonly { name: string; data_type: string }[]): boolean {
-  const deferredTypes = databaseType === "oracle" ? ORACLE_DEFERRED_LOB_TYPES : databaseType === "db2" ? DB2_DEFERRED_LOB_TYPES : undefined;
+  const deferredTypes = databaseType === "oracle" || databaseType === "oceanbase-oracle" ? ORACLE_DEFERRED_LOB_TYPES : databaseType === "db2" ? DB2_DEFERRED_LOB_TYPES : undefined;
   if (!deferredTypes) return false;
   const deferredColumns = new Set(
     columns
@@ -940,7 +940,8 @@ function expandStarProjectionColumnsForSource(analysis: EditableQueryInfo, sourc
       if (column.sourceKey && column.sourceKey !== source.key) return [column];
       return tableColumns.map((tableColumn) => ({
         sourceName: tableColumn.name,
-        sourceNameQuoted: false,
+        // These names come from metadata, including physical quoted "rowid".
+        sourceNameQuoted: true,
         ...(column.sourceQualifier ? { sourceQualifier: column.sourceQualifier } : {}),
         sourceKey: source.key,
         resultName: tableColumn.name,
@@ -2062,6 +2063,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab || !tab.resultRuns || runIndex < 0) return false;
 
     const removedRun = tab.resultRuns[runIndex];
+    if (removedRun) void releaseResultLargeValues(removedRun.result, ...(removedRun.results ?? []));
     if (removedRun?.resultSessionId) void closeResultRunSession(tab, removedRun);
     if (removedRun?.resultCacheKey) void deleteTabResultSnapshot(removedRun.resultCacheKey);
     if (removedRun) clearResultRunPayload(removedRun);
@@ -2091,9 +2093,10 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab.result && !tab.results?.length && !tab.resultEvicted) return false;
 
     const closeSession = closeResultSession(tab);
+    const releaseValues = releaseResultLargeValues(tab.result, ...(tab.results ?? []));
     releaseTabResultObjectPayloads(tab);
     clearResultPayload(tab);
-    await closeSession;
+    await Promise.all([closeSession, releaseValues]);
     return true;
   }
 
@@ -2108,8 +2111,10 @@ export const useQueryStore = defineStore("query", () => {
     const currentSessionId = tab.resultSessionId ?? tab.result?.session_id;
     if (currentSessionId) closedSessionIds.add(currentSessionId);
     const closeOperations = [closeResultSession(tab)];
+    closeOperations.push(releaseResultLargeValues(tab.result, ...(tab.results ?? [])));
 
     for (const run of resultRuns) {
+      closeOperations.push(releaseResultLargeValues(run.result, ...(run.results ?? [])));
       if (run.resultCacheKey) void deleteTabResultSnapshot(run.resultCacheKey);
       if (!run.resultSessionId || closedSessionIds.has(run.resultSessionId)) continue;
       closedSessionIds.add(run.resultSessionId);
@@ -2125,6 +2130,24 @@ export const useQueryStore = defineStore("query", () => {
 
   function nextResultRunSequence(tab: QueryTab): number {
     return (tab.resultRuns?.reduce((max, run) => Math.max(max, run.sequence), 0) ?? 0) + 1;
+  }
+
+  async function releaseResultLargeValues(...results: Array<QueryResult | undefined>) {
+    const released = new Set<string>();
+    for (const result of results) {
+      const context = result?.large_value_context;
+      if (!context) continue;
+      const refs = new Set([...(result.large_value_refs ?? []), ...(result.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []))]);
+      for (const valueRef of refs) {
+        if (released.has(valueRef)) continue;
+        released.add(valueRef);
+        try {
+          await api.releaseLargeValue({ ...context, valueRef });
+        } catch (error) {
+          console.warn("[DBX][large-value:release:error]", error);
+        }
+      }
+    }
   }
 
   async function closeResultRunSession(tab: QueryTab, run: NonNullable<QueryTab["resultRuns"]>[number]) {
@@ -2646,6 +2669,7 @@ export const useQueryStore = defineStore("query", () => {
       objectBrowser: t.objectBrowser,
       objectSource: t.objectSource,
       sourceView: t.sourceView,
+      sourceSnapshot: t.sourceSnapshot,
       tableMeta: t.tableMeta,
       mongoEditTarget: t.mongoEditTarget,
       resultEvicted: t.resultEvicted,
@@ -2934,6 +2958,15 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openSourceRecoverySnapshot(options: Omit<OpenObjectSourceTabOptions, "objectSource">) {
+    // Always preserve the definition read for this attempt, independently of any
+    // editable tab and without stealing focus from the confirmation dialog.
+    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true, sourceView: true, activate: false });
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (tab) tab.sourceSnapshot = true;
+    return id;
+  }
+
   /**
    * 正在后台重新校验源码的 tab。非响应式：仅用于避免同一个 tab 上叠起多次
    * 取源请求（Oracle 的 GET_DDL 正是慢的那一步）。
@@ -2961,6 +2994,20 @@ export const useQueryStore = defineStore("query", () => {
    * 用户看到的是点击后毫无反应。
    */
   function openObjectSourceTabPending(options: OpenPendingObjectSourceTabOptions): string {
+    const typeTab = tabs.value.find(
+      (tab) =>
+        tab.connectionId === options.connectionId &&
+        tab.database === options.database &&
+        (tab.catalog || "") === (options.catalog || "") &&
+        tab.oracleTypeIdentity?.schema === (options.schema || options.database) &&
+        tab.oracleTypeIdentity.name === options.request.name &&
+        tab.oracleTypeIdentity.object_type === options.request.objectType,
+    );
+    if (typeTab) {
+      switchTab(typeTab.id);
+      if (!isTabDirty(typeTab)) refreshObjectSourceTab(typeTab.id);
+      return typeTab.id;
+    }
     // 这个对象已经打开过：立刻切过去，再在后台重新校验源码。
     // 两条弯路都要避开 —— 再建一个 pending tab 会让界面上多出一个转圈 tab，
     // 随后又被交接逻辑关掉；而只切过去不校验，会让重开看到的是旧 DDL
@@ -3061,7 +3108,13 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab) return false;
     if (tab.sourceLoad && !tab.sourceLoad.error) return true;
-    const request = tab.sourceLoad?.request ? { ...tab.sourceLoad.request } : tab.objectSource ? { name: tab.objectSource.name, objectType: tab.objectSource.objectType, signature: tab.objectSource.signature } : null;
+    const request = tab.sourceLoad?.request
+      ? { ...tab.sourceLoad.request }
+      : tab.objectSource
+        ? { name: tab.objectSource.name, objectType: tab.objectSource.objectType, signature: tab.objectSource.signature }
+        : tab.oracleTypeIdentity
+          ? { name: tab.oracleTypeIdentity.name, objectType: tab.oracleTypeIdentity.object_type }
+          : null;
     if (!request) return false;
     sourceRevalidateInFlight.delete(id);
     tab.sourceLoad = {
@@ -3130,6 +3183,9 @@ export const useQueryStore = defineStore("query", () => {
     // 加载期间 tab 被关掉（用户放弃）或连接被断开：静默丢弃，不重建、不写库
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab?.sourceLoad) return;
+    if ((loaded.databaseType === "oracle" || loaded.databaseType === "oceanbase-oracle") && (loaded.resolvedType === "TYPE" || loaded.resolvedType === "TYPE_BODY")) {
+      tab.oracleTypeIdentity = { schema: loaded.raw.schema || loaded.schema || loaded.database, name: loaded.raw.name, object_type: loaded.resolvedType };
+    }
     const sourceIsEditable = !isViewOnlySourceWithoutEditablePayload(loaded.initialEditing, loaded.resolvedType) && loaded.raw.editable !== false && (!OBJECT_SOURCE_READ_ONLY_TYPES.includes(loaded.resolvedType) || (loaded.databaseType === "oceanbase-oracle" && loaded.resolvedType === "SEQUENCE"));
     if (sourceIsEditable) {
       const options: OpenObjectSourceTabOptions = {
@@ -3681,6 +3737,46 @@ export const useQueryStore = defineStore("query", () => {
       mode: "dameng-jobs",
     };
     return registerOpenTab(tab);
+  }
+
+  function openOracleTypeEditor(connectionId: string, database: string, schema = "", name = "") {
+    const existing = tabs.value.find((tab) => tab.mode === "oracle-type-editor" && tab.connectionId === connectionId && tab.database === database && (tab.oracleTypeIdentity?.schema ?? "") === schema && (tab.oracleTypeIdentity?.name ?? "") === name);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+    return registerOpenTab({
+      id: uuid(),
+      title: name ? `${t("tree.types")} - ${name}` : t("tree.types"),
+      connectionId,
+      database,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "oracle-type-editor",
+      oracleTypeIdentity: schema && name ? { schema, name, object_type: "TYPE" } : undefined,
+    });
+  }
+
+  function openOracleJobs(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "oracle-jobs" && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+    const connection = useConnectionStore().getConfig(connectionId);
+    return registerOpenTab({ id: uuid(), title: t("tree.schedulerJobs"), connectionId, database: connection?.database || "", sql: "", isExecuting: false, isCancelling: false, isExplaining: false, mode: "oracle-jobs" });
+  }
+
+  function openOracleInvalidObjects(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "oracle-invalid-objects" && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+    const connection = useConnectionStore().getConfig(connectionId);
+    return registerOpenTab({ id: uuid(), title: t("contextMenu.oracleInvalidObjects"), connectionId, database: connection?.database || "", sql: "", isExecuting: false, isCancelling: false, isExplaining: false, mode: "oracle-invalid-objects" });
   }
 
   function openDamengUsers(connectionId: string) {
@@ -4794,7 +4890,9 @@ export const useQueryStore = defineStore("query", () => {
       structureDraft: original.structureDraft ? cloneTabDraft(original.structureDraft) : undefined,
       objectBrowser: original.objectBrowser ? { ...original.objectBrowser } : undefined,
       objectSource: original.objectSource ? { ...original.objectSource } : undefined,
+      oracleTypeIdentity: original.oracleTypeIdentity ? { ...original.oracleTypeIdentity } : undefined,
       sourceView: original.sourceView,
+      sourceSnapshot: original.sourceSnapshot,
       tableMeta: original.tableMeta
         ? {
             ...original.tableMeta,
@@ -4942,6 +5040,30 @@ export const useQueryStore = defineStore("query", () => {
     // A dropped table-like object makes existing data/structure tabs stale; close
     // them immediately instead of letting the next refresh fail against a missing object.
     closeTabsWhere((tab) => tabMatchesDroppedTableObject(tab, target));
+  }
+
+  function invalidateRenamedViewTabs(target: DroppedTableObjectTarget) {
+    invalidateRenamedObjectTabs({ ...target, objectType: "VIEW" });
+  }
+
+  function invalidateRenamedObjectTabs(target: Omit<DroppedTableObjectTarget, "objectType"> & { objectType: "VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY" }) {
+    if (target.objectType === "VIEW") closeDroppedTableObjectTabs({ ...target, objectType: "VIEW" });
+    const schemas = droppedTableObjectSchemaCandidates({ ...target, objectType: undefined });
+    for (const tab of tabs.value) {
+      if (tab.connectionId !== target.connectionId || tab.database !== target.database) continue;
+      const source = tab.objectSource ?? tab.sourceLoad?.request;
+      const sourceMatches = source?.objectType === target.objectType && source.name === target.name && schemas.has(normalizeOptionalSchema(tab.objectSource?.schema ?? tab.schema));
+      const ddlMatches = tab.ddlViewer?.objectType === target.objectType && tab.ddlViewer.tableName === target.name && schemas.has(normalizeOptionalSchema(tab.ddlViewer.schema ?? tab.schema));
+      if (!sourceMatches && !ddlMatches) continue;
+      // Preserve unsaved text as a read-only snapshot. Removing load identities
+      // also prevents an in-flight response from restoring the old editable name.
+      tab.objectSource = undefined;
+      tab.sourceLoad = undefined;
+      tab.ddlViewer = undefined;
+      tab.ddlLoad = undefined;
+      tab.sourceView = true;
+      tab.sourceSnapshot = true;
+    }
   }
 
   async function refreshDataTabInternal(id: string, options?: { supersedeBusy?: boolean; propagateBuildError?: boolean }): Promise<boolean> {
@@ -5205,6 +5327,7 @@ export const useQueryStore = defineStore("query", () => {
 
   const manualTransactionTargetEpochs = new WeakMap<QueryTab, number>();
   const pendingManualTransactionStarts = new Map<string, { epoch: number; promise: Promise<string> }>();
+  const pendingManualTransactionCommits = new WeakMap<QueryTab, { sessionId: string; promise: Promise<void> }>();
 
   function manualTransactionTargetEpoch(tab: QueryTab): number {
     return manualTransactionTargetEpochs.get(tab) ?? 0;
@@ -5407,12 +5530,26 @@ export const useQueryStore = defineStore("query", () => {
       return ending;
     }
     const sessionId = tab.txnSessionId;
-    try {
-      await api.commitManualTransaction(sessionId);
-    } finally {
-      // A mode or target switch may have started a replacement transaction.
-      if (tab.txnSessionId === sessionId) clearManualTransactionSession(tab);
-    }
+    const pending = pendingManualTransactionCommits.get(tab);
+    if (pending?.sessionId === sessionId) return pending.promise;
+    let resolveCommit!: () => void;
+    let rejectCommit!: (error: unknown) => void;
+    const committing = new Promise<void>((resolve, reject) => {
+      resolveCommit = resolve;
+      rejectCommit = reject;
+    });
+    const entry = { sessionId, promise: committing };
+    pendingManualTransactionCommits.set(tab, entry);
+    void (async () => {
+      try {
+        await api.commitManualTransaction(sessionId);
+      } finally {
+        // A mode or target switch may have started a replacement transaction.
+        if (tab.txnSessionId === sessionId) clearManualTransactionSession(tab);
+        if (pendingManualTransactionCommits.get(tab) === entry) pendingManualTransactionCommits.delete(tab);
+      }
+    })().then(resolveCommit, rejectCommit);
+    return committing;
   }
 
   async function rollbackTransaction(id: string) {
@@ -6031,6 +6168,7 @@ export const useQueryStore = defineStore("query", () => {
     const executionTabId = options?.tabId ?? activeTabId.value;
     if (!executionTabId) return;
     const tab = tabs.value.find((item) => item.id === executionTabId);
+    if (tab?.sourceSnapshot) return false;
     if (tab && pendingResultRunPreparations.has(tab)) return false;
     const previousGridKey = tab ? resultGridInstanceKey(tab) : undefined;
     if (tab?.mode === "query") {
@@ -6157,6 +6295,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function canUseQueryKeylessRowPredicate(databaseType: DatabaseType, loaded: LoadedEditableSource): boolean {
+    if (loaded.tableMeta.columns.some((column) => column.resolved_table) && loaded.tableMeta.tableType?.trim().toUpperCase() !== "TABLE") return false;
     if (!canUseKeylessRowPredicate(databaseType, loaded.tableMeta.primaryKeys)) return false;
     // An unknown Oracle object may be a view whose query shape rejects ROWID
     // and whose rows cannot be mapped safely for writes. Keep the result
@@ -6214,7 +6353,10 @@ export const useQueryStore = defineStore("query", () => {
     // (issue #10567). Fold the SQL-text schema, not a tab-selected one — the
     // object tree already reports the stored spelling.
     const foldedSourceSchema = foldUnquotedPostgresMetadataIdentifier(metadataDbType, source.schema, source.schemaQuoted);
-    const schema = foldedSourceSchema || (dbType === "sqlserver" ? "" : tab.schema) || "";
+    // An OceanBase public synonym is eligible only for an unqualified name.
+    // Keep the selected CURRENT_SCHEMA separate from an explicit SQL owner.
+    const resolveInCurrentOceanbaseSchema = metadataDbType === "oceanbase-oracle" && !source.schema;
+    const schema = foldedSourceSchema || (dbType === "sqlserver" || resolveInCurrentOceanbaseSchema ? "" : tab.schema) || "";
     // Oracle-family connection databases are service names, not schemas. When
     // the query does not qualify a schema, let the driver resolve the current
     // login user's schema instead of looking up metadata under the service name.
@@ -6246,7 +6388,7 @@ export const useQueryStore = defineStore("query", () => {
     // Keep SQL Server writes unqualified unless the SELECT source explicitly
     // named a schema, so SELECT and UPDATE resolve the same object.
     const writeSchema = dbType === "sqlserver" && !source.schema ? undefined : metadataSchema || undefined;
-    const localTableType = oracleCompletionTableType(tab, metadataDbType, metadataDatabase, metadataSchema || conn?.default_schema || "", metadataTableName, metadataCatalog);
+    const localTableType = oracleCompletionTableType(tab, metadataDbType, metadataDatabase, metadataSchema || (resolveInCurrentOceanbaseSchema ? tab.schema : undefined) || conn?.default_schema || "", metadataTableName, metadataCatalog);
     const knownTableType = localTableType ?? (tab.tableMeta?.tableName.toLowerCase() === metadataTableName.toLowerCase() && normalizeOptionalSchema(tab.tableMeta.schema) === normalizeOptionalSchema(metadataSchema) ? tab.tableMeta.tableType : undefined);
     return {
       source: metadataSource,
@@ -6256,6 +6398,7 @@ export const useQueryStore = defineStore("query", () => {
         connectionId: tab.connectionId!,
         database: metadataDatabase,
         schema: metadataSchema,
+        ...(resolveInCurrentOceanbaseSchema && tab.schema ? { currentSchema: tab.schema } : {}),
         tableName: metadataTableName,
         tableType: knownTableType,
         databaseType: dbType,
@@ -6267,7 +6410,8 @@ export const useQueryStore = defineStore("query", () => {
 
   function loadedEditableSourceFromMetadata(target: EditableSourceMetadataTarget, metadata: Awaited<ReturnType<typeof loadTableMetadata>>["metadata"]): LoadedEditableSource {
     const usesReportedSchema = target.request.databaseType === "vastbase" || target.request.databaseType === "kingbase";
-    const writeSchema = usesReportedSchema && !target.writeSchema ? metadata.schema : target.writeSchema;
+    const resolvedTarget = metadata.columns.find((column) => column.resolved_table);
+    const writeSchema = resolvedTarget?.resolved_schema ?? (usesReportedSchema && !target.writeSchema ? metadata.schema : target.writeSchema || target.request.currentSchema);
     return {
       source: target.source,
       analysis: target.analysis,
@@ -6275,7 +6419,7 @@ export const useQueryStore = defineStore("query", () => {
         catalog: target.request.catalog,
         database: target.request.database,
         schema: writeSchema,
-        tableName: target.request.tableName,
+        tableName: resolvedTarget?.resolved_table ?? target.request.tableName,
         tableType: metadata.tableType,
         columns: metadata.columns,
         primaryKeys: metadata.primaryKeys,
@@ -6394,8 +6538,13 @@ export const useQueryStore = defineStore("query", () => {
 
   function buildHiddenPrimaryKeyPreparation(tab: QueryTab, sql: string, databaseType: DatabaseType, loaded: LoadedEditableSource, primaryKeys: string[], declaredPrimaryKeys: string[], traceId: string, elapsed: () => string): EditableQueryExecutionPreparation {
     const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(databaseType, loaded.analysis, loaded.source, loaded.tableMeta.columns), loaded.source, loaded.tableMeta.columns);
-    const stableLobSource = databaseType === "oracle" ? oracleRowIdIsSafeForQuery(tab, loaded) : databaseType === "db2";
-    const largeValuePreview = (databaseType === "oracle" || databaseType === "db2") && primaryKeys.length > 0 && stableLobSource && columnsAllowDeferredLobMarkers(loaded.tableMeta.columns) && queryProjectsDeferredLob(databaseType, metadataAnalysis, loaded.source.key, loaded.tableMeta.columns);
+    const stableLobSource = databaseType === "oracle" || databaseType === "oceanbase-oracle" ? oracleRowIdIsSafeForQuery(tab, loaded) : databaseType === "db2";
+    const largeValuePreview =
+      (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "db2") &&
+      primaryKeys.length > 0 &&
+      stableLobSource &&
+      columnsAllowDeferredLobMarkers(loaded.tableMeta.columns) &&
+      queryProjectsDeferredLob(databaseType, metadataAnalysis, loaded.source.key, loaded.tableMeta.columns);
     const unchanged = { sql, metadataSql: sql, hiddenPrimaryKeys: [], largeValuePreview };
     const missingPrimaryKeys =
       declaredPrimaryKeys.length === 0
@@ -6439,10 +6588,10 @@ export const useQueryStore = defineStore("query", () => {
       const wholeSourceProjected = projectsAllColumnsForSource(analysis, source.key);
       const hasDirectSourceProjection = analysis.columns.some((column) => Boolean(column.sourceName) && (!column.sourceKey || column.sourceKey === source.key));
       if (!wholeSourceProjected && !hasDirectSourceProjection) return unchanged;
-      // Whole-source projections already include declared primary keys. Oracle
+      // Whole-source projections already include declared primary keys. Oracle, OB
       // and Xugu may need a synthetic key, while DB2 needs column metadata to
       // decide whether LOB materialization can be deferred safely.
-      if (databaseType !== "oracle" && databaseType !== "xugu" && databaseType !== "db2" && wholeSourceProjected) return unchanged;
+      if (databaseType !== "oracle" && databaseType !== "oceanbase-oracle" && databaseType !== "xugu" && databaseType !== "db2" && wholeSourceProjected) return unchanged;
 
       const target = resolveEditableSourceMetadataTarget(tab, analysis, source, conn, databaseType, executionDatabase);
       const cached = getCachedTableMetadata(target.request);
@@ -7030,6 +7179,7 @@ export const useQueryStore = defineStore("query", () => {
     assertUpdateAllowsInteraction();
     const tab = findExecutionTab(id);
     if (!tab || !sql.trim()) return;
+    if (tab.sourceSnapshot) return false;
     if (pendingResultRunPreparations.has(tab)) return false;
 
     const openInNewResultTab = tab.mode === "query" && options?.openInNewResultTab === true;
@@ -7986,6 +8136,10 @@ export const useQueryStore = defineStore("query", () => {
       // would return the first page again (#8993).
       const isOffsetJumpPage = typeof pageOffset === "number" && pageOffset > 0 && !options?.pagination?.sessionId;
       const frontendTimeoutSecs = frontendQueryTimeoutSecsForSql(sqlToExecute, effectiveDbType, queryTimeoutSecs, sqlStatementParameterOptions);
+      if (tab.mode === "data" && effectiveDbType === "oceanbase-oracle") {
+        const meta = tableMetaForDataTab(tab);
+        useLargeValuePreview = !!meta && /^(?:BASE )?TABLE$/i.test(meta.tableType ?? "") && columnsAllowDeferredLobMarkers(meta.columns) && meta.columns.some((column) => /^(N?CLOB|BLOB)$/i.test(column.data_type.trim()));
+      }
       const sourceLabelDatabase = targetDatabase || conn?.database;
       const executionClientSessionId = options?.pagination?.clientSessionId ?? (tab.mode === "query" || tab.mode === "data" ? tabClientSessionId(tab) : undefined);
       const currentBeforeDispatch = findExecutionTab(id);
@@ -8201,6 +8355,28 @@ export const useQueryStore = defineStore("query", () => {
       const responseResults = await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }), () => {
         void api.cancelQuery(executionId).catch((error) => queryExecutionLog("warn", "frontend-timeout:cancel-failed", { traceId, error }));
       });
+      for (const result of responseResults) {
+        if (effectiveDbType === "oceanbase-oracle" && !useLargeValuePreview && result.column_types?.some((type) => /^(N?CLOB|BLOB)$/i.test(type.trim()))) {
+          result.messages = [
+            ...(result.messages ?? []),
+            {
+              severity: "INFO",
+              code: "LOB_COMPLETE_READ_FALLBACK",
+              message: "LOB values were read completely because this result does not have a verified single-table preview source.",
+            },
+          ];
+        }
+        if (result.large_value_cells?.some((cell) => cell.value_ref)) {
+          result.large_value_refs = result.large_value_cells.flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []));
+          result.large_value_context = {
+            connectionId: executionConnectionId,
+            database: executionDatabase,
+            clientSessionId: executionClientSessionId,
+            txnSessionId: tab.autoCommit === false ? tab.txnSessionId : undefined,
+            catalog: executionCatalog,
+          };
+        }
+      }
       if (findExecutionTab(id) !== tab || tab.executionId !== executionId || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) return false;
       // A single result has an unambiguous request boundary. This includes fetch and
       // transport, but excludes SQL preparation and the grid's later render work.
@@ -8957,7 +9133,21 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     const postgresAnalyze = databaseType === "postgres" && explainMode === "autotrace";
-    const built = postgresAnalyze ? await buildExplainSql(databaseType, sql, "json", true) : await buildExplainSql(databaseType, sql);
+    let built: BuildExplainSqlResult;
+    try {
+      built = postgresAnalyze ? await buildExplainSql(databaseType, sql, "json", true) : await buildExplainSql(databaseType, sql);
+    } catch (e: any) {
+      const current = tabs.value.find((t) => t.id === id);
+      if (current?.explainExecutionId === executionId) {
+        current.isExplaining = false;
+        current.explainExecutionId = undefined;
+        current.explainError = String(e?.message || e);
+      }
+      return { ok: true as const, sql: "" };
+    }
+    if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) {
+      return { ok: true as const, sql: built.ok ? built.sql : "" };
+    }
     if (!built.ok) {
       tab.explainPlan = undefined;
       tab.explainError = built.reason;
@@ -9975,6 +10165,9 @@ export const useQueryStore = defineStore("query", () => {
     closeConnectionTabs,
     closeDatabaseTabs,
     closeDroppedTableObjectTabs,
+    invalidateRenamedViewTabs,
+    invalidateRenamedObjectTabs,
+    openSourceRecoverySnapshot,
     refreshDataTab,
     refreshDataTabsForTable,
     releaseConnectionTabs,
@@ -10024,6 +10217,9 @@ export const useQueryStore = defineStore("query", () => {
     openDamengUsers,
     openDamengRoles,
     openDamengJobAdmin,
+    openOracleTypeEditor,
+    openOracleJobs,
+    openOracleInvalidObjects,
     openMqAdmin,
     openMqttAdmin,
     openNacosAdmin,

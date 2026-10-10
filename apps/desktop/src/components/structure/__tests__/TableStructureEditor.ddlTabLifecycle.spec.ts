@@ -28,7 +28,10 @@ const mocks = vi.hoisted(() => ({
   copyToClipboard: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async () => {
+  const { ref } = await import("vue");
+  return { useI18n: () => ({ t: (key: string) => key, locale: ref("en-US") }) };
+});
 
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");

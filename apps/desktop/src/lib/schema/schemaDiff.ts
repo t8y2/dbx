@@ -1,4 +1,5 @@
-import type { ColumnInfo, IndexInfo, ForeignKeyInfo, TriggerInfo, FunctionInfo, SequenceInfo, RuleInfo, OwnerInfo, DatabaseType, TableInfo, ConnectionConfig } from "@/types/database";
+import type { ColumnInfo, IndexInfo, ForeignKeyInfo, TriggerInfo, FunctionInfo, SequenceInfo, RuleInfo, OwnerInfo, DatabaseType, TableInfo, ConnectionConfig, SchemaDiffTriggerInfo, SchemaDiffDependencyObject, SchemaDiffTypeInfo } from "@/types/database";
+import { schemaDiffRoutineObjectId, schemaDiffRoutineType, type SchemaDiffRoutineKind } from "@/lib/schema/schemaDiffRoutine";
 import type { SchemaDiffTableMapping } from "@/types/schemaDiff";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
@@ -235,6 +236,7 @@ export interface FieldMappingEntry {
 }
 
 export interface SchemaDiffPreparationOptions {
+  routineEndpoints?: SchemaDiffRoutineEndpoints;
   sourceTables: TableInfo[];
   targetTables: TableInfo[];
   sourceDetails: TableSchemaDetail[];
@@ -248,6 +250,8 @@ export interface SchemaDiffPreparationOptions {
   sourceOwners?: OwnerInfo[];
   targetOwners?: OwnerInfo[];
   databaseType: DatabaseType;
+  sourceDatabaseType?: DatabaseType;
+  sourceSchema?: string;
   targetSchema?: string;
   ignoreComments?: boolean;
   cascadeDelete?: boolean;
@@ -344,9 +348,35 @@ export interface MissingRollbackObject {
 
 export type RollbackCompleteness = "complete" | "incomplete";
 
+export interface SchemaDiffRoutineStep {
+  compatibilityWarnings?: string[];
+  name: string;
+  sourceSchema?: string;
+  targetSchema?: string;
+  routineType: SchemaDiffRoutineKind;
+  operation: "added" | "modified" | "removed";
+  sql?: string;
+  blockedReason?: string;
+  dependencies: string[];
+  incomingDependencies?: SchemaDiffDependencyObject[];
+  typeInfo?: SchemaDiffTypeInfo;
+  trigger?: SchemaDiffTriggerInfo;
+  postSql?: string[];
+}
+
+export interface SchemaDiffRoutineValidation {
+  name: string;
+  schema?: string;
+  routineType: SchemaDiffRoutineKind;
+  trigger?: SchemaDiffTriggerInfo;
+  success: boolean;
+  message: string;
+}
+
 export interface SchemaDiffPreparation {
   diffs: TableDiff[];
   functionDiffs?: FunctionDiff[];
+  routineSteps?: SchemaDiffRoutineStep[];
   sequenceDiffs?: SequenceDiff[];
   ruleDiffs?: RuleDiff[];
   ownerDiffs?: OwnerDiff[];
@@ -363,14 +393,26 @@ export interface SchemaDiffPreparation {
 }
 
 export interface SchemaSyncSqlPlan {
+  routineSteps?: SchemaDiffRoutineStep[];
   syncSql: string;
   rollbackSyncSql?: string;
   rollbackCompleteness: RollbackCompleteness;
   missingRollbackObjects: MissingRollbackObject[];
 }
 
+export interface SchemaDiffRoutineEndpoints {
+  recovery?: boolean;
+  sourceConnectionId: string;
+  sourceDatabase: string;
+  targetConnectionId: string;
+  targetDatabase: string;
+}
+
 export interface GenerateSchemaSyncPlanOptions {
+  routineEndpoints?: SchemaDiffRoutineEndpoints;
   databaseType: DatabaseType;
+  sourceDatabaseType?: DatabaseType;
+  sourceSchema?: string;
   targetSchema?: string;
   cascadeDelete?: boolean;
   sourceDialect?: string;
@@ -404,6 +446,7 @@ export type DiffOperationType = "modify" | "create" | "delete" | "none";
 export type DiffObjectKind = "table" | "view" | "function" | "sequence" | "rule" | "owner" | "column" | "index" | "trigger" | "foreignKey" | "tableOption";
 
 export interface SchemaDiffObject {
+  compatibilityWarnings?: string[];
   id: string;
   operationType: DiffOperationType;
   objectKind: DiffObjectKind;
@@ -422,7 +465,19 @@ export interface SchemaDiffObject {
   /** Function arguments signature (for PostgreSQL overloaded functions) */
   arguments?: string;
   /** PROCEDURE vs FUNCTION when objectKind is function (for getObjectSource). */
-  routineType?: "PROCEDURE" | "FUNCTION";
+  routineType?: SchemaDiffRoutineKind;
+  sourceTrigger?: SchemaDiffTriggerInfo;
+  targetTrigger?: SchemaDiffTriggerInfo;
+  typeInfo?: SchemaDiffTypeInfo;
+  sourceTypeInfo?: SchemaDiffTypeInfo;
+  targetTypeInfo?: SchemaDiffTypeInfo;
+  sourcePairedObjectPresent?: boolean;
+  targetPairedObjectPresent?: boolean;
+  incomingDependencies?: SchemaDiffDependencyObject[];
+  sourceSchema?: string;
+  targetSchema?: string;
+  blockedReason?: string;
+  dependencies?: string[];
   renameMetadata?: {
     confirmed: boolean;
     sourceName?: string;
@@ -655,7 +710,15 @@ function buildSequenceDdl(seq: SequenceInfo): string {
   return parts.join("\n");
 }
 
-export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiffs: FunctionDiff[] = [], sequenceDiffs: SequenceDiff[] = [], ruleDiffs: RuleDiff[] = [], ownerDiffs: OwnerDiff[] = [], renameCandidates?: RenameCandidate[]): SchemaDiffObject[] {
+export function convertToSchemaDiffObjects(
+  tableDiffs: TableDiff[],
+  functionDiffs: FunctionDiff[] = [],
+  sequenceDiffs: SequenceDiff[] = [],
+  ruleDiffs: RuleDiff[] = [],
+  ownerDiffs: OwnerDiff[] = [],
+  renameCandidates?: RenameCandidate[],
+  routineSteps: SchemaDiffRoutineStep[] = [],
+): SchemaDiffObject[] {
   const objects: SchemaDiffObject[] = [];
 
   for (const diff of tableDiffs) {
@@ -757,18 +820,35 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
 
   for (const diff of functionDiffs) {
     const args = diff.source?.arguments || diff.target?.arguments || "";
-    const functionType = (diff.source?.function_type || diff.target?.function_type || "").toUpperCase();
-    const routineType: "PROCEDURE" | "FUNCTION" = functionType.includes("PROC") ? "PROCEDURE" : "FUNCTION";
+    const routineType = schemaDiffRoutineType(diff.source?.function_type || diff.target?.function_type);
+    const trigger = diff.source?.trigger ?? diff.target?.trigger;
+    const routineStep = routineSteps.find((step) => {
+      const tableOwner = trigger && trigger.tableOwner === diff.source?.schema ? (step.targetSchema ?? trigger.tableOwner) : trigger?.tableOwner;
+      return step.name === diff.name && step.routineType === routineType && step.trigger?.tableName === trigger?.tableName && step.trigger?.tableOwner === tableOwner;
+    });
     objects.push({
-      id: `func-${diff.name}-${args}`,
+      id: schemaDiffRoutineObjectId(diff),
       operationType: getOperationType(diff.type),
       objectKind: "function",
       name: diff.name,
       arguments: args,
       routineType,
+      sourceTrigger: diff.source?.trigger,
+      targetTrigger: diff.target?.trigger,
+      typeInfo: routineStep?.typeInfo,
+      sourceTypeInfo: diff.source?.typeInfo,
+      targetTypeInfo: diff.target?.typeInfo,
+      sourcePairedObjectPresent: diff.source?.pairedObjectPresent,
+      targetPairedObjectPresent: diff.target?.pairedObjectPresent,
+      incomingDependencies: routineStep?.incomingDependencies,
+      sourceSchema: diff.source?.schema,
+      targetSchema: diff.target?.schema,
+      blockedReason: routineStep?.blockedReason,
+      compatibilityWarnings: routineStep?.compatibilityWarnings,
+      dependencies: routineStep?.dependencies,
       sourceName: diff.type === "added" ? undefined : diff.name,
       targetName: diff.type === "removed" ? undefined : diff.name,
-      selected: true,
+      selected: !routineStep?.blockedReason,
       sourceDdl: diff.source?.definition,
       targetDdl: diff.target?.definition,
       changes: diff.changes,
@@ -849,7 +929,7 @@ export interface SelectedSchemaDiffInput {
 export function selectSchemaDiffInput(result: SchemaDiffPreparation, objects: SchemaDiffObject[]): SelectedSchemaDiffInput {
   const selectedIds = new Set(
     flattenSchemaDiffObjects(objects)
-      .filter((object) => object.selected && object.operationType !== "none")
+      .filter((object) => object.selected && !object.blockedReason && object.operationType !== "none")
       .map((object) => object.id),
   );
 
@@ -888,7 +968,7 @@ export function selectSchemaDiffInput(result: SchemaDiffPreparation, objects: Sc
 
   return {
     diffs,
-    functionDiffs: (result.functionDiffs ?? []).filter((diff) => selectedIds.has(`func-${diff.name}-${diff.source?.arguments || diff.target?.arguments || ""}`)),
+    functionDiffs: (result.functionDiffs ?? []).filter((diff) => selectedIds.has(schemaDiffRoutineObjectId(diff))),
     sequenceDiffs: (result.sequenceDiffs ?? []).filter((diff) => selectedIds.has(`seq-${diff.name}`)),
     ruleDiffs: (result.ruleDiffs ?? []).filter((diff) => selectedIds.has(`rule-${diff.name}`)),
     ownerDiffs: (result.ownerDiffs ?? []).filter((diff) => selectedIds.has(`owner-${diff.objectName}`)),
@@ -1147,10 +1227,10 @@ export function findSchemaDiffObject(objects: SchemaDiffObject[], objectId: stri
 
 export function setSchemaDiffObjectSelected(objects: SchemaDiffObject[], objectId: string, selected: boolean): boolean {
   const object = findSchemaDiffObject(objects, objectId);
-  if (!object) return false;
+  if (!object || (selected && object.blockedReason)) return false;
 
   const applySelection = (target: SchemaDiffObject) => {
-    target.selected = selected;
+    target.selected = selected && !target.blockedReason;
     for (const child of target.children ?? []) applySelection(child);
   };
   applySelection(object);
@@ -1264,8 +1344,8 @@ export function setSchemaDiffObjectSelectedWithDependencies(objects: SchemaDiffO
 export function selectedSchemaDiffObjects(objects: SchemaDiffObject[]): SchemaDiffObject[] {
   return objects.flatMap((object) => {
     const children = object.children?.filter((child) => child.operationType !== "none") ?? [];
-    if (children.length > 0) return children.filter((child) => child.selected);
-    return object.selected && object.operationType !== "none" ? [object] : [];
+    if (children.length > 0) return children.filter((child) => child.selected && !child.blockedReason);
+    return object.selected && !object.blockedReason && object.operationType !== "none" ? [object] : [];
   });
 }
 

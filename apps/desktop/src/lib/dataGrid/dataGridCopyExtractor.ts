@@ -105,6 +105,7 @@ export interface DataGridExtractColumn {
   displayName: string;
   sourceName?: string;
   sourceIndex: number;
+  dataType?: string;
 }
 
 export interface DataGridExtractRequest {

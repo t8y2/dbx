@@ -45,6 +45,7 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
     private final Object maintenanceLock = new Object();
     private final AtomicBoolean closed = new AtomicBoolean();
     private ScheduledExecutorService maintenance;
+    private boolean blobBindStatements;
 
     public MultiSessionJsonRpcServer(Supplier<? extends DatabaseAgent> agentFactory) {
         this(agentFactory, new JdbcConnectionPoolRegistry(), RuntimeLimits.defaults());
@@ -89,6 +90,12 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
     /** Creates a protocol v2 server for a non-JDBC, session-scoped agent. */
     public static MultiSessionJsonRpcServer forSessionHandlers(Supplier<? extends SessionRpcHandler> sessionHandlerFactory) {
         return new MultiSessionJsonRpcServer(sessionHandlerFactory, true);
+    }
+
+    public static MultiSessionJsonRpcServer withBlobBindings(Supplier<? extends DatabaseAgent> agentFactory) {
+        MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(agentFactory);
+        server.blobBindStatements = true;
+        return server;
     }
 
     public void run() {
@@ -138,7 +145,9 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
         try {
             Object result;
             if (AgentProtocol.METHOD_HANDSHAKE.equals(method)) {
-                result = sessionHandlerFactory == null ? AgentProtocol.multiSessionJdbcHandshakeResult() : customHandshake();
+                result = sessionHandlerFactory == null
+                    ? AgentProtocol.multiSessionJdbcHandshakeResult(blobBindStatements)
+                    : customHandshake();
             } else if (AgentProtocol.METHOD_OPEN_SESSION.equals(method)) {
                 result = openSession(requiredSessionId(params), params);
             } else if (AgentProtocol.METHOD_CLOSE_SESSION.equals(method)) {

@@ -35,7 +35,10 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async () => {
+  const { ref } = await import("vue");
+  return { useI18n: () => ({ t: (key: string) => key, locale: ref("en-US") }) };
+});
 
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -271,11 +274,42 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 
 import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
-import { createColumnDrafts, createIndexDrafts } from "@/lib/table/tableStructureEditorState";
+import { createColumnDrafts, createIndexDrafts, createTriggerDrafts } from "@/lib/table/tableStructureEditorState";
 import type { TableStructureEditorDraft } from "@/types/database";
 import type { BuildTableStructureChangeSqlOptions, EditableStructureIndex } from "@/lib/table/tableStructureEditorSql";
 
 const mountedApps: App[] = [];
+
+describe("TableStructureEditor complete trigger draft protection", () => {
+  it.each(["new", "edit", "drop"] as const)("keeps other %s drafts when opening a complete definition or handling a failed save refresh", async (change) => {
+    mocks.connection.db_type = "oceanbase-oracle";
+    const triggerMetadata = ["FIRST", "SECOND"].map((name) => ({ name, owner: "APP", timing: "BEFORE", event: "INSERT", statement: `CREATE TRIGGER APP.${name} BEFORE INSERT ON APP.USERS BEGIN NULL; END;` }));
+    const triggers = createTriggerDrafts(triggerMetadata);
+    if (change === "new") triggers.push({ id: "new-trigger", name: "PENDING", timing: "AFTER", event: "INSERT", statement: "BEGIN NULL; END;", markedForDrop: false });
+    else if (change === "edit") triggers[1].statement = "BEGIN pending_change; END;";
+    else triggers[1].markedForDrop = true;
+    const draft: TableStructureEditorDraft = { initialized: true, dirty: true, activeTab: "triggers", newTableName: "", tableComment: "", originalTableComment: "", columns: [], indexes: [], foreignKeys: [], triggers, loadedMetadataFacets: ["triggers", "comment"] };
+    mocks.loadObjectMetadataFacet.mockResolvedValue({ value: triggerMetadata, cacheStatus: "remote" });
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(TableStructureEditor, { connectionId: mocks.connection.id, database: "test", schema: "APP", tableName: "USERS", draft });
+    mountedApps.push(app);
+    const vm = app.mount(root);
+    await settle();
+    const state = (vm.$ as unknown as { setupState: { triggers: typeof triggers; triggerDefinitionOpen: boolean; errorMessage: string; openTriggerDefinition: (trigger: (typeof triggers)[number]) => void; refreshAfterTriggerDefinitionSave: () => Promise<void> } }).setupState;
+    const snapshot = JSON.stringify(state.triggers);
+    const metadataCalls = mocks.loadObjectMetadataFacet.mock.calls.length;
+    state.openTriggerDefinition(state.triggers[0]);
+    expect(state.triggerDefinitionOpen).toBe(false);
+    expect(state.errorMessage).toBe("structureEditor.triggerPendingDrafts");
+    // A failed complete-definition save still emits changed after its DDL starts.
+    await state.refreshAfterTriggerDefinitionSave();
+    await settle();
+    expect(JSON.stringify(state.triggers)).toBe(snapshot);
+    expect(mocks.loadObjectMetadataFacet).toHaveBeenCalledTimes(metadataCalls);
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+  });
+});
 
 const initialColumns = [{ name: "id", data_type: "bigint", nullable: false, default_value: null, comment: "" }];
 const rebuiltColumns = [

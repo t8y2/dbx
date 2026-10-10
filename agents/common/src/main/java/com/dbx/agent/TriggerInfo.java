@@ -6,15 +6,29 @@ public final class TriggerInfo {
     private String name;
     private String event;
     private String timing;
+    private String owner;
 
     public TriggerInfo() {
         this("", "", "");
     }
 
     public TriggerInfo(String name, String event, String timing) {
+        this(name, event, timing, null);
+    }
+
+    public TriggerInfo(String name, String event, String timing, String owner) {
         this.name = name;
         this.event = event;
         this.timing = timing;
+        this.owner = owner;
+    }
+
+    public String getOwner() {
+        return owner;
+    }
+
+    public void setOwner(String owner) {
+        this.owner = owner;
     }
 
     public String getName() {
@@ -48,16 +62,17 @@ public final class TriggerInfo {
         TriggerInfo that = (TriggerInfo) other;
         return Objects.equals(name, that.name)
             && Objects.equals(event, that.event)
-            && Objects.equals(timing, that.timing);
+            && Objects.equals(timing, that.timing)
+            && Objects.equals(owner, that.owner);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, event, timing);
+        return Objects.hash(name, event, timing, owner);
     }
 
     @Override
     public String toString() {
-        return "TriggerInfo(name=" + name + ", event=" + event + ", timing=" + timing + ")";
+        return "TriggerInfo(name=" + name + ", event=" + event + ", timing=" + timing + ", owner=" + owner + ")";
     }
 }

@@ -2085,7 +2085,10 @@ test("prioritizes UNIQUEIDENTIFIER above UNION and UPDATE and suppresses externa
   });
 
   // Should NOT suggest columns from other tables when defining column types
-  assert.equal(items.some((item) => item.label === "UpdateDate"), false);
+  assert.equal(
+    items.some((item) => item.label === "UpdateDate"),
+    false,
+  );
 
   // UNIQUEIDENTIFIER must rank above UNION and UPDATE
   const uniqueIdIdx = items.findIndex((item) => item.label === "UNIQUEIDENTIFIER");
@@ -4728,9 +4731,7 @@ test("schema-qualified table completions follow identifierCase (#11400)", () => 
 });
 
 test("table completions with applyName follow identifierCase (#11400)", () => {
-  const tablesWithApplyName = [
-    { name: "DEPT_DICT", schema: "COMM", applyName: "COMM.DEPT_DICT", type: "table" as const },
-  ];
+  const tablesWithApplyName = [{ name: "DEPT_DICT", schema: "COMM", applyName: "COMM.DEPT_DICT", type: "table" as const }];
   const items = buildSqlCompletionItems("select * from d", "select * from d".length, {
     tables: tablesWithApplyName,
     columnsByTable: new Map(),
@@ -4754,4 +4755,3 @@ test("CTE table completions follow identifierCase (#11400)", () => {
   assert.ok(cteItem, "should provide lowercase CTE table label");
   assert.equal(cteItem?.apply, "my_cte", "should apply lowercase CTE name");
 });
-

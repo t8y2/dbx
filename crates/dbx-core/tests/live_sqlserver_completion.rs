@@ -1026,6 +1026,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1415,6 +1416,9 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         target_table_name_case: dbx_core::transfer::TransferTableNameCase::Upper,
         quote_target_column_names: true,
         ownership_policy: dbx_core::transfer::TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 100,
     };
     let result = dbx_core::transfer::transfer_table(

@@ -69,6 +69,13 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.objectSource).toBeUndefined();
   });
 
+  it("keeps renamed source snapshots non-executable after session restore", () => {
+    const [restored] = roundTrip([queryTab({ sourceView: true, sourceSnapshot: true, sql: "CREATE VIEW old_view AS SELECT 2" })]);
+    expect(restored.sourceSnapshot).toBe(true);
+    expect(restored.sql).toBe("CREATE VIEW old_view AS SELECT 2");
+    expect(restored.objectSource).toBeUndefined();
+  });
+
   it("preserves the DDL viewer identity needed for read-only tabs", () => {
     const ddlViewer = { schema: "public", tableName: "users", objectType: "VIEW" as const, formatDialect: "postgres" as const };
     const [restored] = roundTrip([queryTab({ sourceView: true, ddlViewer, sql: "CREATE VIEW users AS SELECT 1" })]);

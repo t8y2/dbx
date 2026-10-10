@@ -1,5 +1,10 @@
 use dbx_sql_core::value_literals::quote_string_literal;
+mod oracle_routines;
 use dbx_sql_dialect::postgres_index_key::decorate_postgres_index_key;
+pub use oracle_routines::{
+    add_oracle_routines_to_plan, add_oracle_routines_to_plan_with_context, comparable_oracle_routine,
+    is_oracle_routine_database, oracle_routine_steps, oracle_routine_steps_with_context, RoutineEndpoints, RoutineStep,
+};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use log;
@@ -487,6 +492,14 @@ pub struct SchemaDiffTableMapping {
 #[serde(rename_all = "camelCase")]
 pub struct SchemaDiffPreparationOptions {
     #[serde(default)]
+    pub routine_endpoints: Option<RoutineEndpoints>,
+    #[serde(skip)]
+    pub routine_context: Option<dbx_sql_core::oracle_program_compatibility::OracleProgramContext>,
+    #[serde(default)]
+    pub source_database_type: Option<DatabaseType>,
+    #[serde(default)]
+    pub source_schema: Option<String>,
+    #[serde(default)]
     pub source_tables: Vec<TableInfo>,
     #[serde(default)]
     pub target_tables: Vec<TableInfo>,
@@ -589,6 +602,8 @@ impl RollbackCompleteness {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaDiffPreparation {
+    #[serde(default)]
+    pub routine_steps: Vec<RoutineStep>,
     pub diffs: Vec<TableDiff>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub function_diffs: Vec<FunctionDiff>,
@@ -624,6 +639,8 @@ pub struct SchemaDiffPreparation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaSyncSqlPlan {
+    #[serde(default)]
+    pub routine_steps: Vec<RoutineStep>,
     pub sync_sql: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rollback_sync_sql: Option<String>,
@@ -1983,6 +2000,10 @@ impl AdaptiveScheduler {
 impl Default for SchemaDiffPreparationOptions {
     fn default() -> Self {
         Self {
+            source_database_type: None,
+            routine_endpoints: None,
+            routine_context: None,
+            source_schema: None,
             source_tables: Vec::new(),
             target_tables: Vec::new(),
             source_details: Vec::new(),
@@ -2245,6 +2266,23 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
         RollbackCompleteness::Incomplete
     };
 
+    let mut routine_plan = SchemaSyncSqlPlan {
+        sync_sql,
+        rollback_sync_sql,
+        rollback_completeness,
+        missing_rollback_objects,
+        routine_steps: Vec::new(),
+    };
+    add_oracle_routines_to_plan_with_context(
+        &mut routine_plan,
+        &function_diffs,
+        options.database_type,
+        options.target_schema.as_deref(),
+        options.source_database_type,
+        options.source_schema.as_deref(),
+        options.routine_context.as_ref(),
+    );
+
     let permission_diffs = if !options.source_permissions.is_empty() || !options.target_permissions.is_empty() {
         diff_permissions(&options.source_permissions, &options.target_permissions)
     } else {
@@ -2258,15 +2296,16 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
     };
 
     SchemaDiffPreparation {
+        routine_steps: routine_plan.routine_steps,
         diffs,
         function_diffs,
         sequence_diffs,
         rule_diffs,
         owner_diffs,
-        sync_sql,
-        rollback_sync_sql,
-        rollback_completeness,
-        missing_rollback_objects,
+        sync_sql: routine_plan.sync_sql,
+        rollback_sync_sql: routine_plan.rollback_sync_sql,
+        rollback_completeness: routine_plan.rollback_completeness,
+        missing_rollback_objects: routine_plan.missing_rollback_objects,
         rename_candidates,
         rollback_graph,
         compatibility_warnings,
@@ -3940,13 +3979,12 @@ fn foreign_key_changes(
 
 pub fn diff_triggers(source: &[TriggerInfo], target: &[TriggerInfo]) -> Vec<TriggerDiff> {
     let mut diffs = Vec::new();
-    let target_map: HashMap<&str, &TriggerInfo> =
-        target.iter().map(|trigger| (trigger.name.as_str(), trigger)).collect();
-    let source_map: HashMap<&str, &TriggerInfo> =
-        source.iter().map(|trigger| (trigger.name.as_str(), trigger)).collect();
+    let identity = |trigger: &TriggerInfo| (trigger.owner.clone(), trigger.name.clone());
+    let target_map: HashMap<_, &TriggerInfo> = target.iter().map(|trigger| (identity(trigger), trigger)).collect();
+    let source_map: HashMap<_, &TriggerInfo> = source.iter().map(|trigger| (identity(trigger), trigger)).collect();
 
     for source_trigger in source {
-        let Some(target_trigger) = target_map.get(source_trigger.name.as_str()) else {
+        let Some(target_trigger) = target_map.get(&identity(source_trigger)) else {
             diffs.push(TriggerDiff {
                 diff_type: "added".to_string(),
                 name: source_trigger.name.clone(),
@@ -3976,7 +4014,7 @@ pub fn diff_triggers(source: &[TriggerInfo], target: &[TriggerInfo]) -> Vec<Trig
     }
 
     for target_trigger in target {
-        if !source_map.contains_key(target_trigger.name.as_str()) {
+        if !source_map.contains_key(&identity(target_trigger)) {
             diffs.push(TriggerDiff {
                 diff_type: "removed".to_string(),
                 name: target_trigger.name.clone(),
@@ -4002,16 +4040,32 @@ pub fn normalize_definition(def: &str) -> String {
         .join("\n")
 }
 
+fn routine_identity(info: &FunctionInfo) -> (&str, &str, &str, &str, &str) {
+    let (table_owner, table_name) = info
+        .trigger
+        .as_ref()
+        .map(|trigger| {
+            (
+                if Some(trigger.table_owner.as_str()) == info.schema.as_deref() {
+                    ""
+                } else {
+                    trigger.table_owner.as_str()
+                },
+                trigger.table_name.as_str(),
+            )
+        })
+        .unwrap_or(("", ""));
+    (&info.name, &info.arguments, if info.schema.is_some() { &info.function_type } else { "" }, table_owner, table_name)
+}
+
 pub fn diff_functions(source: &[FunctionInfo], target: &[FunctionInfo]) -> Vec<FunctionDiff> {
     let mut diffs = Vec::new();
     // Use (name, arguments) as key to support PostgreSQL function overloading
-    let target_map: HashMap<(&str, &str), &FunctionInfo> =
-        target.iter().map(|f| ((f.name.as_str(), f.arguments.as_str()), f)).collect();
-    let source_map: HashMap<(&str, &str), &FunctionInfo> =
-        source.iter().map(|f| ((f.name.as_str(), f.arguments.as_str()), f)).collect();
+    let target_map: HashMap<_, _> = target.iter().map(|f| (routine_identity(f), f)).collect();
+    let source_map: HashMap<_, _> = source.iter().map(|f| (routine_identity(f), f)).collect();
 
     for source_fn in source {
-        let key = (source_fn.name.as_str(), source_fn.arguments.as_str());
+        let key = routine_identity(source_fn);
         let Some(target_fn) = target_map.get(&key) else {
             diffs.push(FunctionDiff {
                 diff_type: "added".to_string(),
@@ -4030,8 +4084,24 @@ pub fn diff_functions(source: &[FunctionInfo], target: &[FunctionInfo]) -> Vec<F
         if source_fn.data_type != target_fn.data_type {
             changes.push(format!("return type: {} → {}", target_fn.data_type, source_fn.data_type));
         }
-        if normalize_definition(&source_fn.definition) != normalize_definition(&target_fn.definition) {
+        let definitions_differ = if source_fn.schema.is_some() || target_fn.schema.is_some() {
+            comparable_oracle_routine(&source_fn.definition) != comparable_oracle_routine(&target_fn.definition)
+        } else {
+            normalize_definition(&source_fn.definition) != normalize_definition(&target_fn.definition)
+        };
+        if definitions_differ {
             changes.push("definition changed".to_string());
+        }
+        if source_fn
+            .trigger
+            .as_ref()
+            .map(|trigger| (&trigger.timing, &trigger.event, &trigger.status, &trigger.base_object_type))
+            != target_fn
+                .trigger
+                .as_ref()
+                .map(|trigger| (&trigger.timing, &trigger.event, &trigger.status, &trigger.base_object_type))
+        {
+            changes.push("trigger timing, event or enabled state changed".to_string());
         }
         if !changes.is_empty() {
             diffs.push(FunctionDiff {
@@ -4045,7 +4115,7 @@ pub fn diff_functions(source: &[FunctionInfo], target: &[FunctionInfo]) -> Vec<F
     }
 
     for target_fn in target {
-        let key = (target_fn.name.as_str(), target_fn.arguments.as_str());
+        let key = routine_identity(target_fn);
         if !source_map.contains_key(&key) {
             diffs.push(FunctionDiff {
                 diff_type: "removed".to_string(),
@@ -5821,6 +5891,19 @@ fn generate_create_table_sql(
     if !triggers.is_empty() {
         lines.push(String::new());
         for trigger in triggers {
+            if matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+                missing.push(MissingRollbackObject {
+                    kind: "trigger".to_string(),
+                    name: trigger
+                        .owner
+                        .as_ref()
+                        .map_or_else(|| trigger.name.clone(), |owner| format!("{owner}.{}", trigger.name)),
+                    table: Some(name.to_string()),
+                    reason: "Oracle trigger reconstruction requires complete source and explicit owner mapping"
+                        .to_string(),
+                });
+                continue;
+            }
             let event_desc = if trigger.event.to_uppercase().contains("INSERT") {
                 "INSERT"
             } else if trigger.event.to_uppercase().contains("UPDATE") {
@@ -6078,7 +6161,13 @@ pub fn generate_schema_sync_sql_plan(
         RollbackCompleteness::Incomplete
     };
 
-    SchemaSyncSqlPlan { sync_sql, rollback_sync_sql, rollback_completeness, missing_rollback_objects }
+    SchemaSyncSqlPlan {
+        sync_sql,
+        rollback_sync_sql,
+        rollback_completeness,
+        missing_rollback_objects,
+        routine_steps: Vec::new(),
+    }
 }
 
 /// Names of the objects a diff's own statements reference.
@@ -6730,7 +6819,7 @@ fn generate_schema_sync_sql_inner(
     }
 
     // Function diffs — only emit executable SQL when profile has templates
-    if !function_diffs.is_empty() {
+    if !function_diffs.is_empty() && !is_oracle_routine_database(db_type) {
         lines.push(String::new());
         lines.push("-- Functions".to_string());
         for diff in function_diffs {
@@ -6902,6 +6991,59 @@ fn generate_schema_sync_sql_inner(
 mod tests {
     use super::*;
 
+    #[test]
+    fn trigger_diff_keeps_same_name_catalog_owners_separate() {
+        let source: Vec<TriggerInfo> = serde_json::from_value(serde_json::json!([
+            {"name":"AUDIT", "owner":"A", "event":"INSERT", "timing":"AFTER"},
+            {"name":"AUDIT", "owner":"B", "event":"INSERT", "timing":"AFTER"}
+        ]))
+        .unwrap();
+        let mut target = source.clone();
+        target[0].event = "UPDATE".to_string();
+        let diffs = diff_triggers(&source, &target);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].diff_type, "modified");
+        assert_eq!(diffs[0].source.as_ref().unwrap().owner.as_deref(), Some("A"));
+        assert_eq!(diffs[0].target.as_ref().unwrap().owner.as_deref(), Some("A"));
+        let mut legacy = source[0].clone();
+        legacy.owner = None;
+        assert!(diff_triggers(&[legacy.clone()], &[legacy.clone()]).is_empty());
+        let diffs = diff_triggers(&[legacy], &source[..1]);
+        assert_eq!(diffs.iter().map(|diff| diff.diff_type.as_str()).collect::<Vec<_>>(), vec!["added", "removed"]);
+    }
+
+    #[test]
+    fn oracle_table_reconstruction_does_not_guess_trigger_owner() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            for owner in [None, Some("APP"), Some("OTHER")] {
+                let trigger: TriggerInfo = serde_json::from_value(serde_json::json!({
+                    "name":"AUDIT", "owner":owner, "event":"INSERT", "timing":"AFTER",
+                    "statement":"BEGIN NULL; END;"
+                }))
+                .unwrap();
+                let (sql, missing) = generate_create_table_sql(
+                    "T",
+                    &[],
+                    &[],
+                    &[],
+                    None,
+                    database_type,
+                    Some("APP"),
+                    None,
+                    &[],
+                    &[trigger],
+                );
+                assert!(!sql.contains("CREATE TRIGGER"));
+                assert_eq!(missing.len(), 1);
+                assert!(missing[0].reason.contains("explicit owner mapping"));
+                assert_eq!(
+                    missing[0].name,
+                    owner.map_or_else(|| "AUDIT".to_string(), |owner| format!("{owner}.AUDIT"))
+                );
+            }
+        }
+    }
+
     fn index(overrides: IndexInfo) -> IndexInfo {
         IndexInfo {
             name: if overrides.name.is_empty() { "idx_users_email".to_string() } else { overrides.name },
@@ -6936,6 +7078,8 @@ mod tests {
             name: name.to_string(),
             data_type: data_type.to_string(),
             resolved_schema: None,
+            resolved_table: None,
+            resolved_object_type: None,
             is_nullable: false,
             column_default: None,
             is_primary_key: false,
@@ -8159,6 +8303,14 @@ mod tests {
             diff_type: "modified".into(),
             name: "next_value".into(),
             source: Some(FunctionInfo {
+                type_info: None,
+                trigger: None,
+                dependency_objects: Vec::new(),
+                incoming_dependencies: Vec::new(),
+                paired_object_present: None,
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: "next_value".into(),
                 function_type: "scalar".into(),
                 data_type: "int".into(),
@@ -8430,6 +8582,7 @@ mod tests {
             add_position: None,
         }];
         let trigger = TriggerInfo {
+            owner: None,
             name: "trg_events_insert".into(),
             event: "INSERT".into(),
             timing: "AFTER".into(),
@@ -8494,6 +8647,14 @@ mod tests {
             diff_type: "modified".into(),
             name: "next_value".into(),
             source: Some(FunctionInfo {
+                type_info: None,
+                trigger: None,
+                dependency_objects: Vec::new(),
+                incoming_dependencies: Vec::new(),
+                paired_object_present: None,
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: "next_value".into(),
                 function_type: "scalar".into(),
                 data_type: "int".into(),
@@ -8541,6 +8702,14 @@ mod tests {
             diff_type: "added".into(),
             name: "pg_only".into(),
             source: Some(FunctionInfo {
+                type_info: None,
+                trigger: None,
+                dependency_objects: Vec::new(),
+                incoming_dependencies: Vec::new(),
+                paired_object_present: None,
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: "pg_only".into(),
                 function_type: "FUNCTION".into(),
                 data_type: "integer".into(),
@@ -10116,6 +10285,8 @@ mod tests {
                     name: "status".to_string(),
                     data_type: "text".to_string(),
                     resolved_schema: None,
+                    resolved_table: None,
+                    resolved_object_type: None,
                     is_nullable: true,
                     column_default: None,
                     is_primary_key: false,
@@ -11102,6 +11273,7 @@ mod tests {
                 indexes: vec![],
                 foreign_keys: vec![],
                 triggers: vec![crate::types::TriggerInfo {
+                    owner: None,
                     name: "trg_orders".to_string(),
                     event: "INSERT".to_string(),
                     timing: "AFTER".to_string(),
@@ -13334,6 +13506,8 @@ mod tests {
             name: "c".into(),
             data_type: "varchar(100)".into(),
             resolved_schema: None,
+            resolved_table: None,
+            resolved_object_type: None,
             is_nullable: true,
             column_default: Some("'default'".into()),
             comment: Some("new".into()),
@@ -13352,6 +13526,8 @@ mod tests {
             name: "c".into(),
             data_type: "varchar(50)".into(),
             resolved_schema: None,
+            resolved_table: None,
+            resolved_object_type: None,
             is_nullable: false,
             column_default: None,
             comment: Some("old".into()),
@@ -13528,6 +13704,8 @@ mod tests {
         let Some(db) = kind_to_db(target_kind) else { return String::new() };
         let _src_db = kind_to_db(source_kind).unwrap_or(DatabaseType::Mysql);
         let options = SchemaDiffPreparationOptions {
+            routine_context: None,
+            routine_endpoints: None,
             source_tables: vec![TableInfo {
                 name: "t".into(),
                 table_type: "BASE TABLE".into(),
@@ -13548,6 +13726,8 @@ mod tests {
             source_owners: vec![],
             target_owners: vec![],
             database_type: db,
+            source_database_type: Some(_src_db),
+            source_schema: None,
             target_schema: None,
             ignore_comments: false,
             cascade_delete: false,
@@ -14958,6 +15138,14 @@ mod tests {
             diff_type: "added".into(),
             name: "f1".into(),
             source: Some(FunctionInfo {
+                type_info: None,
+                trigger: None,
+                dependency_objects: Vec::new(),
+                incoming_dependencies: Vec::new(),
+                paired_object_present: None,
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: "f1".into(),
                 function_type: "FUNCTION".into(),
                 data_type: "int".into(),
@@ -15028,6 +15216,14 @@ mod tests {
             diff_type: "added".into(),
             name: "armor".into(),
             source: Some(FunctionInfo {
+                type_info: None,
+                trigger: None,
+                dependency_objects: Vec::new(),
+                incoming_dependencies: Vec::new(),
+                paired_object_present: None,
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: "armor".into(),
                 function_type: "FUNCTION".into(),
                 data_type: "text".into(),
@@ -15073,6 +15269,14 @@ mod tests {
             diff_type: "added".into(),
             name: "f1".into(),
             source: Some(FunctionInfo {
+                type_info: None,
+                trigger: None,
+                dependency_objects: Vec::new(),
+                incoming_dependencies: Vec::new(),
+                paired_object_present: None,
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: "f1".into(),
                 function_type: "FUNCTION".into(),
                 data_type: "int".into(),

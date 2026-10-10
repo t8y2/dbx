@@ -8,7 +8,17 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import type { QueryResult } from "@/types/database";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 
-const mocks = vi.hoisted(() => ({ hydrate: vi.fn(), save: vi.fn() }));
+const mocks = vi.hoisted(() => ({ hydrate: vi.fn(), save: vi.fn(), savePath: vi.fn(), download: vi.fn(), isTauri: vi.fn() }));
+
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauri }));
+vi.mock("@/lib/export/exportPath", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/export/exportPath")>()),
+  promptExportSavePath: mocks.savePath,
+}));
+vi.mock("@/lib/backend/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/backend/api")>()),
+  downloadLargeValue: mocks.download,
+}));
 
 vi.mock("@/composables/useDataGridLargeValues", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/composables/useDataGridLargeValues")>();
@@ -88,6 +98,7 @@ async function mountGrid() {
       setupState: {
         cellDetailFor: (row: number, column: number) => DataGridCellDetail;
         downloadDetailBinaryValue: (detail: DataGridCellDetail, mode: "binary") => Promise<void>;
+        binaryDownloadSubmenu: (detail: DataGridCellDetail) => { action: () => Promise<void> };
         localColumnFilters: Record<number, Set<string>>;
       };
     }
@@ -104,6 +115,43 @@ async function mountGrid() {
 }
 
 describe("DataGrid binary download identity", () => {
+  it.each([false, true])("keeps the CLOB snapshot selected before the save dialog (replace result: %s)", async (replaceResult) => {
+    const { result, state } = await mountGrid();
+    result.value = {
+      ...result.value,
+      column_types: ["NUMBER", "CLOB"],
+      large_value_cells: [{ row_index: 1, column_index: 1, original_bytes: 10000, value_ref: "original" }],
+      large_value_context: { connectionId: "conn", database: "APP" },
+    };
+    await nextTick();
+    let finish!: (path: string) => void;
+    mocks.isTauri.mockReturnValue(true);
+    mocks.savePath.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    mocks.download.mockResolvedValue(undefined);
+    const pending = state.binaryDownloadSubmenu(state.cellDetailFor(1, 1)).action();
+    expect(mocks.savePath).toHaveBeenCalledOnce();
+    if (replaceResult) {
+      result.value = {
+        ...result.value,
+        rows: [
+          [9, "new preview"],
+          [8, "other preview"],
+        ],
+        large_value_cells: [{ row_index: 1, column_index: 1, original_bytes: 10000, value_ref: "replacement" }],
+      };
+      await nextTick();
+    }
+    finish("snapshot.txt");
+    await pending;
+    if (replaceResult) expect(mocks.download).not.toHaveBeenCalled();
+    else expect(mocks.download).toHaveBeenCalledWith(expect.objectContaining({ valueRef: "original" }), "snapshot.txt");
+  });
+
   it("downloads the selected record when local filtering changes the display position during hydration", async () => {
     const { result, state, finish } = await mountGrid();
     const detail = state.cellDetailFor(1, 1);

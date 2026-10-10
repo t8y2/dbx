@@ -66,6 +66,7 @@ export interface ExportTask {
   targetTables?: string[];
   transferFailures?: DataTransferFailure[];
   transferFailuresOmitted?: number;
+  transferObjectResults?: api.TransferObjectResult[];
   sqlFileFailures?: SqlFileFailure[];
   sqlFileFailuresOmitted?: number;
   multiDbSourceTabId?: string;
@@ -623,9 +624,14 @@ export function useExportTracker() {
       onDone?: () => void | Promise<void>;
       onOpen?: () => void;
       formatOverlapError?: (tables: string[]) => string;
+      databaseLinkCredentials?: api.TransferDatabaseLinkCredential[];
     } = {},
   ): ExportTask {
     const existingTask = taskMap.get(request.transferId);
+    const clearCredentials = () => {
+      for (const credential of options.databaseLinkCredentials ?? []) credential.password = "";
+      options.databaseLinkCredentials = undefined;
+    };
     const task = existingTask ?? addDataTransferTask(request.transferId, label, request.tables.length);
     task.onOpen = options.onOpen;
     task.startedAt ??= Date.now();
@@ -634,7 +640,10 @@ export function useExportTracker() {
     task.targetDatabase = request.targetDatabase;
     task.targetSchema = request.targetSchema;
     task.targetTables = request.tables.map((table) => targetTableName(table, request.targetTableNameCase));
-    if (activeTransferRuns.has(request.transferId)) return task;
+    if (activeTransferRuns.has(request.transferId)) {
+      clearCredentials();
+      return task;
+    }
 
     const overlappingTables = findActiveOverlappingTransfer(request);
     if (overlappingTables.length > 0) {
@@ -642,6 +651,7 @@ export function useExportTracker() {
       const visibleTables = overlappingTables.slice(0, 5);
       task.errorMessage = options.formatOverlapError?.(visibleTables) ?? `Another data transfer is already running for target table(s): ${visibleTables.join(", ")}`;
       finishDataTransferTask(task);
+      clearCredentials();
       return task;
     }
 
@@ -663,6 +673,7 @@ export function useExportTracker() {
             updateDataTransferTask(progress.transferId, progress);
           },
           acknowledgeStart,
+          options.databaseLinkCredentials,
         );
 
         if (terminalStatus === "done" && task.status === "Done") {
@@ -681,6 +692,7 @@ export function useExportTracker() {
           terminal: true,
         });
       } finally {
+        clearCredentials();
         activeTransferRuns.delete(request.transferId);
       }
     })();
@@ -758,6 +770,11 @@ export function useExportTracker() {
   function updateDataTransferTask(transferId: string, progress: api.TransferProgress) {
     const task = taskMap.get(transferId);
     if (!task) return;
+    if (progress.objectResult) {
+      const result = progress.objectResult;
+      const previous = task.transferObjectResults ?? [];
+      task.transferObjectResults = [...previous.filter((item) => item.objectType !== result.objectType || item.schema !== result.schema || item.name !== result.name), result];
+    }
     if (progress.transferFailuresOmitted !== undefined) {
       const state = getTransferFailureState(task);
       state.replayOmittedCount = Math.max(state.replayOmittedCount, progress.transferFailuresOmitted);
@@ -767,7 +784,7 @@ export function useExportTracker() {
       recordTransferFailure(task, progress.table, progress.error);
     }
     const nextStatus = normalizeTransferStatus(progress.status, progress.terminal);
-    const hadError = task.status === "Error";
+    const hadError = task.status === "Error" || task.transferObjectResults?.some((result) => result.status === "failed");
     task.status = hadError && nextStatus === "Done" ? "Error" : nextStatus;
     if (isTerminalTransferProgress(progress)) finishDataTransferTask(task);
     task.errorMessage = progress.error || task.errorMessage || null;

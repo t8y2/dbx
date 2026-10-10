@@ -1,0 +1,21 @@
+{
+  "status": "not-run",
+  "purpose": "Capture actual Oracle and OceanBase Oracle driver diagnostics without assuming their position units",
+  "cases": [
+    { "id": "ascii", "sql": "SELECT 1, FROM DUAL", "focus": "single-line baseline" },
+    { "id": "multiline", "sql": "SELECT 1,\nFROM DUAL", "focus": "line and column bases" },
+    { "id": "chinese", "sql": "SELECT '中文', FROM DUAL", "focus": "UTF-8 bytes versus Unicode scalars" },
+    { "id": "emoji", "sql": "SELECT '😀', FROM DUAL", "focus": "Unicode scalars versus UTF-16 code units" },
+    { "id": "comment-prefix", "sql": "-- 中文😀\nSELECT '中文😀',\nFROM DUAL", "focus": "comment and multiline offsets" },
+    { "id": "plsql", "sql": "-- 中文😀\nBEGIN\n  NULL;\n  @\nEND;", "focus": "PL/SQL compilation diagnostics" }
+  ],
+  "requiredEvidence": [
+    "database and JDBC driver versions",
+    "exact Agent, Core and frontend source SHAs",
+    "redacted raw Agent RPC error",
+    "normalized Core error and executed SQL",
+    "frontend result sourceStatement, executedStatement, sourceFrom, sourceTo",
+    "displayed line/column and UTF-16 caret offset, or explicitly no location",
+    "manual determination of unit and 0/1 base using the paired samples"
+  ]
+}

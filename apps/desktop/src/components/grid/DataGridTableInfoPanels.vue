@@ -5,7 +5,10 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import TablePartitionsPanel from "@/components/structure/TablePartitionsPanel.vue";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
-import { formatObjectBrowserBytes, formatObjectBrowserCount } from "@/lib/table/objectBrowserRows";
+import { triggerDisplayName, triggerIdentity } from "@/lib/table/triggerIdentity";
+import { formatObjectBrowserBytes } from "@/lib/table/objectBrowserRows";
+import { estimatedRowsDetails, estimatedRowsText } from "@/lib/dataGrid/oceanBaseRowStatistics";
+import { oceanbaseSpaceRows } from "@/lib/table/oceanbaseSpaceStatistics";
 import type { ColumnInfo, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectStatistics, PgTablePartitioning, TableInfoTab, TriggerInfo } from "@/types/database";
 
 interface DataGridTableInfoPanelsProps {
@@ -57,7 +60,8 @@ const overviewRows = computed(() => {
     { label: t("common.database"), value: props.database },
     { label: t("grid.tableOwner"), value: props.tableOwner ?? "", mono: true },
     { label: t("structureEditor.comment"), value: props.overviewComment ?? "" },
-    { label: t("grid.tableInfoEstimatedRows"), value: formatObjectBrowserCount(props.overviewStats?.estimated_rows), mono: true },
+    { label: t("grid.tableInfoEstimatedRows"), value: estimatedRowsText(props.overviewStats, t), mono: true },
+    ...estimatedRowsDetails(props.overviewStats, t),
     { label: t("grid.tableInfoTotalSize"), value: formatObjectBrowserBytes(props.overviewStats?.total_bytes), mono: true },
     { label: t("grid.tableInfoDataLength"), value: formatObjectBrowserBytes(props.overviewStats?.data_length), mono: true },
     { label: t("grid.tableInfoEngine"), value: props.overviewStats?.engine ?? "", mono: true },
@@ -71,6 +75,7 @@ const overviewRows = computed(() => {
     { label: t("grid.tableInfoIndexLength"), value: formatObjectBrowserBytes(props.overviewStats?.index_length), mono: true },
     { label: t("grid.tableInfoAutoIncrement"), value: props.overviewStats?.auto_increment ?? "", mono: true },
     { label: t("grid.tableInfoDataFree"), value: formatObjectBrowserBytes(props.overviewStats?.data_free), mono: true },
+    ...oceanbaseSpaceRows(props.overviewStats?.space, t),
   ];
   const query = props.searchQuery.trim().toLowerCase();
   return rows.filter((row) => row.value && (!query || row.label.toLowerCase().includes(query) || row.value.toLowerCase().includes(query)));
@@ -219,8 +224,8 @@ const overviewRows = computed(() => {
       {{ t("grid.tableInfoEmpty") }}
     </div>
     <div v-else class="divide-y">
-      <div v-for="trigger in props.triggers" :key="trigger.name" class="p-3 text-xs">
-        <div class="font-medium truncate">{{ trigger.name }}</div>
+      <div v-for="trigger in props.triggers" :key="triggerIdentity(trigger)" class="p-3 text-xs">
+        <div class="font-medium truncate">{{ triggerDisplayName(trigger) }}</div>
         <div class="mt-1 text-[11px] text-muted-foreground">{{ trigger.timing }} {{ trigger.event }}</div>
       </div>
     </div>

@@ -184,7 +184,7 @@ function tableCellText(value: unknown): string {
     <div class="h-9 shrink-0 border-b px-3 flex items-center gap-2 text-xs overflow-x-auto overflow-y-hidden">
       <span class="shrink-0 whitespace-nowrap inline-flex items-center gap-1 rounded border bg-muted px-2 py-0.5 font-medium">
         <GitBranch class="h-3.5 w-3.5" />
-        {{ t("explain.title") }}
+        {{ t(plan?.databaseType === "oceanbase-oracle" ? "explain.estimatedTitle" : "explain.title") }}
       </span>
       <span v-if="plan || hasTableView" class="shrink-0 whitespace-nowrap text-muted-foreground">
         {{ plan?.databaseType.toUpperCase() || "MYSQL" }}<template v-if="plan"> · {{ t("explain.nodeCount", { count: nodeCount }) }}</template>
@@ -293,7 +293,7 @@ function tableCellText(value: unknown): string {
                 <th class="px-2 py-1.5 font-medium">{{ t("explain.relation") }}</th>
                 <th class="px-2 py-1.5 font-medium">{{ t("explain.index") }}</th>
                 <th class="px-2 py-1.5 font-medium">{{ t("explain.cost") }}</th>
-                <th class="px-2 py-1.5 font-medium">{{ t("explain.rows") }}</th>
+                <th class="px-2 py-1.5 font-medium">{{ t(plan.databaseType === "oceanbase-oracle" ? "explain.estRows" : "explain.rows") }}</th>
                 <th class="px-2 py-1.5 font-medium">{{ t("explain.details") }}</th>
               </tr>
             </thead>

@@ -19,6 +19,7 @@ import {
   reconcileSchemaDiffRoutineMappings,
   reconcileSchemaDiffSelectedRoutines,
   schemaDiffRoutineKey,
+  schemaDiffRoutineKeyFromFunction,
   SCHEMA_DIFF_UNRESTRICTED_ROUTINE_LIMIT,
   type SchemaDiffRoutineMatch,
 } from "@/lib/schema/schemaDiffRoutine";
@@ -381,11 +382,13 @@ async function loadRoutineList(side: "source" | "target") {
     loadingRoutines.value = true;
     await store.ensureConnected(connectionId);
     if (!isCurrent()) return;
-    // Names/signatures only — avoid listFunctions N+1 source fetch on the config step.
+    // Oracle program identities include kind and trigger relation metadata.
+    const oraclePrograms = dbType === "oracle" || dbType === "oceanbase-oracle";
     const kinds = schemaDiffRoutineObjectTypes(dbType as DatabaseType);
-    const objects = kinds.length === 0 ? [] : await api.listObjects(connectionId, database, schema, kinds);
+    const objects = oraclePrograms ? [] : kinds.length === 0 ? [] : await api.listObjects(connectionId, database, schema, kinds);
+    const programs = oraclePrograms ? await api.listFunctions(connectionId, database, schema) : [];
     if (!isCurrent()) return;
-    const keys = objects.map((object) => schemaDiffRoutineKey(object.name, object.signature ?? ""));
+    const keys = oraclePrograms ? programs.map(schemaDiffRoutineKeyFromFunction) : objects.map((object) => schemaDiffRoutineKey(object.name, object.signature ?? ""));
     if (side === "source") {
       sourceRoutineList.value = keys;
       if (restrictRoutines.value) {
@@ -962,6 +965,7 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
           <div v-if="!restrictRoutines" class="text-[11px] text-muted-foreground">
             {{ !isTableIdentityReady("source") ? t("diff.routineSelectionNeedSource") : t("diff.routineSelectionUnrestricted") }}
           </div>
+          <p v-if="sourceDbType === 'oracle' || sourceDbType === 'oceanbase-oracle'" class="text-[11px] text-muted-foreground">{{ t("diff.routineOracleKindsHint") }}</p>
           <div v-if="unrestrictedRoutineLoadTooLarge" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
             {{ t("diff.routineSelectionTooLarge", { count: sourceRoutineList.length, limit: SCHEMA_DIFF_UNRESTRICTED_ROUTINE_LIMIT }) }}
           </div>

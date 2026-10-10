@@ -1,64 +1,50 @@
 // @vitest-environment happy-dom
-
-import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, reactive, ref, type App } from "vue";
+import { createI18n } from "vue-i18n";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { EditorView } from "@codemirror/view";
+import { EditorState } from "@codemirror/state";
 import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
-
-vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { theme: "default", fontSize: 12, fontFamily: "monospace" } }),
-}));
-
-vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false } }) }));
-
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { theme: "default", fontSize: 14, fontFamily: "monospace" } }) }));
+vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: ref(false) }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
+vi.mock("@/lib/editor/editorThemes", () => ({ loadEditorTheme: async () => [], editorFontTheme: () => [] }));
 
-vi.mock("@/lib/editor/editorThemes", () => ({
-  loadEditorTheme: async () => [],
-  editorFontTheme: () => [],
-}));
+let app: App | undefined;
+afterEach(() => {
+  app?.unmount();
+  document.body.innerHTML = "";
+});
 
-vi.mock("@/lib/editor/codemirrorSqlDialect", () => ({ createDbxCodeMirrorSqlDialect: () => undefined }));
-
-// The deploy script preview is a CodeMirror view; the option under test lives in
-// the footer, so the editor is replaced with the smallest view that still accepts
-// the component's document updates.
-vi.mock("@codemirror/view", () => ({
-  EditorView: class {
-    static scrollIntoView = vi.fn(() => ({}));
-    static updateListener = { of: () => [] };
-    state: { doc: { toString: () => string; length: number } };
-    constructor(config: { state: { doc: { toString: () => string; length: number } } }) {
-      this.state = config.state;
-    }
-    dispatch() {}
-    destroy() {}
-  },
-}));
-
-vi.mock("@codemirror/state", () => ({
-  EditorState: {
-    create: (config: { doc: string }) => ({ doc: { toString: () => config.doc, length: config.doc.length } }),
-  },
-  Compartment: class {
-    of() {
-      return [];
-    }
-  },
-}));
-
-vi.mock("@codemirror/lang-sql", () => ({ sql: () => [] }));
-
-vi.mock("codemirror", () => ({ basicSetup: [] }));
-
-const mountedApps: App[] = [];
+it.each([true, false])("program preview readOnly=%s controls actual editor editing and emitted SQL", async (readOnly) => {
+  const update = vi.fn();
+  const previewReadOnly = ref(readOnly);
+  const host = document.createElement("div");
+  document.body.append(host);
+  app = createApp({ render: () => h(SchemaDiffDeployStep, { deploySql: "CREATE PACKAGE P AS END;", selectedObjects: [], targetConnectionId: "target", targetDatabase: "test", targetSchema: "DST", executing: false, readOnly: previewReadOnly.value, "onUpdate:deploySql": update }) });
+  app.use(createI18n({ legacy: false, locale: "en", missingWarn: false, fallbackWarn: false, messages: { en: { diff: { routinePreviewReadOnly: "Program SQL is read-only" } } } }));
+  app.mount(host);
+  await vi.waitFor(() => expect(host.querySelector(".cm-editor")).not.toBeNull());
+  const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")! as HTMLElement)!;
+  expect(editor.state.facet(EditorState.readOnly)).toBe(readOnly);
+  expect(host.querySelector(".cm-content")!.getAttribute("contenteditable")).toBe(String(!readOnly));
+  editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: "edited" } });
+  await nextTick();
+  if (readOnly) {
+    expect(update).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("Program SQL is read-only");
+  } else expect(update).toHaveBeenCalledWith("edited");
+  previewReadOnly.value = !readOnly;
+  await vi.waitFor(() => expect(editor.state.facet(EditorState.readOnly)).toBe(!readOnly));
+  expect(host.querySelector(".cm-content")!.getAttribute("contenteditable")).toBe(String(readOnly));
+});
 
 async function mountDeployStep(extraProps: Record<string, unknown> = {}, onIgnoreForeignKeyChecks?: (value: boolean) => void) {
   const state = reactive({ ignoreForeignKeyChecks: false });
   const container = document.createElement("div");
   document.body.append(container);
-  const app = createApp(
+  app = createApp(
     defineComponent({
       setup: () => () =>
         h(SchemaDiffDeployStep, {
@@ -77,10 +63,10 @@ async function mountDeployStep(extraProps: Record<string, unknown> = {}, onIgnor
         }),
     }),
   );
-  mountedApps.push(app);
+  app.use(createI18n({ legacy: false, locale: "en", missingWarn: false, fallbackWarn: false, messages: { en: {} } }));
   app.mount(container);
   await nextTick();
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await vi.waitFor(() => expect(container.querySelector(".cm-editor")).not.toBeNull());
   return { container, state };
 }
 
@@ -88,11 +74,6 @@ function foreignKeyCheckbox(container: HTMLElement): HTMLInputElement | null {
   const label = [...container.querySelectorAll<HTMLLabelElement>("label")].find((candidate) => candidate.textContent?.includes("diff.ignoreForeignKeyChecks"));
   return label?.querySelector<HTMLInputElement>('input[type="checkbox"]') ?? null;
 }
-
-afterEach(() => {
-  for (const app of mountedApps.splice(0)) app.unmount();
-  document.body.innerHTML = "";
-});
 
 describe("SchemaDiffDeployStep foreign key check option", () => {
   it("offers the option next to the export button for a MySQL target and leaves it unchecked by default", async () => {

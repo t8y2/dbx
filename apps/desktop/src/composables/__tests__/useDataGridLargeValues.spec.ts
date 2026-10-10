@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
 
-import { computed, createApp, defineComponent, h, ref, type Ref } from "vue";
+import { computed, createApp, defineComponent, h, nextTick, ref, type Ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { binaryCellDisplayText, binaryCellDownloadPayload } from "@/lib/dataGrid/binaryCellDownload";
 import { useDataGridLargeValues } from "@/composables/useDataGridLargeValues";
+import { useDataGridEditor } from "@/composables/useDataGridEditor";
 import type { DatabaseType, QueryResult } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
@@ -11,15 +12,27 @@ const mocks = vi.hoisted(() => ({
   buildTableSelectSql: vi.fn(),
   cancelQuery: vi.fn(),
   executeMulti: vi.fn(),
+  readLargeValueChunk: vi.fn(),
+  downloadLargeValue: vi.fn(),
+  prepareDataGridSave: vi.fn(),
+  executeBatch: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/api", () => ({
   buildDataGridContextFilterCondition: mocks.buildDataGridContextFilterCondition,
   cancelQuery: mocks.cancelQuery,
   executeMulti: mocks.executeMulti,
+  readLargeValueChunk: mocks.readLargeValueChunk,
+  downloadLargeValue: mocks.downloadLargeValue,
+  prepareDataGridSave: mocks.prepareDataGridSave,
+  executeBatch: mocks.executeBatch,
+  connectionWriteUnlockState: vi.fn().mockResolvedValue(0),
 }));
 
 vi.mock("@/lib/table/tableSelectSql", () => ({ buildTableSelectSql: mocks.buildTableSelectSql }));
+vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ getConfig: () => undefined }) }));
+vi.mock("@/stores/historyStore", () => ({ useHistoryStore: () => ({ add: vi.fn() }) }));
+vi.mock("@/stores/productionSafetyStore", () => ({ useProductionSafetyStore: () => ({}) }));
 
 const disposers: Array<() => void> = [];
 
@@ -28,11 +41,12 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
-function mountLargeValues(databaseType: DatabaseType, result: Ref<QueryResult>) {
+function mountLargeValues(databaseType: DatabaseType, result: Ref<QueryResult>, withEditor = false) {
   const toast = vi.fn();
   const formatCell = (value: unknown, columnIndex?: number, originalBytes?: number) => binaryCellDisplayText(value, result.value.column_types?.[columnIndex ?? 0], originalBytes, databaseType) ?? String(value ?? "");
   const item = (rowId = 1) => ({ id: rowId, sourceIndex: rowId - 1, data: result.value.rows[rowId - 1]!, isNew: false, isDeleted: false, isDirtyCol: [false, false] });
   let largeValues: ReturnType<typeof useDataGridLargeValues> | undefined;
+  let editor: ReturnType<typeof useDataGridEditor> | undefined;
   const app = createApp(
     defineComponent({
       setup() {
@@ -77,6 +91,35 @@ function mountLargeValues(databaseType: DatabaseType, result: Ref<QueryResult>) 
           cloneRow: vi.fn(),
           cloneRows: vi.fn(),
         });
+        if (withEditor)
+          editor = useDataGridEditor({
+            result: computed(() => result.value),
+            editable: computed(() => true),
+            databaseType: computed(() => databaseType),
+            connectionId: computed(() => `${databaseType}-1`),
+            database: computed(() => "MAXIMO"),
+            tableMeta: computed(() => ({
+              schema: "public",
+              tableName: "APP_DATA",
+              columns: result.value.columns.map((name, index) => ({ name, data_type: index === 0 ? "NUMBER" : "CLOB" })),
+              primaryKeys: ["ID"],
+            })),
+            sourceColumns: computed(() => result.value.columns),
+            onExecuteSql: computed(() => undefined),
+            sql: computed(() => undefined),
+            searchText: ref(""),
+            dataGridQuickEntryEnabled: computed(() => false),
+            whereFilterInput: ref(""),
+            currentWhereInput: computed(() => undefined),
+            orderByInput: ref(""),
+            rowStatusFilter: ref("all"),
+            confirmDangerousRowDeletion: computed(() => false),
+            pageSize: ref(100),
+            currentPage: ref(1),
+            getRowItem: (rowId) => ({ id: rowId, sourceIndex: rowId, data: result.value.rows[rowId]!, isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "normal" }),
+            prepareSaveBaseline: (changes) => largeValues!.prepareSaveBaseline(changes),
+            emit: vi.fn(),
+          });
         return () => h("div");
       },
     }),
@@ -84,7 +127,7 @@ function mountLargeValues(databaseType: DatabaseType, result: Ref<QueryResult>) 
   app.mount(document.createElement("div"));
   disposers.push(() => app.unmount());
   if (!largeValues) throw new Error("useDataGridLargeValues was not mounted");
-  return { largeValues, toast, item };
+  return { largeValues, toast, item, editor };
 }
 
 function previewResult(columnType = "bytea", value = "\\x00017f80ff...", originalBytes = 9645) {
@@ -99,6 +142,162 @@ function previewResult(columnType = "bytea", value = "\\x00017f80ff...", origina
 }
 
 describe("useDataGridLargeValues", () => {
+  it.each(["CLOB", "BLOB"])("keeps the first pending %s edit when loading a second complete LOB on the same row", async (columnType) => {
+    const binary = columnType === "BLOB";
+    const firstEdit = binary ? "0x00ff80" : "first pending edit";
+    const secondEdit = binary ? "0xaabbcc" : "second pending edit";
+    const firstData = (binary ? "11" : "a").repeat(2057);
+    const secondData = (binary ? "22" : "b").repeat(2061);
+    const result = previewResult(columnType, binary ? "0x11" : "first preview", 2057);
+    result.value.columns.push("DOCUMENT");
+    result.value.column_types!.push(columnType);
+    result.value.rows[0]!.push(binary ? "0x22" : "second preview");
+    result.value.large_value_context = { connectionId: "oceanbase-oracle-1", database: "MAXIMO" };
+    result.value.large_value_cells = [
+      { row_index: 0, column_index: 1, original_bytes: 2057, value_ref: "first" },
+      { row_index: 0, column_index: 2, original_bytes: 2061, value_ref: "second" },
+    ];
+    mocks.readLargeValueChunk.mockImplementation(async (options) => {
+      const bytes = options.valueRef === "first" ? 2057 : 2061;
+      return { status: "ok", data: options.valueRef === "first" ? firstData : secondData, next_offset: bytes, eof: true, value_kind: binary ? "binary" : "text" };
+    });
+    const { largeValues, editor } = mountLargeValues("oceanbase-oracle", result, true);
+    await expect(largeValues.hydrateLargeValueCell(1, 1)).resolves.toBe(true);
+    editor!.applyCellValue(0, 1, firstEdit);
+    await nextTick();
+    const row = result.value.rows[0];
+    await expect(largeValues.hydrateLargeValueCell(1, 2)).resolves.toBe(true);
+    await nextTick();
+    expect(editor!.dirtyRows.value.get(0)?.get(1)).toBe(firstEdit);
+    expect(result.value.rows[0]).toBe(row);
+    editor!.applyCellValue(0, 2, secondEdit);
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: [`both ${columnType} updates`], rollbackStatements: [] });
+    await editor!.previewChanges();
+    expect(mocks.prepareDataGridSave.mock.calls[0]![0].dirtyRows).toEqual([
+      [
+        0,
+        [
+          [1, firstEdit],
+          [2, secondEdit],
+        ],
+      ],
+    ]);
+    expect(result.value.rows[0]).toEqual([1, (binary ? "0x" : "") + firstData, (binary ? "0x" : "") + secondData]);
+    editor!.undoPendingChange();
+    expect(editor!.dirtyRows.value.get(0)?.get(1)).toBe(firstEdit);
+    expect(editor!.dirtyRows.value.get(0)?.has(2)).toBe(false);
+  });
+
+  it.each([
+    ["CLOB", "preview"],
+    ["CLOB", "failed preparation"],
+    ["BLOB", "preview"],
+    ["BLOB", "failed preparation"],
+  ])("keeps editor edits, deletes and undo after %s baseline reads during %s", async (columnType, action) => {
+    const binary = columnType === "BLOB";
+    const result = previewResult(columnType, binary ? "0x00" : "preview", 1);
+    result.value.rows.push([2, "second preview"]);
+    result.value.large_value_context = { connectionId: "oracle-1", database: "MAXIMO" };
+    result.value.large_value_cells = [
+      { row_index: 0, column_index: 1, original_bytes: 1, value_ref: "first" },
+      { row_index: 1, column_index: 1, original_bytes: 1, value_ref: "second" },
+    ];
+    const { editor } = mountLargeValues("oracle", result, true);
+    editor!.newRows.value = [[3, "pending insert"]];
+    editor!.applyCellValue(0, 1, "pending edit");
+    editor!.applyDeleteRow(1);
+    const rows = result.value.rows;
+    const first = rows[0];
+    const second = rows[1];
+    mocks.readLargeValueChunk.mockResolvedValue({ status: "ok", data: binary ? "00ff" : "complete", next_offset: binary ? 2 : 8, eof: true, value_kind: binary ? "binary" : "text" });
+    if (action === "preview") {
+      mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE APP_DATA", "DELETE APP_DATA"], rollbackStatements: [] });
+      await editor!.previewChanges();
+    } else {
+      mocks.prepareDataGridSave.mockRejectedValue(new Error("preparation failed"));
+      await editor!.saveChanges();
+    }
+    await nextTick();
+    expect(editor!.dirtyRows.value.get(0)?.get(1)).toBe("pending edit");
+    expect(editor!.deletedRows.value.has(1)).toBe(true);
+    expect(editor!.newRows.value).toEqual([[3, "pending insert"]]);
+    expect(editor!.hasPendingChanges.value).toBe(true);
+    expect(editor!.canUndoPendingChange.value).toBe(true);
+    expect(result.value.rows).toBe(rows);
+    expect(result.value.rows[0]).toBe(first);
+    expect(result.value.rows[1]).toBe(second);
+    expect(first![1]).toBe(binary ? "0x00ff" : "complete");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    editor!.undoPendingChange();
+    expect(editor!.deletedRows.value.has(1)).toBe(false);
+    expect(editor!.dirtyRows.value.get(0)?.get(1)).toBe("pending edit");
+  });
+  it("loads original LOB baselines before clear/delete SQL generation without replacing pending edits", async () => {
+    const result = previewResult("CLOB", "preview", 1);
+    result.value.large_value_context = { connectionId: "oracle-1", database: "MAXIMO", clientSessionId: "original-session" };
+    result.value.large_value_cells![0]!.value_ref = "original-locator";
+    const { largeValues } = mountLargeValues("oracle", result);
+    const dirtyRows = new Map([[0, new Map([[1, null]])]]);
+    mocks.readLargeValueChunk.mockResolvedValue({ status: "ok", data: "original complete", next_offset: 17, eof: true, value_kind: "text" });
+    await largeValues.prepareSaveBaseline({ dirtyRows, deletedRows: new Set() });
+    expect(result.value.rows[0]![1]).toBe("original complete");
+    expect(dirtyRows.get(0)!.get(1)).toBeNull();
+    expect(result.value.large_value_refs).toContain("original-locator");
+    expect(result.value.large_value_cells).toEqual([]);
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+    expect(mocks.readLargeValueChunk).toHaveBeenCalledWith(expect.objectContaining({ valueRef: "original-locator", connectionId: "oracle-1", clientSessionId: "original-session" }));
+  });
+
+  it("blocks save on expired snapshots and keeps every original preview for retry", async () => {
+    const result = previewResult("CLOB", "preview", 1);
+    result.value.large_value_context = { connectionId: "oracle-1", database: "MAXIMO" };
+    result.value.large_value_cells![0]!.value_ref = "expired-locator";
+    const { largeValues } = mountLargeValues("oracle", result);
+    const originalRows = result.value.rows;
+    mocks.readLargeValueChunk.mockResolvedValue({ status: "expired" });
+    await expect(largeValues.prepareSaveBaseline({ dirtyRows: new Map(), deletedRows: new Set([0]) })).rejects.toThrow("snapshot expired");
+    expect(result.value.rows).toBe(originalRows);
+    expect(result.value.large_value_cells![0]!.value_ref).toBe("expired-locator");
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+  });
+
+  it("refuses a save baseline owned by another connection even after hydration", async () => {
+    const result = previewResult("CLOB", "complete original", 1);
+    result.value.large_value_cells = [];
+    result.value.large_value_context = { connectionId: "different-connection", database: "MAXIMO" };
+    result.value.large_value_refs = ["retained-original-locator"];
+    const { largeValues } = mountLargeValues("oracle", result);
+    await expect(largeValues.prepareSaveBaseline({ dirtyRows: new Map([[0, new Map([[1, null]])]]), deletedRows: new Set() })).rejects.toThrow("connection is unavailable");
+    expect(mocks.readLargeValueChunk).not.toHaveBeenCalled();
+  });
+
+  it("preserves a concurrently hydrated cell when save baseline preparation finishes later", async () => {
+    const result = previewResult("CLOB", "first preview", 1);
+    result.value.columns.push("DOCUMENT");
+    result.value.column_types!.push("CLOB");
+    result.value.rows[0]!.push("second preview");
+    result.value.large_value_context = { connectionId: "oracle-1", database: "MAXIMO" };
+    result.value.large_value_cells = [
+      { row_index: 0, column_index: 1, original_bytes: 1, value_ref: "first-locator" },
+      { row_index: 0, column_index: 2, original_bytes: 1, value_ref: "second-locator" },
+    ];
+    result.value.large_value_refs = ["first-locator", "second-locator"];
+    let finishFirst!: (chunk: unknown) => void;
+    mocks.readLargeValueChunk.mockImplementation(({ valueRef }) =>
+      valueRef === "first-locator"
+        ? new Promise((resolve) => {
+            finishFirst = resolve;
+          })
+        : Promise.resolve({ status: "ok", data: "second complete", next_offset: 15, eof: true, value_kind: "text" }),
+    );
+    const { largeValues } = mountLargeValues("oracle", result);
+    const preparation = largeValues.prepareSaveBaseline({ dirtyRows: new Map([[0, new Map([[1, null]])]]), deletedRows: new Set() });
+    await expect(largeValues.hydrateLargeValueCell(1, 2)).resolves.toBe(true);
+    finishFirst({ status: "ok", data: "first complete", next_offset: 14, eof: true, value_kind: "text" });
+    await preparation;
+    expect(result.value.rows[0]).toEqual([1, "first complete", "second complete"]);
+    expect(result.value.large_value_cells).toEqual([]);
+  });
   it.each([
     ["postgres", 3],
     ["mysql", 1],

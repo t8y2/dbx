@@ -86,6 +86,59 @@ function structureRuntimeFixture(databaseType: "mysql" | "oceanbase-oracle" = "m
 }
 
 describe("useSidebarTreeExportRuntime", () => {
+  it("preserves the complete OceanBase trigger script through preview, copy, storage toggle and save", async () => {
+    const { scope, runtime, settingsStore } = structureRuntimeFixture("oceanbase-oracle");
+    const trigger = 'CREATE OR REPLACE TRIGGER "APP"."AUDIT" BEFORE INSERT ON "APP"."A"\nFOR EACH ROW WHEN (new.id > 0)\nBEGIN\n :new.id := :new.id + 1;\n NULL;\nEND;\n/\nALTER TRIGGER "APP"."AUDIT" DISABLE;';
+    const ddl = `-- Export scope: table and all visible table triggers (count: 1).\nCREATE TABLE "APP"."A" (id NUMBER) REPLICA_NUM=1;\n\n${trigger}`;
+    apiMock.getTableDdl.mockResolvedValue(ddl);
+    let saved = "";
+    vi.stubGlobal(
+      "Blob",
+      class {
+        constructor(parts: string[]) {
+          saved = parts.join("");
+        }
+      },
+    );
+    vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:ddl"), revokeObjectURL: vi.fn() });
+    const click = vi.fn();
+    vi.stubGlobal("document", { createElement: vi.fn(() => ({ href: "", download: "", click })) });
+    try {
+      await runtime.exportStructure();
+      expect(structurePreviewSql.value).toContain("visible table triggers (count: 1)");
+      expect(structurePreviewSql.value).toContain(trigger);
+      expect(structurePreviewSql.value).not.toContain("REPLICA_NUM");
+      settingsStore.editorSettings.excludeDdlStorage = false;
+      await nextTick();
+      expect(structurePreviewSql.value).toBe(`${ddl}\n`);
+      await runtime.copyStructurePreview();
+      expect(copyToClipboardMock).toHaveBeenLastCalledWith(`${ddl}\n`);
+      await runtime.saveStructurePreview();
+      expect(saved).toBe(`${ddl}\n`);
+      expect(click).toHaveBeenCalledOnce();
+      expect(apiMock.executeQuery).not.toHaveBeenCalled();
+    } finally {
+      scope.stop();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("shows incomplete trigger exports as errors without offering a partial script", async () => {
+    const { scope, runtime } = structureRuntimeFixture("oceanbase-oracle");
+    apiMock.getTableDdl.mockRejectedValue(new Error("Table DDL export incomplete: insufficient privileges"));
+    try {
+      await runtime.exportStructure();
+      expect(structurePreviewError.value).toContain("export incomplete");
+      expect(structurePreviewSql.value).toBe("");
+      await runtime.copyStructurePreview();
+      await runtime.saveStructurePreview();
+      expect(copyToClipboardMock).not.toHaveBeenCalled();
+      expect(apiMock.executeQuery).not.toHaveBeenCalled();
+    } finally {
+      scope.stop();
+    }
+  });
+
   it("toggles OceanBase structure exports from the original DDL without querying again", async () => {
     const scope = effectScope();
     const ddl = 'CREATE TABLE "T" ("ID" NUMBER) REPLICA_NUM=1 PCTFREE=0 PARTITION BY HASH("ID") PARTITIONS 2';

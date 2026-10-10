@@ -219,6 +219,8 @@ pub struct EditableStructureTrigger {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriggerInfo {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub event: String,
     pub timing: String,
     #[serde(default)]
@@ -232,6 +234,9 @@ pub struct TriggerInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableStructureSqlOptions {
+    /// Server product version, used for version-scoped OceanBase index capabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
     /// Driver profile reported by the connection (e.g. `"gbase8s"`). GBase 8s

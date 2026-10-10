@@ -411,7 +411,10 @@ pub(super) fn normalize_column_data_type(dialect: StructureDialect, data_type: &
         }
     }
 
-    if is_oracle_like(dialect) && is_oracle_lengthless_type(base_type) {
+    if is_oracle_like(dialect)
+        && is_oracle_lengthless_type(base_type)
+        && !(dialect == StructureDialect::Oracle && base_type.eq_ignore_ascii_case("float"))
+    {
         // Dameng/Oracle integer aliases do not accept MySQL-style display widths like INTEGER(11).
         return base_type.to_string();
     }

@@ -1461,6 +1461,7 @@ export interface SqlCompletionObject {
   parentName?: string;
   dataType?: string;
   signature?: string;
+  routineId?: string;
   comment?: string | null;
   applyName?: string;
   boost?: number;
@@ -1555,11 +1556,13 @@ export type SqlCompletionContextKind = "table" | "schema" | "catalog" | "routine
 
 export interface SqlCompletionContext {
   prefix: string;
+  prefixQuoted?: boolean;
   replacementRange?: { start: number; end: number };
   preferredValueKeywords?: string[];
   localVariables?: string[];
   qualifier?: string;
   qualifierParts?: string[];
+  qualifierQuoted?: boolean[];
   suggestTables: boolean;
   suggestColumns: boolean;
   suggestKeywords: boolean;
@@ -1574,6 +1577,8 @@ export interface SqlCompletionContext {
   insertTable?: string;
   insertDatabase?: string;
   insertSchema?: string;
+  insertTableQuoted?: boolean;
+  insertSchemaQuoted?: boolean;
   statementKind: SqlStatementKind;
   tableTriggerWord?: string;
   isGroupBy: boolean;
@@ -1627,9 +1632,10 @@ function isStandaloneSelectWildcard(sql: string, cursor: number, selectListColum
   return next.text === "," || next.text === ";" || (next.kind === "word" && SELECT_WILDCARD_FOLLOWING_CLAUSES.has(next.normalized));
 }
 
-export function prepareSqlCompletionReplacement(sql: string, cursor: number, context: Pick<SqlCompletionContext, "prefix" | "qualifier" | "replacementRange" | "selectListWildcardAfterCursor">, items: SqlCompletionItem[]): { from: number; items: SqlCompletionItem[] } {
+export function prepareSqlCompletionReplacement(sql: string, cursor: number, context: Pick<SqlCompletionContext, "prefix" | "prefixQuoted" | "qualifier" | "replacementRange" | "selectListWildcardAfterCursor">, items: SqlCompletionItem[]): { from: number; items: SqlCompletionItem[] } {
   const range = context.replacementRange;
-  const from = range && range.start >= 0 && range.start <= cursor && range.end === cursor ? range.start : cursor - context.prefix.length;
+  let from = range && range.start >= 0 && range.start <= cursor && range.end === cursor ? range.start : cursor - context.prefix.length;
+  if (!range && context.prefixQuoted && SQL_COMPLETION_CLOSING_QUOTES[sql[from - 1] ?? ""] && items.some((item) => item.type === "function")) from--;
   const closingQuote = from < cursor ? SQL_COMPLETION_CLOSING_QUOTES[sql[from] ?? ""] : undefined;
   const replaceClosingQuote = sql[cursor] === closingQuote ? closingQuote : undefined;
   const replaceSelectWildcard = from === cursor && context.selectListWildcardAfterCursor === true;
@@ -1639,6 +1645,8 @@ export function prepareSqlCompletionReplacement(sql: string, cursor: number, con
     items: items.map((item) => {
       let prepared = item;
       const apply = item.apply ?? item.label;
+      // The replacement includes the opening quote, so CodeMirror must match it too.
+      if (closingQuote && item.type === "function") prepared = { ...prepared, filterText: `${sql[from]}${item.label.replaceAll(closingQuote, closingQuote + closingQuote)}` };
       if (closingQuote && item.type === "column" && !(apply.startsWith(sql[from] ?? "") && apply.endsWith(closingQuote)) && (context.qualifier || !apply.includes("."))) {
         const escaped = apply.replaceAll(closingQuote, closingQuote + closingQuote);
         prepared = { ...prepared, apply: `${sql[from]}${escaped}${closingQuote}` };
@@ -2713,6 +2721,8 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     localVariables,
     qualifier: insertInfo ? undefined : qualifier,
     qualifierParts: insertInfo ? undefined : qualifierParts,
+    qualifierQuoted: insertInfo ? undefined : trailingIdentifier?.qualifierQuoted,
+    prefixQuoted: trailingIdentifier?.prefixQuoted,
     suggestTables: insertInfo || dataTypeContext ? false : afterTableTrigger,
     suggestColumns,
     suggestKeywords: !exclusiveTableSuggestions && !exclusiveColumnSuggestions && !insertInfo && !inCallRoutineContext,
@@ -2727,6 +2737,8 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     insertTable: insertInfo?.table,
     insertDatabase: insertInfo?.database,
     insertSchema: insertInfo?.schema,
+    insertTableQuoted: insertInfo?.nameQuoted,
+    insertSchemaQuoted: insertInfo?.schemaQuoted,
     statementKind,
     tableTriggerWord: lastWord || undefined,
     isGroupBy: isInGroupByContext(beforeCursor),
@@ -2988,7 +3000,14 @@ function detectCompletionContextKind(options: {
   return "keyword";
 }
 
-function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseType): { start: number; prefix: string; qualifier?: string; qualifierParts?: string[] } | null {
+function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseType): { start: number; prefix: string; prefixQuoted?: boolean; qualifier?: string; qualifierParts?: string[]; qualifierQuoted?: boolean[] } | null {
+  if (databaseType === "oceanbase-oracle" && input.includes('"')) {
+    const tokens = tokenizeSqlSemantic(input, "oracle");
+    const tail = tokens[tokens.length - 1];
+    if (tail?.kind === "quoted_identifier" && tail.quote === '"' && tail.closed === false) {
+      return parseTrailingIdentifierContext(`${input}"`, databaseType);
+    }
+  }
   if (/\s$/.test(input)) return null;
   let i = input.length - 1;
   while (i >= 0 && /\s/.test(input[i] ?? "")) i--;
@@ -3022,19 +3041,23 @@ function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseTy
 
   if (parts.length >= 2 || endsWithDot) {
     const qualifierParts = (endsWithDot ? parts : parts.slice(0, -1)).map((part) => completionLookupIdentifier(part, databaseType));
-    const prefixPart = endsWithDot ? "" : unquoteIdentifier(parts[parts.length - 1] ?? "");
+    const rawPrefix = endsWithDot ? "" : unquoteIdentifier(parts[parts.length - 1] ?? "");
+    const prefixPart = databaseType === "oceanbase-oracle" ? rawPrefix.replaceAll('""', '"') : rawPrefix;
     const qualifierValue = qualifierParts.join(".");
     return {
       start,
       prefix: prefixPart,
       qualifier: qualifierValue || undefined,
       qualifierParts: qualifierParts.length > 0 ? qualifierParts : undefined,
+      qualifierQuoted: (endsWithDot ? parts : parts.slice(0, -1)).map((part) => part.startsWith('"')),
+      prefixQuoted: !endsWithDot && parts[parts.length - 1]?.startsWith('"'),
     };
   }
 
   return {
     start,
-    prefix: unquoteIdentifier(parts[0] ?? ""),
+    prefix: databaseType === "oceanbase-oracle" ? unquoteIdentifier(parts[0] ?? "").replaceAll('""', '"') : unquoteIdentifier(parts[0] ?? ""),
+    prefixQuoted: parts[0]?.startsWith('"'),
   };
 }
 
@@ -3312,7 +3335,7 @@ function detectComparisonLeftColumn(beforeCursor: string): string | undefined {
   return match?.[1];
 }
 
-function detectInsertColumnListContext(beforeCursor: string): { table: string; database?: string; schema?: string } | null {
+function detectInsertColumnListContext(beforeCursor: string): { table: string; database?: string; schema?: string; nameQuoted?: boolean; schemaQuoted?: boolean } | null {
   // Keep quoted identifiers intact so schema/table targets resolve to their
   // real names instead of placeholder string contents.
   const cleaned = beforeCursor.replace(/'[^']*'/g, "''");
@@ -3323,12 +3346,15 @@ function detectInsertColumnListContext(beforeCursor: string): { table: string; d
   const fullTable = match[1];
   if (!fullTable) return null;
   const parts = splitQualifiedNameParts(fullTable);
+  const rawParts = splitQualifiedNameRawParts(fullTable);
   const table = parts[parts.length - 1];
   if (!table) return null;
   return {
     table,
     database: parts.length >= 3 ? parts[parts.length - 3] : undefined,
     schema: parts.length >= 2 ? parts[parts.length - 2] : undefined,
+    nameQuoted: isQuotedIdentifier(rawParts[rawParts.length - 1]),
+    schemaQuoted: parts.length >= 2 ? isQuotedIdentifier(rawParts[rawParts.length - 2]) : undefined,
   };
 }
 
@@ -4498,6 +4524,8 @@ function buildSchemaItems(prefix: string, schemas: string[], dialect?: SqlComple
 }
 
 function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionObject[], dialect?: SqlCompletionApplyDialect, databaseType?: DatabaseType, currentSchema?: string, includeParams = true): SqlCompletionItem[] {
+  // A quote preference must not change an Oracle routine's exact identity.
+  if (isOracleCompletionDatabase(databaseType)) dialect = "oracle";
   if (completionQualifierIsReferencedTable(context)) return [];
   const onlyProcedures = context.contextKind === "exec";
   const onlyFunctions = context.suggestColumns && context.referencedTables.length > 0 && !context.qualifier;
@@ -4506,18 +4534,19 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
   return objects
     .filter((object) => {
       if (object.type === "sequence") {
-        return allowOracleSequences && objectMatchesCompletionContext(object, context);
+        return allowOracleSequences && objectMatchesCompletionContext(object, context, databaseType);
       }
-      return (!onlyProcedures || object.type === "procedure") && (!onlyFunctions || (object.type === "function" && object.name.toLowerCase().startsWith(context.prefix.toLowerCase()))) && objectMatchesCompletionContext(object, context);
+      return (!onlyProcedures || object.type === "procedure") && (!onlyFunctions || (object.type === "function" && object.name.toLowerCase().startsWith(context.prefix.toLowerCase()))) && objectMatchesCompletionContext(object, context, databaseType);
     })
     .map((object) => {
-      const qualifiedByContext = objectIsQualifiedByContext(object, context);
-      const objectInCurrentSchema = !!currentSchema && !!object.schema && normalizeIdentifierPart(object.schema) === normalizeIdentifierPart(currentSchema);
+      const qualifiedByContext = objectIsQualifiedByContext(object, context, databaseType);
+      const objectInCurrentSchema = !!currentSchema && !!object.schema && (databaseType === "oceanbase-oracle" ? object.schema === currentSchema : normalizeIdentifierPart(object.schema) === normalizeIdentifierPart(currentSchema));
       const suppliedApplyName = object.applyName ? quoteCompletionRoutineName(object.applyName, dialect) : undefined;
+      const oceanBaseApplyName = databaseType === "oceanbase-oracle" ? [...(object.schema && !objectInCurrentSchema ? [object.schema] : []), ...(object.parentName ? [object.parentName] : []), object.name].map((part) => quoteCompletionRoutineIdentifier(part, dialect)).join(".") : undefined;
       const applyName =
-        qualifiedByContext || (context.qualifier && object.schema?.toLowerCase() === context.qualifier.toLowerCase())
+        qualifiedByContext || (context.qualifier && (databaseType === "oceanbase-oracle" ? object.schema === oceanBaseRoutineQualifierParts(context)[0] : object.schema?.toLowerCase() === context.qualifier.toLowerCase()))
           ? quoteCompletionRoutineIdentifier(object.name, dialect)
-          : (suppliedApplyName ?? (object.schema && !objectInCurrentSchema ? `${quoteCompletionRoutineIdentifier(object.schema, dialect)}.${quoteCompletionRoutineIdentifier(object.name, dialect)}` : quoteCompletionRoutineIdentifier(object.name, dialect)));
+          : (oceanBaseApplyName ?? suppliedApplyName ?? (object.schema && !objectInCurrentSchema ? `${quoteCompletionRoutineIdentifier(object.schema, dialect)}.${quoteCompletionRoutineIdentifier(object.name, dialect)}` : quoteCompletionRoutineIdentifier(object.name, dialect)));
       const locationDetail = object.type === "trigger" && object.parentName ? `trigger on ${object.parentName}` : object.parentName ? `${object.type} in ${object.parentName}` : object.schema ? `${object.type} in ${object.schema}` : object.type;
       const signature = object.signature?.trim();
       const detail = [locationDetail, signature ? `(${signature})` : undefined, object.dataType ? `[${object.dataType}]` : undefined].filter(Boolean).join("  ");
@@ -4529,9 +4558,9 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
         type: object.type === "sequence" ? ("variable" as const) : ("function" as const),
         detail,
         info: buildRoutineInfo(object),
-        apply: object.type === "trigger" || object.type === "package" || object.type === "sequence" ? applyName : buildRoutineApply(applyName, object.signature, includeParams),
+        apply: object.type === "trigger" || object.type === "package" || object.type === "sequence" || (databaseType === "oceanbase-oracle" && object.signature == null) ? applyName : buildRoutineApply(applyName, object.signature, includeParams),
         boost: computeBoost(object.name, context.prefix) + typeBoost + schemaBoost,
-        dedupeKey: signature ? `${baseDedupeKey ?? object.name}(${signature})` : baseDedupeKey,
+        dedupeKey: object.routineId ? JSON.stringify([applyName, object.routineId]) : signature ? `${baseDedupeKey ?? object.name}(${signature})` : baseDedupeKey,
         // Preserve exact routine matches before the capped candidate list is truncated.
         exactMatch: !!context.prefix && object.name.toLowerCase() === context.prefix.toLowerCase(),
       };
@@ -4656,8 +4685,16 @@ function buildOracleSequencePseudoColumnItems(prefix: string, keywordCase?: SqlK
     });
 }
 
-function objectIsQualifiedByContext(object: SqlCompletionObject, context: SqlCompletionContext): boolean {
+function oceanBaseRoutineQualifierParts(context: SqlCompletionContext): string[] {
+  return (context.qualifierParts ?? context.qualifier?.split(".") ?? []).map((part, index) => (context.qualifierQuoted?.[index] ? part.replaceAll('""', '"') : part.toUpperCase()));
+}
+
+function objectIsQualifiedByContext(object: SqlCompletionObject, context: SqlCompletionContext, databaseType?: DatabaseType): boolean {
   if (!context.qualifier || !object.parentName) return false;
+  if (databaseType === "oceanbase-oracle") {
+    const parts = oceanBaseRoutineQualifierParts(context);
+    return object.parentName === parts[parts.length - 1] && (parts.length === 1 || (object.parentSchema ?? object.schema) === parts[parts.length - 2]);
+  }
   const qualifier = context.qualifier.toLowerCase();
   const qualifierParts = qualifier.split(".").filter(Boolean);
   const qualifierSchema = qualifierParts.length > 1 ? qualifierParts[qualifierParts.length - 2] : undefined;
@@ -4665,8 +4702,14 @@ function objectIsQualifiedByContext(object: SqlCompletionObject, context: SqlCom
   return object.parentName.toLowerCase() === qualifier || (!!qualifierPackage && object.parentName.toLowerCase() === qualifierPackage && (!qualifierSchema || !object.parentSchema || object.parentSchema.toLowerCase() === qualifierSchema));
 }
 
-function objectMatchesCompletionContext(object: SqlCompletionObject, context: SqlCompletionContext): boolean {
+function objectMatchesCompletionContext(object: SqlCompletionObject, context: SqlCompletionContext, databaseType?: DatabaseType): boolean {
   if (context.oracleTableFunctionContext && object.type !== "function") return false;
+  if (databaseType === "oceanbase-oracle") {
+    const prefixMatches = context.prefixQuoted ? object.name.startsWith(context.prefix) : matchesPrefix(object.name, context.prefix);
+    if (!context.qualifier) return prefixMatches;
+    const parts = oceanBaseRoutineQualifierParts(context);
+    return prefixMatches && (object.parentName ? objectIsQualifiedByContext(object, context, databaseType) : parts.length === 1 && object.schema === parts[0]);
+  }
   if (object.type === "sequence") {
     if (context.qualifier) {
       const qualifier = context.qualifier.toLowerCase();
@@ -5276,7 +5319,10 @@ function columnsForInsertTarget(context: SqlCompletionContext, columnsByTable: M
   const schemaKey = context.insertSchema ? normalizeIdentifierPart(context.insertSchema) : undefined;
   const databaseKey = context.insertDatabase ? normalizeIdentifierPart(context.insertDatabase) : undefined;
   const qualifiedKey = schemaKey ? normalizeCompletionKey(`${context.insertDatabase ? `${context.insertDatabase}.` : ""}${context.insertSchema}.${context.insertTable}`) : undefined;
+  const reference = { name: context.insertTable, schema: context.insertSchema, nameQuoted: context.insertTableQuoted, schemaQuoted: context.insertSchemaQuoted };
   return collectCompletionColumns(columnsByTable).filter((column) => {
+    const scopedMatch = matchesOceanBaseCompletionCacheKey(column.key, reference);
+    if (scopedMatch !== undefined) return scopedMatch;
     if (normalizeIdentifierPart(column.table) !== tableKey) return false;
     if (!schemaKey) return true;
     if (!databaseKey && column.schema && normalizeIdentifierPart(column.schema) === schemaKey) return true;
@@ -5414,6 +5460,8 @@ function referencedTableMatchesColumnQualifier(table: SqlCompletionReferencedTab
 }
 
 function columnMatchesReferencedTable(column: SqlCompletionColumn & { key: string }, table: SqlCompletionReferencedTable): boolean {
+  const scopedMatch = matchesOceanBaseCompletionCacheKey(column.key, table);
+  if (scopedMatch !== undefined) return scopedMatch;
   if (normalizeIdentifierPart(column.table) !== normalizeIdentifierPart(table.name)) return false;
   if (!table.schema) return true;
   return columnMatchesQualifiedTable(column, { database: table.database, schema: table.schema, table: table.name });
@@ -5488,7 +5536,26 @@ function buildJoinConditionItems(context: SqlCompletionContext, columnsByTable: 
   return items;
 }
 
+type CompletionCacheTableReference = { name: string; schema?: string | null; nameQuoted?: boolean; schemaQuoted?: boolean };
+
+function oceanBaseCompletionReferenceKey(table: CompletionCacheTableReference): string {
+  const schema = table.schema ? (table.schemaQuoted ? table.schema : table.schema.toUpperCase()) : null;
+  const name = table.nameQuoted ? table.name : table.name.toUpperCase();
+  return `oceanbase-oracle:${JSON.stringify([schema, name, !!table.schemaQuoted, !!table.nameQuoted])}:`;
+}
+
+export function oceanBaseCompletionCacheKey(table: CompletionCacheTableReference, currentSchema?: string | null): string {
+  return `${oceanBaseCompletionReferenceKey(table)}${JSON.stringify(currentSchema ?? null)}`;
+}
+
+export function matchesOceanBaseCompletionCacheKey(key: string, table: CompletionCacheTableReference, currentSchema?: string): boolean | undefined {
+  if (!key.startsWith("oceanbase-oracle:[")) return undefined;
+  return currentSchema === undefined ? key.startsWith(oceanBaseCompletionReferenceKey(table)) : key === oceanBaseCompletionCacheKey(table, currentSchema);
+}
+
 function columnsForReferencedTable(table: SqlCompletionReferencedTable, columnsByTable: Map<string, SqlCompletionColumn[]>): SqlCompletionColumn[] {
+  const scopedColumns = [...columnsByTable].filter(([key]) => matchesOceanBaseCompletionCacheKey(key, table));
+  if (scopedColumns.length > 0) return scopedColumns.length === 1 ? applyReferencedColumnAliases(table, scopedColumns[0]![1]) : [];
   const keys = table.schema ? [table.database ? `${table.database}.${table.schema}.${table.name}` : undefined, `${table.schema}.${table.name}`, table.name].filter((key): key is string => !!key) : [table.name];
   for (const key of keys) {
     const columns = columnsByTable.get(key);
@@ -5499,6 +5566,8 @@ function columnsForReferencedTable(table: SqlCompletionReferencedTable, columnsB
 
 function foreignKeysForReferencedTable(table: SqlCompletionReferencedTable, foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>): SqlCompletionForeignKey[] {
   if (!foreignKeysByTable) return [];
+  const scopedKeys = [...foreignKeysByTable].filter(([key]) => matchesOceanBaseCompletionCacheKey(key, table));
+  if (scopedKeys.length > 0) return scopedKeys.length === 1 ? scopedKeys[0]![1] : [];
   const keys = table.schema ? [table.database ? `${table.database}.${table.schema}.${table.name}` : undefined, `${table.schema}.${table.name}`, table.name].filter((key): key is string => !!key) : [table.name];
   for (const key of keys) {
     const foreignKeys = foreignKeysByTable.get(key);

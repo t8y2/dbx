@@ -153,7 +153,7 @@ import type {
 import type { DmlChangePreviewSqlOptions, DmlChangePreviewSqlResult } from "@/lib/sql/dmlChangePreview";
 import type { DataGridExtractRequest, DataGridExtractResult } from "@/lib/dataGrid/dataGridCopyExtractor";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
-import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, SchemaSyncSqlPlan, SelectedSchemaDiffInput, GenerateSchemaSyncPlanOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
+import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, SchemaSyncSqlPlan, SelectedSchemaDiffInput, GenerateSchemaSyncPlanOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff, SchemaDiffRoutineValidation } from "@/lib/schema/schemaDiff";
 import type { BuildCreatePartitionedTableSqlOptions, BuildTableOwnerChangeSqlOptions, BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, SqliteTableStructureChangePreview, TablePartitionSqlOptions, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
 import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
@@ -1079,6 +1079,10 @@ export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
   return invoke("complete_app_close", { action });
 }
 
+export async function oracleJobs(connectionId: string, database: string, request: import("@/lib/database/oracleJobs").OracleJobsRequest): Promise<import("@/lib/database/oracleJobs").OracleJobsResponse> {
+  return invoke("oracle_jobs", { connectionId, database, request });
+}
+
 export async function requestAppClose(): Promise<void> {
   return invoke("request_app_close_from_window_controls");
 }
@@ -1777,6 +1781,14 @@ export async function getObjectSource(connectionId: string, database: string, sc
   });
 }
 
+export async function oracleUserAdmin(connectionId: string, database: string, request: import("@/lib/database/oracleUserAdmin").OracleUserRequest): Promise<import("@/lib/database/oracleUserAdmin").OracleUserResponse> {
+  return invoke("oracle_user_admin", { connectionId, database, request });
+}
+
+export async function oracleRoleAdmin(connectionId: string, database: string, request: import("@/lib/database/oracleRoleAdmin").OracleRoleRequest): Promise<import("@/lib/database/oracleRoleAdmin").OracleRoleResponse> {
+  return invoke("oracle_role_admin", { connectionId, database, request });
+}
+
 export async function getEventInfo(connectionId: string, database: string, schema: string, name: string): Promise<MysqlEventInfo> {
   return invoke("get_event_info", { connectionId, database, schema, name });
 }
@@ -1792,7 +1804,11 @@ export async function listSchemaInfos(connectionId: string, database: string): P
 export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
   return invoke("get_custom_type_details", { connectionId, database, schema, name });
 }
-export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
+
+export async function getOracleTypeDetails(connectionId: string, database: string, schema: string, name: string, objectType: "TYPE" | "TYPE_BODY", executionId?: string): Promise<import("@/types/oracleTypes").OracleTypeDetails> {
+  return invoke("get_oracle_type_details", { connectionId, database, schema, name, objectType, executionId });
+}
+export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string, currentSchema?: string): Promise<ColumnInfo[]> {
   return invoke("get_columns", {
     connectionId,
     database,
@@ -1800,6 +1816,7 @@ export async function getColumns(connectionId: string, database: string, schema:
     table,
     catalog,
     clientSessionId,
+    currentSchema,
   });
 }
 
@@ -2024,6 +2041,22 @@ export async function cancelConditionalUpdate(executionId: string): Promise<Cond
   return invoke("cancel_conditional_update", { executionId });
 }
 
+export async function readLargeValueChunk(request: import("./http").LargeValueRequest): Promise<import("./http").LargeValueChunk> {
+  return invoke("read_large_value_chunk", { request });
+}
+
+export async function releaseLargeValue(request: import("./http").LargeValueRequest): Promise<boolean> {
+  return invoke("release_large_value", { request });
+}
+
+export async function downloadLargeValue(request: import("./http").LargeValueRequest, filePath: string): Promise<void> {
+  await invoke("download_large_value", { request, filePath });
+}
+
+export async function exportSnapshotResult(request: import("./http").SnapshotExportRequest, filePath: string): Promise<void> {
+  await invoke("export_snapshot_result", { request, filePath });
+}
+
 export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string): Promise<boolean> {
   return invoke("close_query_session", {
     connectionId,
@@ -2043,7 +2076,7 @@ export async function closeClientConnectionSession(connectionId: string, databas
   });
 }
 
-export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string, timeoutSecs?: number, useTransaction?: boolean): Promise<QueryResult> {
+export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string, timeoutSecs?: number, useTransaction?: boolean, boundStatements?: BlobBoundStatement[]): Promise<QueryResult> {
   return invoke("execute_batch", {
     connectionId,
     database,
@@ -2051,6 +2084,7 @@ export async function executeBatch(connectionId: string, database: string, state
     schema,
     timeoutSecs,
     useTransaction,
+    boundStatements,
   });
 }
 
@@ -2068,13 +2102,14 @@ export async function executeScriptWith2pc(connectionId: string, database: strin
   });
 }
 
-export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string, catalog?: string): Promise<QueryResult> {
+export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string, catalog?: string, boundStatements?: BlobBoundStatement[]): Promise<QueryResult> {
   return invoke("execute_in_transaction", {
     connectionId,
     database,
     statements,
     schema,
     catalog,
+    boundStatements,
   });
 }
 
@@ -2094,6 +2129,7 @@ export async function executeInManualTransaction(
   classificationSql?: string,
   executionId?: string,
   timeoutSecs?: number,
+  boundStatements?: BlobBoundStatement[],
 ): Promise<QueryResult[]> {
   return invokeBackend("execute_in_manual_transaction", {
     txnSessionId,
@@ -2107,6 +2143,7 @@ export async function executeInManualTransaction(
     classificationSql,
     executionId,
     timeoutSecs,
+    boundStatements,
   });
 }
 
@@ -2327,6 +2364,38 @@ export async function buildCreatePartitionedTableSql(options: BuildCreatePartiti
   return invoke("build_create_partitioned_table_sql", { options: options.options, partitioning: options.partitioning });
 }
 
+export async function previewCheckChange(connectionId: string, database: string, change: import("@/types/constraintChange").CheckChange): Promise<import("@/types/constraintChange").CheckChangePreview> {
+  return invoke("preview_check_change", { connectionId, database, change });
+}
+
+export async function applyCheckChange(connectionId: string, database: string, change: import("@/types/constraintChange").CheckChange, revision: string): Promise<import("@/types/constraintChange").CheckChangeResult> {
+  return invoke("apply_check_change", { connectionId, database, change, revision });
+}
+
+export async function previewUniqueChange(connectionId: string, database: string, change: import("@/types/constraintChange").UniqueChange): Promise<import("@/types/constraintChange").UniqueChangePreview> {
+  return invoke("preview_unique_change", { connectionId, database, change });
+}
+
+export async function applyUniqueChange(connectionId: string, database: string, change: import("@/types/constraintChange").UniqueChange, revision: string): Promise<import("@/types/constraintChange").UniqueChangeResult> {
+  return invoke("apply_unique_change", { connectionId, database, change, revision });
+}
+
+export async function previewForeignKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").ForeignKeyChange): Promise<import("@/types/constraintChange").ForeignKeyChangePreview> {
+  return invoke("preview_foreign_key_change", { connectionId, database, change });
+}
+
+export async function applyForeignKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").ForeignKeyChange, revision: string): Promise<import("@/types/constraintChange").ForeignKeyChangeResult> {
+  return invoke("apply_foreign_key_change", { connectionId, database, change, revision });
+}
+
+export async function previewPrimaryKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").PrimaryKeyChange): Promise<import("@/types/constraintChange").ConstraintChangePreview> {
+  return invoke("preview_primary_key_change", { connectionId, database, change });
+}
+
+export async function applyPrimaryKeyChange(connectionId: string, database: string, change: import("@/types/constraintChange").PrimaryKeyChange, revision: string): Promise<import("@/types/constraintChange").ConstraintChangeResult> {
+  return invoke("apply_primary_key_change", { connectionId, database, change, revision });
+}
+
 export async function previewSqliteTableStructureChange(connectionId: string, database: string, options: BuildTableStructureChangeSqlOptions): Promise<SqliteTableStructureChangePreview> {
   return invoke("preview_sqlite_table_structure_change", {
     connectionId,
@@ -2367,12 +2436,19 @@ export interface DataGridSaveGuard {
   message: string;
 }
 
+export interface BlobBoundStatement {
+  previewSql: string;
+  sql: string;
+  blobParameters: string[];
+}
+
 export interface DataGridSavePreparation {
   validationError?: string;
   statements: string[];
   rollbackStatements: string[];
   executionSchema?: string;
   keylessGuards?: DataGridSaveGuard[];
+  boundStatements?: BlobBoundStatement[];
 }
 
 export async function prepareDataGridSave(options: DataGridSaveStatementOptions, driverProfile?: string): Promise<DataGridSavePreparation> {
@@ -2628,6 +2704,10 @@ export async function generateSchemaSyncPlan(input: SelectedSchemaDiffInput, opt
 
 export async function listFunctions(connectionId: string, database: string, schema: string): Promise<FunctionInfo[]> {
   return invoke("list_functions", { connectionId, database, schema });
+}
+
+export async function validateSchemaDiffRoutines(connectionId: string, database: string, schema: string, expected: FunctionDiff[], preflight = false): Promise<SchemaDiffRoutineValidation[]> {
+  return invoke("validate_schema_diff_routines", { connectionId, database, schema, expected, preflight });
 }
 
 export async function listSequences(connectionId: string, database: string, schema: string, withLastValues: boolean): Promise<SequenceInfo[]> {
@@ -5370,7 +5450,7 @@ export interface HistoryConnectionOption extends HistoryConnectionFilter {
 export type TaskType = "transfer";
 export type TaskLifecycleOwner = "tauri" | "web";
 export type TaskRunStatus = "running" | "succeeded" | "partial_failed" | "failed" | "cancelled";
-export type TaskItemKind = "table" | "view" | "materialized_view" | "procedure" | "function" | "trigger" | "sequence" | "event" | "object";
+export type TaskItemKind = "table" | "view" | "materialized_view" | "procedure" | "function" | "trigger" | "sequence" | "event" | "object" | "package" | "package_body" | "synonym" | "public_synonym" | "db_link" | "public_db_link" | "type" | "type_body";
 export type TaskItemStatus = "pending" | "running" | "succeeded" | "skipped" | "failed" | "cancelled" | "not_started" | "incomplete";
 export type TaskRowCountState = "not_applicable" | "known" | "unknown" | "incomplete";
 export type TransferRunContent = "structure_and_data" | "structure_only" | "data_only";
@@ -5602,7 +5682,29 @@ export type TransferMode = "append" | "overwrite" | "upsert";
 export type TransferTableNameCase = "preserve" | "lower" | "upper";
 export type TransferOwnershipPolicy = "preserve" | "skip" | "reassignMissing";
 export type TransferContent = "structureAndData" | "structureOnly" | "dataOnly";
-export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT";
+export type TransferObjectConflictPolicy = "skip" | "replace";
+export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "PACKAGE_BODY" | "SYNONYM" | "PUBLIC_SYNONYM" | "DB_LINK" | "PUBLIC_DB_LINK" | "TYPE" | "TYPE_BODY";
+
+export interface TransferDatabaseLinkConfig {
+  objectType: "DB_LINK" | "PUBLIC_DB_LINK";
+  name: string;
+  sourceOwner: string;
+  targetName: string;
+  targetScope: "private" | "public" | "tenant" | "";
+  authentication: "fixedUser";
+  username: string;
+  host: string;
+  protocol?: "OB" | "OCI";
+  tenant?: string;
+  cluster?: string;
+  credentialAvailable: boolean;
+}
+
+export interface TransferDatabaseLinkCredential {
+  objectType: "DB_LINK" | "PUBLIC_DB_LINK";
+  name: string;
+  password: string;
+}
 
 export interface TransferObjectSelection {
   objectType: TransferObjectKind;
@@ -5627,6 +5729,8 @@ export interface TransferRequest {
   targetTableNameCase: TransferTableNameCase;
   quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
+  objectConflictPolicy?: TransferObjectConflictPolicy;
+  databaseLinks?: TransferDatabaseLinkConfig[];
   batchSize: number;
   /**
    * Optional per-source-table transfer filter.
@@ -5675,6 +5779,37 @@ export interface TransferOwnershipPreview {
   };
   /** Structure-plan preview: present for structure-only transfers. */
   structure?: TransferStructurePreview;
+  schemaObjects?: TransferSchemaObjectPreview;
+}
+
+export interface TransferSchemaObjectPlan {
+  objectType: TransferObjectKind;
+  name: string;
+  sourceSchema: string;
+  targetSchema: string;
+  action: "create" | "replace" | "skip" | "blocked";
+  ddl: string;
+  dependencies: Array<{ owner: string; name: string; objectType: string; available: boolean }>;
+  warnings: string[];
+  errors: string[];
+  credentialRequired?: boolean;
+  executionPhase?: "beforeTables" | "afterObjects";
+}
+
+export interface TransferSchemaObjectPreview {
+  items: TransferSchemaObjectPlan[];
+  canExecute: boolean;
+}
+
+export interface TransferObjectResult {
+  objectType: TransferObjectKind;
+  name: string;
+  schema: string;
+  status: "transferred" | "created" | "replaced" | "skipped" | "failed" | "not_started";
+  compileStatus?: string;
+  sourceVerified?: boolean;
+  error?: string;
+  recovery?: string;
 }
 
 export interface TransferProgress {
@@ -5688,9 +5823,10 @@ export interface TransferProgress {
   error: string | null;
   terminal: boolean;
   transferFailuresOmitted?: number;
+  objectResult?: TransferObjectResult;
 }
 
-export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void): Promise<void> {
+export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void, databaseLinkCredentials?: TransferDatabaseLinkCredential[]): Promise<void> {
   return new Promise((resolve, reject) => {
     let unlisten: UnlistenFn | null = null;
     void (async () => {
@@ -5704,9 +5840,16 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
           }
         });
 
-        await invoke("start_transfer", { request });
+        try {
+          await invoke("start_transfer", { request, databaseLinkCredentials });
+        } finally {
+          for (const credential of databaseLinkCredentials ?? []) credential.password = "";
+          databaseLinkCredentials = undefined;
+        }
         onStarted?.();
       } catch (e) {
+        for (const credential of databaseLinkCredentials ?? []) credential.password = "";
+        databaseLinkCredentials = undefined;
         unlisten?.();
         reject(e instanceof BackendErrorException ? e : new BackendErrorException(e));
       }

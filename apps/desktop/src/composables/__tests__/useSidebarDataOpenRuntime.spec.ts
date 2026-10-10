@@ -431,6 +431,37 @@ describe("useSidebarDataOpenRuntime", () => {
     });
   });
 
+  it("waits for cold OceanBase Oracle LOB metadata before dispatching the first table query", async () => {
+    mocks.databaseType = "oceanbase-oracle";
+    let releaseMetadata!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseMetadata = resolve;
+    });
+    const loadMetadata = mocks.loadTableMetadata.getMockImplementation()!;
+    mocks.loadTableMetadata.mockImplementation(async (...args) => {
+      await gate;
+      const loaded = await loadMetadata(...args);
+      loaded.metadata.columns = [
+        { name: "C_PAYLOAD", data_type: "CLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+        { name: "B_PAYLOAD", data_type: "BLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ];
+      loaded.metadata.primaryKeys = [];
+      return loaded;
+    });
+    mocks.executeTabSql.mockImplementation(async () => {
+      // The real queryStore derives tableDataPreview from this table metadata.
+      expect(mocks.tabs[0]?.tableMeta?.columns.map((column) => column.data_type)).toEqual(["CLOB", "BLOB"]);
+    });
+    const opening = useSidebarDataOpenRuntime().openData(tableNode);
+    await vi.waitFor(() => expect(mocks.loadTableMetadata).toHaveBeenCalled());
+    expect(mocks.executeTabSql).not.toHaveBeenCalled();
+    expect(mocks.buildTableSelectSql).not.toHaveBeenCalled();
+    releaseMetadata();
+    await opening;
+    expect(mocks.executeTabSql).toHaveBeenCalledOnce();
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ columns: ["C_PAYLOAD", "B_PAYLOAD"] }));
+  });
+
   it.each(["nebula", "neo4j"])("waits for %s properties before building the first table query", async (databaseType) => {
     mocks.databaseType = databaseType;
     let releaseMetadata: () => void = () => {};

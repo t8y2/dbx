@@ -73,6 +73,8 @@ pub struct CloseClientConnectionSessionRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecuteBatchRequest {
+    #[serde(default)]
+    pub bound_statements: Option<Vec<dbx_core::db::BlobBoundStatement>>,
     pub connection_id: String,
     pub database: String,
     pub statements: Vec<String>,
@@ -300,6 +302,169 @@ pub struct PreviewSqliteTableStructureChangeRequest {
     pub connection_id: String,
     pub database: String,
     pub options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimaryKeyChangeRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub change: dbx_core::schema::oracle_constraint_change::PrimaryKeyChange,
+    pub revision: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKeyChangeRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub change: dbx_core::schema::oracle_constraint_change::ForeignKeyChange,
+    pub revision: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckChangeRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub change: dbx_core::schema::oracle_constraint_change::CheckChange,
+    pub revision: Option<String>,
+}
+
+pub async fn preview_check_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<CheckChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::CheckChangePreview>, AppError> {
+    dbx_core::schema::oracle_constraint_change::preview_check_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UniqueChangeRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub change: dbx_core::schema::oracle_constraint_change::UniqueChange,
+    pub revision: Option<String>,
+}
+pub async fn preview_unique_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<UniqueChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::UniqueChangePreview>, AppError> {
+    dbx_core::schema::oracle_constraint_change::preview_unique_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn apply_check_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<CheckChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::CheckChangeResult>, AppError> {
+    let revision = req.revision.ok_or_else(|| AppError::from("A preview revision is required.".to_string()))?;
+    dbx_core::schema::oracle_constraint_change::apply_check_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+        &revision,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn apply_unique_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<UniqueChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::UniqueChangeResult>, AppError> {
+    let revision = req.revision.ok_or_else(|| AppError::from("A preview revision is required.".to_string()))?;
+    dbx_core::schema::oracle_constraint_change::apply_unique_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+        &revision,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn preview_foreign_key_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ForeignKeyChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::ForeignKeyChangePreview>, AppError> {
+    dbx_core::schema::oracle_constraint_change::preview_foreign_key_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn apply_foreign_key_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ForeignKeyChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::ForeignKeyChangeResult>, AppError> {
+    let revision = req.revision.ok_or_else(|| AppError::from("A preview revision is required.".to_string()))?;
+    dbx_core::schema::oracle_constraint_change::apply_foreign_key_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+        &revision,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn preview_primary_key_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<PrimaryKeyChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::ConstraintChangePreview>, AppError> {
+    dbx_core::schema::oracle_constraint_change::preview_primary_key_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn apply_primary_key_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<PrimaryKeyChangeRequest>,
+) -> Result<Json<dbx_core::schema::oracle_constraint_change::ConstraintChangeResult>, AppError> {
+    let revision = req.revision.ok_or_else(|| AppError::from("A preview revision is required.".to_string()))?;
+    dbx_core::schema::oracle_constraint_change::apply_primary_key_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.change,
+        &revision,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
 }
 
 #[derive(Deserialize)]
@@ -646,6 +811,25 @@ pub async fn execute_batch(
     for statement in &req.statements {
         super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &database, statement, false).await?;
     }
+    if let Some(bound) = req.bound_statements.as_ref() {
+        for statement in bound {
+            super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &database, &statement.sql, false)
+                .await?;
+        }
+        return dbx_core::query::execute_blob_bound_statements(
+            &state.app,
+            &req.connection_id,
+            &database,
+            &req.statements,
+            bound,
+            req.schema.as_deref(),
+            req.use_transaction == Some(true),
+            req.timeout_secs,
+        )
+        .await
+        .map(Json)
+        .map_err(AppError::from);
+    }
     tracing::debug!(connection_id = %req.connection_id, "execute_batch");
     let result = dbx_core::query::execute_statements_with_transaction_option(
         &state.app,
@@ -675,6 +859,106 @@ pub async fn cancel_conditional_update(
     Json(req): Json<CancelRequest>,
 ) -> Json<dbx_core::query_cancel::CancellationWaitResult> {
     Json(state.app.running_queries.cancel_and_wait(&req.execution_id, CONDITIONAL_UPDATE_CANCEL_WAIT).await)
+}
+
+pub async fn read_large_value_chunk(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<dbx_core::query::LargeValueRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    dbx_core::query::request_large_value(&state.app, req, false).await.map(Json).map_err(AppError::from)
+}
+
+pub async fn release_large_value(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<dbx_core::query::LargeValueRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    dbx_core::query::request_large_value(&state.app, req, true).await.map(Json).map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeValueDownloadRequest {
+    pub request: dbx_core::query::LargeValueRequest,
+    pub file_name: String,
+}
+
+pub async fn prepare_large_value_download(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<LargeValueDownloadRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mut temporary = tempfile::NamedTempFile::new().map_err(|error| AppError::from(error.to_string()))?;
+    dbx_core::query::write_large_value_snapshot(&state.app, req.request, temporary.as_file_mut())
+        .await
+        .map_err(AppError::from)?;
+    let (_, path) = temporary.keep().map_err(|error| AppError::from(error.to_string()))?;
+    let download_id = uuid::Uuid::new_v4().to_string();
+    state.export_files.write().await.insert(
+        download_id.clone(),
+        crate::state::WebExportFile {
+            file_path: path.to_string_lossy().into_owned(),
+            download_filename: req.file_name,
+            format: "lob".to_string(),
+        },
+    );
+    let cleanup_state = state.clone();
+    let cleanup_id = download_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        if let Some(file) = cleanup_state.export_files.write().await.remove(&cleanup_id) {
+            let _ = tokio::fs::remove_file(file.file_path).await;
+        }
+    });
+    Ok(Json(serde_json::json!({ "downloadId": download_id })))
+}
+
+pub async fn download_large_value(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::response::Response, AppError> {
+    let file = state
+        .export_files
+        .write()
+        .await
+        .remove(&id)
+        .ok_or_else(|| AppError::from("LOB download expired".to_string()))?;
+    super::mongodb_import_export::export_file_response(file).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotExportDownloadRequest {
+    pub request: dbx_core::query::snapshot_export::SnapshotExportRequest,
+    pub file_name: String,
+}
+
+pub async fn prepare_snapshot_export(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SnapshotExportDownloadRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mut temporary = tempfile::NamedTempFile::new().map_err(|error| AppError::from(error.to_string()))?;
+    let format = req.request.format.clone();
+    dbx_core::query::snapshot_export::write_snapshot_export(&state.app, req.request, temporary.as_file_mut())
+        .await
+        .map_err(AppError::from)?;
+    let (_, path) = temporary.keep().map_err(|error| AppError::from(error.to_string()))?;
+    let download_id = uuid::Uuid::new_v4().to_string();
+    state.export_files.write().await.insert(
+        download_id.clone(),
+        crate::state::WebExportFile {
+            file_path: path.to_string_lossy().into_owned(),
+            download_filename: req.file_name,
+            format,
+        },
+    );
+    let cleanup_state = state.clone();
+    let cleanup_id = download_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        if let Some(file) = cleanup_state.export_files.write().await.remove(&cleanup_id) {
+            let _ = tokio::fs::remove_file(file.file_path).await;
+        }
+    });
+    Ok(Json(serde_json::json!({ "downloadId": download_id })))
 }
 
 pub async fn close_query_session(
@@ -746,6 +1030,21 @@ pub async fn execute_in_transaction(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ExecuteBatchRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
+    if let Some(bound) = req.bound_statements.as_ref() {
+        return dbx_core::query::execute_blob_bound_statements(
+            &state.app,
+            &req.connection_id,
+            &req.database,
+            &req.statements,
+            bound,
+            req.schema.as_deref(),
+            true,
+            req.timeout_secs,
+        )
+        .await
+        .map(Json)
+        .map_err(AppError::from);
+    }
     tracing::debug!(connection_id = %req.connection_id, "execute_in_transaction");
     let result = dbx_core::query::execute_statements_in_transaction(
         &state.app,
@@ -765,6 +1064,9 @@ pub async fn execute_script_with_2pc(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ExecuteBatchRequest>,
 ) -> Result<Json<dbx_core::query::SchemaDiffDeployResult>, AppError> {
+    if req.bound_statements.is_some() {
+        return Err(AppError::from("Bound BLOB saves must use a supported save execution endpoint.".to_string()));
+    }
     tracing::debug!(connection_id = %req.connection_id, "execute_script_with_2pc");
     // Single-connection real transaction (not per-statement auto-commit 2PC).
     let result = dbx_core::query::execute_schema_diff_deploy(
@@ -1355,6 +1657,7 @@ mod tests {
     async fn execute_script_with_2pc_returns_structured_result() {
         let (state, _dir) = test_web_state().await;
         let req = ExecuteBatchRequest {
+            bound_statements: None,
             connection_id: "conn-1".to_string(),
             database: "testdb".to_string(),
             statements: vec!["SELECT 1".to_string()],
@@ -1381,6 +1684,7 @@ mod tests {
     async fn execute_script_with_2pc_empty_statements_succeeds() {
         let (state, _dir) = test_web_state().await;
         let req = ExecuteBatchRequest {
+            bound_statements: None,
             connection_id: "conn-empty".to_string(),
             database: "testdb".to_string(),
             statements: vec![],
@@ -1404,6 +1708,7 @@ mod tests {
     async fn execute_script_with_2pc_propagates_structured_failure_fields() {
         let (state, _dir) = test_web_state().await;
         let req = ExecuteBatchRequest {
+            bound_statements: None,
             connection_id: "missing-conn".to_string(),
             database: "testdb".to_string(),
             statements: vec!["CREATE TABLE t1 (id INT)".to_string(), "CREATE TABLE t2 (id INT)".to_string()],
@@ -1429,6 +1734,7 @@ mod tests {
     async fn execute_script_with_2pc_blocks_unconfirmed_destructive_sql() {
         let (state, _dir) = test_web_state().await;
         let req = ExecuteBatchRequest {
+            bound_statements: None,
             connection_id: "missing-conn".to_string(),
             database: "testdb".to_string(),
             statements: vec!["DROP INDEX idx_old ON users".to_string()],

@@ -20,6 +20,10 @@ use dbx_core::types::{ColumnInfo, TableInfo};
 #[test]
 fn prepare_schema_diff_function_signature() {
     let options = SchemaDiffPreparationOptions {
+        routine_endpoints: None,
+        routine_context: None,
+        source_database_type: None,
+        source_schema: None,
         source_tables: vec![TableInfo {
             name: "t".to_string(),
             table_type: "TABLE".to_string(),
@@ -122,6 +126,10 @@ fn classify_sql_risk_function_signature() {
 #[test]
 fn schema_diff_preparation_field_names() {
     let result = prepare_schema_diff(SchemaDiffPreparationOptions {
+        routine_endpoints: None,
+        routine_context: None,
+        source_database_type: None,
+        source_schema: None,
         source_tables: vec![TableInfo {
             name: "t".to_string(),
             table_type: "TABLE".to_string(),
@@ -283,6 +291,8 @@ fn column_info_serialization_roundtrip() {
         name: "id".to_string(),
         data_type: "int".to_string(),
         resolved_schema: None,
+        resolved_table: None,
+        resolved_object_type: None,
         is_nullable: false,
         column_default: None,
         is_primary_key: true,
@@ -331,6 +341,8 @@ fn table_columns_result_serialization_contract() {
             name: "id".to_string(),
             data_type: "int".to_string(),
             resolved_schema: None,
+            resolved_table: None,
+            resolved_object_type: None,
             is_nullable: false,
             column_default: None,
             is_primary_key: true,

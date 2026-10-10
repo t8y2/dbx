@@ -4,7 +4,12 @@ use crate::models::connection::DatabaseType;
 use serde_json::json;
 
 fn column(name: &str, source_index: usize) -> DataGridExtractColumn {
-    DataGridExtractColumn { display_name: name.to_string(), source_name: Some(name.to_string()), source_index }
+    DataGridExtractColumn {
+        display_name: name.to_string(),
+        source_name: Some(name.to_string()),
+        source_index,
+        data_type: None,
+    }
 }
 
 fn request(extractor: DataGridExtractorId) -> DataGridExtractRequest {
@@ -49,6 +54,57 @@ fn temporal_insert_request() -> DataGridExtractRequest {
         ),
     });
     native
+}
+
+#[test]
+fn oracle_query_insert_uses_real_result_types_without_table_metadata() {
+    for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+        let mut value = serde_json::to_value(request(DataGridExtractorId::SqlInserts)).unwrap();
+        value["databaseType"] = serde_json::to_value(database_type).unwrap();
+        value["columns"] = json!([
+            {"displayName":"D","sourceIndex":0,"dataType":"DATE"},
+            {"displayName":"T","sourceIndex":1,"dataType":"TIMESTAMP"},
+            {"displayName":"Z","sourceIndex":2,"dataType":"TIMESTAMP WITH TIME ZONE"},
+            {"displayName":"TEXT","sourceIndex":3,"dataType":"VARCHAR2"}
+        ]);
+        value["selectedColumnIndexes"] = json!([2, 0, 1, 3]);
+        value["rows"] = json!([
+            [
+                "2026-10-10 13:14:15",
+                "2026-10-10 13:14:15.123456",
+                "2026-10-10 13:14:15.123456 -5:30",
+                "2026-10-10 13:14:15"
+            ],
+            [null, null, null, null]
+        ]);
+        let request = serde_json::from_value(value).unwrap();
+        let sql = extract_data_grid_selection(request).unwrap().text;
+        assert!(
+            sql.contains("TO_TIMESTAMP_TZ('2026-10-10 13:14:15.123456 -05:30', 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')")
+        );
+        assert!(sql.contains("TO_DATE('2026-10-10 13:14:15', 'YYYY-MM-DD HH24:MI:SS')"));
+        assert!(sql.contains("TO_TIMESTAMP('2026-10-10 13:14:15.123456', 'YYYY-MM-DD HH24:MI:SS.FF')"));
+        assert!(sql.contains(", '2026-10-10 13:14:15')"));
+        assert!(sql.contains("VALUES (NULL, NULL, NULL, NULL)"));
+    }
+}
+
+#[test]
+fn query_insert_result_types_preserve_metadata_priority_and_unknown_strings() {
+    let mut native = temporal_insert_request();
+    let mut value = serde_json::to_value(&native).unwrap();
+    value["columns"][1]["dataType"] = json!("DATE");
+    native = serde_json::from_value(value).unwrap();
+    let sql = extract_data_grid_selection(native).unwrap().text;
+    assert!(sql.contains("'it''s text'"));
+    let mut value = serde_json::to_value(request(DataGridExtractorId::SqlInserts)).unwrap();
+    value["databaseType"] = serde_json::to_value(DatabaseType::OceanbaseOracle).unwrap();
+    value["columns"][1]["dataType"] = json!("UNKNOWN");
+    value["rows"] = json!([[1, "2026-10-10 13:14:15"]]);
+    assert!(extract_data_grid_selection(serde_json::from_value(value).unwrap())
+        .unwrap()
+        .text
+        .contains("'2026-10-10 13:14:15'"));
 }
 
 #[test]
@@ -1174,7 +1230,7 @@ fn select_cells_falls_back_to_display_name_like_where_clause() {
         columns: None,
     });
     request.columns = vec![
-        DataGridExtractColumn { display_name: "id".to_string(), source_name: None, source_index: 0 },
+        DataGridExtractColumn { display_name: "id".to_string(), source_name: None, source_index: 0, data_type: None },
         column("name", 1),
     ];
     let mut where_request = request.clone();

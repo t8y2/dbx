@@ -370,7 +370,11 @@ fn sql_selected_data(context: &ExtractContext<'_>, for_update: bool) -> Result<S
         .collect();
     let column_types = included_indexes
         .iter()
-        .map(|index| context.selected_column_info[*index].map(|info| info.data_type.clone()))
+        .map(|index| {
+            context.selected_column_info[*index]
+                .map(|info| info.data_type.clone())
+                .or_else(|| context.selected_columns[*index].data_type.clone())
+        })
         .collect();
     let rows = context
         .request

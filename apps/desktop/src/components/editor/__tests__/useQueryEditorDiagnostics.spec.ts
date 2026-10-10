@@ -42,6 +42,16 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
   const view = shallowRef<EditorView | null>(currentView);
   const runtime: Options["runtime"] = { editorIsActive: true, executableStatementRangeCache: null, setSqlDiagnosticsEffect: StateEffect.define<SqlSemanticDiagnostic[]>(), diagnosticComp: null, buildSqlDiagnosticExtension: null, codeMirrorCompletionStatus: () => null };
   const settingsStore = { editorSettings: { sqlSemanticDiagnosticsEnabled: true } } as Options["settingsStore"];
+  const metadata = {
+    cachedTables: [],
+    cachedColumnsByTable: new Map(),
+    loadedColumnsByTable: new Set<string>(),
+    usesOracleSessionCompletionColumns: () => false,
+    findExactSemanticDiagnosticTable: vi.fn().mockResolvedValue(null),
+    completionCacheKey: (table: { name: string }) => table.name,
+    ensureColumnsForTable: vi.fn().mockResolvedValue(false),
+    isMissingTableMetadataError: () => false,
+  };
   let diagnostics!: ReturnType<typeof useQueryEditorDiagnostics>;
   const host = document.createElement("div");
   const app = createApp({
@@ -57,16 +67,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
         sqlBehaviorDialect: () => props.dialect,
         semanticCompletionEnabled: false,
         maxCompletionTables: 100,
-        metadata: {
-          cachedTables: [],
-          cachedColumnsByTable: new Map(),
-          loadedColumnsByTable: new Set(),
-          usesOracleSessionCompletionColumns: () => false,
-          findExactSemanticDiagnosticTable: vi.fn().mockResolvedValue(null),
-          completionCacheKey: (table) => table.name,
-          ensureColumnsForTable: vi.fn().mockResolvedValue(false),
-          isMissingTableMetadataError: () => false,
-        },
+        metadata,
       });
       return () => h("div");
     },
@@ -83,10 +84,22 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
     currentView.destroy();
     parent.remove();
   });
-  return { diagnostics, props, runtime, settingsStore, currentView, unmount };
+  return { diagnostics, props, runtime, settingsStore, currentView, unmount, metadata };
 }
 
 describe("QueryEditor diagnostic scheduling ownership", () => {
+  it("preserves the unqualified quoted OceanBase reference and selected schema through metadata loading", async () => {
+    const sql = 'SELECT MISSING FROM "Alias"';
+    const { diagnostics, metadata } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP", modelValue: sql });
+    analyze.mockResolvedValue({ tables: [{ name: "Alias", span: { start_line: 1, start_column: 21, end_line: 1, end_column: 27 } }], columns: [] });
+    metadata.findExactSemanticDiagnosticTable.mockResolvedValue({ name: "Alias", schema: "PUBLIC" });
+    diagnostics.scheduleSemanticDiagnostics(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(metadata.ensureColumnsForTable).toHaveBeenCalledWith(expect.objectContaining({ name: "Alias", nameQuoted: true }), undefined, expect.objectContaining({ schema: "APP" }));
+    expect(metadata.ensureColumnsForTable.mock.calls[0]![0].schema).toBeUndefined();
+    expect(buildDiagnostics).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ currentSchema: "APP" }));
+  });
+
   it("coalesces timers and shares the latest executable statement cache", async () => {
     const { diagnostics, currentView, runtime } = createHarness();
     diagnostics.scheduleSemanticDiagnostics(50);

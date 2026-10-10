@@ -23,6 +23,9 @@ pub mod mongodb_import_export;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
 pub mod nacos;
+pub mod oracle_jobs;
+pub mod oracle_role_admin;
+pub mod oracle_user_admin;
 pub mod plugins;
 pub mod prompt_template;
 pub mod query;

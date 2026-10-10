@@ -33,12 +33,12 @@ const KINGBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VI
 const VASTBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "TYPE"];
 
 const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"];
-const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"];
-const OCEANBASE_ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"];
+const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
+const OCEANBASE_ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
 const DAMENG_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"];
 const XUGU_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
 const FIREBIRD_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION_INTERNAL", "FUNCTION_UDF", "TRIGGER", "SEQUENCE", "INDEX", "PACKAGE"];
-const PACKAGE_MEMBER_EXPANSION_DATABASES = new Set<DatabaseType>(["oracle", "xugu"]);
+const PACKAGE_MEMBER_EXPANSION_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "xugu"]);
 
 const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   // postgres
@@ -112,7 +112,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
 ]);
 /**
  * Whether a kind is readable as object source for the given connection type.
- * TYPE/TYPE_BODY only have a real source implementation on Xugu; PostgreSQL-
+ * TYPE/TYPE_BODY have source implementations on Oracle, OceanBase Oracle and Xugu; PostgreSQL-
  * family databases list types without a CREATE TYPE getter this cycle.
  */
 function isSourceReadableObjectKind(kind: SidebarObjectKind, dbType?: DatabaseType): boolean {
@@ -133,7 +133,7 @@ export function databaseObjectCapabilities(dbType?: DatabaseType, compatibilityM
 const SCHEMA_DIFF_ROUTINE_KINDS = ["PROCEDURE", "FUNCTION"] as const;
 
 /** Same-dialect families with verified list_objects + get_object_source (or PG catalog) paths. */
-const SCHEMA_DIFF_ROUTINE_FAMILY = new Map<DatabaseType, "postgres" | "mysql" | "sqlserver">([
+const SCHEMA_DIFF_ROUTINE_FAMILY = new Map<DatabaseType, "postgres" | "mysql" | "sqlserver" | "oracle">([
   ["postgres", "postgres"],
   ["opengauss", "postgres"],
   ["gaussdb", "postgres"],
@@ -145,11 +145,13 @@ const SCHEMA_DIFF_ROUTINE_FAMILY = new Map<DatabaseType, "postgres" | "mysql" | 
   ["redshift", "postgres"],
   ["mysql", "mysql"],
   ["sqlserver", "sqlserver"],
+  ["oracle", "oracle"],
+  ["oceanbase-oracle", "oracle"],
 ]);
 
 /**
  * Schema Diff routine compare is limited to an allowlist of same-dialect families.
- * Sidebar may list routines for more engines (oracle/hive/…); those stay out of
+ * Sidebar may list routines for more engines (hive/…); those stay out of
  * schema-diff until a verified compare path lands. Cross-family pairs never match.
  */
 export function supportsSchemaDiffRoutines(dbType?: DatabaseType): boolean {
@@ -158,13 +160,16 @@ export function supportsSchemaDiffRoutines(dbType?: DatabaseType): boolean {
   return SCHEMA_DIFF_ROUTINE_KINDS.some((kind) => sidebarObjects.includes(kind) && sourceReadable.includes(kind));
 }
 
-export function schemaDiffRoutineObjectTypes(dbType?: DatabaseType): Array<"PROCEDURE" | "FUNCTION"> {
+export type SchemaDiffRoutineObjectType = "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY" | "TRIGGER" | "TYPE" | "TYPE_BODY";
+
+export function schemaDiffRoutineObjectTypes(dbType?: DatabaseType): SchemaDiffRoutineObjectType[] {
   if (!supportsSchemaDiffRoutines(dbType)) return [];
+  if (dbType === "oracle" || dbType === "oceanbase-oracle") return ["PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "TRIGGER", "TYPE", "TYPE_BODY"];
   const { sidebarObjects, sourceReadable } = databaseObjectCapabilities(dbType);
   return SCHEMA_DIFF_ROUTINE_KINDS.filter((kind) => sidebarObjects.includes(kind) && sourceReadable.includes(kind));
 }
 
-export function schemaDiffRoutineObjectTypesIntersection(sourceDbType?: DatabaseType, targetDbType?: DatabaseType): Array<"PROCEDURE" | "FUNCTION"> {
+export function schemaDiffRoutineObjectTypesIntersection(sourceDbType?: DatabaseType, targetDbType?: DatabaseType): SchemaDiffRoutineObjectType[] {
   if (!sourceDbType || !targetDbType) return [];
   const sourceFamily = SCHEMA_DIFF_ROUTINE_FAMILY.get(sourceDbType);
   const targetFamily = SCHEMA_DIFF_ROUTINE_FAMILY.get(targetDbType);
@@ -182,14 +187,14 @@ export function sidebarObjectKindsForDatabase(dbType?: DatabaseType, compatibili
 /**
  * Whether a connection's TYPE tree nodes may be opened as object source.
  *
- * Xugu has a real TYPE/TYPE_BODY source implementation. PostgreSQL-family
+ * Oracle-family agents and Xugu read TYPE/TYPE_BODY source. PostgreSQL-family
  * databases only list user-defined types this cycle; their CREATE TYPE DDL has
  * no unified catalog getter, so opening source would error. Callers must gate
  * the source action (single/double click, context menu, shortcuts) on this
  * before dispatching getObjectSource.
  */
 export function supportsTypeObjectSource(dbType?: DatabaseType): boolean {
-  return dbType === "xugu";
+  return dbType === "xugu" || dbType === "oracle" || dbType === "oceanbase-oracle";
 }
 
 export type CustomTypeCapabilities = {

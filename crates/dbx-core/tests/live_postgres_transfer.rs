@@ -265,6 +265,9 @@ async fn live_postgres_transfer_upserts_generated_always_identity_values() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 100,
     };
     let source_db_type = get_db_type(&state, source_connection_id).await.unwrap();
@@ -443,6 +446,9 @@ async fn live_postgres_structure_only_preserves_table_indexes() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 100,
     };
 
@@ -728,6 +734,9 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 100,
     };
 
@@ -1031,6 +1040,9 @@ async fn live_postgres_transfer_skips_create_ddl_for_existing_target_table() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 100,
     };
 
@@ -1162,6 +1174,9 @@ async fn live_postgres_transfer_creates_selected_sequence_before_referencing_tab
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 100,
     };
     let source_db_type = get_db_type(&state, source_connection_id).await.unwrap();
@@ -1348,6 +1363,9 @@ async fn live_postgres_transfer_drop_target_rebuilds_structure_and_indexes() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 1000,
     };
 
@@ -1550,6 +1568,9 @@ impl PostgresRebuildFixture {
                 target_table_name_case: TransferTableNameCase::Preserve,
                 quote_target_column_names: true,
                 ownership_policy: TransferOwnershipPolicy::Preserve,
+                object_conflict_policy: Default::default(),
+                database_links: Vec::new(),
+                database_link_credentials: Vec::new(),
                 batch_size: 100,
             },
             _storage_dir: storage_dir,
@@ -1874,6 +1895,9 @@ async fn live_postgres_keyset_pagination_copies_every_row() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 3,
     };
     let source_db_type = get_db_type(&state, source_connection_id).await.unwrap();
@@ -1987,6 +2011,9 @@ async fn live_postgres_progress_read_survives_total_duration_beyond_timeout() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 10000,
     };
     let source_db_type = get_db_type(&state, source_connection_id).await.unwrap();
@@ -2094,6 +2121,9 @@ async fn live_postgres_keyset_large_batch_copies_every_row() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 50000,
     };
     let source_db_type = get_db_type(&state, source_connection_id).await.unwrap();
@@ -2211,6 +2241,9 @@ async fn live_postgres_structure_only_preview_renders_ddl_without_touching_the_t
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
+        database_links: Vec::new(),
+        database_link_credentials: Vec::new(),
         batch_size: 1000,
     };
     let source_db_type = get_db_type(&state, source_connection_id).await.unwrap();

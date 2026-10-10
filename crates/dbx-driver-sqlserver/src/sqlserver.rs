@@ -2475,6 +2475,7 @@ pub async fn completion_assistant_search(
                 parent_name: row.get::<&str, _>(4).map(str::to_string),
                 comment: row.get::<&str, _>(5).filter(|s: &&str| !s.is_empty()).map(|s| (*s).to_string()),
                 data_type: row.get::<&str, _>(6).map(str::to_string),
+                routine_id: None,
                 signature: None,
             }
         })
@@ -3389,6 +3390,7 @@ pub async fn list_triggers(
     Ok(rows
         .iter()
         .map(|row| TriggerInfo {
+            owner: None,
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
             event: row.get::<&str, _>(1).unwrap_or("").to_string(),
             timing: row.get::<&str, _>(2).unwrap_or("AFTER").to_string(),
@@ -5669,6 +5671,7 @@ mod tests {
             parent_name: None,
             comment: None,
             data_type: None,
+            routine_id: None,
             signature: None,
         };
 
@@ -5698,6 +5701,7 @@ mod tests {
             parent_name: None,
             comment: None,
             data_type: None,
+            routine_id: None,
             signature: None,
         };
 

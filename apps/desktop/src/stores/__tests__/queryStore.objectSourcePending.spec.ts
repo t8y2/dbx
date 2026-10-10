@@ -38,7 +38,7 @@ const CONNECTION_ID = "ora-1";
 const DATABASE = "ORCL";
 const SCHEMA = "APP";
 
-const pendingOptions = (request: { name: string; objectType: "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY"; signature?: string }) => ({
+const pendingOptions = (request: { name: string; objectType: "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY"; signature?: string }) => ({
   connectionId: CONNECTION_ID,
   database: DATABASE,
   title: `Source - ${request.name}`,
@@ -62,6 +62,44 @@ describe("queryStore pending object source tab", () => {
     vi.stubGlobal("localStorage", { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn() });
     setActivePinia(createPinia());
     mocks.connectionStore.dbType = "oracle";
+  });
+
+  it.each(["oracle", "oceanbase-oracle"])("retains exact read-only TYPE identity and refreshes the same tab on %s", async (databaseType) => {
+    mocks.connectionStore.dbType = databaseType;
+    const source = 'CREATE OR REPLACE TYPE "Mixed.Type" AS OBJECT (n NUMBER);';
+    mocks.getObjectSource.mockResolvedValue({ name: "Mixed.Type", schema: 'Owner"Name', object_type: "TYPE", source, editable: false });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const options = { ...pendingOptions({ name: "Mixed.Type", objectType: "TYPE" }), schema: 'Owner"Name', initialEditing: false };
+    const id = store.openObjectSourceTabPending(options);
+    await settle();
+    expect(store.tabs[0]?.oracleTypeIdentity).toEqual({ schema: 'Owner"Name', name: "Mixed.Type", object_type: "TYPE" });
+    expect(store.tabs[0]?.objectSource).toBeUndefined();
+    expect(store.tabs[0]?.sql).toBe(source);
+    expect(store.openObjectSourceTabPending(options)).toBe(id);
+    await settle();
+    expect(store.tabs).toHaveLength(1);
+    expect(mocks.getObjectSource).toHaveBeenCalledTimes(2);
+    expect(mocks.getObjectSource.mock.calls[1].slice(0, 5)).toEqual([CONNECTION_ID, DATABASE, 'Owner"Name', "Mixed.Type", "TYPE"]);
+  });
+
+  it("keeps same-name TYPE and TYPE_BODY and cross-owner type tabs separate", async () => {
+    mocks.getObjectSource.mockImplementation(async (_connectionId, _database, schema, name, objectType) => ({ schema, name, object_type: objectType, source: `CREATE OR REPLACE ${objectType.replace("_", " ")} T AS OBJECT (n NUMBER);`, editable: false }));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const spec = store.openObjectSourceTabPending(pendingOptions({ name: "T", objectType: "TYPE" }));
+    await settle();
+    const body = store.openObjectSourceTabPending(pendingOptions({ name: "T", objectType: "TYPE_BODY" }));
+    const other = store.openObjectSourceTabPending({ ...pendingOptions({ name: "T", objectType: "TYPE" }), schema: "Other" });
+    await settle();
+    expect(new Set([spec, body, other]).size).toBe(3);
+    expect(store.tabs.map((tab) => tab.oracleTypeIdentity)).toEqual(
+      expect.arrayContaining([
+        { schema: SCHEMA, name: "T", object_type: "TYPE" },
+        { schema: SCHEMA, name: "T", object_type: "TYPE_BODY" },
+        { schema: "Other", name: "T", object_type: "TYPE" },
+      ]),
+    );
   });
 
   it("creates a visible loading tab before the source arrives", async () => {

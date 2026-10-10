@@ -33,7 +33,7 @@ fn send_transfer_progress(channel: &TransferProgressChannel, progress: &transfer
     }
 }
 
-fn terminal_transfer_error(req: &TransferRequest, error: impl ToString) -> transfer::TransferProgress {
+async fn terminal_transfer_error(req: &TransferRequest, error: impl ToString) -> transfer::TransferProgress {
     transfer::TransferProgress {
         transfer_id: req.transfer_id.clone(),
         table: String::new(),
@@ -41,9 +41,44 @@ fn terminal_transfer_error(req: &TransferRequest, error: impl ToString) -> trans
         total_tables: req.tables.len(),
         rows_transferred: 0,
         total_rows: None,
-        status: TransferStatus::Error,
+        status: if transfer::is_cancelled(&req.transfer_id).await {
+            TransferStatus::Cancelled
+        } else {
+            TransferStatus::Error
+        },
         error: Some(error.to_string()),
         terminal: true,
+        object_result: None,
+    }
+}
+
+async fn report_unexecuted_objects(
+    req: &TransferRequest,
+    outcome: &mut transfer::TransferObjectOutcome,
+    reason: &str,
+    channel: &TransferProgressChannel,
+    history: Option<&TransferTaskJournal>,
+    all_selected_are_accounted_for: bool,
+) {
+    for result in transfer::mark_unexecuted_transfer_objects(req, outcome, reason, all_selected_are_accounted_for) {
+        send_transfer_progress(
+            channel,
+            &transfer::TransferProgress {
+                transfer_id: req.transfer_id.clone(),
+                table: format!("schema object: {}", result.name),
+                table_index: req.tables.len(),
+                total_tables: req.tables.len(),
+                rows_transferred: 0,
+                total_rows: None,
+                status: TransferStatus::Running,
+                error: None,
+                terminal: false,
+                object_result: Some(result),
+            },
+        );
+    }
+    if let Some(history) = history {
+        history.record_object_outcome(outcome).await;
     }
 }
 
@@ -66,6 +101,8 @@ async fn finish_transfer_channel(state: &Arc<WebState>, transfer_id: &str, chann
 #[serde(rename_all = "camelCase")]
 pub struct StartTransferRequest {
     pub request: TransferRequest,
+    #[serde(default)]
+    pub database_link_credentials: Vec<transfer::TransferDatabaseLinkCredential>,
 }
 
 #[derive(Deserialize)]
@@ -84,7 +121,8 @@ pub async fn start_transfer(
     State(state): State<Arc<WebState>>,
     Json(body): Json<StartTransferRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let req = body.request;
+    let mut req = body.request;
+    req.database_link_credentials = body.database_link_credentials;
     transfer::validate_transfer_request(&req).map_err(AppError::from)?;
 
     // Demo mode skips connection-backed validation: the simulated web build may not
@@ -157,7 +195,7 @@ pub async fn start_transfer(
         {
             send_transfer_progress(
                 &progress_channel,
-                &terminal_transfer_error(&req, "MongoDB 暂不支持仅结构传输".to_string()),
+                &terminal_transfer_error(&req, "MongoDB 暂不支持仅结构传输".to_string()).await,
             );
             finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
             return;
@@ -175,7 +213,7 @@ pub async fn start_transfer(
         {
             Ok(k) => k,
             Err(e) => {
-                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
+                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e).await);
                 finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                 return;
             }
@@ -190,18 +228,93 @@ pub async fn start_transfer(
         {
             Ok(k) => k,
             Err(e) => {
-                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
+                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e).await);
                 finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                 return;
             }
         };
 
         if let Err(e) = transfer::ensure_transfer_source_types_supported(&app, &req, &source_pool_key).await {
-            send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
+            report_unexecuted_objects(
+                &req,
+                &mut transfer::TransferObjectOutcome::default(),
+                "Source preflight failed; no selected schema object was executed",
+                &progress_channel,
+                history.as_ref(),
+                true,
+            )
+            .await;
+            send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e).await);
+            finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+            return;
+        }
+        if let Err(e) =
+            transfer::ensure_transfer_schema_objects_ready(&app, &req, &source_pool_key, &target_pool_key).await
+        {
+            report_unexecuted_objects(
+                &req,
+                &mut transfer::TransferObjectOutcome::default(),
+                "Schema object preflight failed; no selected schema object was executed",
+                &progress_channel,
+                history.as_ref(),
+                true,
+            )
+            .await;
+            send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e).await);
             finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
             return;
         }
 
+        let mut observed_prerequisites = transfer::TransferObjectOutcome::default();
+        let mut prerequisites =
+            match transfer::transfer_schema_prerequisites(&app, &req, &source_pool_key, &target_pool_key, |progress| {
+                if let Some(result) = &progress.object_result {
+                    observed_prerequisites.object_results.push(result.clone());
+                }
+                send_transfer_progress(&progress_channel, &progress);
+            })
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    report_unexecuted_objects(
+                        &req,
+                        &mut observed_prerequisites,
+                        "Prerequisite stage did not complete; remaining selected objects were not executed",
+                        &progress_channel,
+                        history.as_ref(),
+                        true,
+                    )
+                    .await;
+                    send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, error).await);
+                    finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+                    return;
+                }
+            };
+        if let Some(journal) = history.as_ref() {
+            journal.record_object_outcome(&prerequisites).await;
+        }
+        if transfer::has_transfer_object_blockers(&prerequisites) {
+            report_unexecuted_objects(
+                &req,
+                &mut prerequisites,
+                "Type prerequisite failed; this selected object was not executed",
+                &progress_channel,
+                history.as_ref(),
+                true,
+            )
+            .await;
+            send_transfer_progress(
+                &progress_channel,
+                &terminal_transfer_error(
+                    &req,
+                    "Type prerequisite failed; tables and dependent programs were not executed",
+                )
+                .await,
+            );
+            finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+            return;
+        }
         let tables = req.tables.clone();
         // Sort by FK dependency so referenced tables are transferred first, and
         // keep the foreign key metadata fetched along the way — MySQL-family
@@ -289,6 +402,7 @@ pub async fn start_transfer(
                         status: TransferStatus::Cancelled,
                         error: None,
                         terminal: true,
+                        object_result: None,
                     };
                     send_transfer_progress(&progress_channel, &progress);
                     finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
@@ -305,6 +419,7 @@ pub async fn start_transfer(
                         status: TransferStatus::Error,
                         error: Some(e),
                         terminal: true,
+                        object_result: None,
                     };
                     send_transfer_progress(&progress_channel, &progress);
                     finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
@@ -342,6 +457,7 @@ pub async fn start_transfer(
                         status: TransferStatus::Cancelled,
                         error: None,
                         terminal: true,
+                        object_result: None,
                     };
                     send_transfer_progress(&progress_channel, &progress);
                     finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
@@ -358,6 +474,7 @@ pub async fn start_transfer(
                         status: TransferStatus::Error,
                         error: Some(e),
                         terminal: true,
+                        object_result: None,
                     };
                     send_transfer_progress(&progress_channel, &progress);
                     finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
@@ -389,6 +506,7 @@ pub async fn start_transfer(
                     status: TransferStatus::Error,
                     error: Some(e),
                     terminal: true,
+                    object_result: None,
                 };
                 send_transfer_progress(&progress_channel, &progress);
                 finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
@@ -408,6 +526,7 @@ pub async fn start_transfer(
                     status: TransferStatus::Cancelled,
                     error: None,
                     terminal: true,
+                    object_result: None,
                 };
                 send_transfer_progress(&progress_channel, &progress);
                 finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
@@ -479,6 +598,7 @@ pub async fn start_transfer(
                         status: TransferStatus::TableDone,
                         error: None,
                         terminal: false,
+                        object_result: None,
                     };
                     send_transfer_progress(&progress_channel, &progress);
                 }
@@ -504,6 +624,7 @@ pub async fn start_transfer(
                             status: TransferStatus::Cancelled,
                             error: None,
                             terminal: true,
+                            object_result: None,
                         };
                         send_transfer_progress(&progress_channel, &progress);
                         finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
@@ -525,6 +646,7 @@ pub async fn start_transfer(
                         status: TransferStatus::Error,
                         error: Some(e),
                         terminal: false,
+                        object_result: None,
                     };
                     send_transfer_progress(&progress_channel, &progress);
                 }
@@ -557,20 +679,61 @@ pub async fn start_transfer(
         // Core decision handles all content modes: DataOnly never
         // transfers schema objects; PG→PG keeps the legacy empty-selection
         // default only when structure participates in the transfer.
-        let mut object_outcome = transfer::TransferObjectOutcome::default();
+        let mut object_outcome = prerequisites;
+        let mut observed_objects = transfer::TransferObjectOutcome::default();
+        let tables_blocked_objects = transfer::has_transfer_type_prerequisites(&req) && !failed_tables.is_empty();
+        let exact_object_progress = matches!(
+            source_db_type,
+            dbx_core::models::connection::DatabaseType::Oracle
+                | dbx_core::models::connection::DatabaseType::OceanbaseOracle
+                | dbx_core::models::connection::DatabaseType::Dameng
+        ) && transfer::is_same_transfer_family(&source_db_type, &target_db_type);
         let progress_channel_clone = progress_channel.clone();
-        match transfer::transfer_schema_objects(&app, &req, &source_pool_key, &target_pool_key, |progress| {
-            send_transfer_progress(&progress_channel_clone, &progress);
-        })
-        .await
-        {
+        let schema_objects = if tables_blocked_objects {
+            Err("Selected table transfer failed; dependent programs and deferred TYPE BODY were not executed"
+                .to_string())
+        } else {
+            if let Some(journal) = history.as_ref() {
+                journal.start_legacy_schema_objects().await;
+            }
+            transfer::transfer_schema_objects(&app, &req, &source_pool_key, &target_pool_key, |progress| {
+                if let Some(result) = &progress.object_result {
+                    observed_objects.object_results.push(result.clone());
+                }
+                send_transfer_progress(&progress_channel_clone, &progress);
+            })
+            .await
+        };
+        match schema_objects {
             Ok(outcome) => {
                 if let Some(journal) = history.as_ref() {
                     journal.record_object_outcome(&outcome).await;
                 }
-                object_outcome = outcome;
+                object_outcome.transferred.extend(outcome.transferred);
+                object_outcome.skipped.extend(outcome.skipped);
+                object_outcome.failed.extend(outcome.failed);
+                object_outcome.object_results.extend(outcome.object_results);
+                report_unexecuted_objects(
+                    &req,
+                    &mut object_outcome,
+                    "An earlier schema object stage did not complete; this selected object was not executed",
+                    &progress_channel,
+                    history.as_ref(),
+                    true,
+                )
+                .await;
             }
-            Err(e) if e == "Cancelled" => {
+            Err(e) if e == "Cancelled" || transfer::is_cancelled(&req.transfer_id).await => {
+                object_outcome.object_results.extend(observed_objects.object_results);
+                report_unexecuted_objects(
+                    &req,
+                    &mut object_outcome,
+                    "Transfer was cancelled; this selected object was not executed",
+                    &progress_channel,
+                    history.as_ref(),
+                    exact_object_progress,
+                )
+                .await;
                 if let Some(journal) = history.as_ref() {
                     journal.record_schema_objects_error(true).await;
                 }
@@ -582,14 +745,25 @@ pub async fn start_transfer(
                     rows_transferred: 0,
                     total_rows: None,
                     status: TransferStatus::Cancelled,
-                    error: None,
+                    error: Some(e),
                     terminal: true,
+                    object_result: None,
                 };
                 send_transfer_progress(&progress_channel, &progress);
                 finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                 return;
             }
             Err(e) => {
+                object_outcome.object_results.extend(observed_objects.object_results);
+                report_unexecuted_objects(
+                    &req,
+                    &mut object_outcome,
+                    "Schema object stage did not complete; this selected object was not executed",
+                    &progress_channel,
+                    history.as_ref(),
+                    tables_blocked_objects || exact_object_progress,
+                )
+                .await;
                 if let Some(journal) = history.as_ref() {
                     journal.record_schema_objects_error(false).await;
                 }
@@ -604,14 +778,48 @@ pub async fn start_transfer(
                     status: TransferStatus::Error,
                     error: Some(e),
                     terminal: false,
+                    object_result: None,
                 };
                 send_transfer_progress(&progress_channel, &progress);
             }
         }
 
+        if transfer::is_cancelled(&req.transfer_id).await {
+            let error = object_outcome
+                .object_results
+                .iter()
+                .filter_map(|result| result.error.as_deref())
+                .collect::<Vec<_>>()
+                .join("; ");
+            if let Some(journal) = history.as_ref() {
+                journal.record_schema_objects_error(true).await;
+            }
+            let terminal = transfer::TransferProgress {
+                transfer_id: req.transfer_id.clone(),
+                table: "schema objects".into(),
+                table_index: tables.len(),
+                total_tables: tables.len(),
+                rows_transferred: 0,
+                total_rows: None,
+                status: TransferStatus::Cancelled,
+                error: Some(if error.is_empty() { "Transfer cancelled".into() } else { error }),
+                terminal: true,
+                object_result: None,
+            };
+            send_transfer_progress(&progress_channel, &terminal);
+            if let Some(journal) = history.as_ref() {
+                journal.finish(&terminal).await;
+            }
+            finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+            return;
+        }
         // Send done
         if !object_outcome.failed.is_empty() {
             failed_tables.push(format!("schema objects ({})", object_outcome.failed.len()));
+        }
+        let not_started = object_outcome.object_results.iter().filter(|result| result.status == "not_started").count();
+        if not_started > 0 {
+            failed_tables.push(format!("schema objects not executed ({not_started})"));
         }
 
         // The rename pre-pass left one backup per rebuilt table. Drop them only now that
@@ -663,13 +871,14 @@ pub async fn start_transfer(
                 }
             } else {
                 Some(format!(
-                    "{} table(s) failed: {}{}",
+                    "{} transfer stage(s) did not complete: {}{}",
                     failed_tables.len(),
                     failed_tables.iter().take(5).cloned().collect::<Vec<_>>().join(", "),
                     skip_suffix
                 ))
             },
             terminal: true,
+            object_result: None,
         };
         send_transfer_progress(&progress_channel, &done);
         finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
@@ -777,6 +986,31 @@ mod tests {
         TransferContent, TransferMode, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
     };
 
+    #[test]
+    fn aggregate_overwrite_failure_serializes_without_an_object_result() {
+        let channel = TransferProgressChannel::new();
+        let progress = transfer::TransferProgress {
+            transfer_id: "overwrite-test".into(),
+            table: "overwrite pre-pass".into(),
+            table_index: 0,
+            total_tables: 2,
+            rows_transferred: 37,
+            total_rows: None,
+            status: TransferStatus::Error,
+            error: Some("Overwrite clearing failed".into()),
+            terminal: true,
+            object_result: None,
+        };
+        send_transfer_progress(&channel, &progress);
+        let payload: serde_json::Value = serde_json::from_str(&channel.latest().unwrap()).unwrap();
+        assert!(payload.get("objectResult").is_none());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["error"], "Overwrite clearing failed");
+        assert_eq!(payload["terminal"], true);
+        assert_eq!(payload["table"], "overwrite pre-pass");
+        assert_eq!(payload["rowsTransferred"], 37);
+    }
+
     fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
@@ -881,6 +1115,9 @@ mod tests {
             target_table_name_case: TransferTableNameCase::Preserve,
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
+            object_conflict_policy: Default::default(),
+            database_links: Vec::new(),
+            database_link_credentials: Vec::new(),
             batch_size: 1000,
         }
     }
@@ -899,12 +1136,20 @@ mod tests {
 
         let req = transfer_request("src", "dst", &dir);
         let transfer_id = req.transfer_id.clone();
-        let response = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req })).await.unwrap();
+        let response = start_transfer(
+            State(state.clone()),
+            Json(StartTransferRequest { request: req, database_link_credentials: Vec::new() }),
+        )
+        .await
+        .unwrap();
         let _ = response.into_response();
 
         let duplicate = start_transfer(
             State(state.clone()),
-            Json(StartTransferRequest { request: transfer_request("src", "dst", &dir) }),
+            Json(StartTransferRequest {
+                request: transfer_request("src", "dst", &dir),
+                database_link_credentials: Vec::new(),
+            }),
         )
         .await
         .unwrap_err();
@@ -972,9 +1217,21 @@ mod tests {
     async fn demo_mode_transfer_does_not_write_task_history() {
         let (mut state, dir) = test_web_state().await;
         Arc::get_mut(&mut state).unwrap().demo_mode = true;
+        let src = sqlite_config("src", &dir.join("src.db").to_string_lossy());
+        let dst = sqlite_config("dst", &dir.join("dst.db").to_string_lossy());
+        std::fs::write(dir.join("src.db"), b"").unwrap();
+        std::fs::write(dir.join("dst.db"), b"").unwrap();
+        std::fs::write(dir.join("main.db"), b"").unwrap();
+        state.app.configs.write().await.insert("src".to_string(), src);
+        state.app.configs.write().await.insert("dst".to_string(), dst);
         let req = transfer_request("src", "dst", &dir);
         let transfer_id = req.transfer_id.clone();
-        let _ = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req })).await.unwrap();
+        let _ = start_transfer(
+            State(state.clone()),
+            Json(StartTransferRequest { request: req, database_link_credentials: Vec::new() }),
+        )
+        .await
+        .unwrap();
         let channel = {
             let channels = state.transfer_progress_channels.read().await;
             channels.get(&transfer_id).cloned().expect("transfer channel registered")

@@ -85,6 +85,7 @@ export interface EditableStructureTrigger {
 }
 
 export interface BuildTableStructureChangeSqlOptions {
+  databaseVersion?: string | null;
   databaseType?: DatabaseType;
   /** Driver profile reported by the connection (e.g. `"gbase8s"`). GBase 8s is
    * Informix-compatible rather than MySQL-compatible like the rest of the

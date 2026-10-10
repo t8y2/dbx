@@ -2705,7 +2705,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return fetchPage(0, offset + pageSize);
   }
 
-  function buildLoadMoreNode(parent: TreeNode, offset: number, pageSize: number, anchor?: string): TreeNode {
+  function buildLoadMoreNode(parent: TreeNode, offset: number, pageSize: number, anchor?: string, searchFilter?: string): TreeNode {
     return {
       id: `${parent.id}:__load_more:${offset}`,
       label: "tree.loadMore",
@@ -2718,6 +2718,7 @@ export const useConnectionStore = defineStore("connection", () => {
         parentId: parent.id,
         offset,
         pageSize,
+        ...(searchFilter !== undefined ? { searchFilter, searchQuery: sidebarSearchQuery.value || "" } : {}),
         ...(anchor ? { anchor } : {}),
       },
     };
@@ -2837,7 +2838,7 @@ export const useConnectionStore = defineStore("connection", () => {
     // Table-scoped search must page through the full ordered result set, just
     // like unfiltered loads, instead of silently stopping at the first budget
     // window. Global sidebar search keeps the bounded single-shot fetch.
-    const paginate = options.pagedSearch || !searchFilter;
+    const paginate = options.pagedSearch || !searchFilter || getConfig(options.node.connectionId)?.db_type === "oceanbase-oracle";
     const fetchLimit = paginate ? options.pageSize + 1 : SIDEBAR_TABLE_SEARCH_RESULT_BUDGET;
     const fetchOffset = paginate ? options.offset : undefined;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
@@ -2894,8 +2895,9 @@ export const useConnectionStore = defineStore("connection", () => {
       catalog: options.node.catalog,
     });
     const tableNameFilter = effectiveTableNameFilterForNode(options.node, userTableNameFilter);
-    const fetchLimit = searchFilter ? undefined : options.pageSize + 1;
-    const fetchOffset = searchFilter ? undefined : options.offset;
+    const paginate = !searchFilter || getConfig(options.node.connectionId)?.db_type === "oceanbase-oracle";
+    const fetchLimit = paginate ? options.pageSize + 1 : undefined;
+    const fetchOffset = paginate ? options.offset : undefined;
     const objects = await loadCachedMetadataListPage<ObjectInfo[]>(
       metadataListCacheScope({
         kind: "object-list-page",
@@ -2916,7 +2918,7 @@ export const useConnectionStore = defineStore("connection", () => {
           : api.listObjects(options.node.connectionId!, options.node.database!, options.querySchema, options.objectTypes, searchFilter, fetchLimit, fetchOffset),
       { force: options.force },
     );
-    const hasMore = searchFilter ? false : objects.length > options.pageSize;
+    const hasMore = paginate && objects.length > options.pageSize;
     const pageObjects = hasMore ? objects.slice(0, options.pageSize) : objects;
     const children = objectGroupChildrenFromObjects({
       node: options.node,
@@ -2955,7 +2957,36 @@ export const useConnectionStore = defineStore("connection", () => {
       nodeKind: "simple-tables",
     });
     const sourceRevision = tableListSourceRevision(options.connectionId);
-    const paginate = options.pagedSearch || !searchFilter;
+    if (getConfig(options.connectionId)?.db_type === "oceanbase-oracle" && !tableNameFilter) {
+      const objectTypes = (["TABLE", ...options.nonTableObjectTypes] as DatabaseObjectTreeKind[]).filter((type) => ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "SEQUENCE", "SYNONYM"].includes(type));
+      const objects = await loadCachedMetadataListPage<ObjectInfo[]>(
+        metadataListCacheScope({
+          kind: "object-list-page",
+          connectionId: options.connectionId,
+          database: options.database,
+          schema: options.querySchema,
+          nodeKind: "simple-objects",
+          objectTypes,
+          searchFilter,
+          limit: options.pageSize + 1,
+          offset: options.offset,
+          sidebarDisplayMode: "simple",
+          extra: tableNameFilterMetadataExtra(tableNameFilter, sourceRevision),
+        }),
+        () => api.listObjects(options.connectionId, options.database, options.querySchema, objectTypes, searchFilter, options.pageSize + 1, options.offset),
+        { force: options.force },
+      );
+      const hasMore = objects.length > options.pageSize;
+      const pageObjects = objects.slice(0, options.pageSize);
+      const children = markPackageNodesExpandable(buildSimpleObjectTreeNodes({ nodeId: options.nodeId, connectionId: options.connectionId, database: options.database, schema: options.effectiveSchema, objects: pageObjects, databaseType: "oceanbase-oracle" }));
+      if (tableListSourceRevision(options.connectionId) === sourceRevision) {
+        const tables = pageObjects.filter((object) => object.object_type === "TABLE").map((object) => ({ name: object.name, table_type: "TABLE", comment: object.comment }));
+        indexCompletionTables(options.connectionId, options.database, options.effectiveSchema, tableInfosToCompletionTables(tables, options.effectiveSchema));
+      }
+      const anchor = (object: ObjectInfo | undefined) => (object ? JSON.stringify([object.schema ?? options.effectiveSchema, object.name, object.object_type, object.signature ?? ""]) : undefined);
+      return { children, objectCount: children.length, hasMore, nextOffset: options.offset + pageObjects.length, firstAnchor: anchor(objects[0]), nextAnchor: hasMore ? anchor(objects[options.pageSize]) : undefined };
+    }
+    const paginate = options.pagedSearch || !searchFilter || getConfig(options.connectionId)?.db_type === "oceanbase-oracle";
     const fetchLimit = paginate ? options.pageSize + 1 : SIDEBAR_TABLE_SEARCH_RESULT_BUDGET;
     const fetchOffset = paginate ? options.offset : undefined;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
@@ -6623,14 +6654,15 @@ export const useConnectionStore = defineStore("connection", () => {
               database,
               querySchema,
               effectiveSchema,
-              nonTableObjectTypes,
+              nonTableObjectTypes: isSidebarTableSearch ? [] : nonTableObjectTypes,
               offset: 0,
               pageSize,
               searchFilter: options?.searchFilter === "" ? "" : searchFilter || undefined,
               pagedSearch: isSidebarTableSearch,
               force: options?.force,
             });
-            children = page.hasMore && (!searchFilter || isSidebarTableSearch) ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, pageSize, page.nextAnchor), page.loadMoreParent) : page.children;
+            const globalPageSearch = config?.db_type === "oceanbase-oracle" && !isSidebarTableSearch ? searchFilter : undefined;
+            children = page.hasMore && (!searchFilter || isSidebarTableSearch || globalPageSearch !== undefined) ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, pageSize, page.nextAnchor, globalPageSearch), page.loadMoreParent) : page.children;
             nextObjectCount = page.objectCount;
           } else if (simpleObjectDisplay) {
             // The synthetic public scope contains no tables. Avoid issuing a
@@ -6666,7 +6698,7 @@ export const useConnectionStore = defineStore("connection", () => {
           const currentTargetNode = treeNodeLoadTarget(load);
           if (!currentTargetNode) return;
           currentTargetNode.isExpanded = true;
-          if (simpleObjectDisplay && !searchFilter && !isSidebarTableSearch && nonTableObjectTypes.length > 0) {
+          if (simpleObjectDisplay && (config?.db_type !== "oceanbase-oracle" || tableNameFilter) && !searchFilter && !isSidebarTableSearch && nonTableObjectTypes.length > 0) {
             void loadSimpleSupplementalObjectChildren({
               node: currentTargetNode,
               nodeId,
@@ -6767,6 +6799,7 @@ export const useConnectionStore = defineStore("connection", () => {
             catalog: node.catalog,
           });
           const isSidebarTableSearch = !!options?.sidebarTableSearchParentId;
+          const globalPageSearch = config?.db_type === "oceanbase-oracle" && !isSidebarTableSearch ? searchFilter : undefined;
           if (!options?.force && !searchFilter && !tableNameFilter) {
             const cached = await loadPersistedTreeChildren(node, cacheKey, load);
             if (cached.hit) {
@@ -6792,7 +6825,8 @@ export const useConnectionStore = defineStore("connection", () => {
               pagedSearch: isSidebarTableSearch,
               force: options?.force,
             });
-            children = page.hasMore && (!searchFilter || isSidebarTableSearch) ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, sidebarObjectGroupPageSize(), page.nextAnchor), page.loadMoreParent) : page.children;
+            children =
+              page.hasMore && (!searchFilter || isSidebarTableSearch || globalPageSearch !== undefined) ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, sidebarObjectGroupPageSize(), page.nextAnchor, globalPageSearch), page.loadMoreParent) : page.children;
             nextObjectCount = page.objectCount;
           } else {
             const pageSize = sidebarObjectGroupPageSize();
@@ -6807,7 +6841,7 @@ export const useConnectionStore = defineStore("connection", () => {
               searchFilter: searchFilter || undefined,
               force: options?.force,
             });
-            children = page.hasMore && !searchFilter ? [...page.children, buildLoadMoreNode(node, page.nextOffset, pageSize, page.nextAnchor)] : page.children;
+            children = page.hasMore && (!searchFilter || globalPageSearch !== undefined) ? [...page.children, buildLoadMoreNode(node, page.nextOffset, pageSize, page.nextAnchor, globalPageSearch)] : page.children;
             nextObjectCount = page.objectCount;
           }
           if (isTreeLoadSearchChanged(searchFilter, options)) return;
@@ -6905,6 +6939,14 @@ export const useConnectionStore = defineStore("connection", () => {
     const parentConnectionId = parent.connectionId;
     const configForScope = getConfig(parentConnectionId);
     const objectTypesForScope = objectTypesForGroupNode(parent.type);
+    const searchFilter = loadMore.searchFilter ?? options?.searchFilter;
+    const globalSearchQuery = sidebarSearchQuery.value || "";
+    const scopedSearchQuery = sidebarTableSearchQueries.value[parent.id]?.trim() || "";
+    const searchIsCurrent = () =>
+      (sidebarSearchQuery.value || "") === globalSearchQuery &&
+      (sidebarTableSearchQueries.value[parent.id]?.trim() || "") === scopedSearchQuery &&
+      (loadMore.searchQuery === undefined ? options?.searchFilter === undefined || scopedSearchQuery === (searchFilter || "") : globalSearchQuery === loadMore.searchQuery);
+    if (!searchIsCurrent()) return;
     return runTreeMetadataLoad(
       {
         kind: "object-group-page",
@@ -6913,7 +6955,7 @@ export const useConnectionStore = defineStore("connection", () => {
         schema: parent.schema,
         nodeKind: parent.type,
         objectTypes: objectTypesForScope,
-        searchFilter: options?.searchFilter,
+        searchFilter,
         limit: loadMore.pageSize + 1,
         offset: loadMore.offset,
         sidebarDisplayMode: useSettingsStore().editorSettings.sidebarObjectDisplay,
@@ -6926,6 +6968,7 @@ export const useConnectionStore = defineStore("connection", () => {
         const parentEpoch = treeNodeLoads.observe(parent.id);
         try {
           await ensureConnected(parentConnectionId);
+          if (!searchIsCurrent()) return;
           load = reclaimTreeNodeLoad(load, node);
           if (parent.type === "database" || parent.type === "schema" || parent.type === "linked-server-schema") {
             const parentDatabase = parent.database;
@@ -6940,26 +6983,26 @@ export const useConnectionStore = defineStore("connection", () => {
                 database: parentDatabase,
                 querySchema,
                 effectiveSchema,
-                nonTableObjectTypes: [],
+                nonTableObjectTypes: config?.db_type === "oceanbase-oracle" && loadMore.searchQuery !== undefined ? sidebarObjectTypesForScope(config, parentDatabase, parent.schema).filter((type) => type !== "TABLE") : [],
                 offset,
                 pageSize,
-                searchFilter: options?.searchFilter,
-                pagedSearch: !!options?.searchFilter,
+                searchFilter,
+                pagedSearch: !!searchFilter,
                 force: false,
               }),
             );
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
-            if (!targetParent || !parentEpoch.isCurrent()) return;
+            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent()) return;
             const currentChildren = withoutTableTreeLoadMoreNodes(targetParent.children);
             const mergedChildren = mergeTableTreePageChildren(currentChildren, page.children, parentConnectionId, parentDatabase);
-            const nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor), page.loadMoreParent) : mergedChildren;
+            const nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor, loadMore.searchFilter), page.loadMoreParent) : mergedChildren;
             targetParent.objectCount = mergedChildren.length;
             setChildren(targetParent, nextChildren);
-            if (!options?.searchFilter) {
+            if (!searchFilter) {
               await savePersistedTreeChildren(schemaCacheKey(parentConnectionId, parentDatabase, parent.schema || "", ownerAwareMetadataCacheVersion(config, "objects-simple-v9", parent.schema)), nextChildren);
             }
             // 该分支只服务 simple 库/模式表列表；搜索分页结果不是全量，不能作为成员依据。
-            if (!page.hasMore && !options?.searchFilter) pruneTableVGroupStaleMembers(targetParent, nextChildren, true);
+            if (!page.hasMore && !searchFilter) pruneTableVGroupStaleMembers(targetParent, nextChildren, true);
             const currentTargetParent = treeNodeLoadRelatedTarget(load, parent);
             if (currentTargetParent && parentEpoch.isCurrent()) currentTargetParent.isExpanded = true;
             return;
@@ -6986,16 +7029,16 @@ export const useConnectionStore = defineStore("connection", () => {
                 objectTypes,
                 offset,
                 pageSize,
-                searchFilter: options?.searchFilter,
-                pagedSearch: !!options?.searchFilter,
+                searchFilter,
+                pagedSearch: !!searchFilter,
                 force: false,
               }),
             );
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
-            if (!targetParent || !parentEpoch.isCurrent()) return;
+            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent()) return;
             const currentChildren = withoutTableTreeLoadMoreNodes(targetParent.children);
             mergedChildren = mergeTableTreePageChildren(currentChildren, page.children, parentConnectionId, parentDatabase);
-            nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor), page.loadMoreParent) : mergedChildren;
+            nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor, loadMore.searchFilter), page.loadMoreParent) : mergedChildren;
           } else {
             const page = await loadTablePageCheckingAnchor(loadMore.anchor, loadMore.offset, loadMore.pageSize, (offset, pageSize) =>
               loadPagedObjectGroupChildren({
@@ -7006,18 +7049,18 @@ export const useConnectionStore = defineStore("connection", () => {
                 objectTypes,
                 offset,
                 pageSize,
-                searchFilter: options?.searchFilter,
+                searchFilter,
                 force: false,
               }),
             );
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
-            if (!targetParent || !parentEpoch.isCurrent()) return;
+            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent()) return;
             const currentChildren = withoutLoadMoreNodes(targetParent.children);
             mergedChildren = mergeLocatedTreeChildren(targetParent, currentChildren, page.children, parentConnectionId, parentDatabase);
-            nextChildren = page.hasMore ? [...mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor)] : mergedChildren;
+            nextChildren = page.hasMore ? [...mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor, loadMore.searchFilter)] : mergedChildren;
             targetParent.objectCount = mergedChildren.length;
             setChildren(targetParent, nextChildren);
-            if (!options?.searchFilter) {
+            if (!searchFilter) {
               await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren);
               // procedures/triggers 等对象组在此分支提前 return，回收必须在 return 前；
               // 非分组容器由 prune 内部的类别防护挡下。
@@ -7028,10 +7071,10 @@ export const useConnectionStore = defineStore("connection", () => {
             return;
           }
           const targetParent = treeNodeLoadRelatedTarget(load, parent);
-          if (!targetParent || !parentEpoch.isCurrent()) return;
+          if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent()) return;
           targetParent.objectCount = mergedChildren.length;
           setChildren(targetParent, nextChildren);
-          if (!options?.searchFilter) {
+          if (!searchFilter) {
             await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren);
             // 各分组容器按自身类别回收完整列表的失效成员；分页中间态（含
             // load-more）由 prune 内部再挡一次。
@@ -7040,6 +7083,7 @@ export const useConnectionStore = defineStore("connection", () => {
           const currentTargetParent = treeNodeLoadRelatedTarget(load, parent);
           if (currentTargetParent && parentEpoch.isCurrent()) currentTargetParent.isExpanded = true;
         } catch (e) {
+          if (!searchIsCurrent() || !parentEpoch.isCurrent()) return;
           recordMetadataLoadError(parentConnectionId, e, load);
           throw e;
         } finally {
@@ -8205,6 +8249,8 @@ export const useConnectionStore = defineStore("connection", () => {
           });
           const targetNode = treeNodeLoadTarget(load);
           if (!targetNode) return;
+          if (databaseType === "oceanbase-oracle" && response.fallback_used) throw new Error("OceanBase agent does not support package member completion; update the agent");
+          if (databaseType === "oceanbase-oracle" && response.incomplete) throw new Error("Package has more than 1000 members; use a member prefix in SQL completion to narrow the results");
           setChildren(targetNode, buildPackageMemberNodes(targetNode, response.candidates, databaseType));
           targetNode.isExpanded = true;
         },
@@ -8297,7 +8343,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   const ORACLE_SYSTEM_COMPLETION_SCHEMAS = new Set(["SYS", "SYSTEM", "SYSMAN", "DBSNMP", "OUTLN", "XDB", "MDSYS", "CTXSYS", "WMSYS"]);
-  const FILTERED_ROUTINE_COMPLETION_DATABASES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "oracle", "opengauss"]);
+  const FILTERED_ROUTINE_COMPLETION_DATABASES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "oracle", "oceanbase-oracle", "opengauss"]);
 
   function completionPreferredSchema(connectionId: string, preferredSchema?: string): string | undefined {
     return preferredSchema?.trim() || getConfig(connectionId)?.username?.trim() || undefined;
@@ -8353,6 +8399,7 @@ export const useConnectionStore = defineStore("connection", () => {
           parentName: candidate.parent_name ?? undefined,
           dataType,
           signature: candidate.signature ?? undefined,
+          routineId: candidate.routine_id ?? undefined,
           comment: candidate.comment ?? null,
           applyName: completionCandidateApplyName(candidate.name, candidate.schema, preferredSchema),
           boost: oracleMetadata ? completionCandidateSchemaBoost(candidate.schema, preferredSchema) : completionRoutineSchemaBoost(candidate.schema, preferredSchema),
@@ -8448,30 +8495,35 @@ export const useConnectionStore = defineStore("connection", () => {
     objectKinds: CompletionAssistantObjectKind[],
     caseSensitive: boolean,
     matchMode: CompletionAssistantMatchMode = "prefix",
+    requestRevision = completionCacheRevision(connectionId, database),
   ): Promise<SqlCompletionObject[]> {
     const databaseType = getConfig(connectionId)?.db_type;
     const oracleAssistant = isOracleCompletionDatabase(databaseType);
     const requestedSchema = schema?.trim() || currentSchema?.trim() || undefined;
     const sequenceOnly = objectKinds.length === 1 && objectKinds[0] === "sequence";
     const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, currentSchema) : requestedSchema || (!sequenceOnly && databaseType === "postgres" ? "public" : databaseType === "mysql" ? database : undefined);
-    const response = await completionAssistantSearch({
-      connection_id: connectionId,
-      database,
-      schema: oracleAssistant ? (preferredSchema ?? null) : (requestedSchema ?? null),
-      object_kinds: objectKinds,
-      mask: filter.trim(),
-      case_sensitive: caseSensitive,
-      max_results: limit ?? 200,
-      global_search: globalSearch,
-      parent_schema: globalSearch || sequenceOnly ? null : (schema ?? null),
-      parent_name: parentName ?? null,
-      match_mode: matchMode,
-    });
+    const response = await completionAssistantSearch(
+      {
+        connection_id: connectionId,
+        database,
+        schema: oracleAssistant ? (preferredSchema ?? null) : (requestedSchema ?? null),
+        object_kinds: objectKinds,
+        mask: filter.trim(),
+        case_sensitive: caseSensitive,
+        max_results: limit ?? 200,
+        global_search: globalSearch,
+        parent_schema: globalSearch || sequenceOnly ? null : (schema ?? null),
+        parent_name: parentName ?? null,
+        match_mode: matchMode,
+      },
+      requestRevision,
+    );
+    if (databaseType === "oceanbase-oracle" && response.fallback_used) throw new Error("OceanBase agent does not support filtered routine completion");
     const objects = completionAssistantObjects(response.candidates, preferredSchema, oracleAssistant).map((object) => ({
       ...object,
-      applyName: databaseType === "sqlserver" && object.schema ? `${object.schema}.${object.name}` : object.applyName,
+      applyName: databaseType === "oceanbase-oracle" ? undefined : databaseType === "sqlserver" && object.schema ? `${object.schema}.${object.name}` : object.applyName,
     }));
-    indexCompletionObjects(connectionId, database, schema, objects);
+    if (requestRevision === completionCacheRevision(connectionId, database)) indexCompletionObjects(connectionId, database, schema, objects);
     return objects;
   }
 
@@ -8636,6 +8688,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const scopes = schema ? (preferred ? [preferred] : []) : allScopes;
     const ranked = scopes
       .flatMap((entry) => entry?.objects ?? [])
+      .filter((object) => getConfig(connectionId)?.db_type !== "oceanbase-oracle" || !schema || object.schema === schema)
       .map((object) => ({ object, score: objectMatchScore(object, filter, schema) }))
       .filter((entry) => entry.score >= 0)
       .sort((a, b) => b.score - a.score || a.object.name.localeCompare(b.object.name));
@@ -9219,47 +9272,68 @@ export const useConnectionStore = defineStore("connection", () => {
     const cacheFilter = caseSensitive ? filter.trim() : normalizedFilter;
     const databaseType = getConfig(connectionId)?.db_type;
     const filteredRoutineAssistant = !!databaseType && FILTERED_ROUTINE_COMPLETION_DATABASES.has(databaseType) && (!!normalizedFilter || typeof limit === "number" || !!parentName || globalSearch);
-    const cacheKey = filteredRoutineAssistant
-      ? `${connectionId}:${database}:${schema ?? ""}:${parentName ?? ""}:${cacheFilter}:${limit ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}:${[...objectKinds].sort().join(",")}:${caseSensitive ? "case-sensitive" : "case-insensitive"}`
-      : `${connectionId}:${database}:${schema ?? ""}`;
+    const cacheKey =
+      databaseType === "oceanbase-oracle" && filteredRoutineAssistant
+        ? `${connectionId}:${database}:${JSON.stringify([schema, parentName, cacheFilter, limit, globalSearch, currentSchema, [...objectKinds].sort(), caseSensitive])}`
+        : filteredRoutineAssistant
+          ? `${connectionId}:${database}:${schema ?? ""}:${parentName ?? ""}:${cacheFilter}:${limit ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}:${[...objectKinds].sort().join(",")}:${caseSensitive ? "case-sensitive" : "case-insensitive"}`
+          : `${connectionId}:${database}:${schema ?? ""}`;
     if (!completionObjectsCache.value[cacheKey]) {
+      const requestRevision = completionCacheRevision(connectionId, database);
       await withCompletionInFlight(
-        `${cacheKey}:objects`,
+        `${cacheKey}:objects:${requestRevision}`,
         async () => {
           await ensureConnected(connectionId);
+          let loadedObjects: SqlCompletionObject[];
           if (filteredRoutineAssistant) {
             try {
-              let assistantObjects = await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds, caseSensitive);
+              let assistantObjects = await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds, caseSensitive, "prefix", requestRevision);
               if (shouldWidenCompletionMatch(filter, assistantObjects.length, limit)) {
                 try {
-                  const widenedObjects = await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds, caseSensitive, "contains");
+                  const widenedObjects = await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds, caseSensitive, "contains", requestRevision);
                   assistantObjects = [...assistantObjects, ...widenedObjects];
                 } catch {
                   // Keep the prefix matches when the widened lookup is unavailable.
                 }
               }
-              completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(assistantObjects);
-            } catch {
+              loadedObjects = dedupeCompletionObjects(assistantObjects);
+            } catch (error) {
+              if (requestRevision !== completionCacheRevision(connectionId, database)) return;
+              if (databaseType === "oceanbase-oracle" && parentName) throw error;
+              if (databaseType === "oceanbase-oracle" && !/does not support filtered routine completion|unknown method|method not found|not supported/i.test(String(error))) throw error;
               if (objectKinds.length === 1 && objectKinds[0] === "sequence") {
-                completionObjectsCache.value[cacheKey] = [];
+                loadedObjects = [];
               } else {
                 const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, connectionDatabaseMetadataSchema(getConfig(connectionId), database, schema));
-                completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
+                loadedObjects = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
               }
             }
           } else {
             const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, connectionDatabaseMetadataSchema(getConfig(connectionId), database, schema));
-            completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
+            loadedObjects = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
           }
-          indexCompletionObjects(connectionId, database, schema, completionObjectsCache.value[cacheKey]);
+          if (requestRevision !== completionCacheRevision(connectionId, database)) return;
+          completionObjectsCache.value[cacheKey] = loadedObjects;
+          indexCompletionObjects(connectionId, database, schema, loadedObjects);
           evictOldestCacheEntries(completionObjectsCache.value, COMPLETION_CACHE_MAX);
         },
         { scope: completionLimiterScope(connectionId, database), kind: "objects" },
       );
     }
 
-    const objects = completionObjectsCache.value[cacheKey];
-    const filtered = normalizedFilter ? objects.filter((object) => fuzzyCompletionObjectMatch(object, normalizedFilter)) : objects;
+    const objects = completionObjectsCache.value[cacheKey] ?? [];
+    const filtered = objects.filter((object) => {
+      if (databaseType === "oceanbase-oracle") {
+        if (object.type === "sequence") {
+          if (!objectKinds.includes("sequence")) return false;
+        } else if (object.type !== "procedure" && object.type !== "function") return false;
+        else if (!objectKinds.includes("routine") && !objectKinds.includes(object.type)) return false;
+        if (schema && !globalSearch && object.schema !== schema) return false;
+        if (parentName && object.parentName !== parentName) return false;
+        if (caseSensitive) return object.name.includes(filter.trim());
+      }
+      return !normalizedFilter || fuzzyCompletionObjectMatch(object, normalizedFilter);
+    });
     return typeof limit === "number" ? filtered.slice(0, limit) : filtered;
   }
 
@@ -9324,7 +9398,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const seen = new Set<string>();
     const deduped: SqlCompletionObject[] = [];
     for (const object of objects) {
-      const key = `${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}:${object.signature?.trim() ?? ""}`.toLowerCase();
+      const key = JSON.stringify([object.type, object.schema, object.name, object.parentName, object.routineId ?? object.signature?.trim()]);
       if (seen.has(key)) continue;
       seen.add(key);
       deduped.push(object);
@@ -9342,7 +9416,7 @@ export const useConnectionStore = defineStore("connection", () => {
   /// the same fallback.
   const LOGIN_SCHEMA_COMPLETION_TYPES = new Set(["dameng", "db2"]);
 
-  async function listCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean }, catalog?: string): Promise<SqlCompletionColumn[]> {
+  async function listCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean; currentSchema?: string }, catalog?: string): Promise<SqlCompletionColumn[]> {
     const config = getConfig(connectionId);
     // Use the effective database type (e.g. a JDBC connection whose URL is
     // `jdbc:oracle:...` resolves to "oracle") rather than the raw db_type.
@@ -9364,7 +9438,9 @@ export const useConnectionStore = defineStore("connection", () => {
       return [];
     }
     const sessionCacheScope = usesCurrentSchema && context?.clientSessionId ? `:${context.clientSessionId}:${context.version ?? 0}` : "";
-    const cacheKey = `${completionColumnsKey(connectionId, database, completionTable, completionSchema, catalog, context)}${sessionCacheScope}`;
+    const currentSchema = effectiveDbType === "oceanbase-oracle" && usesCurrentSchema ? context?.currentSchema : undefined;
+    const contextCacheScope = currentSchema ? `:current=${JSON.stringify(currentSchema)}` : "";
+    const cacheKey = `${completionColumnsKey(connectionId, database, completionTable, completionSchema, catalog, context)}${sessionCacheScope}${contextCacheScope}`;
     if (!completionColumnsCache.value[cacheKey]) {
       const requestRevision = completionCacheRevision(connectionId, database);
       await withCompletionInFlight(
@@ -9398,7 +9474,9 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
           const querySchema = usesCurrentSchema ? "" : metadataQuerySchema(connectionId, database, completionSchema);
-          const columns = await api.getColumns(connectionId, database, querySchema, completionTable, catalog, usesCurrentSchema ? context?.clientSessionId : undefined);
+          const columns = currentSchema
+            ? await api.getColumns(connectionId, database, querySchema, completionTable, catalog, context?.clientSessionId, currentSchema)
+            : await api.getColumns(connectionId, database, querySchema, completionTable, catalog, usesCurrentSchema ? context?.clientSessionId : undefined);
           if (requestRevision !== completionCacheRevision(connectionId, database)) return;
           completionColumnsCache.value[cacheKey] = columns;
           evictOldestCacheEntries(completionColumnsCache.value, COMPLETION_CACHE_MAX);
@@ -9469,7 +9547,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return listCompletionDatabases(connectionId);
   }
 
-  function refreshCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean }, catalog?: string): Promise<SqlCompletionColumn[]> {
+  function refreshCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean; currentSchema?: string }, catalog?: string): Promise<SqlCompletionColumn[]> {
     return listCompletionColumns(connectionId, database, table, schema, context, catalog);
   }
 

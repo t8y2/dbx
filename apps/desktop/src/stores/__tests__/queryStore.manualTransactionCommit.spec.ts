@@ -58,6 +58,71 @@ describe.each(["oracle", "oceanbase-oracle"] as const)("queryStore %s commit lif
 
   afterEach(() => vi.unstubAllGlobals());
 
+  it("preserves a synchronous backend error and permits the next transaction to commit", async () => {
+    const { store, id, tab } = await setupManualTab(dbType);
+    const error = new Error("Synchronous commit boundary failure");
+    mocks.commitManualTransaction.mockImplementationOnce(() => {
+      throw error;
+    });
+
+    await expect(store.commitTransaction(id)).rejects.toBe(error);
+    expect(tab.txnSessionId).toBeUndefined();
+    expect(tab.txnPossiblyDirty).toBe(false);
+
+    mocks.beginManualTransaction.mockResolvedValueOnce("txn-next");
+    await store.ensureManualTransactionSession(id, "ORCL", "APP");
+    mocks.commitManualTransaction.mockResolvedValueOnce(undefined);
+    await expect(store.commitTransaction(id)).resolves.toBeUndefined();
+    expect(mocks.commitManualTransaction.mock.calls.map(([sessionId]) => sessionId)).toEqual(["txn-old", "txn-next"]);
+    expect(tab.txnSessionId).toBeUndefined();
+  });
+
+  it.each(["success", "failure"] as const)("shares an in-flight commit until its %s result arrives", async (outcome) => {
+    const { store, id, tab } = await setupManualTab(dbType);
+    const commit = deferred<void>();
+    mocks.commitManualTransaction.mockReturnValueOnce(commit.promise).mockRejectedValue(new Error("Transaction session not found"));
+    const first = store.commitTransaction(id);
+    const second = store.commitTransaction(id);
+    const secondResult = second.then(
+      () => undefined,
+      (error) => error,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mocks.commitManualTransaction).toHaveBeenCalledTimes(1);
+    expect(tab.txnSessionId).toBe("txn-old");
+    expect(tab.txnPossiblyDirty).toBe(true);
+
+    await finishCommit(commit, first, outcome);
+    expect(await secondResult).toEqual(outcome === "success" ? undefined : new Error("Commit response lost"));
+    expect(tab.txnSessionId).toBeUndefined();
+  });
+
+  it("tracks a replacement commit independently while the old commit finishes", async () => {
+    const { store, id, tab } = await setupManualTab(dbType);
+    const oldCommit = deferred<void>();
+    const newCommit = deferred<void>();
+    mocks.commitManualTransaction.mockReturnValueOnce(oldCommit.promise).mockReturnValueOnce(newCommit.promise);
+    const oldCommitting = store.commitTransaction(id);
+    store.updateSchema(id, "OTHER");
+    mocks.beginManualTransaction.mockResolvedValueOnce("txn-new");
+    await store.ensureManualTransactionSession(id, "ORCL", "OTHER");
+    store.markManualTransactionDirty(id);
+    const newCommitting = store.commitTransaction(id);
+
+    oldCommit.resolve();
+    await oldCommitting;
+    const duplicate = store.commitTransaction(id);
+    expect(mocks.commitManualTransaction.mock.calls.map(([sessionId]) => sessionId)).toEqual(["txn-old", "txn-new"]);
+    expect(tab.txnSessionId).toBe("txn-new");
+    expect(tab.txnPossiblyDirty).toBe(true);
+
+    newCommit.resolve();
+    await Promise.all([newCommitting, duplicate]);
+    expect(tab.txnSessionId).toBeUndefined();
+  });
+
   describe.each(["success", "failure"] as const)("old commit %s", (outcome) => {
     it.each(["mode", "schema", "database", "connection"] as const)("preserves a replacement transaction after a %s change", async (change) => {
       const { store, id, tab } = await setupManualTab(dbType);

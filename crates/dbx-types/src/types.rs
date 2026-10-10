@@ -1,5 +1,34 @@
 use serde::{Deserialize, Serialize};
 
+/// A data-grid statement whose BLOB values travel outside the executable SQL.
+/// The preview must match the caller's reviewed SQL before any statement runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobBoundStatement {
+    pub preview_sql: String,
+    pub sql: String,
+    pub blob_parameters: Vec<String>,
+}
+
+pub fn validate_blob_bound_statements(previews: &[String], bound: &[BlobBoundStatement]) -> Result<(), String> {
+    if previews.len() != bound.len()
+        || previews.iter().zip(bound).any(|(preview, statement)| preview != &statement.preview_sql)
+    {
+        return Err("The reviewed SQL changed; regenerate the BLOB save preview before saving.".into());
+    }
+    if bound.iter().any(|statement| {
+        statement.sql.trim().is_empty()
+            || statement.blob_parameters.is_empty() && statement.sql != statement.preview_sql
+            || statement
+                .blob_parameters
+                .iter()
+                .any(|hex| hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    }) {
+        return Err("Invalid BLOB statement parameters.".into());
+    }
+    Ok(())
+}
+
 pub use crate::mysql_event::MysqlEventInfo;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -172,11 +201,39 @@ pub struct EventTriggerInfo {
     pub source: Option<String>,
 }
 
+/// OceanBase Leader disk metrics. Component snapshots must not be added to the
+/// source-reported table metric: their coverage and collection times differ.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ObjectSpaceStatistics {
+    pub status: String,
+    pub source: String,
+    pub replica_scope: String,
+    pub data_bytes: Option<i64>,
+    pub allocated_bytes: Option<i64>,
+    pub components_status: String,
+    pub components: Vec<SpaceComponent>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SpaceComponent {
+    pub kind: String,
+    pub data_bytes: Option<i64>,
+    pub allocated_bytes: Option<i64>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectStatistics {
     pub name: String,
     pub schema: Option<String>,
     pub estimated_rows: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_last_analyzed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_stale: Option<bool>,
     pub total_bytes: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_length: Option<i64>,
@@ -202,6 +259,8 @@ pub struct ObjectStatistics {
     pub auto_increment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_free: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<ObjectSpaceStatistics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -291,6 +350,10 @@ pub struct ColumnInfo {
     pub data_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_object_type: Option<String>,
     pub is_nullable: bool,
     pub column_default: Option<String>,
     pub is_primary_key: bool,
@@ -423,6 +486,8 @@ pub struct CompletionAssistantCandidate {
     pub comment: Option<String>,
     pub data_type: Option<String>,
     pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -541,6 +606,9 @@ pub struct LargeValueCell {
     pub row_index: usize,
     pub column_index: usize,
     pub original_bytes: usize,
+    /// Opaque original-result locator. Absent for legacy preview/re-query drivers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -788,6 +856,9 @@ pub struct ForeignKeyInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerInfo {
     pub name: String,
+    /// Catalog-reported trigger owner; never inferred from the parent table schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub event: String,
     pub timing: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -955,9 +1026,63 @@ pub struct PgTablePartitioning {
     pub server_version_num: Option<i32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineDependency {
+    pub owner: String,
+    pub name: String,
+    pub object_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineTriggerInfo {
+    pub table_owner: String,
+    pub table_name: String,
+    pub timing: String,
+    pub event: String,
+    pub status: String,
+    pub base_object_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineTypeInfo {
+    pub pairing_state: crate::oracle_types::OracleMetadataReadState,
+    pub dependency_state: crate::oracle_types::OracleMetadataReadState,
+    pub incoming_state: crate::oracle_types::OracleMetadataReadState,
+    pub referenced_columns: Vec<RoutineColumnDependency>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineColumnDependency {
+    pub owner: String,
+    pub table_name: String,
+    pub column_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FunctionInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_info: Option<RoutineTypeInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<RoutineTriggerInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_objects: Vec<RoutineDependency>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incoming_dependencies: Vec<RoutineDependency>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paired_object_present: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
     pub name: String,
     pub function_type: String,
     pub data_type: String,
@@ -1109,11 +1234,61 @@ pub struct CustomTypeDetails {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blob_bindings_refuse_edited_previews_and_invalid_later_parameters() {
+        let previews = vec!["first reviewed save".to_string(), "second reviewed save".to_string()];
+        let mut bound = previews
+            .iter()
+            .map(|preview| super::BlobBoundStatement {
+                preview_sql: preview.clone(),
+                sql: "BEGIN UPDATE T SET B=?; END;".into(),
+                blob_parameters: vec!["00ff".into()],
+            })
+            .collect::<Vec<_>>();
+        assert!(super::validate_blob_bound_statements(&previews, &bound).is_ok());
+        bound[1].blob_parameters[0] = "xyz".into();
+        assert!(super::validate_blob_bound_statements(&previews, &bound).is_err());
+        bound[1].blob_parameters[0] = "00ff".into();
+        bound[1].preview_sql = "user edited SQL".into();
+        assert!(super::validate_blob_bound_statements(&previews, &bound).is_err());
+        assert!(super::validate_blob_bound_statements(&previews, &bound[..1]).is_err());
+    }
     use super::{
         is_opaque_aggregate_state_type, CompletionAssistantCandidate, CompletionAssistantCandidateKind, ObjectInfo,
         ObjectSource, ObjectSourceKind, QueryMessage, RoutineParameterMode, SpatialColumn, SpatialColumnBuilder,
-        TableInfo,
+        TableInfo, TriggerInfo,
     };
+
+    #[test]
+    fn trigger_owner_is_optional_and_round_trips_exact_catalog_identity() {
+        let legacy = r#"{"name":"AUDIT","event":"INSERT","timing":"AFTER"}"#;
+        let mut trigger: TriggerInfo = serde_json::from_str(legacy).unwrap();
+        assert_eq!(trigger.owner, None);
+        assert!(serde_json::to_value(&trigger).unwrap().get("owner").is_none());
+        trigger.owner = Some("Other\"Owner".to_string());
+        let decoded: TriggerInfo = serde_json::from_value(serde_json::to_value(&trigger).unwrap()).unwrap();
+        assert_eq!(decoded.owner.as_deref(), Some("Other\"Owner"));
+        let null_owner: TriggerInfo =
+            serde_json::from_str(r#"{"name":"AUDIT","owner":null,"event":"INSERT","timing":"AFTER"}"#).unwrap();
+        assert_eq!(null_owner.owner, None);
+    }
+
+    #[test]
+    fn agent_object_validity_remains_optional_across_core_serialization() {
+        for expected in [Some(true), Some(false), None] {
+            let mut wire = serde_json::json!({"name":"PKG", "object_type":"PACKAGE", "schema":"APP"});
+            if let Some(valid) = expected {
+                wire["valid"] = serde_json::json!(valid);
+            }
+            let object: ObjectInfo = serde_json::from_value(wire).unwrap();
+            assert_eq!(object.valid, expected);
+            let forwarded = serde_json::to_value(object).unwrap();
+            match expected {
+                Some(valid) => assert_eq!(forwarded["valid"], valid),
+                None => assert!(forwarded.get("valid").is_none()),
+            }
+        }
+    }
 
     #[test]
     fn opaque_aggregate_state_type_is_narrow() {

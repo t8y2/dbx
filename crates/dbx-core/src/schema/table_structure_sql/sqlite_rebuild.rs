@@ -1524,6 +1524,7 @@ mod tests {
             transwarp_create: None,
             partitioned: false,
             foreign_table: false,
+            database_version: None,
             is_gaussdb_m_mode: false,
             table_collation: None,
         }

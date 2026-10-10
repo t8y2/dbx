@@ -7480,6 +7480,8 @@ export default withEnglishFallback({
     queryPageSizeDescription: "Righe caricate per pagina dei risultati. Sono supportate fino a {max} righe.",
     defaultAutoKeepResults: "Mantieni automaticamente i risultati per impostazione predefinita",
     defaultAutoKeepResultsDescription: "Applicando questa impostazione si aggiornano le schede di query aperte e si imposta il valore predefinito per le nuove. Puoi modificarlo per ogni scheda.",
+    pinResultTabOnClick: "Fissa la scheda dei risultati al clic",
+    pinResultTabOnClickDescription: "Fissa automaticamente la scheda dei risultati della query quando si fa clic per passare ad essa, evitando che le query successive la sovrascrivano. Quando disabilitato, il clic cambia solo scheda.",
     multiStatementDefaultView: "Vista predefinita per istruzioni multiple",
     multiStatementDefaultViewDescription: "Scegli se i batch con più istruzioni SQL si aprono nella tabella dei risultati o nel riepilogo dell'esecuzione.",
     defaultExplainView: "Vista predefinita per il piano di esecuzione",

@@ -7298,6 +7298,8 @@ export default withEnglishFallback({
     queryPageSizeDescription: "Sorgu sonucu sayfası başına yüklenen satır sayısı. Desteklenen en büyük sayfa boyutu {max}.",
     defaultAutoKeepResults: "Sorgu sonuçlarını varsayılan olarak otomatik sakla",
     defaultAutoKeepResultsDescription: "Bu ayar uygulandığında açık sorgu sekmeleri güncellenir ve yeni sekmeler için varsayılan belirlenir. Her sekmede ayrı ayrı değiştirebilirsiniz.",
+    pinResultTabOnClick: "Tıklandığında sonuç sekmesini sabitle",
+    pinResultTabOnClickDescription: "Geçiş yapmak için tıklandığında sorgu sonucu sekmesini otomatik olarak sabitler ve sonraki sorguların üzerine yazmasını önler. Devre dışıyken tıklama yalnızca sekmeyi değiştirir.",
     multiStatementDefaultView: "Birden çok ifade için varsayılan görünüm",
     multiStatementDefaultViewDescription: "Birden çok SQL ifadesi içeren toplu işlerin sonuç tablosunda mı yoksa yürütme özetinde mi açılacağını seçin.",
     defaultExplainView: "Yürütme planı için varsayılan görünüm",

@@ -8145,6 +8145,8 @@ export default withEnglishFallback({
     queryPageSizeDescription: "Baris yang dimuat per halaman hasil kueri. Ukuran halaman maksimum yang didukung adalah {max}.",
     defaultAutoKeepResults: "Simpan hasil kueri secara otomatis secara default",
     defaultAutoKeepResultsDescription: "Menerapkan pengaturan ini memperbarui tab kueri yang terbuka dan mengatur default untuk tab baru. Anda tetap dapat mengaktifkan/menonaktifkannya per tab.",
+    pinResultTabOnClick: "Sematkan tab hasil saat diklik",
+    pinResultTabOnClickDescription: "Sematkan tab hasil kueri secara otomatis saat beralih dengan klik, mencegah kueri berikutnya menimpanya. Saat dinonaktifkan, klik hanya beralih tab.",
     multiStatementDefaultView: "Tampilan default untuk beberapa pernyataan",
     multiStatementDefaultViewDescription: "Pilih apakah batch dengan beberapa pernyataan SQL terbuka pada tabel hasil atau ringkasan eksekusi.",
     defaultExplainView: "Tampilan default untuk rencana eksekusi",

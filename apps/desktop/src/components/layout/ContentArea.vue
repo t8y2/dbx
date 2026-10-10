@@ -1638,11 +1638,13 @@ async function selectResultRun(runId: string) {
 }
 
 /**
- * 点击结果标签：切换显示的同时固定该结果（issue #9975）。
- * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来。
+ * 点击结果标签：切换显示的同时根据设置决定是否固定该结果（issue #9975, #10680）。
+ * 开启时（默认）：点击即固定，防止后续查询覆盖。
+ * 关闭时：仅切换标签页，不自动改变固定状态。
  */
 async function selectResultRunFromTab(runId: string) {
   if (!(await selectResultRun(runId))) return;
+  if (!settingsStore.editorSettings.pinResultTabOnClick) return;
   const run = resultRuns.value.find((item) => item.id === runId);
   if (run && !run.pinned) toggleResultRunPinned(runId);
 }

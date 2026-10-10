@@ -1041,6 +1041,8 @@ export interface EditorSettings {
   dataGridExtractorOptions: DataGridExtractorOptions;
   dataGridExtractorOptionsMigrationVersion: number;
   resultRunDisplayMode: ResultRunDisplayMode;
+  /** 单击切换结果标签时是否自动锁定（固定）。为 true 时保持历史行为，点击即锁定；为 false 时单击仅切换，不改变锁定状态。 */
+  pinResultTabOnClick: boolean;
   defaultAutoKeepResults: boolean;
   multiStatementDefaultView: MultiStatementDefaultView;
   defaultExplainView: DefaultExplainView;
@@ -1363,6 +1365,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridExtractorOptions: normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
   dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
   resultRunDisplayMode: "tabs",
+  pinResultTabOnClick: true,
   defaultAutoKeepResults: false,
   multiStatementDefaultView: "result",
   defaultExplainView: "canvas",
@@ -2004,6 +2007,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridExtractorOptions,
     dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
     resultRunDisplayMode: normalizeResultRunDisplayMode(settings.resultRunDisplayMode),
+    pinResultTabOnClick: typeof settings.pinResultTabOnClick === "boolean" ? settings.pinResultTabOnClick : DEFAULT_EDITOR_SETTINGS.pinResultTabOnClick,
     defaultAutoKeepResults: settings.defaultAutoKeepResults === true,
     multiStatementDefaultView: normalizeMultiStatementDefaultView(settings.multiStatementDefaultView),
     defaultExplainView: normalizeDefaultExplainView(settings.defaultExplainView),
@@ -2885,6 +2889,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridExtractorOptions !== undefined) editorSettings.value.dataGridExtractorOptions = normalizeDataGridExtractorOptions(partial.dataGridExtractorOptions);
     if (partial.dataGridExtractorOptionsMigrationVersion !== undefined) editorSettings.value.dataGridExtractorOptionsMigrationVersion = DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION;
     if (partial.resultRunDisplayMode !== undefined) editorSettings.value.resultRunDisplayMode = normalizeResultRunDisplayMode(partial.resultRunDisplayMode);
+    if (partial.pinResultTabOnClick !== undefined) editorSettings.value.pinResultTabOnClick = partial.pinResultTabOnClick === true;
     if (partial.defaultAutoKeepResults !== undefined) editorSettings.value.defaultAutoKeepResults = partial.defaultAutoKeepResults === true;
     if (partial.multiStatementDefaultView !== undefined) editorSettings.value.multiStatementDefaultView = normalizeMultiStatementDefaultView(partial.multiStatementDefaultView);
     if (partial.defaultExplainView !== undefined) editorSettings.value.defaultExplainView = normalizeDefaultExplainView(partial.defaultExplainView);

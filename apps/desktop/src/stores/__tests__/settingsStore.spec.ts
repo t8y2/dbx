@@ -1126,6 +1126,24 @@ describe("normalizeEditorSettings - sidebarPinDefaultDatabase", () => {
   });
 });
 
+describe("normalizeEditorSettings - pinResultTabOnClick", () => {
+  it("defaults pinResultTabOnClick to true", () => {
+    expect(normalizeEditorSettings({}).pinResultTabOnClick).toBe(true);
+  });
+
+  it("preserves explicit boolean values", () => {
+    expect(normalizeEditorSettings({ pinResultTabOnClick: false }).pinResultTabOnClick).toBe(false);
+    expect(normalizeEditorSettings({ pinResultTabOnClick: true }).pinResultTabOnClick).toBe(true);
+  });
+
+  it("falls back to default for non-boolean values", () => {
+    expect(normalizeEditorSettings({ pinResultTabOnClick: "false" } as any).pinResultTabOnClick).toBe(true);
+    expect(normalizeEditorSettings({ pinResultTabOnClick: undefined } as any).pinResultTabOnClick).toBe(true);
+    expect(normalizeEditorSettings({ pinResultTabOnClick: null } as any).pinResultTabOnClick).toBe(true);
+    expect(normalizeEditorSettings({ pinResultTabOnClick: 0 } as any).pinResultTabOnClick).toBe(true);
+  });
+});
+
 describe("normalizeEditorSettings - preferredExportPath", () => {
   it("defaults preferredExportPath to empty string", () => {
     expect(normalizeEditorSettings({}).preferredExportPath).toBe("");
@@ -2175,6 +2193,21 @@ describe("settingsStore sidebar connection sort persistence", () => {
 
     expect(store.editorSettings.resultRunDisplayMode).toBe("list");
     expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ resultRunDisplayMode: "list" }));
+    expect(isProxy(saveEditorSettings.mock.calls[0][0])).toBe(false);
+  });
+
+  it("persists the pin result tab on click preference", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue(null);
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    store.updateEditorSettings({ pinResultTabOnClick: false });
+
+    expect(store.editorSettings.pinResultTabOnClick).toBe(false);
+    expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ pinResultTabOnClick: false }));
     expect(isProxy(saveEditorSettings.mock.calls[0][0])).toBe(false);
   });
 });

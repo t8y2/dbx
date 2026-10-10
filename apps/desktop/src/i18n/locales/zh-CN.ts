@@ -8408,6 +8408,8 @@ export default withEnglishFallback({
     queryPageSizeDescription: "每个查询结果分页加载的行数，最大支持 {max} 行。",
     defaultAutoKeepResults: "默认自动保留查询结果",
     defaultAutoKeepResultsDescription: "应用后同步更新已打开的查询标签，新建查询标签也使用此设置。仍可在标签内单独切换。",
+    pinResultTabOnClick: "单击切换结果标签时锁定",
+    pinResultTabOnClickDescription: "开启后，单击切换查询结果标签页时自动固定（锁定）该结果，防止后续查询覆盖；关闭后单击仅切换，需通过右键菜单手动锁定。",
     multiStatementDefaultView: "多语句执行默认视图",
     multiStatementDefaultViewDescription: "选择多条 SQL 语句批量执行后默认打开数据表或执行摘要。",
     defaultExplainView: "执行计划默认视图",

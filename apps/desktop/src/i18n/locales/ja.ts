@@ -2775,6 +2775,8 @@ export default withEnglishFallback({
     copyExtractorInsertRowByRow: "1行ごとに1文",
     copyExtractorPrettyJson: "JSONを整形",
     copyExtractorCamelCaseJsonFields: "snake_caseのフィールド名をcamelCaseに変換",
+    copyExtractorValuesOnlyJsonArray: "値のみ（単一列）",
+    copyExtractorValuesOnlyJsonArrayHint: "オブジェクトではなく、選択した列の値だけの JSON 配列を生成します。複数列の選択ではオブジェクトのまま出力されます。",
     copyExtractorPreview: "プレビュー（現在の選択）",
     copyExtractorEmptySelection: "データを選択してから抽出結果をプレビューしてください。",
     copyExtractorUnsupportedSelection: "現在の抽出器では各行で同じ列を選択する必要があります。",

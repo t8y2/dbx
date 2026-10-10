@@ -128,11 +128,14 @@ pub enum DataGridTemporalFormat {
 pub struct DataGridJsonExtractorOptions {
     pub pretty: bool,
     pub camel_case_field_names: bool,
+    /// Emit a bare array of cell values instead of objects. Only honored for
+    /// single-column selections; multi-column selections fall back to objects.
+    pub values_only: bool,
 }
 
 impl Default for DataGridJsonExtractorOptions {
     fn default() -> Self {
-        Self { pretty: DEFAULT_JSON_PRETTY, camel_case_field_names: false }
+        Self { pretty: DEFAULT_JSON_PRETTY, camel_case_field_names: false, values_only: false }
     }
 }
 

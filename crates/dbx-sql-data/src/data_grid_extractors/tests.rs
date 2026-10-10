@@ -272,6 +272,7 @@ fn partially_deserialized_options_use_the_canonical_defaults() {
     assert_eq!(options.sql.temporal_format, DataGridTemporalFormat::Native);
     assert!(options.json.pretty);
     assert!(!options.json.camel_case_field_names);
+    assert!(!options.json.values_only);
 }
 
 #[test]
@@ -990,6 +991,40 @@ fn suffixes_collisions_after_normalizing_uppercase_json_names() {
     assert_eq!(serde_json::from_str::<Value>(&result.text).expect("valid JSON"), json!([{"id": 1, "id_2": 2}]));
     assert_eq!(result.warnings.len(), 1);
     assert_eq!(result.warnings[0].code, DataGridExtractWarningCode::DuplicateJsonColumnNames);
+}
+
+#[test]
+fn emits_bare_values_for_single_column_json_array_when_values_only() {
+    let mut request = request(DataGridExtractorId::Json);
+    request.columns = vec![column("attendance_date", 0)];
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![vec![json!("2026-09-04")], vec![json!("2026-09-27")], vec![json!(null)]];
+    request.options.json.values_only = true;
+
+    let result = extract_data_grid_selection(request.clone()).expect("values-only JSON extraction");
+    assert_eq!(
+        serde_json::from_str::<Value>(&result.text).expect("valid JSON"),
+        json!(["2026-09-04", "2026-09-27", null])
+    );
+
+    request.options.json.pretty = false;
+    let compact = extract_data_grid_selection(request).expect("compact values-only JSON extraction");
+    assert_eq!(compact.text, r#"["2026-09-04","2026-09-27",null]"#);
+}
+
+#[test]
+fn keeps_object_json_arrays_when_values_only_selection_spans_multiple_columns() {
+    let mut request = request(DataGridExtractorId::Json);
+    request.columns = vec![column("attendance_date", 0), column("state", 1)];
+    request.selected_column_indexes = vec![0, 1];
+    request.rows = vec![vec![json!("2026-09-04"), json!("done")]];
+    request.options.json.values_only = true;
+
+    let result = extract_data_grid_selection(request).expect("multi-column JSON extraction");
+    assert_eq!(
+        serde_json::from_str::<Value>(&result.text).expect("valid JSON"),
+        json!([{"attendance_date": "2026-09-04", "state": "done"}])
+    );
 }
 
 #[test]

@@ -2112,6 +2112,8 @@ export default withEnglishFallback({
     copyExtractorInsertRowByRow: "Satu pernyataan per baris",
     copyExtractorPrettyJson: "Format JSON rapi",
     copyExtractorCamelCaseJsonFields: "Ubah field snake_case menjadi camelCase",
+    copyExtractorValuesOnlyJsonArray: "Hanya nilai (satu kolom)",
+    copyExtractorValuesOnlyJsonArrayHint: "Menghasilkan array JSON berisi nilai kolom terpilih saja, bukan objek. Pilihan multi-kolom tetap menghasilkan objek.",
     copyExtractorPreview: "Pratinjau (pilihan saat ini)",
     copyExtractorEmptySelection: "Pilih data untuk melihat pratinjau hasil ekstraktor.",
     copyExtractorUnsupportedSelection: "Ekstraktor ini mengharuskan kolom yang sama dipilih di setiap baris.",

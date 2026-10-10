@@ -98,6 +98,8 @@ export interface DataGridExtractorOptions {
   json: {
     pretty: boolean;
     camelCaseFieldNames: boolean;
+    /** Bare array of values instead of objects; only honored for single-column selections. */
+    valuesOnly: boolean;
   };
 }
 
@@ -158,7 +160,7 @@ export const DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS: DataGridExtractorOptions = {
     quoteIdentifiers: true,
     temporalFormat: "native",
   },
-  json: { pretty: true, camelCaseFieldNames: false },
+  json: { pretty: true, camelCaseFieldNames: false, valuesOnly: false },
 };
 
 function unicodeCodePointLength(value: string): number {
@@ -194,6 +196,7 @@ export function normalizeDataGridExtractorOptions(value: unknown): DataGridExtra
     json: {
       pretty: json.pretty !== false,
       camelCaseFieldNames: json.camelCaseFieldNames === true,
+      valuesOnly: json.valuesOnly === true,
     },
   };
 }

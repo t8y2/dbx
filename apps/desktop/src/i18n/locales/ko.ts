@@ -2086,6 +2086,8 @@ export default withEnglishFallback({
     copyExtractorInsertRowByRow: "행별 한 구문",
     copyExtractorPrettyJson: "JSON 보기 좋게",
     copyExtractorCamelCaseJsonFields: "snake_case 필드 이름을 camelCase로 변환",
+    copyExtractorValuesOnlyJsonArray: "값만 포함 (단일 열)",
+    copyExtractorValuesOnlyJsonArrayHint: "객체 대신 선택한 열의 값만 담은 JSON 배열을 생성합니다. 여러 열을 선택하면 객체 형태가 유지됩니다.",
     copyExtractorPreview: "미리보기 (현재 선택)",
     copyExtractorEmptySelection: "추출기 출력을 미리보려면 데이터를 선택하세요.",
     copyExtractorUnsupportedSelection: "이 추출기는 모든 행에서 동일한 컬럼이 선택되어야 합니다.",

@@ -2766,6 +2766,8 @@ export default withEnglishFallback({
     copyExtractorInsertRowByRow: "每行一條語句",
     copyExtractorPrettyJson: "格式化 JSON",
     copyExtractorCamelCaseJsonFields: "將底線欄位名稱轉為小駝峰",
+    copyExtractorValuesOnlyJsonArray: "僅保留值（單欄）",
+    copyExtractorValuesOnlyJsonArrayHint: "複製為僅含所選欄位值的 JSON 陣列，而不是物件；多欄選取仍輸出物件。",
     copyExtractorPreview: "預覽（目前選擇）",
     copyExtractorEmptySelection: "請選擇資料後預覽提取結果。",
     copyExtractorUnsupportedSelection: "目前提取器要求每一行選擇相同的列。",

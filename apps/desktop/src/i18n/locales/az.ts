@@ -1840,6 +1840,8 @@ export default withEnglishFallback({
     copyExtractorInsertRowByRow: "Hər sətir üçün bir əmr",
     copyExtractorPrettyJson: "JSON-u oxunaqlı formatla",
     copyExtractorCamelCaseJsonFields: "snake_case sahələrini camelCase formasına çevir",
+    copyExtractorValuesOnlyJsonArray: "Yalnız dəyərlər (tək sütun)",
+    copyExtractorValuesOnlyJsonArrayHint: "Obyektlər əvəzinə yalnız seçilmiş sütunun dəyərlərindən ibarət JSON massivi yaradır. Çoxsütunlu seçimlərdə obyekt formatı saxlanılır.",
     copyExtractorPreview: "Önbaxış (cari seçim)",
     copyExtractorEmptySelection: "Çıxarma vasitəsinin nəticəsinə önbaxış üçün verilənləri seçin.",
     copyExtractorUnsupportedSelection: "Bu çıxarma vasitəsi hər sətirdə eyni sütunların seçilməsini tələb edir.",

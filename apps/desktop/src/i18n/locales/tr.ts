@@ -1839,6 +1839,8 @@ export default withEnglishFallback({
     copyExtractorInsertRowByRow: "Her satır için bir ifade",
     copyExtractorPrettyJson: "JSON'u düzenli yazdır",
     copyExtractorCamelCaseJsonFields: "snake_case alanları camelCase'e dönüştür",
+    copyExtractorValuesOnlyJsonArray: "Yalnızca değerler (tek sütun)",
+    copyExtractorValuesOnlyJsonArrayHint: "Nesneler yerine yalnızca seçili sütunun değerlerinden oluşan bir JSON dizisi oluşturur. Çok sütunlu seçimlerde nesne biçimi korunur.",
     copyExtractorPreview: "Önizleme (geçerli seçim)",
     copyExtractorEmptySelection: "Çıkarıcı çıktısını önizlemek için veri seçin.",
     copyExtractorUnsupportedSelection: "Bu çıkarıcı, her satırda aynı sütunların seçilmesini gerektirir.",

@@ -2756,6 +2756,8 @@ export default withEnglishFallback({
     copyExtractorInsertRowByRow: "Una istruzione per riga",
     copyExtractorPrettyJson: "JSON formattato",
     copyExtractorCamelCaseJsonFields: "Converti i campi snake_case in camelCase",
+    copyExtractorValuesOnlyJsonArray: "Solo valori (singola colonna)",
+    copyExtractorValuesOnlyJsonArrayHint: "Genera un array JSON con i soli valori della colonna selezionata invece di oggetti. Le selezioni su più colonne restano oggetti.",
     copyExtractorPreview: "Anteprima (selezione corrente)",
     copyExtractorEmptySelection: "Seleziona i dati per visualizzare l'anteprima dell'estrazione.",
     copyExtractorUnsupportedSelection: "L'estrattore corrente richiede la stessa selezione di colonne per ogni riga.",

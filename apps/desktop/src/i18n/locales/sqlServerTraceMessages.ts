@@ -60,3 +60,20 @@ export const sqlServerTraceMessages = {
     "missing-capability": "This SQL Server instance is missing required Extended Events capabilities: {capabilities}.",
   },
 };
+
+// Polish interface overrides; retains all keys from the canonical English object.
+export const sqlServerTraceMessagesPl = {
+  ...sqlServerTraceMessages,
+  title: "Śledzenie aktywności SQL Server",
+  start: "Uruchom",
+  pause: "Wstrzymaj odpytywanie",
+  resume: "Wznów",
+  stop: "Zatrzymaj",
+  clear: "Wyczyść zdarzenia",
+  export: "Eksportuj przefiltrowane zdarzenia do CSV",
+  database: "Baza danych",
+  selectDatabase: "Wybierz bazę danych",
+  maxEvents: "Limit zdarzeń",
+  duration: "Czas trwania (min)",
+  statements: "Instrukcje",
+};

@@ -12,6 +12,7 @@
 // unresolved `${name}` or `@name` remains available to the parameter dialog.
 
 import type { DatabaseType } from "@/types/database";
+import { collectSqlDatabaseLinkStarts } from "@/lib/sql/sqlDatabaseLinks";
 
 const VARIABLE_NAME_START_RE = /[\p{L}_]/u;
 const VARIABLE_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
@@ -242,6 +243,8 @@ function readValueEnd(sql: string, start: number, databaseType?: DatabaseType, i
 }
 
 function replaceReferences(sql: string, values: Map<string, string>, databaseType?: DatabaseType): string {
+  // 声明移除后再计算位置，保护与 @set 同名的 DBLink，只展开真正的变量引用。
+  const databaseLinkStarts = collectSqlDatabaseLinkStarts(sql, databaseType);
   let result = "";
   let i = 0;
   let dollarQuoteEnd = "";
@@ -304,7 +307,7 @@ function replaceReferences(sql: string, values: Map<string, string>, databaseTyp
         }
       }
     }
-    if (ch === "@" && next !== "@" && sql[i - 1] !== "@") {
+    if (ch === "@" && next !== "@" && sql[i - 1] !== "@" && !databaseLinkStarts.has(i)) {
       const name = readVariableName(sql, i + 1);
       if (name) {
         const value = values.get(name.toLowerCase());

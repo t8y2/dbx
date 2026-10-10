@@ -75,6 +75,42 @@ describe("expandSqlVariables", () => {
     expect(expandSqlVariables(sql)).toEqual({ sql, expanded: false });
   });
 
+  describe.each(["dameng", "oracle", "oceanbase-oracle"] as const)("%s database links", (databaseType) => {
+    it.each(["", " ", "\t", "\n", "/* @ignored */", " /* first */ \n /* second */ ", "-- @ignored\n"])("preserves a link separated by %j while expanding same-name references", (separator) => {
+      const target = `SELECT @Dm1 FROM test.table_name${separator}@dM1 WHERE id = @DM1 AND tenant_id = \${dm1}`;
+      const expected = `SELECT 7 FROM test.table_name${separator}@dM1 WHERE id = 7 AND tenant_id = 7`;
+      expect(expandSqlVariables(`@set DM1 = 7;\n${target}`, { databaseType })).toEqual({ sql: expected, expanded: true });
+      expect(expandSqlVariables(target, { databaseType, declarationSql: `@set DM1 = 7;\n${target}` })).toEqual({ sql: expected, expanded: true });
+    });
+
+    it.each(['"Hr"."Audit Log"', '"SELECT"', "订单"])("preserves quoted and Unicode object %s", (objectName) => {
+      const target = `SELECT @dm1 FROM ${objectName} /* separator */ @dm1 WHERE id = @dm1`;
+      expect(expandSqlVariables(`@set dm1 = 7;\n${target}`, { databaseType }).sql).toBe(`SELECT 7 FROM ${objectName} /* separator */ @dm1 WHERE id = 7`);
+    });
+
+    it("expands keyword-led references and leaves unresolved references intact", () => {
+      const target = "SELECT CASE WHEN @dm1 THEN @dm1 ELSE @missing END FROM DUAL; BEGIN IF @dm1 THEN NULL; END IF; RETURN @dm1; END;";
+      expect(expandSqlVariables(`@set dm1 = 7;\n${target}`, { databaseType }).sql).toBe("SELECT CASE WHEN 7 THEN 7 ELSE @missing END FROM DUAL; BEGIN IF 7 THEN NULL; END IF; RETURN 7; END;");
+    });
+  });
+
+  it("expands Dameng TOP and LIMIT variables while preserving links", () => {
+    const sql = "@set count = 7;\n@set offset = 3;\nSELECT TOP @count * FROM test.table_name @count LIMIT @offset, @count";
+    expect(expandSqlVariables(sql, { databaseType: "dameng" }).sql).toBe("SELECT TOP 7 * FROM test.table_name @count LIMIT 3, 7");
+  });
+
+  it.each([
+    ["@set value = '2026-10-10';\nSELECT DATE @value FROM DUAL", "SELECT DATE '2026-10-10' FROM DUAL"],
+    ["@set value = '2026-10-10 12:00:00';\nSELECT TIMESTAMP @value FROM DUAL", "SELECT TIMESTAMP '2026-10-10 12:00:00' FROM DUAL"],
+  ])("expands Dameng datetime literal variables in %s", (sql, expected) => {
+    expect(expandSqlVariables(sql, { databaseType: "dameng" }).sql).toBe(expected);
+  });
+
+  it.each(["postgres", "sqlserver", "mysql"] as const)("keeps legacy at-sign variable expansion for %s", (databaseType) => {
+    const sql = "@set dm1 = 7;\nSELECT @dm1 FROM test.table_name@dm1, other_table /* separator */ @dm1";
+    expect(expandSqlVariables(sql, { databaseType }).sql).toBe("SELECT 7 FROM test.table_name7, other_table /* separator */ 7");
+  });
+
   it("keeps PostgreSQL ARRAY literals from corrupting later variable references", () => {
     const sql = ["@set selected = 7;", "select ARRAY[']']::varchar[], @selected, ${missing}"].join("\n");
     expect(expandSqlVariables(sql, { databaseType: "postgres" }).sql).toBe("select ARRAY[']']::varchar[], 7, ${missing}");

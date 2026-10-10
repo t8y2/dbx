@@ -557,6 +557,10 @@ export function isOracleReservedKeyword(identifier: string): boolean {
   return ORACLE_RESERVED_IDENTIFIER_KEYWORDS.has(identifier.toUpperCase());
 }
 
+export function isDamengReservedKeyword(identifier: string): boolean {
+  return DAMENG_RESERVED_IDENTIFIER_KEYWORDS.has(identifier.toUpperCase());
+}
+
 export function requiresDamengIdentifierQuote(identifier: string): boolean {
   return !SIMPLE_DAMENG_IDENTIFIER.test(identifier) || DAMENG_RESERVED_IDENTIFIER_KEYWORDS.has(identifier);
 }

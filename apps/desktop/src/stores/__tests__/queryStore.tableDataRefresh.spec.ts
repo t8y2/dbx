@@ -1,5 +1,8 @@
 import { createPinia, setActivePinia } from "pinia";
+import { effectScope, nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { clearDataGridStructuredFilterStates, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { clearDataGridSortBuilderMemoryCache, useDataGridSortBuilder } from "@/composables/useDataGridSortBuilder";
 
 const mocks = vi.hoisted(() => ({
   buildTableSelectSql: vi.fn(),
@@ -57,6 +60,8 @@ describe("queryStore table data refresh", () => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
     installLocalStorage();
+    clearDataGridStructuredFilterStates();
+    clearDataGridSortBuilderMemoryCache();
     setActivePinia(createPinia());
     mocks.metadataGeneration = 0;
     mocks.getConnectionConfig.mockReturnValue({
@@ -122,6 +127,66 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
     expect(original.result?.rows).toEqual([[99]]);
     expect(copy.result).not.toBe(original.result);
+  });
+
+  it.each(["filter", "sort"] as const)("duplicates the %s builder state separately from manual SQL inputs (#11609)", async (kind) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(id, {
+      database: "app",
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "status", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+    const original = store.tabs.find((tab) => tab.id === id)!;
+    original.whereInput = "(status = 'ACTIVE') AND (id > 10) AND (status <> 'DELETED')";
+    original.orderByInput = "status ASC";
+    original.structuredOrderByInput = "id DESC";
+    const filterState = {
+      scopeKey: "filter-scope",
+      manualWhereInput: "status = 'ACTIVE'",
+      appliedWhereInput: "id > 10",
+      rules: [{ id: "filter-1", columnName: "id", mode: "greater-than" as const, rawValue: "10", rawEndValue: "", conjunction: "AND" as const }],
+      serverColumnFilters: { 1: { condition: "status <> 'DELETED'", keys: ["active"], labels: ["ACTIVE"] } },
+    };
+    saveDataGridStructuredFilterState(id, filterState);
+    const scope = effectScope();
+    try {
+      const source = scope.run(() => useDataGridSortBuilder({ columns: ["id", "status"], cacheKey: id, scopeKey: "sort-scope" }))!;
+      source.setOpen(true);
+      source.updateRule(source.rules.value[0].id, { columnName: "id", direction: "desc" });
+      source.addRule();
+      source.updateRule(source.rules.value[1].id, { columnName: "status", direction: "asc", disabled: true });
+      source.markApplied("id DESC");
+      await nextTick();
+      store.duplicateTab(id);
+      const copy = store.tabs[1];
+      await vi.waitFor(() => expect(copy.result).toBeDefined());
+      expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ whereInput: original.whereInput, orderBy: "status ASC, id DESC" }));
+      if (kind === "filter") {
+        const copied = loadDataGridStructuredFilterState(copy.id, "filter-scope");
+        expect(copied).toEqual(filterState);
+        copied!.rules[0].rawValue = "100";
+        copied!.serverColumnFilters[1].labels.push("CHANGED");
+        saveDataGridStructuredFilterState(copy.id, copied!);
+        expect(loadDataGridStructuredFilterState(id, "filter-scope")).toEqual(filterState);
+      } else {
+        const target = scope.run(() => useDataGridSortBuilder({ columns: ["id", "status"], cacheKey: copy.id, scopeKey: "sort-scope" }))!;
+        expect(target.rules.value).toEqual(source.rules.value);
+        expect(target.appliedOrderByInput.value).toBe("id DESC");
+        target.updateRule(target.rules.value[0].id, { direction: "asc" });
+        await nextTick();
+        expect(source.rules.value[0].direction).toBe("desc");
+      }
+    } finally {
+      scope.stop();
+    }
   });
 
   it("refreshes only matching data tabs after a table mutation", async () => {

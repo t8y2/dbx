@@ -89,11 +89,19 @@ const (
 	procCntAbort               = "DBX_CNT_ABORT"
 	procCntStepOut             = "DBX_CNT_STEP_OUT"
 	procCntExit                = "DBX_CNT_EXIT"
-	procGetValues              = "DBX_GET_VALUES"
-	procGetValue               = "DBX_GET_VALUE"
-	procGetRuntimeInfo         = "DBX_GET_RUNTIME_INFO"
-	procSynchronize            = "DBX_SYNCHRONIZE"
-	procGetLine                = "DBX_GET_LINE"
+	// procCntException is the V6.4 native exception-mode resume. The pre-V6.4 mode looped
+	// CONTINUE(break_any_return), and an unhandled exception propagating out of the target
+	// simply ended the program: measured on 19c EE, both a 500-call nested loop and a
+	// 500-line body answered reason_knl_exit (25) with terminated=true, no stop at the
+	// raising statement and no frames, so the "break on exception" switch did nothing.
+	// CONTINUE(break_exception|break_handler) stops at the statement that raises (or at the
+	// handler that catches it), in one round trip.
+	procCntException   = "DBX_CNT_EXCEPTION"
+	procGetValues      = "DBX_GET_VALUES"
+	procGetValue       = "DBX_GET_VALUE"
+	procGetRuntimeInfo = "DBX_GET_RUNTIME_INFO"
+	procSynchronize    = "DBX_SYNCHRONIZE"
+	procGetLine        = "DBX_GET_LINE"
 	// procFetchOutput is the V6.3 one-call DBMS_OUTPUT drain, and it is a FUNCTION
 	// on purpose: the debuggee's own anonymous block calls it as the trailing
 	// statement of the program it runs (see plDebugAnonymousBlock), which is the one
@@ -384,7 +392,7 @@ const plDebugVersionNote = "-- DBX PL Debug Package Version: V6 (ODC V3.3.2.1 al
 // All changes are inert on engines whose set_breakpoint ignores namespace / entrypointname
 // (OceanBase Oracle mode resolves the name only) and whose get_runtime_info ignores the
 // request mask, so the shared package stays correct for both agents.
-const plDebugBodyFixNote = "-- DBX PL Debug Package Fix: V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain (V6.2 program_info.entrypointname arm for package subprograms, V6.1 namespace-aware set_breakpoint + explicit run_info mask retained)"
+const plDebugBodyFixNote = "-- DBX PL Debug Package Fix: V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume (V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain, V6.2 program_info.entrypointname arm for package subprograms, V6.1 namespace-aware set_breakpoint + explicit run_info mask retained)"
 
 // plDebugRunInfoMask is the info_requested bit-field every DBX_CNT_* wrapper passes to
 // DBMS_DEBUG.CONTINUE instead of relying on the default. info_getStackDepth (2) is what
@@ -421,6 +429,7 @@ const plDebugPackageHeadDDL = `CREATE OR REPLACE PACKAGE "%[1]s".` + plDebugPack
 	` PROCEDURE ` + procCntAbort + `(result OUT BINARY_INTEGER, message OUT VARCHAR2);` +
 	` PROCEDURE ` + procCntStepOut + `(result OUT BINARY_INTEGER, message OUT VARCHAR2);` +
 	` PROCEDURE ` + procCntExit + `(message OUT VARCHAR2);` +
+	` PROCEDURE ` + procCntException + `(result OUT BINARY_INTEGER, message OUT VARCHAR2);` +
 	` PROCEDURE ` + procGetValues + `(scalar_values OUT VARCHAR2, result OUT BINARY_INTEGER);` +
 	` PROCEDURE ` + procGetValue + `(variable_name VARCHAR2, frame# BINARY_INTEGER, value OUT VARCHAR2, result OUT BINARY_INTEGER);` +
 	` PROCEDURE ` + procGetRuntimeInfo + `(status OUT BINARY_INTEGER, result OUT BINARY_INTEGER);` +
@@ -446,17 +455,25 @@ const plDebugPackageHeadDDL = `CREATE OR REPLACE PACKAGE "%[1]s".` + plDebugPack
 // documented as "NOT YET SUPPORTED" in the package spec, so DBX_CNT_ABORT calls
 // continue(abort_execution = 8192) instead of dbms_debug.abort().
 //
-// Two mechanisms are deliberately NOT implemented here, recorded so the next
-// iteration does not have to rediscover them:
+// Two mechanisms were once recorded here as not implemented; the first is now V6.4 and
+// the second is still open:
 //
+//   - Exception breakpoints are native as of V6.4. DBX_CNT_EXCEPTION continues with
+//     break_exception (2) | break_handler (2048), so one round trip stops at the raising
+//     statement or at the handler that catches it. The values were read from the 19c EE
+//     DBMS_DEBUG package spec, and the literals are used rather than the named constants on
+//     purpose: this body is shared with the OceanBase Oracle agent, and a reference to a
+//     constant an engine does not declare would fail the whole PACKAGE BODY at compile
+//     time instead of degrading at run time.
+//   - Per-OER breakpoints are still open: SET_OER_BREAKPOINT / DELETE_OER_BREAKPOINT with
+//     runtime_info.oer and reason_oer_breakpoint (26) would narrow the stop to selected
+//     error codes (both functions and the reason code exist on 19c EE, verified through
+//     ALL_PROCEDURES and the package spec). Nothing selects codes yet, so the two flags
+//     above are what is implemented.
 //   - DBX_PRINT_BACKTRACE wraps the textual overload (listing IN OUT VARCHAR2).
 //     PRINT_BACKTRACE also has (backtrace OUT backtrace_table), a structured
 //     TABLE OF program_info, which would replace the "[Line N] NAME" parsing in
 //     plDebugParseBacktraceFrames.
-//   - Exception breakpoints have a native mechanism: SET_OER_BREAKPOINT /
-//     DELETE_OER_BREAKPOINT together with continue's break_exception (2) /
-//     break_handler (2048) flags and runtime_info.oer. The current exception mode
-//     resumes in a loop and inspects run_info.reason instead.
 const plDebugPackageBodyDDL = `CREATE OR REPLACE PACKAGE BODY "%[1]s".` + plDebugPackageName + ` AS ` + plDebugVersionNote + ` ` + plDebugBodyFixNote + `
 -- V6.2 (real Oracle 19c EE verified): DBX_SET_BREAKPOINT_ENTRY added. It fills
 -- dbms_debug.program_info.entrypointname (and tries namespace_pkg_body first), which is
@@ -589,6 +606,15 @@ BEGIN
   END LOOP dbx_drain;
   RETURN buffer;
 END;
+
+-- V6.4 (real Oracle 19c EE verified): DBX_CNT_EXCEPTION added. The flags below are the
+-- whole exception-mode stop condition: break_exception (2) returns at the statement that
+-- raises, break_handler (2048) at the handler that catches it. Before this the exception
+-- mode looped CONTINUE(break_any_return) and inspected run_info.reason, which never saw the
+-- exception at all: an unhandled RAISE_APPLICATION_ERROR ended the program, so the loop's
+-- first answer was reason_knl_exit (25) with terminated=true and no frames. Measured on 19c
+-- EE with DBX_EXC_DEEP (500 nested calls) and DBX_EXC_LONG (500 statements).
+PROCEDURE ` + procCntException + `(result OUT BINARY_INTEGER, message OUT VARCHAR2) IS run_info dbms_debug.runtime_info; BEGIN result := dbms_debug.continue(run_info, 2 + 2048, ` + plDebugRunInfoMask + `); ` + runInfoMessage + ` END;
 
 END ` + plDebugPackageName + `;`
 
@@ -901,6 +927,10 @@ var plDebugHeadRequiredRoutines = []string{
 	// DBX_FETCH_OUTPUT, and the target block the debuggee executes calls it, so the
 	// head is replaced with it (and with it the body).
 	procFetchOutput,
+	// The V6.4 native exception resume. A head installed before it declares no
+	// DBX_CNT_EXCEPTION, and the Go agent calls it whenever the exception breakpoint is
+	// on, so the head -- and therefore the body -- is replaced with it.
+	procCntException,
 }
 
 // plDebugHeadRequiredDeclarations pin down the *signature* of the routines whose
@@ -2115,17 +2145,38 @@ func (p *plDebugSession) resume() (map[string]interface{}, error) {
 	return p.resumeUntilException()
 }
 
-// resumeUntilException drives the exception-mode resume: reason_finish (8) and
-// every other non-exceptional stop keep the loop going, because the debuggee only
-// stops at entrypoint returns while breakpoints are suspended. The loop is capped
-// so a server that never reports a stop condition cannot hang the RPC.
+// resumeUntilException drives the exception-mode resume. V6.4 first uses the native
+// mechanism: DBX_CNT_EXCEPTION continues with break_exception|break_handler, so one round
+// trip stops at the statement that raises or at the handler that catches it. A server that
+// rejects those flags (the call errors) falls back to the pre-V6.4 loop, which continues
+// with break_any_return and inspects run_info.reason; that loop is kept because it is the
+// only mechanism a server without the flags can offer, and it is capped so a server that
+// never reports a stop condition cannot hang the RPC.
+//
+// The pre-V6.4 loop alone was not enough to break on exceptions at all: measured on 19c EE,
+// an unhandled RAISE_APPLICATION_ERROR propagating out of the target ended the program, so
+// its first answer was reason_knl_exit (25) with terminated=true and no frames.
 func (p *plDebugSession) resumeUntilException() (map[string]interface{}, error) {
 	var response map[string]interface{}
 	truncated := false
+	native := true
 	for iteration := 0; iteration < plDebugExceptionResumeIterations; iteration++ {
-		current, err := p.continueWith(procCntNextBreakpoint)
-		if err != nil {
-			return nil, err
+		var current map[string]interface{}
+		if native {
+			var err error
+			current, err = p.continueWith(procCntException)
+			if err != nil {
+				// The server does not accept the exception flags (or the helper package it
+				// is talking to predates V6.4); polling is what remains.
+				native = false
+				continue
+			}
+		} else {
+			var err error
+			current, err = p.continueWith(procCntNextBreakpoint)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if current == nil {
 			break

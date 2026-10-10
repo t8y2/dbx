@@ -135,9 +135,10 @@ class PlDebugSessionTest {
         // to be replaced, without bumping the shared V6 identity the Go agent also
         // asserts. The Go driver writes this exact literal (plDebugBodyFixNote).
         Assertions.assertEquals(
-            "-- DBX PL Debug Package Fix: V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain"
-                + " (V6.2 program_info.entrypointname arm for package subprograms, V6.1"
-                + " namespace-aware set_breakpoint + explicit run_info mask retained)",
+            "-- DBX PL Debug Package Fix: V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume"
+                + " (V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain, V6.2 program_info.entrypointname arm"
+                + " for package subprograms, V6.1 namespace-aware set_breakpoint + explicit run_info mask"
+                + " retained)",
             DbxPlDebugPackage.BODY_FIX_NOTE
         );
         Assertions.assertTrue(
@@ -165,6 +166,21 @@ class PlDebugSessionTest {
                     + "(max_chars IN BINARY_INTEGER) RETURN VARCHAR2"
             ),
             "the drain routine's head declaration must be pinned, so a head installed before V6.3 is replaced"
+        );
+        // V6.4 parity: the native exception resume. The flags are literals because a named
+        // constant an engine does not declare would fail the whole shared body at compile
+        // time, so the body must not reference them.
+        Assertions.assertTrue(body.contains("-- V6.4 (real Oracle 19c EE verified): DBX_CNT_EXCEPTION added"));
+        Assertions.assertTrue(body.contains(
+            "PROCEDURE " + DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION
+                + "(result OUT BINARY_INTEGER, message OUT VARCHAR2) IS"
+        ));
+        Assertions.assertTrue(body.contains("dbms_debug.continue(run_info, 2 + 2048, "));
+        Assertions.assertFalse(body.contains("dbms_debug.break_exception"));
+        Assertions.assertFalse(body.contains("dbms_debug.break_handler"));
+        Assertions.assertTrue(
+            DbxPlDebugPackage.HEAD_REQUIRED_ROUTINES.contains(DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION),
+            "a head installed before V6.4 must be replaced, or the Go agent's call fails with PLS-00302"
         );
         Assertions.assertTrue(body.contains("-- V6.2 (real Oracle 19c EE verified): DBX_SET_BREAKPOINT_ENTRY added"));
         Assertions.assertTrue(body.contains("-- V6: DBX_SET_VALUE now matches the real DBMS_DEBUG.SET_VALUE overloads"));
@@ -687,7 +703,10 @@ class PlDebugSessionTest {
                 DbxPlDebugPackage.PROCEDURE_SET_BREAKPOINT_ANONYMOUS,
                 DbxPlDebugPackage.PROCEDURE_SYNCHRONIZE,
                 DbxPlDebugPackage.PROCEDURE_ENABLE_BREAKPOINT,
-                DbxPlDebugPackage.PROCEDURE_DISABLE_BREAKPOINT
+                DbxPlDebugPackage.PROCEDURE_DISABLE_BREAKPOINT,
+                // V6.4: the Go agent calls DBX_CNT_EXCEPTION whenever the exception
+                // breakpoint is on, so a head from before V6.4 is replaced.
+                DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION
             ),
             DbxPlDebugPackage.HEAD_REQUIRED_ROUTINES
         );

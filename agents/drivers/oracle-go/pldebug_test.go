@@ -2234,6 +2234,7 @@ var oracleDebugHelperRoutines = []string{
 	procCntStepOut,
 	procCntAbort,
 	procCntExit,
+	procCntException,
 	procEnableBreakpoint,
 	procDisableBreakpoint,
 	procSetValue,
@@ -3223,25 +3224,30 @@ func TestPLDebugBodyFixNoteIsOnTheHeaderAndRequired(t *testing.T) {
 	if strings.Contains(plDebugVersionNote, "Fix: V6.1") {
 		t.Fatal("the fix note was folded into the shared V6 literal, which would fork the Go and Java agents")
 	}
-	// The fix note moves with the body version. V6.2's notes are folded into the V6.3
-	// literal (the history is kept inside it), so the stamp itself is V6.3 and it still
-	// names every fix it stands for. The Java agent writes the identical literal.
-	const previousFixNote = "-- DBX PL Debug Package Fix: V6.1 namespace-aware set_breakpoint + explicit run_info mask"
-	if plDebugBodyFixNote == previousFixNote || strings.Contains(plDebugBodyFixNote, "Fix: V6.1 ") {
-		t.Fatalf("the fix note was not bumped past V6.1: %q", plDebugBodyFixNote)
+	// The fix note moves with the body version. Older stamps are folded into the current
+	// literal (the history is kept inside it), so the stamp itself is always the newest one
+	// and it still names every fix it stands for. The Java agent writes the identical
+	// literal, which is what keeps the two agents from rebuilding each other's body.
+	for _, previous := range []string{
+		"-- DBX PL Debug Package Fix: V6.1 namespace-aware set_breakpoint + explicit run_info mask",
+		"-- DBX PL Debug Package Fix: V6.2 program_info.entrypointname arm for package subprograms",
+		"-- DBX PL Debug Package Fix: V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain",
+	} {
+		if plDebugBodyFixNote == previous || strings.HasPrefix(plDebugBodyFixNote, previous) {
+			t.Fatalf("the fix note was not bumped past %q: %q", previous, plDebugBodyFixNote)
+		}
 	}
-	const previousV62FixNote = "-- DBX PL Debug Package Fix: V6.2 program_info.entrypointname arm for package subprograms"
-	if plDebugBodyFixNote == previousV62FixNote || strings.HasPrefix(plDebugBodyFixNote, previousV62FixNote) {
-		t.Fatalf("the fix note was not bumped past V6.2: %q", plDebugBodyFixNote)
-	}
-	if !strings.Contains(plDebugBodyFixNote, "Fix: V6.3") {
-		t.Fatalf("the fix note does not carry the V6.3 stamp: %q", plDebugBodyFixNote)
+	if !strings.Contains(plDebugBodyFixNote, "Fix: V6.4") {
+		t.Fatalf("the fix note does not carry the V6.4 stamp: %q", plDebugBodyFixNote)
 	}
 	if !strings.Contains(plDebugBodyFixNote, "entrypointname") {
 		t.Fatalf("the fix note does not name the entrypoint fix it stands for: %q", plDebugBodyFixNote)
 	}
 	if !strings.Contains(plDebugBodyFixNote, procFetchOutput) {
 		t.Fatalf("the fix note does not name the routine V6.3 adds: %q", plDebugBodyFixNote)
+	}
+	if !strings.Contains(plDebugBodyFixNote, procCntException) {
+		t.Fatalf("the fix note does not name the routine V6.4 adds: %q", plDebugBodyFixNote)
 	}
 }
 
@@ -3422,6 +3428,121 @@ func TestPLDebugKnlExitTerminatesTheSession(t *testing.T) {
 				t.Fatalf("reason=%d did not terminate the session", reason)
 			}
 		})
+	}
+}
+
+// V6.4: an exception breakpoint is native. DBX_CNT_EXCEPTION continues with
+// break_exception|break_handler, so the interpreter returns at the statement that raises
+// (or at the handler that catches it) in one call. Before this the mode looped
+// CONTINUE(break_any_return) and never saw the exception at all: measured on 19c EE, an
+// unhandled RAISE_APPLICATION_ERROR ended the program, so the loop's first answer was
+// reason_knl_exit (25) with terminated=true and no frames.
+func TestPLDebugExceptionResumeUsesTheNativeFlagsFirst(t *testing.T) {
+	db, drv := openOracleDebugCallTestDB(t)
+	drv.scriptOut(procCntException, 0, 0)
+	drv.scriptOut(procCntException, 1,
+		plDebugRunInfo("DBX_EXC_DEEP", "DBX_DEBUG", 0, 1, plDebugReasonException))
+	drv.scriptOut(procPrintBacktrace, 0, " [Line 6]     RAISE_APPLICATION_ERROR(-20001, 'a6-deep-boom');\n")
+	drv.scriptOut(procPrintBacktrace, 1, 0)
+	session := newPLDebugCallSession(db, false)
+	session.setExceptionBreakpoint(true)
+
+	response, err := session.resumeUntilException()
+	if err != nil {
+		t.Fatalf("resumeUntilException failed: %v", err)
+	}
+	if response["reason"] != plDebugReasonException {
+		t.Fatalf("reason = %v, want reason_exception (%d)", response["reason"], plDebugReasonException)
+	}
+	if response["stoppedOnException"] != true || !session.stoppedOnException {
+		t.Fatalf("the native exception stop was not reported as such: %v", response)
+	}
+	if response["line"] != 6 {
+		t.Fatalf("the stop did not report the raising line: %v", response["line"])
+	}
+	if countRoutine(drv.recordedRoutines(), procCntException) == 0 {
+		t.Fatalf("the native flags were never used: %v", drv.recordedRoutines())
+	}
+	if got := countRoutine(drv.recordedRoutines(), procCntNextBreakpoint); got != 0 {
+		t.Fatalf("the polling primitive ran %d times even though the native call answered: %v",
+			got, drv.recordedRoutines())
+	}
+}
+
+// A server that rejects break_exception/break_handler must not fail the RPC: the mode
+// falls back to the pre-V6.4 polling primitive instead.
+func TestPLDebugExceptionResumeFallsBackToPollingWhenTheFlagsAreRejected(t *testing.T) {
+	db, drv := openOracleDebugCallTestDB(t)
+	drv.scriptError(procCntException, errors.New("ORA-00097: use of Oracle SQL feature not in this Oracle version"))
+	drv.scriptOut(procCntNextBreakpoint, 0, 0)
+	drv.scriptOut(procCntNextBreakpoint, 1,
+		plDebugRunInfo("DBX_EXC_DEEP", "DBX_DEBUG", 0, 1, plDebugReasonException))
+	session := newPLDebugCallSession(db, false)
+	session.setExceptionBreakpoint(true)
+
+	response, err := session.resumeUntilException()
+	if err != nil {
+		t.Fatalf("the fallback turned a rejected flag into a failed RPC: %v", err)
+	}
+	if response["stoppedOnException"] != true {
+		t.Fatalf("the polling fallback did not report the exception stop: %v", response)
+	}
+	if countRoutine(drv.recordedRoutines(), procCntException) == 0 {
+		t.Fatal("the native call was never attempted")
+	}
+	if countRoutine(drv.recordedRoutines(), procCntNextBreakpoint) == 0 {
+		t.Fatal("the polling fallback never ran")
+	}
+}
+
+// The handler flag stops the mode at the handler that catches a raised exception.
+func TestPLDebugExceptionResumeStopsAtTheHandler(t *testing.T) {
+	db, drv := openOracleDebugCallTestDB(t)
+	drv.scriptOut(procCntException, 0, 0)
+	drv.scriptOut(procCntException, 1,
+		plDebugRunInfo("DBX_EXC_DEEP", "DBX_DEBUG", 0, 1, plDebugReasonHandler))
+	session := newPLDebugCallSession(db, false)
+	session.setExceptionBreakpoint(true)
+
+	response, err := session.resumeUntilException()
+	if err != nil {
+		t.Fatalf("resumeUntilException failed: %v", err)
+	}
+	if response["reason"] != plDebugReasonHandler || response["stoppedOnException"] != true {
+		t.Fatalf("a handler stop was not reported as an exception stop: %v", response)
+	}
+}
+
+// The V6.4 routine has to be declared in the head and listed as required: the head is what
+// makes the body's call resolvable, and without the requirement an installed head from
+// before V6.4 is kept, so the Go agent's DBX_CNT_EXCEPTION call fails with PLS-00302.
+func TestPLDebugExceptionRoutineIsDeclaredAndRequired(t *testing.T) {
+	head := fmt.Sprintf(plDebugPackageHeadDDL, "DBX_TEST")
+	declaration := "PROCEDURE " + procCntException + "(result OUT BINARY_INTEGER, message OUT VARCHAR2);"
+	if !strings.Contains(head, declaration) {
+		t.Fatalf("the head does not declare %s:\n%s", procCntException, head)
+	}
+	body := plDebugPackageBody("DBX_TEST", plDebugProgramInfoFields{})
+	if !strings.Contains(body, "PROCEDURE "+procCntException+"(") {
+		t.Fatalf("the body does not implement %s", procCntException)
+	}
+	// The flags are literals on purpose: a named reference would fail the whole PACKAGE
+	// BODY at compile time on an engine whose DBMS_DEBUG does not declare the constants,
+	// and this body is shared with the OceanBase Oracle agent.
+	if !strings.Contains(body, "dbms_debug.continue(run_info, 2 + 2048, ") {
+		t.Fatalf("the body does not continue with break_exception|break_handler:\n%s", body)
+	}
+	if strings.Contains(body, "dbms_debug.break_exception") || strings.Contains(body, "dbms_debug.break_handler") {
+		t.Fatal("the body references the named flags, which not every engine declares")
+	}
+	if !strings.Contains(body, "-- V6.4 (real Oracle 19c EE verified): "+procCntException) {
+		t.Fatalf("the V6.4 history comment is missing:\n%s", body)
+	}
+	if !containsString(plDebugHeadRequiredRoutines, procCntException) {
+		t.Fatalf("%s is not required, so an older head is never replaced", procCntException)
+	}
+	if !containsString(plDebugHeadRequirements, procCntException) {
+		t.Fatalf("%s is missing from plDebugHeadRequirements", procCntException)
 	}
 }
 

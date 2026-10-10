@@ -62,13 +62,19 @@ final class DbxPlDebugPackage {
      * only) and whose {@code get_runtime_info} ignores the request mask.
      */
     static final String BODY_FIX_NOTE =
-        "-- DBX PL Debug Package Fix: V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain"
-            + " (V6.2 program_info.entrypointname arm for package subprograms, V6.1"
-            + " namespace-aware set_breakpoint + explicit run_info mask retained)";
+        "-- DBX PL Debug Package Fix: V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume"
+            + " (V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain, V6.2 program_info.entrypointname arm"
+            + " for package subprograms, V6.1 namespace-aware set_breakpoint + explicit run_info mask"
+            + " retained)";
 
     /** Version history, written after the header line so it never hides the marker. */
     private static final String VERSION_NOTE_DETAIL =
-        "\n-- V6.3 (real Oracle 19c EE verified): DBX_FETCH_OUTPUT added, the one-call"
+        "\n-- V6.4 (real Oracle 19c EE verified): DBX_CNT_EXCEPTION added. continue's"
+            + "\n-- break_exception (2) and break_handler (2048) flags stop the interpreter at the"
+            + "\n-- statement that raises, or at the handler that catches it, in one call. The mode"
+            + "\n-- used to loop CONTINUE(break_any_return) and never saw the exception at all: an"
+            + "\n-- unhandled RAISE_APPLICATION_ERROR ended the program. See BODY_FIX_NOTE."
+            + "\n-- V6.3 (real Oracle 19c EE verified): DBX_FETCH_OUTPUT added, the one-call"
             + "\n-- DBMS_OUTPUT drain the Go agent calls from the target's own anonymous block."
             + "\n-- DBX_PL_DEBUG_PACKAGE_PENDING_LINE holds the line a chunk boundary could not"
             + "\n-- return yet. See BODY_FIX_NOTE."
@@ -202,6 +208,13 @@ final class DbxPlDebugPackage {
      * the head declaration (an ODC defect); DBX declares it so the body compiles.
      */
     static final String PROCEDURE_CNT_EXIT = "DBX_CNT_EXIT";
+    /**
+     * V6.4 native exception-mode resume: one {@code continue} with
+     * {@code break_exception|break_handler} stops at the statement that raises, or at the
+     * handler that catches it. The Go agent calls it; this agent renders the identical
+     * body so both install the same package.
+     */
+    static final String PROCEDURE_CNT_EXCEPTION = "DBX_CNT_EXCEPTION";
     static final String PROCEDURE_GET_VALUES = "DBX_GET_VALUES";
     static final String PROCEDURE_GET_VALUE = "DBX_GET_VALUE";
     static final String PROCEDURE_GET_RUNTIME_INFO = "DBX_GET_RUNTIME_INFO";
@@ -596,6 +609,26 @@ final class DbxPlDebugPackage {
             + "END;";
 
     /**
+     * V6.4 native exception resume, byte-for-byte the Go agent's rendering of
+     * {@code procCntException}. The break flags are literals on purpose: a reference to a
+     * named constant an engine does not declare would fail the whole body at compile time,
+     * and this body is shared with the Go agent.
+     */
+    private static final String CNT_EXCEPTION =
+        "\n-- V6.4 (real Oracle 19c EE verified): DBX_CNT_EXCEPTION added. The flags below are the"
+            + "\n-- whole exception-mode stop condition: break_exception (2) returns at the statement that"
+            + "\n-- raises, break_handler (2048) at the handler that catches it. Before this the exception"
+            + "\n-- mode looped CONTINUE(break_any_return) and inspected run_info.reason, which never saw the"
+            + "\n-- exception at all: an unhandled RAISE_APPLICATION_ERROR ended the program, so the loop's"
+            + "\n-- first answer was reason_knl_exit (25) with terminated=true and no frames. Measured on 19c"
+            + "\n-- EE with DBX_EXC_DEEP (500 nested calls) and DBX_EXC_LONG (500 statements)."
+            + "\nPROCEDURE " + PROCEDURE_CNT_EXCEPTION + "(result OUT BINARY_INTEGER, message OUT VARCHAR2) IS"
+            + " run_info dbms_debug.runtime_info;"
+            + " BEGIN result := dbms_debug.continue(run_info, 2 + 2048, " + RUN_INFO_MASK + ");"
+            + " " + RUN_INFO_MESSAGE
+            + " END;";
+
+    /**
      * Variable inspection. The {@code dbms_debug.get_values} call is deliberately
      * dynamic: Oracle 21c XE does not declare that routine at all (PLS-00302 /
      * ORA-00904, and it is absent from {@code ALL_PROCEDURES}), so a static
@@ -680,7 +713,10 @@ final class DbxPlDebugPackage {
         PROCEDURE_SET_BREAKPOINT_ANONYMOUS,
         PROCEDURE_SYNCHRONIZE,
         PROCEDURE_ENABLE_BREAKPOINT,
-        PROCEDURE_DISABLE_BREAKPOINT
+        PROCEDURE_DISABLE_BREAKPOINT,
+        // V6.4: the Go agent calls DBX_CNT_EXCEPTION whenever the exception breakpoint is on,
+        // so a head installed before V6.4 is replaced with it (and the body with the head).
+        PROCEDURE_CNT_EXCEPTION
     );
 
     /**
@@ -738,6 +774,8 @@ final class DbxPlDebugPackage {
         + " PROCEDURE " + PROCEDURE_CNT_ABORT + "(result OUT BINARY_INTEGER, message OUT VARCHAR2);"
         + " PROCEDURE " + PROCEDURE_CNT_STEP_OUT + "(result OUT BINARY_INTEGER, message OUT VARCHAR2);"
         + " PROCEDURE " + PROCEDURE_CNT_EXIT + "(message OUT VARCHAR2);"
+        + " PROCEDURE " + PROCEDURE_CNT_EXCEPTION
+        + "(result OUT BINARY_INTEGER, message OUT VARCHAR2);"
         + " PROCEDURE " + PROCEDURE_GET_VALUES
         + "(scalar_values OUT VARCHAR2, result OUT BINARY_INTEGER);"
         + " PROCEDURE " + PROCEDURE_GET_VALUE
@@ -778,6 +816,7 @@ final class DbxPlDebugPackage {
         + SYNCHRONIZE
         + GET_LINE
         + FETCH_OUTPUT_MARKER
+        + CNT_EXCEPTION
         + "END " + PACKAGE_NAME + ";";
 
     private DbxPlDebugPackage() {

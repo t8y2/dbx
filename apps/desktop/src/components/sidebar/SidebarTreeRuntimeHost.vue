@@ -249,6 +249,7 @@ import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
+import { buildOracleCompileErrorsSql, buildOracleCompileSql, formatOracleCompileErrors } from "@/lib/database/oracleCompileSql";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import { collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
@@ -3017,6 +3018,54 @@ async function compileDamengView() {
     routeTreeItemDialogController();
     showCompileErrorDialog.value = true;
   }
+}
+
+/**
+ * Oracle answers `ALTER ... COMPILE` with success even when the object is left INVALID: the
+ * diagnostics live in ALL_ERRORS, not in the DDL's result. So the compile is followed by a
+ * read-back and *that* decides between the success toast and the error dialog -- reporting
+ * the DDL's own result would always say "compiled", which is exactly the case the dialog
+ * exists for.
+ */
+async function compileOracleObject() {
+  const node = activeNode.value;
+  if (currentDatabaseType() !== "oracle" || !node.connectionId || !node.database) return;
+  const objectName = node.objectName || node.label;
+  const sql = buildOracleCompileSql({ objectType: node.type, schema: node.schema, name: objectName });
+  if (!sql) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    if (!executed) return;
+    const errorsSql = buildOracleCompileErrorsSql({ schema: node.schema, name: objectName });
+    // A read-back, so it goes straight to the API rather than through the production guard
+    // (the same way the metadata preflights in this component do).
+    const errors = errorsSql ? await api.executeQuery(node.connectionId, node.database, errorsSql, node.schema) : undefined;
+    const message = formatOracleCompileErrors(errors?.rows ?? []);
+    await connectionStore.refreshObjectListTreeNode(node.connectionId, node.database, node.schema);
+    if (!message) {
+      toast(t("contextMenu.compileObjectSuccess", { name: node.label }), 3000);
+      return;
+    }
+    compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
+    compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: node.label, message });
+    claimTreeItemDialogOwnership();
+    routeTreeItemDialogController();
+    showCompileErrorDialog.value = true;
+  } catch (e: any) {
+    compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
+    compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: node.label, message: e?.message || String(e) });
+    claimTreeItemDialogOwnership();
+    routeTreeItemDialogController();
+    showCompileErrorDialog.value = true;
+  }
+}
+
+/** The Compile entry for an Oracle object, or null when Oracle cannot recompile that kind. */
+function oracleCompileMenuItem(node: TreeNode): ContextMenuItem | null {
+  if (currentDatabaseType() !== "oracle") return null;
+  if (!buildOracleCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) return null;
+  return { label: t("contextMenu.compileObject"), action: compileOracleObject, icon: Wrench };
 }
 
 async function executeXuguSchedulerJobAction(action: XuguSchedulerJobAction) {
@@ -6698,6 +6747,8 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       if (node.type === "view" && currentDatabaseType() === "dameng" && buildDamengCompileViewSql({ schema: node.schema, name: node.objectName || node.label })) {
         items.push({ sidebarActionId: "contextMenu.compileObject", label: t("contextMenu.compileObject"), action: compileDamengView, icon: Wrench });
       }
+      const oracleCompile = oracleCompileMenuItem(node);
+      if (oracleCompile) items.push(oracleCompile);
       items.push({
         sidebarActionId: "contextMenu.viewDdl",
         label: t("contextMenu.viewDdl"),
@@ -6896,6 +6947,11 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (!isPackageMember && currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }
+    // A package member has no compilable target of its own -- Oracle recompiles the package.
+    if (!isPackageMember) {
+      const oracleCompile = oracleCompileMenuItem(node);
+      if (oracleCompile) items.push(oracleCompile);
+    }
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     if (!isPackageMember) {
       items.push({ label: t("diff.title"), action: openSchemaDiffForRoutine, icon: ArrowRightLeft });
@@ -6974,6 +7030,8 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }
+    const oracleCompile = oracleCompileMenuItem(node);
+    if (oracleCompile) items.push(oracleCompile);
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
       items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
@@ -6994,6 +7052,8 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   // copy action. Xugu keeps its source/change-open-mode entries.
   if (node.type === "type" || node.type === "type-body") {
     if (supportsTypeObjectSource(currentDatabaseType())) {
+      const oracleCompile = oracleCompileMenuItem(node);
+      if (oracleCompile) items.push(oracleCompile);
       items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
       items.push(copyNameMenuItem());
       items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });

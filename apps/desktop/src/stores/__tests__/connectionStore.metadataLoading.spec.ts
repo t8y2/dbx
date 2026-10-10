@@ -2048,6 +2048,90 @@ describe("connectionStore metadata loading", () => {
     expect(refreshedSchema?.isLoading).toBe(true);
   });
 
+  it.each([
+    { database: "", type: "group-views" as const },
+    { database: "HXE", type: "group-views" as const },
+    { database: "", type: "group-procedures" as const },
+    { database: "HXE", type: "group-procedures" as const },
+  ])("loads HANA $type beyond 1000 objects with database '$database'", async ({ database, type }) => {
+    const tables: TableInfo[] = Array.from({ length: 1005 }, (_, index) => ({
+      name: `package/view_${String(index).padStart(4, "0")}`,
+      table_type: "VIEW",
+      comment: null,
+    }));
+    const objects = tables.map((table) => ({ ...procedure(table.name), schema: "_SYS_BIC" }));
+    const listTables = vi.fn(async (_id: string, _database: string, _schema: string, _filter: string | undefined, limit: number, offset: number) => tables.slice(offset ?? 0, (offset ?? 0) + limit));
+    const listObjects = vi.fn(async (_id: string, _database: string, _schema: string, _types: string[], _filter: string | undefined, limit: number, offset: number) => objects.slice(offset ?? 0, (offset ?? 0) + limit));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      listObjects,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.sidebarObjectDisplay = "grouped";
+    settings.desktopSettings.sidebar_table_page_size = 1000;
+    const connection = { ...genericJdbcConnection(), id: "hana-paging", db_type: "saphana", driver_profile: "saphana", database } as ConnectionConfig;
+    const group: TreeNode = {
+      id: `${connection.id}:${database}:_SYS_BIC:${type === "group-views" ? "__views" : "__procedures"}`,
+      label: type,
+      type,
+      connectionId: connection.id,
+      database,
+      schema: "_SYS_BIC",
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        children: [
+          {
+            id: `${connection.id}:${database}`,
+            label: "default",
+            type: "database",
+            connectionId: connection.id,
+            database,
+            children: [
+              {
+                id: `${connection.id}:${database}:_SYS_BIC`,
+                label: "_SYS_BIC",
+                type: "schema",
+                connectionId: connection.id,
+                database,
+                schema: "_SYS_BIC",
+                children: [group],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    const liveGroup = store.treeNodes[0].children![0].children![0].children![0];
+    await store.loadObjectGroupChildren(liveGroup);
+    expect(liveGroup.children!.filter((child) => child.type !== "load-more")).toHaveLength(1000);
+    const more = liveGroup.children!.find((child) => child.type === "load-more")!;
+    expect(more).toBeDefined();
+    await store.loadMoreObjectGroupChildren(more);
+    expect(liveGroup.children!.filter((child) => child.type !== "load-more")).toHaveLength(1005);
+    expect(liveGroup.children!.some((child) => child.type === "load-more")).toBe(false);
+    const calls = type === "group-views" ? listTables.mock.calls : listObjects.mock.calls;
+    expect(calls.length).toBeGreaterThan(1);
+    expect(calls.every((call) => call[1] === database && call[2] === "_SYS_BIC")).toBe(true);
+  });
+
   it("paginates procedure groups and appends the next page", async () => {
     const firstPage = Array.from({ length: 201 }, (_, index) => procedure(`p_${String(index + 1).padStart(4, "0")}`));
     const listObjects = vi

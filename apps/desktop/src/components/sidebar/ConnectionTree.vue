@@ -2168,7 +2168,7 @@ function openSidebarVisibleNacosNamespaces(node: TreeNode) {
 }
 
 function tableNameFilterScopeForNode(node: TreeNode): string | null {
-  if (!node.connectionId || !node.database) return null;
+  if (!node.connectionId || node.database == null) return null;
   return store.tableNameFilterScopeKey({
     connectionId: node.connectionId,
     database: node.database,

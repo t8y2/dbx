@@ -8,6 +8,7 @@ import { EditorView, showTooltip } from "@codemirror/view";
 import { toggleLineComment, undo } from "@codemirror/commands";
 import { completionStatus, currentCompletions, startCompletion } from "@codemirror/autocomplete";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { INLINE_QUERY_RESULT_PORTAL, createInlineQueryResultPortal } from "@/lib/editor/inlineQueryResultPortal";
 import QueryEditor from "../QueryEditor.vue";
 import type { QueryEditorProps } from "../queryEditorTypes";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -41,6 +42,7 @@ async function mountEditor(overrides: Partial<QueryEditorProps> = {}) {
         },
       }),
   });
+  app.provide(INLINE_QUERY_RESULT_PORTAL, createInlineQueryResultPortal());
   app.use(pinia);
   app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
   app.mount(host);
@@ -173,5 +175,25 @@ describe("QueryEditor language capabilities", () => {
     expect(editor.requestExecute({ bypassPicker: true })).toBe(true);
     expect(onExecute.mock.lastCall?.[0].selectedSql).toBe(request);
     expect(view.state.doc.toString()).toBe(request);
+  });
+});
+
+describe("QueryEditor inline results", () => {
+  it("shows executed results, retains results while editing, and isolates tab switches", async () => {
+    const sql = "select 1;";
+    const result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceStatement: sql, sourceFrom: 0, sourceTo: sql.length } as import("@/types/database").QueryResult;
+    const { host, view, props } = await mountEditor({ modelValue: sql, tabId: "inline-one", databaseType: "mysql", inlineQueryResults: [result] });
+    await vi.waitFor(() => expect(host.querySelector(".cm-inline-query-result")).not.toBeNull());
+    const originalHost = host.querySelector(".cm-inline-query-result");
+    view.dispatch({ changes: { from: 7, to: 8, insert: "2" } });
+    await nextTick();
+    expect(host.querySelector(".cm-inline-query-result")).toBe(originalHost);
+    props.tabId = "inline-two";
+    props.modelValue = sql;
+    props.inlineQueryResults = [];
+    await nextTick();
+    expect(host.querySelector(".cm-inline-query-result")).toBeNull();
+    props.inlineQueryResults = [result];
+    await vi.waitFor(() => expect(host.querySelector(".cm-inline-query-result")).not.toBeNull());
   });
 });

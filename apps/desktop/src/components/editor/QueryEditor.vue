@@ -30,10 +30,12 @@ import { createQueryEditorCodeMirrorRuntime } from "./queryEditorCodeMirrorRunti
 import { useQueryEditorCompletion } from "./useQueryEditorCompletion";
 
 import { useQueryEditorCompletionMetadata } from "./useQueryEditorCompletionMetadata";
-import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
+import { inject, ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { Transaction } from "@codemirror/state";
+import { INLINE_QUERY_RESULT_PORTAL, type InlineQueryResultPortal } from "@/lib/editor/inlineQueryResultPortal";
+import { currentInlineQueryResults, inlineQueryResultsExtension, inlineQueryResultSnapshots, setInlineQueryResults } from "@/lib/editor/inlineQueryResults";
 import type { Text } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { search as cmSearch } from "@codemirror/search";
@@ -143,6 +145,25 @@ import { isMacOS } from "@/lib/backend/platform";
 import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
 import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionReferencedTable } from "@/lib/sql/sqlCompletion";
 
+const inlineResultPortal = inject<InlineQueryResultPortal | null>(INLINE_QUERY_RESULT_PORTAL, null);
+const inlineResultHostOwners = new WeakMap<HTMLElement, string>();
+const inlineResultLifecycle = {
+  sync(results: import("@/types/database").QueryResult[]) {
+    if (props.tabId) {
+      inlineResultPortal?.sync(props.tabId, results);
+      if (view.value) inlineResultPortal?.anchors.set(props.tabId, currentInlineQueryResults(view.value));
+    }
+  },
+  mount(target: HTMLElement, result: import("@/types/database").QueryResult) {
+    if (!props.tabId) return;
+    inlineResultHostOwners.set(target, props.tabId);
+    inlineResultPortal?.mount(props.tabId, result, target);
+  },
+  unmount(target: HTMLElement, result: import("@/types/database").QueryResult) {
+    const owner = inlineResultHostOwners.get(target);
+    if (owner) inlineResultPortal?.unmount(owner, result, target);
+  },
+};
 const props = defineProps<QueryEditorProps>();
 
 function sqlBehaviorDialect(): "mysql" | "postgres" | "sqlserver" | undefined {
@@ -1967,6 +1988,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       doc: props.modelValue,
       selection: normalizedEditorSelection(props.initialSelection, props.modelValue.length),
       extensions: [
+        inlineQueryResultsExtension(inlineResultLifecycle),
         cmSearch({
           top: true,
           createPanel: () => {
@@ -2367,6 +2389,20 @@ watch([() => props.connectionId, () => props.database, () => props.catalog, () =
 watch(
   () => [props.connectionId, props.database, props.schema, props.databaseType] as const,
   () => syncQueryEditorInsertContext(),
+);
+
+let inlineResultsTabId: string | undefined;
+watch(
+  () => [view.value, props.tabId, props.inlineQueryResults, props.inlineQueryResults?.map((result) => result.rows.length).join(",")],
+  () => {
+    const currentView = view.value;
+    if (!currentView) return;
+    const previous = inlineResultsTabId === props.tabId ? currentInlineQueryResults(currentView) : (inlineResultPortal?.anchors.get(props.tabId ?? "") ?? []);
+    if (inlineResultsTabId !== props.tabId) currentView.dispatch({ effects: setInlineQueryResults.of([]) });
+    inlineResultsTabId = props.tabId;
+    currentView.dispatch({ effects: setInlineQueryResults.of(inlineQueryResultSnapshots(currentView.state.doc.toString(), inlineResultPortal ? (props.inlineQueryResults ?? []) : [], previous)) });
+  },
+  { flush: "post" },
 );
 
 // Restored tabs mount before their connection is established, so the warm-up

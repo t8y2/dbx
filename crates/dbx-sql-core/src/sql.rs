@@ -533,6 +533,36 @@ fn dash_dash_starts_line_comment(profile: SqlDialectProfile, char_after_dashes: 
     char_after_dashes.is_none_or(|ch| ch.is_whitespace() || ch.is_control())
 }
 
+/// Whether the text ends with an XML/HTML character reference whose closing `;`
+/// is about to be scanned. MyBatis XML writes comparison operators as `&gt;=`
+/// / `&lt;=`, and that `;` must not be read as a statement terminator (#11699).
+/// Only the five predefined XML names (`lt`, `gt`, `amp`, `quot`, `apos`) plus
+/// numeric references (`&#39;`, `&#x27;`) are recognized, so a plain bitwise
+/// `a&b;` still splits at its real terminator. Mirrors
+/// `isXmlEntityReferenceSemicolon` in the editor splitter
+/// (`apps/desktop/src/lib/sql/sqlStatementRanges.ts`); keep both in sync.
+fn ends_with_xml_entity_reference(buffer: &str) -> bool {
+    let bytes = buffer.as_bytes();
+    let mut start = bytes.len();
+    while start > 0 && bytes[start - 1].is_ascii_alphanumeric() {
+        start -= 1;
+    }
+    if start > 0 && bytes[start - 1] == b'#' {
+        start -= 1;
+    }
+    if start == 0 || bytes[start - 1] != b'&' {
+        return false;
+    }
+    let name = &buffer[start..];
+    if let Some(hex) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+        return !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    if let Some(digits) = name.strip_prefix('#') {
+        return !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit());
+    }
+    matches!(name, "lt" | "gt" | "amp" | "quot" | "apos")
+}
+
 /// Tracks an Oracle `q'...'` literal across characters, so a semicolon inside its
 /// text never splits the statement.
 #[derive(Default, Clone, Copy)]
@@ -799,7 +829,11 @@ impl SqlStatementSplitter {
                     self.buffer.push(ch);
                 }
                 ';' if !self.in_single_quote && !self.in_double_quote && !self.in_backtick => {
-                    if (self.options.profile.supports_custom_delimiter_commands && self.on_delimiter_line())
+                    if ends_with_xml_entity_reference(&self.buffer) {
+                        // The `;` closes an XML/MyBatis entity (`&gt;`, `&lt;`,
+                        // `&#39;`, ...), not the statement (#11699).
+                        self.buffer.push(ch);
+                    } else if (self.options.profile.supports_custom_delimiter_commands && self.on_delimiter_line())
                         || self.custom_delimiter.is_some()
                     {
                         self.buffer.push(ch);
@@ -3497,6 +3531,36 @@ mod tests {
         assert_eq!(
             split_sql_script("CREATE TABLE a(id int); INSERT INTO a VALUES (1);").unwrap(),
             vec!["CREATE TABLE a(id int)", "INSERT INTO a VALUES (1)"]
+        );
+    }
+
+    #[test]
+    fn keeps_mybatis_comparison_entity_semicolons_inside_one_statement() {
+        // Issue #11699: the `;` of `&gt;`/`&lt;`/`&#39;` closes an XML entity,
+        // not the statement.
+        let sql = "select * from course_user cu\nwhere cu.is_delete = 0\nand cu.create_time &gt;= #{param.startDateTime}\nand cu.create_time &lt;= #{param.endDateTime}\ngroup by cu.dept_id";
+
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Mysql), vec![sql.to_string()]);
+        assert_eq!(
+            split_sql_statements_for_database("SELECT a FROM t WHERE b &gt;= 1;\nSELECT 2;", DatabaseType::Mysql),
+            vec!["SELECT a FROM t WHERE b &gt;= 1".to_string(), "SELECT 2".to_string()]
+        );
+        // A bitwise AND before a real terminator must still split.
+        assert_eq!(
+            split_sql_statements_for_database("SELECT a FROM t WHERE a&b;", DatabaseType::Mysql),
+            vec!["SELECT a FROM t WHERE a&b".to_string()]
+        );
+        // Numeric character references and quoted entities stay intact too.
+        assert_eq!(
+            split_sql_statements_for_database("SELECT 'Tom &amp; Jerry' AS n;\nSELECT 2;", DatabaseType::Mysql),
+            vec!["SELECT 'Tom &amp; Jerry' AS n".to_string(), "SELECT 2".to_string()]
+        );
+        // Numeric character references: MySQL-family dialects read a bare `#` as a
+        // line comment, so exercise this on SQL Server (whose `#` is an identifier
+        // marker) where `&#39;` reaches the splitter as code.
+        assert_eq!(
+            split_sql_statements_for_database("SELECT &#39; AS q;\nSELECT 2;", DatabaseType::SqlServer),
+            vec!["SELECT &#39; AS q".to_string(), "SELECT 2".to_string()]
         );
     }
 

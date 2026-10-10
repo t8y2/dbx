@@ -1712,6 +1712,28 @@ DISTRIBUTED BY HASH(product_id) BUCKETS 1`;
 
     expect(rangeSqlTexts(executableStatementRanges(`${first};\n\n${second};`, databaseType))).toEqual([first, second]);
   });
+
+  // Issue #11699: MyBatis XML comparison entities (`&gt;=`, `&lt;=`) end with a
+  // `;` that must not be read as a statement terminator, otherwise one query is
+  // split into fragments, its run buttons multiply, and parameters living in
+  // later fragments are lost from the execute dialog.
+  it("keeps MyBatis comparison entities from splitting a statement (issue #11699)", () => {
+    const sql = ["select * from course_user cu", "where cu.is_delete = 0", "and cu.create_time &gt;= #{param.startDateTime}", "and cu.create_time &lt;= #{param.endDateTime}", "group by cu.dept_id"].join("\n");
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual([sql]);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql]);
+    expect(hasMultipleExecutionTargets(sql, "mysql")).toBe(false);
+    expect(currentExecutableStatementRange(sql, sql.indexOf("group by"), "mysql")?.sql).toBe(sql);
+  });
+
+  it("still splits real statements after an entity and after a bitwise AND (issue #11699)", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT a FROM t WHERE b &gt;= 1;\nSELECT 2;", "mysql"))).toEqual(["SELECT a FROM t WHERE b &gt;= 1", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT a FROM t WHERE a&b;", "mysql"))).toEqual(["SELECT a FROM t WHERE a&b"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT 'Tom &amp; Jerry';\nSELECT 2;", "mysql"))).toEqual(["SELECT 'Tom &amp; Jerry'", "SELECT 2"]);
+    // Numeric refs: MySQL-family dialects (and, in this splitter, Postgres) read a
+    // bare `#` as a line comment, so use sqlserver where `#` is an identifier marker.
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT &#39; AS q;\nSELECT 2;", "sqlserver"))).toEqual(["SELECT &#39; AS q", "SELECT 2"]);
+  });
+
   it("returns statement ranges starting only at statement starts", () => {
     const sql = "SELECT *\nFROM users\nWHERE active = 1;\nSELECT 2;";
     const ranges = executableStatementRanges(sql);

@@ -173,7 +173,13 @@ class OceanBaseOracleAgentTest {
             if ("setMaxRows".equals(method.getName())) queryLimit[0] = (Integer) args[0];
             if ("setFetchSize".equals(method.getName())) queryFetchSize[0] = (Integer) args[0];
             if ("execute".equals(method.getName())) {
-                queryStarted[0] = !String.valueOf(args[0]).startsWith("ALTER SESSION");
+                String statementSql = String.valueOf(args[0]);
+                if (statementSql.contains("DBMS_OUTPUT.ENABLE")) {
+                    // The capture enable probe runs before the statement; it is not the
+                    // query the audit assertions below are about.
+                    return false;
+                }
+                queryStarted[0] = !statementSql.startsWith("ALTER SESSION");
                 statementClosed[0] = false;
                 return queryStarted[0];
             }
@@ -188,6 +194,10 @@ class OceanBaseOracleAgentTest {
                 return auditConnection.createStatement();
             }
             if ("prepareStatement".equals(method.getName())) return auditConnection.prepareStatement((String) args[0]);
+            if ("prepareCall".equals(method.getName())) {
+                // The first page drains DBMS_OUTPUT; an empty buffer is one round trip.
+                return emptyDbmsOutputCall();
+            }
             return defaultValue(method.getReturnType());
         });
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
@@ -228,7 +238,15 @@ class OceanBaseOracleAgentTest {
         });
         int[] statementsCreated = {0};
         Statement statement = proxy(Statement.class, (method, args) -> {
-            if ("execute".equals(method.getName())) return !String.valueOf(args[0]).startsWith("ALTER SESSION");
+            if ("execute".equals(method.getName())) {
+                String statementSql = String.valueOf(args[0]);
+                if (statementSql.contains("DBMS_OUTPUT.ENABLE")) {
+                    // The capture enable probe runs before the statement and is not the
+                    // query this test counts.
+                    return false;
+                }
+                return !statementSql.startsWith("ALTER SESSION");
+            }
             if ("getResultSet".equals(method.getName())) return cursor;
             return defaultValue(method.getReturnType());
         });
@@ -237,6 +255,9 @@ class OceanBaseOracleAgentTest {
                 statementsCreated[0]++;
                 return statement;
             }
+            if ("prepareCall".equals(method.getName())) {
+                return emptyDbmsOutputCall();
+            }
             if ("isClosed".equals(method.getName())) return false;
             return defaultValue(method.getReturnType());
         });
@@ -244,13 +265,17 @@ class OceanBaseOracleAgentTest {
         TestSupport.setPrivateConnection(agent, connection);
         QueryPageResult first = agent.executeQueryPage("SELECT N FROM T", null, new QueryPageOptions(1, null, 10, 5));
         Assertions.assertTrue(first.getHas_more());
-        Assertions.assertEquals(2, statementsCreated[0]);
+        Assertions.assertEquals(
+            3,
+            statementsCreated[0],
+            "the paged statement opens the ENABLE probe, its query timeout and its own cursor, and nothing else"
+        );
 
 
         QueryPageResult last = agent.fetchQueryPage(first.getSession_id(), 1);
         Assertions.assertFalse(last.getHas_more());
         Assertions.assertNull(last.getServer_execute_time_us());
-        Assertions.assertEquals(2, statementsCreated[0], "no diagnostic query may run when the cursor finishes");
+        Assertions.assertEquals(3, statementsCreated[0], "no diagnostic query may run when the cursor finishes");
     }
 
     @Test
@@ -635,6 +660,44 @@ class OceanBaseOracleAgentTest {
         Assertions.assertTrue(
             session.preparedSql.contains(OceanBaseOracleAgent.DBMS_OUTPUT_GET_LINE_SQL),
             "the drain must use the agent's GET_LINE wrapper"
+        );
+    }
+
+    /**
+     * The paged path captures DBMS_OUTPUT for the statement that opens the page, exactly
+     * like {@code executeQuery}, and only for that one: a later {@code fetchQueryPage}
+     * reads the open cursor and collects nothing, because there is no new statement to
+     * attribute output to. That is the rule the Go agent's T4 paged capture follows.
+     */
+    @Test
+    void capturesDbmsOutputOnTheFirstPageOnly() {
+        PagedDbmsOutputSession session = new PagedDbmsOutputSession(2);
+        session.buffer.add("printed by the statement");
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        QueryPageResult first = agent.executeQueryPage(
+            "SELECT N FROM T", null, new QueryPageOptions(1, null, 10, 5)
+        );
+
+        Assertions.assertTrue(first.getHas_more(), "a page size of one leaves the second row for the next page");
+        Assertions.assertEquals(
+            List.of(Map.of("severity", "INFO", "message", "printed by the statement")),
+            first.getMessages()
+        );
+        Assertions.assertTrue(
+            session.executedSql.contains("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;"),
+            "the first page must enable the buffer before its statement runs"
+        );
+        Assertions.assertTrue(
+            session.preparedSql.contains(OceanBaseOracleAgent.DBMS_OUTPUT_GET_LINE_SQL),
+            "the first page must drain through the GET_LINE wrapper"
+        );
+
+        QueryPageResult second = agent.fetchQueryPage(first.getSession_id(), 1);
+        Assertions.assertTrue(
+            second.getMessages().isEmpty(),
+            "a cursor re-read must not re-collect server output"
         );
     }
 
@@ -2154,6 +2217,116 @@ class OceanBaseOracleAgentTest {
     }
 
     /**
+     * Fake paged session: a cursor of {@code rowCount} rows (one per page) plus the
+     * batched DBMS_OUTPUT drain block, so the capture wiring of the paged path can be
+     * asserted without a server.
+     */
+    private static final class PagedDbmsOutputSession {
+        final List<String> executedSql = new ArrayList<>();
+        /** Every {@code prepareCall} text, so the drain's own call can be asserted. */
+        final List<String> preparedSql = new ArrayList<>();
+        /** Lines already buffered, consumed by the drain's batched fetch. */
+        final List<String> buffer = new ArrayList<>();
+        private final int rowCount;
+        private int rowIndex;
+        private String lastPayload = "";
+        private boolean bufferExhausted;
+
+        PagedDbmsOutputSession(int rowCount) {
+            this.rowCount = rowCount;
+        }
+
+        Connection connection() {
+            ResultSetMetaData meta = proxy(ResultSetMetaData.class, (method, args) -> {
+                switch (method.getName()) {
+                    case "getColumnCount":
+                        return 1;
+                    case "getColumnLabel":
+                        return "N";
+                    case "getColumnType":
+                        return Types.INTEGER;
+                    case "getColumnTypeName":
+                        return "NUMBER";
+                    default:
+                        return defaultValue(method.getReturnType());
+                }
+            });
+            ResultSet cursor = proxy(ResultSet.class, (method, args) -> {
+                switch (method.getName()) {
+                    case "next":
+                        return rowIndex < rowCount;
+                    case "getMetaData":
+                        return meta;
+                    case "getObject":
+                    case "getInt":
+                        rowIndex++;
+                        return rowIndex;
+                    case "close":
+                        return null;
+                    default:
+                        return defaultValue(method.getReturnType());
+                }
+            });
+            Statement statement = proxy(Statement.class, (method, args) -> {
+                switch (method.getName()) {
+                    case "execute":
+                        String statementSql = String.valueOf(args[0]);
+                        executedSql.add(statementSql);
+                        if (statementSql.contains("DBMS_OUTPUT.ENABLE")) {
+                            return false;
+                        }
+                        return !statementSql.startsWith("ALTER SESSION");
+                    case "getResultSet":
+                        return cursor;
+                    case "getUpdateCount":
+                        return -1;
+                    case "setMaxRows":
+                    case "setFetchSize":
+                    case "setQueryTimeout":
+                    case "close":
+                        return null;
+                    default:
+                        return defaultValue(method.getReturnType());
+                }
+            });
+            CallableStatement drain = proxy(CallableStatement.class, (method, args) -> {
+                switch (method.getName()) {
+                    case "registerOutParameter":
+                    case "setInt":
+                    case "close":
+                        return null;
+                    case "execute":
+                        lastPayload = buffer.isEmpty() ? "" : String.join("\n", buffer) + "\n";
+                        buffer.clear();
+                        bufferExhausted = true;
+                        // execute() returns a primitive boolean; a proxy may not answer null.
+                        return Boolean.FALSE;
+                    case "getString":
+                        return ((Number) args[0]).intValue() == 3 ? lastPayload : "";
+                    case "getInt":
+                        // :4 reports the session buffer as empty, which ends the drain.
+                        return ((Number) args[0]).intValue() == 4 && bufferExhausted ? 1 : 0;
+                    default:
+                        return defaultValue(method.getReturnType());
+                }
+            });
+            return proxy(Connection.class, (method, args) -> {
+                switch (method.getName()) {
+                    case "createStatement":
+                        return statement;
+                    case "prepareCall":
+                        preparedSql.add(String.valueOf(args[0]));
+                        return drain;
+                    case "isClosed":
+                        return false;
+                    default:
+                        return defaultValue(method.getReturnType());
+                }
+            });
+        }
+    }
+
+    /**
      * Fake session answering the dictionary, privilege and user queries the
      * PL/SQL capability probe runs. Privilege lists model the rows of a
      * privilege view; a null list makes that view unreadable.
@@ -2234,6 +2407,28 @@ class OceanBaseOracleAgentTest {
             }
             return resultSet(new String[]{"PRIVILEGE"}, rowsOf(privileges));
         }
+    }
+
+    /**
+     * The drain call of an empty {@code DBMS_OUTPUT} buffer: the block answers one empty
+     * batch and reports the session buffer as empty ({@code :4} = 1), which is what ends
+     * the drain in one round trip.
+     */
+    private static CallableStatement emptyDbmsOutputCall() {
+        return proxy(CallableStatement.class, (method, args) -> {
+            switch (method.getName()) {
+                case "registerOutParameter":
+                case "setInt":
+                case "close":
+                    return null;
+                case "getString":
+                    return "";
+                case "getInt":
+                    return ((Number) args[0]).intValue() == 4 ? 1 : 0;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
     }
 
     private static Object[][] rowsOf(List<String> values) {

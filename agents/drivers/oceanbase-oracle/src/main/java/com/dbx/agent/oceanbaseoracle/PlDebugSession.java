@@ -125,6 +125,15 @@ final class PlDebugSession implements AutoCloseable {
      */
     private static final int EXCEPTION_RESUME_ITERATIONS = 200;
 
+    /**
+     * One {@code DBX_FETCH_OUTPUT} chunk, mirroring the Go driver's
+     * {@code plDebugLogChars}. It is one character below PL/SQL's 32767-byte VARCHAR2
+     * limit, so the helper's trailing {@code chr(10)} join can never overflow the
+     * server-side register. A chunk shorter than this is the end of the buffer: the
+     * helper only stops early when it ran out of lines.
+     */
+    static final int LOG_CHARS = 32000;
+
     private final String debugId;
     private final String owner;
     private final Connection debuggeeConnection;
@@ -154,6 +163,19 @@ final class PlDebugSession implements AutoCloseable {
     private volatile boolean exceptionBreakpoint;
     /** True only when the last exception-mode resume stopped on reason 11/16. */
     private volatile boolean stoppedOnException;
+    /**
+     * The debuggee's {@code DBMS_OUTPUT} as {@code log()} returns it. It survives a call
+     * because the helper pops every line it hands out: the drain continues where the
+     * previous chunk ended, so the text read so far has to be kept here (the Go driver
+     * keeps it in {@code logText}).
+     */
+    private String logText = "";
+    /**
+     * True once a drain reached the end of the buffer. A later {@code log()} answers from
+     * {@link #logText} without touching the debuggee connection, which is what keeps a
+     * finished session from paying the {@code DBMS_DEBUG} park on every refresh.
+     */
+    private boolean logComplete;
 
     PlDebugSession(
         String debugId,
@@ -363,6 +385,33 @@ final class PlDebugSession implements AutoCloseable {
             DEFAULT_TIMEOUT_MILLIS,
             new DbxPlDebugPackage.ProgramInfoFields(false, false)
         );
+    }
+
+    /**
+     * Test-only session over scripted connections. It is the seam the drain and the
+     * continuation loops are unit-tested through: {@code terminated} is set directly
+     * (the production path learns it from the debuggee future), so a test can decide
+     * whether {@code log()} reaches for the buffer and whether a continuation still has
+     * a debuggee to drive.
+     */
+    static PlDebugSession withConnections(
+        String debugId,
+        String owner,
+        Connection debuggeeConnection,
+        Connection debuggerConnection,
+        boolean terminated
+    ) {
+        PlDebugSession session = new PlDebugSession(
+            debugId,
+            owner,
+            debuggeeConnection,
+            debuggerConnection,
+            null,
+            DEFAULT_TIMEOUT_MILLIS,
+            new DbxPlDebugPackage.ProgramInfoFields(false, false)
+        );
+        session.terminated = terminated;
+        return session;
     }
 
     /**
@@ -873,16 +922,38 @@ final class PlDebugSession implements AutoCloseable {
     }
 
     /**
-     * Drives the exception-mode resume: {@code reason_finish} (8) and every other
-     * non-exceptional stop keep the loop going, because the debuggee only stops at
-     * entrypoint returns while breakpoints are suspended. The loop is capped so a
-     * server that never reports a stop condition cannot hang the RPC.
+     * Drives the exception-mode resume. The V6.4 mechanism is native: one
+     * {@code DBX_CNT_EXCEPTION} call continues with {@code break_exception |
+     * break_handler}, so the interpreter returns at the statement that raises, or at the
+     * handler that catches it, in one round trip.
+     *
+     * <p>A server or helper package that rejects those flags (the call errors, e.g.
+     * {@code PLS-00302} for a helper installed before V6.4) falls back to the pre-V6.4
+     * polling loop, which continues with {@code break_any_return} and inspects
+     * {@code run_info.reason}. That loop is capped by
+     * {@link #EXCEPTION_RESUME_ITERATIONS} so a server that never reports a stop
+     * condition cannot hang the RPC. Mirrors the Go driver's
+     * {@code resumeUntilException}.
      */
     private Map<String, Object> resumeUntilException() throws Exception {
         Map<String, Object> response = null;
         boolean truncated = false;
+        boolean nativeFlags = true;
         for (int iteration = 0; iteration < EXCEPTION_RESUME_ITERATIONS; iteration++) {
-            Map<String, Object> current = continueWith(DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT);
+            Map<String, Object> current;
+            if (nativeFlags) {
+                try {
+                    current = continueWith(DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION);
+                } catch (Exception error) {
+                    // The helper package predates V6.4 (or the engine rejects the
+                    // exception flags); polling is what remains.
+                    LOG.log(Level.FINE, "DBX_CNT_EXCEPTION failed; falling back to polling", error);
+                    nativeFlags = false;
+                    continue;
+                }
+            } else {
+                current = continueWith(DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT);
+            }
             if (current == null) {
                 break;
             }
@@ -1530,26 +1601,128 @@ final class PlDebugSession implements AutoCloseable {
         return frames;
     }
 
+    /**
+     * The debuggee's {@code DBMS_OUTPUT} buffer, drained in {@link #LOG_CHARS} chunks
+     * through the V6.3 helper {@code DBX_FETCH_OUTPUT} function.
+     *
+     * <p>A single {@code DBX_GET_LINE} call cannot read a buffer bigger than the helper's
+     * own {@code VARCHAR2} register: it silently stops there, which is what made a long
+     * log come back truncated. The chunked drain continues at the line boundary the helper
+     * kept in {@code DBX_PL_DEBUG_PACKAGE_PENDING_LINE}, and every chunk it read is kept
+     * in {@link #logText} because the helper pops the lines it hands out.
+     *
+     * <p>The V6.3 function is not assumed: a helper package installed before it (or an
+     * engine that rejects the call) falls back to the pre-V6.3 single-call
+     * {@code DBX_GET_LINE}, exactly as this agent read the buffer before. Reading the
+     * buffer is diagnostic, so neither path may fail the request.
+     *
+     * <p>Mirrors the Go driver's {@code plDebugSession.log}: its cache fields
+     * ({@code logText}/{@code logComplete}) are the same, and its
+     * {@code waitForTargetReturn} has no counterpart here because this session's
+     * {@link #terminateState()} already reports the debuggee statement's own completion.
+     */
     synchronized Map<String, Object> log() throws Exception {
         requireOpen();
         Map<String, Object> response = snapshot();
-        String output = "";
+        String output = logText == null ? "" : logText;
         // DBMS_OUTPUT is readable only after the interpreter released the
         // debuggee connection (debug_off / program finished).
-        if (terminateState()) {
-            try (CallableStatement call = debuggeeConnection.prepareCall(
-                "BEGIN " + qualifiedCall(DbxPlDebugPackage.PROCEDURE_GET_LINE) + "(?, ?); END;"
-            )) {
-                call.registerOutParameter(1, Types.VARCHAR);
-                call.registerOutParameter(2, Types.INTEGER);
-                call.execute();
-                output = call.getString(1);
-            } catch (Exception ignored) {
-                // Output is best effort; a closed or busy debuggee must not fail the call.
+        if (terminateState() && !logComplete) {
+            OutputDrain drain = drainDebuggeeOutput();
+            output = drain.text;
+            if (drain.complete) {
+                logComplete = true;
+            } else if (output.isEmpty()) {
+                output = legacyGetLine();
+            } else {
+                // The Go driver reports a partial drain the same way, next to the chunks
+                // it did read; the response is never turned into a failure.
+                response.put("message", "DBMS_OUTPUT could not be read completely: " + drain.error);
             }
         }
-        response.put("output", output == null ? "" : output);
+        logText = output == null ? "" : output;
+        response.put("output", logText);
         return response;
+    }
+
+    /** One drain's text, whether it reached the end of the buffer, and its failure. */
+    private static final class OutputDrain {
+        final String text;
+        final boolean complete;
+        final String error;
+
+        OutputDrain(String text, boolean complete, String error) {
+            this.text = text;
+            this.complete = complete;
+            this.error = error;
+        }
+    }
+
+    /**
+     * Reads one chunk of the calling session's {@code DBMS_OUTPUT} buffer. The helper
+     * lowers its own post-program park to one second on the first call (the only way a
+     * drain can finish inside one RPC after {@code DEBUG_ON}), so the calls after a full
+     * chunk are cheap. Mirrors the Go driver's {@code plDebugFetchOutput}.
+     */
+    private String fetchOutputChunk() throws Exception {
+        try (CallableStatement call = debuggeeConnection.prepareCall(
+            "BEGIN ? := " + qualifiedCall(DbxPlDebugPackage.FUNCTION_FETCH_OUTPUT) + "(?); END;"
+        )) {
+            call.registerOutParameter(1, Types.VARCHAR);
+            call.setInt(2, LOG_CHARS);
+            call.execute();
+            return call.getString(1);
+        }
+    }
+
+    /**
+     * Drains the buffer chunk by chunk, appending to what an earlier call already read.
+     * An empty chunk and a chunk shorter than the request both end the buffer: the helper
+     * only stops early when it ran out of lines. A failing chunk ends the drain with the
+     * text read so far, because reading the buffer is diagnostic. Mirrors the Go driver's
+     * {@code drainDebuggeeOutputLocked}.
+     */
+    private OutputDrain drainDebuggeeOutput() {
+        StringBuilder builder = new StringBuilder(logText == null ? "" : logText);
+        try {
+            while (true) {
+                String chunk = fetchOutputChunk();
+                if (chunk == null || chunk.isEmpty()) {
+                    return new OutputDrain(builder.toString(), true, null);
+                }
+                if (builder.length() > 0) {
+                    builder.append('\n');
+                }
+                builder.append(chunk);
+                if (chunk.length() < LOG_CHARS) {
+                    return new OutputDrain(builder.toString(), true, null);
+                }
+            }
+        } catch (Exception error) {
+            LOG.log(Level.FINE, "DBX_FETCH_OUTPUT failed; the DBMS_OUTPUT drain is incomplete", error);
+            return new OutputDrain(builder.toString(), false, String.valueOf(error.getMessage()));
+        }
+    }
+
+    /**
+     * The pre-V6.3 read: one {@code DBX_GET_LINE} call, which returns the whole buffer the
+     * helper's own register can hold. It is only reached when the V6.3 function itself
+     * failed before returning anything, and it keeps the old best-effort semantics: a
+     * closed or busy debuggee must not fail the call.
+     */
+    private String legacyGetLine() {
+        try (CallableStatement call = debuggeeConnection.prepareCall(
+            "BEGIN " + qualifiedCall(DbxPlDebugPackage.PROCEDURE_GET_LINE) + "(?, ?); END;"
+        )) {
+            call.registerOutParameter(1, Types.VARCHAR);
+            call.registerOutParameter(2, Types.INTEGER);
+            call.execute();
+            String line = call.getString(1);
+            return line == null ? "" : line;
+        } catch (Exception ignored) {
+            // Output is best effort; a closed or busy debuggee must not fail the call.
+            return "";
+        }
     }
 
     synchronized Map<String, Object> snapshot() {
@@ -1770,7 +1943,7 @@ final class PlDebugSession implements AutoCloseable {
      * run_info-mask / entrypointname fixes to be replaced. Ignoring it would leave the
      * Go and Java agents rebuilding each other's body forever.
      */
-    private static boolean packageVersionCurrent(Connection connection, String owner) throws Exception {
+    static boolean packageVersionCurrent(Connection connection, String owner) throws Exception {
         try (PreparedStatement statement = connection.prepareStatement(
             "SELECT S.TEXT"
                 + " FROM (SELECT * FROM ALL_OBJECTS WHERE OBJECT_TYPE = 'PACKAGE BODY') O"

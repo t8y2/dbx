@@ -5,6 +5,13 @@ import java.util.List;
 import java.util.Objects;
 
 public final class QueryPageResult {
+    /**
+     * Hard cap on informational messages one page may carry, matching
+     * {@code QueryResult}'s cap. The Oracle-family drivers report at most 10000
+     * DBMS_OUTPUT lines plus one truncation notice, so the shared cap has to admit
+     * that (10001) instead of cutting the notice off.
+     */
+    private static final int MAX_INFORMATIONAL_MESSAGES = 10001;
     private List<String> columns;
     private List<String> column_types;
     private List<SpatialColumn> spatial_columns;
@@ -14,6 +21,15 @@ public final class QueryPageResult {
     private long execution_time_ms;
     private Long server_execute_time_us;
     private java.util.Map<String, Double> query_timings_ms;
+    /**
+     * Optional protocol field: DBMS_OUTPUT lines the statement that opened this
+     * page produced. It is only ever filled for the first page (the statement that
+     * ran), never for a later page fetched from the open cursor -- there is no new
+     * statement to attribute output to. A null backing field is an absent
+     * {@code messages} key, which is what keeps an existing client's payload
+     * unchanged when there is no server output.
+     */
+    private List<java.util.Map<String, Object>> messages;
     /** Number of rows read by this JDBC cursor across all pages; never sent over JSON RPC. */
     private transient long cursor_rows_read;
     private boolean truncated;
@@ -27,6 +43,29 @@ public final class QueryPageResult {
 
     public void setMessages(List<java.util.Map<String, Object>> messages) {
         this.messages = messages;
+    }
+
+    public List<java.util.Map<String, Object>> getMessages() {
+        return messages == null ? Collections.emptyList() : messages;
+    }
+
+    public void setMessages(List<java.util.Map<String, Object>> messages) {
+        this.messages = messages == null || messages.isEmpty() ? null : messages;
+    }
+
+    /**
+     * Appends one informational message in the same shape {@code QueryResult} uses
+     * ({@code severity}/{@code message} and an optional {@code code}), so a client
+     * reads a page's server output exactly like a single-statement result's.
+     */
+    public void addInformationalMessage(String message, String code) {
+        if (messages == null) messages = new java.util.ArrayList<>();
+        if (messages.size() >= MAX_INFORMATIONAL_MESSAGES) return;
+        java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("severity", "INFO");
+        entry.put("message", message);
+        if (code != null) entry.put("code", code);
+        messages.add(entry);
     }
 
     public QueryPageResult() {

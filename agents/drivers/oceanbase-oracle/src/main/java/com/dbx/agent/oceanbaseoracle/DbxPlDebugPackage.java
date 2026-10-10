@@ -62,14 +62,21 @@ final class DbxPlDebugPackage {
      * only) and whose {@code get_runtime_info} ignores the request mask.
      */
     static final String BODY_FIX_NOTE =
-        "-- DBX PL Debug Package Fix: V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume"
-            + " (V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain, V6.2 program_info.entrypointname arm"
+        "-- DBX PL Debug Package Fix: V6.5 DBX_FETCH_BACKTRACE structured table-overload backtrace with"
+            + " textual fallback (V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume,"
+            + " V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain, V6.2 program_info.entrypointname arm"
             + " for package subprograms, V6.1 namespace-aware set_breakpoint + explicit run_info mask"
             + " retained)";
 
     /** Version history, written after the header line so it never hides the marker. */
     private static final String VERSION_NOTE_DETAIL =
-        "\n-- V6.4 (real Oracle 19c EE verified): DBX_CNT_EXCEPTION added. continue's"
+        "\n-- V6.5 (real Oracle 19c EE verified): DBX_FETCH_BACKTRACE added. It returns both the"
+            + "\n-- dbms_debug.backtrace_table payload (line#, name, owner, namespace, entrypointname"
+            + "\n-- per frame) and the textual listing, so the two can be merged: the table carries the"
+            + "\n-- subprogram name the textual listing cannot show for a package-body frame. The type"
+            + "\n-- reference lives inside a dynamic block, so an engine without backtrace_table still"
+            + "\n-- compiles the body and degrades to the listing at run time. See BODY_FIX_NOTE."
+            + "\n-- V6.4 (real Oracle 19c EE verified): DBX_CNT_EXCEPTION added. continue's"
             + "\n-- break_exception (2) and break_handler (2048) flags stop the interpreter at the"
             + "\n-- statement that raises, or at the handler that catches it, in one call. The mode"
             + "\n-- used to loop CONTINUE(break_any_return) and never saw the exception at all: an"
@@ -198,6 +205,17 @@ final class DbxPlDebugPackage {
     static final String PROCEDURE_SET_BREAKPOINT_ANONYMOUS = "DBX_SET_BREAKPOINT_ANONYMOUS";
     static final String PROCEDURE_SHOW_BREAKPOINTS = "DBX_SHOW_BREAKPOINTS";
     static final String PROCEDURE_PRINT_BACKTRACE = "DBX_PRINT_BACKTRACE";
+    /**
+     * V6.5 structured backtrace: one call returns the
+     * {@code dbms_debug.backtrace_table} payload (line#, name, owner, namespace,
+     * entrypointname per frame) next to the textual listing, so the two can be merged.
+     * The table overload exists on Oracle 19c EE (measured) and carries the subprogram
+     * name the textual listing cannot show for a package-body frame. The type reference
+     * lives inside a dynamic block, so an engine without {@code backtrace_table} still
+     * compiles the body and degrades to the textual listing at run time. The Go agent
+     * calls it; this agent renders the identical body so both install the same package.
+     */
+    static final String PROCEDURE_FETCH_BACKTRACE = "DBX_FETCH_BACKTRACE";
     static final String PROCEDURE_CNT_NEXT_LINE = "DBX_CNT_NEXT_LINE";
     static final String PROCEDURE_CNT_NEXT_BREAKPOINT = "DBX_CNT_NEXT_BREAKPOINT";
     static final String PROCEDURE_CNT_STEP_IN = "DBX_CNT_STEP_IN";
@@ -525,9 +543,8 @@ final class DbxPlDebugPackage {
      * Stack backtrace. {@code DBMS_DEBUG.PRINT_BACKTRACE} also has a structured
      * overload -- {@code (backtrace OUT backtrace_table)}, where
      * {@code backtrace_table} is {@code TABLE OF program_info INDEX BY
-     * BINARY_INTEGER} -- which the client currently parses as text. Not changed here;
-     * it is the natural replacement for the "[Line N] NAME" parsing whenever the
-     * frames need more than a line number and a program name.
+     * BINARY_INTEGER} -- and V6.5 wraps both in {@link #FETCH_BACKTRACE_ROUTINE}, so the
+     * frames no longer have to be recovered by parsing the "[Line N] NAME" text alone.
      */
     private static final String PRINT_BACKTRACE =
         "PROCEDURE " + PROCEDURE_PRINT_BACKTRACE
@@ -539,6 +556,58 @@ final class DbxPlDebugPackage {
             + " status := run_info.terminated;"
             + " dbms_debug.print_backtrace(listing);"
             + "END;";
+
+    /**
+     * The V6.5 routine, byte-for-byte the Go agent's rendering
+     * ({@code agents/drivers/oracle-go/pldebug.go}, the
+     * {@code "-- V6.5 (real Oracle 19c EE verified): DBX_FETCH_BACKTRACE added"} block).
+     * It builds the CHR(31)/CHR(30) separated payload and returns the textual listing
+     * through the same call, mirroring {@code plDebugMergeStructuredBacktrace} on the Go
+     * side. The 1024-character reserve keeps the 32767-byte register from overflowing on
+     * a pathologically deep stack: a truncated payload is simply fewer records.
+     */
+    static final String FETCH_BACKTRACE_ROUTINE =
+        "\n-- V6.5 (real Oracle 19c EE verified): DBX_FETCH_BACKTRACE added. DBMS_DEBUG.PRINT_BACKTRACE"
+            + "\n-- also has a table overload, PRINT_BACKTRACE(backtrace OUT backtrace_table), and its"
+            + "\n-- program_info elements carry what the textual listing does not: measured on 19c EE against"
+            + "\n-- a package subprogram parked inside a nested call, the package-body frames come back with"
+            + "\n-- name=<package>, owner=<owner>, namespace=2 (namespace_pkg_body), libunittype=11 and"
+            + "\n-- entrypointname=<subprogram>, while the textual listing prints the frame's SOURCE line in"
+            + "\n-- the name position and cannot name the subprogram at all. The type reference lives inside"
+            + "\n-- the dynamic block on purpose: an engine that does not declare backtrace_table still"
+            + "\n-- compiles this body and degrades to the textual listing at run time (PLS-00302 is caught"
+            + "\n-- by WHEN OTHERS and answers structured=NULL, which the Go agent reads as \"use the listing"
+            + "\n-- only\" -- see plDebugMergeStructuredBacktrace). The payload is one CHR(31)-separated record"
+            + "\n-- per frame (line#/name/owner/namespace/entrypointname), each terminated by CHR(30); NULLs"
+            + "\n-- arrive as empty fields because the || operator drops NULLs. bt(1) is the OUTERMOST frame, the reverse"
+            + "\n-- of the textual listing's innermost-first order, which is why the Go side reverses it. The"
+            + "\n-- 1024-character reserve before each append keeps the 32767-byte register from overflowing"
+            + "\n-- on a pathologically deep stack: a truncated payload is simply fewer records and the Go"
+            + "\n-- side then answers from the textual listing. The frame count itself is not capped beyond"
+            + "\n-- that, because the reserve is the bound that matters (a 2000-frame cap would still let the"
+            + "\n-- register overflow)."
+            + "\nPROCEDURE " + PROCEDURE_FETCH_BACKTRACE
+            + "(structured OUT VARCHAR2, listing IN OUT VARCHAR, status OUT BINARY_INTEGER) IS"
+            + "\n  run_info dbms_debug.runtime_info;"
+            + "\n  result BINARY_INTEGER;"
+            + "\nBEGIN"
+            + "\n  structured := NULL;"
+            + "\n  result := dbms_debug.get_runtime_info(dbms_debug.info_getLineinfo, run_info);"
+            + "\n  status := run_info.terminated;"
+            + "\n  BEGIN"
+            + "\n    EXECUTE IMMEDIATE"
+            + "\n      'DECLARE bt dbms_debug.backtrace_table; buf VARCHAR2(32767) := NULL; BEGIN '"
+            + "\n      || 'dbms_debug.print_backtrace(bt); FOR i IN 1 .. bt.COUNT LOOP '"
+            + "\n      || 'IF LENGTH(buf) + 1024 > 32000 THEN EXIT; END IF; '"
+            + "\n      || 'buf := buf || bt(i).line# || CHR(31) || bt(i).name || CHR(31) || bt(i).owner"
+            + " || CHR(31) || bt(i).namespace || CHR(31) || bt(i).entrypointname || CHR(30); '"
+            + "\n      || 'END LOOP; :1 := buf; END;' USING OUT structured;"
+            + "\n  EXCEPTION WHEN OTHERS THEN structured := NULL; END;"
+            + "\n  dbms_debug.print_backtrace(listing);"
+            + "\nEND;";
+
+    /** Marker the body template replaces with {@link #FETCH_BACKTRACE_ROUTINE}. */
+    private static final String FETCH_BACKTRACE_MARKER = "--{{DBX_FETCH_BACKTRACE}}";
 
     private static final String CNT_NEXT_LINE =
         "PROCEDURE " + PROCEDURE_CNT_NEXT_LINE + "(result OUT BINARY_INTEGER, message OUT VARCHAR2) IS"
@@ -716,7 +785,10 @@ final class DbxPlDebugPackage {
         PROCEDURE_DISABLE_BREAKPOINT,
         // V6.4: the Go agent calls DBX_CNT_EXCEPTION whenever the exception breakpoint is on,
         // so a head installed before V6.4 is replaced with it (and the body with the head).
-        PROCEDURE_CNT_EXCEPTION
+        PROCEDURE_CNT_EXCEPTION,
+        // V6.5: the Go agent calls DBX_FETCH_BACKTRACE on every stop, so a head installed
+        // before V6.5 is replaced with it (and the body with the head).
+        PROCEDURE_FETCH_BACKTRACE
     );
 
     /**
@@ -731,6 +803,9 @@ final class DbxPlDebugPackage {
         // V6.3: the drain routine is a FUNCTION, so its signature is pinned the same way the
         // Go agent pins it; a head installed before V6.3 declares nothing to match.
         "FUNCTION " + FUNCTION_FETCH_OUTPUT + "(max_chars IN BINARY_INTEGER) RETURN VARCHAR2",
+        // V6.5: the structured backtrace pins all three registers: the OUT payload, the
+        // IN OUT textual listing the routine also has to return, and the OUT status.
+        PROCEDURE_FETCH_BACKTRACE + "(structured OUT VARCHAR2, listing IN OUT VARCHAR, status OUT BINARY_INTEGER",
         PROCEDURE_SET_VALUE + "(frame# IN BINARY_INTEGER, assignment_statement IN VARCHAR2",
         PROCEDURE_ENABLE_BREAKPOINT + "(breakpoint# IN BINARY_INTEGER",
         PROCEDURE_DISABLE_BREAKPOINT + "(breakpoint# IN BINARY_INTEGER"
@@ -745,8 +820,22 @@ final class DbxPlDebugPackage {
         return List.copyOf(requirements);
     }
 
+    /**
+     * The package head. It carries the same two identity notes as the body (as inert
+     * PL/SQL comments): a spec that documents the contract it was installed for is what
+     * lets an inspection of the head answer the same question the body's first line
+     * answers, without a pause on the library lock a body read can take.
+     *
+     * <p>The notes are referenced as constants so both cross-language gates evaluate this
+     * constant to the same text an install uses. That text is deliberately longer than a
+     * V6.x routine region: both gates locate a routine by the shortest constant that
+     * contains its declaration, and the V6.5 region (its history comment included) is
+     * longer than the bare head of declarations.
+     */
     private static final String WRAPPED_PACKAGE_HEAD = "CREATE OR REPLACE PACKAGE "
         + "%s" + PACKAGE_NAME + " AS"
+        + "\n" + VERSION_NOTE
+        + "\n" + BODY_FIX_NOTE
         + " PROCEDURE " + PROCEDURE_SET_BREAKPOINT
         + "(owner IN VARCHAR2, name IN VARCHAR2, line# IN BINARY_INTEGER, breakpoint# OUT BINARY_INTEGER, result OUT BINARY_INTEGER);"
         + " PROCEDURE " + PROCEDURE_SET_BREAKPOINT_EX
@@ -766,6 +855,8 @@ final class DbxPlDebugPackage {
         + " PROCEDURE " + PROCEDURE_SHOW_BREAKPOINTS + "(listing in out varchar2);"
         + " PROCEDURE " + PROCEDURE_PRINT_BACKTRACE
         + "(listing IN OUT VARCHAR, status OUT BINARY_INTEGER);"
+        + " PROCEDURE " + PROCEDURE_FETCH_BACKTRACE
+        + "(structured OUT VARCHAR2, listing IN OUT VARCHAR, status OUT BINARY_INTEGER);"
         + " PROCEDURE " + PROCEDURE_CNT_NEXT_LINE
         + "(result OUT BINARY_INTEGER, message OUT VARCHAR2);"
         + " PROCEDURE " + PROCEDURE_CNT_NEXT_BREAKPOINT
@@ -804,6 +895,7 @@ final class DbxPlDebugPackage {
         + DISABLE_BREAKPOINT
         + SHOW_BREAKPOINTS
         + PRINT_BACKTRACE
+        + FETCH_BACKTRACE_MARKER
         + CNT_NEXT_LINE
         + CNT_NEXT_BREAKPOINT
         + CNT_STEP_IN
@@ -857,6 +949,7 @@ final class DbxPlDebugPackage {
             .replace(PROGRAM_INFO_EXTRA_MARKER, extra.toString())
             .replace(PROGRAM_INFO_ENTRY_MARKER, entry)
             .replace(PENDING_LINE_DECLARATION_MARKER, PENDING_LINE_DECLARATION)
+            .replace(FETCH_BACKTRACE_MARKER, FETCH_BACKTRACE_ROUTINE)
             .replace(FETCH_OUTPUT_MARKER, FETCH_OUTPUT_ROUTINE);
     }
 

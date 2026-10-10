@@ -3,6 +3,16 @@ package com.dbx.agent.oceanbaseoracle;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.CallableStatement;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -42,8 +52,7 @@ class PlDebugSessionTest {
             + " pro_info.namespace := dbms_debug.namespace_pkgspec_or_toplevel";
 
     @Test
-    void packageHeadDeclaresSetValueAndSetBreakpointEx() {
-        String head = DbxPlDebugPackage.packageHead("SCOTT");
+    void packageHeadDeclaresSetValueAndSetBreakpointEx() {        String head = DbxPlDebugPackage.packageHead("SCOTT");
         Assertions.assertTrue(
             head.contains("PROCEDURE " + DbxPlDebugPackage.PROCEDURE_SET_VALUE),
             "the package head must declare DBX_SET_VALUE, else the body compiles to INVALID"
@@ -135,8 +144,9 @@ class PlDebugSessionTest {
         // to be replaced, without bumping the shared V6 identity the Go agent also
         // asserts. The Go driver writes this exact literal (plDebugBodyFixNote).
         Assertions.assertEquals(
-            "-- DBX PL Debug Package Fix: V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume"
-                + " (V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain, V6.2 program_info.entrypointname arm"
+            "-- DBX PL Debug Package Fix: V6.5 DBX_FETCH_BACKTRACE structured table-overload backtrace with"
+                + " textual fallback (V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume,"
+                + " V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain, V6.2 program_info.entrypointname arm"
                 + " for package subprograms, V6.1 namespace-aware set_breakpoint + explicit run_info mask"
                 + " retained)",
             DbxPlDebugPackage.BODY_FIX_NOTE
@@ -181,6 +191,28 @@ class PlDebugSessionTest {
         Assertions.assertTrue(
             DbxPlDebugPackage.HEAD_REQUIRED_ROUTINES.contains(DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION),
             "a head installed before V6.4 must be replaced, or the Go agent's call fails with PLS-00302"
+        );
+        // V6.5 parity: the structured backtrace, with the same history comment and dynamic
+        // block the Go agent renders. The table type is only referenced inside the dynamic
+        // block, so an engine without backtrace_table still compiles this body.
+        Assertions.assertTrue(body.contains("-- V6.5 (real Oracle 19c EE verified): DBX_FETCH_BACKTRACE added"));
+        Assertions.assertTrue(body.contains(
+            "PROCEDURE " + DbxPlDebugPackage.PROCEDURE_FETCH_BACKTRACE
+                + "(structured OUT VARCHAR2, listing IN OUT VARCHAR, status OUT BINARY_INTEGER) IS"
+        ));
+        Assertions.assertTrue(body.contains("DECLARE bt dbms_debug.backtrace_table; buf VARCHAR2(32767) := NULL; BEGIN "));
+        Assertions.assertTrue(body.contains("EXCEPTION WHEN OTHERS THEN structured := NULL; END;"));
+        Assertions.assertTrue(body.contains("dbms_debug.print_backtrace(listing);"));
+        Assertions.assertTrue(
+            DbxPlDebugPackage.HEAD_REQUIRED_ROUTINES.contains(DbxPlDebugPackage.PROCEDURE_FETCH_BACKTRACE),
+            "a head installed before V6.5 must be replaced, or the Go agent's call fails with PLS-00302"
+        );
+        Assertions.assertTrue(
+            DbxPlDebugPackage.HEAD_REQUIRED_DECLARATIONS.contains(
+                DbxPlDebugPackage.PROCEDURE_FETCH_BACKTRACE
+                    + "(structured OUT VARCHAR2, listing IN OUT VARCHAR, status OUT BINARY_INTEGER"
+            ),
+            "the structured backtrace's head declaration must be pinned, so a head installed before V6.5 is replaced"
         );
         Assertions.assertTrue(body.contains("-- V6.2 (real Oracle 19c EE verified): DBX_SET_BREAKPOINT_ENTRY added"));
         Assertions.assertTrue(body.contains("-- V6: DBX_SET_VALUE now matches the real DBMS_DEBUG.SET_VALUE overloads"));
@@ -476,6 +508,467 @@ class PlDebugSessionTest {
         return count;
     }
 
+    /**
+     * The head carries the same two identity notes the body's header line carries. They
+     * are inert PL/SQL comments, and they are also what keeps the head's evaluated text
+     * longer than a V6.x routine region: the cross-language gates locate a routine by the
+     * <em>shortest</em> string constant that contains its declaration, and the V6.5
+     * region (its history comment included) is longer than the bare head of
+     * declarations. A head shorter than that region would make both gates compare the
+     * region against the head and report a drift that does not exist.
+     */
+    @Test
+    void packageHeadCarriesTheIdentityNotes() {
+        String head = DbxPlDebugPackage.packageHead("SCOTT");
+        Assertions.assertTrue(head.contains(DbxPlDebugPackage.VERSION_NOTE), "the head must carry the shared V6 identity note");
+        Assertions.assertTrue(head.contains(DbxPlDebugPackage.BODY_FIX_NOTE), "the head must carry the V6.x fix note");
+        Assertions.assertTrue(head.contains("\n-- "), "the notes are PL/SQL comments");
+        Assertions.assertTrue(
+            head.length() > DbxPlDebugPackage.FETCH_BACKTRACE_ROUTINE.length(),
+            "the head's text must stay longer than the V6.5 routine region the parity gates locate by declaration"
+        );
+    }
+
+    @Test
+    void logChunkMatchesTheGoDriversFetchOutputChunk() {
+        Assertions.assertEquals(32000, PlDebugSession.LOG_CHARS);
+    }
+
+    /**
+     * The drain asks {@code DBX_FETCH_OUTPUT} for one chunk at a time and stops at the
+     * first short answer: the helper only stops early when the buffer ran out, so a
+     * shorter chunk is already the end (the Go driver's rule).
+     */
+    @Test
+    void drainsTheBufferAtTheFirstShortChunk() throws Exception {
+        OutputSession session = new OutputSession();
+        session.chunks.add("first line\nsecond line");
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", session.connection(), null, true
+        );
+
+        Map<String, Object> response = debug.log();
+
+        Assertions.assertEquals("first line\nsecond line", response.get("output"));
+        Assertions.assertEquals(1, session.fetchCalls, "a short chunk ends the buffer");
+        Assertions.assertFalse(response.containsKey("message"), "a complete drain reports no message");
+        Assertions.assertTrue(
+            session.prepared.get(0).contains(DbxPlDebugPackage.FUNCTION_FETCH_OUTPUT),
+            "the drain must go through the V6.3 function, not the single-call DBX_GET_LINE"
+        );
+        Assertions.assertEquals(0, session.legacyCalls);
+    }
+
+    /**
+     * A full chunk means the helper stopped exactly at the requested size and may still
+     * hold more, so the drain asks again and joins the chunks with a newline -- the
+     * helper's {@code DBX_PL_DEBUG_PACKAGE_PENDING_LINE} keeps the line the boundary cut
+     * off, so nothing is lost between the calls.
+     */
+    @Test
+    void continuesAfterAFullChunkAndJoinsWithANewline() throws Exception {
+        OutputSession session = new OutputSession();
+        String full = "x".repeat(PlDebugSession.LOG_CHARS);
+        session.chunks.add(full);
+        session.chunks.add("tail");
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", session.connection(), null, true
+        );
+
+        Assertions.assertEquals(full + "\ntail", debug.log().get("output"));
+        Assertions.assertEquals(2, session.fetchCalls, "a full chunk asks again, the short tail ends the drain");
+    }
+
+    /** An empty chunk is the end of the buffer as well, and it ends it immediately. */
+    @Test
+    void stopsAtAnEmptyChunk() throws Exception {
+        OutputSession session = new OutputSession();
+        session.chunks.add("x".repeat(PlDebugSession.LOG_CHARS));
+        session.chunks.add("");
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", session.connection(), null, true
+        );
+
+        Assertions.assertEquals("x".repeat(PlDebugSession.LOG_CHARS), debug.log().get("output"));
+        Assertions.assertEquals(2, session.fetchCalls);
+    }
+
+    /**
+     * The buffer is popped by the helper as it is read, so the text has to be kept: a
+     * second request answers from memory without touching the debuggee connection again
+     * (the Go driver's {@code logText}/{@code logComplete} cache).
+     */
+    @Test
+    void cachesTheDrainedBuffer() throws Exception {
+        OutputSession session = new OutputSession();
+        session.chunks.add("only line");
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", session.connection(), null, true
+        );
+
+        Assertions.assertEquals("only line", debug.log().get("output"));
+        Assertions.assertEquals("only line", debug.log().get("output"));
+
+        Assertions.assertEquals(1, session.fetchCalls, "a complete drain is answered from the cache");
+    }
+
+    /**
+     * Reading the buffer is diagnostic: a failing chunk ends the drain with the text read
+     * so far and reports it next to the output, but it must not fail the request, and the
+     * incomplete read must not be cached as complete.
+     */
+    @Test
+    void reportsAPartialDrainWithoutFailingTheRequest() throws Exception {
+        OutputSession session = new OutputSession();
+        String full = "y".repeat(PlDebugSession.LOG_CHARS);
+        session.chunks.add(full);
+        session.chunkFailureAt = 2;
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", session.connection(), null, true
+        );
+
+        Map<String, Object> response = debug.log();
+
+        Assertions.assertEquals(full, response.get("output"), "the chunks read before the failure are kept");
+        Assertions.assertTrue(
+            String.valueOf(response.get("message")).contains("DBMS_OUTPUT could not be read completely"),
+            "the incomplete drain is reported: " + response.get("message")
+        );
+        Assertions.assertEquals(2, session.fetchCalls);
+
+        debug.log();
+        Assertions.assertEquals(3, session.fetchCalls, "an incomplete drain is retried, not cached");
+    }
+
+    /**
+     * The V6.3 function is not assumed: a helper package installed before it (or an engine
+     * that rejects the call) falls back to the pre-V6.3 single {@code DBX_GET_LINE}, which
+     * is exactly how this agent read the buffer before.
+     */
+    @Test
+    void fallsBackToTheSingleGetLineWhenTheChunkedDrainIsMissing() throws Exception {
+        OutputSession session = new OutputSession();
+        session.fetchFailure = "ORA-06550: PLS-00302: component 'DBX_FETCH_OUTPUT' must be declared";
+        session.legacyLine = "legacy text";
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", session.connection(), null, true
+        );
+
+        Map<String, Object> response = debug.log();
+
+        Assertions.assertEquals("legacy text", response.get("output"));
+        Assertions.assertEquals(1, session.fetchCalls, "the V6.3 function was tried");
+        Assertions.assertEquals(1, session.legacyCalls, "the fallback read the buffer");
+        Assertions.assertTrue(
+            session.prepared.stream().anyMatch(sql -> sql.contains(DbxPlDebugPackage.PROCEDURE_GET_LINE)),
+            "the fallback must prepare DBX_GET_LINE"
+        );
+    }
+
+    /**
+     * A debuggee that is still parked holds the connection and its buffer: reading it
+     * would park for the whole {@code DBMS_DEBUG} timeout, so a non-terminated session
+     * reports an empty output and touches no connection at all.
+     */
+    @Test
+    void doesNotReadTheBufferBeforeTheProgramFinished() throws Exception {
+        OutputSession session = new OutputSession();
+        session.chunks.add("never read");
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", session.connection(), null, false
+        );
+
+        Assertions.assertEquals("", debug.log().get("output"));
+        Assertions.assertEquals(0, session.fetchCalls);
+        Assertions.assertEquals(0, session.legacyCalls);
+    }
+
+    /**
+     * V6.4+: an exception breakpoint stops through the native
+     * {@code DBX_CNT_EXCEPTION} (one continue with break_exception|break_handler), not
+     * through the pre-V6.4 polling loop.
+     */
+    @Test
+    void exceptionResumeUsesTheNativeFlagsFirst() throws Exception {
+        ContinueSession session = new ContinueSession();
+        session.script(DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION, 0, runInfo(0, 1, 11, "DBX_EXC_DEEP"));
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", null, session.connection(), false
+        );
+        debug.setExceptionBreakpoint(true);
+
+        Map<String, Object> response = debug.resume();
+
+        Assertions.assertEquals(11, response.get("reason"));
+        Assertions.assertEquals(true, response.get("stoppedOnException"));
+        Assertions.assertEquals(1, countOf(session.calls.toString(), DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION));
+        Assertions.assertEquals(
+            0,
+            countOf(session.calls.toString(), DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT),
+            "the polling primitive must not run when the native call answered"
+        );
+    }
+
+    /**
+     * A server or helper package that rejects the exception flags must not fail the RPC:
+     * the mode falls back to the pre-V6.4 polling loop (bounded by
+     * {@code EXCEPTION_RESUME_ITERATIONS}).
+     */
+    @Test
+    void exceptionResumeFallsBackToPollingWhenTheFlagsAreRejected() throws Exception {
+        ContinueSession session = new ContinueSession();
+        session.failRoutine = DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION;
+        session.script(DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT, 0, runInfo(0, 1, 16, "DBX_EXC_DEEP"));
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", null, session.connection(), false
+        );
+        debug.setExceptionBreakpoint(true);
+
+        Map<String, Object> response = debug.resume();
+
+        Assertions.assertEquals(16, response.get("reason"));
+        Assertions.assertEquals(true, response.get("stoppedOnException"));
+        Assertions.assertTrue(session.calls.contains(DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION), "the native call was attempted");
+        Assertions.assertTrue(session.calls.contains(DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT), "the polling fallback ran");
+    }
+
+    /** {@code reason_finish} (8) keeps the exception mode going until the handler stop. */
+    @Test
+    void exceptionResumeKeepsContinuingUntilAStopCondition() throws Exception {
+        ContinueSession session = new ContinueSession();
+        session.script(DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION, 0, runInfo(0, 1, 8, "DBX_EXC_DEEP"));
+        session.script(DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION, 0, runInfo(0, 2, 16, "DBX_EXC_DEEP"));
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", null, session.connection(), false
+        );
+        debug.setExceptionBreakpoint(true);
+
+        Map<String, Object> response = debug.resume();
+
+        Assertions.assertEquals(16, response.get("reason"));
+        Assertions.assertEquals(true, response.get("stoppedOnException"));
+        Assertions.assertEquals(2, countOf(session.calls.toString(), DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION));
+    }
+
+    /** The run_info diagnostic line the helper builds, as the session parses it. */
+    private static String runInfo(int breakpoint, int stackDepth, int reason, String program) {
+        return " run_info.breakpoint = " + breakpoint
+            + ", run_info.stackdepth = " + stackDepth
+            + ", run_info.reason = " + reason
+            + ", run_info.programname = " + program
+            + ", run_info.programowner = SCOTT";
+    }
+
+    /**
+     * The version check reads the installed body's FIRST ALL_SOURCE line and requires both
+     * markers on it. A body that carries only one of them (an older install, or a body of
+     * the other agent before the notes were shared) is replaced, and a body that carries
+     * both is left alone -- the two agents must not rebuild each other's package.
+     */
+    @Test
+    void packageVersionCurrentRequiresBothMarkersOnTheBodyHeaderLine() throws Exception {
+        String header = "PACKAGE BODY             " + DbxPlDebugPackage.PACKAGE_NAME + " AS "
+            + DbxPlDebugPackage.VERSION_NOTE + " " + DbxPlDebugPackage.BODY_FIX_NOTE;
+
+        Assertions.assertTrue(PlDebugSession.packageVersionCurrent(
+            versionCheckConnection(header, "  PROCEDURE DBX_CNT_EXIT(message OUT VARCHAR2) IS", "END;"),
+            "SCOTT"
+        ));
+        Assertions.assertFalse(PlDebugSession.packageVersionCurrent(
+            versionCheckConnection("PACKAGE BODY             " + DbxPlDebugPackage.PACKAGE_NAME + " AS "
+                + DbxPlDebugPackage.VERSION_NOTE, "  PROCEDURE X IS", "END;"),
+            "SCOTT"
+        ));
+        Assertions.assertFalse(PlDebugSession.packageVersionCurrent(
+            versionCheckConnection("PACKAGE BODY             " + DbxPlDebugPackage.PACKAGE_NAME + " AS", "  PROCEDURE X IS"),
+            "SCOTT"
+        ));
+        Assertions.assertFalse(
+            PlDebugSession.packageVersionCurrent(versionCheckConnection(), "SCOTT"),
+            "a missing body is never current"
+        );
+    }
+
+    /** A connection whose ALL_SOURCE query answers the given lines in order. */
+    private static Connection versionCheckConnection(String... bodyLines) {
+        int[] index = {0};
+        ResultSet rows = proxy(ResultSet.class, (member, args) -> {
+            switch (member.getName()) {
+                case "next":
+                    return index[0]++ < bodyLines.length;
+                case "getString":
+                    return bodyLines[index[0] - 1];
+                case "close":
+                    return null;
+                default:
+                    return defaultValue(member.getReturnType());
+            }
+        });
+        PreparedStatement statement = proxy(PreparedStatement.class, (member, args) -> {
+            switch (member.getName()) {
+                case "setString":
+                case "close":
+                    return null;
+                case "executeQuery":
+                    return rows;
+                default:
+                    return defaultValue(member.getReturnType());
+            }
+        });
+        return proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                return statement;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    /**
+     * Scripted debuggee connection for the {@code DBMS_OUTPUT} drain: one answer per
+     * {@code DBX_FETCH_OUTPUT} call (the last one repeats), plus the single-call
+     * {@code DBX_GET_LINE} answer the pre-V6.3 fallback reads.
+     */
+    private static final class OutputSession {
+        final List<String> prepared = new ArrayList<>();
+        final List<String> chunks = new ArrayList<>();
+        int fetchCalls;
+        /** First call number whose {@code execute} fails (every later call fails too); 0 fails nothing. */
+        int chunkFailureAt;
+        /** When set, every {@code DBX_FETCH_OUTPUT} call fails. */
+        String fetchFailure;
+        String legacyLine = "";
+        int legacyCalls;
+
+        Connection connection() {
+            return proxy(Connection.class, (method, args) -> {
+                if (!"prepareCall".equals(method.getName())) {
+                    return defaultValue(method.getReturnType());
+                }
+                String sql = String.valueOf(args[0]);
+                prepared.add(sql);
+                boolean fetch = sql.contains(DbxPlDebugPackage.FUNCTION_FETCH_OUTPUT);
+                boolean legacy = sql.contains(DbxPlDebugPackage.PROCEDURE_GET_LINE);
+                return proxy(CallableStatement.class, (member, memberArgs) -> {
+                    switch (member.getName()) {
+                        case "registerOutParameter":
+                        case "setInt":
+                        case "close":
+                            return null;
+                        case "execute":
+                            if (fetch) {
+                                fetchCalls++;
+                                if (fetchFailure != null) {
+                                    throw new SQLException(fetchFailure);
+                                }
+                                if (chunkFailureAt > 0 && fetchCalls >= chunkFailureAt) {
+                                    throw new SQLException("ORA-06502: PL/SQL: numeric or value error");
+                                }
+                            } else if (legacy) {
+                                legacyCalls++;
+                            }
+                            // execute() returns a primitive boolean; a proxy may not answer null.
+                            return Boolean.FALSE;
+                        case "getString":
+                            if (fetch) {
+                                // A chunk past the script answers empty, so a test can never
+                                // spin the drain forever.
+                                return fetchCalls <= chunks.size() ? chunks.get(fetchCalls - 1) : "";
+                            }
+                            return legacy ? legacyLine : "";
+                        default:
+                            return defaultValue(member.getReturnType());
+                    }
+                });
+            });
+        }
+    }
+
+    /**
+     * Scripted debugger connection for the continuation wrappers: every
+     * {@code DBX_CNT_*} call shifts the next scripted run_info line for its routine (the
+     * last one repeats) and answers {@code result = 0} unless the routine is set to fail.
+     */
+    private static final class ContinueSession {
+        final List<String> calls = new ArrayList<>();
+        private final Map<String, List<String>> messages = new LinkedHashMap<>();
+        String failRoutine;
+
+        void script(String routine, int result, String message) {
+            messages.computeIfAbsent(routine, key -> new ArrayList<>()).add(message);
+        }
+
+        Connection connection() {
+            return proxy(Connection.class, (method, args) -> {
+                if (!"prepareCall".equals(method.getName())) {
+                    return defaultValue(method.getReturnType());
+                }
+                String sql = String.valueOf(args[0]);
+                String routine = null;
+                for (String candidate : new String[] {
+                    DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION,
+                    DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT,
+                    DbxPlDebugPackage.PROCEDURE_CNT_NEXT_LINE,
+                    DbxPlDebugPackage.PROCEDURE_CNT_STEP_IN,
+                }) {
+                    if (sql.contains(candidate)) {
+                        routine = candidate;
+                        break;
+                    }
+                }
+                String matched = routine;
+                return proxy(CallableStatement.class, (member, memberArgs) -> {
+                    switch (member.getName()) {
+                        case "registerOutParameter":
+                        case "close":
+                            return null;
+                        case "execute":
+                            calls.add(matched);
+                            if (matched != null && matched.equals(failRoutine)) {
+                                throw new SQLException(
+                                    "ORA-00097: use of Oracle SQL feature not in this Oracle version"
+                                );
+                            }
+                            // execute() returns a primitive boolean; a proxy may not answer null.
+                            return Boolean.FALSE;
+                        case "getInt":
+                            return 0;
+                        case "getString":
+                            List<String> scripted = messages.get(matched);
+                            if (scripted == null || scripted.isEmpty()) {
+                                return "";
+                            }
+                            int index = Math.min(countOf(calls.toString(), matched), scripted.size()) - 1;
+                            return scripted.get(index);
+                        default:
+                            return defaultValue(member.getReturnType());
+                    }
+                });
+            });
+        }
+    }
+
+    private static <T> T proxy(Class<T> type, MethodHandler handler) {
+        InvocationHandler invocationHandler = (proxy, method, args) ->
+            handler.handle(method, args == null ? new Object[0] : args);
+        return type.cast(Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type}, invocationHandler));
+    }
+
+    private static Object defaultValue(Class<?> type) {
+        if (type == Boolean.TYPE) return false;
+        if (type == Byte.TYPE) return (byte) 0;
+        if (type == Short.TYPE) return (short) 0;
+        if (type == Integer.TYPE) return 0;
+        if (type == Long.TYPE) return 0L;
+        if (type == Float.TYPE) return 0f;
+        if (type == Double.TYPE) return 0d;
+        if (type == Character.TYPE) return (char) 0;
+        return null;
+    }
+
+    private interface MethodHandler {
+        Object handle(Method method, Object[] args) throws Throwable;
+    }
+
     @Test
     void parsesEveryBacktraceFrameInnermostFirst() {
         List<Map<String, Object>> frames = PlDebugSession.parseBacktraceFrames(
@@ -706,7 +1199,9 @@ class PlDebugSessionTest {
                 DbxPlDebugPackage.PROCEDURE_DISABLE_BREAKPOINT,
                 // V6.4: the Go agent calls DBX_CNT_EXCEPTION whenever the exception
                 // breakpoint is on, so a head from before V6.4 is replaced.
-                DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION
+                DbxPlDebugPackage.PROCEDURE_CNT_EXCEPTION,
+                // V6.5: the structured backtrace the Go agent calls on every stop.
+                DbxPlDebugPackage.PROCEDURE_FETCH_BACKTRACE
             ),
             DbxPlDebugPackage.HEAD_REQUIRED_ROUTINES
         );

@@ -61,6 +61,7 @@ import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.BiConsumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -455,6 +456,25 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     private void attachDbmsOutputMessages(QueryResult result) {
+        attachDbmsOutputMessages(result::addInformationalMessage);
+    }
+
+    /**
+     * The paged first page is the statement that ran, so it captures server output
+     * exactly like {@link #executeQuery}: the lines are attached to the page the
+     * statement produced. The later {@code fetchQueryPage} calls only read the open
+     * cursor and collect nothing, because there is no new statement to attribute
+     * output to -- the same rule the Go agent's paged path follows.
+     */
+    private void attachDbmsOutputMessages(QueryPageResult result) {
+        attachDbmsOutputMessages(result::addInformationalMessage);
+    }
+
+    /**
+     * Drains the buffer of the statement that just ran and hands every line to
+     * {@code sink}, the one step both result shapes share.
+     */
+    private void attachDbmsOutputMessages(BiConsumer<String, String> sink) {
         if (!dbmsOutputInitializationSupported || !isDbmsOutputInitialized(requireConnected())) {
             return;
         }
@@ -467,10 +487,10 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         boolean truncated = drain.truncated || drain.lines.size() > attachLimit;
         int attachCount = Math.min(drain.lines.size(), attachLimit);
         for (int index = 0; index < attachCount; index++) {
-            result.addInformationalMessage(drain.lines.get(index), null);
+            sink.accept(drain.lines.get(index), null);
         }
         if (truncated) {
-            result.addInformationalMessage(dbmsOutputTruncatedMessage(attachCount), null);
+            sink.accept(dbmsOutputTruncatedMessage(attachCount), null);
         }
     }
 
@@ -700,19 +720,36 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         try (QueryTiming timing = QueryTiming.begin()) {
             prepareLobExecution(sql, options.getDeferLobs());
             long prepareStarted = System.nanoTime();
-            // The paged path captures no server output, but it can still run a
-            // statement that disables the buffer; without this the "already
-            // enabled" record would keep every later captured statement on this
-            // pooled connection from enabling it again.
-            if (disablesDbmsOutput(sql)) {
-                forgetDbmsOutputSession();
-            }
+            boolean disablesOutput = disablesDbmsOutput(sql);
+            // The first page runs the statement, so it enables and drains the buffer
+            // exactly like executeQuery (see attachDbmsOutputMessages). A later
+            // fetchQueryPage re-reads the open cursor and captures nothing.
+            initializeDbmsOutputIfNeeded();
             Connection connection = requireConnected();
             uncheckedVoid(() -> beforeQueryExecution(connection, options.getTimeoutSecs()));
             QueryTiming.record("session_prepare", prepareStarted);
-            QueryPageResult result = JdbcExecutor.current().executeBoundedPage(
-                connection, sql, schema, this::setSchemaSQL, this::resetSchemaSQL, options, resultValueReader()
-            );
+            QueryPageResult result;
+            try {
+                result = JdbcExecutor.current().executeBoundedPage(
+                    connection, sql, schema, this::setSchemaSQL, this::resetSchemaSQL, options, resultValueReader()
+                );
+            } catch (RuntimeException | Error failure) {
+                // The statement failed, so its lines have no result left to be
+                // attached to; draining them here and dropping them stops the next
+                // statement on this pooled session from inheriting them.
+                discardDbmsOutputMessages();
+                if (disablesOutput) {
+                    forgetDbmsOutputSession();
+                }
+                throw failure;
+            }
+            attachDbmsOutputMessages(result);
+            if (disablesOutput) {
+                // Only now: the statement's own DISABLE purges the buffer, and
+                // forgetting earlier would skip draining the lines it printed
+                // before disabling.
+                forgetDbmsOutputSession();
+            }
             markLobPage(result);
             result.setQuery_timings_ms(timing.finish());
             return result;

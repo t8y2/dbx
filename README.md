@@ -309,6 +309,8 @@ Dark mode with native title bar sync · 9 editor themes · English, 简体中文
 
 ## AI Agent Integration (MCP)
 
+For a self-contained workbench and MCP server inside Codex, see [DBX for Codex](packages/codex-plugin/README.md). The native plugin does not require the DBX desktop application.
+
 DBX provides a separate [Rust-powered MCP server](packages/mcp-server/) that lets AI coding agents query databases using connections configured in DBX. The MCP server is distributed independently from the desktop application, so installing DBX does not automatically install the MCP executable.
 
 ```bash

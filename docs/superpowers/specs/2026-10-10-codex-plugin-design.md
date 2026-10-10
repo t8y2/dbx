@@ -1,6 +1,6 @@
 # DBX Codex 插件设计
 
-状态：待用户审阅，尚未实施。
+状态：已按用户批准方案实施；平台与验收边界见 `packages/codex-plugin/README.zh-CN.md`。
 
 ## 用户目标与交付方式
 
@@ -103,7 +103,7 @@ Codex
 
 ## 当前环境记录
 
-fork 已浅克隆到 `/Users/skyfour/work/business/scripts/dbx`。SSH 连接已验证可用。Node 和 pnpm 可用；未发现 Rust/Cargo 工具链。后续构建需要准备工具链或使用 fork CI，尚未安装依赖或开始产品代码实现。
+fork 已克隆并在 `feat/codex-plugin` 开发，SSH 连接可用。仓库隔离的 Node/Rust 构建工具链已准备；macOS ARM64 原生包已构建并安装到实际 Codex 缓存。功能验收与平台边界详见 `packages/codex-plugin/VALIDATION.md`。
 
 ## 非目标
 

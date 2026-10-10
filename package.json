@@ -22,6 +22,8 @@
     "release:agents": "node scripts/release.mjs agents",
     "release:app": "node scripts/release.mjs app",
     "release:packages": "node scripts/release.mjs packages",
+    "package:codex-plugin": "node scripts/package-codex-plugin.mjs",
+    "test:codex-plugin-package": "node --test scripts/package-codex-plugin.test.mjs",
     "test:release": "node --test scripts/release.test.mjs",
     "build:knowledge-base": "node scripts/build-knowledge-base.mjs",
     "generate:connection-types": "node scripts/sync-connection-types.mjs",

@@ -465,8 +465,25 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
 }
 
+fn codex_package_capabilities() -> serde_json::Value {
+    #[cfg(feature = "embed-static")]
+    let embedded_frontend = (!cfg!(debug_assertions) || cfg!(feature = "codex-plugin"))
+        && EmbeddedStaticAssets::get("index.html").is_some();
+    #[cfg(not(feature = "embed-static"))]
+    let embedded_frontend = false;
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"), "embedded_frontend": embedded_frontend,
+        "full_features": cfg!(feature = "duckdb-sidecar") && cfg!(feature = "dynamodb")
+            && cfg!(feature = "mq-admin") && cfg!(feature = "sqlite-sqlcipher") && cfg!(feature = "system-fonts"),
+    })
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--codex-package-check") {
+        println!("{}", codex_package_capabilities());
+        return ExitCode::SUCCESS;
+    }
     if args.iter().any(|arg| arg == "--version") {
         println!("dbx-web {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;

@@ -750,7 +750,7 @@ function collectSeparatedOracleDatabaseLinks(sql: string, databaseType: Database
     if (token.kind !== "word" || !token.text.startsWith("@")) continue;
     const isObjectIdentifier = (position: number) => {
       const candidate = tokens[position];
-      return candidate && ((candidate.kind === "quoted_identifier" && candidate.quote === '"') || (candidate.kind === "word" && /^[\p{L}_][\p{L}\p{N}_$#]*$/u.test(candidate.text)));
+      return candidate && ((candidate.kind === "quoted_identifier" && candidate.quote === '"') || (candidate.kind === "word" && /^[\p{L}_][\p{L}\p{N}_$#]*$/u.test(candidate.text) && !isOracleReservedKeyword(candidate.text)));
     };
     if (!isObjectIdentifier(i - 1)) continue;
     let objectStart = i - 1;
@@ -768,7 +768,7 @@ function collectSeparatedOracleDatabaseLinks(sql: string, databaseType: Database
         const before = tokens[j];
         if (before.depth < token.depth || before.text === ";") break;
         if (before.depth === token.depth && before.kind === "word" && ORACLE_TABLE_LIST_BOUNDARIES.has(before.normalized)) {
-          objectContext = before.normalized === "from";
+          objectContext = before.normalized === "from" || routineCall;
           break;
         }
       }

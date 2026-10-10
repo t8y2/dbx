@@ -421,6 +421,17 @@ describe("extractSqlParameters", () => {
       expect(extractSqlParameters(sql, { databaseType })).toEqual(["value", "source", "target", "column", "offset", "count", "sql", "input"]);
     });
 
+    it.each(["DELETE FROM @table WHERE id = :id", "INSERT INTO @table VALUES (:id)"])("keeps parameters after reserved keywords in %s", (sql) => {
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["table", "id"]);
+      expect(substituteSqlParameters(sql, { table: { kind: "raw", value: "employees" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe(sql.replace("@table", "employees").replace(":id", "7"));
+    });
+
+    it("preserves remote routine links in comma-separated select lists", () => {
+      const sql = "SELECT ename, HR.get_sal@LINK(empno) FROM emp WHERE id = :id";
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { LINK: { kind: "raw", value: "WRONG" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT ename, HR.get_sal@LINK(empno) FROM emp WHERE id = 7");
+    });
+
     it.each(["HR.NEXT", "HR.OFFSET", "HR.FIRST", "FIRST", "-- comment\nFIRST", "employees, FIRST", "(SELECT id FROM employees) e, FIRST"])("preserves database links on the non-reserved object %s", (objectName) => {
       const sql = `SELECT * FROM ${objectName} /* separator */ @LINK WHERE id = :id`;
       expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);

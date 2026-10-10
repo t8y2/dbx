@@ -188,7 +188,11 @@ pub struct StreamingXlsxWriter<W: Write + Seek> {
 /// Estimate column widths from header names only (used by the streaming path
 /// where full row data is not available up-front).  Each width is clamped to
 /// [10, 60] to stay within reasonable bounds.
-fn estimate_header_widths(columns: &[String], column_comments: &[Option<String>], header_comment_rows: bool) -> Vec<usize> {
+fn estimate_header_widths(
+    columns: &[String],
+    column_comments: &[Option<String>],
+    header_comment_rows: bool,
+) -> Vec<usize> {
     columns
         .iter()
         .enumerate()
@@ -329,7 +333,18 @@ pub fn start_streaming_xlsx_workbook<W: Write + Seek>(
     columns: &[String],
     column_types: &[String],
 ) -> Result<StreamingXlsxWriter<W>, String> {
-    start_streaming_xlsx_workbook_with_options(writer, sheet_name, columns, column_types, &[], &[], None, false, true, false)
+    start_streaming_xlsx_workbook_with_options(
+        writer,
+        sheet_name,
+        columns,
+        column_types,
+        &[],
+        &[],
+        None,
+        false,
+        true,
+        false,
+    )
 }
 
 #[cfg(test)]
@@ -400,7 +415,8 @@ fn start_xlsx_writer_inner<W: Write + Seek>(
         cols = cols_xml(&width_cache),
     );
     zip.write_all(sheet_header.as_bytes()).map_err(|err| err.to_string())?;
-    zip.write_all(header_row_xml(columns, column_comments, header_comment_rows).as_bytes()).map_err(|err| err.to_string())?;
+    zip.write_all(header_row_xml(columns, column_comments, header_comment_rows).as_bytes())
+        .map_err(|err| err.to_string())?;
 
     Ok(StreamingXlsxWriter {
         zip,
@@ -682,7 +698,11 @@ fn estimate_column_widths(
             // must fit the wider of the two; otherwise the comment overrides
             // the header text outright.
             let header_text = if header_comment_rows { col.as_str() } else { effective_header(col, comment) };
-            let header_len = header_text.chars().count().max(if header_comment_rows { comment.map(str::chars).map(Iterator::count).unwrap_or(0) } else { 0 });
+            let header_len = header_text.chars().count().max(if header_comment_rows {
+                comment.map(str::chars).map(Iterator::count).unwrap_or(0)
+            } else {
+                0
+            });
             let max_len = std::iter::once(header_len.min(max_clamp))
                 .chain(rows.iter().take(100).map(|row| {
                     let text = value_text(row.get(col_index));
@@ -969,12 +989,8 @@ fn write_worksheet_xml<W: Write>(
     let header_rows = header_row_count(segment.column_comments, segment.header_comment_rows);
     let total_rows = segment.rows.len() + header_rows;
     let range = sheet_range(segment.columns.len(), total_rows);
-    let widths = estimate_column_widths(
-        segment.columns,
-        segment.column_comments,
-        segment.rows,
-        segment.header_comment_rows,
-    );
+    let widths =
+        estimate_column_widths(segment.columns, segment.column_comments, segment.rows, segment.header_comment_rows);
 
     writer
         .write_all(

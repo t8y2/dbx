@@ -126,7 +126,7 @@ import {
 import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, compareSidebarNames, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
 import { spannerDisplayDatabase, spannerSchemaDisplayName } from "@/lib/connection/spannerResourcePath";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
-import { collapseExpandedTreeNodes } from "@/lib/sidebar/sidebarTreeCollapse";
+import { collapseExpandedTreeNodes, collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
 import { findNodePathByIdentity, nodeMatchesRegexScopeIdentity, type SidebarRegexScopeIdentity } from "@/lib/sidebar/sidebarSearchTree";
 import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
 import { simpleModeEmptyShellNeedsConfirmedLoad, treeNodeLoadedChildrenContentPresent } from "@/lib/sidebar/treeLoadedChildrenMarker";
@@ -8225,6 +8225,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!connectionId || !database) return;
     if (node.isExpanded && !options?.force) {
       node.isExpanded = false;
+      collapseSubtreeDescendants(node);
       if (!sidebarSearchQuery.value && !options?.preserveCollapsedChildren) releaseCollapsedTreeNodeChildren(node.id);
       return;
     }
@@ -10599,6 +10600,10 @@ export const useConnectionStore = defineStore("connection", () => {
       return connectionIdsInGroupsOp(sidebarLayout.value, groupIds);
     },
     toggleConnectionGroupCollapsed(groupId: string) {
+      const groupNode = findNode(treeNodes.value, groupId);
+      if (groupNode) {
+        collapseSubtreeDescendants(groupNode);
+      }
       updateLayoutAndRebuild(toggleGroupCollapsedOp(sidebarLayout.value, groupId));
     },
     expandConnectionGroups(groupIds: Iterable<string>) {

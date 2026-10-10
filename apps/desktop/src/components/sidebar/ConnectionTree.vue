@@ -2042,8 +2042,18 @@ function findSchemaNode(nodes: TreeNode[], connId: string, database: string, sch
 function onSearchToggle(node: TreeNode) {
   if (!isTreeSearchFiltering.value || !node.children) return;
   const next = new Set(searchCollapsedIds.value);
-  if (node.isExpanded) next.add(node.id);
-  else next.delete(node.id);
+  if (node.isExpanded) {
+    next.add(node.id);
+    const collectDescendants = (children: readonly TreeNode[]) => {
+      for (const child of children) {
+        next.add(child.id);
+        if (child.children?.length) collectDescendants(child.children);
+      }
+    };
+    collectDescendants(node.children);
+  } else {
+    next.delete(node.id);
+  }
   searchCollapsedIds.value = next;
 }
 

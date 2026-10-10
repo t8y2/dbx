@@ -244,6 +244,7 @@ import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
+import { collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
 import { createSidebarMenuContext, normalizeSidebarMenuDescriptors } from "@/lib/sidebar/sidebarTreeMenuDescriptors";
 import { driverProfileDatabaseWorkspace } from "@/lib/database/driverProfileExtensions";
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
@@ -872,6 +873,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   if (node.isLoading) {
     if (node.isExpanded) {
       node.isExpanded = false;
+      collapseSubtreeDescendants(node);
       if (shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
       connectionStore.cancelTreeNodeLoad(node.id);
       emitNodeToggled(node, true, false);
@@ -886,6 +888,7 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.type === "connection-group") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     connectionStore.toggleConnectionGroupCollapsed(node.id);
     emitNodeToggled(node, wasExpanded);
     return;
@@ -893,12 +896,14 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.type === "group-partitions") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if (node.type === "table-vgroup") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     if (node.vgroupId) connectionStore.toggleTableVGroupCollapsed(node, node.vgroupId);
     emitNodeToggled(node, wasExpanded);
     return;
@@ -906,6 +911,7 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.type === "type" && customTypeCapabilities(currentDatabaseType()).details && node.children !== undefined) {
     node.isExpanded = node.children.length > 0 ? !node.isExpanded : false;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
@@ -917,6 +923,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   // schema and replace the package's member list with unrelated objects.
   if (currentDatabaseType() === "xugu" && (node.type === "group-procedures" || node.type === "group-functions") && node.parentType === "package") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     // Package member groups have no group-level reload path: their children
     // are hydrated together with the owning package. Releasing a large group
     // here would leave it empty on the next local-only expand.
@@ -931,6 +938,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   const needsConfiguredTablePageDrain = node.type === "group-tables" && connectionStore.getConfig(node.connectionId || "")?.sidebar_auto_load_all_tables === true && hasTableTreeLoadMore(node.children ?? []);
   if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node) && !needsConfiguredTablePageDrain) {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded);
     return;
@@ -938,18 +946,21 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.type === "type-attributes" || node.type === "type-methods") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if (node.type === "saved-sql-root" || node.type === "saved-sql-folder") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if ((node.type === "group-extensions" || node.type === "group-event-triggers") && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded);
     return;
@@ -959,6 +970,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   // with the tablespace listing; expanding them is a pure local toggle.
   if (node.type === "tablespace" || node.type === "group-datafiles") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
@@ -966,6 +978,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   if (node.type === "group-tablespaces") {
     if (connectionStore.canUseLoadedTreeNodeToggle(node)) {
       node.isExpanded = !node.isExpanded;
+      if (!node.isExpanded) collapseSubtreeDescendants(node);
       if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
       emitNodeToggled(node, wasExpanded);
       return;
@@ -975,7 +988,10 @@ async function toggle(requestId = beginNavigationRequest()) {
       emitNodeToggled(node, wasExpanded);
     } catch (e: any) {
       if (!isCurrentNavigationRequest(requestId)) return;
-      if (!wasExpanded) node.isExpanded = false;
+      if (!wasExpanded) {
+        node.isExpanded = false;
+        collapseSubtreeDescendants(node);
+      }
       const errMsg = e?.message || String(e);
       if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
       toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
@@ -992,6 +1008,7 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.isExpanded) {
     node.isExpanded = false;
+    collapseSubtreeDescendants(node);
     if (shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded, false);
     return;
@@ -7277,7 +7294,14 @@ function activateRuntimeNode(node: TreeNode) {
 function emitNodeToggled(node: TreeNode, wasExpanded: boolean, expandedOverride?: boolean) {
   const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
   activeNode.value = liveNode;
-  emit("node-toggled", node, expandedOverride ?? !wasExpanded);
+  const isExpanded = expandedOverride ?? !wasExpanded;
+  if (!isExpanded) {
+    collapseSubtreeDescendants(node);
+    if (liveNode !== node) {
+      collapseSubtreeDescendants(liveNode);
+    }
+  }
+  emit("node-toggled", node, isExpanded);
 }
 
 function activateActionTarget(target: SidebarActionTarget) {

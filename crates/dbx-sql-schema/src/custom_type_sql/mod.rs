@@ -721,27 +721,27 @@ fn plan_edit(
     // Rename and schema move establish the identity used by comment and owner.
     // Transfer ownership last: the current role may then lose permission to
     // change the comment when it does not inherit the new owner's privileges.
-    if draft.name.as_str() != old_name {
-        if builder.require(
+    if draft.name.as_str() != old_name
+        && builder.require(
             capabilities,
             CustomTypeOperation::AlterRename,
             "name",
             "Renaming a type is not verified on this connection.",
-        ) {
-            builder.push(postgres::alter_rename(kind, &final_schema, &final_name, draft.name.as_str()));
-            final_name = draft.name.as_str().to_string();
-        }
+        )
+    {
+        builder.push(postgres::alter_rename(kind, &final_schema, &final_name, draft.name.as_str()));
+        final_name = draft.name.as_str().to_string();
     }
-    if draft.schema.as_str() != old_schema {
-        if builder.require(
+    if draft.schema.as_str() != old_schema
+        && builder.require(
             capabilities,
             CustomTypeOperation::AlterSetSchema,
             "schema",
             "Moving a type to another schema is not verified on this connection.",
-        ) {
-            builder.push(postgres::alter_set_schema(kind, &final_schema, &final_name, draft.schema.as_str()));
-            final_schema = draft.schema.as_str().to_string();
-        }
+        )
+    {
+        builder.push(postgres::alter_set_schema(kind, &final_schema, &final_name, draft.schema.as_str()));
+        final_schema = draft.schema.as_str().to_string();
     }
     let snapshot_comment = normalize_comment(snapshot.comment.as_deref());
     let draft_comment = normalize_comment(draft.comment.as_deref());
@@ -1294,17 +1294,17 @@ fn plan_domain_diff(
 
     let live_default = normalize_comment(snapshot.properties.default.as_deref());
     let draft_default = normalize_comment(default);
-    if live_default != draft_default {
-        if builder.require(
+    if live_default != draft_default
+        && builder.require(
             capabilities,
             CustomTypeOperation::AlterDomainDefault,
             "definition.default",
             "Changing a domain's default is not verified on this connection.",
-        ) {
-            match draft_default {
-                Some(value) => builder.push(postgres::alter_domain_set_default(schema, name, value)),
-                None => builder.push(postgres::alter_domain_drop_default(schema, name)),
-            }
+        )
+    {
+        match draft_default {
+            Some(value) => builder.push(postgres::alter_domain_set_default(schema, name, value)),
+            None => builder.push(postgres::alter_domain_drop_default(schema, name)),
         }
     }
 

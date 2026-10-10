@@ -660,8 +660,8 @@ pub async fn preview_custom_type_drop_core(
         Err(error) => {
             let target = &request.target;
             return Err(format!(
-                "{} no longer exists or could not be read, so it cannot be dropped. Refresh the object list and try again. ({error})",
-                format!("{}.{}", target.schema, target.name)
+                "{}.{} no longer exists or could not be read, so it cannot be dropped. Refresh the object list and try again. ({error})",
+                target.schema, target.name
             ));
         }
     };

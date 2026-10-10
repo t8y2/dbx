@@ -3306,11 +3306,32 @@ func (c *oracleViewSourceConn) Begin() (driver.Tx, error) {
 	return nil, errors.New("not supported")
 }
 
+// isCaptureStatement reports whether a call is one the agent's DBMS_OUTPUT capture
+// issues around a user statement: ENABLE before it, the GET_LINE drain after it.
+func isCaptureStatement(query string) bool {
+	return strings.Contains(strings.ToUpper(query), "DBMS_OUTPUT.")
+}
+
+// expectsCall reports whether the next scripted step describes this call.
+func (d *oracleViewSourceDriver) expectsCall(query string, exec bool) bool {
+	if d.next >= len(d.steps) {
+		return false
+	}
+	step := d.steps[d.next]
+	return step.exec == exec && strings.Contains(query, step.queryContains)
+}
+
 func (c *oracleViewSourceConn) QueryContext(
 	_ context.Context,
 	query string,
 	args []driver.NamedValue,
 ) (driver.Rows, error) {
+	// The capture's own statements are answered without consuming a step: they wrap the
+	// scripted conversation, which stays exact for every other statement. A test that
+	// scripts a DBMS_OUTPUT statement as its next step still consumes it below.
+	if isCaptureStatement(query) && !c.driver.expectsCall(query, false) {
+		return &oracleViewSourceRows{columns: []string{"LINE"}}, nil
+	}
 	if c.driver.next >= len(c.driver.steps) {
 		return nil, errors.New("unexpected extra query: " + query)
 	}
@@ -3353,6 +3374,11 @@ func (c *oracleViewSourceConn) ExecContext(
 	query string,
 	args []driver.NamedValue,
 ) (driver.Result, error) {
+	// Same rule as QueryContext: the capture's ENABLE/DISABLE statements are not part of
+	// the scripted conversation, so they are answered without consuming a step.
+	if isCaptureStatement(query) && !c.driver.expectsCall(query, true) {
+		return driver.RowsAffected(0), nil
+	}
 	if c.driver.next >= len(c.driver.steps) {
 		return nil, errors.New("unexpected extra exec: " + query)
 	}

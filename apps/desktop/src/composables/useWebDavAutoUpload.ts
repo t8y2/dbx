@@ -6,13 +6,37 @@ import { readWebDavAutoUploadConfig, readWebDavBackupSelection, WEB_DAV_AUTO_UPL
 
 export function useWebDavAutoUpload() {
   const settingsStore = useSettingsStore();
-  let timer: ReturnType<typeof window.setInterval> | undefined;
+  const maxTimeoutDelayMs = 2_147_000_000;
+  let timer: ReturnType<typeof window.setTimeout> | undefined;
+  let nextUploadAt = 0;
   let uploading = false;
 
   function clearTimer() {
-    if (!timer) return;
-    window.clearInterval(timer);
+    if (timer === undefined) return;
+    window.clearTimeout(timer);
     timer = undefined;
+  }
+
+  function armTimer() {
+    const remainingMs = Math.max(0, nextUploadAt - Date.now());
+    timer = window.setTimeout(
+      () => {
+        if (Date.now() < nextUploadAt) {
+          armTimer();
+          return;
+        }
+
+        void runAutoUpload();
+        const config = readWebDavAutoUploadConfig();
+        if (!config.enabled || !config.webDavConfig) {
+          clearTimer();
+          return;
+        }
+        nextUploadAt = Date.now() + config.intervalMinutes * 60_000;
+        armTimer();
+      },
+      Math.min(remainingMs, maxTimeoutDelayMs),
+    );
   }
 
   function schedule() {
@@ -20,9 +44,8 @@ export function useWebDavAutoUpload() {
     const config = readWebDavAutoUploadConfig();
     if (!config.enabled || !config.webDavConfig) return;
 
-    timer = window.setInterval(() => {
-      void runAutoUpload();
-    }, config.intervalMinutes * 60_000);
+    nextUploadAt = Date.now() + config.intervalMinutes * 60_000;
+    armTimer();
   }
 
   async function runAutoUpload() {

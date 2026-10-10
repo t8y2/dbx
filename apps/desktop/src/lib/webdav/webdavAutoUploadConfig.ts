@@ -7,6 +7,7 @@ export const WEB_DAV_AUTO_UPLOAD_STORAGE_KEYS = ["dbx-webdav-endpoint", "dbx-web
 
 export const DEFAULT_WEB_DAV_REMOTE_PATH = "DBX/sync/snapshot.json";
 export const DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES = 30;
+export const MAX_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES = 365 * 24 * 60;
 
 export type SyncMethod = "webdav" | "snippet" | "local";
 
@@ -28,7 +29,49 @@ export interface WebDavAutoUploadConfig {
 export function normalizedWebDavAutoUploadInterval(value: unknown): number {
   const numberValue = Number(value);
   if (!Number.isFinite(numberValue)) return DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES;
-  return Math.max(1, Math.min(1440, Math.round(numberValue)));
+  return Math.max(1, Math.min(MAX_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, Math.round(numberValue)));
+}
+
+export interface WebDavAutoUploadIntervalUnits {
+  minute: string;
+  hour: string;
+  day: string;
+}
+
+export interface FormattedWebDavAutoUploadInterval {
+  interval: string;
+  approximate: boolean;
+}
+
+export function formatWebDavAutoUploadInterval(value: unknown, locale: string, units: WebDavAutoUploadIntervalUnits): FormattedWebDavAutoUploadInterval {
+  const minutes = normalizedWebDavAutoUploadInterval(value);
+  const formatNumber = (number: number) => new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(number);
+  const formatHours = (hourMinutes: number) => {
+    const hours = hourMinutes / 60;
+    const roundedHours = Math.round(hours * 100) / 100;
+    return {
+      interval: `${formatNumber(roundedHours)} ${units.hour}`,
+      approximate: Math.abs(hours - roundedHours) > Number.EPSILON,
+    };
+  };
+
+  if (minutes < 60) {
+    return { interval: `${formatNumber(minutes)} ${units.minute}`, approximate: false };
+  }
+  if (minutes < 24 * 60) {
+    return formatHours(minutes);
+  }
+
+  const days = Math.floor(minutes / (24 * 60));
+  const remainingMinutes = minutes % (24 * 60);
+  if (remainingMinutes === 0) {
+    return { interval: `${formatNumber(days)} ${units.day}`, approximate: false };
+  }
+  const remainingHours = formatHours(remainingMinutes);
+  return {
+    interval: `${formatNumber(days)} ${units.day} ${remainingHours.interval}`,
+    approximate: remainingHours.approximate,
+  };
 }
 
 export function readWebDavAutoUploadConfig(): WebDavAutoUploadConfig {

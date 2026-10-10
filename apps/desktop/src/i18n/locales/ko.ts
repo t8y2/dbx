@@ -6580,6 +6580,8 @@ export default withEnglishFallback({
     recentConfigs: "최근 설정",
     selectRecentConfig: "최근 설정 선택",
     ignoreComments: "주석 차이 무시",
+    ignoreForeignKeyChecks: "외래 키 검사 무시",
+    ignoreForeignKeyChecksHint: "스크립트 앞뒤에 SET FOREIGN_KEY_CHECKS = 0 / = 1을 추가해 테이블을 임의 순서로 삭제하고 다시 만들 수 있게 합니다",
     compare: "비교",
     comparing: "스키마를 비교하는 중...",
     noDifferences: "차이점이 없습니다",

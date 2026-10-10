@@ -109,6 +109,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     keys: ["pluginPlatform.dataAccessConsent", "pluginPlatform.dataAccessConsentTitle", "pluginPlatform.aiTools.*", "pluginPlatform.dataAccess.*", "ai.toolApproval.*"],
     translated: true,
   },
+  { feature: "schema diff deploy ignores foreign key checks", keys: under("diff", ["ignoreForeignKeyChecks", "ignoreForeignKeyChecksHint"]), translated: true },
 ];
 
 function lookup(messages: unknown, path: string): unknown {

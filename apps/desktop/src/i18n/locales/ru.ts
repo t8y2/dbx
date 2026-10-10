@@ -7979,6 +7979,8 @@ export default withEnglishFallback({
     recentConfigs: "Недавние конфигурации",
     selectRecentConfig: "Выбрать недавнюю конфигурацию",
     ignoreComments: "Игнорировать различия комментариев",
+    ignoreForeignKeyChecks: "Игнорировать проверку внешних ключей",
+    ignoreForeignKeyChecksHint: "Оборачивает скрипт в SET FOREIGN_KEY_CHECKS = 0 / = 1, позволяя удалять и создавать таблицы в любом порядке",
     compare: "Сравнить",
     comparing: "Сравнение схем...",
     noDifferences: "Различия не найдены",

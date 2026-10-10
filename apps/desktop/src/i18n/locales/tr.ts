@@ -6591,6 +6591,8 @@ export default withEnglishFallback({
     recentConfigs: "Son Yapılandırmalar",
     selectRecentConfig: "Son yapılandırmayı seç",
     ignoreComments: "Açıklama farklarını yoksay",
+    ignoreForeignKeyChecks: "Yabancı anahtar denetimlerini yoksay",
+    ignoreForeignKeyChecksHint: "Tabloların herhangi bir sırayla silinip yeniden oluşturulabilmesi için betiği SET FOREIGN_KEY_CHECKS = 0 / = 1 ile sarar",
     compare: "Karşılaştır",
     comparing: "Şemalar karşılaştırılıyor...",
     noDifferences: "Fark bulunamadı",

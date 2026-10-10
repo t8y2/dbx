@@ -115,6 +115,8 @@ For selected objects, review:
 
 The final deployment page repeats the target server, database, schema, database version, and statement count. Production protection requires explicit confirmation before execution.
 
+When the target is MySQL, deployment review also offers **Ignore foreign key checks**. It brackets the deployment script — and its rollback script — with `SET FOREIGN_KEY_CHECKS = 0` and `SET FOREIGN_KEY_CHECKS = 1`, so tables that reference each other can be dropped and recreated in any order. The option is off by default; it has no effect on other engines, which do not have the session variable.
+
 <Callout type="info">Run in transaction provides full rollback only when the target database and statements support transactional DDL. MySQL and other databases can implicitly commit DDL.</Callout>
 
 ## Dialect Semantics

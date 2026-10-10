@@ -7391,6 +7391,8 @@ export default withEnglishFallback({
     recentConfigs: "Konfigurasi Terbaru",
     selectRecentConfig: "Pilih konfigurasi terbaru",
     ignoreComments: "Abaikan perbedaan komentar",
+    ignoreForeignKeyChecks: "Abaikan pemeriksaan kunci asing",
+    ignoreForeignKeyChecksHint: "Membungkus skrip dengan SET FOREIGN_KEY_CHECKS = 0 / = 1 agar tabel dapat dihapus dan dibuat ulang dalam urutan apa pun",
     compare: "Bandingkan",
     comparing: "Membandingkan skema...",
     noDifferences: "Tidak ditemukan perbedaan",

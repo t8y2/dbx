@@ -48,11 +48,16 @@ const props = defineProps<{
   missingRollbackObjects?: MissingRollbackObject[];
   canExecute?: boolean;
   destructiveStatementCount?: number;
+  /** Current value of the "ignore foreign key checks" deploy option. */
+  ignoreForeignKeyChecks?: boolean;
+  /** Whether the target database is MySQL, the only engine that gets the option. */
+  showIgnoreForeignKeyChecks?: boolean;
 }>();
 
 const emit = defineEmits<{
   "update:deploySql": [sql: string];
   "update:deploySqlMode": [mode: "forward" | "rollback"];
+  "update:ignoreForeignKeyChecks": [enabled: boolean];
   back: [];
   deploy: [];
 }>();
@@ -383,6 +388,13 @@ function getObjectIconColor(kind: DiffObjectKind): string {
           <Download class="w-3.5 h-3.5" />
           {{ t("diff.exportSql") }}
         </Button>
+        <!-- Offered for MySQL targets only: the toggle is a MySQL session
+             variable, and for any other engine the backend returns the script
+             without it. -->
+        <label v-if="showIgnoreForeignKeyChecks" class="flex items-center gap-1.5 text-xs" :class="executing ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'" :title="t('diff.ignoreForeignKeyChecksHint')">
+          <input type="checkbox" class="accent-primary" :checked="ignoreForeignKeyChecks === true" :disabled="executing" @change="emit('update:ignoreForeignKeyChecks', ($event.target as HTMLInputElement).checked)" />
+          {{ t("diff.ignoreForeignKeyChecks") }}
+        </label>
       </div>
       <div class="flex items-center gap-2">
         <Button variant="ghost" size="sm" class="h-7 text-xs gap-1" @click="$emit('back')">

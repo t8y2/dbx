@@ -7661,6 +7661,8 @@ export default {
     recentConfigs: "Recent Configs",
     selectRecentConfig: "Select recent config",
     ignoreComments: "Ignore comment differences",
+    ignoreForeignKeyChecks: "Ignore foreign key checks",
+    ignoreForeignKeyChecksHint: "Wraps the script in SET FOREIGN_KEY_CHECKS = 0 / = 1 so tables can be dropped and recreated in any order",
     compare: "Compare",
     comparing: "Comparing schemas...",
     noDifferences: "No differences found",

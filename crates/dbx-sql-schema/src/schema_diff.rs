@@ -6009,6 +6009,30 @@ pub fn generate_schema_sync_sql(
     .0
 }
 
+/// Header that turns MySQL's session-scoped foreign key validation off.
+pub const MYSQL_DISABLE_FOREIGN_KEY_CHECKS: &str = "SET FOREIGN_KEY_CHECKS = 0;";
+/// Trailer that restores MySQL's session default for foreign key validation.
+pub const MYSQL_ENABLE_FOREIGN_KEY_CHECKS: &str = "SET FOREIGN_KEY_CHECKS = 1;";
+
+/// Wrap a generated deploy script in MySQL's FOREIGN_KEY_CHECKS toggle.
+///
+/// The deploy path runs the whole script on one checked-out connection inside a
+/// single transaction, so the header suppresses foreign key validation for every
+/// statement in between and the trailer restores the session default before that
+/// connection returns to the pool.
+///
+/// Only MySQL gets the wrapper: FOREIGN_KEY_CHECKS is a MySQL session variable,
+/// and PostgreSQL, Oracle and the rest reject the statement outright, so a client
+/// that asks for the option on another engine cannot make the plan unexecutable.
+/// A script without executable statements is returned unchanged; wrapping it
+/// would turn "nothing to deploy" into a runnable two-statement script.
+pub fn wrap_script_with_foreign_key_checks(sql: &str, db_type: DatabaseType) -> String {
+    if db_type != DatabaseType::Mysql || sql.trim().is_empty() {
+        return sql.to_string();
+    }
+    format!("{MYSQL_DISABLE_FOREIGN_KEY_CHECKS}\n{sql}\n{MYSQL_ENABLE_FOREIGN_KEY_CHECKS}")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn generate_schema_sync_sql_plan(
     diffs: &[TableDiff],
@@ -6022,6 +6046,7 @@ pub fn generate_schema_sync_sql_plan(
     source_dialect: Option<DialectKind>,
     field_mappings: &[FieldMapping],
     enable_rollback: bool,
+    ignore_foreign_key_checks: bool,
 ) -> SchemaSyncSqlPlan {
     let (sync_sql, _) = generate_schema_sync_sql_inner(
         diffs,
@@ -6035,11 +6060,21 @@ pub fn generate_schema_sync_sql_plan(
         source_dialect,
         field_mappings,
     );
+    let sync_sql = if ignore_foreign_key_checks {
+        wrap_script_with_foreign_key_checks(&sync_sql, db_type)
+    } else {
+        sync_sql
+    };
 
     let (rollback_sync_sql, missing_rollback_objects) = if enable_rollback {
         let dependency_graph = DependencyGraph { nodes: HashMap::new(), topological_order: Vec::new() };
         let rollback_graph = RollbackGraph::from_forward_diffs(diffs, &[], &dependency_graph);
         let (sql, missing) = generate_rollback_sync_sql_with_missing(&rollback_graph, db_type, schema, cascade_delete);
+        let sql = if ignore_foreign_key_checks {
+            wrap_script_with_foreign_key_checks(&sql, db_type)
+        } else {
+            sql
+        };
         (Some(sql), missing)
     } else {
         (None, Vec::new())
@@ -7837,6 +7872,7 @@ mod tests {
             Some(DialectKind::SqlServer),
             &[],
             true,
+            false,
         );
         let rollback = plan.rollback_sync_sql.expect("rollback SQL");
 
@@ -7981,6 +8017,7 @@ mod tests {
             Some(DialectKind::SqlServer),
             &[],
             true,
+            false,
         );
         let rollback = plan.rollback_sync_sql.expect("rollback SQL");
 
@@ -9935,12 +9972,124 @@ mod tests {
             None,
             &[],
             true,
+            false,
         );
 
         assert!(plan.sync_sql.contains("ADD COLUMN `nickname`"), "{}", plan.sync_sql);
         let rollback = plan.rollback_sync_sql.expect("rollback SQL");
         assert!(rollback.contains("DROP COLUMN `nickname`"), "{rollback}");
         assert_eq!(plan.rollback_completeness, RollbackCompleteness::Complete);
+    }
+
+    /// One-column MySQL/PostgreSQL table diff used by the foreign-key-check wrapper tests.
+    fn added_nickname_column_diff() -> TableDiff {
+        TableDiff {
+            diff_type: "modified".to_string(),
+            object_type: Some("table".to_string()),
+            name: "users".to_string(),
+            target_name: None,
+            columns: Some(vec![ColumnDiff {
+                diff_type: "added".to_string(),
+                name: "nickname".to_string(),
+                source: Some(column("nickname", "varchar(64)", None)),
+                target: None,
+                changes: Vec::new(),
+                add_position: None,
+            }]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn foreign_key_check_wrapper_brackets_mysql_scripts_and_leaves_other_engines_alone() {
+        let script = "ALTER TABLE `users` ADD COLUMN `nickname` varchar(64);";
+        assert_eq!(
+            wrap_script_with_foreign_key_checks(script, DatabaseType::Mysql),
+            format!("{MYSQL_DISABLE_FOREIGN_KEY_CHECKS}\n{script}\n{MYSQL_ENABLE_FOREIGN_KEY_CHECKS}")
+        );
+        for db_type in [DatabaseType::Postgres, DatabaseType::SqlServer, DatabaseType::Oracle, DatabaseType::Sqlite] {
+            assert_eq!(wrap_script_with_foreign_key_checks(script, db_type), script, "{db_type:?} must keep the script unchanged");
+        }
+    }
+
+    #[test]
+    fn foreign_key_check_wrapper_leaves_scripts_without_statements_alone() {
+        for script in ["", "   \n\t"] {
+            assert_eq!(wrap_script_with_foreign_key_checks(script, DatabaseType::Mysql), script);
+        }
+    }
+
+    #[test]
+    fn mysql_plan_brackets_forward_and_rollback_sql_when_foreign_key_checks_are_ignored() {
+        let plan = generate_schema_sync_sql_plan(
+            &[added_nickname_column_diff()],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            Some("shop"),
+            false,
+            None,
+            &[],
+            true,
+            true,
+        );
+
+        assert!(plan.sync_sql.starts_with(MYSQL_DISABLE_FOREIGN_KEY_CHECKS), "{}", plan.sync_sql);
+        assert!(plan.sync_sql.ends_with(MYSQL_ENABLE_FOREIGN_KEY_CHECKS), "{}", plan.sync_sql);
+        let rollback = plan.rollback_sync_sql.expect("rollback SQL");
+        assert!(rollback.starts_with(MYSQL_DISABLE_FOREIGN_KEY_CHECKS), "{rollback}");
+        assert!(rollback.ends_with(MYSQL_ENABLE_FOREIGN_KEY_CHECKS), "{rollback}");
+    }
+
+    #[test]
+    fn mysql_plan_keeps_the_plain_script_when_foreign_key_checks_are_not_ignored() {
+        let plan = generate_schema_sync_sql_plan(
+            &[added_nickname_column_diff()],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            Some("shop"),
+            false,
+            None,
+            &[],
+            true,
+            false,
+        );
+
+        assert!(!plan.sync_sql.contains("FOREIGN_KEY_CHECKS"), "{}", plan.sync_sql);
+        let rollback = plan.rollback_sync_sql.expect("rollback SQL");
+        assert!(!rollback.contains("FOREIGN_KEY_CHECKS"), "{rollback}");
+    }
+
+    #[test]
+    fn postgres_plan_ignores_the_foreign_key_check_option() {
+        let plan = generate_schema_sync_sql_plan(
+            &[added_nickname_column_diff()],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Postgres,
+            Some("public"),
+            false,
+            None,
+            &[],
+            false,
+            true,
+        );
+
+        assert!(plan.sync_sql.contains("ADD COLUMN"), "{}", plan.sync_sql);
+        assert!(!plan.sync_sql.contains("FOREIGN_KEY_CHECKS"), "{}", plan.sync_sql);
+    }
+
+    #[test]
+    fn empty_plan_is_not_wrapped_even_when_foreign_key_checks_are_ignored() {
+        let plan = generate_schema_sync_sql_plan(&[], &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[], false, true);
+        assert_eq!(plan.sync_sql, "");
     }
 
     #[test]

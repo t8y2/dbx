@@ -6767,6 +6767,8 @@ export default withEnglishFallback({
     recentConfigs: "最近の設定",
     selectRecentConfig: "最近の設定を選択",
     ignoreComments: "コメントの差分を無視",
+    ignoreForeignKeyChecks: "外部キー検査を無視",
+    ignoreForeignKeyChecksHint: "スクリプトの前後に SET FOREIGN_KEY_CHECKS = 0 / = 1 を付け、テーブルを任意の順序で削除・再作成できるようにします",
     compare: "比較",
     comparing: "スキーマを比較中...",
     noDifferences: "差分が見つかりません",

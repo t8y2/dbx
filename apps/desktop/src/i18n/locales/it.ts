@@ -6739,6 +6739,8 @@ export default withEnglishFallback({
     recentConfigs: "Configurazioni Recenti",
     selectRecentConfig: "Seleziona configurazione recente",
     ignoreComments: "Ignora differenze nei commenti",
+    ignoreForeignKeyChecks: "Ignora i controlli delle chiavi esterne",
+    ignoreForeignKeyChecksHint: "Racchiude lo script tra SET FOREIGN_KEY_CHECKS = 0 / = 1 per eliminare e ricreare le tabelle in qualsiasi ordine",
     compare: "Confronta",
     comparing: "Confronto degli schemi...",
     noDifferences: "Nessuna differenza trovata",

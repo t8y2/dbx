@@ -27,6 +27,24 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.uiState).toEqual({ activeOutputView: "chart", redisResultViewMode: "console", resultPaneOpen: false });
   });
 
+  it("preserves a custom title suffix across a data tab round-trip", () => {
+    const [restored] = roundTrip([queryTab({ mode: "data", titleSuffix: "pending" })]);
+
+    expect(restored.titleSuffix).toBe("pending");
+  });
+
+  it.each(["redis", "mongo", "plugin-workbench", "objects"] as const)("preserves a custom title suffix across a %s tab round-trip", (mode) => {
+    const [restored] = roundTrip([queryTab({ mode, titleSuffix: "待办" })]);
+
+    expect(restored.titleSuffix).toBe("待办");
+  });
+
+  it("does not persist an empty title suffix", () => {
+    const [saved] = serializeOpenTabs([queryTab({ mode: "data", titleSuffix: "  " })]);
+
+    expect(saved).not.toHaveProperty("titleSuffix");
+  });
+
   it("preserves the structured sort field across a data tab round-trip", () => {
     const [restored] = roundTrip([queryTab({ mode: "data", orderByInput: '"status" ASC', structuredOrderByInput: '"created_at" DESC' })]);
 

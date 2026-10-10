@@ -115,13 +115,34 @@ export function isEventObjectBrowserTab(tab: QueryTab): boolean {
 }
 
 /**
+ * Longest custom suffix accepted by the tab suffix editor.
+ *
+ * The suffix keeps its full width until the whole title area is used up: the
+ * title shortens first, and only then does the suffix itself end in an ellipsis.
+ * 8 characters fit completely in every `tabMaxWidth` preset from 240px up, even
+ * with pin and read-only controls; the narrowest presets may ellipsize it, and the
+ * tab tooltip always shows the full text.
+ */
+export const TAB_TITLE_SUFFIX_MAX_LENGTH = 8;
+
+/** A tab label split so the suffix can be rendered without being truncated. */
+export interface TabTitleParts {
+  base: string;
+  suffix: string;
+}
+
+export function joinTabTitleParts(parts: TabTitleParts): string {
+  return parts.suffix ? `${parts.base} ${parts.suffix}` : parts.base;
+}
+
+/**
  * Display titles for a whole tab list.
  *
  * Tabs whose plain title collides (most obviously several query tabs on the
  * same connection and database, which all render `connection@database`) get a
  * 1-based numeric suffix so the strip stays readable. The first tab keeps no
  * suffix when its title is unique, so single-tab windows look exactly as
- * before.
+ * before. A tab with a user-chosen `titleSuffix` shows that instead of a number.
  *
  * 编号不在这里计算，而是由 `syncTabTitleNumbers` 一次性写进标签（见该函数）：渲染
  * 函数只看标签上已有的编号，这样关闭一个重名标签不会让后面的标签被重新编号
@@ -129,11 +150,45 @@ export function isEventObjectBrowserTab(tab: QueryTab): boolean {
  */
 export function tabDisplayTitles(tabs: QueryTab[], t: Translate): Map<string, string> {
   const titles = new Map<string, string>();
-  for (const tab of tabs) {
-    const title = tabDisplayTitle(tab, t);
-    titles.set(tab.id, tabTitleNumber(tab, title) !== undefined ? `${title} ${tabTitleNumber(tab, title)}` : title);
-  }
+  for (const [id, parts] of tabDisplayTitleParts(tabs, t)) titles.set(id, joinTabTitleParts(parts));
   return titles;
+}
+
+/**
+ * Same labels as `tabDisplayTitles`, split into the title and its suffix so the
+ * tab strip can truncate the title while always showing the suffix in full.
+ */
+export function tabDisplayTitleParts(tabs: QueryTab[], t: Translate): Map<string, TabTitleParts> {
+  const parts = new Map<string, TabTitleParts>();
+  for (const tab of tabs) {
+    const base = tabDisplayTitle(tab, t);
+    parts.set(tab.id, { base, suffix: tabTitleSuffix(tab, base) });
+  }
+  return parts;
+}
+
+function customTitleSuffix(tab: QueryTab): string | undefined {
+  return tab.titleSuffix?.trim() || undefined;
+}
+
+/** The suffix a tab currently shows: its custom one, else its automatic number. */
+function tabTitleSuffix(tab: QueryTab, title: string): string {
+  const custom = customTitleSuffix(tab);
+  if (custom) return custom;
+  const number = tabTitleNumber(tab, title);
+  return number !== undefined ? String(number) : "";
+}
+
+/**
+ * Finds another open tab that would show exactly the same label as `target`
+ * once `suffix` is applied to it — same title and same suffix, whether the other
+ * tab's suffix is custom or an automatic number.
+ */
+export function findTabWithSameTitleSuffix(tabs: QueryTab[], target: QueryTab, suffix: string, t: Translate): QueryTab | undefined {
+  const wanted = suffix.trim();
+  if (!wanted) return undefined;
+  const base = tabDisplayTitle(target, t);
+  return tabs.find((tab) => tab.id !== target.id && tabDisplayTitle(tab, t) === base && tabTitleSuffix(tab, base) === wanted);
 }
 
 function tabTitleNumber(tab: QueryTab, title: string): number | undefined {
@@ -153,14 +208,32 @@ function tabTitleNumber(tab: QueryTab, title: string): number | undefined {
  * stays unsuffixed, which keeps single-tab windows unchanged, while a tab that
  * carries a number keeps it until it is closed.
  *
+ * Tabs with a custom `titleSuffix` are skipped: they show that suffix instead of a
+ * number and do not count towards the numbered group.
+ *
  * Callers own the tab list, so this runs from the store whenever the list or
  * any contributing title changes — never from a render/computed path.
  */
 export function syncTabTitleNumbers(tabs: QueryTab[], t: Translate): void {
   const groups = new Map<string, QueryTab[]>();
+  // Custom suffixes already shown under each title, so a freshly minted number
+  // never lands on a label another tab has claimed (e.g. a custom suffix "2").
+  const customSuffixes = new Map<string, Set<string>>();
   for (const tab of tabs) {
     if (isPreviewTab(tab)) continue;
     const title = tabDisplayTitle(tab, t);
+    const custom = customTitleSuffix(tab);
+    if (custom) {
+      // A custom suffix replaces the number, so the tab leaves the numbering
+      // pool. Dropping its old number means clearing the suffix later mints a
+      // fresh one instead of resurrecting a stale value.
+      tab.titleNumber = undefined;
+      tab.titleNumberKey = undefined;
+      const used = customSuffixes.get(title);
+      if (used) used.add(custom);
+      else customSuffixes.set(title, new Set([custom]));
+      continue;
+    }
     const group = groups.get(title);
     if (group) group.push(tab);
     else groups.set(title, [tab]);
@@ -182,6 +255,7 @@ export function syncTabTitleNumbers(tabs: QueryTab[], t: Translate): void {
     let next = numbered.reduce((highest, tab) => Math.max(highest, tab.titleNumber ?? 0), 0) + 1;
     for (const tab of group) {
       if (tabTitleNumber(tab, title) !== undefined) continue;
+      while (customSuffixes.get(title)?.has(String(next))) next += 1;
       tab.titleNumber = next;
       tab.titleNumberKey = title;
       next += 1;
@@ -324,6 +398,9 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   if (tab.mode === "query" && queryTitle(tab)) {
     lines.unshift({ label: t("tabs.tooltipTitle"), value: tab.title });
   }
+  // The suffix can be ellipsized in a narrow tab, so the tooltip is where its full text lives.
+  const customSuffix = customTitleSuffix(tab);
+  if (customSuffix) lines.unshift({ label: t("tabs.tooltipSuffix"), value: customSuffix });
   if (tab.mode === "query" && tab.externalSqlPath) {
     lines.push({ label: t("tabs.tooltipFilePath"), value: tab.externalSqlPath });
     if (tab.externalSqlFileMissing) lines.push({ label: t("tabs.tooltipFileStatus"), value: t("tabs.externalFileMissing") });

@@ -42,6 +42,7 @@ import {
   Clock3,
   Copy,
   Database,
+  Eraser,
   FoldHorizontal,
   ListFilter,
   ListOrdered,
@@ -61,6 +62,7 @@ import {
   Search,
   Server,
   Settings,
+  Tag,
   Ungroup,
   X,
 } from "@lucide/vue";
@@ -89,7 +91,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { parseTabDragPayload, serializeTabDragPayload } from "@/lib/tabs/tabDrag";
 import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems } from "@/lib/tabs/tabMenu";
-import { tabConnectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabDisplayTitles, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
+import { findTabWithSameTitleSuffix, joinTabTitleParts, TAB_TITLE_SUFFIX_MAX_LENGTH, tabConnectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabDisplayTitleParts, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import "./appTabBar.css";
 import type { QueryTab } from "@/types/database";
@@ -443,10 +445,21 @@ function compareTabGroupKeys(left: string, right: string) {
 
 // Numbered across every open tab (not just this group's) so a tab keeps the
 // same label when the same query tab is moved between panes.
-const tabTitles = computed(() => tabDisplayTitles(queryStore.tabs, t));
+const tabTitleParts = computed(() => tabDisplayTitleParts(queryStore.tabs, t));
+
+function tabTitleBase(tab: QueryTab) {
+  return (tabTitleParts.value.get(tab.id) ?? { base: tabDisplayTitle(tab, t), suffix: "" }).base;
+}
+
+// The suffix is rendered outside the truncating title element so a narrow tab
+// (tabMaxWidth) shortens the title instead of hiding the part that tells
+// duplicate tabs apart.
+function tabTitleSuffixText(tab: QueryTab) {
+  return tabTitleParts.value.get(tab.id)?.suffix ?? "";
+}
 
 function tabTitleText(tab: QueryTab) {
-  return tabTitles.value.get(tab.id) ?? tabDisplayTitle(tab, t);
+  return joinTabTitleParts({ base: tabTitleBase(tab), suffix: tabTitleSuffixText(tab) });
 }
 
 function tabConnectionLabel(tab: QueryTab) {
@@ -1132,7 +1145,8 @@ function tabDropStyle(tab: QueryTab): CSSProperties | undefined {
 function createTabDragGhost(sourceEl: HTMLElement, x: number, y: number) {
   const ghost = document.createElement("div");
   const textNode = sourceEl.querySelector(".truncate");
-  ghost.textContent = textNode?.textContent || "";
+  const suffixNode = sourceEl.querySelector("[data-tab-title-suffix]");
+  ghost.textContent = [textNode?.textContent, suffixNode?.textContent].filter(Boolean).join(" ");
   ghost.style.cssText = `position: fixed; pointer-events: none; z-index: 9999; opacity: 0.9; box-shadow: 0 2px 8px rgba(0,0,0,0.15); border-radius: var(--dbx-radius-fixed-6); background: var(--background, #fff); border: 1px solid var(--border, #e5e7eb); max-width: 200px; height: 28px; padding: 0 12px; font-size: 12px; line-height: 28px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; left: ${x + 12}px; top: ${y - 14}px;`;
   document.body.appendChild(ghost);
   return ghost;
@@ -1222,6 +1236,78 @@ function canRenameTab(tab: QueryTab) {
   return tab.mode === "query";
 }
 
+// Every tab except a query tab derives its label from its connection, database
+// and object (table, collection, key, plugin page...), so it cannot be renamed;
+// the suffix is how users tell several tabs of the same target apart. Query tabs
+// already have a full rename, which lets them choose the whole title.
+function canSetTabSuffix(tab: QueryTab) {
+  return tab.mode !== "query";
+}
+
+const tabSuffixEditorOpen = ref(false);
+const tabSuffixEditingTabId = ref<string | null>(null);
+const tabSuffixInput = ref("");
+const tabSuffixDuplicateOpen = ref(false);
+const tabSuffixDuplicateTitle = ref("");
+const tabSuffixEditingTab = computed(() => queryStore.tabs.find((tab) => tab.id === tabSuffixEditingTabId.value));
+const tabSuffixEditorPreview = computed(() => {
+  const tab = tabSuffixEditingTab.value;
+  if (!tab) return "";
+  return joinTabTitleParts({ base: tabTitleBase(tab), suffix: tabSuffixInput.value.trim() });
+});
+
+function openTabSuffixEditor(tab: QueryTab) {
+  tabSuffixEditingTabId.value = tab.id;
+  tabSuffixInput.value = tab.titleSuffix ?? "";
+  tabSuffixEditorOpen.value = true;
+  nextTick(() => {
+    const input = document.querySelector<HTMLInputElement>("[data-tab-suffix-input]");
+    input?.focus();
+    input?.select();
+  });
+}
+
+function applyTabSuffix(tab: QueryTab, suffix: string) {
+  queryStore.setTabTitleSuffix(tab.id, suffix);
+  tabSuffixDuplicateOpen.value = false;
+  tabSuffixEditorOpen.value = false;
+  tabSuffixEditingTabId.value = null;
+}
+
+function saveTabSuffix() {
+  const tab = tabSuffixEditingTab.value;
+  if (!tab) {
+    tabSuffixEditorOpen.value = false;
+    return;
+  }
+  const suffix = tabSuffixInput.value.trim();
+  const duplicate = findTabWithSameTitleSuffix(queryStore.tabs, tab, suffix, t);
+  if (duplicate) {
+    tabSuffixDuplicateTitle.value = tabTitleText(duplicate);
+    tabSuffixDuplicateOpen.value = true;
+    return;
+  }
+  applyTabSuffix(tab, suffix);
+}
+
+function backToTabSuffixEditor() {
+  tabSuffixDuplicateOpen.value = false;
+  nextTick(() => document.querySelector<HTMLInputElement>("[data-tab-suffix-input]")?.focus());
+}
+
+function confirmDuplicateTabSuffix() {
+  const tab = tabSuffixEditingTab.value;
+  if (tab) applyTabSuffix(tab, tabSuffixInput.value);
+  else tabSuffixDuplicateOpen.value = false;
+}
+
+function handleTabSuffixKeydown(event: KeyboardEvent) {
+  // Enter that confirms an IME composition (e.g. Chinese pinyin) must not save.
+  if (event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  saveTabSuffix();
+}
+
 function isDetachableTab(tab: QueryTab) {
   return tab.mode === "query" || tab.mode === "data";
 }
@@ -1301,6 +1387,18 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       onRename: () => startRenameTab(tab),
       onDuplicate: () => queryStore.duplicateTab(tab.id),
     }),
+    {
+      label: t("contextMenu.setTabSuffix"),
+      action: () => openTabSuffixEditor(tab),
+      icon: Tag,
+      visible: canSetTabSuffix(tab),
+    },
+    {
+      label: t("contextMenu.clearTabSuffix"),
+      action: () => queryStore.setTabTitleSuffix(tab.id, ""),
+      icon: Eraser,
+      visible: canSetTabSuffix(tab) && !!tab.titleSuffix,
+    },
     {
       label: t("contextMenu.copyName"),
       action: async () => {
@@ -1835,7 +1933,10 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             />
                             <span v-else-if="!isTabBarCollapsed" class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
                               <span v-if="isDirtyTab(entry.tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                              <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(entry.tab)">{{ tabTitleText(entry.tab) }}</span>
+                              <span class="flex min-w-0 flex-1 items-center overflow-hidden">
+                                <span class="min-w-0 truncate" :style="tabTitleStyle(entry.tab)">{{ tabTitleBase(entry.tab) }}</span>
+                                <span v-if="tabTitleSuffixText(entry.tab)" class="tab-title-suffix max-w-full shrink-0 overflow-hidden pl-1 text-ellipsis whitespace-nowrap" :style="tabTitleStyle(entry.tab)" data-tab-title-suffix>{{ tabTitleSuffixText(entry.tab) }}</span>
+                              </span>
                             </span>
                             <ReadOnlySessionControl v-if="!isTabBarCollapsed" :connection-id="entry.tab.connectionId" compact />
                             <button
@@ -2006,7 +2107,10 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                   </TabExecutionStatus>
                   <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                     <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                    <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                    <span class="flex min-w-0 flex-1 items-center overflow-hidden">
+                      <span class="min-w-0 truncate" :style="tabTitleStyle(tab)">{{ tabTitleBase(tab) }}</span>
+                      <span v-if="tabTitleSuffixText(tab)" class="tab-title-suffix max-w-full shrink-0 overflow-hidden pl-1 text-ellipsis whitespace-nowrap" :style="tabTitleStyle(tab)">{{ tabTitleSuffixText(tab) }}</span>
+                    </span>
                   </span>
                   <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
                   <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
@@ -2079,6 +2183,38 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
             <Button variant="outline" @click="tabGroupEditorOpen = false">{{ t("common.cancel") }}</Button>
             <Button @click="saveTabGroupCustomization">{{ t("common.save") }}</Button>
           </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    <Dialog v-model:open="tabSuffixEditorOpen">
+      <DialogContent class="sm:max-w-[400px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("tabs.suffixDialogTitle") }}</DialogTitle>
+        </DialogHeader>
+        <div class="space-y-3">
+          <label class="grid gap-1.5 text-sm">
+            <span class="font-medium">{{ t("tabs.suffixLabel") }}</span>
+            <Input v-model="tabSuffixInput" data-tab-suffix-input :maxlength="TAB_TITLE_SUFFIX_MAX_LENGTH" :placeholder="t('tabs.suffixPlaceholder')" class="h-9" @keydown.enter="handleTabSuffixKeydown" />
+          </label>
+          <p class="text-xs text-muted-foreground">{{ t("tabs.suffixHint") }}</p>
+          <p class="text-xs text-muted-foreground" data-tab-suffix-limit>{{ t("tabs.suffixMaxLength", { max: TAB_TITLE_SUFFIX_MAX_LENGTH }) }}</p>
+          <p class="break-all rounded-md bg-muted px-2 py-1.5 text-xs" data-tab-suffix-preview>{{ tabSuffixEditorPreview }}</p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="tabSuffixEditorOpen = false">{{ t("common.cancel") }}</Button>
+          <Button data-tab-suffix-save @click="saveTabSuffix">{{ t("common.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    <Dialog v-model:open="tabSuffixDuplicateOpen">
+      <DialogContent class="sm:max-w-[400px]" data-tab-suffix-duplicate>
+        <DialogHeader>
+          <DialogTitle>{{ t("tabs.suffixDuplicateTitle") }}</DialogTitle>
+        </DialogHeader>
+        <p class="break-all text-sm text-muted-foreground">{{ t("tabs.suffixDuplicateMessage", { title: tabSuffixDuplicateTitle }) }}</p>
+        <DialogFooter>
+          <Button variant="outline" data-tab-suffix-duplicate-back @click="backToTabSuffixEditor">{{ t("tabs.suffixDuplicateBack") }}</Button>
+          <Button data-tab-suffix-duplicate-confirm @click="confirmDuplicateTabSuffix">{{ t("tabs.suffixDuplicateUseAnyway") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

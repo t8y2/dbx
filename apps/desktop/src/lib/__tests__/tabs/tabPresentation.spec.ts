@@ -17,7 +17,9 @@ import {
   tabColorStyle,
   tabConnectionColor,
   tabDatabaseIconType,
+  findTabWithSameTitleSuffix,
   tabDisplayTitle,
+  tabDisplayTitleParts,
   tabDisplayTitles,
   syncTabTitleNumbers,
   tabIconClass,
@@ -462,6 +464,121 @@ describe("tab group presentation", () => {
     expect(titles.get("tab-1")).toBe("orders.sql 1");
     expect(titles.get("tab-2")).toBe("orders.sql 2");
     expect(titles.get("tab-preview")).toBe("SQL");
+  });
+
+  describe("custom title suffix", () => {
+    const dataTab = (id: string, overrides: Partial<QueryTab> = {}) => queryTab({ id, mode: "data", title: "ticket_bug", tableMeta: { schema: "feedback_v2", tableName: "ticket_bug", columns: [], primaryKeys: [] }, ...overrides });
+
+    function seedConnection() {
+      useConnectionStore().connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    }
+
+    it("shows the custom suffix instead of the automatic number", () => {
+      seedConnection();
+      const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2")];
+
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("ticket_bug@db.feedback_v2 pending");
+      // The custom tab leaves the numbered pool, so the other tab is alone in it
+      // and keeps its plain title rather than becoming "… 1".
+      expect(titles.get("tab-2")).toBe("ticket_bug@db.feedback_v2");
+    });
+
+    it("keeps numbering the remaining tabs when only some have a custom suffix", () => {
+      seedConnection();
+      const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2"), dataTab("tab-3")];
+
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("ticket_bug@db.feedback_v2 pending");
+      expect(titles.get("tab-2")).toBe("ticket_bug@db.feedback_v2 1");
+      expect(titles.get("tab-3")).toBe("ticket_bug@db.feedback_v2 2");
+    });
+
+    it("splits the label into base and suffix so the suffix can be rendered untruncated", () => {
+      seedConnection();
+      const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2"), dataTab("tab-3")];
+      syncTabTitleNumbers(tabs, translate);
+
+      const parts = tabDisplayTitleParts(tabs, translate);
+      expect(parts.get("tab-1")).toEqual({ base: "ticket_bug@db.feedback_v2", suffix: "pending" });
+      expect(parts.get("tab-2")).toEqual({ base: "ticket_bug@db.feedback_v2", suffix: "1" });
+    });
+
+    it("falls back to a number when the custom suffix is cleared", () => {
+      seedConnection();
+      const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2")];
+      titlesWithNumbers(tabs);
+
+      delete tabs[0]!.titleSuffix;
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("ticket_bug@db.feedback_v2 1");
+      expect(titles.get("tab-2")).toBe("ticket_bug@db.feedback_v2 2");
+    });
+
+    it("treats a blank custom suffix as no suffix", () => {
+      seedConnection();
+      const tabs = [dataTab("tab-1", { titleSuffix: "   " }), dataTab("tab-2")];
+
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("ticket_bug@db.feedback_v2 1");
+    });
+
+    it("does not mint an automatic number that another tab already claimed as a custom suffix", () => {
+      seedConnection();
+      const tabs = [dataTab("tab-1", { titleSuffix: "1" }), dataTab("tab-2"), dataTab("tab-3")];
+
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("ticket_bug@db.feedback_v2 1");
+      expect(titles.get("tab-2")).toBe("ticket_bug@db.feedback_v2 2");
+      expect(titles.get("tab-3")).toBe("ticket_bug@db.feedback_v2 3");
+    });
+
+    it("applies the custom suffix in compact mode too", () => {
+      seedConnection();
+      useSettingsStore().editorSettings.compactTabTitle = true;
+      const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2")];
+
+      expect(titlesWithNumbers(tabs).get("tab-1")).toBe("ticket_bug pending");
+    });
+
+    it("lists the full custom suffix in the tab tooltip, because the strip may ellipsize it", () => {
+      seedConnection();
+      const withSuffix = tabTooltipLines(dataTab("tab-1", { titleSuffix: "客服待处理单" }), translate);
+      expect(withSuffix[0]).toEqual({ label: "tabs.tooltipSuffix", value: "客服待处理单" });
+
+      const without = tabTooltipLines(dataTab("tab-2"), translate);
+      expect(without.some((line) => line.label === "tabs.tooltipSuffix")).toBe(false);
+    });
+
+    describe("findTabWithSameTitleSuffix", () => {
+      it("finds another tab that already shows the same custom suffix", () => {
+        seedConnection();
+        const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2")];
+        syncTabTitleNumbers(tabs, translate);
+
+        expect(findTabWithSameTitleSuffix(tabs, tabs[1]!, "pending", translate)?.id).toBe("tab-1");
+        expect(findTabWithSameTitleSuffix(tabs, tabs[1]!, " pending ", translate)?.id).toBe("tab-1");
+      });
+
+      it("also finds a tab whose automatic number equals the requested suffix", () => {
+        seedConnection();
+        const tabs = [dataTab("tab-1"), dataTab("tab-2"), dataTab("tab-3")];
+        syncTabTitleNumbers(tabs, translate);
+
+        expect(findTabWithSameTitleSuffix(tabs, tabs[2]!, "1", translate)?.id).toBe("tab-1");
+      });
+
+      it("ignores the tab being edited, different tables, empty suffixes and unused suffixes", () => {
+        seedConnection();
+        const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2"), dataTab("tab-3", { tableMeta: { schema: "feedback_v2", tableName: "other", columns: [], primaryKeys: [] } })];
+        syncTabTitleNumbers(tabs, translate);
+
+        expect(findTabWithSameTitleSuffix(tabs, tabs[0]!, "pending", translate)).toBeUndefined();
+        expect(findTabWithSameTitleSuffix(tabs, tabs[2]!, "pending", translate)).toBeUndefined();
+        expect(findTabWithSameTitleSuffix(tabs, tabs[1]!, "", translate)).toBeUndefined();
+        expect(findTabWithSameTitleSuffix(tabs, tabs[1]!, "done", translate)).toBeUndefined();
+      });
+    });
   });
 
   it("does not expose the internal objects mode in object browser tab titles", () => {

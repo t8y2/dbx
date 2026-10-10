@@ -5958,6 +5958,11 @@ impl AppState {
     }
 
     pub async fn remove_connection_pools(&self, connection_id: &str) {
+        // Live PL debug sessions own dedicated pools and a parked debuggee: close them
+        // through the agent before their pools are drained. This is the only path that
+        // releases the debuggee without waiting for the server-side timeout, and it keeps
+        // `pl_debug_sessions` from holding handles to pools that are about to disappear.
+        crate::query::pl_debug::pl_debug_close_all_for_connection_core(self, connection_id).await;
         self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let mut removed = self.drain_connection_pools(connection_id).await;
@@ -5984,6 +5989,17 @@ impl AppState {
     }
 
     pub async fn remove_connection_pools_detached(&self, connection_id: &str) {
+        // The agent-side close is one blocking RPC per session, which would defeat the
+        // detached drain below, so this path only forgets the handles: draining the pools
+        // kills the agent processes, and the parked debuggee is released by the
+        // server-side SET_TIMEOUT.
+        let forgotten = crate::query::pl_debug::pl_debug_forget_all_for_connection(self, connection_id).await;
+        if !forgotten.is_empty() {
+            log::debug!(
+                "[pl-debug] forgot {} session(s) while removing connection {connection_id} in the background",
+                forgotten.len()
+            );
+        }
         self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let mut removed = self.drain_connection_pools(connection_id).await;

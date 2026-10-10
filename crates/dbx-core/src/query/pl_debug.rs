@@ -24,6 +24,9 @@ use crate::models::connection::{ConnectionConfig, DatabaseType};
 pub const PL_DEBUG_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Non-blocking calls (probe, breakpoint management) use a short budget.
 const PL_DEBUG_QUICK_TIMEOUT: Duration = Duration::from_secs(60);
+/// Upper bound for the graceful close of one session while its connection is
+/// being removed; see [`pl_debug_close_all_for_connection_core`].
+const PL_DEBUG_REMOVAL_CLOSE_BUDGET: Duration = Duration::from_secs(5);
 const PL_DEBUG_CLIENT_SESSION_PREFIX: &str = "pl-debug-";
 
 /// One live debug session and where its agent-side state lives.
@@ -369,6 +372,12 @@ pub async fn pl_debug_close_core(state: &AppState, debug_id: &str) -> Result<(),
 }
 
 /// Closes every open session, e.g. when a connection is removed.
+///
+/// Each close is bounded: a session whose agent client is busy inside a blocked
+/// continuation (resume/step wait up to [`PL_DEBUG_TIMEOUT`]) must not hold up
+/// the removal, because the pool drain that follows ends the agent process
+/// anyway. The graceful close is what lets the agent release the debuggee
+/// without the client-side timeout, not a precondition for removal.
 pub async fn pl_debug_close_all_for_connection_core(state: &AppState, connection_id: &str) {
     let debug_ids: Vec<String> = {
         let sessions = state.pl_debug_sessions.read().await;
@@ -379,8 +388,124 @@ pub async fn pl_debug_close_all_for_connection_core(state: &AppState, connection
             .collect()
     };
     for debug_id in debug_ids {
-        if let Err(error) = pl_debug_close_core(state, &debug_id).await {
-            log::debug!("[pl-debug] closing session {debug_id} failed: {error}");
+        if tokio::time::timeout(PL_DEBUG_REMOVAL_CLOSE_BUDGET, pl_debug_close_core(state, &debug_id)).await.is_err() {
+            log::debug!(
+                "[pl-debug] graceful close of {debug_id} did not finish within {PL_DEBUG_REMOVAL_CLOSE_BUDGET:?}; the pool drain will end it"
+            );
         }
+    }
+}
+
+/// Forgets every session of a connection without talking to the agent.
+///
+/// Used by the detached pool-removal path, where the agent-side close RPC would
+/// block the caller: draining the pools kills the agent processes, and the
+/// parked debuggee is released by the server-side `SET_TIMEOUT`. Returning the
+/// dropped debug ids keeps the caller able to log what it let go.
+pub async fn pl_debug_forget_all_for_connection(state: &AppState, connection_id: &str) -> Vec<String> {
+    let mut sessions = state.pl_debug_sessions.write().await;
+    let forgotten: Vec<String> = sessions
+        .values()
+        .filter(|handle| handle.connection_id == connection_id)
+        .map(|handle| handle.debug_id.clone())
+        .collect();
+    sessions.retain(|_, handle| handle.connection_id != connection_id);
+    forgotten
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::connection::{ConnectionConfig, DatabaseType};
+
+    fn config(db_type: DatabaseType) -> ConnectionConfig {
+        serde_json::from_value(json!({
+            "id": "test-connection",
+            "name": "Test",
+            "db_type": db_type,
+            "host": "127.0.0.1",
+            "port": 1521,
+            "username": "user",
+            "password": "secret",
+        }))
+        .expect("minimal connection config")
+    }
+
+    #[test]
+    fn supports_pl_debug_only_for_oracle_flavours() {
+        assert!(!supports_pl_debug(None));
+        assert!(supports_pl_debug(Some(&config(DatabaseType::Oracle))));
+        assert!(supports_pl_debug(Some(&config(DatabaseType::OceanbaseOracle))));
+        assert!(!supports_pl_debug(Some(&config(DatabaseType::Mysql))));
+    }
+
+    #[test]
+    fn unsupported_probe_result_names_the_current_engine() {
+        let result = unsupported_probe_result(Some(&config(DatabaseType::Mysql)));
+        assert_eq!(result["supported"], json!(false));
+        let reason = result["reason"].as_str().unwrap_or("");
+        assert!(reason.contains("mysql"), "reason must name the engine: {reason}");
+        assert!(reason.contains("Oracle"), "reason must say what is supported: {reason}");
+
+        let unknown = unsupported_probe_result(None);
+        assert_eq!(unknown["supported"], json!(false));
+        assert!(unknown["reason"].as_str().unwrap_or("").contains("unknown"));
+    }
+
+    #[test]
+    fn parse_scalar_values_empty_payload_is_no_variable() {
+        assert_eq!(parse_scalar_values(""), json!([]));
+        assert_eq!(parse_scalar_values("   \n "), json!([]));
+    }
+
+    #[test]
+    fn parse_scalar_values_flattens_json_objects_and_arrays() {
+        let payload = r#"{"local_a": 7, "nested": {"flag": true, "name": "x"}, "list": [1, {"deep": "y"}]}"#;
+        let parsed = parse_scalar_values(payload);
+        let entries = parsed.as_array().cloned().unwrap_or_default();
+        let by_name = |name: &str| -> Value {
+            entries
+                .iter()
+                .find(|entry| entry["name"] == json!(name))
+                .unwrap_or_else(|| panic!("missing {name} in {parsed}"))
+                .clone()
+        };
+        assert_eq!(by_name("local_a")["value"], json!("7"));
+        assert_eq!(by_name("nested.flag")["value"], json!("true"));
+        assert_eq!(by_name("nested.name")["value"], json!("x"));
+        assert_eq!(by_name("list[0]")["value"], json!("1"));
+        assert_eq!(by_name("list[1].deep")["value"], json!("y"));
+    }
+
+    #[test]
+    fn parse_scalar_values_bare_json_string_stays_raw_text() {
+        // Only object/array payloads are treated as JSON: a bare quoted scalar is not a
+        // GET_VALUES shape either agent produces, so it must survive verbatim instead of
+        // being half-parsed.
+        assert_eq!(parse_scalar_values("\"just text\""), json!([{ "name": "values", "value": "\"just text\"" }]));
+    }
+
+    #[test]
+    fn parse_scalar_values_legacy_star_format_carries_type_and_value() {
+        let parsed = parse_scalar_values("*V_COUNT*NUMBER*42*V_NAME*VARCHAR2*hello");
+        assert_eq!(
+            parsed,
+            json!([
+                { "name": "V_COUNT", "type": "NUMBER", "value": "42" },
+                { "name": "V_NAME", "type": "VARCHAR2", "value": "hello" },
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_scalar_values_legacy_partial_groups_still_report_the_name() {
+        assert_eq!(parse_scalar_values("*V_ONLY"), json!([{ "name": "V_ONLY" }]));
+        assert_eq!(parse_scalar_values("*V_TYPED*DATE"), json!([{ "name": "V_TYPED", "type": "DATE" }]));
+    }
+
+    #[test]
+    fn parse_scalar_values_unrecognised_payload_survives_as_raw_text() {
+        let parsed = parse_scalar_values("some server specific dump");
+        assert_eq!(parsed, json!([{ "name": "values", "value": "some server specific dump" }]));
     }
 }

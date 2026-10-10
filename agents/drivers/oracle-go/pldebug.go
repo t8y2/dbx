@@ -829,6 +829,12 @@ type plDebugSession struct {
 	lastProgram        string
 	lastProgramOwner   string
 	lastActivityMillis int64
+	// breakpointDisabled remembers the server breakpoints the desktop client turned
+	// off (pl_debug_set_breakpoint_enabled), because the server keeps no enabled flag
+	// the agent could read back. A breakpoint is armed unless its number appears here;
+	// the run-to-the-end path (resumeIgnoreBreakpoints) uses this to disable only the
+	// armed ones and to put exactly those back.
+	breakpointDisabled map[int]bool
 	// exceptionBreakpoint switches pl_debug_resume into exception mode; it is
 	// deliberately ignored by the step operations.
 	exceptionBreakpoint bool
@@ -2222,6 +2228,7 @@ func (p *plDebugSession) deleteBreakpoints(requested []plDebugBreakpoint) ([]plD
 			}
 		}
 		p.breakpoints = kept
+		delete(p.breakpointDisabled, requestedBreakpoint.BreakpointNbr)
 		removed = append(removed, requestedBreakpoint)
 	}
 	p.touch()
@@ -2444,39 +2451,108 @@ func (p *plDebugSession) setExceptionBreakpoint(enabled bool) map[string]interfa
 	return p.snapshot(message)
 }
 
-// resumeIgnoreBreakpoints runs the debuggee to completion, ignoring every
-// remaining breakpoint -- ODC's resumeIgnoreBreakpoints (its "CNT_EXIT"). The
-// helper package loops DBMS_DEBUG.CONTINUE(break_next_line) internally, so this
-// single call only returns once the interpreter reported reason_exit, or when a
-// continuation failed; the session is finished either way. Unlike the other
-// continuation helpers, DBX_CNT_EXIT has no `result OUT` parameter: its message
-// carries nothing but the final reason.
+// plDebugIgnoreResumeIterations bounds the continue loop of resumeIgnoreBreakpoints.
+// It mirrors the exception-mode cap: a handful of ordinary continuations ends a normal
+// program, and a run that keeps stopping for another reason must answer with a message
+// instead of spinning.
+const plDebugIgnoreResumeIterations = 200
+
+// resumeIgnoreBreakpoints runs the debuggee to completion without stopping at the
+// session's breakpoints -- ODC's resumeIgnoreBreakpoints.
+//
+// The helper package ships DBX_CNT_EXIT for this, but its loop cannot end on this
+// architecture, so it is deliberately not called any more (the routine stays in the
+// shared body untouched: removing it would force a package version bump in both
+// agents for no behaviour). DBX_CNT_EXIT steps with CONTINUE(break_next_line) and
+// leaves the loop only when run_info.reason is reason_exit (15), while the debuggee's
+// driver block always ends with reason_knl_exit (25). Measured on 19c EE, 2026-10-10:
+// a step with that flag reports reasons 9, 9, ... and finally 25 with terminated=1 --
+// never 15 -- so the loop kept continuing an already finished program until the agent's
+// 30s guard abandoned the debugger connection (the "run to the end" button was dead),
+// and a single break_next_line round trip costs ~120ms, which no real procedure's line
+// count could afford anyway.
+//
+// Breakpoints pause the interpreter regardless of the CONTINUE flags (see the note in
+// the helper template), so "ignore the breakpoints" can only mean "take them out of the
+// way": every armed breakpoint is disabled for the run, the ordinary break_any_return
+// continue drives the program to its end, and the breakpoints this call disabled are put
+// back unless the program finished -- a finished session has nothing left to stop and
+// refusing to re-enable would only log. The exception breakpoint is ignored as well:
+// this is a plain run, not an exception-mode resume.
 func (p *plDebugSession) resumeIgnoreBreakpoints() (map[string]interface{}, error) {
 	p.mu.Lock()
 	if p.terminated {
 		p.mu.Unlock()
 		return p.snapshot("debuggee has finished"), nil
 	}
-	p.mu.Unlock()
-
-	var message string
-	if err := p.plDebugCall(procCntExit, nil, &message); err != nil {
-		return nil, fmt.Errorf("%s failed: %w", procCntExit, err)
+	armed := make([]int, 0, len(p.breakpoints))
+	for _, breakpoint := range p.breakpoints {
+		if breakpoint.BreakpointNbr > 0 && !p.breakpointDisabled[breakpoint.BreakpointNbr] {
+			armed = append(armed, breakpoint.BreakpointNbr)
+		}
 	}
-	// This call only returns once the interpreter reported the end, so give the
-	// debuggee's own statement its bounded moment before the snapshot is built.
-	p.awaitTargetReturned(true)
-
-	p.mu.Lock()
-	// The message is only ' reason = <n>' (no run_info fields), so it cannot be
-	// fed to applyRunInfoMessage; read the reason from it directly. reason_exit
-	// is the normal outcome; any other reason means the internal continuation
-	// stopped failing, which also leaves the debuggee without a live stop point.
-	p.lastReason = atoiOrZero(runInfoValue(message))
-	p.terminated = true
-	p.touch()
-	response := p.snapshot(message)
 	p.mu.Unlock()
+
+	disabled := make([]int, 0, len(armed))
+	for _, number := range armed {
+		response, err := p.setBreakpointEnabled(number, false)
+		if err != nil {
+			plDebugLogf("disabling breakpoint %d for the run to the end failed: %v", number, err)
+			continue
+		}
+		if ok, _ := response["ok"].(bool); !ok {
+			plDebugLogf("the server refused to disable breakpoint %d; the run may stop there", number)
+			continue
+		}
+		disabled = append(disabled, number)
+	}
+
+	response, err := p.runToTermination()
+	if err == nil && response != nil {
+		if terminated, _ := response["terminated"].(bool); terminated {
+			return response, nil
+		}
+	}
+	// The program is still alive (it stopped at a breakpoint this call could not
+	// disable, or the loop hit its cap): put back exactly what was taken away.
+	for _, number := range disabled {
+		if _, restoreErr := p.setBreakpointEnabled(number, true); restoreErr != nil {
+			plDebugLogf("re-enabling breakpoint %d after the run failed: %v", number, restoreErr)
+		}
+	}
+	return response, err
+}
+
+// runToTermination drives the program to its end with the ordinary resume continue, one
+// call per stop, for resumeIgnoreBreakpoints. A stop at a breakpoint ends the loop
+// instead of continuing: its breakpoint could not be disabled, so continuing would hit
+// the same stop again, and the caller is the one that restores what it disabled.
+func (p *plDebugSession) runToTermination() (map[string]interface{}, error) {
+	var response map[string]interface{}
+	for iteration := 0; iteration < plDebugIgnoreResumeIterations; iteration++ {
+		current, err := p.continueWith(procCntNextBreakpoint)
+		if err != nil {
+			return nil, err
+		}
+		if current == nil {
+			break
+		}
+		response = current
+		if terminated, _ := current["terminated"].(bool); terminated {
+			return current, nil
+		}
+		breakpoint, _ := current["breakpoint"].(int)
+		reason, _ := current["reason"].(int)
+		if breakpoint > 0 || reason == plDebugReasonBreakpoint {
+			current["message"] = fmt.Sprintf(
+				"运行到结束在断点处停下（该断点未能被禁用）: breakpoint=%d reason=%d", breakpoint, reason)
+			return current, nil
+		}
+	}
+	if response == nil {
+		return nil, nil
+	}
+	response["message"] = fmt.Sprintf("运行到结束在 %d 次续跑后仍未终止", plDebugIgnoreResumeIterations)
 	return response, nil
 }
 
@@ -2837,6 +2913,19 @@ func (p *plDebugSession) setBreakpointEnabled(breakpoint int, enabled bool) (map
 	var result int
 	if err := p.plDebugCall(procedure, []any{breakpoint}, &result); err != nil {
 		return nil, fmt.Errorf("set breakpoint %d enabled=%t failed: %w", breakpoint, enabled, err)
+	}
+	// Remember the toggle: the server has no readable enabled flag (DBX_SHOW_BREAKPOINTS
+	// is not parsed by the agent), and the run-to-the-end path has to restore exactly
+	// the breakpoints it disabled instead of re-arming the ones the user turned off.
+	if result == plDebugErrSuccess {
+		if enabled {
+			delete(p.breakpointDisabled, breakpoint)
+		} else {
+			if p.breakpointDisabled == nil {
+				p.breakpointDisabled = map[int]bool{}
+			}
+			p.breakpointDisabled[breakpoint] = true
+		}
 	}
 	p.touch()
 	return map[string]interface{}{

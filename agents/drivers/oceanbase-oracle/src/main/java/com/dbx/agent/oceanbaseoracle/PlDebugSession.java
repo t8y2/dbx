@@ -8,10 +8,12 @@ import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -69,9 +71,6 @@ final class PlDebugSession implements AutoCloseable {
     /** Mirrors the Go parser: "[Line 8] PROC" / "[Line 0] PKG.F_ADD". */
     private static final Pattern BACKTRACE_FRAME = Pattern.compile("Line\\s*(\\d+)\\s*\\]\\s*([^\\r\\n]*)");
 
-    /** The CNT_EXIT diagnostic line, e.g. {@code " reason = 3"}: reason only, no run_info fields. */
-    private static final Pattern FINAL_REASON_MESSAGE = Pattern.compile("reason\\s*=\\s*(\\d+)");
-
     private static final int RESULT_SUCCESS = 0;
 
     /**
@@ -119,11 +118,29 @@ final class PlDebugSession implements AutoCloseable {
     private static final int REASON_HANDLER = 16;
 
     /**
+     * {@code run_info.reason} value for a breakpoint being hit (measured on Oracle 19c
+     * EE: {@code reason_breakpoint = 3}). The run-to-the-end loop stops on it instead of
+     * continuing, because a breakpoint this call could not disable would be hit again on
+     * the next continuation. It is the Java twin of the Go driver's
+     * {@code plDebugReasonBreakpoint}.
+     */
+    private static final int REASON_BREAKPOINT = 3;
+
+    /**
      * Caps the exception-mode resume loop. Without it a server that keeps
      * reporting {@code reason_finish} (or an unparsable reason) would spin forever
      * inside {@code pl_debug_resume} and the RPC would never return.
      */
     private static final int EXCEPTION_RESUME_ITERATIONS = 200;
+
+    /**
+     * Caps the continue loop of {@link #runToTermination()}. It mirrors the
+     * exception-mode cap: a handful of ordinary continuations ends a normal program, and
+     * a run that keeps stopping for another reason must answer with a message instead of
+     * spinning. The Java twin of the Go driver's
+     * {@code plDebugIgnoreResumeIterations}.
+     */
+    private static final int IGNORE_RESUME_ITERATIONS = 200;
 
     /**
      * One {@code DBX_FETCH_OUTPUT} chunk, mirroring the Go driver's
@@ -140,6 +157,14 @@ final class PlDebugSession implements AutoCloseable {
     private final Connection debuggerConnection;
     private final ExecutorService debuggeeExecutor;
     private final List<PlDebugBreakpoint> breakpoints = new CopyOnWriteArrayList<>();
+    /**
+     * The server breakpoints the desktop client turned off, keyed by breakpoint number.
+     * The server keeps no enabled flag the agent could read back, so a breakpoint is
+     * armed unless its number appears here; the run-to-the-end path
+     * ({@link #resumeIgnoreBreakpoints()}) uses this to disable only the armed ones and
+     * to put exactly those back. Mirrors the Go driver's {@code breakpointDisabled}.
+     */
+    private final Set<Integer> breakpointDisabled = new HashSet<>();
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private final AtomicBoolean debugOffSent = new AtomicBoolean(false);
     private final long timeoutMillis;
@@ -401,6 +426,25 @@ final class PlDebugSession implements AutoCloseable {
         Connection debuggerConnection,
         boolean terminated
     ) {
+        return withConnections(debugId, owner, debuggeeConnection, debuggerConnection, terminated, null, null);
+    }
+
+    /**
+     * The same test-only seam with the two facts a scripted connection cannot produce for
+     * the run-to-the-end loop: the breakpoints the caller already armed, and the debuggee's
+     * own signal ({@link #debuggeeFuture}, which is what {@link #terminateState()} reads
+     * once the target statement returned -- the completion of a
+     * {@code CompletableFuture} stands in for it).
+     */
+    static PlDebugSession withConnections(
+        String debugId,
+        String owner,
+        Connection debuggeeConnection,
+        Connection debuggerConnection,
+        boolean terminated,
+        List<PlDebugBreakpoint> armedBreakpoints,
+        Future<?> debuggeeFuture
+    ) {
         PlDebugSession session = new PlDebugSession(
             debugId,
             owner,
@@ -411,6 +455,10 @@ final class PlDebugSession implements AutoCloseable {
             new DbxPlDebugPackage.ProgramInfoFields(false, false)
         );
         session.terminated = terminated;
+        if (armedBreakpoints != null) {
+            session.breakpoints.addAll(armedBreakpoints);
+        }
+        session.debuggeeFuture = debuggeeFuture;
         return session;
     }
 
@@ -895,6 +943,10 @@ final class PlDebugSession implements AutoCloseable {
             }
             deleteBreakpointNumber(breakpoint.getBreakpointNumber());
             breakpoints.removeIf(existing -> breakpoint.getBreakpointNumber().equals(existing.getBreakpointNumber()));
+            // A deleted breakpoint has no enabled state left to remember; without this
+            // a later re-arm of the same number would be skipped by the run-to-the-end
+            // path as if the user had turned it off.
+            breakpointDisabled.remove(breakpoint.getBreakpointNumber());
             removed.add(breakpoint);
         }
         touch();
@@ -1016,13 +1068,30 @@ final class PlDebugSession implements AutoCloseable {
     }
 
     /**
-     * Runs the debuggee to completion, ignoring every remaining breakpoint --
-     * ODC's resumeIgnoreBreakpoints (its "CNT_EXIT"). The helper package loops
-     * DBMS_DEBUG.CONTINUE(break_next_line) internally, so this single call only
-     * returns once the interpreter reported reason_exit, or when a continuation
-     * failed; the session is finished either way. Unlike the other continuation
-     * helpers, DBX_CNT_EXIT has no {@code result OUT} parameter: its message
-     * carries nothing but the final reason.
+     * Runs the debuggee to completion without stopping at the session's breakpoints --
+     * ODC's resumeIgnoreBreakpoints.
+     *
+     * <p>The helper package ships {@code DBX_CNT_EXIT} for this, but its loop cannot end
+     * on this architecture, so it is deliberately not called any more (the routine stays
+     * in the shared body untouched: removing it would force a package version bump in
+     * both agents for no behaviour). {@code DBX_CNT_EXIT} steps with
+     * {@code CONTINUE(break_next_line)} and leaves the loop only when
+     * {@code run_info.reason} is {@code reason_exit} (15), while the debuggee's driver
+     * block always ends with {@code reason_knl_exit} (25). Measured on Oracle 19c EE,
+     * 2026-10-10: a step with that flag reports reasons 9, 9, ... and finally 25 with
+     * {@code terminated=1} -- never 15 -- so the loop kept continuing an already finished
+     * program until the agent's 30s guard abandoned the debugger connection (the "run to
+     * the end" button was dead), and a single {@code break_next_line} round trip costs
+     * about 120ms, which no real procedure's line count could afford anyway.
+     *
+     * <p>Breakpoints pause the interpreter regardless of the {@code CONTINUE} flags, so
+     * "ignore the breakpoints" can only mean "take them out of the way": every armed
+     * breakpoint is disabled for the run, the ordinary {@code break_any_return} continue
+     * drives the program to its end, and the breakpoints this call disabled are put back
+     * unless the program finished -- a finished session has nothing left to stop and
+     * refusing to re-enable would only log. The exception breakpoint is ignored as well:
+     * this is a plain run, not an exception-mode resume. Mirrors the Go driver's
+     * {@code resumeIgnoreBreakpoints}.
      */
     synchronized Map<String, Object> resumeIgnoreBreakpoints() throws Exception {
         requireOpen();
@@ -1031,26 +1100,104 @@ final class PlDebugSession implements AutoCloseable {
             response.put("message", "debuggee has finished");
             return response;
         }
-        String message;
-        try (CallableStatement call = debuggerConnection.prepareCall(
-            "BEGIN " + qualifiedCall(DbxPlDebugPackage.PROCEDURE_CNT_EXIT) + "(?); END;"
-        )) {
-            call.registerOutParameter(1, Types.VARCHAR);
-            call.execute();
-            message = call.getString(1);
+        List<Integer> armed = new ArrayList<>();
+        for (PlDebugBreakpoint breakpoint : breakpoints) {
+            Integer number = breakpoint == null ? null : breakpoint.getBreakpointNumber();
+            if (number != null && number > 0 && !breakpointDisabled.contains(number)) {
+                armed.add(number);
+            }
         }
-        // The message is only ' reason = <n>' (no run_info fields), so it cannot
-        // be fed to applyRunInfoMessage; read the reason from it directly. A
-        // reason other than reason_exit means the internal continuation stopped
-        // failing, which also leaves the debuggee without a live stop point.
-        Matcher reasonMatcher = FINAL_REASON_MESSAGE.matcher(message == null ? "" : message);
-        if (reasonMatcher.find()) {
-            currentReason = parseInteger(reasonMatcher.group(1));
+
+        List<Integer> disabled = new ArrayList<>();
+        for (int number : armed) {
+            Map<String, Object> toggle;
+            try {
+                toggle = setBreakpointEnabled(number, false);
+            } catch (Exception error) {
+                LOG.log(Level.FINE, "disabling breakpoint " + number + " for the run to the end failed", error);
+                continue;
+            }
+            if (!Boolean.TRUE.equals(toggle.get("ok"))) {
+                LOG.warning("the server refused to disable breakpoint " + number + "; the run may stop there");
+                continue;
+            }
+            disabled.add(number);
         }
-        terminated = true;
-        touch();
-        Map<String, Object> response = snapshot();
-        response.put("message", message == null ? "" : message);
+
+        Map<String, Object> response;
+        try {
+            response = runToTermination();
+        } catch (Exception error) {
+            // A continuation that failed leaves the program and its breakpoints in an
+            // unknown state: put back what this call took away before reporting, exactly
+            // like the error path of the Go driver's resumeIgnoreBreakpoints.
+            restoreDisabledBreakpoints(disabled);
+            throw error;
+        }
+        if (response != null && Boolean.TRUE.equals(response.get("terminated"))) {
+            return response;
+        }
+        // The program is still alive (it stopped at a breakpoint this call could not
+        // disable, or the loop hit its cap): put back exactly what was taken away.
+        restoreDisabledBreakpoints(disabled);
+        return response;
+    }
+
+    /**
+     * Re-enables the breakpoints a run-to-the-end call disabled, best effort: a session
+     * that is already gone can no longer re-arm anything, and a refusal is logged rather
+     * than turned into a second failure.
+     */
+    private void restoreDisabledBreakpoints(List<Integer> disabled) {
+        for (int number : disabled) {
+            try {
+                setBreakpointEnabled(number, true);
+            } catch (Exception error) {
+                LOG.log(Level.FINE, "re-enabling breakpoint " + number + " after the run failed", error);
+            }
+        }
+    }
+
+    /**
+     * Drives the program to its end with the ordinary resume continue, one call per stop,
+     * for {@link #resumeIgnoreBreakpoints()}. Each {@code DBX_CNT_NEXT_BREAKPOINT}
+     * ({@code break_any_return}) answer carries the session's real termination state --
+     * {@code terminated} comes from {@link #terminateState()}, i.e. from the debuggee's
+     * own statement having returned, which is the one signal this agent has (the run_info
+     * message carries no {@code terminated} field) -- so a finished program ends the loop
+     * without this method ever marking it. A stop at a breakpoint ends the loop instead
+     * of continuing: its breakpoint could not be disabled, so continuing would hit the
+     * same stop again, and the caller is the one that restores what it disabled. Mirrors
+     * the Go driver's {@code runToTermination}.
+     */
+    private Map<String, Object> runToTermination() throws Exception {
+        Map<String, Object> response = null;
+        for (int iteration = 0; iteration < IGNORE_RESUME_ITERATIONS; iteration++) {
+            Map<String, Object> current = continueWith(DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT);
+            if (current == null) {
+                break;
+            }
+            response = current;
+            if (Boolean.TRUE.equals(current.get("terminated"))) {
+                return current;
+            }
+            Integer breakpoint = asInteger(current.get("breakpoint"));
+            Integer reason = asInteger(current.get("reason"));
+            if ((breakpoint != null && breakpoint > 0) || (reason != null && reason == REASON_BREAKPOINT)) {
+                current.put(
+                    "message",
+                    "运行到结束在断点处停下（该断点未能被禁用）: breakpoint="
+                        + (breakpoint == null ? 0 : breakpoint)
+                        + " reason="
+                        + (reason == null ? 0 : reason)
+                );
+                return current;
+            }
+        }
+        if (response == null) {
+            return null;
+        }
+        response.put("message", "运行到结束在 " + IGNORE_RESUME_ITERATIONS + " 次续跑后仍未终止");
         return response;
     }
 
@@ -1451,6 +1598,16 @@ final class PlDebugSession implements AutoCloseable {
             call.registerOutParameter(2, Types.INTEGER);
             call.execute();
             result = call.getInt(2);
+        }
+        // Remember the toggle: the server has no readable enabled flag, and the
+        // run-to-the-end path has to restore exactly the breakpoints it disabled
+        // instead of re-arming the ones the user turned off.
+        if (result == RESULT_SUCCESS) {
+            if (enabled) {
+                breakpointDisabled.remove(breakpoint);
+            } else {
+                breakpointDisabled.add(breakpoint);
+            }
         }
         touch();
         Map<String, Object> response = new LinkedHashMap<>();

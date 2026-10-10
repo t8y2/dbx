@@ -3,6 +3,8 @@ package com.dbx.agent.oceanbaseoracle;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import com.dbx.agent.PlDebugBreakpoint;
+
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -15,6 +17,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 /**
  * Units for the PL/SQL debugger additions ported from the Go driver: the helper
@@ -759,6 +763,164 @@ class PlDebugSessionTest {
             + ", run_info.programowner = SCOTT";
     }
 
+    private static PlDebugBreakpoint storedBreakpoint(int number) {
+        PlDebugBreakpoint breakpoint = new PlDebugBreakpoint();
+        breakpoint.setBreakpointNumber(number);
+        return breakpoint;
+    }
+
+    /**
+     * The run-to-the-end path ({@code pl_debug_resume_ignore_breakpoints}) pins the
+     * redesigned design: the helper's {@code DBX_CNT_EXIT} cannot end its loop on this
+     * architecture (it steps with {@code CONTINUE(break_next_line)}, whose terminal reason
+     * is {@code reason_knl_exit} (25) and never {@code reason_exit} (15) -- measured on
+     * 19c EE, the loop kept continuing a finished program until the agent's guard
+     * abandoned the connection after 30s). The session therefore disables the armed
+     * breakpoints for the run, drives the ordinary {@code break_any_return} continue, and
+     * puts exactly the breakpoints it disabled back when the program did not finish.
+     *
+     * <p>An armed breakpoint is disabled, and a finished program is not restored: the
+     * debuggee's own statement returning (its future completing) is what marks the
+     * session terminated -- the Java twin of the Go driver's
+     * {@code TestPLDebugResumeIgnoreBreakpointsDisablesAndRestores} first scenario.
+     */
+    @Test
+    void runToTheEndDisablesTheArmedBreakpointAndDoesNotRestoreIt() throws Exception {
+        ContinueSession session = new ContinueSession();
+        CompletableFuture<Void> target = new CompletableFuture<>();
+        session.script(DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT, 0, runInfo(0, 1, 25, "PRO1"));
+        // markDebuggeeFinished: what the debuggee future does on the real session once the
+        // program's own statement returns -- the only termination signal this agent has.
+        session.onCall = routine -> {
+            if (DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT.equals(routine)) {
+                target.complete(null);
+            }
+        };
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", null, session.connection(), false, List.of(storedBreakpoint(7)), target
+        );
+
+        Map<String, Object> response = debug.resumeIgnoreBreakpoints();
+
+        Assertions.assertEquals(true, response.get("terminated"), "the finished program must be reported: " + response);
+        Assertions.assertTrue(
+            session.calls.contains(DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT),
+            "the run must drive the ordinary break_any_return resume"
+        );
+        Assertions.assertEquals(List.of(7), session.intArguments(DbxPlDebugPackage.PROCEDURE_DISABLE_BREAKPOINT));
+        Assertions.assertEquals(
+            List.of(),
+            session.intArguments(DbxPlDebugPackage.PROCEDURE_ENABLE_BREAKPOINT),
+            "a finished program must not have breakpoints re-enabled"
+        );
+        Assertions.assertFalse(
+            session.calls.contains(DbxPlDebugPackage.PROCEDURE_CNT_EXIT),
+            "DBX_CNT_EXIT cannot end its loop on this architecture and must not be called"
+        );
+    }
+
+    /**
+     * A breakpoint the client already turned off is not touched by the run: the session
+     * tracks the toggles itself (the server has no readable enabled flag), disables only
+     * the armed number, and restores nothing when the program finished.
+     */
+    @Test
+    void runToTheEndLeavesAClientDisabledBreakpointAlone() throws Exception {
+        ContinueSession session = new ContinueSession();
+        CompletableFuture<Void> target = new CompletableFuture<>();
+        session.script(DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT, 0, runInfo(0, 1, 25, "PRO1"));
+        session.onCall = routine -> {
+            if (DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT.equals(routine)) {
+                target.complete(null);
+            }
+        };
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1",
+            "SCOTT",
+            null,
+            session.connection(),
+            false,
+            List.of(storedBreakpoint(7), storedBreakpoint(8)),
+            target
+        );
+        // The user turns 7 off through the normal toggle; the run must not re-disable it
+        // (it is not armed) and must not re-enable it either.
+        debug.setBreakpointEnabled(7, false);
+
+        Map<String, Object> response = debug.resumeIgnoreBreakpoints();
+
+        Assertions.assertEquals(true, response.get("terminated"));
+        Assertions.assertEquals(
+            List.of(7, 8),
+            session.intArguments(DbxPlDebugPackage.PROCEDURE_DISABLE_BREAKPOINT),
+            "the run disabled only the still-armed 8, after the client's own 7"
+        );
+        Assertions.assertEquals(List.of(), session.intArguments(DbxPlDebugPackage.PROCEDURE_ENABLE_BREAKPOINT));
+    }
+
+    /**
+     * A run that stops at a breakpoint (one that could not be disabled, so continuing
+     * would hit it again) must end honestly: the stop is explained, the session is not
+     * reported as finished, and the breakpoint this call disabled is put back.
+     */
+    @Test
+    void runToTheEndStopsAtABreakpointAndRestoresWhatItDisabled() throws Exception {
+        ContinueSession session = new ContinueSession();
+        session.script(DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT, 0, runInfo(7, 1, 3, "PRO1"));
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", null, session.connection(), false, List.of(storedBreakpoint(7)), null
+        );
+
+        Map<String, Object> response = debug.resumeIgnoreBreakpoints();
+
+        Assertions.assertEquals(false, response.get("terminated"), "a breakpoint stop is not a finished program");
+        Assertions.assertEquals(7, response.get("breakpoint"));
+        Assertions.assertEquals(3, response.get("reason"));
+        Assertions.assertTrue(
+            String.valueOf(response.get("message")).contains("断点"),
+            "the breakpoint stop carries no explanation: " + response.get("message")
+        );
+        Assertions.assertEquals(List.of(7), session.intArguments(DbxPlDebugPackage.PROCEDURE_DISABLE_BREAKPOINT));
+        Assertions.assertEquals(
+            List.of(7),
+            session.intArguments(DbxPlDebugPackage.PROCEDURE_ENABLE_BREAKPOINT),
+            "the breakpoint this run disabled has to come back"
+        );
+    }
+
+    /**
+     * A server that refuses to disable (the -1 capability sentinel of a server without
+     * {@code DISABLE_BREAKPOINT}) keeps the run honest: nothing counts as disabled, the
+     * stop at the breakpoint is reported, and there is nothing to restore.
+     */
+    @Test
+    void runToTheEndKeepsAnUnDisableableBreakpointStopHonest() throws Exception {
+        ContinueSession session = new ContinueSession();
+        session.script(
+            DbxPlDebugPackage.PROCEDURE_DISABLE_BREAKPOINT,
+            DbxPlDebugPackage.RESULT_CAPABILITY_UNAVAILABLE,
+            null
+        );
+        session.script(DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT, 0, runInfo(7, 1, 3, "PRO1"));
+        PlDebugSession debug = PlDebugSession.withConnections(
+            "dbg-1", "SCOTT", null, session.connection(), false, List.of(storedBreakpoint(7)), null
+        );
+
+        Map<String, Object> response = debug.resumeIgnoreBreakpoints();
+
+        Assertions.assertEquals(false, response.get("terminated"));
+        Assertions.assertEquals(
+            List.of(7),
+            session.intArguments(DbxPlDebugPackage.PROCEDURE_DISABLE_BREAKPOINT),
+            "the toggle was attempted"
+        );
+        Assertions.assertEquals(
+            List.of(),
+            session.intArguments(DbxPlDebugPackage.PROCEDURE_ENABLE_BREAKPOINT),
+            "nothing was disabled, so nothing may be re-enabled"
+        );
+    }
+
     /**
      * The version check reads the installed body's FIRST ALL_SOURCE line and requires both
      * markers on it. A body that carries only one of them (an older install, or a body of
@@ -884,17 +1046,35 @@ class PlDebugSessionTest {
     }
 
     /**
-     * Scripted debugger connection for the continuation wrappers: every
-     * {@code DBX_CNT_*} call shifts the next scripted run_info line for its routine (the
-     * last one repeats) and answers {@code result = 0} unless the routine is set to fail.
+     * Scripted debugger connection for the continuation and breakpoint-toggle wrappers:
+     * every call shifts the scripted {@code result} / message for its routine (the last
+     * message repeats) and records the integer arguments it was given, so a test can see
+     * which breakpoint numbers the session disabled or re-enabled.
      */
     private static final class ContinueSession {
         final List<String> calls = new ArrayList<>();
         private final Map<String, List<String>> messages = new LinkedHashMap<>();
+        /** The scripted {@code result} register per routine; 0 unless a test says otherwise. */
+        private final Map<String, Integer> results = new LinkedHashMap<>();
+        /** Every {@code setInt} a prepared call received, per routine. */
+        private final Map<String, List<Integer>> intArgs = new LinkedHashMap<>();
         String failRoutine;
+        /**
+         * Runs after every scripted call with the routine name, the way the Go driver's
+         * test hook does: a test uses it to make the debuggee side advance at the exact
+         * moment a given call answers.
+         */
+        Consumer<String> onCall;
 
         void script(String routine, int result, String message) {
+            results.put(routine, result);
             messages.computeIfAbsent(routine, key -> new ArrayList<>()).add(message);
+        }
+
+        /** The {@code setInt} values a routine's prepared calls received. */
+        List<Integer> intArguments(String routine) {
+            List<Integer> values = intArgs.get(routine);
+            return values == null ? List.of() : values;
         }
 
         Connection connection() {
@@ -909,6 +1089,11 @@ class PlDebugSessionTest {
                     DbxPlDebugPackage.PROCEDURE_CNT_NEXT_BREAKPOINT,
                     DbxPlDebugPackage.PROCEDURE_CNT_NEXT_LINE,
                     DbxPlDebugPackage.PROCEDURE_CNT_STEP_IN,
+                    DbxPlDebugPackage.PROCEDURE_ENABLE_BREAKPOINT,
+                    DbxPlDebugPackage.PROCEDURE_DISABLE_BREAKPOINT,
+                    // Recorded, not used: a test pins that the run-to-the-end path never
+                    // calls the helper's unrunnable DBX_CNT_EXIT loop.
+                    DbxPlDebugPackage.PROCEDURE_CNT_EXIT,
                 }) {
                     if (sql.contains(candidate)) {
                         routine = candidate;
@@ -921,6 +1106,12 @@ class PlDebugSessionTest {
                         case "registerOutParameter":
                         case "close":
                             return null;
+                        case "setInt":
+                            // (parameterIndex, value): the value is what the statement was
+                            // handed, e.g. the breakpoint number of a toggle.
+                            intArgs.computeIfAbsent(matched, key -> new ArrayList<>())
+                                .add(((Number) memberArgs[1]).intValue());
+                            return null;
                         case "execute":
                             calls.add(matched);
                             if (matched != null && matched.equals(failRoutine)) {
@@ -928,10 +1119,14 @@ class PlDebugSessionTest {
                                     "ORA-00097: use of Oracle SQL feature not in this Oracle version"
                                 );
                             }
+                            if (onCall != null) {
+                                onCall.accept(matched);
+                            }
                             // execute() returns a primitive boolean; a proxy may not answer null.
                             return Boolean.FALSE;
                         case "getInt":
-                            return 0;
+                            Integer scriptedResult = results.get(matched);
+                            return scriptedResult == null ? 0 : scriptedResult;
                         case "getString":
                             List<String> scripted = messages.get(matched);
                             if (scripted == null || scripted.isEmpty()) {

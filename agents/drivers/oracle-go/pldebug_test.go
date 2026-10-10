@@ -2294,6 +2294,11 @@ type oracleDebugCallDriver struct {
 	// returnType is what the ALL_ARGUMENTS read of a FUNCTION target answers. "" models
 	// a dictionary with no POSITION 0 row (the lookup then keeps an empty type).
 	returnType string
+	// onExec, when set, runs after every scripted Exec with the routine name. A test
+	// uses it to make the debuggee side advance -- for example to mark the session
+	// terminated the way runTarget's finishTarget does once the program's statement
+	// returns -- at the exact moment a given debugger call answers.
+	onExec func(routine string)
 	// closed counts the physical connections the pool really closed. It is what
 	// separates "the teardown closed the connection" from "the teardown abandoned it":
 	// database/sql's DB.Close only closes free connections, so a session whose
@@ -2531,6 +2536,7 @@ func (c *oracleDebugCallConn) ExecContext(_ context.Context, query string, args 
 		return nil, err
 	}
 	gate := state.blocked[routine]
+	hook := state.onExec
 	state.mu.Unlock()
 	// The gate is waited on without the driver lock so the test can still read
 	// the recorded calls while the Exec is parked -- and it ignores the context,
@@ -2543,6 +2549,9 @@ func (c *oracleDebugCallConn) ExecContext(_ context.Context, query string, args 
 		setOutDest(args, index, value)
 	}
 	state.mu.Unlock()
+	if hook != nil {
+		hook(routine)
+	}
 	return driver.RowsAffected(0), nil
 }
 
@@ -2718,22 +2727,6 @@ func TestPLDebugHelperCallsBindExecOutForEachDriver(t *testing.T) {
 				}
 				if depth, ok := response["stackDepth"].(int); !ok || depth != 2 {
 					t.Fatalf("stepIn did not apply the run_info register: %#v", response["stackDepth"])
-				}
-				return nil
-			},
-		},
-		{
-			name:    "resumeIgnoreBreakpoints",
-			routine: procCntExit,
-			thin:    []string{"go_ora.Out(size=4000)"},
-			script:  func(d *oracleDebugCallDriver) { d.scriptOut(procCntExit, 0, " reason = 15") },
-			run: func(t *testing.T, p *plDebugSession) error {
-				response, err := p.resumeIgnoreBreakpoints()
-				if err != nil {
-					return err
-				}
-				if terminated, ok := response["terminated"].(bool); !ok || !terminated {
-					t.Fatalf("resumeIgnoreBreakpoints did not terminate the session: %#v", response["terminated"])
 				}
 				return nil
 			},
@@ -4551,4 +4544,140 @@ func TestPLDebugIsProgramNameRejectsKeywords(t *testing.T) {
 				testCase.name, testCase.text, got, testCase.want)
 		}
 	}
+}
+
+// TestPLDebugResumeIgnoreBreakpointsDisablesAndRestores pins the redesigned
+// run-to-the-end path. The helper's DBX_CNT_EXIT cannot end its loop on this
+// architecture: it steps with CONTINUE(break_next_line), whose terminal reason is
+// reason_knl_exit (25) and never reason_exit (15) -- measured on 19c EE, the loop kept
+// continuing a finished program until the agent's guard abandoned the connection after
+// 30s. The agent therefore disables the armed breakpoints for the run, drives the
+// ordinary break_any_return continue, and puts exactly the breakpoints it disabled back
+// when the program did not finish.
+func TestPLDebugResumeIgnoreBreakpointsDisablesAndRestores(t *testing.T) {
+	const terminatingFields = " run_info.breakpoint = , run_info.stackdepth = 1, run_info.reason = %d, run_info.programname = PRO1, run_info.programowner = CHZ"
+
+	// markDebuggeeFinished simulates what runTarget's finishTarget does on the real
+	// pool once the program's own statement returns: the session learns the debuggee
+	// ended while the debugger call that reported it is being answered.
+	markDebuggeeFinished := func(session *plDebugSession, routine string) func(string) {
+		return func(answer string) {
+			if answer != routine {
+				return
+			}
+			session.mu.Lock()
+			session.terminated = true
+			session.mu.Unlock()
+		}
+	}
+
+	disableCalls := func(driver *oracleDebugCallDriver) []string {
+		numbers := []string{}
+		for _, call := range driver.recordedCalls() {
+			if call.routine == procDisableBreakpoint && len(call.inValues) > 0 {
+				numbers = append(numbers, call.inValues[0])
+			}
+		}
+		return numbers
+	}
+	enableCalls := func(driver *oracleDebugCallDriver) []string {
+		numbers := []string{}
+		for _, call := range driver.recordedCalls() {
+			if call.routine == procEnableBreakpoint && len(call.inValues) > 0 {
+				numbers = append(numbers, call.inValues[0])
+			}
+		}
+		return numbers
+	}
+
+	t.Run("an armed breakpoint is disabled, the finished program is not restored", func(t *testing.T) {
+		db, driver := openOracleDebugCallTestDB(t)
+		session := newPLDebugCallSession(db, false)
+		session.breakpoints = []plDebugBreakpoint{{BreakpointNbr: 7}}
+		driver.scriptOut(procDisableBreakpoint, 1, plDebugErrSuccess)
+		driver.scriptOut(procCntNextBreakpoint, 0, plDebugErrSuccess)
+		driver.scriptOut(procCntNextBreakpoint, 1, fmt.Sprintf(terminatingFields, plDebugReasonKnlExit))
+		driver.onExec = markDebuggeeFinished(session, procCntNextBreakpoint)
+
+		response, err := session.resumeIgnoreBreakpoints()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if terminated, _ := response["terminated"].(bool); !terminated {
+			t.Fatalf("resumeIgnoreBreakpoints did not report the finished program: %#v", response)
+		}
+		if got := disableCalls(driver); len(got) != 1 || got[0] != "7" {
+			t.Fatalf("disabled breakpoints = %v, want [7]", got)
+		}
+		if got := enableCalls(driver); len(got) != 0 {
+			t.Fatalf("a finished program must not have breakpoints re-enabled: %v", got)
+		}
+	})
+
+	t.Run("a breakpoint the client disabled is left alone", func(t *testing.T) {
+		db, driver := openOracleDebugCallTestDB(t)
+		session := newPLDebugCallSession(db, false)
+		session.breakpoints = []plDebugBreakpoint{{BreakpointNbr: 7}, {BreakpointNbr: 8}}
+		session.breakpointDisabled = map[int]bool{7: true}
+		driver.scriptOut(procDisableBreakpoint, 1, plDebugErrSuccess)
+		driver.scriptOut(procCntNextBreakpoint, 0, plDebugErrSuccess)
+		driver.scriptOut(procCntNextBreakpoint, 1, fmt.Sprintf(terminatingFields, plDebugReasonKnlExit))
+		driver.onExec = markDebuggeeFinished(session, procCntNextBreakpoint)
+
+		if _, err := session.resumeIgnoreBreakpoints(); err != nil {
+			t.Fatal(err)
+		}
+		if got := disableCalls(driver); len(got) != 1 || got[0] != "8" {
+			t.Fatalf("disabled breakpoints = %v, want only the armed [8]", got)
+		}
+		if session.breakpointDisabled[7] != true {
+			t.Fatal("the client-disabled breakpoint lost its disabled state")
+		}
+	})
+
+	t.Run("a breakpoint that could not be disabled stops the run and is restored", func(t *testing.T) {
+		db, driver := openOracleDebugCallTestDB(t)
+		session := newPLDebugCallSession(db, false)
+		session.breakpoints = []plDebugBreakpoint{{BreakpointNbr: 7}}
+		driver.scriptOut(procDisableBreakpoint, 1, plDebugErrSuccess)
+		driver.scriptOut(procCntNextBreakpoint, 0, plDebugErrSuccess)
+		driver.scriptOut(procCntNextBreakpoint, 1,
+			" run_info.breakpoint = 7, run_info.stackdepth = 1, run_info.reason = 3, run_info.programname = PRO1, run_info.programowner = CHZ")
+		driver.scriptOut(procEnableBreakpoint, 1, plDebugErrSuccess)
+
+		response, err := session.resumeIgnoreBreakpoints()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if terminated, _ := response["terminated"].(bool); terminated {
+			t.Fatalf("a breakpoint stop must not report a finished program: %#v", response)
+		}
+		if message, _ := response["message"].(string); !strings.Contains(message, "断点") {
+			t.Fatalf("the breakpoint stop carries no explanation: %#v", response["message"])
+		}
+		if got := enableCalls(driver); len(got) != 1 || got[0] != "7" {
+			t.Fatalf("re-enabled breakpoints = %v, want [7]", got)
+		}
+	})
+
+	t.Run("a server that refuses to disable keeps the run honest", func(t *testing.T) {
+		db, driver := openOracleDebugCallTestDB(t)
+		session := newPLDebugCallSession(db, false)
+		session.breakpoints = []plDebugBreakpoint{{BreakpointNbr: 7}}
+		driver.scriptOut(procDisableBreakpoint, 1, plDebugErrCapabilityUnavailable)
+		driver.scriptOut(procCntNextBreakpoint, 0, plDebugErrSuccess)
+		driver.scriptOut(procCntNextBreakpoint, 1,
+			" run_info.breakpoint = 7, run_info.stackdepth = 1, run_info.reason = 3, run_info.programname = PRO1, run_info.programowner = CHZ")
+
+		response, err := session.resumeIgnoreBreakpoints()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if terminated, _ := response["terminated"].(bool); terminated {
+			t.Fatalf("an un-disableable breakpoint stop must not report a finished program: %#v", response)
+		}
+		if got := enableCalls(driver); len(got) != 0 {
+			t.Fatalf("nothing was disabled, so nothing may be re-enabled: %v", got)
+		}
+	})
 }

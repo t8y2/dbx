@@ -3244,6 +3244,10 @@ export default withEnglishFallback({
     hualongDescription: "🐉 Relay model sumber resmi untuk developer AI berat! Seri Codex dan Claude 100% asli dengan penagihan berbasis token yang dapat diverifikasi, kontrak enterprise, dan invoicing.\n🎉Daftar dengan kode promo DBX&HUALONG untuk kredit gratis $1!",
     aicodemirrorDescription: "⚡ AICodeMirror menghadirkan konkurensi tingkat enterprise, invoicing cepat, dan dukungan khusus 7×24; pengguna baru mendapat kredit gratis ¥8 plus diskon 20% untuk top up pertama.",
     astraflowDescription: "AstraFlow dari UCloud menyediakan akses ke lebih dari 200 model AI populer dengan satu API key, kompatibel dengan API OpenAI.",
+    astraflowSponsored: "Kredit gratis ¥50",
+    hiapiSponsored: "200 Credits gratis",
+    hiapiDescription:
+      "HiAPI adalah platform API untuk developer dengan model gambar, video, audio, dan teks; model teks menggunakan endpoint yang kompatibel dengan OpenAI, sementara Remote MCP dan Agent Skills menghubungkan akun yang sama ke Claude Code, Cursor, dan agen coding lainnya.\n🎁 Pengguna baru mendapat 200 Credits saat mendaftar dan hingga 12% Credits ekstra pada top-up pertama.",
     visitPartner: "Kunjungi situs web mitra",
     getApiKey: "Dapatkan API key",
     defaultModel: "Model Default",

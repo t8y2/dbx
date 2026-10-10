@@ -3195,6 +3195,10 @@ export default withEnglishFallback({
     hualongDescription: "🐉 Relay de modelos com fonte oficial para desenvolvedores de IA intensivos! Série Codex/Claude 100% oficial, faturamento por token verificável, contratos e notas fiscais. \n🎉Cadastre-se com o código promocional DBX&HUALONG e ganhe US$ 1 de crédito!",
     aicodemirrorDescription: "⚡ AICodeMirror oferece concorrência de nível corporativo, faturamento rápido e suporte dedicado 7×24; novos usuários ganham ¥8 de crédito gratuito e 20% de desconto na primeira recarga.",
     astraflowDescription: "O AstraFlow da UCloud oferece acesso a mais de 200 modelos populares de IA com uma única chave de API e é compatível com a API da OpenAI.",
+    astraflowSponsored: "¥50 de crédito grátis",
+    hiapiSponsored: "200 Credits grátis",
+    hiapiDescription:
+      "A HiAPI é uma plataforma de API para desenvolvedores com modelos de imagem, vídeo, áudio e texto; os modelos de texto usam endpoints compatíveis com OpenAI, e o Remote MCP e as Agent Skills conectam a mesma conta ao Claude Code, Cursor e outros agentes de código.\n🎁 Novos usuários recebem 200 Credits no cadastro e até 12% de Credits extras na primeira recarga.",
     visitPartner: "Visitar site do parceiro",
     getApiKey: "Obter chave de API",
     defaultModel: "Modelo padrão",

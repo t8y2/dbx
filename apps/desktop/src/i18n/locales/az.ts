@@ -2943,6 +2943,10 @@ export default withEnglishFallback({
       "🐉 AI ilə intensiv işləyən tərtibatçılar üçün rəsmi mənbəli model vasitəçisi! Yoxlanıla bilən token səviyyəli hesablaşma, müəssisə müqavilələri və hesab-fakturalarla 100% orijinal Codex və Claude seriyaları.\n🎉$1 pulsuz kredit üçün DBX&HUALONG promo kodu ilə qeydiyyatdan keçin!",
     aicodemirrorDescription: "⚡ AICodeMirror korporativ səviyyəli yüksək paralellik, sürətli faktura və 7×24 xüsusi dəstək təklif edir; yeni istifadəçilər ¥8 pulsuz kredit və ilk dolduruşda 20% endirim qazanır.",
     astraflowDescription: "UCloud-un AstraFlow platforması bir API açarı ilə 200-dən çox populyar süni intellekt modelinə çıxış verir və OpenAI API ilə uyğundur.",
+    astraflowSponsored: "¥50 pulsuz kredit",
+    hiapiSponsored: "200 pulsuz Credits",
+    hiapiDescription:
+      "HiAPI; şəkil, video, səs və mətn modelləri üçün tərtibatçı yönümlü API platformasıdır. Mətn modelləri OpenAI ilə uyğun uç nöqtələrdən istifadə edir, Remote MCP və Agent Skills isə eyni hesabı Claude Code, Cursor və digər kodlaşdırma agentlərinə qoşur.\n🎁 Yeni istifadəçilər qeydiyyatda 200 Credits, ilk dolduruşda isə 12%-ə qədər əlavə Credits qazanır.",
     visitPartner: "Tərəfdaşın saytına keç",
     getApiKey: "API açarı əldə et",
     defaultModel: "Standart model",

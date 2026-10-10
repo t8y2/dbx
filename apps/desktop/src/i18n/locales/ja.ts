@@ -3218,6 +3218,10 @@ export default withEnglishFallback({
     hualongDescription: "🐉 ヘビーなAI開発者のための公式直結リレー！Codex/Claudeシリーズは100%公式ソース、トークン単位の明細検証、法人契約・請求書対応。\n🎉プロモコード DBX&HUALONG で登録すると$1クレジット進呈！",
     aicodemirrorDescription: "⚡ AICodeMirror はエンタープライズ級の高同時実行、迅速なインボイス発行、7×24 の専任サポートを提供。新規ユーザーは 8 元の無料クレジットと初回チャージ 20% オフを獲得できます。",
     astraflowDescription: "UCloud の AstraFlow は、1 つの API キーで 200 以上の主要 AI モデルを利用できる、OpenAI API 互換のプラットフォームです。",
+    astraflowSponsored: "50元無料クレジット",
+    hiapiSponsored: "登録で200 Credits進呈",
+    hiapiDescription:
+      "HiAPI は画像・動画・音声・テキストモデル向けの開発者向け API プラットフォームです。テキストモデルは OpenAI 互換エンドポイントを提供し、Remote MCP と Agent Skills で Claude Code や Cursor などのコーディングエージェントに接続できます。\n🎁 新規登録で 200 Credits を進呈、初回チャージで最大 12% の Credits を追加プレゼント。",
     visitPartner: "パートナーサイトを開く",
     getApiKey: "APIキーを取得",
     defaultModel: "デフォルトモデル",

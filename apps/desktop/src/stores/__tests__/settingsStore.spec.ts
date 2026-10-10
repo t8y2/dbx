@@ -1268,9 +1268,10 @@ describe("settingsStore AI API key normalization", () => {
       apiStyle: "completions",
       authMethod: "bearer",
       requiresApiKey: true,
-      websiteUrl: "https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx",
+      websiteUrl: "https://www.ucloud.cn/site/active/astraflow-credit?ytag=geo_waituo_dbx",
       apiKeyUrl: "https://console.ucloud.cn/modelverse/experience/api-keys",
       descriptionKey: "ai.astraflowDescription",
+      badgeKey: "ai.astraflowSponsored",
     });
     expect(preset.models ?? []).toEqual([]);
     expect(normalizeAiConfig(preset)).toMatchObject({
@@ -1287,6 +1288,31 @@ describe("settingsStore AI API key normalization", () => {
     expect(getAiProviderPresetId("openai-compatible", " HTTPS://API.MODELVERSE.CN/v1/ ")).toBe("astraflow");
     expect(getAiProviderPreset("openai-compatible", "https://example.com/v1")).toBe(AI_PROVIDER_PRESETS["openai-compatible"]);
     expect(getAiProviderPresetOption("hualong-ai").model).toBe("deepseek-v4.1-flash");
+  });
+
+  it("adds HiAPI as a sponsored partner preset", () => {
+    const preset = getAiProviderPresetOption("hiapi");
+
+    expect(AI_PROVIDER_PARTNER_PRESETS.find((candidate) => candidate.id === "hiapi")).toBe(preset);
+    expect(preset).toMatchObject({
+      id: "hiapi",
+      label: "HiAPI",
+      iconPath: "/icons/ai/hiapi.png",
+      group: "partner",
+      provider: "openai-compatible",
+      endpoint: "https://api.hiapi.ai/v1",
+      model: "",
+      models: [{ name: "glm-5.3" }, { name: "deepseek-v4-flash" }, { name: "deepseek-v4.1-flash" }, { name: "gpt-6-astra" }, { name: "claude-sonnet-4-6" }, { name: "kimi-k3" }],
+      apiStyle: "completions",
+      authMethod: "bearer",
+      requiresApiKey: true,
+      websiteUrl: "https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=ai-provider",
+      apiKeyUrl: "https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=ai-provider",
+      descriptionKey: "ai.hiapiDescription",
+      badgeKey: "ai.hiapiSponsored",
+    });
+    expect(getAiProviderPreset("openai-compatible", "https://api.hiapi.ai/v1")).toBe(preset);
+    expect(getAiProviderPresetId("openai-compatible", " HTTPS://API.HIAPI.AI/v1/ ")).toBe("hiapi");
   });
 
   it("uses the mainland MiniMax endpoint only for new zh-CN presets", () => {

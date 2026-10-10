@@ -3146,6 +3146,10 @@ export default withEnglishFallback({
     hualongDescription: "🐉 헤비 AI 개발자를 위한 공식 직결 릴레이! Codex/Claude 시리즈 100% 공식 소스, 토큰 단위 명세 검증, 기업 계약 및 인보이스 지원. \n🎉프로모 코드 DBX&HUALONG 로 가입하면 $1 크레딧 증정!",
     aicodemirrorDescription: "⚡ AICodeMirror는 기업급 동시 처리, 빠른 세금계산서 발급, 7×24 전담 기술 지원을 제공합니다. 신규 사용자는 8위안 무료 크레딧과 첫 충전 20% 할인을 받습니다.",
     astraflowDescription: "UCloud의 AstraFlow는 하나의 API 키로 200개 이상의 주요 AI 모델을 이용할 수 있는 OpenAI API 호환 플랫폼입니다.",
+    astraflowSponsored: "50위안 무료 크레딧",
+    hiapiSponsored: "가입 시 200 Credits 증정",
+    hiapiDescription:
+      "HiAPI는 이미지·비디오·오디오·텍스트 모델을 위한 개발자 중심 API 플랫폼입니다. 텍스트 모델은 OpenAI 호환 엔드포인트를 제공하며, Remote MCP와 Agent Skills로 Claude Code, Cursor 등 코딩 에이전트에 연결할 수 있습니다.\n🎁 신규 가입 시 200 Credits를 증정하고, 첫 충전 시 최대 12% 추가 Credits를 제공합니다.",
     visitPartner: "파트너 웹사이트 방문",
     getApiKey: "API 키 받기",
     defaultModel: "기본 모델",

@@ -2917,6 +2917,10 @@ export default withEnglishFallback({
     hualongDescription: "🐉 Yoğun yapay zekâ geliştiricileri için resmî kaynak aktarıcı! Codex/Claude serisi %100 resmî kaynak, doğrulanabilir belirteç düzeyinde fatura, kurumsal sözleşme ve fatura. \n🎉DBX&HUALONG promosyon koduyla kayıt olun, 1$ kredi kazanın!",
     aicodemirrorDescription: "⚡ AICodeMirror, kurumsal düzeyde eşzamanlılık, hızlı faturalandırma ve 7×24 özel destek sunar; yeni kullanıcılar ¥8 ücretsiz kredi ve ilk yüklemede %20 indirim kazanır.",
     astraflowDescription: "UCloud'un AstraFlow platformu, tek bir API anahtarıyla 200'den fazla popüler yapay zekâ modeline erişim sağlar ve OpenAI API ile uyumludur.",
+    astraflowSponsored: "¥50 ücretsiz kredi",
+    hiapiSponsored: "200 ücretsiz Credits",
+    hiapiDescription:
+      "HiAPI; görsel, video, ses ve metin modelleri için geliştirici odaklı bir API platformudur. Metin modelleri OpenAI uyumlu uç noktalar kullanır; Remote MCP ve Agent Skills aynı hesabı Claude Code, Cursor ve diğer kodlama ajanlarına bağlar.\n🎁 Yeni kullanıcılara kayıtta 200 Credits, ilk yüklemede ise %12'ye kadar ek Credits verilir.",
     visitPartner: "İş ortağının web sitesini ziyaret et",
     getApiKey: "API anahtarı al",
     defaultModel: "Varsayılan Model",

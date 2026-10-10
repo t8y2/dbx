@@ -2,7 +2,7 @@
 //! The wire protocol remains UTF8. ISO-8859-1 here is the byte carrier, not
 //! Windows-1252 (in particular, bytes 0x80..0x9f must round-trip unchanged).
 use bytes::BytesMut;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -32,7 +32,7 @@ impl TextEncoding {
         }
     }
 
-    pub fn decode(self, text: &str) -> Result<String, String> {
+    fn decode_strict(self, text: &str) -> Result<String, String> {
         if text.is_ascii() {
             return Ok(text.to_owned());
         }
@@ -45,6 +45,20 @@ impl TextEncoding {
             .decode_without_bom_handling_and_without_replacement(&bytes)
             .map(|s| s.into_owned())
             .ok_or_else(|| format!("Invalid {} bytes in PostgreSQL legacy text", self.0.name()))
+    }
+
+    // Reading a legacy database must tolerate mixed or byte-masked values.
+    // Preserve the complete original carrier when conversion is impossible;
+    // replacement characters would irreversibly discard the original bytes.
+    pub fn decode(self, text: &str) -> Result<String, String> {
+        Ok(self.decode_for_read(text).0)
+    }
+
+    fn decode_for_read(self, text: &str) -> (String, bool) {
+        match self.decode_strict(text) {
+            Ok(decoded) => (decoded, false),
+            Err(_) => (text.to_owned(), true),
+        }
     }
 
     pub fn encode(self, text: &str) -> Result<String, String> {
@@ -199,44 +213,79 @@ impl TextEncoding {
     }
 
     fn transform(self, ty: &Type, raw: &[u8], encode: bool) -> Result<Vec<u8>, String> {
+        self.transform_with_status(ty, raw, encode, &mut false)
+    }
+
+    fn transform_with_status(
+        self,
+        ty: &Type,
+        raw: &[u8],
+        encode: bool,
+        fallback: &mut bool,
+    ) -> Result<Vec<u8>, String> {
         match ty.kind() {
-            Kind::Domain(inner) => return self.transform(inner, raw, encode),
-            Kind::Array(inner) => return self.transform_array(inner, raw, encode),
-            Kind::Enum(_) => return self.transform_text(raw, encode),
+            Kind::Domain(inner) => return self.transform_with_status(inner, raw, encode, fallback),
+            Kind::Array(inner) => return self.transform_array(inner, raw, encode, fallback),
+            Kind::Enum(_) => return self.transform_text(raw, encode, fallback),
             _ => {}
         }
         if *ty == Type::JSON {
-            return self.transform_json(raw, encode);
+            return self.transform_json_with_status(raw, encode, fallback);
         }
         if matches!(*ty, Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN) {
-            return self.transform_text(raw, encode);
+            return self.transform_text(raw, encode, fallback);
         }
         if *ty == Type::JSONB {
             let Some((&1, value)) = raw.split_first() else {
                 return Err("Invalid PostgreSQL jsonb version".into());
             };
             let mut result = vec![1];
-            result.extend(self.transform_json(value, encode)?);
+            result.extend(self.transform_json_with_status(value, encode, fallback)?);
             return Ok(result);
         }
         Ok(raw.to_vec())
     }
 
     fn transform_json(self, raw: &[u8], encode: bool) -> Result<Vec<u8>, String> {
-        fn visit(codec: TextEncoding, value: &mut serde_json::Value, encode: bool) -> Result<(), String> {
-            let text = |s: &str| if encode { codec.encode(s) } else { codec.decode(s) };
+        self.transform_json_with_status(raw, encode, &mut false)
+    }
+
+    fn transform_json_with_status(self, raw: &[u8], encode: bool, fallback: &mut bool) -> Result<Vec<u8>, String> {
+        fn visit(
+            codec: TextEncoding,
+            value: &mut serde_json::Value,
+            encode: bool,
+            fallback: &mut bool,
+        ) -> Result<(), String> {
+            let text = |s: &str, fallback: &mut bool| {
+                if encode {
+                    codec.encode(s)
+                } else {
+                    let (decoded, preserved) = codec.decode_for_read(s);
+                    *fallback |= preserved;
+                    Ok(decoded)
+                }
+            };
             match value {
-                serde_json::Value::String(s) => *s = text(s)?,
+                serde_json::Value::String(s) => *s = text(s, fallback)?,
                 serde_json::Value::Array(values) => {
                     for v in values {
-                        visit(codec, v, encode)?;
+                        visit(codec, v, encode, fallback)?;
                     }
                 }
                 serde_json::Value::Object(object) => {
+                    let keys = object.keys().map(|key| text(key, fallback)).collect::<Result<Vec<_>, _>>()?;
+                    let mut seen = HashSet::new();
+                    if !encode && keys.iter().any(|key| !seen.insert(key)) {
+                        // Keep the entire original object if decoded and
+                        // preserved keys collide; never discard a JSON member.
+                        *fallback = true;
+                        return Ok(());
+                    }
                     let mut result = serde_json::Map::new();
-                    for (key, mut value) in std::mem::take(object) {
-                        visit(codec, &mut value, encode)?;
-                        result.insert(text(&key)?, value);
+                    for ((_, mut value), key) in std::mem::take(object).into_iter().zip(keys) {
+                        visit(codec, &mut value, encode, fallback)?;
+                        result.insert(key, value);
                     }
                     *object = result;
                 }
@@ -245,16 +294,21 @@ impl TextEncoding {
             Ok(())
         }
         let mut value = serde_json::from_slice(raw).map_err(|e| e.to_string())?;
-        visit(self, &mut value, encode)?;
+        visit(self, &mut value, encode, fallback)?;
         serde_json::to_vec(&value).map_err(|e| e.to_string())
     }
 
-    fn transform_text(self, raw: &[u8], encode: bool) -> Result<Vec<u8>, String> {
+    fn transform_text(self, raw: &[u8], encode: bool, fallback: &mut bool) -> Result<Vec<u8>, String> {
         let text = std::str::from_utf8(raw).map_err(|_| "Invalid UTF-8 in PostgreSQL text protocol")?;
-        Ok(if encode { self.encode(text)? } else { self.decode(text)? }.into_bytes())
+        if encode {
+            return Ok(self.encode(text)?.into_bytes());
+        }
+        let (decoded, preserved) = self.decode_for_read(text);
+        *fallback |= preserved;
+        Ok(decoded.into_bytes())
     }
 
-    fn transform_array(self, inner: &Type, raw: &[u8], encode: bool) -> Result<Vec<u8>, String> {
+    fn transform_array(self, inner: &Type, raw: &[u8], encode: bool, fallback: &mut bool) -> Result<Vec<u8>, String> {
         fn int(raw: &[u8], pos: &mut usize) -> Result<i32, String> {
             let end = pos.checked_add(4).ok_or("Invalid PostgreSQL array length")?;
             let bytes = raw.get(*pos..end).ok_or("Truncated PostgreSQL array")?;
@@ -292,7 +346,7 @@ impl TextEncoding {
                 .ok_or("Invalid PostgreSQL array element")?;
             let bytes = raw.get(pos..end).ok_or("Truncated PostgreSQL array element")?;
             pos = end;
-            let value = self.transform(inner, bytes, encode)?;
+            let value = self.transform_with_status(inner, bytes, encode, fallback)?;
             result
                 .extend(i32::try_from(value.len()).map_err(|_| "PostgreSQL array element is too large")?.to_be_bytes());
             result.extend(value);
@@ -387,13 +441,23 @@ pub struct Row {
     // per-row Vec<String> would tax every result row of every ordinary query.
     names: Option<Vec<String>>,
     values: Option<Vec<Option<Vec<u8>>>>,
+    encoding_fallback: bool,
 }
 impl Row {
     pub(crate) fn new(original: tokio_postgres::Row, encoding: Option<TextEncoding>) -> Result<Self, PgError> {
+        let mut encoding_fallback = false;
         let (names, values) = match encoding {
             None => (None, None),
             Some(e) => {
-                let names = original.columns().iter().map(|c| e.decode(c.name())).collect::<Result<_, _>>()?;
+                let names = original
+                    .columns()
+                    .iter()
+                    .map(|c| {
+                        let (name, preserved) = e.decode_for_read(c.name());
+                        encoding_fallback |= preserved;
+                        name
+                    })
+                    .collect();
                 let values = Some(
                     original
                         .columns()
@@ -404,14 +468,17 @@ impl Row {
                                 return Ok(None);
                             }
                             let value: Option<Raw> = original.try_get(i)?;
-                            value.map(|raw| e.transform(c.type_(), &raw.0, false)).transpose().map_err(PgError::from)
+                            value
+                                .map(|raw| e.transform_with_status(c.type_(), &raw.0, false, &mut encoding_fallback))
+                                .transpose()
+                                .map_err(PgError::from)
                         })
                         .collect::<Result<_, PgError>>()?,
                 );
                 (Some(names), values)
             }
         };
-        Ok(Self { original, names, values })
+        Ok(Self { original, names, values, encoding_fallback })
     }
     pub fn columns(&self) -> &[tokio_postgres::Column] {
         self.original.columns()
@@ -499,20 +566,58 @@ impl Statement for tokio_postgres::Statement {
     }
 }
 
+type WarningBuffer = Arc<Mutex<Vec<crate::types::QueryMessage>>>;
+const FALLBACK_WARNING_CODE: &str = "DBX_PG_TEXT_ENCODING_FALLBACK";
+
+fn report_encoding_fallback(buffer: Option<&WarningBuffer>, encoding: Option<TextEncoding>) {
+    let (Some(buffer), Some(encoding)) = (buffer, encoding) else {
+        return;
+    };
+    let mut messages = buffer.lock().unwrap_or_else(|e| e.into_inner());
+    if messages.iter().any(|m| m.code.as_deref() == Some(FALLBACK_WARNING_CODE)) {
+        return;
+    }
+    messages.push(crate::types::QueryMessage {
+        severity: "WARNING".into(),
+        code: Some(FALLBACK_WARNING_CODE.into()),
+        message: format!("Some text could not be decoded as {}; original text was retained without conversion.", encoding.0.name()),
+        detail: None,
+        hint: Some("Check mixed encodings or masking that splits multibyte characters. Valid values are still decoded normally.".into()),
+    });
+}
+
 pub struct Client<'a> {
     original: &'a deadpool_postgres::Client,
     pub(crate) encoding: Option<TextEncoding>,
+    warning_buffer: Option<WarningBuffer>,
 }
 impl<'a> Client<'a> {
     pub fn new(original: &'a deadpool_postgres::Client) -> Self {
-        Self { original, encoding: for_client(original) }
+        let encoding = for_client(original);
+        let warning_buffer = encoding.and_then(|_| crate::postgres::postgres_query_message_buffer(original));
+        Self { original, encoding, warning_buffer }
     }
     pub fn encode(&self, text: &str) -> Result<String, PgError> {
         self.encoding.map_or_else(|| Ok(text.into()), |e| e.encode_sql(text).map_err(Into::into))
     }
     pub fn decode(&self, text: &str) -> Result<String, PgError> {
-        self.encoding.map_or_else(|| Ok(text.into()), |e| e.decode(text).map_err(Into::into))
+        let Some(encoding) = self.encoding else {
+            return Ok(text.into());
+        };
+        let (decoded, preserved) = encoding.decode_for_read(text);
+        if preserved {
+            report_encoding_fallback(self.warning_buffer.as_ref(), self.encoding);
+        }
+        Ok(decoded)
     }
+    fn row(&self, original: tokio_postgres::Row) -> Result<Row, PgError> {
+        let row = Row::new(original, self.encoding)?;
+        if row.encoding_fallback {
+            report_encoding_fallback(self.warning_buffer.as_ref(), self.encoding);
+        }
+        Ok(row)
+    }
+
     async fn statement<T: Statement + ?Sized>(&self, stmt: &T) -> Result<tokio_postgres::Statement, PgError> {
         if let Some(stmt) = stmt.prepared() {
             return Ok(stmt.clone());
@@ -536,7 +641,7 @@ impl<'a> Client<'a> {
         let stmt = self.statement(sql).await?;
         let params = self.params(params);
         let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as _).collect();
-        self.original.query(&stmt, &refs).await?.into_iter().map(|row| Row::new(row, self.encoding)).collect()
+        self.original.query(&stmt, &refs).await?.into_iter().map(|row| self.row(row)).collect()
     }
     pub async fn query_one<T: Statement + ?Sized>(
         &self,
@@ -546,7 +651,7 @@ impl<'a> Client<'a> {
         let stmt = self.statement(sql).await?;
         let params = self.params(params);
         let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as _).collect();
-        Row::new(self.original.query_one(&stmt, &refs).await?, self.encoding)
+        self.row(self.original.query_one(&stmt, &refs).await?)
     }
     pub async fn query_opt<T: Statement + ?Sized>(
         &self,
@@ -556,7 +661,7 @@ impl<'a> Client<'a> {
         let stmt = self.statement(sql).await?;
         let params = self.params(params);
         let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as _).collect();
-        self.original.query_opt(&stmt, &refs).await?.map(|row| Row::new(row, self.encoding)).transpose()
+        self.original.query_opt(&stmt, &refs).await?.map(|row| self.row(row)).transpose()
     }
     pub async fn execute<T: Statement + ?Sized>(
         &self,
@@ -573,19 +678,14 @@ impl<'a> Client<'a> {
             params.iter().map(|(inner, _)| Param { inner: *inner, encoding: self.encoding }).collect();
         let refs: Vec<_> =
             wrapped.iter().zip(params).map(|(p, (_, t))| (p as &(dyn ToSql + Sync), t.clone())).collect();
-        self.original
-            .query_typed(&self.encode(sql)?, &refs)
-            .await?
-            .into_iter()
-            .map(|r| Row::new(r, self.encoding))
-            .collect()
+        self.original.query_typed(&self.encode(sql)?, &refs).await?.into_iter().map(|r| self.row(r)).collect()
     }
     pub async fn query_typed_one(&self, sql: &str, params: &[(&(dyn ToSql + Sync), Type)]) -> Result<Row, PgError> {
         let wrapped: Vec<_> =
             params.iter().map(|(inner, _)| Param { inner: *inner, encoding: self.encoding }).collect();
         let refs: Vec<_> =
             wrapped.iter().zip(params).map(|(p, (_, t))| (p as &(dyn ToSql + Sync), t.clone())).collect();
-        Row::new(self.original.query_typed_one(&self.encode(sql)?, &refs).await?, self.encoding)
+        self.row(self.original.query_typed_one(&self.encode(sql)?, &refs).await?)
     }
     pub async fn execute_typed(&self, sql: &str, params: &[(&(dyn ToSql + Sync), Type)]) -> Result<u64, PgError> {
         let wrapped: Vec<_> =
@@ -609,7 +709,11 @@ impl<'a> Client<'a> {
         let stmt = self.statement(stmt).await?;
         let params: Vec<_> = params.into_iter().map(|inner| Param { inner, encoding: self.encoding }).collect();
         let stream = self.original.query_raw(&stmt, params.iter().map(|p| p as &(dyn ToSql + Sync))).await?;
-        Ok(RowStream { original: Box::pin(stream), encoding: self.encoding })
+        Ok(RowStream {
+            original: Box::pin(stream),
+            encoding: self.encoding,
+            warning_buffer: self.warning_buffer.clone(),
+        })
     }
     pub async fn query_typed_raw<'b, I>(&self, sql: &str, params: I) -> Result<RowStream, PgError>
     where
@@ -622,7 +726,11 @@ impl<'a> Client<'a> {
             .original
             .query_typed_raw(&self.encode(sql)?, params.iter().map(|(p, t)| (p as &(dyn ToSql + Sync), t.clone())))
             .await?;
-        Ok(RowStream { original: Box::pin(stream), encoding: self.encoding })
+        Ok(RowStream {
+            original: Box::pin(stream),
+            encoding: self.encoding,
+            warning_buffer: self.warning_buffer.clone(),
+        })
     }
 }
 impl std::ops::Deref for Client<'_> {
@@ -634,6 +742,7 @@ impl std::ops::Deref for Client<'_> {
 pub struct RowStream {
     original: std::pin::Pin<Box<tokio_postgres::RowStream>>,
     pub(crate) encoding: Option<TextEncoding>,
+    warning_buffer: Option<WarningBuffer>,
 }
 impl RowStream {
     pub fn columns(&self) -> &[tokio_postgres::Column] {
@@ -647,10 +756,16 @@ impl futures::Stream for RowStream {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let encoding = self.encoding;
-        self.original
-            .as_mut()
-            .poll_next(cx)
-            .map(|item| item.map(|r| r.map_err(PgError::from).and_then(|r| Row::new(r, encoding))))
+        let buffer = self.warning_buffer.clone();
+        self.original.as_mut().poll_next(cx).map(|item| {
+            item.map(|r| {
+                let row = Row::new(r.map_err(PgError::from)?, encoding)?;
+                if row.encoding_fallback {
+                    report_encoding_fallback(buffer.as_ref(), encoding);
+                }
+                Ok(row)
+            })
+        })
     }
 }
 
@@ -703,8 +818,9 @@ mod tests {
         let carrier: String = [0xd6, 0xd0, 0xce, 0xc4, 0x94, 0x39, 0xfc, 0x36].into_iter().map(char::from).collect();
         assert_eq!(codec.decode(&carrier).unwrap(), "中文😀");
         assert_eq!(codec.encode("中文😀").unwrap(), carrier);
-        assert!(codec.decode("café").is_err());
-        assert!(codec.decode("中文").is_err());
+        assert!(codec.decode_strict("café").is_err());
+        assert_eq!(codec.decode_for_read("café"), ("café".into(), true));
+        assert_eq!(codec.decode_for_read("中文"), ("中文".into(), true));
         let utf8 = TextEncoding(encoding_rs::UTF_8);
         assert_eq!(utf8.decode(&utf8.encode("中文\u{80}").unwrap()).unwrap(), "中文\u{80}");
     }
@@ -716,6 +832,32 @@ mod tests {
         let encoded = codec.transform_json(&serde_json::to_vec(&value).unwrap(), true).unwrap();
         let decoded = codec.transform_json(&encoded, false).unwrap();
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(), value);
+    }
+
+    #[test]
+    fn invalid_read_values_are_preserved_without_replacement_or_json_key_loss() {
+        let codec = TextEncoding(encoding_rs::GB18030);
+        let masked = "Õ*****";
+        assert_eq!(codec.decode_for_read(masked), (masked.into(), true));
+        let raw = serde_json::json!({"items": [codec.encode("中文").unwrap(), masked, "café", null]});
+        let mut fallback = false;
+        let decoded =
+            codec.transform_json_with_status(&serde_json::to_vec(&raw).unwrap(), false, &mut fallback).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(),
+            serde_json::json!({"items":["中文",masked,"café",null]})
+        );
+        assert!(fallback);
+        let mut object = serde_json::Map::new();
+        object.insert("é".into(), serde_json::json!(1));
+        object.insert(codec.encode("é").unwrap(), serde_json::json!(2));
+        let original = serde_json::Value::Object(object);
+        fallback = false;
+        let decoded =
+            codec.transform_json_with_status(&serde_json::to_vec(&original).unwrap(), false, &mut fallback).unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(), original);
+        assert!(fallback);
+        assert!(TextEncoding(encoding_rs::GBK).encode("😀").is_err());
     }
 
     #[test]

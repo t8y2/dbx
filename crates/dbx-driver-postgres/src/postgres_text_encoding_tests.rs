@@ -136,8 +136,10 @@ async fn legacy_encoding_live_read_filter_write_metadata_and_export() {
     let columns = get_columns(&pool, &schema, "中文表").await.unwrap();
     assert_eq!(columns[0].name, "中文列");
     assert_eq!(columns[0].comment.as_deref(), Some("中文注释"));
-    let error = execute_query(&pool, "SELECT 'caf'||chr(233)").await.unwrap_err();
-    assert!(error.contains("Invalid gb18030 bytes"), "{error}");
+    let retained = execute_query(&pool, "SELECT 'caf'||chr(233)").await.unwrap();
+    assert_eq!(retained.rows[0][0], "café");
+    assert_eq!(retained.messages.len(), 1);
+    assert_eq!(retained.messages[0].code.as_deref(), Some("DBX_PG_TEXT_ENCODING_FALLBACK"));
 
     let normal = connect_with_max_connections(&base, Duration::from_secs(5), 1).await.unwrap();
     let result = execute_query(&normal, "SELECT 'caf'||chr(233),current_setting('client_encoding')").await.unwrap();
@@ -157,4 +159,52 @@ async fn legacy_encoding_live_rejects_utf8_server_and_preserves_normal_utf8() {
     let configured = format!("{base}{sep}clientEncoding=GB18030&serverEncoding=ISO-8859-1");
     let error = connect(&configured, Duration::from_secs(5)).await.unwrap_err();
     assert!(error.contains("requires a LATIN1 database; server reports UTF8"), "{error}");
+}
+
+#[tokio::test]
+async fn legacy_encoding_live_masked_multibyte_value() {
+    let Ok(base) = std::env::var("DBX_TEST_POSTGRES_LATIN1_URL") else {
+        return;
+    };
+    let sep = if base.contains('?') { '&' } else { '?' };
+    let configured = format!("{base}{sep}clientEncoding=GB18030&serverEncoding=ISO-8859-1");
+    let pool = connect_with_max_connections(&configured, Duration::from_secs(5), 1).await.unwrap();
+    let sql = "SELECT convert_from(decode('d6d0cec4','hex'),'LATIN1') AS valid_text, \
+        left(convert_from(decode('d5c5c8fd','hex'),'LATIN1'),1)||'*****' AS masked_text";
+    let result = execute_query(&pool, sql).await.unwrap();
+    assert_eq!(result.rows[0], vec![serde_json::json!("中文"), serde_json::json!("Õ*****")]);
+    assert_eq!(result.messages.len(), 1);
+    assert_eq!(result.messages[0].severity, "WARNING");
+    assert_eq!(result.messages[0].code.as_deref(), Some("DBX_PG_TEXT_ENCODING_FALLBACK"));
+    assert!(!result.messages[0].message.contains("Õ*****"));
+    let repeated = execute_query(&pool, &format!("{sql} FROM generate_series(1,20)")).await.unwrap();
+    assert_eq!(repeated.rows.len(), 20);
+    assert_eq!(repeated.messages.len(), 1);
+    let client = checkout_postgres_client(&pool, None, Duration::from_secs(5)).await.unwrap();
+    let unnamed = execute_select_query_unnamed(&client, sql, Instant::now(), 10).await.unwrap();
+    assert_eq!(unnamed.rows[0], result.rows[0]);
+    assert_eq!(drain_postgres_notices(&client).await.len(), 1);
+    let text = execute_select_text(&client, sql, Instant::now(), 10, Some(vec!["text".into(), "text".into()]), None)
+        .await
+        .unwrap();
+    assert_eq!(text.rows[0], result.rows[0]);
+    assert_eq!(drain_postgres_notices(&client).await.len(), 1);
+    let encoded_client = EncodingClient::new(&client);
+    let mixed = encoded_client.query_one("SELECT ARRAY[convert_from(decode('d6d0cec4','hex'),'LATIN1'), chr(213)||'*****'], jsonb_build_array(convert_from(decode('d6d0cec4','hex'),'LATIN1'), chr(213)||'*****')", &[]).await.unwrap();
+    assert_eq!(mixed.try_get::<_, Vec<String>>(0).unwrap(), vec!["中文", "Õ*****"]);
+    assert_eq!(mixed.try_get::<_, serde_json::Value>(1).unwrap(), serde_json::json!(["中文", "Õ*****"]));
+    drop(client);
+    let clean = execute_query(&pool, "SELECT convert_from(decode('d6d0cec4','hex'),'LATIN1')").await.unwrap();
+    assert!(clean.messages.is_empty());
+    let bytes = execute_query(
+        &pool,
+        "SELECT encode(convert_to(left(convert_from(decode('d5c5c8fd','hex'),'LATIN1'),1)||'*****','LATIN1'),'hex')",
+    )
+    .await
+    .unwrap();
+    assert_eq!(bytes.rows[0][0], "d52a2a2a2a2a");
+    let normal = connect_with_max_connections(&base, Duration::from_secs(5), 1).await.unwrap();
+    let raw = execute_query(&normal, sql).await.unwrap();
+    assert_eq!(raw.rows[0], vec![serde_json::json!("ÖÐÎÄ"), serde_json::json!("Õ*****")]);
+    println!("Verified: masked d5 + stars is retained, valid Chinese is decoded, original bytes are unchanged");
 }

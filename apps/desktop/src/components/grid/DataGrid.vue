@@ -2298,6 +2298,7 @@ const {
   // Existing tab snapshots may still carry this field; new changes persist in the internal layout store.
   initialHiddenColumnKeys: computed(() => props.result.local_hidden_column_keys),
   hideNullColumns,
+  freezeFirstColumn: () => settingsStore.editorSettings.dataGridFreezeFirstColumn,
   onHideNullColumnsChange: (value) => settingsStore.updateEditorSettings({ dataGridHideNullColumns: value }),
   onRefreshMetrics: scheduleColumnLayoutRefresh,
 });
@@ -13408,8 +13409,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         freezeToColumn: t("grid.freezeToColumn"),
         freezeSelectedColumns: t("grid.freezeSelectedColumns", { count: selectedColumnCount }),
         freezeCurrentColumn: t("grid.freezeCurrentColumn"),
-        unfreezeCurrentColumn: t("grid.unfreezeCurrentColumn"),
-        unfreezeColumns: t("grid.unfreezeColumns", { count: frozenColumnCount.value }),
+        unfreezeCurrentColumn: t("grid.unfreezeCurrentColumn") + (settingsStore.editorSettings.dataGridFreezeFirstColumn ? ` (${t("grid.globalFirstColumnRemainsFrozen")})` : ""),
+        unfreezeColumns: t("grid.unfreezeColumns", { count: frozenColumnCount.value }) + (settingsStore.editorSettings.dataGridFreezeFirstColumn ? ` (${t("grid.globalFirstColumnRemainsFrozen")})` : ""),
         hideColumn: t("grid.hideColumn"),
         hideSelectedColumns: t("grid.hideSelectedColumns", { count: selectedColumnCount }),
         hideIdenticalColumns: identicalColumnCount > 0 ? t("grid.hideIdenticalColumnsCount", { count: identicalColumnCount }) : t("grid.hideIdenticalColumns"),

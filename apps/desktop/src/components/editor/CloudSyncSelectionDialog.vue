@@ -107,6 +107,7 @@ const editorSettingCategoryOverrides: Partial<Record<string, BackupSettingsCateg
   mongoViewMode: "data",
   dataGridMultiRowTranspose: "data",
   dataGridHideNullColumns: "data",
+  dataGridFreezeFirstColumn: "data",
   dataGridBooleanDisplayMode: "data",
   numericColumnRightAlign: "data",
   structureEditorDensity: "data",

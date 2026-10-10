@@ -106,15 +106,26 @@ fn protocol_error(error: ServiceError) -> ErrorData {
     }
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct StopArgs {
+    #[serde(default)]
+    confirm_interrupt: bool,
+}
+
 fn local_tools() -> Vec<Tool> {
     let schema: JsonObject =
         serde_json::from_value(json!({"type":"object","properties":{},"additionalProperties":false}))
             .expect("static schema");
-    [
+    let mut tools: Vec<_> = [
         ("dbx_codex_open", "Open the full local DBX workbench in the Codex browser panel. Works before first setup; returns a URL without credentials."),
         ("dbx_codex_status", "Check the local workbench version and whether database MCP is ready."),
     ].into_iter().map(|(name, description)| Tool::new(name, description, schema.clone())
-        .annotate(ToolAnnotations::new().read_only(true).destructive(false).idempotent(true).open_world(false))).collect()
+        .annotate(ToolAnnotations::new().read_only(true).destructive(false).idempotent(true).open_world(false))).collect();
+    tools.push(Tool::new("dbx_codex_stop", "Stop the shared local DBX workbench. May interrupt other clients, writes, imports or backups. Set confirm_interrupt=true only after the user explicitly authorizes interrupting all work. Persistent data is retained.",
+        serde_json::from_value::<JsonObject>(json!({"type":"object","properties":{"confirm_interrupt":{"type":"boolean","default":false}},"additionalProperties":false})).expect("static schema"))
+        .annotate(ToolAnnotations::new().read_only(false).destructive(true).idempotent(true).open_world(false)));
+    tools
 }
 
 impl ServerHandler for Gateway {
@@ -156,6 +167,25 @@ impl ServerHandler for Gateway {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if request.name == "dbx_codex_stop" {
+            let args: StopArgs = serde_json::from_value(json!(request.arguments.unwrap_or_default()))
+                .map_err(|_| ErrorData::invalid_params("Expected only confirm_interrupt: boolean", None))?;
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(5))
+                .build()
+                .map_err(|_| unavailable())?;
+            let response = client.post(self.handle.base_url.join("_codex/stop").map_err(|_| unavailable())?)
+                .bearer_auth(&self.token)
+                .json(&json!({"confirm_interrupt":args.confirm_interrupt,"instance_id":self.handle.instance_id}))
+                .send().await.map_err(|_| ErrorData::internal_error("Stop response was lost; shutdown was not retried. Check workbench status before taking further action.", None))?;
+            let is_error = !response.status().is_success();
+            let body: serde_json::Value = response.json().await.map_err(|_| unavailable())?;
+            let mut result = CallToolResult::structured(body);
+            result.is_error = Some(is_error);
+            return Ok(result.into());
+        }
         if matches!(request.name.as_ref(), "dbx_codex_open" | "dbx_codex_status") {
             if request.arguments.as_ref().is_some_and(|args| !args.is_empty()) {
                 return Err(ErrorData::invalid_params("This workbench tool takes no arguments", None));
@@ -164,6 +194,38 @@ impl ServerHandler for Gateway {
                 json!({"url":self.handle.base_url,"version":self.handle.version,"instance_id":self.handle.instance_id});
             if request.name == "dbx_codex_status" {
                 result["database_ready"] = json!(self.connect(context.peer.clone()).await.is_ok());
+                result["stop_requires_confirmation"] = json!(true);
+                result["activity_tracking"] = json!("unavailable");
+                if let Ok(client) = reqwest::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_secs(2))
+                    .build()
+                {
+                    if let Ok(response) = client
+                        .get(self.handle.base_url.join("_codex/status").map_err(|_| unavailable())?)
+                        .bearer_auth(&self.token)
+                        .send()
+                        .await
+                    {
+                        if response.status().is_success() {
+                            if let Ok(status) = response.json::<serde_json::Value>().await {
+                                if status["instance_id"] == self.handle.instance_id {
+                                    for key in [
+                                        "tracked_tasks",
+                                        "active_mcp_sessions",
+                                        "activity_tracking",
+                                        "stop_requires_confirmation",
+                                    ] {
+                                        if let Some(value) = status.get(key) {
+                                            result[key] = value.clone();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             return Ok(CallToolResult::structured(result).into());
         }

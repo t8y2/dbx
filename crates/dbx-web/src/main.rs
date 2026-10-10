@@ -1539,8 +1539,14 @@ async fn serve() -> Result<(), String> {
     );
     tracing::info!("DBX Web MCP endpoint is available at /mcp when enabled");
 
+    let server_shutdown = tokio_util::sync::CancellationToken::new();
     if let Some(lease) = &codex_runtime {
-        app = app.merge(codex::control_router(&lease.handle(), &lease.token()?)?);
+        app = app.merge(codex::control_router(
+            &lease.handle(),
+            &lease.token()?,
+            web_state.app.clone(),
+            server_shutdown.clone(),
+        )?);
     }
 
     let static_dir = std::env::var_os("DBX_STATIC_DIR").map(std::path::PathBuf::from);
@@ -1602,8 +1608,8 @@ async fn serve() -> Result<(), String> {
         tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address")
     };
     let shutdown_state = web_state.app.clone();
-    let server_shutdown = tokio_util::sync::CancellationToken::new();
     let server_shutdown_trigger = server_shutdown.clone();
+    let signal_backup_stop = backup_stop.clone();
     tokio::spawn(async move {
         #[cfg(unix)]
         {
@@ -1643,7 +1649,7 @@ async fn serve() -> Result<(), String> {
                 tracing::info!("Shutdown signal received (Ctrl+C)");
             }
         }
-        backup_stop.cancel();
+        signal_backup_stop.cancel();
         server_shutdown_trigger.cancel();
     });
 
@@ -1670,6 +1676,7 @@ async fn serve() -> Result<(), String> {
             tracing::warn!("Graceful HTTP shutdown timed out after 5s; proceeding with teardown");
         }
     }
+    backup_stop.cancel();
     if tokio::time::timeout(std::time::Duration::from_secs(5), backup_worker).await.is_err() {
         tracing::warn!("Scheduled backup worker did not drain within 5s; exiting with failure status");
         exit_code = 1;

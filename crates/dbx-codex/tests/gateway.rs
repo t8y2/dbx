@@ -187,8 +187,62 @@ async fn native_version_does_not_start_workbench() {
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path().join("unused-data");
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_dbx-codex"))
-        .arg("--version").env("DBX_CODEX_DATA_DIR", &data).output().await.unwrap();
+        .arg("--version")
+        .env("DBX_CODEX_DATA_DIR", &data)
+        .output()
+        .await
+        .unwrap();
     assert!(output.status.success());
     assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "dbx-codex 0.6.39");
     assert!(!data.exists());
+}
+
+#[tokio::test]
+async fn stop_tool_forwards_confirmation_once_without_database_setup() {
+    use axum::{
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+        Json, Router,
+    };
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+    async fn stop(
+        State(calls): State<Arc<std::sync::Mutex<Vec<bool>>>>,
+        headers: HeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> (StatusCode, Json<serde_json::Value>) {
+        assert_eq!(headers["authorization"], "Bearer private-fixture-credential-do-not-leak");
+        let confirm = body["confirm_interrupt"].as_bool().unwrap();
+        calls.lock().unwrap().push(confirm);
+        (
+            if confirm { StatusCode::ACCEPTED } else { StatusCode::CONFLICT },
+            Json(serde_json::json!({"stopping":confirm})),
+        )
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let handle = RuntimeHandle {
+        base_url: format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap(),
+        version: "0.6.39".into(),
+        instance_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let router = Router::new().route("/_codex/stop", post(stop)).with_state(calls.clone());
+    let backend = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let (client, server) = client(handle).await;
+    let denied = client.call_tool(CallToolRequestParams::new("dbx_codex_stop")).await.unwrap();
+    assert_eq!(denied.is_error, Some(true));
+    let accepted = client
+        .call_tool(
+            CallToolRequestParams::new("dbx_codex_stop")
+                .with_arguments(serde_json::json!({"confirm_interrupt":true}).as_object().unwrap().clone()),
+        )
+        .await
+        .unwrap();
+    assert_ne!(accepted.is_error, Some(true));
+    assert_eq!(accepted.structured_content.unwrap()["stopping"], true);
+    assert_eq!(*calls.lock().unwrap(), vec![false, true]);
+    client.cancel().await.unwrap();
+    server.await.unwrap();
+    backend.abort();
 }

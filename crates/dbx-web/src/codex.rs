@@ -81,18 +81,59 @@ pub async fn browser_gate(
     next.run(request).await
 }
 
-pub fn control_router(handle: &RuntimeHandle, token: &str) -> Result<Router, String> {
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopRequest {
+    instance_id: String,
+    #[serde(default)]
+    confirm_interrupt: bool,
+}
+
+pub fn control_router(
+    handle: &RuntimeHandle,
+    token: &str,
+    app: Arc<dbx_core::connection::AppState>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<Router, String> {
     let host = handle.base_url.as_str().trim_start_matches("http://").trim_end_matches('/').to_string();
     let auth = HttpAuth::new_with_hosts(Some(token.into()), vec![host], Vec::<String>::new(), false)?;
+    let instance_id = handle.instance_id.clone();
     let handle = handle.clone();
+    let status_app = app.clone();
     Ok(Router::new()
-        .route(
-            "/_codex/status",
-            get(move || {
-                let handle = handle.clone();
-                async move { Json(handle) }
-            }),
-        )
+        .route("/_codex/status", get(move || {
+            let handle = handle.clone();
+            let app = status_app.clone();
+            async move {
+                let mut status = serde_json::to_value(handle).expect("runtime handle");
+                status["tracked_tasks"] = serde_json::json!(app.running_queries.diagnostics().active_execution_ids.len());
+                status["active_mcp_sessions"] = serde_json::Value::Null;
+                status["activity_tracking"] = serde_json::json!("incomplete");
+                status["stop_requires_confirmation"] = serde_json::json!(true);
+                Json(status)
+            }
+        }))
+        .route("/_codex/stop", axum::routing::post(move |Json(request): Json<StopRequest>| {
+            let app = app.clone();
+            let shutdown = shutdown.clone();
+            let instance_id = instance_id.clone();
+            async move {
+                if request.instance_id != instance_id {
+                    return (StatusCode::CONFLICT, Json(serde_json::json!({"error":"Runtime instance changed; shutdown refused"}))).into_response();
+                }
+                // shortcut: imports, backups and plugin/MCP sessions lack one shared activity registry; require explicit interruption approval until they do.
+                if !request.confirm_interrupt {
+                    return (StatusCode::CONFLICT, Json(serde_json::json!({
+                        "error":"Cannot prove the shared workbench is idle. Confirm interruption of all clients, writes, imports and backups before stopping.",
+                        "tracked_tasks": app.running_queries.diagnostics().active_execution_ids.len(),
+                        "active_mcp_sessions":null, "activity_tracking":"incomplete", "stopping":false,
+                    }))).into_response();
+                }
+                shutdown.cancel();
+                (StatusCode::ACCEPTED, Json(serde_json::json!({"stopping":true,"data_preserved":true}))).into_response()
+            }
+        }))
+        .layer(axum::extract::DefaultBodyLimit::max(4096))
         .layer(middleware::from_fn_with_state(auth, authorize_request)))
 }
 
@@ -157,6 +198,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_requires_explicit_interrupt_confirmation_and_keeps_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("dbx.db");
+        let storage = dbx_core::persistence::test_storage::open_unmigrated(&data).await.unwrap();
+        let app_state = Arc::new(dbx_core::connection::AppState::new(storage));
+        let active = app_state.running_queries.register("active-write".into());
+        let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let mut lease = ServiceLease::acquire(&directory.path().join("runtime")).await.unwrap();
+        let handle = lease.handle();
+        let token = lease.token().unwrap();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let router = control_router(&handle, &token, app_state.clone(), shutdown.clone()).unwrap();
+        let listener = lease.take_listener().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let url = handle.base_url.join("_codex/stop").unwrap();
+        let client = reqwest::Client::new();
+        assert_eq!(
+            client
+                .post(url.clone())
+                .json(&serde_json::json!({"confirm_interrupt":true,"instance_id":handle.instance_id}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        let denied = client
+            .post(url.clone())
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"instance_id":handle.instance_id}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), 409);
+        assert_eq!(denied.json::<serde_json::Value>().await.unwrap()["tracked_tasks"], 1);
+        assert!(!shutdown.is_cancelled());
+        let wrong_instance = client
+            .post(url.clone())
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"confirm_interrupt":true,"instance_id":"old-instance"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong_instance.status(), 409);
+        assert!(!shutdown.is_cancelled());
+        let stopped = client
+            .post(url)
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"confirm_interrupt":true,"instance_id":handle.instance_id}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stopped.status(), 202);
+        assert!(shutdown.is_cancelled());
+        assert!(data.is_file());
+        drop(active);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn intent_results_require_browser_login_and_are_not_consumed() {
         let directory = tempfile::tempdir().unwrap();
         let storage =
@@ -203,7 +304,10 @@ mod tests {
         let mut lease = ServiceLease::acquire(&directory.path().join("data")).await.unwrap();
         let handle = lease.handle();
         let token = lease.token().unwrap();
-        let app = control_router(&handle, &token).unwrap();
+        let storage =
+            dbx_core::persistence::test_storage::open_unmigrated(&directory.path().join("dbx.db")).await.unwrap();
+        let app_state = Arc::new(dbx_core::connection::AppState::new(storage));
+        let app = control_router(&handle, &token, app_state, tokio_util::sync::CancellationToken::new()).unwrap();
         let listener = lease.take_listener().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = reqwest::Client::new();

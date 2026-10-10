@@ -427,6 +427,7 @@ export default withEnglishFallback({
     logout: "Cerrar sesión",
     logoutDescription: "Finalizar la sesión actual y volver a la página de inicio de sesión",
     logoutConfirm: "¿Seguro que deseas cerrar sesión?",
+    or: "o",
   },
   toolbar: {
     fileEncoding: "Codificación del archivo",

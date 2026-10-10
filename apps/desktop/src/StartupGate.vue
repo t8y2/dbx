@@ -96,7 +96,7 @@ onUnmounted(() => authRequest?.abort());
 </script>
 <template>
   <StartupLoading v-if="checkingLocale || localeFailed || checkingAuth || authFailed" :label="authFailed ? t('migration.authFailed') : !checkingLocale && !localeFailed ? t('migration.checking') : undefined" :error="localeFailed || authFailed" :retry="localeFailed ? initializeLocale : initialize" />
-  <LoginPage v-else-if="loginRequired" :setup-mode="setupRequired" @authenticated="authenticated" />
+  <LoginPage v-else-if="loginRequired" :setup-mode="setupRequired" :oidc="startupAuthentication?.oidc" @authenticated="authenticated" />
   <SecurityMigrationWizard v-else-if="blocking" :store="migration" />
   <App v-else :startup-authentication="startupAuthentication" />
 </template>

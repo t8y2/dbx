@@ -25,6 +25,8 @@ sqlserver-native-attention = ["dbx-core/sqlserver-native-attention"]
 embed-static = ["dep:rust-embed", "dep:mime_guess"]
 
 [dependencies]
+cel = { version = "0.15", features = ["json"] }
+jsonwebtoken = "9"
 dbx-core = { path = "../dbx-core", default-features = false, features = ["openapi"] }
 dbx-mcp = { path = "../dbx-mcp", default-features = false }
 redis = { version = "0.32", features = ["tokio-comp"] }

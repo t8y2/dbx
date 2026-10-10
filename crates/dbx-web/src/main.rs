@@ -1,13 +1,14 @@
 mod auth;
 mod demo;
 mod error;
+mod oidc;
 mod routes;
 mod sse;
 mod ssh_prompt;
 mod state;
 mod web_mcp;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -549,6 +550,23 @@ async fn serve() -> Result<(), String> {
 
     let demo_mode = demo::demo_mode_from_env();
 
+    // OIDC service: initialized at startup if DBX_OIDC_ISSUER is set
+    let oidc_service = match oidc::OidcConfig::from_env() {
+        Ok(Some(cfg)) => match oidc::OidcService::from_config(cfg).await {
+            Ok(svc) => {
+                tracing::info!("OIDC authentication enabled (issuer: {})", svc.config.issuer);
+                Some(Arc::new(svc))
+            }
+            Err(e) => {
+                panic!("Failed to initialise OIDC service: {e}");
+            }
+        },
+        Ok(None) => None,
+        Err(e) => {
+            panic!("OIDC configuration error: {e}");
+        }
+    };
+
     let migration_ready = storage_migration_ready(&app_state).await;
     let web_mcp = Arc::new(if migration_ready {
         WebMcpRuntime::load(&app_state.storage, !password_disabled && password_hash.is_some())
@@ -565,7 +583,7 @@ async fn serve() -> Result<(), String> {
         demo_mode,
         password_disabled,
         password_hash: RwLock::new(password_hash),
-        sessions: RwLock::new(HashSet::new()),
+        sessions: RwLock::new(HashMap::new()),
         sse_channels: RwLock::new(HashMap::new()),
         transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
@@ -577,6 +595,7 @@ async fn serve() -> Result<(), String> {
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
         migration_ready: Arc::new(AtomicBool::new(migration_ready)),
         web_mcp,
+        oidc: oidc_service,
     });
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
@@ -608,6 +627,9 @@ async fn serve() -> Result<(), String> {
         .route("/auth/setup", post(auth::setup).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/change-password", post(auth::change_password).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/logout", post(auth::logout))
+        // OIDC
+        .route("/auth/oidc/start", get(auth::oidc_start))
+        .route("/auth/oidc/callback", get(auth::oidc_callback))
         // Connection
         .route("/connection/test", post(routes::connection::test_connection))
         .route("/connection/test-info", post(routes::connection::test_connection_with_info))

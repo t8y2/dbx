@@ -421,6 +421,7 @@ export default withEnglishFallback({
     logout: "Disconnetti",
     logoutDescription: "Termina la sessione corrente e torna alla pagina di accesso",
     logoutConfirm: "Sei sicuro di voler uscire?",
+    or: "o",
   },
   toolbar: {
     fileEncoding: "Codifica del file",

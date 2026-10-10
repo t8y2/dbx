@@ -1816,9 +1816,23 @@ mod tests {
         let db_path = dir.join("a.db").to_string_lossy().to_string();
         std::fs::File::create(&db_path).unwrap();
         {
+            use crate::state::{AuthMethod, SessionInfo};
             let mut sessions = state.sessions.write().await;
-            sessions.insert("token-a".to_string());
-            sessions.insert("token-b".to_string());
+            for token in ["token-a", "token-b"] {
+                sessions.insert(
+                    token.to_string(),
+                    SessionInfo {
+                        token: token.to_string(),
+                        method: AuthMethod::Password,
+                        sub: String::new(),
+                        email: String::new(),
+                        name: String::new(),
+                        role: "Admin".to_string(),
+                        claims: serde_json::Value::Null,
+                        created_at: 0,
+                    },
+                );
+            }
         }
         let headers_a = cookie_headers("token-a");
 

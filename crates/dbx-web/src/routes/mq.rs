@@ -1581,7 +1581,7 @@ mod tests {
     use dbx_core::connection::AppState;
     use dbx_core::models::connection::ConnectionConfig;
     use dbx_core::storage::McpGlobalPolicy;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::{Mutex, RwLock};
 
@@ -1612,7 +1612,7 @@ mod tests {
             password_disabled: false,
             demo_mode: false,
             password_hash: RwLock::new(None),
-            sessions: RwLock::new(HashSet::new()),
+            sessions: RwLock::new(HashMap::new()),
             sse_channels: RwLock::new(HashMap::new()),
             transfer_progress_channels: RwLock::new(HashMap::new()),
             table_import_channels: RwLock::new(HashMap::new()),
@@ -1624,6 +1624,7 @@ mod tests {
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
             migration_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             web_mcp: Arc::new(crate::web_mcp::WebMcpRuntime::disabled()),
+            oidc: None,
         });
         (state, dir)
     }

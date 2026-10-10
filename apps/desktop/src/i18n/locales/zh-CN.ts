@@ -349,6 +349,7 @@ export default withEnglishFallback({
     loadingTitle: "正在加载 {title}",
   },
   auth: {
+    or: "或",
     rateLimited: "请 {seconds} 秒后再试",
     setupTitle: "设置访问密码",
     setupDescription: "设置密码以保护您的实例",

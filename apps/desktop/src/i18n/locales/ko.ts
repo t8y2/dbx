@@ -430,6 +430,7 @@ export default withEnglishFallback({
     logout: "로그아웃",
     logoutDescription: "현재 세션을 종료하고 로그인 페이지로 돌아갑니다",
     logoutConfirm: "로그아웃하시겠습니까?",
+    or: "또는",
   },
   toolbar: {
     fileEncoding: "파일 인코딩",

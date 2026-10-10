@@ -427,6 +427,7 @@ export default withEnglishFallback({
     logout: "登出",
     logoutDescription: "結束目前工作階段並返回登入頁面",
     logoutConfirm: "確定要登出嗎？",
+    or: "或",
   },
   toolbar: {
     fileEncoding: "檔案編碼",

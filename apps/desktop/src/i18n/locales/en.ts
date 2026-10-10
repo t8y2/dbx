@@ -412,6 +412,7 @@ export default {
     loadingTitle: "Loading {title}",
   },
   auth: {
+    or: "or",
     rateLimited: "Please try again in {seconds}s",
     setupTitle: "Set up access password",
     setupDescription: "Set a password to protect your instance",

@@ -422,6 +422,7 @@ export default withEnglishFallback({
     logout: "ログアウト",
     logoutDescription: "現在のセッションを終了してログイン画面に戻ります",
     logoutConfirm: "ログアウトしてもよろしいですか？",
+    or: "または",
   },
   toolbar: {
     fileEncoding: "ファイルの文字コード",

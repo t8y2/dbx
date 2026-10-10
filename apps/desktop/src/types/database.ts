@@ -1984,6 +1984,11 @@ export interface QueryTab {
    */
   titleNumber?: number;
   titleNumberKey?: string;
+  /**
+   * User-chosen suffix shown after the tab title (set from the tab context menu).
+   * It replaces the automatic `titleNumber` for this tab and is persisted with it.
+   */
+  titleSuffix?: string;
   /** Force the editor to word-wrap regardless of the global setting, e.g. for auto-generated single-line templates. */
   forceWordWrap?: boolean;
   connectionId: string;

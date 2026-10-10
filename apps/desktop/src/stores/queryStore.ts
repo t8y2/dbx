@@ -113,7 +113,7 @@ import { clearDataGridStructuredFilterStatesForTab } from "@/lib/dataGrid/dataGr
 import { clearDataGridSearchStatesForTab } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
 import { estimateQueryResultsBytes, selectInactiveResultEvictions } from "@/lib/tabs/queryResultSize";
-import { queryResultBaseSql, queryResultExecutionSql, resultGridInstanceKey, syncTabTitleNumbers, tabDisplayTitle } from "@/lib/tabs/tabPresentation";
+import { queryResultBaseSql, queryResultExecutionSql, resultGridInstanceKey, syncTabTitleNumbers, TAB_TITLE_SUFFIX_MAX_LENGTH, tabDisplayTitle } from "@/lib/tabs/tabPresentation";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { batchSqlRecoverySql, batchSqlRecoveryState, mergeBatchQueryResults, offsetBatchQueryResultIndexes, prepareBatchSqlRecovery, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/query/queryResultArchive";
@@ -1086,7 +1086,7 @@ export const useQueryStore = defineStore("query", () => {
   // 里而不是渲染函数里，是为了避免在 computed 求值过程中写标签状态；getter 只读
   // 参与标题计算的字段（id + 显示标题），分配编号本身不会再次触发它。
   watch(
-    () => tabs.value.map((tab) => `${tab.id}\u0000${tabDisplayTitle(tab, t)}`),
+    () => tabs.value.map((tab) => `${tab.id}\u0000${tabDisplayTitle(tab, t)}\u0000${tab.titleSuffix ?? ""}`),
     () => syncTabTitleNumbers(tabs.value, t),
     { immediate: true, flush: "sync" },
   );
@@ -2608,6 +2608,7 @@ export const useQueryStore = defineStore("query", () => {
     tabs.value.map((t) => ({
       id: t.id,
       title: t.title,
+      titleSuffix: t.titleSuffix,
       connectionId: t.connectionId,
       database: t.database,
       schema: t.schema,
@@ -5553,6 +5554,19 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab || tab.mode !== "query") return false;
     tab.title = trimmed;
     tab.customTitle = true;
+    return true;
+  }
+
+  /**
+   * Sets (or clears, with an empty string) the user-chosen suffix shown after a
+   * tab's title. The suffix replaces the automatic number for that tab only.
+   */
+  function setTabTitleSuffix(id: string, suffix: string) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab) return false;
+    const trimmed = suffix.trim().slice(0, TAB_TITLE_SUFFIX_MAX_LENGTH);
+    if (trimmed) tab.titleSuffix = trimmed;
+    else delete tab.titleSuffix;
     return true;
   }
 
@@ -9823,6 +9837,7 @@ export const useQueryStore = defineStore("query", () => {
     rollbackTransaction,
     ensureManualTransactionSession,
     renameTab,
+    setTabTitleSuffix,
     openDatabaseBrowser,
     openDatabaseSearch,
     openDriverProfileWorkspace,

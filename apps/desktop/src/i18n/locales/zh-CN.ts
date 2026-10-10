@@ -9063,7 +9063,7 @@ export default withEnglishFallback({
     shortcutConflictBadge: "{count} 项冲突",
     shortcutConflictTooltip: "与「{label}」（{scope}）同键。同一作用域内一个组合只能绑定一个操作，需改掉其中一个才能应用。",
     shortcutConflictSummaryTooltip: "同作用域冲突 {count} 项（{pairs} 组重复）。同一作用域内一个组合只能绑定一个操作，解决前无法应用。",
-    shortcutCrossScopeBadge: "{count} 项跨域同键",
+    shortcutCrossScopeBadge: "{count} 组跨域同键",
     shortcutCrossScopeTooltip: "与 {targets} 同键。不同作用域各自生效，按焦点路由，同一时刻只触发一个；无需处理。",
     shortcutCrossScopeTooltipSeparator: "、",
     shortcutCrossScopeSummaryTooltip: "跨作用域同键 {count} 项（{pairs} 组重复）。不同作用域各自生效，同一时刻只触发一个；仅作提示，不影响应用。",

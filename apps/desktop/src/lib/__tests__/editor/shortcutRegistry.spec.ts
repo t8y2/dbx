@@ -3,6 +3,7 @@ import {
   closeOtherTabsDefaultShortcut,
   countShortcutConflictPairs,
   DEFAULT_SHORTCUT_SETTINGS,
+  filterShortcutConflictsByVisibleIds,
   findCrossScopeShortcutConflicts,
   findShortcutConflict,
   foldAllDefaultShortcut,
@@ -562,6 +563,32 @@ describe("shortcutRegistry editor actions", () => {
       const before = { ...shortcuts };
       findCrossScopeShortcutConflicts(shortcuts);
       expect(shortcuts).toEqual(before);
+    });
+  });
+
+  describe("filterShortcutConflictsByVisibleIds", () => {
+    it("keeps a conflict whose partner row is filtered out (detection stays global)", () => {
+      // find(editor) <-> focusSearch(global) 默认跨作用域同键；搜索只留下 find
+      // 一行时，这组重叠仍要计入徽章——对方行被过滤不代表冲突消失。
+      const conflicts = findCrossScopeShortcutConflicts(DEFAULT_SHORTCUT_SETTINGS);
+      const filtered = filterShortcutConflictsByVisibleIds(conflicts, new Set<ShortcutActionId>(["find"]));
+      expect(filtered.find).toContain("focusSearch");
+      expect(filtered.focusSearch).toContain("find");
+      expect(Object.keys(filtered)).not.toContain("explainSql");
+    });
+
+    it("handles the L1 same-scope shape and the empty visible set", () => {
+      const seeded = normalizeShortcutSettings({ explainSql: DEFAULT_SHORTCUT_SETTINGS.formatSql });
+      const l1: Partial<Record<ShortcutActionId, ShortcutActionId>> = {};
+      for (const definition of SHORTCUT_DEFINITIONS) {
+        const conflict = findShortcutConflict(definition.id, seeded[definition.id], seeded);
+        if (conflict) l1[definition.id] = conflict;
+      }
+      expect(Object.keys(l1).sort()).toEqual(["explainSql", "formatSql"]);
+      // 只留冲突一方时整组保留；可见集与冲突无关或为空时返回空映射。
+      expect(filterShortcutConflictsByVisibleIds(l1, new Set<ShortcutActionId>(["explainSql"]))).toEqual(l1);
+      expect(filterShortcutConflictsByVisibleIds(l1, new Set<ShortcutActionId>(["goToColumn"]))).toEqual({});
+      expect(filterShortcutConflictsByVisibleIds(l1, new Set())).toEqual({});
     });
   });
 

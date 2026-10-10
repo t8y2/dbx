@@ -7392,7 +7392,7 @@ export default withEnglishFallback({
     shortcutConflictBadge: "{count} 項衝突",
     shortcutConflictTooltip: "與「{label}」（{scope}）同鍵。同一作用域內一個組合只能綁定一個操作，需改掉其中一個才能套用。",
     shortcutConflictSummaryTooltip: "同作用域衝突 {count} 項（{pairs} 組重複）。同一作用域內一個組合只能綁定一個操作，解決前無法套用。",
-    shortcutCrossScopeBadge: "{count} 項跨域同鍵",
+    shortcutCrossScopeBadge: "{count} 組跨域同鍵",
     shortcutCrossScopeTooltip: "與 {targets} 同鍵。不同作用域各自生效，依焦點路由，同一時刻只觸發一個；無需處理。",
     shortcutCrossScopeTooltipSeparator: "、",
     shortcutCrossScopeSummaryTooltip: "跨作用域同鍵 {count} 項（{pairs} 組重複）。不同作用域各自生效，同一時刻只觸發一個；僅作提示，不影響套用。",

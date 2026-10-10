@@ -982,3 +982,28 @@ export function countShortcutConflictPairs(conflicts: Partial<Record<ShortcutAct
   }
   return pairs.size;
 }
+
+/**
+ * 按当前搜索的可见行过滤冲突**展示**（不改变判定）。
+ *
+ * 冲突判定始终基于全局绑定（见上方两个 find*），但顶部徽章、组头摘要要与
+ * 列表同口径：只统计“可见行或其冲突对方”参与的冲突。取“或”是因为对方被
+ * 搜索过滤掉时，冲突本身仍然真实存在，不能从统计里消失——与 Eclipse/
+ * DBeaver Keys 偏好页一致：过滤器只作用于视图，冲突模型始终全局。
+ *
+ * 同时接受 L1（每行单个对方）与 L2（每行多个对方）两种形状，与
+ * `countShortcutConflictPairs` 的口径约定一致。空可见集返回空映射，
+ * 让徽章在“无搜索结果”时自然隐藏。
+ */
+export function filterShortcutConflictsByVisibleIds<T extends ShortcutActionId | ShortcutActionId[]>(conflicts: Partial<Record<ShortcutActionId, T>>, visibleIds: ReadonlySet<ShortcutActionId>): Partial<Record<ShortcutActionId, T>> {
+  if (visibleIds.size === 0) return {};
+  const filtered: Partial<Record<ShortcutActionId, T>> = {};
+  for (const [actionId, value] of Object.entries(conflicts)) {
+    if (!value) continue;
+    const others = (Array.isArray(value) ? value : [value]) as ShortcutActionId[];
+    if (visibleIds.has(actionId as ShortcutActionId) || others.some((other) => visibleIds.has(other))) {
+      filtered[actionId as ShortcutActionId] = value;
+    }
+  }
+  return filtered;
+}

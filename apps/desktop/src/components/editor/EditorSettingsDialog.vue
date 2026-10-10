@@ -207,7 +207,19 @@ import {
   type WebDavConfig,
 } from "@/lib/backend/api";
 import { eventToModifierOnlyShortcut, eventToShortcut } from "@/lib/editor/keyboardShortcuts";
-import { SHORTCUT_DEFINITIONS, countShortcutConflictPairs, findCrossScopeShortcutConflicts, findShortcutConflict, isReservedShortcut, normalizeShortcutSettings, resolveCapturedShortcutEdit, type ShortcutActionId, type ShortcutDefinition, type ShortcutScope } from "@/lib/editor/shortcutRegistry";
+import {
+  SHORTCUT_DEFINITIONS,
+  countShortcutConflictPairs,
+  filterShortcutConflictsByVisibleIds,
+  findCrossScopeShortcutConflicts,
+  findShortcutConflict,
+  isReservedShortcut,
+  normalizeShortcutSettings,
+  resolveCapturedShortcutEdit,
+  type ShortcutActionId,
+  type ShortcutDefinition,
+  type ShortcutScope,
+} from "@/lib/editor/shortcutRegistry";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { COLUMN_NAME_COPY_SEPARATOR_LABELS, COLUMN_NAME_COPY_SEPARATOR_OPTIONS, isColumnNameCopySeparator, type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
@@ -2159,9 +2171,7 @@ const shortcutConflicts = computed(() => Object.keys(shortcutConflictMap.value) 
 // 有意的设计（find / focusSearch 默认都是 Mod+F，运行时按焦点路由），所以这里
 // 只用于展示；normalizeShortcutSettings 的占用判定依旧只看同作用域。
 const crossScopeShortcutConflicts = computed(() => findCrossScopeShortcutConflicts(editShortcuts.value));
-const crossScopeShortcutConflictIds = computed(() => Object.keys(crossScopeShortcutConflicts.value) as ShortcutActionId[]);
 const shortcutConflictPairCount = computed(() => countShortcutConflictPairs(shortcutConflictMap.value));
-const crossScopeShortcutPairCount = computed(() => countShortcutConflictPairs(crossScopeShortcutConflicts.value));
 const sqlShortcutConflicts = computed(() => findSqlShortcutConflicts(editSqlShortcuts.value, editShortcuts.value));
 const hasSqlShortcutConflicts = computed(() => sqlShortcutConflicts.value.length > 0);
 const shortcutSearchQuery = ref("");
@@ -2204,6 +2214,19 @@ const filteredShortcutDefinitions = computed(() => {
   });
 });
 
+// 搜索时顶部徽章与组头摘要要和列表同口径：冲突判定仍全局（上面两个 find* 的
+// 输入不变），展示层只统计“可见行或其冲突对方”参与的冲突，清空搜索即恢复
+// 全局。应用门禁（页脚“冲突阻止应用”与 Apply 禁用）刻意保持全局口径，不随
+// 搜索缩小——保存约束与当前视图无关。
+const shortcutSearchActive = computed(() => shortcutSearchQuery.value.trim().length > 0);
+const visibleShortcutIds = computed(() => new Set(filteredShortcutDefinitions.value.map((definition) => definition.id)));
+const visibleShortcutConflictMap = computed(() => (shortcutSearchActive.value ? filterShortcutConflictsByVisibleIds(shortcutConflictMap.value, visibleShortcutIds.value) : shortcutConflictMap.value));
+const visibleCrossScopeShortcutConflicts = computed(() => (shortcutSearchActive.value ? filterShortcutConflictsByVisibleIds(crossScopeShortcutConflicts.value, visibleShortcutIds.value) : crossScopeShortcutConflicts.value));
+const visibleShortcutConflictIds = computed(() => Object.keys(visibleShortcutConflictMap.value) as ShortcutActionId[]);
+const visibleCrossScopeShortcutConflictIds = computed(() => Object.keys(visibleCrossScopeShortcutConflicts.value) as ShortcutActionId[]);
+const visibleShortcutConflictPairCount = computed(() => countShortcutConflictPairs(visibleShortcutConflictMap.value));
+const visibleCrossScopeShortcutPairCount = computed(() => countShortcutConflictPairs(visibleCrossScopeShortcutConflicts.value));
+
 // 二级归类：快捷键页签按作用域分组展示。顺序即运行时优先级——越外层先响应，
 // 用户读到的顺序与事件实际分发顺序一致。
 const SHORTCUT_SCOPE_ORDER: readonly ShortcutScope[] = ["global", "editor", "grid", "search", "sidebar"];
@@ -2239,6 +2262,8 @@ interface ShortcutScopeGroup {
   unboundCount: number;
   conflictCount: number;
   crossScopeCount: number;
+  conflictPairCount: number;
+  crossScopePairCount: number;
 }
 
 // 计数一律基于“当前可见行”（受搜索过滤影响）：组头是它下方那份列表的摘要，
@@ -2246,6 +2271,8 @@ interface ShortcutScopeGroup {
 const shortcutScopeGroups = computed<ShortcutScopeGroup[]>(() =>
   SHORTCUT_SCOPE_ORDER.map((scope) => {
     const definitions = filteredShortcutDefinitions.value.filter((definition) => definition.scope === scope);
+    // 组内“N 组重复”与上方徽章同口径：判定全局，统计只看“可见行或其冲突对方”。
+    const groupIds = new Set(definitions.map((definition) => definition.id));
     return {
       scope,
       label: t(shortcutScopeLabelKey(scope)),
@@ -2254,6 +2281,8 @@ const shortcutScopeGroups = computed<ShortcutScopeGroup[]>(() =>
       unboundCount: definitions.filter((definition) => !editShortcuts.value[definition.id]).length,
       conflictCount: definitions.filter((definition) => shortcutConflictMap.value[definition.id]).length,
       crossScopeCount: definitions.filter((definition) => (crossScopeShortcutConflicts.value[definition.id] ?? []).length > 0).length,
+      conflictPairCount: countShortcutConflictPairs(filterShortcutConflictsByVisibleIds(shortcutConflictMap.value, groupIds)),
+      crossScopePairCount: countShortcutConflictPairs(filterShortcutConflictsByVisibleIds(crossScopeShortcutConflicts.value, groupIds)),
     };
   }).filter((group) => group.definitions.length > 0),
 );
@@ -9462,17 +9491,20 @@ onUnmounted(() => {
                   <Search class="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input v-model="shortcutSearchQuery" autocomplete="off" :placeholder="t('settings.shortcutSearchPlaceholder')" class="h-9 pl-9 text-sm" />
                 </div>
-                <!-- 冲突摘只需计数，明细进浮层：不再用整条横幅占掉列表高度。 -->
-                <LightTooltip v-if="shortcutConflicts.length > 0" :text="t('settings.shortcutConflictSummaryTooltip', { count: shortcutConflicts.length, pairs: shortcutConflictPairCount })">
+                <!-- 冲突摘要只需计数，明细进浮层：不再用整条横幅占掉列表高度。
+                     计数随搜索同口径（见 visibleShortcutConflict* computeds）；
+                     页脚的应用门禁保持全局，不受搜索影响。 -->
+                <LightTooltip v-if="visibleShortcutConflictIds.length > 0" :text="t('settings.shortcutConflictSummaryTooltip', { count: visibleShortcutConflictIds.length, pairs: visibleShortcutConflictPairCount })">
                   <span class="inline-flex h-9 shrink-0 cursor-help items-center gap-1.5 rounded-md border border-destructive/25 bg-destructive/10 px-2 text-[11.5px] font-medium tabular-nums text-destructive">
                     <span class="size-1.5 rounded-full bg-current" aria-hidden="true" />
-                    {{ t("settings.shortcutConflictBadge", { count: shortcutConflicts.length }) }}
+                    {{ t("settings.shortcutConflictBadge", { count: visibleShortcutConflictIds.length }) }}
                   </span>
                 </LightTooltip>
-                <LightTooltip v-if="crossScopeShortcutConflictIds.length > 0" :text="t('settings.shortcutCrossScopeSummaryTooltip', { count: crossScopeShortcutConflictIds.length, pairs: crossScopeShortcutPairCount })">
+                <LightTooltip v-if="visibleCrossScopeShortcutConflictIds.length > 0" :text="t('settings.shortcutCrossScopeSummaryTooltip', { count: visibleCrossScopeShortcutConflictIds.length, pairs: visibleCrossScopeShortcutPairCount })">
                   <span class="inline-flex h-9 shrink-0 cursor-help items-center gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 text-[11.5px] font-medium tabular-nums text-warning">
                     <span class="size-1.5 rounded-full bg-current" aria-hidden="true" />
-                    {{ t("settings.shortcutCrossScopeBadge", { count: crossScopeShortcutConflictIds.length }) }}
+                    <!-- 黄色徽章按“组”（pairs）计数，避免与行级绑定条目数混淆。 -->
+                    {{ t("settings.shortcutCrossScopeBadge", { count: visibleCrossScopeShortcutPairCount }) }}
                   </span>
                 </LightTooltip>
               </div>
@@ -9506,10 +9538,10 @@ onUnmounted(() => {
                         {{ t("settings.shortcutGroupUnbound", { count: group.unboundCount }) }}
                       </span>
                     </LightTooltip>
-                    <LightTooltip v-if="group.conflictCount > 0" :text="t('settings.shortcutConflictSummaryTooltip', { count: group.conflictCount, pairs: shortcutConflictPairCount })">
+                    <LightTooltip v-if="group.conflictCount > 0" :text="t('settings.shortcutConflictSummaryTooltip', { count: group.conflictCount, pairs: group.conflictPairCount })">
                       <span class="inline-flex shrink-0 cursor-help items-center gap-1 text-[11px] font-medium tabular-nums text-destructive"> <span class="size-[5px] rounded-full bg-current" aria-hidden="true" />{{ group.conflictCount }} </span>
                     </LightTooltip>
-                    <LightTooltip v-if="group.crossScopeCount > 0" :text="t('settings.shortcutCrossScopeSummaryTooltip', { count: group.crossScopeCount, pairs: crossScopeShortcutPairCount })">
+                    <LightTooltip v-if="group.crossScopeCount > 0" :text="t('settings.shortcutCrossScopeSummaryTooltip', { count: group.crossScopeCount, pairs: group.crossScopePairCount })">
                       <span class="inline-flex shrink-0 cursor-help items-center gap-1 text-[11px] font-medium tabular-nums text-warning"> <span class="size-[5px] rounded-full bg-current" aria-hidden="true" />{{ group.crossScopeCount }} </span>
                     </LightTooltip>
                     <span class="ml-auto hidden truncate text-[11px] text-muted-foreground xl:block">{{ group.hint }}</span>

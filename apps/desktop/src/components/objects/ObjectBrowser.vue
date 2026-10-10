@@ -143,6 +143,7 @@ import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutio
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
+import { buildOracleCompileErrorsSql, buildOracleCompileSql, formatOracleCompileErrors } from "@/lib/database/oracleCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
@@ -3020,6 +3021,46 @@ async function compileDamengView(row: ObjectBrowserRow) {
   }
 }
 
+/**
+ * Oracle answers `ALTER ... COMPILE` with success even when the object is left INVALID, so
+ * the compile is followed by an ALL_ERRORS read-back and *that* decides between the success
+ * toast and the error dialog: the DDL's own result would always say "compiled".
+ */
+async function compileOracleObject(row: ObjectBrowserRow) {
+  if (effectiveDatabaseType.value !== "oracle") return;
+  const schema = row.schema || selectedSchema.value;
+  const sql = buildOracleCompileSql({ objectType: row.type, schema, name: row.name });
+  if (!sql) return;
+  try {
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
+    if (!executed) return;
+    const errorsSql = buildOracleCompileErrorsSql({ schema, name: row.name });
+    const errors = errorsSql ? await api.executeQuery(props.connection.id, props.database, errorsSql, schema) : undefined;
+    const message = formatOracleCompileErrors(errors?.rows ?? []);
+    await reload();
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
+    if (!message) {
+      toast(t("contextMenu.compileObjectSuccess", { name: row.name }));
+      return;
+    }
+    compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
+    compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: row.name, message });
+    showCompileErrorDialog.value = true;
+  } catch (e: any) {
+    compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
+    compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: row.name, message: e?.message || String(e) });
+    showCompileErrorDialog.value = true;
+  }
+}
+
+/** The Compile entry for an Oracle object, or null when Oracle cannot recompile that kind. */
+function oracleCompileMenuItem(row: ObjectBrowserRow): ContextMenuItem | null {
+  if (effectiveDatabaseType.value !== "oracle") return null;
+  const schema = row.schema || selectedSchema.value;
+  if (!buildOracleCompileSql({ objectType: row.type, schema, name: row.name })) return null;
+  return { label: t("contextMenu.compileObject"), action: () => compileOracleObject(row), icon: Wrench };
+}
+
 async function refreshTruncatePreviewSql(row: ObjectBrowserRow) {
   truncatePreviewSql.value = "";
   truncatePreviewSql.value = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })).catch(() => "");
@@ -3988,12 +4029,19 @@ function getObjectBrowserActionMenuItems(item: ObjectBrowserRow): ContextMenuIte
       { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
     ];
   }
-  if (item.type === "TABLE") return getTableMenuItems(item);
-  if (item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") return getViewMenuItems(item);
-  if (item.type === "EVENT") return getEventMenuItems(item);
-  if (item.type === "TYPE" || item.type === "TYPE_BODY") return getTypeMenuItems(item);
-  if (isSourceOnlyObjectBrowserRow(item)) return getPackageMenuItems(item);
-  return getProcFuncMenuItems(item);
+  let items: ContextMenuItem[];
+  if (item.type === "TABLE") items = getTableMenuItems(item);
+  else if (item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") items = getViewMenuItems(item);
+  else if (item.type === "EVENT") items = getEventMenuItems(item);
+  else if (item.type === "TYPE" || item.type === "TYPE_BODY") items = getTypeMenuItems(item);
+  else if (isSourceOnlyObjectBrowserRow(item)) items = getPackageMenuItems(item);
+  else items = getProcFuncMenuItems(item);
+  // Appended once here rather than per kind: every kind Oracle can recompile gets the action
+  // (the helper rejects the rest), and its outcome is the ALL_ERRORS read-back rather than the
+  // DDL's own result.
+  const oracleCompile = oracleCompileMenuItem(item);
+  if (oracleCompile) items.push(oracleCompile);
+  return items;
 }
 
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {

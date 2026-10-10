@@ -47,6 +47,8 @@ export const MCP_TOOL_OPTIONS = [
   { name: "dbx_remove_connection", labelKey: "settings.mcpToolRemoveConnection" },
   { name: "dbx_open_table", labelKey: "settings.mcpToolOpenTable" },
   { name: "dbx_execute_and_show", labelKey: "settings.mcpToolExecuteAndShow" },
+  { name: "dbx_codex_open_table", labelKey: "settings.mcpToolOpenTable" },
+  { name: "dbx_codex_execute_and_show", labelKey: "settings.mcpToolExecuteAndShow" },
   { name: "dbx_plugin_list", labelKey: "settings.mcpToolPluginList" },
   { name: "dbx_plugin_tools", labelKey: "settings.mcpToolPluginTools" },
   { name: "dbx_plugin_call", labelKey: "settings.mcpToolPluginCall" },

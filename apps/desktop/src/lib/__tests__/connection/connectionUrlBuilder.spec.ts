@@ -175,6 +175,22 @@ describe("buildConnectionUrlCopy JDBC URL", () => {
     expect(parseConnectionUrl(text ?? "").password).toBe(password);
   });
 
+  it("keeps Oracle Easy Connect credentials literal instead of URI-encoding them", () => {
+    const oracle = config({ db_type: "oracle", host: "ora.example.com", port: 1521, database: "ORCLPDB1", password: "p^ss%40#y" });
+    expect(buildConnectionUrlCopy(oracle, "jdbcUrlWithCredentials")).toBe("jdbc:oracle:thin:@//ora.example.com:1521/ORCLPDB1?user=app_user&password=p^ss%40#y");
+  });
+
+  it("does not offer an Oracle credential URL that would split a property", () => {
+    const oracle = config({ db_type: "oracle", host: "ora.example.com", port: 1521, database: "ORCLPDB1", password: "p&ss" });
+    expect(buildConnectionUrlCopy(oracle, "jdbcUrlWithCredentials")).toBeNull();
+    expect(connectionUrlCopyFormats(oracle)).not.toContain("jdbcUrlWithCredentials");
+  });
+
+  it("does not offer an Oracle credential URL that would split at @", () => {
+    const oracle = config({ db_type: "oracle", host: "ora.example.com", port: 1521, database: "ORCLPDB1", password: "p@ss" });
+    expect(buildConnectionUrlCopy(oracle, "jdbcUrlWithCredentials")).toBeNull();
+  });
+
   it("redacts a percent-encoded password property name accepted by the MySQL importer", () => {
     const mysql = config({ db_type: "mysql", port: 3306, username: "", password: "", url_params: "pass%77ord=synthetic-secret&connectTimeout=5000" });
     const jdbcWithCredentials = buildConnectionUrlCopy(mysql, "jdbcUrlWithCredentials")!;

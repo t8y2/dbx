@@ -293,6 +293,20 @@ function jdbcCredentialParams(config: ConnectionUrlCopyConfig, withCredentials: 
 }
 
 /**
+ * Oracle Easy Connect Plus properties are not URI query parameters. The
+ * Oracle driver keeps percent escapes literal, so `^` must stay `^` rather
+ * than becoming `%5E`. Values containing property delimiters cannot be
+ * represented safely in the generated URL and are rejected by the caller.
+ */
+function oracleJdbcCredentialValue(value: string): string {
+  return value;
+}
+
+function oracleJdbcCredentialCanBeEmbedded(value: string): boolean {
+  return !/[&=@\s\\"]/.test(value);
+}
+
+/**
  * Dialects whose JDBC URL is not `prefix://host:port/db?query`.
  * Returns `undefined` when the type is not a special dialect, `null` when the
  * dialect is special but cannot be built from this config.
@@ -301,7 +315,8 @@ function buildSpecialJdbcUrl(config: ConnectionUrlCopyConfig, database: string, 
   const host = config.host?.trim() ?? "";
   const rawParams = (config.url_params ?? "").trim();
   const propertyStyle = config.db_type === "sqlserver" || config.db_type === "teradata" ? config.db_type : null;
-  const credentials = jdbcCredentialParams(config, withCredentials, propertyStyle ? (value) => quoteJdbcProperty(value, propertyStyle) : encodeURIComponent);
+  if (config.db_type === "oracle" && withCredentials && [effectiveUsername(config), config.password ?? ""].some((value) => value && !oracleJdbcCredentialCanBeEmbedded(value))) return null;
+  const credentials = jdbcCredentialParams(config, withCredentials, propertyStyle ? (value) => quoteJdbcProperty(value, propertyStyle) : config.db_type === "oracle" ? oracleJdbcCredentialValue : encodeURIComponent);
 
   switch (config.db_type) {
     case "sqlserver": {

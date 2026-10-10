@@ -10,6 +10,7 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { createQueryEditorExecutionViewportOwnership } from "@/lib/editor/queryEditorExecutionViewport";
 import * as objectMetadataCache from "@/lib/metadata/objectMetadataCache";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
+import { formatSqlText } from "@/lib/sql/sqlFormatter";
 import type { SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 
 vi.mock("vue-i18n", () => ({
@@ -878,10 +879,12 @@ SELECT @value AS Message;`;
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
   });
 
-  it("executes Oracle database-link queries without opening the parameter dialog", async () => {
-    const sql = "SELECT 1 FROM DUAL@WDHIS160;";
-    const activeTab = ref<QueryTab | undefined>(queryTab("ORCL"));
-    const activeConnection = ref<ConnectionConfig | undefined>(connection("oracle"));
+  it.each([
+    { databaseType: "oracle", database: "ORCL", sql: "SELECT 1 FROM DUAL@WDHIS160;" },
+    { databaseType: "dameng", database: "test", sql: "select * from test.table_name@dm1" },
+  ] as const)("executes $databaseType database-link queries without opening the parameter dialog", async ({ databaseType, database, sql }) => {
+    const activeTab = ref<QueryTab | undefined>(queryTab(database));
+    const activeConnection = ref<ConnectionConfig | undefined>(connection(databaseType));
     const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
     const queryStore = useQueryStore();
     const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
@@ -901,6 +904,40 @@ SELECT @value AS Message;`;
     expect(execution.showSqlParameterDialog.value).toBe(false);
     expect(execution.sqlParameterNames.value).toEqual([]);
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
+  });
+
+  it("executes a formatted Dameng DBLink query without a parameter dialog or SQL changes", async () => {
+    const sql = await formatSqlText("select * from test.table_name@dm1", "dameng");
+    expect(sql).toContain("table_name @dm1");
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("test"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("dameng"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const executeCurrentSql = vi.spyOn(useQueryStore(), "executeCurrentSql").mockResolvedValue(undefined);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => activeConnection.value), executableSql: computed(() => sql), activeOutputView });
+
+    await execution.tryExecute();
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(execution.sqlParameterNames.value).toEqual([]);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
+  });
+
+  it.each(["", " ", "/* separator */", "-- separator\n"])("preserves a Dameng link separated by %j in the full @set execution flow", async (separator) => {
+    const target = `select * from test.table_name${separator}@dm1 where id=@DM1`;
+    const sql = `@set dm1 = 7;\n${target}`;
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("test"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("dameng"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const executeCurrentSql = vi.spyOn(useQueryStore(), "executeCurrentSql").mockResolvedValue(undefined);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => activeConnection.value), executableSql: computed(() => sql), activeOutputView });
+
+    await execution.tryExecute();
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(execution.sqlParameterNames.value).toEqual([]);
+    expect(executeCurrentSql).toHaveBeenCalledWith(`select * from test.table_name${separator}@dm1 where id=7`, { tabId: "tab-1" });
   });
 
   it("sends native SET variables without client-side expansion", async () => {

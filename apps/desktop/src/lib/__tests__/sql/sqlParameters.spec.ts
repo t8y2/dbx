@@ -310,7 +310,13 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters("select @amount/2, @total / 4")).toEqual(["amount", "total"]);
   });
 
-  it.each(["oracle", "oceanbase-oracle"] as const)("ignores %s database links while preserving standalone at-sign placeholders", (databaseType) => {
+  it("does not treat the Dameng DBLink in issue #11247 as a parameter", () => {
+    const sql = "select * from test.table_name@dm1";
+    expect(extractSqlParameterDescriptors(sql, { databaseType: "dameng" })).toEqual([]);
+    expect(substituteSqlParameters(sql, { dm1: { kind: "string", value: "WRONG" } }, { databaseType: "dameng" })).toBe(sql);
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("ignores %s database links while preserving standalone at-sign placeholders", (databaseType) => {
     const sql = 'SELECT * FROM HR.EMPLOYEES@REMOTE_DB, "AUDIT_LOG"@ARCHIVE_DB WHERE tenant_id = @tenant_id';
     expect(extractSqlParameters("SELECT 1 FROM DUAL@WDHIS160;", { databaseType })).toEqual([]);
     expect(extractSqlParameters(sql, { databaseType })).toEqual(["tenant_id"]);
@@ -318,7 +324,7 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters("SELECT * FROM EMPLOYEES@REMOTE_DB", { databaseType: "postgres" })).toEqual(["REMOTE_DB"]);
   });
 
-  it.each(["oracle", "oceanbase-oracle"] as const)("preserves %s links, quoted names, strings and comments during substitution", (databaseType) => {
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("preserves %s links, quoted names, strings and comments during substitution", (databaseType) => {
     const sql = `SELECT '@literal' FROM "Hr"."Audit Log"@ARCHIVE_DB /* @comment */ WHERE "Id" = :id AND tenant_id = @tenant_id -- @tail`;
     expect(extractSqlParameters(sql, { databaseType })).toEqual(["id", "tenant_id"]);
     expect(
@@ -337,7 +343,7 @@ describe("extractSqlParameters", () => {
     ).toBe(`SELECT '@literal' FROM "Hr"."Audit Log"@ARCHIVE_DB /* @comment */ WHERE "Id" = 3 AND tenant_id = 7 -- @tail`);
   });
 
-  it.each(["oracle", "oceanbase-oracle"] as const)("extracts only real %s parameters around separated database links", (databaseType) => {
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("extracts only real %s parameters around separated database links", (databaseType) => {
     const sql = `SELECT @projection FROM SYS.ALL_TABLES @LINK
       JOIN "Hr"."Audit Log"/* comment */@ARCHIVE_DB ON 1 = 1
       JOIN employees -- comment with /* and @ignored
@@ -441,7 +447,55 @@ describe("extractSqlParameters", () => {
     });
   });
 
-  it.each(["postgres", "sqlserver", "dameng"] as const)("keeps separated at-sign parameters unchanged for %s", (databaseType) => {
+  describe("Dameng database link separators", () => {
+    it.each(["", " ", "\t", "\n", "/* @ignored */", " /* first */ \n /* second */ ", "-- @ignored\n"])("preserves links separated by %j alongside same-name parameters", (separator) => {
+      for (const objectName of ["test.table_name", '"Hr"."Audit Log"', "订单", '"SELECT"']) {
+        const sql = `SELECT @id FROM ${objectName}${separator}@id WHERE id = :id AND tenant_id = @tenant_id`;
+        expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["id", "tenant_id"]);
+        expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" }, tenant_id: { kind: "number", value: "3" } }, { databaseType: "dameng" })).toBe(`SELECT 7 FROM ${objectName}${separator}@id WHERE id = 7 AND tenant_id = 3`);
+      }
+    });
+
+    it.each([
+      ["SELECT * FROM test.remote_view /* link */ @dm1", [], "SELECT * FROM test.remote_view /* link */ @dm1"],
+      ["SELECT test.remote_seq /* link */ @dm1.NEXTVAL FROM DUAL", [], "SELECT test.remote_seq /* link */ @dm1.NEXTVAL FROM DUAL"],
+      ["SELECT test.remote_fn /* link */ @dm1(:id) FROM DUAL", ["id"], "SELECT test.remote_fn /* link */ @dm1(7) FROM DUAL"],
+      ["CALL test.remote_proc /* link */ @dm1(@id)", ["id"], "CALL test.remote_proc /* link */ @dm1(7)"],
+      ["SELECT * FROM ACCESS /* link */ @dm1 WHERE id = :id", ["id"], "SELECT * FROM ACCESS /* link */ @dm1 WHERE id = 7"],
+    ] as const)("preserves links on remote objects in %s", (sql, names, expected) => {
+      expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(names);
+      expect(substituteSqlParameters(sql, { dm1: { kind: "number", value: "99" }, id: { kind: "number", value: "7" } }, { databaseType: "dameng" })).toBe(expected);
+    });
+
+    it.each([
+      ["SELECT TOP @count * FROM test.table_name @dm1", ["count"], "SELECT TOP 7 * FROM test.table_name @dm1"],
+      ["SELECT * FROM test.table_name @dm1 LIMIT @offset, @count", ["offset", "count"], "SELECT * FROM test.table_name @dm1 LIMIT 7, 7"],
+      ["SELECT CASE WHEN/* comment */@condition THEN @yes ELSE @no END FROM DUAL", ["condition", "yes", "no"], "SELECT CASE WHEN/* comment */7 THEN 7 ELSE 7 END FROM DUAL"],
+      ["BEGIN IF @condition THEN NULL; END IF; RETURN @result; END;", ["condition", "result"], "BEGIN IF 7 THEN NULL; END IF; RETURN 7; END;"],
+    ] as const)("keeps real parameters after Dameng keywords in %s", (sql, names, expected) => {
+      expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(names);
+      const values = Object.fromEntries(names.map((name) => [name, { kind: "number" as const, value: "7" }]));
+      expect(substituteSqlParameters(sql, values, { databaseType: "dameng" })).toBe(expected);
+    });
+
+    it("respects disabled parameter syntaxes without changing links", () => {
+      const sql = "SELECT @id FROM test.table_name /* link */ @id WHERE id = :id";
+      expect(extractSqlParameters(sql, { databaseType: "dameng", enabledSyntaxes: ["named"] })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType: "dameng", enabledSyntaxes: ["named"] })).toBe("SELECT @id FROM test.table_name /* link */ @id WHERE id = 7");
+      expect(extractSqlParameters(sql, { databaseType: "dameng", enabledSyntaxes: [] })).toEqual([]);
+      expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType: "dameng", enabledSyntaxes: [] })).toBe(sql);
+    });
+
+    it.each([
+      ["SELECT DATE @value FROM DUAL", "'2026-10-10'", "SELECT DATE '2026-10-10' FROM DUAL"],
+      ["SELECT TIMESTAMP @value FROM DUAL", "'2026-10-10 12:00:00'", "SELECT TIMESTAMP '2026-10-10 12:00:00' FROM DUAL"],
+    ])("keeps Dameng datetime literal parameters in %s", (sql, value, expected) => {
+      expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["value"]);
+      expect(substituteSqlParameters(sql, { value: { kind: "raw", value } }, { databaseType: "dameng" })).toBe(expected);
+    });
+  });
+
+  it.each(["postgres", "sqlserver", "mysql"] as const)("keeps separated at-sign parameters unchanged for %s", (databaseType) => {
     const sql = "SELECT * FROM employees /* comment */ @LINK WHERE id = :id";
     expect(extractSqlParameters(sql, { databaseType })).toEqual(["LINK", "id"]);
     expect(substituteSqlParameters(sql, { LINK: { kind: "number", value: "9" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT * FROM employees /* comment */ 9 WHERE id = 7");

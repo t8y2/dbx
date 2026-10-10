@@ -1,7 +1,5 @@
 import type { DatabaseType } from "@/types/database";
-import { supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
-import { isOracleReservedKeyword } from "@/lib/sql/sqlIdentifier";
-import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
+import { collectSqlDatabaseLinkStarts } from "@/lib/sql/sqlDatabaseLinks";
 
 export type SqlParameterValueKind = "string" | "number" | "boolean" | "null" | "raw";
 
@@ -67,50 +65,6 @@ export interface SqlParameterOptions {
 const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*$/u;
 const PARAMETER_NAME_START_RE = /[\p{L}_]/u;
 const PARAMETER_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
-const ORACLE_PARAMETER_PREFIX_KEYWORDS = new Set([
-  "begin",
-  "case",
-  "close",
-  "collate",
-  "continue",
-  "elsif",
-  "escape",
-  "exit",
-  "fetch",
-  "first",
-  "goto",
-  "if",
-  "interval",
-  "join",
-  "key",
-  "limit",
-  "loop",
-  "name",
-  "next",
-  "nocycle",
-  "nulls",
-  "offset",
-  "open",
-  "out",
-  "passing",
-  "raise",
-  "range",
-  "return",
-  "returning",
-  "reverse",
-  "savepoint",
-  "scn",
-  "timestamp",
-  "truncate",
-  "using",
-  "value",
-  "wait",
-  "when",
-  "while",
-  "zone",
-]);
-const ORACLE_OBJECT_PREFIX_KEYWORDS = new Set(["from", "join", "update", "into", "table", "delete"]);
-const ORACLE_TABLE_LIST_BOUNDARIES = new Set(["select", "from", "where", "group", "having", "order", "connect", "start", "union", "intersect", "minus", "for", "returning", "set", "values"]);
 const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join", "into", "update", "truncate"]);
 const MYSQL_ROUTINE_LABEL_STATEMENTS = new Set(["begin", "loop", "while", "repeat"]);
 const MYSQL_ROUTINE_LABEL_CONTEXTS = new Set(["begin", "then", "else", "do", "loop", "repeat"]);
@@ -428,7 +382,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   const supportsNamedParameters = databaseType !== "saphana" && databaseType !== "neo4j" && databaseType !== "nebula";
   const enabledSyntaxes = options?.enabledSyntaxes ? new Set(options.enabledSyntaxes) : null;
   const isSyntaxEnabled = (syntax: SqlParameterSyntax) => !enabledSyntaxes || enabledSyntaxes.has(syntax);
-  const separatedOracleDatabaseLinks = isSyntaxEnabled("sqlserver") ? collectSeparatedOracleDatabaseLinks(sql, databaseType) : new Set<number>();
+  const databaseLinkStarts = isSyntaxEnabled("sqlserver") ? collectSqlDatabaseLinkStarts(sql, databaseType) : new Set<number>();
   const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql, databaseType) : new Set<number>();
   const duckDbStructFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") && databaseType === "duckdb" ? collectDuckDbStructFieldSeparators(sql) : new Set<number>();
   const triggerPseudoRecordFieldStarts = supportsNamedParameters && isSyntaxEnabled("named") ? collectTriggerPseudoRecordFieldStarts(sql, databaseType) : new Set<number>();
@@ -589,16 +543,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     if (ch === "@" && isSyntaxEnabled("sqlserver")) {
       const name = readParameterName(sql, i + 1);
-      if (
-        name &&
-        next !== "@" &&
-        sql[i - 1] !== "@" &&
-        !separatedOracleDatabaseLinks.has(i) &&
-        !isOracleDatabaseLinkMarker(sql, i, databaseType) &&
-        !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) &&
-        !nativeSqlServerParameters.declared.has(name.toLowerCase()) &&
-        !nativeSqlServerParameters.ignoredStarts.has(i)
-      ) {
+      if (name && next !== "@" && sql[i - 1] !== "@" && !databaseLinkStarts.has(i) && !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
         occurrences.push({
           key: name,
           name,
@@ -779,46 +724,6 @@ function isDuckDbCompactPrefixAliasSeparator(sql: string, index: number, databas
   if (databaseType !== "duckdb") return false;
   const previous = sql[index - 1] ?? "";
   return PARAMETER_NAME_CHAR_RE.test(previous) || previous === '"';
-}
-
-function isOracleDatabaseLinkMarker(sql: string, index: number, databaseType: DatabaseType | undefined): boolean {
-  if (!supportsOracleDatabaseLinks(databaseType) || index === 0) return false;
-  const previous = sql[index - 1];
-  return PARAMETER_NAME_CHAR_RE.test(previous) || previous === "$" || previous === "#" || previous === '"';
-}
-
-function collectSeparatedOracleDatabaseLinks(sql: string, databaseType: DatabaseType | undefined): Set<number> {
-  const links = new Set<number>();
-  if (!supportsOracleDatabaseLinks(databaseType) || !sql.includes("@")) return links;
-  const tokens = tokenizeSqlSemantic(sql, "oracle").filter((token) => token.kind !== "comment");
-  for (let i = 1; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    if (token.kind !== "word" || !token.text.startsWith("@")) continue;
-    const object = tokens[i - 1];
-    if (object.kind === "quoted_identifier" && object.quote === '"') {
-      links.add(token.span.start);
-      continue;
-    }
-    if (object.kind !== "word" || !/^[\p{L}_][\p{L}\p{N}_$#]*$/u.test(object.text) || isOracleReservedKeyword(object.text)) continue;
-    const prefix = tokens[i - 2]?.normalized ?? "";
-    // Non-reserved words can name objects (FROM first@link), while expression
-    // keywords still introduce parameters (FETCH FIRST @count, UPDATE WAIT @n).
-    let objectContext = prefix === "." || (ORACLE_OBJECT_PREFIX_KEYWORDS.has(prefix) && !(prefix === "update" && tokens[i - 3]?.normalized === "for"));
-    // A comma can separate tables or expressions. Only a FROM list makes the
-    // following non-reserved keyword an object name, including after subqueries.
-    if (prefix === "," && ORACLE_PARAMETER_PREFIX_KEYWORDS.has(object.normalized)) {
-      for (let j = i - 3; j >= 0; j -= 1) {
-        const before = tokens[j];
-        if (before.depth < token.depth || before.text === ";") break;
-        if (before.depth === token.depth && before.kind === "word" && ORACLE_TABLE_LIST_BOUNDARIES.has(before.normalized)) {
-          objectContext = before.normalized === "from";
-          break;
-        }
-      }
-    }
-    if (objectContext || !ORACLE_PARAMETER_PREFIX_KEYWORDS.has(object.normalized)) links.add(token.span.start);
-  }
-  return links;
 }
 
 function isPostgresQuestionMarkOperator(sql: string, index: number, databaseType: DatabaseType | undefined): boolean {

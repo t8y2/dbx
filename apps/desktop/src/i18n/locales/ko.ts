@@ -2764,6 +2764,8 @@ export default withEnglishFallback({
     xlsxExportTitle: "내보내기 옵션",
     xlsxFilterPrompt: "내보낸 Excel에 필터를 포함할지 선택하십시오:",
     xlsxIncludeAutoFilter: "필터 포함",
+    xlsxHeaderNameAndCommentRows: "필드 이름과 주석을 두 헤더 행으로 사용",
+    xlsxHeaderNameAndCommentRowsHint: "1행은 필드 이름, 2행은 주석이며 데이터는 3행부터 시작합니다. 다시 가져오기 전에 주석 행을 삭제하면 필드 이름과 일치합니다.",
     batchAppendPasteNoMatchingColumns: "INSERT 문의 열 이름이 현재 결과 집합의 어떤 열과도 일치하지 않습니다.",
   },
   exportProgress: {

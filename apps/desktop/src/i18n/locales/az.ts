@@ -1985,6 +1985,8 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "Sütun adlarından başlıq kimi istifadə et",
     xlsxHeaderComment: "Sütun şərhlərindən başlıq kimi istifadə et",
     xlsxHeaderNameAndComment: "Sütun adlarından və şərhlərindən başlıq kimi istifadə et",
+    xlsxHeaderNameAndCommentRows: "Sütun adları və şərhləri iki başlıq sətrində istifadə et",
+    xlsxHeaderNameAndCommentRowsHint: "1-ci sətirdə sütun adları, 2-ci sətirdə şərhlər yer alır, məlumatlar 3-cü sətirdən başlayır. Yenidən idxal etməzdən əvvəl şərh sətrini silərək sütun adları ilə uyğunlaşdıra bilərsiniz.",
     xlsxFilterPrompt: "İxrac edilən Excel faylına süzgəclərin daxil edilib-edilməyəcəyini seçin:",
     xlsxIncludeAutoFilter: "Süzgəcləri daxil et",
     copied: "Kopyalandı",

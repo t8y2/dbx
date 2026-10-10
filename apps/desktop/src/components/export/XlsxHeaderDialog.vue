@@ -56,6 +56,11 @@ function onOpenChange(value: boolean) {
               <input type="radio" v-model="selected" value="name-comment" class="h-4 w-4" />
               <span class="text-sm">{{ t("grid.xlsxHeaderNameAndComment") }}</span>
             </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio" v-model="selected" value="name-comment-rows" class="h-4 w-4" />
+              <span class="text-sm">{{ t("grid.xlsxHeaderNameAndCommentRows") }}</span>
+            </label>
+            <p v-if="selected === 'name-comment-rows'" class="text-xs text-muted-foreground">{{ t("grid.xlsxHeaderNameAndCommentRowsHint") }}</p>
           </div>
         </div>
         <div class="space-y-3">

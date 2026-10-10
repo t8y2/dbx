@@ -2422,6 +2422,8 @@ export default {
     xlsxHeaderOriginal: "Use column names as headers",
     xlsxHeaderComment: "Use column comments as headers",
     xlsxHeaderNameAndComment: "Use column names and comments as headers",
+    xlsxHeaderNameAndCommentRows: "Use column names and comments as two header rows",
+    xlsxHeaderNameAndCommentRowsHint: "Row 1 keeps the column names, row 2 lists the comments, and data starts at row 3 — delete the comment row before re-importing to match the column names.",
     xlsxFilterPrompt: "Choose whether the exported Excel file includes filters:",
     xlsxIncludeAutoFilter: "Include filters",
     copied: "Copied",

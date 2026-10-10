@@ -133,6 +133,10 @@ pub struct QueryResultExportRequest {
     pub numeric_column_right_align: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_comments: Option<Vec<Option<String>>>,
+    /// Render `column_comments` as a second header row (names on row 1,
+    /// comments on row 2, data from row 3) instead of overriding headers.
+    #[serde(default)]
+    pub header_comment_rows: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_filter: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -254,6 +258,7 @@ fn query_sql_worksheets(request: &QueryResultExportRequest) -> Vec<XlsxWorksheet
         rows: split_excel_cell_text(&request.sql).into_iter().map(|sql| vec![Value::String(sql)]).collect(),
         numeric_column_right_align: false,
         auto_filter: Some(false),
+        header_comment_rows: false,
     }]
 }
 
@@ -275,6 +280,7 @@ fn start_query_result_xlsx_workbook<W: Write + Seek>(
         request.date_time_format.as_deref(),
         request.numeric_column_right_align,
         request.auto_filter.unwrap_or(true),
+        request.header_comment_rows,
     )
 }
 
@@ -2249,6 +2255,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             identifier_quote: None,
             insert_mode: SqlInsertMode::Batch,
             csv_quote_mode: Default::default(),
@@ -2341,6 +2348,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             identifier_quote: None,
             insert_mode: Default::default(),
             csv_quote_mode: Default::default(),
@@ -2430,6 +2438,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             identifier_quote: None,
             exclude_primary_keys: false,
             primary_keys: Vec::new(),

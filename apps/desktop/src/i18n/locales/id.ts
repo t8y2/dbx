@@ -2257,6 +2257,8 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "Gunakan nama kolom sebagai header",
     xlsxHeaderComment: "Gunakan komentar kolom sebagai header",
     xlsxHeaderNameAndComment: "Gunakan nama dan komentar kolom sebagai header",
+    xlsxHeaderNameAndCommentRows: "Gunakan nama dan komentar sebagai dua baris header",
+    xlsxHeaderNameAndCommentRowsHint: "Baris 1 berisi nama kolom, baris 2 komentar, dan data mulai dari baris 3. Hapus baris komentar sebelum mengimpor ulang agar sesuai dengan nama kolom.",
     xlsxFilterPrompt: "Pilih apakah file Excel yang diekspor menyertakan filter:",
     xlsxIncludeAutoFilter: "Sertakan filter",
     copied: "Disalin",

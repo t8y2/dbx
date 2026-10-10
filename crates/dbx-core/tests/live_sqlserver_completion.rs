@@ -530,6 +530,7 @@ async fn live_sqlserver_bulk_imports_zero_fraction_xlsx_numbers_into_bigint() {
         rows: vec![vec![serde_json::json!(1.0), serde_json::json!("xlsx")]],
         numeric_column_right_align: false,
         auto_filter: None,
+        header_comment_rows: false,
     })
     .expect("build SQL Server XLSX integer fixture");
     let path = dir.join("zero-fraction-integer.xlsx");
@@ -1231,6 +1232,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         export_column_extras: None,
         column_comments: None,
         auto_filter: None,
+        header_comment_rows: false,
         identifier_quote: None,
         numeric_column_right_align: false,
         exclude_primary_keys: false,

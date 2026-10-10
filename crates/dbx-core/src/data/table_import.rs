@@ -9382,6 +9382,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(""), serde_json::Value::Null]],
             numeric_column_right_align: false,
             auto_filter: None,
+            header_comment_rows: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -10711,6 +10712,7 @@ mod tests {
                 rows: vec![vec![serde_json::json!(1)]],
                 numeric_column_right_align: false,
                 auto_filter: None,
+                header_comment_rows: false,
             },
             XlsxWorksheetData {
                 sheet_name: Some("Second".to_string()),
@@ -10720,6 +10722,7 @@ mod tests {
                 rows: vec![vec![serde_json::json!("Ada")]],
                 numeric_column_right_align: false,
                 auto_filter: None,
+                header_comment_rows: false,
             },
         ])
         .unwrap();
@@ -10759,6 +10762,7 @@ mod tests {
                 rows: vec![vec![serde_json::json!(1)]],
                 numeric_column_right_align: false,
                 auto_filter: None,
+                header_comment_rows: false,
             },
             XlsxWorksheetData {
                 sheet_name: Some("Second".to_string()),
@@ -10768,6 +10772,7 @@ mod tests {
                 rows: vec![vec![serde_json::json!("Ada")], vec![serde_json::json!("Grace")]],
                 numeric_column_right_align: false,
                 auto_filter: None,
+                header_comment_rows: false,
             },
         ])
         .unwrap();
@@ -10982,6 +10987,7 @@ mod tests {
             ],
             numeric_column_right_align: false,
             auto_filter: None,
+            header_comment_rows: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -11360,6 +11366,7 @@ mod tests {
             ],
             numeric_column_right_align: false,
             auto_filter: None,
+            header_comment_rows: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -11965,6 +11972,7 @@ mod tests {
             ],
             numeric_column_right_align: false,
             auto_filter: None,
+            header_comment_rows: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -12065,6 +12073,7 @@ mod tests {
             ],
             numeric_column_right_align: false,
             auto_filter: None,
+            header_comment_rows: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();

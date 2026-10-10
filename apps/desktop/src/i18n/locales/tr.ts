@@ -1978,6 +1978,8 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "Başlık olarak sütun adlarını kullan",
     xlsxHeaderComment: "Başlık olarak sütun açıklamalarını kullan",
     xlsxHeaderNameAndComment: "Başlık olarak sütun adlarını ve açıklamalarını kullan",
+    xlsxHeaderNameAndCommentRows: "Alan adları ve açıklamaları iki başlık satırı olarak kullan",
+    xlsxHeaderNameAndCommentRowsHint: "1. satırda alan adları, 2. satırda açıklamalar yer alır ve veriler 3. satırdan başlar. Yeniden içe aktarmadan önce açıklama satırını silerek alan adlarıyla eşleştirebilirsiniz.",
     xlsxFilterPrompt: "Dışa aktarılan Excel dosyasının filtre içerip içermeyeceğini seçin:",
     xlsxIncludeAutoFilter: "Filtreleri dâhil et",
     copied: "Kopyalandı",

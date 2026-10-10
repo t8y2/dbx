@@ -10,6 +10,8 @@ export interface XlsxWorksheetData {
   rows: readonly (readonly XlsxCellValue[])[];
   numericColumnRightAlign?: boolean;
   autoFilter?: boolean;
+  /** Render comments as a second header row (names row 1, comments row 2, data from row 3). */
+  headerCommentRows?: boolean;
 }
 
 interface XlsxWorksheetSegment {
@@ -114,14 +116,18 @@ function normalizeUniqueSheetNames(sheets: readonly { sheetName?: string }[]): s
   return names;
 }
 
-function estimateColumnWidths(columns: readonly string[], rows: readonly (readonly XlsxCellValue[])[], rowStart: number, rowEnd: number, columnComments?: readonly (string | null)[]): number[] {
+function estimateColumnWidths(columns: readonly string[], rows: readonly (readonly XlsxCellValue[])[], rowStart: number, rowEnd: number, columnComments?: readonly (string | null)[], headerCommentRows = false): number[] {
   return columns.map((column, colIndex) => {
-    const headerText = columnComments?.[colIndex] || column;
+    // With a separate comment row both texts are visible, so the column must
+    // fit the wider of the two; otherwise the comment overrides the header.
+    const headerText = headerCommentRows ? column : columnComments?.[colIndex] || column;
+    const commentText = headerCommentRows ? columnComments?.[colIndex] || "" : "";
     const isSqlCol = column.toUpperCase() === "SQL";
     const maxClamp = isSqlCol ? 100 : 60;
     const values = Array.from({ length: Math.min(100, rowEnd - rowStart) }, (_, index) => rows[rowStart + index]?.[colIndex]);
     const maxLen = [
       headerText,
+      commentText,
       ...values.map((value) => {
         if (value == null) return "";
         const str = String(value);
@@ -182,15 +188,19 @@ function worksheetXml(segment: XlsxWorksheetSegment): string {
   const data = segment.worksheet;
   const columns = data.columns;
   const rows = data.rows;
-  const totalRows = segment.rowEnd - segment.rowStart + 1;
+  const hasCommentRow = data.headerCommentRows === true && data.columnComments?.some((comment) => !!comment?.trim());
+  const headerRows = hasCommentRow ? 2 : 1;
+  const totalRows = segment.rowEnd - segment.rowStart + headerRows;
   const range = sheetRange(columns.length, totalRows);
-  const widths = estimateColumnWidths(columns, rows, segment.rowStart, segment.rowEnd, data.columnComments);
+  const widths = estimateColumnWidths(columns, rows, segment.rowStart, segment.rowEnd, data.columnComments, hasCommentRow);
   const rightAlignEnabled = data.numericColumnRightAlign !== false;
   const colsXml = widths.map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`).join("");
-  const headerXml = `<row r="1">${columns.map((column, index) => cellXml(data.columnComments?.[index] || column, 0, index, 1)).join("")}</row>`;
+  const headerXml = `<row r="1">${columns.map((column, index) => cellXml(hasCommentRow ? column : data.columnComments?.[index] || column, 0, index, 1)).join("")}</row>${
+    hasCommentRow ? `<row r="2">${columns.map((_, index) => cellXml(data.columnComments?.[index] ?? null, 1, index, 1)).join("")}</row>` : ""
+  }`;
   const bodyXml = Array.from({ length: segment.rowEnd - segment.rowStart }, (_, rowIndex) => {
     const row = rows[segment.rowStart + rowIndex]!;
-    const excelRowIndex = rowIndex + 2;
+    const excelRowIndex = rowIndex + headerRows + 1;
     const cells = columns.map((colName, colIndex) => cellXml(row[colIndex], excelRowIndex - 1, colIndex, numericColumnStyle(data.columnTypes?.[colIndex], rightAlignEnabled), data.columnTypes?.[colIndex], colName)).join("");
     return `<row r="${excelRowIndex}">${cells}</row>`;
   }).join("");
@@ -200,7 +210,7 @@ function worksheetXml(segment: XlsxWorksheetSegment): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <dimension ref="${range}"/>
-  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="${headerRows}" topLeftCell="A${headerRows + 1}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
   <sheetFormatPr defaultRowHeight="15"/>
   <cols>${colsXml}</cols>
   <sheetData>${headerXml}${bodyXml}</sheetData>${autoFilterXml}

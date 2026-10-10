@@ -37,7 +37,7 @@ import { formatTemporalRowsForExport } from "@/lib/dataGrid/columnFormatter";
 import { translateBackendError } from "@/i18n/backend-errors";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import i18n from "@/i18n";
-import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 
 /**
  * Format metadata for backend table exports. Each entry maps a format key
@@ -588,7 +588,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return resultPageSql?.value || currentExportSql();
   }
 
-  async function writeXlsxResult(outputPath: string, result: { columns: string[]; columnTypes: string[]; columnComments?: (string | null)[]; rows: CellValue[][] }, includeSqlSheet: boolean, autoFilter: boolean, sqlOverride?: string) {
+  async function writeXlsxResult(outputPath: string, result: { columns: string[]; columnTypes: string[]; columnComments?: (string | null)[]; rows: CellValue[][] }, includeSqlSheet: boolean, autoFilter: boolean, sqlOverride?: string, headerCommentRows = false) {
     const effectiveSql = sqlOverride ?? currentExportSql();
     const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet([{ sql: effectiveSql || "" }]) : undefined;
     const rightAlign = useSettingsStore().editorSettings.numericColumnRightAlign;
@@ -597,7 +597,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     // a `SSS` pattern silently displays as `yyyy-mm-dd hh:mm:ss`.
     const dateTimeFormat = useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined;
     if (!sqlWorksheet) {
-      await api.exportQueryResultXlsx(outputPath, currentXlsxSheetName(), result.columns, result.columnTypes, result.columnComments, result.rows, rightAlign, autoFilter, dateTimeFormat);
+      await api.exportQueryResultXlsx(outputPath, currentXlsxSheetName(), result.columns, result.columnTypes, result.columnComments, result.rows, rightAlign, autoFilter, dateTimeFormat, headerCommentRows);
       return;
     }
     await api.exportQueryResultsXlsx(
@@ -611,6 +611,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           rows: result.rows,
           numericColumnRightAlign: rightAlign,
           autoFilter,
+          headerCommentRows,
         },
         { ...sqlWorksheet, autoFilter: false },
       ],
@@ -1272,7 +1273,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             totalRows: result.rows.length,
           };
         }
-        await writeXlsxResult(outputPath, result, includeSqlSheet, exportOptions.autoFilter);
+        await writeXlsxResult(outputPath, result, includeSqlSheet, exportOptions.autoFilter, undefined, xlsxHeaderUsesCommentRows(exportOptions.headerMode));
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
@@ -1332,7 +1333,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           outputPath = path;
         }
         const result = await resultToExport({ columnIndexes }, undefined, false, true, exportOptions.headerMode);
-        await writeXlsxResult(outputPath, result, includeSqlSheet, exportOptions.autoFilter, currentPageExportSql());
+        await writeXlsxResult(outputPath, result, includeSqlSheet, exportOptions.autoFilter, currentPageExportSql(), xlsxHeaderUsesCommentRows(exportOptions.headerMode));
         notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
@@ -1378,6 +1379,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           rows: formatTemporalRowsForExport(sheet.result.rows, sheet.result.column_types ?? [], exportPattern),
           numericColumnRightAlign: rightAlign,
           autoFilter: exportOptions.autoFilter,
+          headerCommentRows: xlsxHeaderUsesCommentRows(exportOptions.headerMode),
         }));
         const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet(sheets.map((sheet) => ({ resultName: sheet.sheetName, sql: sheet.sql || sheet.result.sourceStatement || "" }))) : undefined;
         await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [...worksheets, { ...sqlWorksheet, autoFilter: false }] : worksheets, exportOptions.autoFilter, exportPattern || undefined);
@@ -1516,6 +1518,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           columnTypes: columnTypes.value,
           ...(format === "sql" ? { columnExtras: sqlExportColumnExtras(effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!)) } : {}),
           columnComments: format === "xlsx" ? buildXlsxHeaderOverrides(columns.value, visibleXlsxColumnComments.value, headerMode) : undefined,
+          headerCommentRows: format === "xlsx" ? xlsxHeaderUsesCommentRows(headerMode) : undefined,
           primaryKeys: meta.primaryKeys,
           ...sqlExportPrimaryKeyOptions(),
           whereInput: whereInput.value,
@@ -1603,6 +1606,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       ...(format === "sql" && sqlExportOptions ? { insertMode: sqlExportOptions.insertMode } : {}),
     });
     const columnComments = format === "xlsx" ? buildXlsxHeaderOverrides(allColumns.value, allXlsxColumnComments.value, headerMode) : undefined;
+    const headerCommentRows = format === "xlsx" && xlsxHeaderUsesCommentRows(headerMode);
     const request = baseRequest
       ? {
           ...baseRequest,
@@ -1613,6 +1617,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined,
           numericColumnRightAlign: useSettingsStore().editorSettings.numericColumnRightAlign ?? true,
           columnComments,
+          headerCommentRows,
           autoFilter: format === "xlsx" ? autoFilter : undefined,
         }
       : undefined;

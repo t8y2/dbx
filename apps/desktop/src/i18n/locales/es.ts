@@ -2932,6 +2932,8 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "Encabezado usando nombres de campos",
     xlsxHeaderComment: "Encabezado usando comentarios",
     xlsxHeaderNameAndComment: "Encabezado usando nombres de campos y comentarios",
+    xlsxHeaderNameAndCommentRows: "Usar nombres y comentarios como dos filas de encabezado",
+    xlsxHeaderNameAndCommentRowsHint: "La fila 1 contiene los nombres de los campos, la fila 2 los comentarios y los datos empiezan en la fila 3; elimina la fila de comentarios antes de reimportar para alinear con los nombres.",
     xlsxFilterPrompt: "Seleccione si el Excel exportado incluye filtros:",
     xlsxIncludeAutoFilter: "Incluir filtros",
     jumpToPage: "Ir a la página",

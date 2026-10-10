@@ -2320,6 +2320,8 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "Использовать имена столбцов как заголовки",
     xlsxHeaderComment: "Использовать комментарии столбцов как заголовки",
     xlsxHeaderNameAndComment: "Использовать имена и комментарии столбцов как заголовки",
+    xlsxHeaderNameAndCommentRows: "Имена и комментарии в двух строках заголовка",
+    xlsxHeaderNameAndCommentRowsHint: "Строка 1 — имена столбцов, строка 2 — комментарии, данные начинаются со строки 3. Перед повторным импортом удалите строку комментариев, чтобы выровнять имена.",
     xlsxFilterPrompt: "Выберите, включать ли фильтры в экспортируемый файл Excel:",
     xlsxIncludeAutoFilter: "Включить фильтры",
     copied: "Скопировано",

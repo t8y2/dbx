@@ -2820,6 +2820,8 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "ヘッダーにフィールド名を使用",
     xlsxHeaderComment: "ヘッダーにコメントを使用",
     xlsxHeaderNameAndComment: "ヘッダーにフィールド名とコメントを使用",
+    xlsxHeaderNameAndCommentRows: "フィールド名とコメントを2行のヘッダーに分ける",
+    xlsxHeaderNameAndCommentRowsHint: "1行目にフィールド名、2行目にコメント、データは3行目から始まります。再インポート時にコメント行を削除すればフィールド名が一致します。",
     xlsxFilterPrompt: "エクスポートする Excel にフィルターを含めるか選択してください：",
     xlsxIncludeAutoFilter: "フィルターを含める",
     searchMode: "検索モード",

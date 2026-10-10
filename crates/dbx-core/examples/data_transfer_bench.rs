@@ -117,6 +117,7 @@ fn run() -> Result<(), String> {
         rows,
         numeric_column_right_align: false,
         auto_filter: None,
+        header_comment_rows: false,
     })?;
     let xlsx_ms = elapsed_ms(xlsx_started);
 

@@ -341,6 +341,9 @@ function close() {
               </SelectContent>
             </Select>
             <p v-if="!isCreate" class="text-xs text-muted-foreground">{{ t("scheduler.editor.providerLockedHint") }}</p>
+            <p v-if="selectedTrigger?.mode === 'resident'" class="text-xs text-amber-700 dark:text-amber-300" data-scheduler-editor-resident-hint>
+              {{ t("scheduler.editor.residentHint") }}
+            </p>
           </div>
         </div>
         <div v-if="!formConnectionKey" class="space-y-2" data-scheduler-editor-connection>

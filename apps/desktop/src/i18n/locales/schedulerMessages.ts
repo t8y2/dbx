@@ -76,6 +76,7 @@ export const schedulerEn = {
     connectionRequired: "This provider requires a connection.",
     enabled: "Enabled",
     providerLockedHint: "Fixed after creation.",
+    residentHint: "Resident commands must keep running (e.g. tail -F). A command that exits is treated as a crash and restarts - use the run trigger for one-shot commands.",
     risk: {
       medium: "This action is marked medium risk. It runs unattended once enabled.",
       high: "This action is marked HIGH risk. Confirm that you want it to run unattended.",
@@ -308,6 +309,7 @@ export const schedulerZhCN = {
     connectionRequired: "该提供方需要绑定连接。",
     enabled: "启用任务",
     providerLockedHint: "创建后不可更改。",
+    residentHint: "常驻命令需要长期运行（如 tail -F）；会正常退出的短命令会被视为崩溃并重启，请改用「执行命令」触发器。",
     risk: {
       medium: "该动作被标记为中风险，启用后将自动执行。",
       high: "该动作被标记为高风险。请确认允许其自动执行。",
@@ -540,6 +542,7 @@ export const schedulerZhTW = {
     connectionRequired: "該提供方需要綁定連線。",
     enabled: "啟用任務",
     providerLockedHint: "建立後不可更改。",
+    residentHint: "常駐命令需要長期執行（如 tail -F）；會正常結束的短命令會被視為崩潰並重啟，請改用「執行命令」觸發器。",
     risk: {
       medium: "該動作被標記為中風險，啟用後將自動執行。",
       high: "該動作被標記為高風險。請確認允許其自動執行。",

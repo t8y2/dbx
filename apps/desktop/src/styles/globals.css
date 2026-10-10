@@ -336,6 +336,81 @@ html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"]):dis
   }
 }
 
+/* Pearl stays a neutral light theme, but gives the shell, navigation and
+ * editor chrome enough separation from the white content surfaces. */
+html.theme-pearl {
+  --background: rgb(255 255 255);
+  --foreground: rgb(28 31 36);
+  --dbx-foreground-rgb: 28, 31, 36;
+  --card: rgb(255 255 255);
+  --card-foreground: rgb(28 31 36);
+  --popover: rgb(255 255 255);
+  --popover-foreground: rgb(28 31 36);
+  --primary: rgb(38 45 54);
+  --dbx-primary-rgb: 38, 45, 54;
+  --primary-foreground: rgb(250 251 252);
+  --secondary: rgb(239 242 246);
+  --secondary-foreground: rgb(39 43 50);
+  --muted: rgb(239 242 246);
+  --muted-foreground: rgb(101 109 120);
+  --accent: rgb(226 231 238);
+  --accent-foreground: rgb(35 41 49);
+  --border: rgb(194 201 211);
+  --input: rgb(191 199 210);
+  --ring: rgb(114 127 145);
+  --sidebar: rgb(239 242 246);
+  --sidebar-foreground: rgb(39 43 50);
+  --sidebar-primary: rgb(38 45 54);
+  --sidebar-primary-foreground: rgb(250 251 252);
+  --sidebar-accent: rgb(225 230 237);
+  --sidebar-accent-foreground: rgb(35 41 49);
+  --sidebar-border: rgb(189 197 208);
+  --sidebar-ring: rgb(114 127 145);
+  --dbx-chrome: rgb(232 236 241);
+  --dbx-chrome-muted: rgb(222 227 234);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(241 244 248);
+  --dbx-gutter: rgb(229 234 240);
+  --dbx-sidebar-header: rgb(232 236 242);
+}
+
+html.theme-pearl.dark {
+  --background: rgb(22 23 25);
+  --foreground: rgb(215 215 219);
+  --dbx-foreground-rgb: 215, 215, 219;
+  --card: rgb(29 29 32);
+  --card-foreground: rgb(215 215 219);
+  --popover: rgb(32 32 35);
+  --popover-foreground: rgb(221 221 226);
+  --primary: rgb(208 208 214);
+  --dbx-primary-rgb: 208, 208, 214;
+  --primary-foreground: rgb(22 23 25);
+  --secondary: rgb(40 40 43);
+  --secondary-foreground: rgb(215 215 219);
+  --muted: rgb(40 40 43);
+  --muted-foreground: rgb(151 152 157);
+  --accent: rgb(47 48 52);
+  --accent-foreground: rgb(221 221 226);
+  --destructive: rgb(243 98 95);
+  --border: rgb(110 110 114 / 0.22);
+  --input: rgb(110 110 114 / 0.27);
+  --ring: rgb(133 134 139);
+  --sidebar: rgb(26 27 31);
+  --sidebar-foreground: rgb(208 208 213);
+  --sidebar-primary: rgb(208 208 214);
+  --sidebar-primary-foreground: rgb(22 23 25);
+  --sidebar-accent: rgb(43 43 47);
+  --sidebar-accent-foreground: rgb(221 221 226);
+  --sidebar-border: rgb(110 110 114 / 0.22);
+  --sidebar-ring: rgb(133 134 139);
+  --dbx-chrome: rgb(25 25 28);
+  --dbx-chrome-muted: rgb(30 30 33);
+  --dbx-content: rgb(22 23 25);
+  --dbx-editor-toolbar: rgb(25 25 28);
+  --dbx-gutter: rgb(31 32 37);
+  --dbx-sidebar-header: rgb(29 30 34);
+}
+
 html.theme-soft {
   --background: rgb(250 251 253);
   --foreground: rgb(40 44 52);
@@ -2758,6 +2833,35 @@ body.dbx-is-resizing .cm-scroller,
   color: var(--sidebar-foreground);
   background: var(--sidebar);
 }
+/* Pearl keeps panel corners square and uses a narrow, even gutter between
+   navigation and work areas. */
+html.theme-pearl .app-panel-gutter {
+  column-gap: 4px;
+}
+html.theme-pearl .app-panel-gutter > [data-app-sidebar] {
+  margin-right: 0;
+}
+html.theme-pearl .app-layout-classic > [data-app-sidebar] {
+  margin-right: 4px;
+}
+html.theme-pearl .app-panel-gutter > [data-app-sidebar],
+html.theme-pearl .app-panel-gutter > [data-editor-content],
+html.theme-pearl .app-panel-gutter > .relative.z-30.isolate {
+  border-radius: 0;
+}
+html.theme-pearl [data-app-sidebar] > div:first-child {
+  border-radius: inherit;
+}
+html.theme-pearl .app-layout-classic {
+  column-gap: 0;
+  background: var(--dbx-gutter);
+}
+html.theme-pearl .app-layout-classic > [data-app-sidebar],
+html.theme-pearl .app-layout-classic > [data-editor-content],
+html.theme-pearl .app-layout-classic > .relative.z-30.isolate {
+  border: 1px solid var(--border);
+  border-radius: 0;
+}
 .app-sidebar-toolbar,
 .connection-tree-search,
 .sticky-database-header {
@@ -2775,16 +2879,14 @@ body.dbx-is-resizing .cm-scroller,
 html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false"] {
   border-color: var(--dbx-tab-outline);
 }
-.app-layout-classic .panel-resize-handle {
-  width: 3px;
+html.theme-pearl .app-layout-classic .panel-resize-handle {
+  width: 6px;
 }
-.app-layout-classic .panel-resize-handle--right {
-  right: 0;
-  border-right: 1px solid var(--border);
+html.theme-pearl .app-layout-classic .panel-resize-handle--right {
+  right: -6px;
 }
-.app-layout-classic .panel-resize-handle--left {
-  left: 0;
-  border-left: 1px solid var(--border);
+html.theme-pearl .app-layout-classic .panel-resize-handle--left {
+  left: -3px;
 }
 .app-layout-classic .panel-resize-handle:hover,
 .app-layout-classic .panel-resize-handle:active {

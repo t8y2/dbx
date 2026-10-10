@@ -159,7 +159,7 @@ export type AppThemePaletteOption = {
 };
 
 export const APP_THEME_PALETTES: AppThemePaletteOption[] = [
-  { value: "pearl", labelKey: "settings.themePalettePearl", className: null, previewColor: "#ffffff" },
+  { value: "pearl", labelKey: "settings.themePalettePearl", className: "theme-pearl", previewColor: "#e8ecf1" },
   { value: "mist", labelKey: "settings.themePaletteMist", className: "theme-soft", previewColor: "#e4eaf2" },
   { value: "graphite", labelKey: "settings.themePaletteGraphite", className: "theme-graphite", previewColor: "#d8dce4" },
   { value: "cobalt", labelKey: "settings.themePaletteCobalt", className: "theme-cobalt", previewColor: "#d8e6f7" },

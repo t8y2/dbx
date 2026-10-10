@@ -1820,6 +1820,7 @@ jobs:
 
           missing=()
           for f in release/*; do
+            [ -f "$f" ] || continue
             [ -n "${have["$(basename "$f")"]:-}" ] || missing+=("$f")
           done
           echo "release already has ${#existing[@]} assets; uploading ${#missing[@]} missing"

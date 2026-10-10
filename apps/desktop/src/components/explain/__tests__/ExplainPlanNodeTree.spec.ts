@@ -60,7 +60,7 @@ function blend(foreground: Rgb, background: Rgb, opacity: number): Rgb {
 
 describe("ExplainPlanNodeTree interactions", () => {
   it("keeps foreground-based tree metadata readable in every application palette", () => {
-    expect(themeColors).toHaveLength(26);
+    expect(themeColors).toHaveLength(28);
 
     for (const theme of themeColors) {
       expect(contrastRatio(blend(theme.foreground, theme.background, 0.8), theme.background), theme.selector).toBeGreaterThanOrEqual(4.5);

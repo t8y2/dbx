@@ -111,3 +111,15 @@ export const redisGroupingEs = {
   emptyKey: "(clave vacía)",
   selectLoaded: "Seleccionar coincidencias cargadas",
 };
+
+// Polish interface overrides; retains all keys from the canonical English object.
+export const redisGroupingPl = {
+  ...redisGroupingEn,
+  useList: "Użyj listy",
+  settings: "Zasady grupowania",
+  toggle: "Grupy niestandardowe",
+  list: "Lista",
+  tree: "Drzewo",
+  preparingLegacy: "Przygotowywanie poprzedniego widoku; grupy niestandardowe pozostają dostępne…",
+  fuzzyTreeUnavailable: "To wyszukiwanie przekracza limit zasobów drzewa. Wybierz listę, aby przeglądać wczytane wyniki, albo zawęź wyszukiwanie, aby użyć widoku drzewa.",
+};

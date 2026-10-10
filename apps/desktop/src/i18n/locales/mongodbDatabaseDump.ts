@@ -437,3 +437,17 @@ export const mongodbDatabaseDumpZhTW = {
   validationBytes: "已驗證：解壓縮後 {size} GiB，{count} 個文件",
   phase: { preparing: "準備中", uploading: "上傳選取的檔案", validating: "驗證備份", data: "集合資料", indexes: "還原索引", views: "還原檢視表", archive: "寫入備份", done: "已結束" },
 };
+
+// Polish interface overrides; retains all keys from the canonical English object.
+export const mongodbDatabaseDumpPl = {
+  ...mongodbDatabaseDumpEn,
+  selectAll: "Zaznacz wszystkie kolekcje",
+  menuDump: "Utwórz kopię bazy…",
+  menuRestore: "Przywróć bazę…",
+  dumpTitle: "Kopia zapasowa bazy MongoDB",
+  restoreTitle: "Przywracanie bazy MongoDB",
+  format: "Format",
+  archive: "Archiwum MongoDB",
+  directory: "Katalog kopii MongoDB",
+  source: "Źródło kopii zapasowej",
+};

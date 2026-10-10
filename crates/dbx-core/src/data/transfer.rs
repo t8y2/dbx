@@ -5267,9 +5267,26 @@ fn rewrite_transfer_source_table_ddl(
         // and string literals remain untouched; table casing is validated as
         // Preserve for structure transfers.
         Some(rewrite_double_quoted_schema_qualifier(sql, source_schema, target_schema))
+    } else if matches!((source_db_type, target_db_type), (DatabaseType::SqlServer, DatabaseType::SqlServer)) {
+        // SQL Server's reused DDL brackets the schema qualifier in the CREATE
+        // TABLE head and in FOREIGN KEY ... REFERENCES; reusing it verbatim
+        // recreated the table in the source schema (or failed outright when
+        // the target had no schema of that name). Rewrite only the bracketed
+        // source qualifier — cross-schema references to third-party tables
+        // keep their own qualifier, exactly like the Oracle-family rewrite.
+        Some(rewrite_sqlserver_bracketed_schema_qualifier(sql, source_schema, target_schema))
     } else {
         Some(sql.to_string())
     }
+}
+
+fn rewrite_sqlserver_bracketed_schema_qualifier(ddl: &str, source_schema: &str, target_schema: &str) -> String {
+    if source_schema == target_schema || source_schema.is_empty() {
+        return ddl.to_string();
+    }
+    let source = format!("[{}].", source_schema.replace(']', "]]"));
+    let target = format!("[{}].", target_schema.replace(']', "]]"));
+    map_sql_code_spans(ddl, false, |code| code.replace(&source, &target))
 }
 
 /// Rewrites the table identifier of the leading CREATE TABLE statement of a reused
@@ -16903,6 +16920,84 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
         assert!(rewritten.contains("PARTITION BY RANGE (TO_DAYS(`created_day`))"));
         assert!(rewritten.contains("ENGINE=InnoDB"));
         assert!(!rewritten.contains("`orders_plain`"));
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_rewrites_schema_qualifier_in_head_and_foreign_keys() {
+        // Issue #11533: the reused DDL kept `[src].` so the CREATE TABLE ran
+        // against the source schema — same-database transfers failed with 2714
+        // and cross-database ones either errored (2760) or silently created
+        // the table in a stray source-named schema.
+        let ddl = "CREATE TABLE [src].[DBXE_PARENT] (\n  [ID] int NOT NULL,\n  [NAME] nvarchar(50) NOT NULL,\n  CONSTRAINT [PK_DBXE_PARENT] PRIMARY KEY ([ID])\n);\nCREATE TABLE [src].[DBXE_CHILD] (\n  [ID] int NOT NULL,\n  [PARENT_ID] int NOT NULL,\n  CONSTRAINT [FK_DBXE_CHILD_PARENT] FOREIGN KEY ([PARENT_ID]) REFERENCES [src].[DBXE_PARENT]([ID])\n);";
+
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "src",
+            "dst",
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            "DBXE_PARENT",
+            "DBXE_PARENT",
+        )
+        .unwrap();
+
+        assert!(rewritten.contains("CREATE TABLE [dst].[DBXE_PARENT] ("), "head: {rewritten}");
+        assert!(rewritten.contains("CREATE TABLE [dst].[DBXE_CHILD] ("), "child head: {rewritten}");
+        assert!(rewritten.contains("REFERENCES [dst].[DBXE_PARENT]([ID])"), "fk: {rewritten}");
+        assert!(!rewritten.contains("[src]."), "no source qualifier may remain: {rewritten}");
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_keeps_cross_schema_references_and_literals() {
+        let ddl = "CREATE TABLE [src].[child] (\n  [note] nvarchar(50) NOT NULL DEFAULT 'mirrors [src].[keep]',\n  [ref_id] int NOT NULL,\n  CONSTRAINT [fk_other] FOREIGN KEY ([ref_id]) REFERENCES [other].[target]([id])\n);";
+
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "src",
+            "dst",
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            "child",
+            "child",
+        )
+        .unwrap();
+
+        assert!(rewritten.contains("CREATE TABLE [dst].[child] ("), "head: {rewritten}");
+        // A third-party table referenced from another schema must not be
+        // repointed at the target schema, where it does not exist.
+        assert!(rewritten.contains("REFERENCES [other].[target]([id])"), "cross-schema ref: {rewritten}");
+        // String literals keep their original text.
+        assert!(rewritten.contains("'mirrors [src].[keep]'"), "literal: {rewritten}");
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_preserves_identity_and_escaped_brackets() {
+        // Same schema on both sides: the DDL is reused verbatim.
+        assert_eq!(
+            rewrite_transfer_source_table_ddl(
+                "CREATE TABLE [dbo].[t] ([id] int);",
+                "dbo",
+                "dbo",
+                &DatabaseType::SqlServer,
+                &DatabaseType::SqlServer,
+                "t",
+                "t"
+            ),
+            Some("CREATE TABLE [dbo].[t] ([id] int);".to_string())
+        );
+        // A schema name containing `]` appears in the DDL with its escaped
+        // form (`]` doubled inside brackets) and is rewritten as a whole.
+        let rewritten = rewrite_transfer_source_table_ddl(
+            "CREATE TABLE [we]]ird].[t] ([id] int);",
+            "we]ird",
+            "plain",
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            "t",
+            "t",
+        )
+        .unwrap();
+        assert_eq!(rewritten, "CREATE TABLE [plain].[t] ([id] int);");
     }
 
     #[test]

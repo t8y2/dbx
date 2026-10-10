@@ -3035,6 +3035,13 @@ async fn postgres_client_key(client: &deadpool_postgres::Client) -> Option<Postg
     resolve_postgres_client_key(client).await
 }
 
+pub(crate) fn postgres_query_message_buffer(
+    client: &deadpool_postgres::Client,
+) -> Option<Arc<Mutex<Vec<QueryMessage>>>> {
+    let key = cached_postgres_client_key(client)??;
+    postgres_notice_buffers().lock().unwrap_or_else(|e| e.into_inner()).get(&key).and_then(Weak::upgrade)
+}
+
 fn take_notices_for_key(key: &PostgresConnectionKey) -> Vec<QueryMessage> {
     let buffer = {
         let mut buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());

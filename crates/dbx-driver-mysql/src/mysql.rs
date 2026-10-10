@@ -9879,7 +9879,6 @@ mod tests {
 
     #[test]
     fn mysql_proxysql_hostgroup_locked_error_retries_with_literal_floor() {
-        let url = "mysql://root:pw@host:3306/app";
         let error = "MySQL connection verification query failed: Server error: `ERROR 9006 (Y0000): ProxySQL Error: connection is locked to hostgroup 0 but trying to reach hostgroup 1`";
         let fallback = mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error)
             .expect("ProxySQL error 9006 must trigger setup fallback");

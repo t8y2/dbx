@@ -6060,21 +6060,14 @@ pub fn generate_schema_sync_sql_plan(
         source_dialect,
         field_mappings,
     );
-    let sync_sql = if ignore_foreign_key_checks {
-        wrap_script_with_foreign_key_checks(&sync_sql, db_type)
-    } else {
-        sync_sql
-    };
+    let sync_sql =
+        if ignore_foreign_key_checks { wrap_script_with_foreign_key_checks(&sync_sql, db_type) } else { sync_sql };
 
     let (rollback_sync_sql, missing_rollback_objects) = if enable_rollback {
         let dependency_graph = DependencyGraph { nodes: HashMap::new(), topological_order: Vec::new() };
         let rollback_graph = RollbackGraph::from_forward_diffs(diffs, &[], &dependency_graph);
         let (sql, missing) = generate_rollback_sync_sql_with_missing(&rollback_graph, db_type, schema, cascade_delete);
-        let sql = if ignore_foreign_key_checks {
-            wrap_script_with_foreign_key_checks(&sql, db_type)
-        } else {
-            sql
-        };
+        let sql = if ignore_foreign_key_checks { wrap_script_with_foreign_key_checks(&sql, db_type) } else { sql };
         (Some(sql), missing)
     } else {
         (None, Vec::new())
@@ -10008,7 +10001,11 @@ mod tests {
             format!("{MYSQL_DISABLE_FOREIGN_KEY_CHECKS}\n{script}\n{MYSQL_ENABLE_FOREIGN_KEY_CHECKS}")
         );
         for db_type in [DatabaseType::Postgres, DatabaseType::SqlServer, DatabaseType::Oracle, DatabaseType::Sqlite] {
-            assert_eq!(wrap_script_with_foreign_key_checks(script, db_type), script, "{db_type:?} must keep the script unchanged");
+            assert_eq!(
+                wrap_script_with_foreign_key_checks(script, db_type),
+                script,
+                "{db_type:?} must keep the script unchanged"
+            );
         }
     }
 
@@ -10088,7 +10085,20 @@ mod tests {
 
     #[test]
     fn empty_plan_is_not_wrapped_even_when_foreign_key_checks_are_ignored() {
-        let plan = generate_schema_sync_sql_plan(&[], &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[], false, true);
+        let plan = generate_schema_sync_sql_plan(
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            None,
+            false,
+            None,
+            &[],
+            false,
+            true,
+        );
         assert_eq!(plan.sync_sql, "");
     }
 

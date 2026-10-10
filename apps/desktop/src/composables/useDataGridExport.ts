@@ -1598,7 +1598,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       includeSqlSheet,
       exportTableName: insertTarget?.tableName,
       exportSchema: insertTarget?.tableName ? sqlInsertTargetSchema(insertTarget) : undefined,
-      exportColumnTypes: format === "sql" ? allColumnTypes.value?.map((type) => type ?? null) : undefined,
+      exportColumnTypes: format === "sql" || format === "xlsx" ? allColumnTypes.value?.map((type) => type ?? null) : undefined,
       exportColumnExtras: format === "sql" ? sqlExportColumnExtras(allColumns.value) : undefined,
       ...(format === "sql" && sqlExportOptions ? { insertMode: sqlExportOptions.insertMode } : {}),
     });

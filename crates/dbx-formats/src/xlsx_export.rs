@@ -747,6 +747,12 @@ fn is_numeric_column_type(column_type: Option<&String>) -> bool {
             | "int"
             | "integer"
             | "bigint"
+            | "hugeint"
+            | "uhugeint"
+            | "utinyint"
+            | "usmallint"
+            | "uinteger"
+            | "ubigint"
             | "serial"
             | "smallserial"
             | "bigserial"
@@ -1994,6 +2000,26 @@ mod tests {
         for fixture in fixtures["nonNumeric"].as_array().expect("non-numeric fixtures") {
             let column_type = fixture["type"].as_str().expect("non-numeric fixture type").to_string();
             assert!(!is_numeric_column_type(Some(&column_type)), "expected non-numeric backend type: {column_type}");
+        }
+    }
+
+    #[test]
+    fn duckdb_numeric_types_recognized_by_classifier() {
+        for duckdb_type in [
+            "DECIMAL(18, 3)",
+            "decimal",
+            "NUMERIC(10, 2)",
+            "hugeint",
+            "uhugeint",
+            "utinyint",
+            "usmallint",
+            "uinteger",
+            "ubigint",
+        ] {
+            assert!(
+                is_numeric_column_type(Some(&duckdb_type.to_string())),
+                "expected DuckDB numeric type: {duckdb_type}"
+            );
         }
     }
 

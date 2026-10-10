@@ -1323,8 +1323,7 @@ func TestPLDebugStepIntoRoutineAcceptsThePackageFrameInsideTheSubprogram(t *test
 		db, drv := openOracleDebugCallTestDB(t)
 		drv.scriptOut(procCntStepIn, 0, plDebugErrSuccess)
 		drv.scriptOut(procCntStepIn, 1, plDebugRunInfo("DBX_MSCHK_PKG", "DBX_DEBUG", 0, 2, plDebugReasonEnter))
-		drv.scriptOut(procPrintBacktrace, 0, " [Line 2]   PROCEDURE RUN_MSCHK IS\n<source not available>")
-		drv.scriptOut(procPrintBacktrace, 1, 0)
+		scriptFetchBacktrace(drv, " [Line 2]   PROCEDURE RUN_MSCHK IS\n<source not available>", 0)
 		session := newPLDebugCallSession(db, false)
 		session.targetLines = plDebugLineRange{First: 2, Last: 7}
 
@@ -1346,8 +1345,7 @@ func TestPLDebugStepIntoRoutineAcceptsThePackageFrameInsideTheSubprogram(t *test
 			drv.scriptOut(procCntStepIn, 0, plDebugErrSuccess)
 			drv.scriptOut(procCntStepIn, 1, plDebugRunInfo("DBX_MSCHK_PKG", "DBX_DEBUG", 0, 2, plDebugReasonLine))
 		}
-		drv.scriptOut(procPrintBacktrace, 0, " [Line 9]   DBMS_OUTPUT.PUT_LINE('init');\n<source not available>")
-		drv.scriptOut(procPrintBacktrace, 1, 0)
+		scriptFetchBacktrace(drv, " [Line 9]   DBMS_OUTPUT.PUT_LINE('init');\n<source not available>", 0)
 		session := newPLDebugCallSession(db, false)
 		session.targetLines = plDebugLineRange{First: 2, Last: 7}
 
@@ -1374,8 +1372,7 @@ func TestPLDebugStepIntoRoutineAcceptsThePackageFrameInsideTheSubprogram(t *test
 		db, drv := openOracleDebugCallTestDB(t)
 		drv.scriptOut(procCntStepIn, 0, plDebugErrSuccess)
 		drv.scriptOut(procCntStepIn, 1, plDebugRunInfo("OTHER_PKG", "DBX_DEBUG", 0, 2, plDebugReasonEnter))
-		drv.scriptOut(procPrintBacktrace, 0, " [Line 2]   PROCEDURE RUN_MSCHK IS\n<source not available>")
-		drv.scriptOut(procPrintBacktrace, 1, 0)
+		scriptFetchBacktrace(drv, " [Line 2]   PROCEDURE RUN_MSCHK IS\n<source not available>", 0)
 		session := newPLDebugCallSession(db, false)
 		session.targetLines = plDebugLineRange{First: 2, Last: 7}
 
@@ -2238,6 +2235,7 @@ var oracleDebugHelperRoutines = []string{
 	procEnableBreakpoint,
 	procDisableBreakpoint,
 	procSetValue,
+	procFetchBacktrace,
 	procPrintBacktrace,
 	procShowBreakpoints,
 	procGetRuntimeInfo,
@@ -2293,6 +2291,9 @@ type oracleDebugCallDriver struct {
 	// plsqlDebug is what the PLSQL_DEBUG probe answers. "" models a server that has no
 	// ALL_PLSQL_OBJECT_SETTINGS row for the object (found == false).
 	plsqlDebug string
+	// returnType is what the ALL_ARGUMENTS read of a FUNCTION target answers. "" models
+	// a dictionary with no POSITION 0 row (the lookup then keeps an empty type).
+	returnType string
 	// closed counts the physical connections the pool really closed. It is what
 	// separates "the teardown closed the connection" from "the teardown abandoned it":
 	// database/sql's DB.Close only closes free connections, so a session whose
@@ -2334,6 +2335,15 @@ func (d *oracleDebugCallDriver) blockRoutine(routine string) (release func()) {
 	d.mu.Unlock()
 	var once sync.Once
 	return func() { once.Do(func() { close(gate) }) }
+}
+
+// scriptFetchBacktrace makes the next DBX_FETCH_BACKTRACE answer the textual listing and
+// its status, leaving the structured register empty. The merge then finds nothing to
+// align and falls back to exactly the pre-V6.5 textual path, which is what these tests
+// pin; the structured path has its own tests.
+func scriptFetchBacktrace(d *oracleDebugCallDriver, listing string, status int) {
+	d.scriptOut(procFetchBacktrace, 1, listing)
+	d.scriptOut(procFetchBacktrace, 2, status)
 }
 
 // scriptOut makes the next call of a routine write value into its index-th OUT
@@ -2467,6 +2477,16 @@ func (c *oracleDebugCallConn) QueryContext(_ context.Context, query string, _ []
 		}
 		return rows, nil
 	}
+	if strings.Contains(query, "ALL_ARGUMENTS") {
+		state.mu.Lock()
+		returnType := state.returnType
+		state.mu.Unlock()
+		rows := &oracleDebugRows{columns: []string{"DATA_TYPE"}}
+		if returnType != "" {
+			rows.values = [][]driver.Value{{returnType}}
+		}
+		return rows, nil
+	}
 	return nil, fmt.Errorf("unexpected query: %s", query)
 }
 
@@ -2541,12 +2561,17 @@ func newPLDebugCallSession(db *sql.DB, oci bool) *plDebugSession {
 
 // ociPLDebugBindKinds maps a thin-driver binding expectation to the OCI one:
 // go-ora's sized Out becomes the sql.Out godror sizes itself, every other
-// argument keeps its kind.
+// argument keeps its kind. The IN OUT marker travels with the binding, because
+// both drivers express it on their own Out struct.
 func ociPLDebugBindKinds(thin []string) []string {
 	oci := make([]string, len(thin))
 	for index, kind := range thin {
 		if strings.HasPrefix(kind, "go_ora.Out(") {
-			oci[index] = "sql.Out"
+			suffix := ""
+			if strings.Contains(kind, ",in)") {
+				suffix = ",in"
+			}
+			oci[index] = "sql.Out" + suffix
 			continue
 		}
 		oci[index] = kind
@@ -2783,12 +2808,14 @@ func TestPLDebugHelperCallsBindExecOutForEachDriver(t *testing.T) {
 			},
 		},
 		{
-			name:    "stackPrintBacktrace",
-			routine: procPrintBacktrace,
-			thin:    []string{"go_ora.Out(size=4000)", "go_ora.Out(size=0)"},
+			name:    "stackFetchBacktrace",
+			routine: procFetchBacktrace,
+			// The structured payload register is sized to what one DBX_FETCH_BACKTRACE
+			// chunk can carry, the listing keeps the standard text register and the
+			// status is a NUMBER.
+			thin: []string{"go_ora.Out(size=32000)", "go_ora.Out(size=4000)", "go_ora.Out(size=0)"},
 			script: func(d *oracleDebugCallDriver) {
-				d.scriptOut(procPrintBacktrace, 0, "[Line 8] PROC")
-				d.scriptOut(procPrintBacktrace, 1, 0)
+				scriptFetchBacktrace(d, "[Line 8] PROC", 0)
 			},
 			run: func(t *testing.T, p *plDebugSession) error {
 				response, err := p.stack()
@@ -2896,6 +2923,34 @@ func TestPLDebugRunTargetBindsDriverOut(t *testing.T) {
 			request: map[string]interface{}{"objectType": "PROCEDURE", "objectName": "PROC"},
 			thin:    []string{"go_ora.Out(size=32000)"},
 		},
+		{
+			// IN OUT keeps its input side: the bind is the driver's OUT type with the
+			// In flag, which is what makes both drivers encode the destination's
+			// current value as the input and still write the result back into it.
+			name: "inOutParameter",
+			request: map[string]interface{}{
+				"objectType": "PROCEDURE",
+				"objectName": "PROC",
+				"params": []interface{}{
+					map[string]interface{}{"name": "A", "mode": "IN", "value": "5"},
+					map[string]interface{}{"name": "B", "mode": "INOUT", "type": "VARCHAR2", "value": "x"},
+				},
+			},
+			thin: []string{"string", "go_ora.Out(size=4000,in)", "go_ora.Out(size=32000)"},
+		},
+		{
+			name: "outAndInOutFunction",
+			request: map[string]interface{}{
+				"objectType": "FUNCTION",
+				"objectName": "F_ADD",
+				"params": []interface{}{
+					map[string]interface{}{"name": "A", "mode": "IN", "value": "1"},
+					map[string]interface{}{"name": "B", "mode": "IN OUT", "type": "NUMBER", "value": "2"},
+					map[string]interface{}{"name": "C", "mode": "OUT", "type": "DATE"},
+				},
+			},
+			thin: []string{"go_ora.Out(size=4000)", "string", "go_ora.Out(size=4000,in)", "go_ora.Out(size=4000)", "go_ora.Out(size=32000)"},
+		},
 	}
 	for _, testCase := range cases {
 		testCase := testCase
@@ -2919,6 +2974,274 @@ func TestPLDebugRunTargetBindsDriverOut(t *testing.T) {
 			})
 		}
 	}
+}
+
+// scriptReturnType makes the ALL_ARGUMENTS read of a FUNCTION target answer one type.
+func (d *oracleDebugCallDriver) scriptReturnType(dataType string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.returnType = dataType
+}
+
+// The declared return type of a function is read from ALL_ARGUMENTS (POSITION 0); a
+// procedure is never looked up, and a package member uses the package query shape.
+func TestPLDebugResolveReturnTypeReadsThePositionZeroRow(t *testing.T) {
+	db, drv := openOracleDebugCallTestDB(t)
+	drv.scriptReturnType("number")
+	if got := plDebugResolveReturnType(db, "CHZ", map[string]interface{}{
+		"objectType": "FUNCTION", "objectName": "F_ADD"}); got != "NUMBER" {
+		t.Fatalf("standalone return type = %q, want NUMBER", got)
+	}
+	if got := plDebugResolveReturnType(db, "CHZ", map[string]interface{}{
+		"objectType": "PROCEDURE", "objectName": "P"}); got != "" {
+		t.Fatalf("a procedure answered return type %q", got)
+	}
+	drv.scriptReturnType("varchar2")
+	if got := plDebugResolveReturnType(db, "CHZ", map[string]interface{}{
+		"objectType": "FUNCTION", "objectName": "PKG.F"}); got != "VARCHAR2" {
+		t.Fatalf("package member return type = %q, want VARCHAR2", got)
+	}
+	queries := drv.recordedQueries()
+	last := queries[len(queries)-1]
+	if !strings.Contains(last, "PACKAGE_NAME") {
+		t.Fatalf("the package member was read with the standalone query: %s", last)
+	}
+	// A dictionary without a POSITION 0 row answers no type, never an error.
+	drv.scriptReturnType("")
+	if got := plDebugResolveReturnType(db, "CHZ", map[string]interface{}{
+		"objectType": "FUNCTION", "objectName": "F_ADD"}); got != "" {
+		t.Fatalf("a missing dictionary row answered %q", got)
+	}
+}
+
+// The OUT / IN OUT parameter values and the function result are published only for a
+// target that ran to its end. A run that is still parked, that failed, or that the
+// client aborted must not expose them.
+func TestPLDebugPublishesOutValuesOnlyForACompletedTarget(t *testing.T) {
+	newSession := func(t *testing.T) (*oracleDebugCallDriver, *plDebugSession) {
+		t.Helper()
+		db, drv := openOracleDebugCallTestDB(t)
+		// The fake driver writes the scripted registers when the target block runs:
+		// 0 = function result, 1 = OUT B, 2 = IN OUT C, 3 = the DBMS_OUTPUT capture.
+		drv.scriptOut("", 0, "42")
+		drv.scriptOut("", 1, "-7")
+		drv.scriptOut("", 2, "in-out")
+		session := newPLDebugCallSession(db, false)
+		session.targetReturnType = "NUMBER"
+		session.runTarget(map[string]interface{}{
+			"objectType": "FUNCTION", "objectName": "F_ADD",
+			"params": []interface{}{
+				map[string]interface{}{"name": "B", "mode": "OUT", "type": "NUMBER"},
+				map[string]interface{}{"name": "C", "mode": "INOUT", "type": "VARCHAR2", "value": "in"},
+			},
+		})
+		if session.targetErr != "" {
+			t.Fatalf("runTarget reported %q", session.targetErr)
+		}
+		return drv, session
+	}
+
+	t.Run("parked", func(t *testing.T) {
+		_, session := newSession(t)
+		// A parked debuggee is modelled by clearing the flag runTarget sets once its
+		// statement returned; a really parked target never reaches finishTarget.
+		session.terminated = false
+		response := session.snapshot("")
+		if _, ok := response["outParams"]; ok {
+			t.Fatalf("a parked session published %#v", response["outParams"])
+		}
+		if _, ok := response["returnValue"]; ok {
+			t.Fatalf("a parked session published %#v", response["returnValue"])
+		}
+	})
+
+	t.Run("completed", func(t *testing.T) {
+		_, session := newSession(t)
+		session.terminated = true
+		session.lastReason = plDebugReasonExit
+		response := session.snapshot("")
+		outParams, ok := response["outParams"].([]plDebugOutParam)
+		if !ok || len(outParams) != 2 {
+			t.Fatalf("outParams = %#v", response["outParams"])
+		}
+		if outParams[0].Name != "B" || outParams[0].Mode != "OUT" || outParams[0].Type != "NUMBER" || outParams[0].Value != "-7" {
+			t.Fatalf("OUT parameter = %#v", outParams[0])
+		}
+		if outParams[1].Name != "C" || outParams[1].Mode != "IN OUT" || outParams[1].Value != "in-out" {
+			t.Fatalf("IN OUT parameter = %#v", outParams[1])
+		}
+		returnValue, ok := response["returnValue"].(map[string]interface{})
+		if !ok || returnValue["type"] != "NUMBER" || returnValue["value"] != "42" {
+			t.Fatalf("returnValue = %#v", response["returnValue"])
+		}
+	})
+
+	t.Run("failed target", func(t *testing.T) {
+		_, session := newSession(t)
+		session.terminated = true
+		session.targetErr = "ORA-06512: boom"
+		response := session.snapshot("")
+		if _, ok := response["outParams"]; ok {
+			t.Fatalf("a failed run published %#v", response["outParams"])
+		}
+		if _, ok := response["returnValue"]; ok {
+			t.Fatalf("a failed run published %#v", response["returnValue"])
+		}
+	})
+
+	t.Run("aborted", func(t *testing.T) {
+		_, session := newSession(t)
+		session.terminated = true
+		session.abortRequested = true
+		response := session.snapshot("")
+		if _, ok := response["outParams"]; ok {
+			t.Fatalf("an aborted run published %#v", response["outParams"])
+		}
+		if _, ok := response["returnValue"]; ok {
+			t.Fatalf("an aborted run published %#v", response["returnValue"])
+		}
+	})
+}
+
+// openOracleDebugCallTestDBPair registers the fake driver once and opens two pools from
+// it, the way a session has one connection for the debuggee and one for the debugger. The
+// publication-race tests need that: their debuggee statement is held open while the
+// debugger side runs, and one shared pool would make the debugger wait for it.
+func openOracleDebugCallTestDBPair(t *testing.T) (*sql.DB, *sql.DB, *oracleDebugCallDriver) {
+	t.Helper()
+	drv := &oracleDebugCallDriver{
+		outs:    map[string]map[int]any{},
+		errs:    map[string]error{},
+		blocked: map[string]chan struct{}{},
+	}
+	name := "oracle-debug-race-" + strings.ReplaceAll(t.Name(), "/", "-")
+	sql.Register(name, drv)
+	debuggee, err := sql.Open(name, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	debugger, err := sql.Open(name, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, db := range []*sql.DB{debuggee, debugger} {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+	}
+	t.Cleanup(func() {
+		_ = debuggee.Close()
+		_ = debugger.Close()
+	})
+	return debuggee, debugger, drv
+}
+
+// waitForRecordedStatement waits until the fake driver has recorded the target block's
+// Exec (it records the call before it parks on the block gate).
+func waitForRecordedStatement(t *testing.T, drv *oracleDebugCallDriver) {
+	t.Helper()
+	for attempt := 0; attempt < 400; attempt++ {
+		for _, call := range drv.recordedCalls() {
+			if call.routine == "" {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the target statement never reached the driver")
+}
+
+// The debugger reports the program's end before the debuggee's own statement has returned
+// (its trailing DBX_FETCH_OUTPUT capture is still running), and the OUT values only exist
+// once that statement returns. The terminating response must wait for it, or the client
+// would see reason=25 without outParams/returnValue -- measured on 19c EE: the resume
+// answered in 49ms without them, and only the following get_stack had them.
+func TestPLDebugTerminatingResponseWaitsForTheOutValues(t *testing.T) {
+	debuggee, debugger, drv := openOracleDebugCallTestDBPair(t)
+	release := drv.blockRoutine("")
+	drv.scriptOut("", 0, "42") // function result
+	drv.scriptOut("", 1, "11") // OUT P_OUT
+	session := newPLDebugCallSession(debugger, false)
+	session.debuggee = debuggee
+	session.targetReturnType = "NUMBER"
+	go session.runTarget(map[string]interface{}{
+		"objectType": "FUNCTION", "objectName": "F_ADD",
+		"params": []interface{}{map[string]interface{}{"name": "P_OUT", "mode": "OUT", "type": "NUMBER"}},
+	})
+	waitForRecordedStatement(t, drv)
+
+	// The debugger reports the end while the debuggee statement is still held open.
+	drv.scriptOut(procCntNextBreakpoint, 0, 0)
+	drv.scriptOut(procCntNextBreakpoint, 1, plDebugRunInfo("", "", 0, 0, plDebugReasonKnlExit))
+	type continueResult struct {
+		response map[string]interface{}
+		err      error
+	}
+	done := make(chan continueResult, 1)
+	go func() {
+		response, err := session.continueWith(procCntNextBreakpoint)
+		done <- continueResult{response, err}
+	}()
+	select {
+	case got := <-done:
+		release()
+		t.Fatalf("the terminating response did not wait for the debuggee statement: %#v", got.response)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	release()
+	var got continueResult
+	select {
+	case got = <-done:
+	case <-time.After(4 * time.Second):
+		t.Fatal("the terminating response never returned after the debuggee statement finished")
+	}
+	if got.err != nil {
+		t.Fatalf("continueWith failed: %v", got.err)
+	}
+	outParams, ok := got.response["outParams"].([]plDebugOutParam)
+	if !ok || len(outParams) != 1 || outParams[0].Value != "11" {
+		t.Fatalf("the terminating response did not carry the OUT values: %#v", got.response["outParams"])
+	}
+	returnValue, ok := got.response["returnValue"].(map[string]interface{})
+	if !ok || returnValue["value"] != "42" {
+		t.Fatalf("the terminating response did not carry the return value: %#v", got.response["returnValue"])
+	}
+}
+
+// A parked stop must not wait for anything and must not grow the new fields: the debuggee
+// statement is still running, and its termination is not being reported.
+func TestPLDebugParkedResponseDoesNotWaitForOutValues(t *testing.T) {
+	debuggee, debugger, drv := openOracleDebugCallTestDBPair(t)
+	release := drv.blockRoutine("")
+	drv.scriptOut("", 0, "42")
+	drv.scriptOut("", 1, "11")
+	session := newPLDebugCallSession(debugger, false)
+	session.debuggee = debuggee
+	session.targetReturnType = "NUMBER"
+	go session.runTarget(map[string]interface{}{
+		"objectType": "FUNCTION", "objectName": "F_ADD",
+		"params": []interface{}{map[string]interface{}{"name": "P_OUT", "mode": "OUT", "type": "NUMBER"}},
+	})
+	waitForRecordedStatement(t, drv)
+
+	drv.scriptOut(procCntNextBreakpoint, 0, 0)
+	drv.scriptOut(procCntNextBreakpoint, 1, plDebugRunInfo("F_ADD", "CHZ", 0, 1, plDebugReasonBreakpoint))
+	started := time.Now()
+	response, err := session.continueWith(procCntNextBreakpoint)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("continueWith failed: %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("a parked response waited %s for the still-running debuggee statement", elapsed)
+	}
+	if _, ok := response["outParams"]; ok {
+		t.Fatalf("a parked response published %#v", response["outParams"])
+	}
+	if _, ok := response["returnValue"]; ok {
+		t.Fatalf("a parked response published %#v", response["returnValue"])
+	}
+	release()
 }
 
 // plDebugHelperSQL renders one placeholder per argument, in order, so the routine
@@ -3232,13 +3555,14 @@ func TestPLDebugBodyFixNoteIsOnTheHeaderAndRequired(t *testing.T) {
 		"-- DBX PL Debug Package Fix: V6.1 namespace-aware set_breakpoint + explicit run_info mask",
 		"-- DBX PL Debug Package Fix: V6.2 program_info.entrypointname arm for package subprograms",
 		"-- DBX PL Debug Package Fix: V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain",
+		"-- DBX PL Debug Package Fix: V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume",
 	} {
 		if plDebugBodyFixNote == previous || strings.HasPrefix(plDebugBodyFixNote, previous) {
 			t.Fatalf("the fix note was not bumped past %q: %q", previous, plDebugBodyFixNote)
 		}
 	}
-	if !strings.Contains(plDebugBodyFixNote, "Fix: V6.4") {
-		t.Fatalf("the fix note does not carry the V6.4 stamp: %q", plDebugBodyFixNote)
+	if !strings.Contains(plDebugBodyFixNote, "Fix: V6.5") {
+		t.Fatalf("the fix note does not carry the V6.5 stamp: %q", plDebugBodyFixNote)
 	}
 	if !strings.Contains(plDebugBodyFixNote, "entrypointname") {
 		t.Fatalf("the fix note does not name the entrypoint fix it stands for: %q", plDebugBodyFixNote)
@@ -3248,6 +3572,9 @@ func TestPLDebugBodyFixNoteIsOnTheHeaderAndRequired(t *testing.T) {
 	}
 	if !strings.Contains(plDebugBodyFixNote, procCntException) {
 		t.Fatalf("the fix note does not name the routine V6.4 adds: %q", plDebugBodyFixNote)
+	}
+	if !strings.Contains(plDebugBodyFixNote, procFetchBacktrace) {
+		t.Fatalf("the fix note does not name the routine V6.5 adds: %q", plDebugBodyFixNote)
 	}
 }
 
@@ -3299,8 +3626,7 @@ func TestPLDebugContinuationHelpersAskForTheRunInfoMask(t *testing.T) {
 // authoritative name is the run_info register.
 func TestPLDebugFetchBacktraceDoesNotPublishSourceTextAsTheProgram(t *testing.T) {
 	db, drv := openOracleDebugCallTestDB(t)
-	drv.scriptOut(procPrintBacktrace, 0, " [Line 2]   V_COUNT NUMBER := 0;\n<source not available>")
-	drv.scriptOut(procPrintBacktrace, 1, 0)
+	scriptFetchBacktrace(drv, " [Line 2]   V_COUNT NUMBER := 0;\n<source not available>", 0)
 	session := newPLDebugCallSession(db, false)
 	session.lastProgram = "DBX_V1_PROC"
 
@@ -3315,8 +3641,7 @@ func TestPLDebugFetchBacktraceDoesNotPublishSourceTextAsTheProgram(t *testing.T)
 	// A listing that does carry a program name still updates it.
 	t.Run("a listing with a program name", func(t *testing.T) {
 		db, drv := openOracleDebugCallTestDB(t)
-		drv.scriptOut(procPrintBacktrace, 0, " [Line 8] PKG.F_ADD\n<source not available>")
-		drv.scriptOut(procPrintBacktrace, 1, 0)
+		scriptFetchBacktrace(drv, " [Line 8] PKG.F_ADD\n<source not available>", 0)
 		session := newPLDebugCallSession(db, false)
 		session.lastProgram = "DBX_V1_PROC"
 		session.refreshBacktrace()
@@ -3324,6 +3649,203 @@ func TestPLDebugFetchBacktraceDoesNotPublishSourceTextAsTheProgram(t *testing.T)
 			t.Fatalf("a real program name in the listing was ignored: %q", session.lastProgram)
 		}
 	})
+}
+
+// -- DBX_FETCH_BACKTRACE (V6.5 structured payload) ---------------------------
+//
+// The payload is one CHR(31)-separated record per frame (line#, name, owner,
+// namespace, entrypointname) with CHR(30) after each frame. The tests build the
+// separators with rune() so the payloads stay readable in source form; the frame
+// values are the ones the real 19c EE probe captured (v65_t0_probe.out):
+//
+//	frame=1|line#0|name=<NULL>|owner=<NULL>|namespace=0|entrypointname=<hidden>|libunittype=0
+//	frame=2|line#10|name=DBX_T_V65_PKG|owner=DBX_DEBUG|namespace=2|entrypointname=B|libunittype=11
+//	frame=3|line#5|name=DBX_T_V65_PKG|owner=DBX_DEBUG|namespace=2|entrypointname=A|libunittype=11
+func structuredPayload(records ...string) string {
+	return strings.Join(records, string(rune(30))) + string(rune(30))
+}
+
+func structuredRecord(fields ...string) string {
+	return strings.Join(fields, string(rune(31)))
+}
+
+func TestPLDebugParseStructuredBacktrace(t *testing.T) {
+	payload := structuredPayload(
+		structuredRecord("0", "", "", "0", "<hidden>"),
+		structuredRecord("10", "DBX_T_V65_PKG", "DBX_DEBUG", "2", "B"),
+		structuredRecord("5", "DBX_T_V65_PKG", "DBX_DEBUG", "2", "A"),
+	)
+	frames := plDebugParseStructuredBacktrace(payload)
+	if len(frames) != 3 {
+		t.Fatalf("parsed %d frames, want 3: %#v", len(frames), frames)
+	}
+	if frames[0].Line != 0 || frames[0].Name != "" || frames[0].Owner != "" || frames[0].Entrypointname != "" {
+		t.Fatalf("the anonymous driver block was not normalized: %#v", frames[0])
+	}
+	if frames[1].Line != 10 || frames[1].Name != "DBX_T_V65_PKG" || frames[1].Owner != "DBX_DEBUG" ||
+		frames[1].Namespace != 2 || frames[1].Entrypointname != "B" {
+		t.Fatalf("the package frame was mis-parsed: %#v", frames[1])
+	}
+	if frames[2].Entrypointname != "A" {
+		t.Fatalf("the entrypointname of the innermost frame was lost: %#v", frames[2])
+	}
+
+	// A frame whose concatenation dropped the NULLs still parses; only a record with
+	// fewer than four fields is a torn tail and is dropped.
+	partial := plDebugParseStructuredBacktrace(structuredPayload(
+		structuredRecord("12", "PROC"),
+		structuredRecord("7", "PKG.F_ADD", "DBX_DEBUG", "1", ""),
+	))
+	if len(partial) != 1 || partial[0].Line != 7 || partial[0].Entrypointname != "" {
+		t.Fatalf("a torn record was not skipped: %#v", partial)
+	}
+	if got := plDebugParseStructuredBacktrace(""); got != nil {
+		t.Fatalf("an empty payload parsed to %#v", got)
+	}
+}
+
+// The structured frames and the textual listing use opposite orders (bt(1) is the
+// outermost frame, the listing prints the current frame first) and only the listing
+// carries the SOURCE text Oracle prints in the name position. The merge therefore
+// reverses the structured frames, drops the ones without a source line (the anonymous
+// driver block has no "[Line N]" entry) and requires the rest to line up one for one.
+func TestPLDebugMergeStructuredBacktraceAlignsTheListing(t *testing.T) {
+	newline := string(rune(10))
+	payload := structuredPayload(
+		structuredRecord("0", "", "", "0", "<hidden>"),
+		structuredRecord("10", "DBX_T_V65_PKG", "DBX_DEBUG", "2", "B"),
+		structuredRecord("5", "DBX_T_V65_PKG", "DBX_DEBUG", "2", "A"),
+	)
+	listing := strings.Join([]string{
+		" [Line 5]     V_COUNT := V_COUNT + 1;",
+		"[Line 10]     A;",
+		"<source not available>",
+		"",
+	}, newline)
+	frames, ok := plDebugMergeStructuredBacktrace(payload, listing)
+	if !ok || len(frames) != 2 {
+		t.Fatalf("merge = %#v/%v, want two aligned frames", frames, ok)
+	}
+	if frames[0].Line != 5 || frames[0].Source != "V_COUNT := V_COUNT + 1;" ||
+		frames[0].ProgramOwner != "DBX_DEBUG" || frames[0].Program != "" || frames[0].StackDepth != 2 {
+		t.Fatalf("the current frame is wrong: %#v", frames[0])
+	}
+	if frames[1].Line != 10 || frames[1].Source != "A;" || frames[1].ProgramOwner != "DBX_DEBUG" ||
+		frames[1].StackDepth != 1 {
+		t.Fatalf("the caller frame is wrong: %#v", frames[1])
+	}
+
+	// An identifier-shaped listing entry is still the frame's program name, so the
+	// A4 split (source text into Source, never into Program) stays intact.
+	identifierListing := " [Line 8] PKG.F_ADD" + newline + "<source not available>"
+	identifierPayload := structuredPayload(
+		structuredRecord("0", "", "", "0", "<hidden>"),
+		structuredRecord("8", "PKG", "DBX_DEBUG", "1", "F_ADD"),
+	)
+	identifierFrames, identifierOK := plDebugMergeStructuredBacktrace(identifierPayload, identifierListing)
+	if !identifierOK || len(identifierFrames) != 1 {
+		t.Fatalf("identifier merge = %#v/%v", identifierFrames, identifierOK)
+	}
+	if identifierFrames[0].Program != "PKG.F_ADD" || identifierFrames[0].Source != "" {
+		t.Fatalf("an identifier entry was not kept as the program name: %#v", identifierFrames[0])
+	}
+}
+
+func TestPLDebugMergeStructuredBacktraceFallsBack(t *testing.T) {
+	listing := " [Line 5]     V_COUNT := V_COUNT + 1;" + string(rune(10))
+	twoFrames := structuredPayload(
+		structuredRecord("10", "DBX_T_V65_PKG", "DBX_DEBUG", "2", "B"),
+		structuredRecord("5", "DBX_T_V65_PKG", "DBX_DEBUG", "2", "A"),
+	)
+	for _, testCase := range []struct {
+		name       string
+		structured string
+		listing    string
+	}{
+		{"empty payload (old helper or no table type)", "", listing},
+		{"frame count mismatch", twoFrames, listing},
+		{"line number mismatch", structuredPayload(structuredRecord("6", "P", "O", "2", "S")), listing},
+		{"listing carries no frame", twoFrames, "program source" + string(rune(10))},
+		{"every structured frame lacks a line", structuredPayload(structuredRecord("0", "", "", "0", "")), listing},
+	} {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			if frames, ok := plDebugMergeStructuredBacktrace(testCase.structured, testCase.listing); ok {
+				t.Fatalf("merge accepted %#v", frames)
+			}
+		})
+	}
+}
+
+// stack() takes the frames from the merged path: the structured owner fills every
+// frame's programOwner and the listing still supplies the source text the program-name
+// label rules need (the declaration line names the subprogram).
+func TestPLDebugStackUsesTheMergedStructuredFrames(t *testing.T) {
+	db, drv := openOracleDebugCallTestDB(t)
+	newline := string(rune(10))
+	drv.scriptOut(procFetchBacktrace, 0, structuredPayload(
+		structuredRecord("0", "", "", "0", "<hidden>"),
+		structuredRecord("10", "DBX_T_V65_PKG", "DBX_DEBUG", "2", "B"),
+		structuredRecord("5", "DBX_T_V65_PKG", "DBX_DEBUG", "2", "A"),
+	))
+	drv.scriptOut(procFetchBacktrace, 1, strings.Join([]string{
+		" [Line 5]     PROCEDURE A IS",
+		"[Line 10]     B;",
+		"<source not available>",
+		"",
+	}, newline))
+	drv.scriptOut(procFetchBacktrace, 2, 0)
+	session := newPLDebugCallSession(db, false)
+	session.lastStackDepth = 3
+	session.lastProgram = "DBX_T_V65_PKG"
+	session.targetProgram = "DBX_T_V65_PKG.A"
+	session.targetPackage = "DBX_T_V65_PKG"
+
+	response, err := session.stack()
+	if err != nil {
+		t.Fatalf("stack failed: %v", err)
+	}
+	frames, ok := response["frames"].([]plDebugFrame)
+	if !ok || len(frames) != 2 {
+		t.Fatalf("stack answered %#v", response["frames"])
+	}
+	if frames[0].Line != 5 || frames[0].Source != "PROCEDURE A IS" || frames[0].ProgramOwner != "DBX_DEBUG" {
+		t.Fatalf("the current frame is wrong: %#v", frames[0])
+	}
+	if frames[0].StackDepth != 3 || frames[1].StackDepth != 2 {
+		t.Fatalf("the run_info depth was not applied: %#v", frames)
+	}
+	// Iron rule 1: a current frame sitting on a declaration line is labelled with the
+	// subprogram, not with the package the engine reported.
+	if response["program"] != "DBX_T_V65_PKG.A" {
+		t.Fatalf("the declaration-line frame was labelled %v", response["program"])
+	}
+	if frames[0].Program != "DBX_T_V65_PKG.A" {
+		t.Fatalf("the current frame's program was not filled from the label: %#v", frames[0])
+	}
+}
+
+// A helper that predates V6.5 (no DBX_FETCH_BACKTRACE, or an engine whose
+// backtrace_table is unusable) must degrade to the textual listing instead of failing
+// the stop.
+func TestPLDebugFetchBacktraceFallsBackToPrintBacktrace(t *testing.T) {
+	db, drv := openOracleDebugCallTestDB(t)
+	drv.scriptError(procFetchBacktrace, errors.New("ORA-06550: PLS-00302: component 'DBX_FETCH_BACKTRACE' must be declared"))
+	drv.scriptOut(procPrintBacktrace, 0, " [Line 4]     V_COUNT := V_COUNT + 1;"+string(rune(10))+"<source not available>")
+	drv.scriptOut(procPrintBacktrace, 1, 0)
+	session := newPLDebugCallSession(db, false)
+
+	listing, status, frames, err := session.fetchBacktrace()
+	if err != nil {
+		t.Fatalf("the fallback failed the backtrace: %v", err)
+	}
+	if status != 0 || listing == "" || len(frames) != 1 || frames[0].Line != 4 {
+		t.Fatalf("the textual fallback answered %#v/%d/%q", frames, status, listing)
+	}
+	if countRoutine(drv.recordedRoutines(), procFetchBacktrace) == 0 ||
+		countRoutine(drv.recordedRoutines(), procPrintBacktrace) == 0 {
+		t.Fatalf("the fallback did not try both routines: %v", drv.recordedRoutines())
+	}
 }
 
 // A stop has to report the line it stopped on. run_info carries only reason, stack
@@ -3337,8 +3859,7 @@ func TestPLDebugContinueRefreshesTheStoppedLine(t *testing.T) {
 	drv.scriptOut(procCntNextBreakpoint, 0, 0)
 	drv.scriptOut(procCntNextBreakpoint, 1,
 		plDebugRunInfo("DBX_V1_PROC", "DBX_DEBUG", 0, 2, plDebugReasonBreakpoint))
-	drv.scriptOut(procPrintBacktrace, 0, " [Line 10]     V_LABEL := 'iter-' || i;\n<source not available>\n")
-	drv.scriptOut(procPrintBacktrace, 1, 0)
+	scriptFetchBacktrace(drv, " [Line 10]     V_LABEL := 'iter-' || i;\n<source not available>\n", 0)
 	session := newPLDebugCallSession(db, false)
 	session.lastProgram = "DBX_V1_PROC"
 	session.lastLine = 1
@@ -3356,7 +3877,7 @@ func TestPLDebugContinueRefreshesTheStoppedLine(t *testing.T) {
 	if session.lastProgram != "DBX_V1_PROC" {
 		t.Fatalf("the 19c source text overwrote the program name: %q", session.lastProgram)
 	}
-	if countRoutine(drv.recordedRoutines(), procPrintBacktrace) == 0 {
+	if countRoutine(drv.recordedRoutines(), procFetchBacktrace) == 0 {
 		t.Fatal("a live stop did not ask for the backtrace, so its line stays stale")
 	}
 }
@@ -3387,7 +3908,7 @@ func TestPLDebugKnlExitTerminatesTheSession(t *testing.T) {
 			t.Fatalf("reason = %v, want %d", response["reason"], plDebugReasonKnlExit)
 		}
 		// The debuggee is gone, so there is nothing left to ask for a backtrace.
-		if countRoutine(drv.recordedRoutines(), procPrintBacktrace) != 0 {
+		if countRoutine(drv.recordedRoutines(), procFetchBacktrace) != 0 {
 			t.Fatal("a terminated stop asked the finished debuggee for a backtrace")
 		}
 	})
@@ -3442,8 +3963,7 @@ func TestPLDebugExceptionResumeUsesTheNativeFlagsFirst(t *testing.T) {
 	drv.scriptOut(procCntException, 0, 0)
 	drv.scriptOut(procCntException, 1,
 		plDebugRunInfo("DBX_EXC_DEEP", "DBX_DEBUG", 0, 1, plDebugReasonException))
-	drv.scriptOut(procPrintBacktrace, 0, " [Line 6]     RAISE_APPLICATION_ERROR(-20001, 'a6-deep-boom');\n")
-	drv.scriptOut(procPrintBacktrace, 1, 0)
+	scriptFetchBacktrace(drv, " [Line 6]     RAISE_APPLICATION_ERROR(-20001, 'a6-deep-boom');\n", 0)
 	session := newPLDebugCallSession(db, false)
 	session.setExceptionBreakpoint(true)
 

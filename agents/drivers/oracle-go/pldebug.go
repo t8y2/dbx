@@ -83,6 +83,14 @@ const (
 	procSetBreakpointAnonymous = "DBX_SET_BREAKPOINT_ANONYMOUS"
 	procShowBreakpoints        = "DBX_SHOW_BREAKPOINTS"
 	procPrintBacktrace         = "DBX_PRINT_BACKTRACE"
+	// procFetchBacktrace is the V6.5 structured backtrace: one call returns both the
+	// dbms_debug.backtrace_table payload (line#, name, owner, namespace, entrypointname
+	// per frame) and the textual listing, so the two can be merged. The table overload
+	// exists on Oracle 19c EE (measured) and carries the subprogram name the textual
+	// listing cannot show for a package-body frame; the type reference lives inside a
+	// dynamic block, so an engine without backtrace_table still compiles the body (see
+	// the V6.5 note in plDebugBodyFixNote and DBX_FETCH_BACKTRACE in the body).
+	procFetchBacktrace = "DBX_FETCH_BACKTRACE"
 	procCntNextLine            = "DBX_CNT_NEXT_LINE"
 	procCntNextBreakpoint      = "DBX_CNT_NEXT_BREAKPOINT"
 	procCntStepIn              = "DBX_CNT_STEP_IN"
@@ -392,7 +400,35 @@ const plDebugVersionNote = "-- DBX PL Debug Package Version: V6 (ODC V3.3.2.1 al
 // All changes are inert on engines whose set_breakpoint ignores namespace / entrypointname
 // (OceanBase Oracle mode resolves the name only) and whose get_runtime_info ignores the
 // request mask, so the shared package stays correct for both agents.
-const plDebugBodyFixNote = "-- DBX PL Debug Package Fix: V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume (V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain, V6.2 program_info.entrypointname arm for package subprograms, V6.1 namespace-aware set_breakpoint + explicit run_info mask retained)"
+const plDebugBodyFixNote = "-- DBX PL Debug Package Fix: V6.5 DBX_FETCH_BACKTRACE structured table-overload backtrace with textual fallback (V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume, V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain, V6.2 program_info.entrypointname arm for package subprograms, V6.1 namespace-aware set_breakpoint + explicit run_info mask retained)"
+
+// plDebugStructuredFieldSep / plDebugStructuredFrameSep are the separators of the
+// DBX_FETCH_BACKTRACE payload: CHR(31) between the fields of one frame, CHR(30) after
+// each frame. Both are octal unit/record separators, chosen because they cannot occur in
+// an Oracle identifier or in a source line (a source line with CHR(30) would have to be
+// written as an escape, and the fields are identifiers and integers anyway).
+const (
+	plDebugStructuredFieldSep = "\x1f"
+	plDebugStructuredFrameSep = "\x1e"
+)
+
+// plDebugHiddenEntrypoint is the literal 19c EE puts into backtrace_table's
+// entrypointname for the anonymous block that drives a target ("<hidden>", measured on
+// the real server). It is a server-side marker, not a subprogram name, and the parser
+// drops it so it can never surface as an identifier.
+const plDebugHiddenEntrypoint = "<hidden>"
+
+// plDebugStructuredFrame is one frame of the DBX_FETCH_BACKTRACE payload. A NULL field
+// arrives as the empty string because the helper's concatenation drops NULLs (PL/SQL
+// `||` semantics); Line is 0 both for an honestly absent line and for the anonymous
+// driver block, which 19c EE reports with line# 0 and no name.
+type plDebugStructuredFrame struct {
+	Line           int
+	Name           string
+	Owner          string
+	Namespace      int
+	Entrypointname string
+}
 
 // plDebugRunInfoMask is the info_requested bit-field every DBX_CNT_* wrapper passes to
 // DBMS_DEBUG.CONTINUE instead of relying on the default. info_getStackDepth (2) is what
@@ -423,6 +459,7 @@ const plDebugPackageHeadDDL = `CREATE OR REPLACE PACKAGE "%[1]s".` + plDebugPack
 	` PROCEDURE ` + procSetBreakpointAnonymous + `(line# IN BINARY_INTEGER, breakpoint# OUT BINARY_INTEGER, result OUT BINARY_INTEGER);` +
 	` PROCEDURE ` + procShowBreakpoints + `(listing in out varchar2);` +
 	` PROCEDURE ` + procPrintBacktrace + `(listing IN OUT VARCHAR, status OUT BINARY_INTEGER);` +
+	` PROCEDURE ` + procFetchBacktrace + `(structured OUT VARCHAR2, listing IN OUT VARCHAR, status OUT BINARY_INTEGER);` +
 	` PROCEDURE ` + procCntNextLine + `(result OUT BINARY_INTEGER, message OUT VARCHAR2);` +
 	` PROCEDURE ` + procCntNextBreakpoint + `(result OUT BINARY_INTEGER, message OUT VARCHAR2);` +
 	` PROCEDURE ` + procCntStepIn + `(result OUT BINARY_INTEGER, message OUT VARCHAR2);` +
@@ -541,6 +578,43 @@ PROCEDURE ` + procDisableBreakpoint + `(breakpoint# IN BINARY_INTEGER, result OU
 PROCEDURE ` + procShowBreakpoints + `(listing in out varchar2) IS BEGIN dbms_debug.show_breakpoints(listing); END;
 
 PROCEDURE ` + procPrintBacktrace + `(listing IN OUT VARCHAR, status OUT BINARY_INTEGER) IS run_info dbms_debug.runtime_info; result BINARY_INTEGER; BEGIN result := dbms_debug.get_runtime_info(dbms_debug.info_getLineinfo, run_info); status := run_info.terminated; dbms_debug.print_backtrace(listing); END;
+
+-- V6.5 (real Oracle 19c EE verified): DBX_FETCH_BACKTRACE added. DBMS_DEBUG.PRINT_BACKTRACE
+-- also has a table overload, PRINT_BACKTRACE(backtrace OUT backtrace_table), and its
+-- program_info elements carry what the textual listing does not: measured on 19c EE against
+-- a package subprogram parked inside a nested call, the package-body frames come back with
+-- name=<package>, owner=<owner>, namespace=2 (namespace_pkg_body), libunittype=11 and
+-- entrypointname=<subprogram>, while the textual listing prints the frame's SOURCE line in
+-- the name position and cannot name the subprogram at all. The type reference lives inside
+-- the dynamic block on purpose: an engine that does not declare backtrace_table still
+-- compiles this body and degrades to the textual listing at run time (PLS-00302 is caught
+-- by WHEN OTHERS and answers structured=NULL, which the Go agent reads as "use the listing
+-- only" -- see plDebugMergeStructuredBacktrace). The payload is one CHR(31)-separated record
+-- per frame (line#/name/owner/namespace/entrypointname), each terminated by CHR(30); NULLs
+-- arrive as empty fields because the || operator drops NULLs. bt(1) is the OUTERMOST frame, the reverse
+-- of the textual listing's innermost-first order, which is why the Go side reverses it. The
+-- 1024-character reserve before each append keeps the 32767-byte register from overflowing
+-- on a pathologically deep stack: a truncated payload is simply fewer records and the Go
+-- side then answers from the textual listing. The frame count itself is not capped beyond
+-- that, because the reserve is the bound that matters (a 2000-frame cap would still let the
+-- register overflow).
+PROCEDURE ` + procFetchBacktrace + `(structured OUT VARCHAR2, listing IN OUT VARCHAR, status OUT BINARY_INTEGER) IS
+  run_info dbms_debug.runtime_info;
+  result BINARY_INTEGER;
+BEGIN
+  structured := NULL;
+  result := dbms_debug.get_runtime_info(dbms_debug.info_getLineinfo, run_info);
+  status := run_info.terminated;
+  BEGIN
+    EXECUTE IMMEDIATE
+      'DECLARE bt dbms_debug.backtrace_table; buf VARCHAR2(32767) := NULL; BEGIN '
+      || 'dbms_debug.print_backtrace(bt); FOR i IN 1 .. bt.COUNT LOOP '
+      || 'IF LENGTH(buf) + 1024 > 32000 THEN EXIT; END IF; '
+      || 'buf := buf || bt(i).line# || CHR(31) || bt(i).name || CHR(31) || bt(i).owner || CHR(31) || bt(i).namespace || CHR(31) || bt(i).entrypointname || CHR(30); '
+      || 'END LOOP; :1 := buf; END;' USING OUT structured;
+  EXCEPTION WHEN OTHERS THEN structured := NULL; END;
+  dbms_debug.print_backtrace(listing);
+END;
 
 PROCEDURE ` + procCntNextLine + `(result OUT BINARY_INTEGER, message OUT VARCHAR2) IS run_info dbms_debug.runtime_info; BEGIN result := dbms_debug.continue(run_info, dbms_debug.break_next_line, ` + plDebugRunInfoMask + `); ` + runInfoMessage + ` END;
 
@@ -688,6 +762,55 @@ type plDebugParam struct {
 	Value string
 }
 
+// plDebugOutDestination is one value the debuggee call writes back: a function's
+// return value or one OUT / IN OUT parameter, with the destination it is read from
+// once the target has finished (see plDebugSession.outParamValues).
+//
+// The destination is a *sql.NullString for every declared Oracle type on purpose. The
+// bind is typed by the destination's Go type, so a text destination makes the server
+// convert NUMBER and DATE to the bind's character type -- the one conversion both
+// drivers deliver without a type catalogue (go-ora infers NCHAR from *sql.NullString,
+// parameter_encode.go:34, and its value setter handles string, number and time inputs
+// into sql.NullString; godror sizes a Scanner destination itself). A *time.Time or
+// *float64 destination would instead need the agent to know each type's Go shape and to
+// format it back, which is exactly the per-type matrix this avoids. NULL is a Valid=false
+// destination; the published value is an empty string because the front-end contract
+// (PlDebugOutParam.value) declares a plain string.
+type plDebugOutDestination struct {
+	Name string
+	// Mode is the canonical "OUT" / "IN OUT" of the published contract.
+	Mode string
+	Type string
+	Dest *sql.NullString
+}
+
+// text is the published string form of a finished destination: the value, or "" for a
+// NULL (and, indistinguishably, for an empty string -- see plDebugOutDestination).
+func (d *plDebugOutDestination) text() string {
+	if d == nil || d.Dest == nil || !d.Dest.Valid {
+		return ""
+	}
+	return d.Dest.String
+}
+
+// plDebugNormalizeParamMode folds the spellings the desktop client and ALL_ARGUMENTS use
+// ("IN", "OUT", "IN OUT", "INOUT", "IN/OUT", "RETURN") onto the four modes the binder
+// distinguishes. Anything else is treated as IN, which is the safe direction: an unknown
+// mode must never turn a parameter into a destination that swallows its value.
+func plDebugNormalizeParamMode(mode string) string {
+	normalized := strings.ToUpper(strings.Join(strings.Fields(strings.TrimSpace(mode)), ""))
+	switch normalized {
+	case "OUT":
+		return "OUT"
+	case "INOUT", "IN/OUT":
+		return "IN OUT"
+	case "RETURN", "RETURNING":
+		return "RETURN"
+	default:
+		return "IN"
+	}
+}
+
 type plDebugSession struct {
 	mu                 sync.Mutex
 	debugID            string
@@ -734,6 +857,23 @@ type plDebugSession struct {
 	// shows the package where the user expects the routine they are debugging.
 	targetProgram string
 	targetPackage string
+	// targetReturnType is the declared return type of a FUNCTION target, read from
+	// ALL_ARGUMENTS at start (plDebugResolveReturnType). Empty when the target is not a
+	// function or the dictionary read failed; it is published next to the return value.
+	targetReturnType string
+	// outDestinations / returnDestination are the OUT registers of the target call, in
+	// signature order. runTarget fills them before the debuggee statement runs and the
+	// published values are read from them once the target has finished normally.
+	outDestinations   []*plDebugOutDestination
+	returnDestination *plDebugOutDestination
+	// targetReturned records that the debuggee's statement returned without an error,
+	// i.e. the program ran to its end. OUT values are only published when it holds (see
+	// snapshot): a parked or aborted program has no outcome to report.
+	targetReturned bool
+	// abortRequested records that the client aborted this run. The OUT registers are
+	// never published afterwards, even if the debuggee's statement still answered
+	// success -- an aborted program did not produce a result.
+	abortRequested bool
 	// oci selects the OUT bind type every helper-package call uses. The OCI
 	// (godror) driver binds database/sql's sql.Out directly and sizes it, while
 	// the built-in go-ora driver needs its own Out type carrying an explicit
@@ -931,6 +1071,10 @@ var plDebugHeadRequiredRoutines = []string{
 	// DBX_CNT_EXCEPTION, and the Go agent calls it whenever the exception breakpoint is
 	// on, so the head -- and therefore the body -- is replaced with it.
 	procCntException,
+	// The V6.5 structured backtrace. A head installed before it declares no
+	// DBX_FETCH_BACKTRACE, and fetchBacktrace calls it on every stop, so the head --
+	// and with it the body -- is replaced with one that does.
+	procFetchBacktrace,
 }
 
 // plDebugHeadRequiredDeclarations pin down the *signature* of the routines whose
@@ -950,6 +1094,9 @@ var plDebugHeadRequiredDeclarations = []string{
 	// at all) would leave the target block uncompilable and every debuggee call
 	// would fail with PLS-00221/PLS-00302.
 	"FUNCTION " + procFetchOutput + "(max_chars IN BINARY_INTEGER) RETURN VARCHAR2",
+	// The V6.5 structured backtrace pins all three registers: the OUT payload, the
+	// IN OUT textual listing the routine also has to return, and the OUT status.
+	procFetchBacktrace + "(structured OUT VARCHAR2, listing IN OUT VARCHAR, status OUT BINARY_INTEGER",
 }
 
 // plDebugHeadRequirements is everything an installed head has to declare: the
@@ -1356,6 +1503,9 @@ func plDebugStart(s *server, debuggee, debugger *sql.DB, request map[string]inte
 	targetLines, nestedLines, targetLinesNote := plDebugResolveTargetLines(debuggee, owner, request)
 	session.targetLines = targetLines
 	session.nestedLines = nestedLines
+	// The declared return type of a FUNCTION target, for the published returnValue.
+	// Same pre-DEBUG_ON dictionary phase as the source-line range above.
+	session.targetReturnType = plDebugResolveReturnType(debuggee, owner, request)
 	// A range the scan could not read or close is a degradation the caller has to see:
 	// it is what decides whether the current routine label may name the subprogram at
 	// all (see currentProgramLabel), so it is published next to any debug-information
@@ -2086,13 +2236,73 @@ func (p *plDebugSession) listBreakpoints() []plDebugBreakpoint {
 	return list
 }
 
+// plDebugTargetAwaitTimeout bounds the wait for the debuggee's own statement to return
+// after the debugger has already reported the program's end.
+const plDebugTargetAwaitTimeout = 2 * time.Second
+
+// awaitTargetReturned gives the debuggee's statement a bounded moment to come back once
+// the debugger reported (or the session already knows) that the program ended, so the
+// response that reports the termination can carry the OUT values it publishes.
+//
+// The two sessions do not finish in lockstep: the debugger's CONTINUE answers
+// reason_knl_exit as soon as the interpreter leaves the program, while the debuggee's own
+// statement is still returning from its trailing DBX_FETCH_OUTPUT capture. The OUT
+// registers -- and with them outParams / returnValue -- are read when that statement
+// returns (runTarget sets targetReturned, finishTarget closes targetDone), so without
+// this wait the terminating response is built before the values exist. Measured on 19c EE
+// against a FUNCTION with an OUT parameter: the resume answered reason=25 in 49ms without
+// outParams/returnValue, and only the following get_stack had them (P_OUT=11, -42).
+//
+// It must be called WITHOUT holding p.mu: finishTarget takes that lock, so waiting under
+// it would deadlock. The parked path is free -- nothing waits unless the program ended,
+// the statement has not returned yet, and there is no error or abort that would keep the
+// values unpublished anyway.
+func (p *plDebugSession) awaitTargetReturned(reportedTerminal bool) {
+	p.mu.Lock()
+	done := p.targetDone
+	wait := done != nil && (p.terminated || reportedTerminal) &&
+		!p.targetReturned && p.targetErr == "" && !p.abortRequested
+	p.mu.Unlock()
+	if !wait {
+		return
+	}
+	timer := time.NewTimer(plDebugTargetAwaitTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		plDebugLogf("the debuggee's statement has not returned within %s of the program's end; "+
+			"publishing the snapshot without its OUT values", plDebugTargetAwaitTimeout)
+	}
+}
+
+// plDebugMessageReportsTermination reads the run_info reason out of one CNT_* message (the
+// same positional shape applyRunInfoMessage parses) and reports whether that reason ended
+// the program. It is what lets continueWith wait for the debuggee's statement *before* it
+// takes p.mu to parse the message for real.
+func plDebugMessageReportsTermination(message string) bool {
+	parts := strings.Split(message, ",")
+	if len(parts) < 5 {
+		return false
+	}
+	switch atoiOrZero(runInfoValue(parts[2])) {
+	case plDebugReasonExit, plDebugReasonAborting, plDebugReasonKnlExit:
+		return true
+	}
+	return false
+}
+
 // continueWith runs one of the CNT_* helpers. It blocks until the debuggee
 // stops again (breakpoint / new line / return) or finishes.
 func (p *plDebugSession) continueWith(procedure string) (map[string]interface{}, error) {
 	p.mu.Lock()
 	if p.terminated {
 		p.mu.Unlock()
-		return p.snapshot("debuggee has finished"), nil
+		p.awaitTargetReturned(true)
+		p.mu.Lock()
+		response := p.snapshot("debuggee has finished")
+		p.mu.Unlock()
+		return response, nil
 	}
 	p.mu.Unlock()
 
@@ -2100,6 +2310,14 @@ func (p *plDebugSession) continueWith(procedure string) (map[string]interface{},
 	var message string
 	if err := p.plDebugCall(procedure, nil, &result, &message); err != nil {
 		return nil, fmt.Errorf("%s failed: %w", procedure, err)
+	}
+
+	// The debugger can report the program's end before the debuggee's own statement has
+	// returned; wait for it here, before p.mu is taken, so this response already carries
+	// the published OUT values. result != success means the values are withheld anyway
+	// (targetErr), and an abort is excluded inside the helper.
+	if result == plDebugErrSuccess && plDebugMessageReportsTermination(message) {
+		p.awaitTargetReturned(true)
 	}
 
 	p.mu.Lock()
@@ -2245,6 +2463,9 @@ func (p *plDebugSession) resumeIgnoreBreakpoints() (map[string]interface{}, erro
 	if err := p.plDebugCall(procCntExit, nil, &message); err != nil {
 		return nil, fmt.Errorf("%s failed: %w", procCntExit, err)
 	}
+	// This call only returns once the interpreter reported the end, so give the
+	// debuggee's own statement its bounded moment before the snapshot is built.
+	p.awaitTargetReturned(true)
 
 	p.mu.Lock()
 	// The message is only ' reason = <n>' (no run_info fields), so it cannot be
@@ -2272,6 +2493,11 @@ func (p *plDebugSession) stepOut() (map[string]interface{}, error) {
 }
 
 func (p *plDebugSession) abort() (map[string]interface{}, error) {
+	p.mu.Lock()
+	// An aborted program has no outcome: the OUT registers must never be published,
+	// even if the debuggee's statement happens to answer success afterwards.
+	p.abortRequested = true
+	p.mu.Unlock()
 	return p.continueWith(procCntAbort)
 }
 
@@ -2624,17 +2850,54 @@ func (p *plDebugSession) setBreakpointEnabled(breakpoint int, enabled bool) (map
 	}, nil
 }
 
-// fetchBacktrace queries DBX_PRINT_BACKTRACE and folds the listing into the
-// session's current line/program. The caller holds p.mu. The run_info message no
-// longer carries the line (ODC's does not either): the current line and the
+// fetchBacktrace queries the V6.5 DBX_FETCH_BACKTRACE and folds the result into the
+// session's current line/program and call stack. The caller holds p.mu. The run_info
+// message no longer carries the line (ODC's does not either): the current line and the
 // object the interpreter is parked in come from this listing.
-func (p *plDebugSession) fetchBacktrace() (string, int, error) {
-	var listing string
+//
+// The helper answers both shapes in one call: the structured backtrace_table payload
+// (line/name/owner/namespace/entrypointname per frame) and the textual listing. The
+// structured frames are authoritative for the line and the owner; the textual listing
+// still supplies each frame's SOURCE text (Oracle prints the source line where a frame
+// name would go), which is what the A4 split and the program-name label rules need.
+// When the two cannot be aligned -- an older helper without the routine, an engine
+// without backtrace_table, a payload cut by its register -- the function silently keeps
+// the pure-textual path it used before, so a backtrace miss never fails a session.
+func (p *plDebugSession) fetchBacktrace() (string, int, []plDebugFrame, error) {
+	var structured, listing string
 	var status int
-	if err := p.plDebugCall(procPrintBacktrace, nil, &listing, &status); err != nil {
-		return "", 0, fmt.Errorf("print_backtrace failed: %w", err)
+	err := p.plDebugBacktraceCall(&structured, &listing, &status)
+	if err != nil {
+		// A timed-out call already abandoned the debugger connection and every later
+		// call on it fails at once (plDebugGuarded); only a non-fatal failure -- an
+		// older helper that lacks the routine, a server without the table type --
+		// degrades to the textual listing.
+		var timeoutErr *plDebugCallTimeoutError
+		if errors.As(err, &timeoutErr) || p.debuggerFailure() != nil {
+			return "", 0, nil, fmt.Errorf("fetch_backtrace failed: %w", err)
+		}
+		if fallbackErr := p.plDebugCall(procPrintBacktrace, nil, &listing, &status); fallbackErr != nil {
+			return "", 0, nil, fmt.Errorf("print_backtrace failed: %w", fallbackErr)
+		}
+		frames := plDebugParseBacktraceFrames(listing)
+		p.touch()
+		p.updateBacktraceState(listing, frames)
+		return listing, status, frames, nil
+	}
+	frames, merged := plDebugMergeStructuredBacktrace(structured, listing)
+	if !merged {
+		frames = plDebugParseBacktraceFrames(listing)
 	}
 	p.touch()
+	p.updateBacktraceState(listing, frames)
+	return listing, status, frames, nil
+}
+
+// updateBacktraceState folds the current line and the derived program label of one
+// backtrace into the session. Both paths of fetchBacktrace end here, so the label rules
+// (currentProgramLabel) see the same frames whether the structured payload could be used
+// or the listing had to be parsed on its own.
+func (p *plDebugSession) updateBacktraceState(listing string, frames []plDebugFrame) {
 	if line, program, parseErr := plDebugParseBacktrace(listing); parseErr == nil {
 		p.lastLine = line
 		if plDebugIsProgramName(program) {
@@ -2645,9 +2908,114 @@ func (p *plDebugSession) fetchBacktrace() (string, int, error) {
 		// rebuilt from the frames of this very listing: the current frame's source line
 		// names the subprogram whenever the interpreter sits on its declaration, and the
 		// session's own target names it otherwise.
-		p.lastProgram = p.currentProgramLabel(plDebugParseBacktraceFrames(listing))
+		p.lastProgram = p.currentProgramLabel(frames)
 	}
-	return listing, status, nil
+}
+
+// plDebugParseStructuredBacktrace decodes the DBX_FETCH_BACKTRACE payload into its
+// frames, in the order the helper wrote them (bt(1) first, i.e. OUTERMOST first).
+//
+// Each record is five CHR(31)-separated fields terminated by CHR(30): line#, name,
+// owner, namespace, entrypointname. A NULL field arrives empty because the helper's
+// concatenation drops NULLs, and a record with fewer than four fields is a torn tail
+// (the server-side reserve cut it) and is dropped rather than guessed at. The server's
+// "<hidden>" entrypoint of the anonymous driver block is normalized away so it can never
+// be mistaken for a subprogram name.
+func plDebugParseStructuredBacktrace(payload string) []plDebugStructuredFrame {
+	if strings.TrimSpace(payload) == "" {
+		return nil
+	}
+	frames := make([]plDebugStructuredFrame, 0, 8)
+	for _, record := range strings.Split(payload, plDebugStructuredFrameSep) {
+		if record == "" {
+			continue
+		}
+		fields := strings.Split(record, plDebugStructuredFieldSep)
+		if len(fields) < 4 {
+			continue
+		}
+		frame := plDebugStructuredFrame{
+			Line:      atoiOrZero(strings.TrimSpace(fields[0])),
+			Name:      strings.TrimSpace(fields[1]),
+			Owner:     strings.TrimSpace(fields[2]),
+			Namespace: atoiOrZero(strings.TrimSpace(fields[3])),
+		}
+		if len(fields) >= 5 {
+			frame.Entrypointname = strings.TrimSpace(fields[4])
+			if frame.Entrypointname == plDebugHiddenEntrypoint {
+				frame.Entrypointname = ""
+			}
+		}
+		frames = append(frames, frame)
+	}
+	return frames
+}
+
+// plDebugMergeStructuredBacktrace aligns the structured payload with the textual listing
+// and returns the call stack the session publishes.
+//
+// The two shapes use opposite orders: bt(1) is the OUTERMOST frame while the listing
+// prints innermost first, so the structured frames are reversed. Frames without a source
+// line are dropped before the alignment because such a frame (the anonymous block that
+// drives the target) has no "[Line N]" entry in the listing to take its source text from:
+// the text path never published it either, so keeping today's frame set needs it gone.
+// What remains has to line up one for one -- same count, same line numbers, in order --
+// because only then does "the Nth listing entry is the Nth frame" hold; any other shape
+// (a torn payload, a listing that names programs instead of printing source, a register
+// that cut either side) reports merged=false and the caller keeps the pure-textual path.
+//
+// The structured data decides the line and the owner; the listing still decides the A4
+// split: an identifier-shaped entry is the frame's program name, anything else is its
+// source line. ProgramOwner is therefore the structured owner, while Program keeps the
+// existing semantics (an identifier from the listing, or empty for Oracle's source
+// entries, which the session then relabels through currentProgramLabel).
+func plDebugMergeStructuredBacktrace(structured, listing string) ([]plDebugFrame, bool) {
+	parsed := plDebugParseStructuredBacktrace(structured)
+	if len(parsed) == 0 {
+		return nil, false
+	}
+	usable := make([]plDebugStructuredFrame, 0, len(parsed))
+	for index := len(parsed) - 1; index >= 0; index-- {
+		if parsed[index].Line <= 0 {
+			continue
+		}
+		usable = append(usable, parsed[index])
+	}
+	if len(usable) == 0 {
+		return nil, false
+	}
+	type listingEntry struct {
+		line int
+		text string
+	}
+	entries := make([]listingEntry, 0, len(usable))
+	for _, line := range strings.Split(listing, "\n") {
+		lineNumber, text, ok := plDebugParseBacktraceLine(line)
+		if !ok {
+			continue
+		}
+		entries = append(entries, listingEntry{line: lineNumber, text: text})
+	}
+	if len(entries) != len(usable) {
+		return nil, false
+	}
+	frames := make([]plDebugFrame, 0, len(usable))
+	for index, frame := range usable {
+		if frame.Line != entries[index].line {
+			return nil, false
+		}
+		merged := plDebugFrame{Line: frame.Line, ProgramOwner: frame.Owner}
+		if plDebugIsProgramName(entries[index].text) {
+			merged.Program = entries[index].text
+		} else {
+			merged.Source = entries[index].text
+		}
+		frames = append(frames, merged)
+	}
+	for index := range frames {
+		frames[index].StackDepth = len(frames) - index
+	}
+	return frames, true
 }
 
 // plDebugIsProgramName reports whether the text PRINT_BACKTRACE printed after "[Line N]"
@@ -2708,12 +3076,16 @@ func (p *plDebugSession) refreshBacktraceLocked() {
 	if p.terminated {
 		return
 	}
-	if _, _, err := p.fetchBacktrace(); err != nil {
+	if _, _, _, err := p.fetchBacktrace(); err != nil {
 		plDebugLogf("backtrace refresh failed (ignored): %v", err)
 	}
 }
 
 func (p *plDebugSession) stack() (map[string]interface{}, error) {
+	// A terminated session whose debuggee statement is still returning would otherwise
+	// answer without the OUT values this very snapshot publishes; the wait is free for a
+	// parked session (see awaitTargetReturned). It runs before p.mu is taken.
+	p.awaitTargetReturned(false)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	response := p.snapshot("")
@@ -2724,17 +3096,18 @@ func (p *plDebugSession) stack() (map[string]interface{}, error) {
 		response["backtrace"] = ""
 		return response, nil
 	}
-	listing, status, err := p.fetchBacktrace()
+	listing, status, frames, err := p.fetchBacktrace()
 	if err != nil {
 		return nil, err
 	}
 	response["backtrace"] = listing
 	response["dbmsStatus"] = status
 	response["line"] = p.lastLine
-	// Every frame of the listing, first frame = current frame. The run_info stack
-	// depth is the depth of the current frame, so it renumbers the frames when it
-	// is known; the parser's own ordering is the fallback.
-	frames := plDebugParseBacktraceFrames(listing)
+	// Every frame of the listing, first frame = current frame: either the structured
+	// backtrace_table frames already merged with the listing's source text, or the
+	// parsed listing alone (see fetchBacktrace). The run_info stack depth is the depth
+	// of the current frame, so it renumbers the frames when it is known; the merge's
+	// own ordering is the fallback.
 	if p.lastStackDepth > 0 {
 		for index := range frames {
 			depth := p.lastStackDepth - index
@@ -2750,7 +3123,12 @@ func (p *plDebugSession) stack() (map[string]interface{}, error) {
 	program := p.currentProgramLabel(frames)
 	response["program"] = program
 	if len(frames) > 0 {
-		frames[0].ProgramOwner = p.lastProgramOwner
+		// The run_info owner is the same value the structured payload carries, so it
+		// only fills the field when the structured frames had none (the merge's own
+		// owner must not be erased by an empty run_info register).
+		if p.lastProgramOwner != "" {
+			frames[0].ProgramOwner = p.lastProgramOwner
+		}
 		// Oracle prints the SOURCE line at the current frame, so the parser cannot
 		// name that frame from the listing; the derived label names it instead.
 		if frames[0].Program == "" && program != "" {
@@ -2874,6 +3252,37 @@ func plDebugFetchOutput(db *sql.DB, oci bool, owner string, maxChars int, out *s
 	args := []any{plDebugLogOutArg(oci, out), maxChars}
 	_, err := db.Exec(plDebugHelperFunctionSQL(owner, procFetchOutput, 1), args...)
 	return err
+}
+
+// plDebugBacktraceOutArg is the OUT binding of the DBX_FETCH_BACKTRACE structured
+// payload: a text register of plDebugLogChars characters instead of plDebugLineChars,
+// because one frame carries up to five fields and a deep stack would otherwise overflow
+// the 4000-character register. The driver split is the same as plDebugLogOutArg's: the
+// OCI (godror) driver sizes sql.Out itself, go-ora needs the size on its own Out type.
+func plDebugBacktraceOutArg(oci bool, dest *string) any {
+	if oci {
+		return sql.Out{Dest: dest}
+	}
+	return go_ora.Out{Dest: dest, Size: plDebugLogChars}
+}
+
+// plDebugBacktraceCall runs DBX_FETCH_BACKTRACE, whose first register needs the sized
+// binding above. It is the only helper call that does not go through plDebugCall, and it
+// uses the same guard so a server that never answers is bounded exactly like the rest.
+func (p *plDebugSession) plDebugBacktraceCall(structured, listing *string, status *int) error {
+	return p.plDebugGuarded(procFetchBacktrace, p.debugCallTimeout(), func() error {
+		query := plDebugHelperSQL(p.owner, procFetchBacktrace, 3)
+		if p.oci {
+			_, err := p.debugger.Exec(query,
+				sql.Out{Dest: structured}, sql.Out{Dest: listing}, sql.Out{Dest: status})
+			return err
+		}
+		_, err := p.debugger.Exec(query,
+			plDebugBacktraceOutArg(false, structured),
+			go_ora.Out{Dest: listing, Size: plDebugLineChars},
+			go_ora.Out{Dest: status})
+		return err
+	})
 }
 
 // plDebugCall runs one DBX_PL_DEBUG_PACKAGE routine on the debugger connection,
@@ -3105,12 +3514,28 @@ func plDebugDriverArgs(oci bool, args []interface{}) []any {
 	converted := make([]any, 0, len(args))
 	for _, arg := range args {
 		if out, ok := arg.(sql.Out); ok {
-			converted = append(converted, plDebugOutArg(oci, out.Dest))
+			converted = append(converted, plDebugOutArgIn(oci, out.Dest, out.In))
 			continue
 		}
 		converted = append(converted, arg)
 	}
 	return converted
+}
+
+// plDebugOutArgIn is plDebugOutArg carrying database/sql's IN OUT flag: an IN OUT
+// destination is an input as well, so the driver's own OUT type gets the flag
+// (go_ora.Out.In feeds the destination's current value back as the input;
+// sql.Out.In is what godror reads). A pure OUT keeps the exact binding it had.
+func plDebugOutArgIn(oci bool, dest any, in bool) any {
+	if !in {
+		return plDebugOutArg(oci, dest)
+	}
+	if oci {
+		return sql.Out{Dest: dest, In: true}
+	}
+	bind := plDebugOutArg(false, dest).(go_ora.Out)
+	bind.In = true
+	return bind
 }
 
 // plDebugGetLineArgs returns the OUT bindings one DBX_GET_LINE call needs.
@@ -3469,10 +3894,23 @@ func (p *plDebugSession) runTarget(request map[string]interface{}) {
 		return
 	}
 
-	var resultValue string
 	callArgs := make([]interface{}, 0, len(target.Params)+1)
+	var returnDestination *plDebugOutDestination
 	if target.IsFunction {
-		callArgs = append(callArgs, sql.Out{Dest: &resultValue})
+		// The return value is read into the same destination shape as every OUT
+		// parameter, so NUMBER / DATE / VARCHAR2 all come back as text (see
+		// plDebugOutDestination).
+		returnDestination = &plDebugOutDestination{
+			Mode: "OUT",
+			Type: target.ReturnType,
+			Dest: new(sql.NullString),
+		}
+		if returnDestination.Type == "" {
+			// The request carried no return type, so the value the start sequence read
+			// from ALL_ARGUMENTS is what names it.
+			returnDestination.Type = p.targetReturnType
+		}
+		callArgs = append(callArgs, sql.Out{Dest: returnDestination.Dest})
 	}
 	callArgs = append(callArgs, target.Params...)
 	// The trailing capture statement of the block binds last, and it needs a buffer
@@ -3483,6 +3921,12 @@ func (p *plDebugSession) runTarget(request map[string]interface{}) {
 	if target.CapturedOutput != nil {
 		args = append(args, plDebugLogOutArg(p.oci, &captured))
 	}
+	// The destinations are published only after the statement returned, so they are
+	// installed before it runs.
+	p.mu.Lock()
+	p.outDestinations = target.OutDestinations
+	p.returnDestination = returnDestination
+	p.mu.Unlock()
 	// The target block is Exec'd here, so the OUT bindings only need the type and
 	// (for go-ora) the buffer size the driver in use understands.
 	if _, err := p.debuggee.Exec(target.Block, args...); err != nil {
@@ -3491,15 +3935,18 @@ func (p *plDebugSession) runTarget(request map[string]interface{}) {
 		p.mu.Unlock()
 		return
 	}
+	p.mu.Lock()
+	// The statement returned without an error, so the program reached its end and the
+	// OUT registers hold its outcome (see snapshot's publication condition).
+	p.targetReturned = true
 	if captured != "" {
-		p.mu.Lock()
 		p.logText = captured
 		// A chunk shorter than what the capture asked for means the buffer was read
 		// to its end, so no later pl_debug_get_log has to touch the debuggee
 		// connection again (see plDebugSession.log).
 		p.logComplete = len(captured) < plDebugLogChars
-		p.mu.Unlock()
 	}
+	p.mu.Unlock()
 }
 
 // plDebugTarget is one resolved debugging target: the qualified routine, the
@@ -3524,6 +3971,14 @@ type plDebugTarget struct {
 	// statement (see plDebugAnonymousBlock) for a PROCEDURE/FUNCTION target, nil when
 	// the block has no capture (nothing to bind, no statement).
 	CapturedOutput *string
+	// OutDestinations are the OUT / IN OUT parameters of the target, in signature
+	// order; the call binds their destinations and runTarget publishes their values
+	// once the program has finished (see plDebugOutDestination).
+	OutDestinations []*plDebugOutDestination
+	// ReturnType is the declared return type of a FUNCTION as the request reported it
+	// (a RETURN-mode parameter or the returnType attribute). The session prefers the
+	// dictionary value plDebugResolveReturnType read at start; this one is the fallback.
+	ReturnType string
 }
 
 // plDebugResolveTarget resolves the qualified routine, binds its parameters and
@@ -3531,7 +3986,7 @@ type plDebugTarget struct {
 // what debugBefore locates the call line in, so the debugger arms its breakpoint
 // on exactly the statement the debuggee is running.
 func plDebugResolveTarget(owner string, request map[string]interface{}) (plDebugTarget, error) {
-	routine, params, isFunction, err := plDebugTargetRoutine(owner, request)
+	routine, params, outDestinations, isFunction, returnType, err := plDebugTargetRoutine(owner, request)
 	if err != nil {
 		return plDebugTarget{}, err
 	}
@@ -3548,13 +4003,15 @@ func plDebugResolveTarget(owner string, request map[string]interface{}) (plDebug
 		packageName = program[:dot]
 	}
 	return plDebugTarget{
-		Routine:        routine,
-		Program:        program,
-		Package:        packageName,
-		Block:          plDebugAnonymousBlock(owner, routine, isFunction, len(params)),
-		Params:         params,
-		IsFunction:     isFunction,
-		CapturedOutput: new(string),
+		Routine:         routine,
+		Program:         program,
+		Package:         packageName,
+		Block:           plDebugAnonymousBlock(owner, routine, isFunction, len(params)),
+		Params:          params,
+		IsFunction:      isFunction,
+		CapturedOutput:  new(string),
+		OutDestinations: outDestinations,
+		ReturnType:      returnType,
 	}, nil
 }
 
@@ -3747,6 +4204,58 @@ func plDebugResolveTargetLines(db *sql.DB, owner string, request map[string]inte
 		return target, nested, note
 	}
 	return target, nested, ""
+}
+
+// plDebugReturnTypeStandaloneQuery / plDebugReturnTypePackageQuery read a FUNCTION
+// target's declared return type from ALL_ARGUMENTS, where the return value is the
+// POSITION 0 row (ARGUMENT_NAME is NULL there). 19c EE has no PROCEDURE_NAME column --
+// measured against ALL_TAB_COLUMNS -- so a package member is addressed by its own
+// OBJECT_NAME plus PACKAGE_NAME (for DBMS_DEBUG.PRINT_BACKTRACE, OBJECT_NAME is
+// PRINT_BACKTRACE and PACKAGE_NAME is DBMS_DEBUG).
+const (
+	plDebugReturnTypeStandaloneQuery = `SELECT DATA_TYPE FROM ALL_ARGUMENTS
+		  WHERE OWNER = :1 AND OBJECT_NAME = :2 AND POSITION = 0 AND PACKAGE_NAME IS NULL AND ROWNUM = 1`
+	plDebugReturnTypePackageQuery = `SELECT DATA_TYPE FROM ALL_ARGUMENTS
+		  WHERE OWNER = :1 AND OBJECT_NAME = :2 AND PACKAGE_NAME = :3 AND POSITION = 0 AND ROWNUM = 1`
+)
+
+// plDebugResolveReturnType reads the declared return type of a FUNCTION target so the
+// published returnValue can name its type. It is best effort: a target that is not a
+// function, an unreadable dictionary or an unusable name all answer "", which only
+// means the value panel shows no type next to the value.
+//
+// It runs in the start sequence, before DEBUG_ON, because it is a plain dictionary
+// SELECT: those are the only statements that keep answering quickly in a debug session,
+// and the ones that must run before the session parks are exactly the pre-DEBUG_ON ones.
+func plDebugResolveReturnType(db *sql.DB, owner string, request map[string]interface{}) string {
+	if strings.ToUpper(strings.TrimSpace(stringField(request, "objectType"))) != "FUNCTION" {
+		return ""
+	}
+	objectName := strings.ToUpper(strings.TrimSpace(stringField(request, "objectName")))
+	packageName := strings.ToUpper(strings.TrimSpace(stringField(request, "packageName")))
+	if packageName == "" {
+		if dot := strings.IndexByte(objectName, '.'); dot > 0 {
+			packageName, objectName = objectName[:dot], objectName[dot+1:]
+		}
+	}
+	if !plDebugPlainIdentifier(objectName) {
+		return ""
+	}
+	query := plDebugReturnTypeStandaloneQuery
+	args := []any{owner, objectName}
+	if packageName != "" {
+		if !plDebugPlainIdentifier(packageName) {
+			return ""
+		}
+		query = plDebugReturnTypePackageQuery
+		args = append(args, packageName)
+	}
+	var dataType sql.NullString
+	if err := db.QueryRow(query, args...).Scan(&dataType); err != nil {
+		plDebugLogf("return type of %s could not be read (ignored): %v", objectName, err)
+		return ""
+	}
+	return strings.ToUpper(strings.TrimSpace(dataType.String))
 }
 
 // plDebugSubprogramDeclaration reports whether one comment-free source line starts the
@@ -4133,13 +4642,21 @@ func plDebugStripSQLComments(line string, inBlockComment *bool) string {
 }
 
 // plDebugTargetRoutine resolves the qualified routine name and its bound
-// parameters for the debuggee call.
-func plDebugTargetRoutine(owner string, request map[string]interface{}) (string, []interface{}, bool, error) {
+// parameters for the debuggee call. It returns the bind arguments in signature
+// order, the OUT / IN OUT destinations those binds were created for (so their
+// values can be published once the target finished), the target's FUNCTION-ness
+// and, for a function, the return type the request declared.
+//
+// An OUT parameter is rendered as sql.Out{In: false} and an IN OUT parameter as
+// sql.Out{In: true} -- the same rendering both drivers convert through
+// plDebugDriverArgs, so an IN OUT keeps its input value (the destination's current
+// value is what the driver encodes as the input).
+func plDebugTargetRoutine(owner string, request map[string]interface{}) (string, []interface{}, []*plDebugOutDestination, bool, string, error) {
 	objectType := strings.ToUpper(strings.TrimSpace(stringField(request, "objectType")))
 	packageName := strings.ToUpper(strings.TrimSpace(stringField(request, "packageName")))
 	objectName := strings.ToUpper(strings.TrimSpace(stringField(request, "objectName")))
 	if objectName == "" {
-		return "", nil, false, fmt.Errorf("object name is required")
+		return "", nil, nil, false, "", fmt.Errorf("object name is required")
 	}
 	var routine string
 	if packageName != "" {
@@ -4163,17 +4680,38 @@ func plDebugTargetRoutine(owner string, request map[string]interface{}) (string,
 		}
 	}
 	args := make([]interface{}, 0, len(rawParams))
+	outDestinations := make([]*plDebugOutDestination, 0, len(rawParams))
+	returnType := strings.TrimSpace(stringField(request, "returnType"))
 	for _, param := range rawParams {
-		mode := strings.ToUpper(strings.TrimSpace(param.Mode))
-		if mode == "OUT" {
-			// Rendered as sql.Out here and converted to the driver's own OUT type
-			// by plDebugDriverArgs when the target block is executed.
-			args = append(args, sql.Out{Dest: new(string)})
-			continue
+		switch plDebugNormalizeParamMode(param.Mode) {
+		case "RETURN":
+			// A RETURN-mode entry is metadata, not a bind: it carries the function's
+			// declared return type when the client sends one.
+			if returnType == "" {
+				returnType = strings.TrimSpace(param.Type)
+			}
+		case "OUT", "IN OUT":
+			destination := &plDebugOutDestination{
+				Name: param.Name,
+				Mode: plDebugNormalizeParamMode(param.Mode),
+				Type: param.Type,
+				Dest: new(sql.NullString),
+			}
+			if destination.Mode == "IN OUT" {
+				// The destination also carries the caller's input value: the IN OUT
+				// bind's input side is the destination's current value (go-ora
+				// indirects the pointer and uses it as the input, godror reads
+				// sql.Out.In the same way). An empty input is NULL, which is what
+				// an empty string is in Oracle.
+				destination.Dest = &sql.NullString{String: param.Value, Valid: param.Value != ""}
+			}
+			outDestinations = append(outDestinations, destination)
+			args = append(args, sql.Out{Dest: destination.Dest, In: destination.Mode == "IN OUT"})
+		default:
+			args = append(args, param.Value)
 		}
-		args = append(args, param.Value)
 	}
-	return routine, args, objectType == "FUNCTION", nil
+	return routine, args, outDestinations, objectType == "FUNCTION", returnType, nil
 }
 
 func (p *plDebugSession) snapshot(message string) map[string]interface{} {
@@ -4197,6 +4735,23 @@ func (p *plDebugSession) snapshot(message string) map[string]interface{} {
 	if message != "" {
 		response["message"] = message
 	}
+	// The OUT / IN OUT parameter values and a function's return value are only ever
+	// published for a target that ran to its END: the program must have terminated,
+	// its statement must have returned without an error (a parked, aborted or
+	// exception-terminated run has no outcome -- see targetReturned / abortRequested),
+	// and the client must not have aborted the run. While the debuggee is parked the
+	// fields are absent, which the front-end contract defines as "not finished yet".
+	if p.terminated && p.targetErr == "" && p.targetReturned && !p.abortRequested {
+		if outParams := p.outParamValues(); len(outParams) > 0 {
+			response["outParams"] = outParams
+		}
+		if p.returnDestination != nil {
+			response["returnValue"] = map[string]interface{}{
+				"type":  p.returnDestination.Type,
+				"value": p.returnDestination.text(),
+			}
+		}
+	}
 	// debugInfo is only present when the start sequence had to restore the target's
 	// PL/SQL debug information: it explains why a target that "should" never have been
 	// steppable now is, and reports the DDL that was run against the user's object.
@@ -4204,6 +4759,29 @@ func (p *plDebugSession) snapshot(message string) map[string]interface{} {
 		response["debugInfo"] = p.debugInfo
 	}
 	return response
+}
+
+// plDebugOutParam is one published OUT / IN OUT value (the front-end contract:
+// name, mode, type, value; a NULL arrives as an empty value).
+type plDebugOutParam struct {
+	Name  string `json:"name"`
+	Mode  string `json:"mode"`
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+// outParamValues renders the finished OUT / IN OUT destinations in signature order.
+func (p *plDebugSession) outParamValues() []plDebugOutParam {
+	values := make([]plDebugOutParam, 0, len(p.outDestinations))
+	for _, destination := range p.outDestinations {
+		values = append(values, plDebugOutParam{
+			Name:  destination.Name,
+			Mode:  destination.Mode,
+			Type:  destination.Type,
+			Value: destination.text(),
+		})
+	}
+	return values
 }
 
 // currentProgramLabel names the routine the interpreter is parked in.

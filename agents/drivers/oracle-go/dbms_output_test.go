@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -322,9 +323,12 @@ type oracleDBMSOutputDriver struct {
 	enableErr          error
 	enableCount        int
 	getLineCount       int
-	statements         []string
-	nextStatementLines []string
-	nextStatementErr   error
+	statements []string
+	// statementLines queues the lines each statement writes when it runs, in order, so
+	// one call that runs several statements (execute_batch) can script every one of
+	// them. scriptLines appends one entry; a statement pops the head.
+	statementLines   [][]string
+	nextStatementErr error
 	outBinds           []string
 	events             []string
 	// rejectRegisterAbove makes the fetch fail like a server that refuses a bind
@@ -353,8 +357,19 @@ func (d *oracleDBMSOutputDriver) Open(string) (driver.Conn, error) {
 
 func (d *oracleDBMSOutputDriver) scriptLines(lines []string) {
 	d.mu.Lock()
-	d.nextStatementLines = lines
+	d.statementLines = append(d.statementLines, append([]string(nil), lines...))
 	d.mu.Unlock()
+}
+
+// takeStatementLines pops the lines scripted for the statement that is starting. The
+// caller holds d.mu.
+func (d *oracleDBMSOutputDriver) takeStatementLines() []string {
+	if len(d.statementLines) == 0 {
+		return nil
+	}
+	lines := d.statementLines[0]
+	d.statementLines = d.statementLines[1:]
+	return lines
 }
 
 // scriptStatementError makes the next statement fail, the way a PL/SQL block
@@ -401,6 +416,7 @@ func (c *oracleDBMSOutputConn) Begin() (driver.Tx, error) {
 
 var (
 	_ driver.ExecerContext     = (*oracleDBMSOutputConn)(nil)
+	_ driver.QueryerContext    = (*oracleDBMSOutputConn)(nil)
 	_ driver.NamedValueChecker = (*oracleDBMSOutputConn)(nil)
 )
 
@@ -451,28 +467,66 @@ func (c *oracleDBMSOutputConn) ExecContext(_ context.Context, query string, args
 		// later statement on this physical connection until ENABLE runs again.
 		c.enabled = false
 		c.buffer = nil
-		c.driver.nextStatementLines = nil
+		c.driver.statementLines = nil
 		c.driver.nextStatementErr = nil
 		return driver.RowsAffected(0), nil
 	}
+	lines := c.driver.takeStatementLines()
 	if c.driver.nextStatementErr != nil {
 		if c.enabled {
 			// The statement wrote into the buffer before it raised, exactly like a
 			// block that calls PUT_LINE and then hits ORA-20002.
-			c.buffer = append(c.buffer, c.driver.nextStatementLines...)
+			c.buffer = append(c.buffer, lines...)
 		}
 		err := c.driver.nextStatementErr
 		c.driver.nextStatementErr = nil
-		c.driver.nextStatementLines = nil
 		return nil, err
 	}
 	// Without a successful ENABLE the session keeps no output, exactly like a
 	// session where DBMS_OUTPUT is unavailable or disabled.
 	if c.enabled {
-		c.buffer = append(c.buffer, c.driver.nextStatementLines...)
+		c.buffer = append(c.buffer, lines...)
 	}
-	c.driver.nextStatementLines = nil
 	return driver.RowsAffected(1), nil
+}
+
+// QueryContext serves the SELECT a paged query starts. It is the same statement path as
+// ExecContext: the scripted lines enter the session buffer, so a capture around the
+// query reads exactly what the statement wrote before its first page.
+func (c *oracleDBMSOutputConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	c.driver.mu.Lock()
+	defer c.driver.mu.Unlock()
+	c.driver.statements = append(c.driver.statements, query)
+	c.driver.events = append(c.driver.events, "query")
+	if c.enabled {
+		c.buffer = append(c.buffer, c.driver.takeStatementLines()...)
+	}
+	return &oracleDBMSOutputRows{
+		columns: []string{"N"},
+		values:  [][]driver.Value{{int64(1)}, {int64(2)}, {int64(3)}},
+	}, nil
+}
+
+// oracleDBMSOutputRows is the three-row result set every SELECT over this fake
+// connection returns, so a page size of two leaves a live paging session behind.
+type oracleDBMSOutputRows struct {
+	columns []string
+	values  [][]driver.Value
+	index   int
+}
+
+var _ driver.Rows = (*oracleDBMSOutputRows)(nil)
+
+func (r *oracleDBMSOutputRows) Columns() []string { return r.columns }
+func (r *oracleDBMSOutputRows) Close() error      { return nil }
+
+func (r *oracleDBMSOutputRows) Next(dest []driver.Value) error {
+	if r.index >= len(r.values) {
+		return io.EOF
+	}
+	copy(dest, r.values[r.index])
+	r.index++
+	return nil
 }
 
 // fetchBatch mirrors the server-side fetch block: it frames buffered lines
@@ -573,16 +627,25 @@ func describeOutBind(args []driver.NamedValue, index int) string {
 	}
 	switch out := args[index].Value.(type) {
 	case go_ora.Out:
-		return fmt.Sprintf("go_ora.Out(size=%d)", out.Size)
+		return fmt.Sprintf("go_ora.Out(size=%d%s)", out.Size, inOutSuffix(out.In))
 	case *go_ora.Out:
-		return fmt.Sprintf("go_ora.Out(size=%d)", out.Size)
+		return fmt.Sprintf("go_ora.Out(size=%d%s)", out.Size, inOutSuffix(out.In))
 	case sql.Out:
-		return "sql.Out"
+		return "sql.Out" + inOutSuffix(out.In)
 	case *sql.Out:
-		return "sql.Out"
+		return "sql.Out" + inOutSuffix(out.In)
 	default:
 		return fmt.Sprintf("%T", args[index].Value)
 	}
+}
+
+// inOutSuffix marks an IN OUT bind in the recorded kind so a test can tell it apart
+// from a pure OUT bind without depending on each driver's struct layout.
+func inOutSuffix(in bool) string {
+	if in {
+		return ",in"
+	}
+	return ""
 }
 
 // describeInValue records the text of an argument that is not an OUT register, so a
@@ -622,10 +685,90 @@ func setOutDest(args []driver.NamedValue, index int, value any) {
 		if text, ok := value.(string); ok {
 			*target = text
 		}
+	case *sql.NullString:
+		switch typed := value.(type) {
+		case string:
+			*target = sql.NullString{String: typed, Valid: true}
+		case nil:
+			*target = sql.NullString{}
+		}
 	case *int:
 		if number, ok := value.(int); ok {
 			*target = number
 		}
+	}
+}
+
+// The first page of a paged SELECT is captured like a plain execute_query (T4): the
+// statement's DBMS_OUTPUT lines come back on the page result, and the connection that
+// owns the still-open cursor -- and with it the captured session -- is closed only when
+// the paging session ends.
+func TestExecuteQueryPageCapturesDBMSOutputForTheFirstPage(t *testing.T) {
+	db, drv := openOracleDBMSOutputTestDB(t)
+	s := newServer()
+	s.db = db
+	drv.scriptLines([]string{"page-one-line"})
+
+	result, err := s.executeQueryPage(queryOptions{SQL: "SELECT N FROM T"}, 2)
+	if err != nil {
+		t.Fatalf("executeQueryPage failed: %v", err)
+	}
+	if len(result.Rows) != 2 || !result.HasMore || result.SessionID == nil {
+		t.Fatalf("the first page did not stay paged: %+v", result)
+	}
+	if len(result.Messages) != 1 || result.Messages[0].Message != "page-one-line" {
+		t.Fatalf("the first page carried no captured output: %+v", result.Messages)
+	}
+	session := s.sessions[*result.SessionID]
+	if session == nil || session.conn == nil {
+		t.Fatal("the paging session did not keep the capture connection")
+	}
+	if stats := db.Stats(); stats.InUse != 1 {
+		t.Fatalf("the capture connection was released while its cursor is open: %+v", stats)
+	}
+
+	// The remaining page reads from the live cursor; when it ends the session releases
+	// both the rows and the capture connection.
+	next, err := s.fetchQueryPage(*result.SessionID, 2)
+	if err != nil {
+		t.Fatalf("fetchQueryPage failed: %v", err)
+	}
+	if len(next.Rows) != 1 || next.HasMore || next.SessionID != nil {
+		t.Fatalf("the last page did not end the session: %+v", next)
+	}
+	if _, stillThere := s.sessions[*result.SessionID]; stillThere {
+		t.Fatal("the paging session outlived its last page")
+	}
+	if stats := db.Stats(); stats.InUse != 0 {
+		t.Fatalf("the capture connection was not released with the session: %+v", stats)
+	}
+	if len(drv.outBindKinds()) == 0 {
+		t.Fatal("no DBMS_OUTPUT drain ran for the paged SELECT")
+	}
+}
+
+// executeBatch keeps every statement's DBMS_OUTPUT, in execution order (T5), so a batch
+// and the Rust caller's statement-by-statement fallback answer the same messages.
+func TestExecuteBatchMergesStatementMessages(t *testing.T) {
+	db, drv := openOracleDBMSOutputTestDB(t)
+	s := newServer()
+	s.db = db
+	drv.scriptLines([]string{"first-line"})
+	drv.scriptLines([]string{"second-line"})
+
+	params := map[string]json.RawMessage{
+		"statements": json.RawMessage(`["BEGIN dbms_output.put_line('first-line'); END;", "BEGIN dbms_output.put_line('second-line'); END;"]`),
+	}
+	result, err := s.executeBatch(params)
+	if err != nil {
+		t.Fatalf("executeBatch failed: %v", err)
+	}
+	got := make([]string, 0, len(result.Messages))
+	for _, message := range result.Messages {
+		got = append(got, message.Message)
+	}
+	if strings.Join(got, ",") != "first-line,second-line" {
+		t.Fatalf("batch messages = %v, want both statements' lines in order", got)
 	}
 }
 

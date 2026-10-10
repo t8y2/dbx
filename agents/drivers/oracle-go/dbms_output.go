@@ -420,6 +420,26 @@ func (s *server) beginStatementContext() (context.Context, func()) {
 	}
 }
 
+// pinStatementContext registers the context of a statement whose result outlives the
+// call (the first page of a paged SELECT) and returns a release that restores the
+// previous context WITHOUT cancelling this one. Cancelling it would close the very
+// cursor the caller is about to page through: the query derived its own context from
+// this one (queryRowsWithTimeout), so a cancel here propagates to the live rows. The
+// derived context is cancelled by closeRows when the paging session ends, which is also
+// what cancel_session reaches through activeRows.
+func (s *server) pinStatementContext() (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.activeCancelMu.Lock()
+	previousCtx, previousCancel := s.statementCtx, s.statementCancel
+	s.statementCtx, s.statementCancel = ctx, cancel
+	s.activeCancelMu.Unlock()
+	return ctx, func() {
+		s.activeCancelMu.Lock()
+		s.statementCtx, s.statementCancel = previousCtx, previousCancel
+		s.activeCancelMu.Unlock()
+	}
+}
+
 // withStatementDBMSOutput runs one statement and returns the DBMS_OUTPUT lines
 // that statement produced. Capture is always best effort: the statement runs on
 // every path, and a connection that cannot be pinned or enabled simply yields no
@@ -468,6 +488,63 @@ func (s *server) withStatementDBMSOutput(sqlText string, run func() error) []que
 	s.ensureDBMSOutput(ctx, session)
 	_ = run()
 	return s.finishStatementDBMSOutput(ctx, session, sqlText)
+}
+
+// withPagedStatementDBMSOutput is withStatementDBMSOutput for a statement whose live
+// cursor outlives the call: the first page of a paged SELECT. The statement and the
+// DBMS_OUTPUT drain still share one pinned physical connection (the drain runs while the
+// page's cursor is open and reads the same session's buffer), but the connection cannot
+// be closed here: database/sql's Conn.Close blocks until the open Rows are closed, and
+// those rows become the caller's paging session. The returned connection is therefore
+// the caller's to close -- it belongs to the paging session and is closed when that
+// session ends (see closeQuerySession).
+//
+// A manual transaction and a nested capture already own their connection, so those
+// paths capture ordinally and return no connection to hand over.
+func (s *server) withPagedStatementDBMSOutput(sqlText string, run func() error) (*sql.Conn, []queryMessage) {
+	if s.statementConn != nil {
+		_ = run()
+		return nil, nil
+	}
+	if s.manualConn != nil {
+		ctx, release := s.pinStatementContext()
+		defer release()
+		session := s.statementDBMSOutputSession(s.manualConn)
+		s.ensureDBMSOutput(ctx, session)
+		_ = run()
+		return nil, s.finishStatementDBMSOutput(ctx, session, sqlText)
+	}
+	db, err := s.requireDB()
+	if err != nil {
+		_ = run()
+		return nil, nil
+	}
+	ctx, release := s.pinStatementContext()
+	defer release()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		logDBMSOutput("capture disabled for this statement: %v", err)
+		_ = run()
+		return nil, nil
+	}
+	previous := s.statementConn
+	s.statementConn = conn
+	defer func() {
+		s.statementConn = previous
+		if recovered := recover(); recovered != nil {
+			// A panic on the way out means the caller never receives this connection,
+			// so this function owns it. The statement's own cleanup has already closed
+			// its rows (runPagedOracleSelect defers that), which is what lets the close
+			// below return instead of waiting for a cursor that no one will close.
+			_ = conn.Close()
+			panic(recovered)
+		}
+	}()
+	session := s.statementDBMSOutputSession(conn)
+	s.ensureDBMSOutput(ctx, session)
+	_ = run()
+	messages := s.finishStatementDBMSOutput(ctx, session, sqlText)
+	return conn, messages
 }
 
 // finishStatementDBMSOutput handles the capture bookkeeping that follows a

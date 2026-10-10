@@ -444,6 +444,12 @@ type querySession struct {
 	columnTypes []string
 	pending     []any
 	remaining   int
+	// conn is the pinned physical connection the rows were read from when the first
+	// page's DBMS_OUTPUT was captured (see withPagedStatementDBMSOutput). It is nil for
+	// a paging session that did not capture. The connection cannot be released while
+	// the cursor is open -- database/sql's Conn.Close waits for the open Rows -- so the
+	// session owns it and closes it together with the rows.
+	conn *sql.Conn
 }
 
 type oracleColumnMeta struct {
@@ -4405,6 +4411,13 @@ func (s *server) executeBatch(params map[string]json.RawMessage) (queryResult, e
 	start := time.Now()
 	schema := stringParam(params, "schema")
 	var affected int64
+	// Every statement's DBMS_OUTPUT lines are kept, in execution order, exactly as the
+	// graceful degradation does it (the Rust caller falls back to running the statements
+	// one by one when a batch is not supported): running them as a batch then answers
+	// the same messages, in the same order, as that fallback would. A failed statement
+	// still bubbles up as an error -- the reply is dropped with it, which is also what
+	// the fallback produces for the failing statement itself.
+	var messages []queryMessage
 	for _, statement := range stringSliceParam(params, "statements") {
 		// Whitespace-only and delimiter-only statements are skipped rather than executed:
 		// Oracle answers an empty statement with ORA-00900, and the newline a script leaves
@@ -4420,6 +4433,7 @@ func (s *server) executeBatch(params map[string]json.RawMessage) (queryResult, e
 			return queryResult{}, err
 		}
 		affected += result.AffectedRows
+		messages = append(messages, result.Messages...)
 	}
 	return queryResult{
 		Columns:         []string{},
@@ -4427,6 +4441,7 @@ func (s *server) executeBatch(params map[string]json.RawMessage) (queryResult, e
 		Rows:            [][]any{},
 		AffectedRows:    affected,
 		ExecutionTimeMS: time.Since(start).Milliseconds(),
+		Messages:        messages,
 	}, nil
 }
 
@@ -4494,13 +4509,37 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 			Messages:        result.Messages,
 		}, err
 	}
-	result, session, err := s.runPagedOracleSelect(sqlText, opts, pageSize, start)
+	// The first page of a SELECT is captured exactly like a plain execute_query: the
+	// statement and the DBMS_OUTPUT drain share one pinned physical connection, so the
+	// lines belong to this statement's Oracle session (the drain runs while the page's
+	// cursor is still open, which Oracle allows on one session -- a second cursor). The
+	// capture happens per execute_query_page CALL: a call re-executes the statement and
+	// therefore re-collects everything it writes up to its first page. The later
+	// fetch_query_page calls read from the live cursor without re-executing, so the
+	// output rows of later pages produce while being fetched is not re-collected (there
+	// is no new statement to attribute it to).
+	var result queryPageResult
+	var session *querySession
+	var err error
+	pinned, messages := s.withPagedStatementDBMSOutput(sqlText, func() error {
+		result, session, err = s.runPagedOracleSelect(sqlText, opts, pageSize, start)
+		return err
+	})
 	if err != nil {
+		if pinned != nil {
+			_ = pinned.Close()
+		}
 		return queryPageResult{}, err
 	}
+	result.Messages = messages
 	if session != nil {
+		// The cursor stays open, so the connection that owns it stays with the session:
+		// it is closed when the session ends (closeQuerySession).
+		session.conn = pinned
 		sessionID := s.storeQuerySession(session)
 		result.SessionID = &sessionID
+	} else if pinned != nil {
+		_ = pinned.Close()
 	}
 	return result, nil
 }
@@ -4644,6 +4683,12 @@ func (s *server) closeQuerySession(sessionID string) bool {
 		return false
 	}
 	s.closeRows(session.rows)
+	// The pinned capture connection goes after the rows: Conn.Close waits for open
+	// Rows, so closing it first would block until the cursor ended.
+	if session.conn != nil {
+		_ = session.conn.Close()
+		session.conn = nil
+	}
 	delete(s.sessions, sessionID)
 	return true
 }

@@ -126,6 +126,17 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
+      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-zh" target="_blank">
+        <img src="docs/public/sponsors/hiapi-logo.png" alt="HiAPI" width="175" />
+      </a>
+    </td>
+    <td>
+      HiAPI 是面向开发者的图片、视频、音频及文本模型 API 平台。GPT Image 2.5 提供 Flare 和 Sunburst：Flare 适合日常快速创作，Sunburst 适合对画质与编辑精度要求更高的任务，均支持 1K、2K、4K 输出。可先在 Playground 验证提示词，再用一个 API Key 通过 <code>/v1/tasks</code> 提交媒体任务，轮询或回调取回结果；文本模型提供 OpenAI 兼容接口。生成结果通过 HiAPI CDN 链接交付，需要长期保留时可选付费持久存储。Remote MCP 和 Agent Skills 可接入 Claude Code、Cursor 等 AI 编程工具。平台按量付费、无最低消费；新用户注册赠送 200 Credits。首充最高加赠 12% 积分。
+      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-zh" target="_blank">访问 HiAPI</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
         <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
       </a>

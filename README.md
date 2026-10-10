@@ -126,6 +126,17 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
+      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-en" target="_blank">
+        <img src="docs/public/sponsors/hiapi-logo.png" alt="HiAPI" width="175" />
+      </a>
+    </td>
+    <td>
+      HiAPI is a developer-focused API platform for image, video, audio, and text models. Its GPT Image 2.5 family includes Flare for fast everyday creation and Sunburst for detailed generation and editing, with 1K, 2K, and 4K outputs. Test prompts in the Playground, then use one API key to submit media tasks through <code>/v1/tasks</code> and collect results by polling or callback; text models use OpenAI-compatible endpoints. Generated assets come back as HiAPI CDN links, with optional paid persistent storage for long-term access. Remote MCP and Agent Skills connect the same account to Claude Code, Cursor, and other coding agents. Pay as you go with no minimum spend. New users receive 200 Credits on signup. Get up to 12% extra Credits on your first top-up.
+      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-en" target="_blank">Visit HiAPI</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
         <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
       </a>

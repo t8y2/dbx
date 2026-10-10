@@ -109,6 +109,7 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
         selected_columns: None,
         export_column_extras: None,
         column_comments: None,
+        header_comment_rows: false,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,

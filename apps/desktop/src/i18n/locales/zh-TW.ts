@@ -2815,6 +2815,8 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "表頭使用欄位名稱",
     xlsxHeaderComment: "表頭使用註解",
     xlsxHeaderNameAndComment: "表頭使用欄位名稱 + 註解",
+    xlsxHeaderNameAndCommentRows: "欄位名稱與註解分兩列表頭",
+    xlsxHeaderNameAndCommentRowsHint: "第 1 列為欄位名稱，第 2 列為註解，資料從第 3 列開始；重新匯入前刪除註解列即可對齊欄位名稱。",
     xlsxFilterPrompt: "請選擇匯出的 Excel 是否包含篩選：",
     xlsxIncludeAutoFilter: "包含篩選",
     cut: "已剪下",

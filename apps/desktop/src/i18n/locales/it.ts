@@ -2805,6 +2805,8 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "Intestazione con nome campo",
     xlsxHeaderComment: "Intestazione con commento",
     xlsxHeaderNameAndComment: "Intestazione con nome campo e commento",
+    xlsxHeaderNameAndCommentRows: "Usa nomi dei campi e commenti come due righe di intestazione",
+    xlsxHeaderNameAndCommentRowsHint: "La riga 1 contiene i nomi dei campi, la riga 2 i commenti e i dati iniziano dalla riga 3; elimina la riga dei commenti prima di reimportare per allinearti ai nomi.",
     xlsxFilterPrompt: "Scegli se il file Excel esportato include filtri:",
     xlsxIncludeAutoFilter: "Includi filtri",
     jumpToPage: "Vai alla pagina",

@@ -2356,6 +2356,8 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "表头使用字段名称",
     xlsxHeaderComment: "表头使用注释",
     xlsxHeaderNameAndComment: "表头使用字段名称 + 注释",
+    xlsxHeaderNameAndCommentRows: "字段名称与注释分两行表头",
+    xlsxHeaderNameAndCommentRowsHint: "第 1 行为字段名称，第 2 行为注释，数据从第 3 行开始；重新导入前删除注释行即可对齐字段名称。",
     xlsxFilterPrompt: "请选择是否在导出的 Excel 中包含筛选：",
     xlsxIncludeAutoFilter: "包含筛选",
     copied: "已复制",

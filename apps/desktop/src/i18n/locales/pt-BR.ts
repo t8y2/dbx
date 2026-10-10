@@ -2805,6 +2805,8 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "Cabeçalho usa nome do campo",
     xlsxHeaderComment: "Cabeçalho usa comentário",
     xlsxHeaderNameAndComment: "Cabeçalho usa nome do campo e comentário",
+    xlsxHeaderNameAndCommentRows: "Usar nomes e comentários como duas linhas de cabeçalho",
+    xlsxHeaderNameAndCommentRowsHint: "A linha 1 mantém os nomes dos campos, a linha 2 os comentários e os dados começam na linha 3; exclua a linha de comentários antes de reimportar para alinhar com os nomes.",
     xlsxFilterPrompt: "Selecione se o Excel exportado inclui filtros:",
     xlsxIncludeAutoFilter: "Incluir filtros",
     jumpToPage: "Ir para a página",

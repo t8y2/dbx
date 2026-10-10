@@ -2369,6 +2369,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapApply: "Uygula",
     layerPreviewCustomBasemapInvalid: "Bir ad ve {z}, {x} ile {y} içeren geçerli bir HTTP(S) XYZ karo URL'si girin.",
     insertRowsNotSupported: "Geçerli kaydetme hedefi satır eklemeyi desteklemiyor.",
+    rowIdDeleteConflict: "Silme işlemi seçilen {expected} satırdan {actual} satırı etkiledi. Bazı hedefler başka bir oturum tarafından zaten silinmiş veya artık eşleşmiyor olabilir. Bekleyen silmeler temizlendi ve sonuç yenilendi; güncel verileri kontrol edin.",
     zoomIn: "Yakınlaştır",
     zoomOut: "Uzaklaştır",
     fitImage: "Görünüme Sığdır",

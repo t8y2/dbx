@@ -2647,6 +2647,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapApply: "Aplicar",
     layerPreviewCustomBasemapInvalid: "Introduzca un nombre y una URL XYZ HTTP(S) válida con los marcadores {z}, {x} y {y}.",
     insertRowsNotSupported: "El destino de guardado actual no admite añadir filas.",
+    rowIdDeleteConflict: "La eliminación afectó a {actual} de {expected} filas seleccionadas. Es posible que algunos objetivos ya hayan sido eliminados por otra sesión o que ya no coincidan. Se borraron las eliminaciones pendientes y se actualizó el resultado; compruebe los datos actuales.",
     zoomIn: "Acercar",
     zoomOut: "Alejar",
     fitImage: "Ajustar a la vista",

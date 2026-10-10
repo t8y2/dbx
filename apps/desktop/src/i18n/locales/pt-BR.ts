@@ -2542,6 +2542,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapApply: "Aplicar",
     layerPreviewCustomBasemapInvalid: "Informe um nome e uma URL XYZ HTTP(S) válida contendo os marcadores {z}, {x} e {y}.",
     insertRowsNotSupported: "O destino de salvamento atual não suporta a adição de linhas.",
+    rowIdDeleteConflict: "A exclusão afetou {actual} de {expected} linhas selecionadas. Alguns destinos podem já ter sido excluídos por outra sessão ou não corresponder mais. As exclusões pendentes foram limpas e o resultado foi atualizado; verifique os dados atuais.",
     zoomIn: "Aproximar",
     zoomOut: "Afastar",
     fitImage: "Ajustar à Visualização",

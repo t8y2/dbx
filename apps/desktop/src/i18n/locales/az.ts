@@ -2376,6 +2376,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapApply: "Tətbiq et",
     layerPreviewCustomBasemapInvalid: "Ad və {z}, {x}, {y} ehtiva edən etibarlı HTTP(S) XYZ xəritə fraqmenti URL-i daxil edin.",
     insertRowsNotSupported: "Cari saxlama hədəfi sətir əlavə etməyi dəstəkləmir.",
+    rowIdDeleteConflict: "Silinmə {expected} seçilmiş sətirdən {actual} sətirə təsir etdi. Bəzi hədəflər artıq başqa sessiya tərəfindən silinmiş və ya artıq uyğun gəlmir. Gözləyən silinmələr təmizləndi və nəticə yeniləndi; cari məlumatları yoxlayın.",
     zoomIn: "Yaxınlaşdır",
     zoomOut: "Uzaqlaşdır",
     fitImage: "Görünüşə sığdır",

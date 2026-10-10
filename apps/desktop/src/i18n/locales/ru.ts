@@ -2717,6 +2717,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapApply: "Применить",
     layerPreviewCustomBasemapInvalid: "Введите название и допустимый HTTP(S) URL XYZ-тайлов, содержащий {z}, {x} и {y}.",
     insertRowsNotSupported: "Текущая цель сохранения не поддерживает добавление строк.",
+    rowIdDeleteConflict: "Удаление затронуло {actual} из {expected} выбранных строк. Некоторые цели могли быть уже удалены другим сеансом или больше не соответствуют условиям. Отложенные удаления очищены, результат обновлён; проверьте текущие данные.",
     zoomIn: "Увеличить",
     zoomOut: "Уменьшить",
     fitImage: "По размеру окна",

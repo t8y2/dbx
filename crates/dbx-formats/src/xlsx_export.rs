@@ -369,6 +369,19 @@ pub fn start_streaming_xlsx_workbook_with_trailing_sheets<W: Write + Seek>(
     )
 }
 
+/// Sheet-level rendering options shared by the streaming writer and the
+/// in-memory worksheet writer.
+#[derive(Debug, Clone, Default)]
+struct XlsxSheetRenderOptions {
+    date_time_format: Option<String>,
+    numeric_right_align: bool,
+    auto_filter: bool,
+    max_data_rows_per_sheet: usize,
+    /// Render comments as a second header row (names row 1, comments row 2,
+    /// data from row 3) instead of overriding the header text.
+    header_comment_rows: bool,
+}
+
 /// Start a new streaming XLSX workbook with full options. Metadata files
 /// ([Content_Types].xml, workbook.xml, styles.xml, etc.) are deferred to
 /// [`StreamingXlsxWriter::finish`] so that the final sheet count is known
@@ -380,12 +393,15 @@ fn start_xlsx_writer_inner<W: Write + Seek>(
     column_types: &[String],
     column_comments: &[Option<String>],
     trailing_sheets: &[XlsxWorksheetData],
-    date_time_format: Option<&str>,
-    numeric_right_align: bool,
-    auto_filter: bool,
-    max_data_rows_per_sheet: usize,
-    header_comment_rows: bool,
+    render_options: XlsxSheetRenderOptions,
 ) -> Result<StreamingXlsxWriter<W>, String> {
+    let XlsxSheetRenderOptions {
+        date_time_format,
+        numeric_right_align,
+        auto_filter,
+        max_data_rows_per_sheet,
+        header_comment_rows,
+    } = render_options;
     // The comment row only renders when at least one comment is non-empty; an
     // all-empty second row would shift the data down for nothing.
     let header_comment_rows = header_comment_rows && header_row_count(column_comments, true) > 1;
@@ -399,6 +415,7 @@ fn start_xlsx_writer_inner<W: Write + Seek>(
     zip.start_file("xl/worksheets/sheet1.xml", options).map_err(|err| err.to_string())?;
 
     let header_rows = header_row_count(column_comments, header_comment_rows);
+    let top_left_cell = format!("A{}", header_rows + 1);
     let sheet_header = format!(
         concat!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
@@ -411,7 +428,7 @@ fn start_xlsx_writer_inner<W: Write + Seek>(
             "<sheetData>"
         ),
         y_split = header_rows,
-        top_left = format!("A{}", header_rows + 1),
+        top_left = top_left_cell,
         cols = cols_xml(&width_cache),
     );
     zip.write_all(sheet_header.as_bytes()).map_err(|err| err.to_string())?;
@@ -431,7 +448,7 @@ fn start_xlsx_writer_inner<W: Write + Seek>(
         width_cache,
         column_comments: column_comments.to_vec(),
         header_comment_rows,
-        date_time_format: date_time_format.map(str::to_string),
+        date_time_format,
         numeric_right_align,
         auto_filter,
         row_buffer: String::with_capacity(columns.len().saturating_mul(48)),
@@ -457,11 +474,13 @@ pub fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
         column_types,
         column_comments,
         trailing_sheets,
-        date_time_format,
-        numeric_right_align,
-        auto_filter,
-        XLSX_MAX_DATA_ROWS,
-        header_comment_rows,
+        XlsxSheetRenderOptions {
+            date_time_format: date_time_format.map(str::to_string),
+            numeric_right_align,
+            auto_filter,
+            max_data_rows_per_sheet: XLSX_MAX_DATA_ROWS,
+            header_comment_rows,
+        },
     )
 }
 
@@ -481,11 +500,7 @@ pub fn start_streaming_xlsx_workbook_with_max_rows<W: Write + Seek>(
         column_types,
         &[],
         trailing_sheets,
-        None,
-        false,
-        true,
-        max_data_rows_per_sheet,
-        false,
+        XlsxSheetRenderOptions { max_data_rows_per_sheet, auto_filter: true, ..XlsxSheetRenderOptions::default() },
     )
 }
 
@@ -534,6 +549,7 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
             .map_err(|err| err.to_string())?;
 
         let header_rows = header_row_count(&self.column_comments, self.header_comment_rows);
+        let top_left_cell = format!("A{}", header_rows + 1);
         let sheet_header = format!(
             concat!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
@@ -546,7 +562,7 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
                 "<sheetData>"
             ),
             y_split = header_rows,
-            top_left = format!("A{}", header_rows + 1),
+            top_left = top_left_cell,
             cols = cols_xml(&self.width_cache),
         );
         self.zip.write_all(sheet_header.as_bytes()).map_err(|err| err.to_string())?;
@@ -992,6 +1008,7 @@ fn write_worksheet_xml<W: Write>(
     let widths =
         estimate_column_widths(segment.columns, segment.column_comments, segment.rows, segment.header_comment_rows);
 
+    let top_left_cell = format!("A{}", header_rows + 1);
     writer
         .write_all(
             format!(
@@ -1006,7 +1023,7 @@ fn write_worksheet_xml<W: Write>(
         ),
         range = range,
         y_split = header_rows,
-        top_left = format!("A{}", header_rows + 1),
+        top_left = top_left_cell,
         cols = cols_xml(&widths),
     )
             .as_bytes(),
@@ -2679,7 +2696,6 @@ mod tests {
 
     #[test]
     fn header_row_count_skips_the_comment_row_when_every_comment_is_empty() {
-        let columns = vec!["id".to_string()];
         let empty = vec![Some(String::new()), None];
         assert_eq!(super::header_row_count(&empty, true), 1);
         assert_eq!(super::header_row_count(&[], true), 1);

@@ -47,10 +47,14 @@ async fn serve() -> Result<(), String> {
         return Err("DBX_CODEX_DATA_DIR must be an absolute path".into());
     }
     let handle = ensure_runtime(&data_dir, &web_binary).await?;
-    let service = Gateway::new(handle, read_token(&data_dir)?)
+    let gateway = std::sync::Arc::new(Gateway::new(handle, read_token(&data_dir)?));
+    let service = gateway
+        .clone()
         .serve(rmcp::transport::stdio())
         .await
         .map_err(|_| "MCP stdio initialization failed".to_string())?;
-    service.waiting().await.map_err(|_| "MCP stdio service failed".to_string())?;
+    let result = service.waiting().await.map_err(|_| "MCP stdio service failed".to_string());
+    gateway.shutdown().await?;
+    result?;
     Ok(())
 }

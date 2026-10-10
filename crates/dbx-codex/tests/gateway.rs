@@ -6,13 +6,9 @@ use rmcp::{model::*, service::RunningService, RoleClient, ServiceExt};
 async fn client(handle: RuntimeHandle) -> (RunningService<RoleClient, ()>, tokio::task::JoinHandle<()>) {
     let (server_io, client_io) = tokio::io::duplex(65536);
     let server = tokio::spawn(async move {
-        Gateway::new(handle, "private-fixture-credential-do-not-leak".into())
-            .serve(server_io)
-            .await
-            .unwrap()
-            .waiting()
-            .await
-            .unwrap();
+        let gateway = Arc::new(Gateway::new(handle, "private-fixture-credential-do-not-leak".into()));
+        gateway.clone().serve(server_io).await.unwrap().waiting().await.unwrap();
+        gateway.shutdown().await.unwrap();
     });
     (().serve(client_io).await.unwrap(), server)
 }
@@ -45,6 +41,9 @@ use std::sync::{
 
 #[derive(Clone, Default)]
 struct Fixture {
+    deletes: Arc<AtomicUsize>,
+    expire: Arc<std::sync::atomic::AtomicBool>,
+    expired_posts: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     cancelled: Arc<AtomicUsize>,
 }
@@ -96,6 +95,30 @@ impl ServerHandler for Fixture {
         self.cancelled.fetch_add(1, Ordering::SeqCst);
         Ok(CallToolResult::structured_error(serde_json::json!({"cancelled":true})).into())
     }
+    async fn list_resource_templates(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        _: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        let second = request.and_then(|r| r.cursor).as_deref() == Some("templates-page-2");
+        let mut result = ListResourceTemplatesResult::with_all_items(vec![ResourceTemplate::new(
+            if second { "dbx://two/{id}" } else { "dbx://one/{id}" },
+            "Fixture",
+        )]);
+        result.next_cursor = if second { None } else { Some("templates-page-2".into()) };
+        Ok(result)
+    }
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        context.peer.notify_resource_list_changed().await.unwrap();
+        if let Some(token) = context.meta.get_progress_token() {
+            context.peer.notify_progress(ProgressNotificationParam::new(token, 1.0)).await.unwrap();
+        }
+        Ok(ReadResourceResult::new(vec![ResourceContents::text("original resource 中文", request.uri)]).into())
+    }
 }
 
 async fn backend() -> (RuntimeHandle, Fixture, tokio::task::JoinHandle<()>) {
@@ -112,7 +135,29 @@ async fn backend() -> (RuntimeHandle, Fixture, tokio::task::JoinHandle<()>) {
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default().with_allowed_hosts(vec![address.to_string()]),
     );
-    let app = axum::Router::new().nest_service("/mcp", service);
+    let deletes = fixture.deletes.clone();
+    let expire = fixture.expire.clone();
+    let expired_posts = fixture.expired_posts.clone();
+    let app = axum::Router::new().nest_service("/mcp", service).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let deletes = deletes.clone();
+            let expire = expire.clone();
+            let expired_posts = expired_posts.clone();
+            async move {
+                if request.method() == axum::http::Method::DELETE {
+                    deletes.fetch_add(1, Ordering::SeqCst);
+                }
+                if request.method() == axum::http::Method::POST
+                    && request.headers().contains_key("mcp-session-id")
+                    && expire.load(Ordering::SeqCst)
+                {
+                    expired_posts.fetch_add(1, Ordering::SeqCst);
+                    return axum::response::IntoResponse::into_response(axum::http::StatusCode::NOT_FOUND);
+                }
+                next.run(request).await
+            }
+        },
+    ));
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let handle = RuntimeHandle {
         base_url: format!("http://{address}/").parse().unwrap(),
@@ -120,6 +165,21 @@ async fn backend() -> (RuntimeHandle, Fixture, tokio::task::JoinHandle<()>) {
         instance_id: uuid::Uuid::new_v4().to_string(),
     };
     (handle, fixture, task)
+}
+
+#[tokio::test]
+async fn stdio_disconnect_closes_only_its_upstream_session() {
+    let (handle, fixture, backend) = backend().await;
+    let (downstream, server) = client(handle.clone()).await;
+    downstream.list_resources(None).await.unwrap();
+    downstream.cancel().await.unwrap();
+    server.await.unwrap();
+    assert_eq!(fixture.deletes.load(Ordering::SeqCst), 1, "disconnect must await HTTP session cleanup");
+    let (next, server) = client(handle).await;
+    next.list_resources(None).await.unwrap();
+    next.cancel().await.unwrap();
+    server.await.unwrap();
+    backend.abort();
 }
 
 #[tokio::test]
@@ -141,6 +201,79 @@ async fn tool_and_resource_pagination_is_preserved() {
     let second = client.list_resources(Some(page)).await.unwrap();
     assert_eq!(second.resources[0].uri, "dbx://two");
     assert!(second.next_cursor.is_none());
+    let first = client.list_resource_templates(None).await.unwrap();
+    assert_eq!(first.resource_templates[0].uri_template, "dbx://one/{id}");
+    let mut page = PaginatedRequestParams::default();
+    page.cursor = first.next_cursor;
+    let second = client.list_resource_templates(Some(page)).await.unwrap();
+    assert_eq!(second.resource_templates[0].uri_template, "dbx://two/{id}");
+    assert!(second.next_cursor.is_none());
+    client.cancel().await.unwrap();
+    server.await.unwrap();
+    backend.abort();
+}
+
+#[tokio::test]
+async fn expired_http_session_never_retries_a_write() {
+    let (handle, fixture, backend) = backend().await;
+    let (client, server) = client(handle).await;
+    client.list_tools(None).await.unwrap();
+    fixture.expire.store(true, Ordering::SeqCst);
+    assert!(client.call_tool(CallToolRequestParams::new("fixture_write")).await.is_err());
+    assert_eq!(fixture.expired_posts.load(Ordering::SeqCst), 1);
+    fixture.expire.store(false, Ordering::SeqCst);
+    client.cancel().await.unwrap();
+    server.await.unwrap();
+    backend.abort();
+}
+
+#[derive(Clone, Default)]
+struct NotificationClient {
+    progress: Arc<std::sync::Mutex<Vec<ProgressToken>>>,
+    resource_changes: Arc<AtomicUsize>,
+}
+impl rmcp::ClientHandler for NotificationClient {
+    async fn on_progress(&self, params: ProgressNotificationParam, _: rmcp::service::NotificationContext<RoleClient>) {
+        self.progress.lock().unwrap().push(params.progress_token);
+    }
+    async fn on_resource_list_changed(&self, _: rmcp::service::NotificationContext<RoleClient>) {
+        self.resource_changes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn resource_content_and_notifications_reach_the_stdio_client() {
+    let (handle, _, backend) = backend().await;
+    let (server_io, client_io) = tokio::io::duplex(65536);
+    let gateway = Arc::new(Gateway::new(handle, "private-fixture-credential-do-not-leak".into()));
+    let server = tokio::spawn(async move {
+        gateway.clone().serve(server_io).await.unwrap().waiting().await.unwrap();
+        gateway.shutdown().await.unwrap();
+    });
+    let notifications = NotificationClient::default();
+    let client = notifications.clone().serve(client_io).await.unwrap();
+    client.list_resources(None).await.unwrap();
+    let pending = client
+        .send_request_with_option(
+            ReadResourceRequest::new(ReadResourceRequestParams::new("dbx://one")).into(),
+            rmcp::service::PeerRequestOptions::no_options(),
+        )
+        .await
+        .unwrap();
+    let expected_token = pending.progress_token.clone();
+    let result = pending.await_response().await.unwrap();
+    let ServerResult::ReadResourceResult(result) = result else { panic!("Unexpected response") };
+    assert_eq!(result.contents, vec![ResourceContents::text("original resource 中文", "dbx://one")]);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while notifications.progress.lock().unwrap().is_empty()
+            || notifications.resource_changes.load(Ordering::SeqCst) == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(*notifications.progress.lock().unwrap(), vec![expected_token]);
     client.cancel().await.unwrap();
     server.await.unwrap();
     backend.abort();

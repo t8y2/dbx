@@ -26,6 +26,17 @@ impl Gateway {
         Self { handle, token, upstream: tokio::sync::Mutex::new(None), progress: Default::default() }
     }
 
+    pub async fn shutdown(&self) -> Result<(), String> {
+        if let Some(mut service) = self.upstream.lock().await.take() {
+            match service.close_with_timeout(Duration::from_secs(3)).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return Err("Upstream MCP session cleanup timed out".into()),
+                Err(_) => return Err("Upstream MCP session cleanup failed".into()),
+            }
+        }
+        Ok(())
+    }
+
     async fn connect(&self, downstream: Peer<RoleServer>) -> Result<Peer<RoleClient>, ErrorData> {
         let mut upstream = self.upstream.lock().await;
         if let Some(service) = upstream.as_ref().filter(|service| !service.is_transport_closed()) {

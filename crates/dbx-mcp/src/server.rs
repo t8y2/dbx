@@ -2886,7 +2886,7 @@ impl DbxMcpServer {
         };
         let sql = request.sql.clone();
         let mut result = self
-            .execute_batch_request(ExecuteBatchQueryRequest {
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: request.selector,
                 database: request.database,
                 sql: request.sql,
@@ -2894,7 +2894,7 @@ impl DbxMcpServer {
                 session_id: None,
                 continue_on_error: None,
                 use_transaction: None,
-            })
+            }))
             .await;
         if let Some(structured) = &mut result.structured_content {
             if let Some(results) = structured.get("results") {
@@ -8753,6 +8753,30 @@ mod tests {
             !result_text(&with_session).contains("TRANSACTION_WITH_SESSION_UNSUPPORTED"),
             "single-statement use_transaction + session_id must not be rejected as a transaction/session conflict"
         );
+    }
+
+    #[tokio::test]
+    async fn codex_display_requires_batch_tool_permission() {
+        let backend = Arc::new(FakeBackend {
+            workbench: true,
+            connections: vec![connection("pg", "pg", "postgres", "app")],
+            policy: McpGlobalPolicy {
+                allowed_tool_names: Some(vec!["dbx_codex_execute_and_show".into()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), true);
+        let result = server
+            .codex_execute_and_show(Parameters(ExecuteAndShowRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT 1".into(),
+            }))
+            .await;
+        assert!(result_text(&result).contains("TOOL_OUT_OF_SCOPE"));
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+        assert!(backend.intents.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

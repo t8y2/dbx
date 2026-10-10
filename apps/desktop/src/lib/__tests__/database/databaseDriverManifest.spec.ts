@@ -13,7 +13,7 @@ describe("databaseDriverManifest", () => {
       tableDataEdit: true,
       tableStructureEdit: true,
       tableImport: true,
-      dataTransfer: false,
+      dataTransfer: true,
       sqlFileExecution: true,
       databaseCreate: false,
       fieldLineage: false,

@@ -43,6 +43,17 @@ describe("schema awareness", () => {
     expect(usesTreeSchemaMode("spanner")).toBe(true);
   });
 
+  it("keeps SunDB on a schema tree so the database name is never used as the schema", () => {
+    // SUNDB reports a real schema level (its driver implements SET SCHEMA and
+    // DatabaseMetaData.getSchemas()), while the database in the JDBC URL is a
+    // catalog. Without both traits the sidebar expanded the database node with
+    // loadTables(database, undefined) and the agent sent the catalog name as the
+    // getTables schemaPattern; the driver matched `TABLE_SCHEMA LIKE '<catalog>'`
+    // and the tree showed "表 0" (issue #11360).
+    expect(isSchemaAware("sundb")).toBe(true);
+    expect(usesTreeSchemaMode("sundb")).toBe(true);
+  });
+
   it("treats Cloud Spanner's blank schema as a loadable node name", () => {
     // The GoogleSQL default schema node carries "", so a truthiness check would render an
     // expandable node that never loads its tables. Other types keep the truthiness test, which is

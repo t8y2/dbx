@@ -32,3 +32,17 @@ description: DBX 常见问题：连接数据保存在哪里、如何备份、如
   </Accordion>
   <p>升级已有安装前，请先阅读[数据安全升级与迁移说明](/cn/docs/data-security-migration)。</p>
 </Accordions>
+
+## PostgreSQL / openGauss 中文乱码
+
+如果数据库声明为 `LATIN1`，但历史文本实际保存的是 GB18030 字节，可以在 **编辑连接 → 连接 → URL 参数** 中填写：
+
+```text
+clientEncoding=GB18030&serverEncoding=ISO-8859-1
+```
+
+保存后重新连接。DBX 原生驱动使用这组参数转换查询结果、中文 SQL 和绑定参数；支持表格读取与编辑、文本数组、JSON、元数据和按行导出。不会修改数据库编码或已有数据。`clientEncoding` 也支持 `GBK` 和 `UTF-8`，`serverEncoding` 可写为 `LATIN1`；两个参数必须同时提供。
+
+这组参数只适用于数据库声明编码与实际文本字节不一致的连接。服务端必须报告 `server_encoding=LATIN1`，且 `standard_conforming_strings=on`。不能转换的文本会明确报错，避免替换字符或静默丢失。未填写参数的连接使用正常的 PostgreSQL 编码转换。
+
+COPY 文本导入支持 DBX 的默认文本格式；跨连接数据传输会使用按行 INSERT 路径。原始 COPY 输出和其他 COPY 格式请使用按行导入/导出。

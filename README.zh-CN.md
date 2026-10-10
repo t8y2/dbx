@@ -71,6 +71,17 @@
 <table>
   <tr>
     <td align="center" valign="middle" width="200">
+      <a href="https://www.jumpserver.org/" target="_blank">
+        <img src="docs/public/sponsors/jumpserver-card.png" alt="JumpServer" width="175" />
+      </a>
+    </td>
+    <td>
+      JumpServer 是具备 AI 能力的开源特权访问管理（PAM）平台，为 DevOps 和 IT 团队提供统一的工作空间，安全访问 SSH、RDP、Kubernetes、数据库、网站、RemoteApp、VirtualApp 等资源。
+      <a href="https://www.jumpserver.org/" target="_blank">访问 JumpServer</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
       <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
         <img src="docs/public/sponsors/rainyun-card.png" alt="雨云" width="175" />
       </a>
@@ -78,17 +89,6 @@
     <td>
       雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。
       <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">访问雨云</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
-      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">
-        <img src="docs/public/sponsors/trustasia-card.png" alt="TrustAsia" width="175" />
-      </a>
-    </td>
-    <td>
-      由 TrustAsia 提供代码签名云签服务，实现 CICD 自动化构建可信软件。
-      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">访问 TrustAsia</a>
     </td>
   </tr>
   <tr>
@@ -133,6 +133,17 @@
     <td>
       UCloud 优刻得是国内首家公有云科创板上市公司，覆盖国内、亚洲、欧洲、北美等 28 个地域的云主机、数据库、CDN 等服务，注册享新客优惠 0.9 折起；星图 AstraFlow 大模型平台支持主流 200+ 大模型一键调用。
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">访问 UCloud 优刻得</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">
+        <img src="docs/public/sponsors/trustasia-card.png" alt="TrustAsia" width="175" />
+      </a>
+    </td>
+    <td>
+      由 TrustAsia 提供代码签名云签服务，实现 CICD 自动化构建可信软件。
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">访问 TrustAsia</a>
     </td>
   </tr>
   <tr>

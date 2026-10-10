@@ -798,6 +798,8 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-materialized-views",
   "group-procedures",
   "group-functions",
+  "group-internal-functions",
+  "group-udf-functions",
   "group-sequences",
   "group-synonyms",
   "group-jobs",
@@ -3393,6 +3395,7 @@ async function executeTreeNodeSqlWithProductionGuard(
     isCancelledBeforeDispatch?: () => boolean;
     beforeExecute?: () => Promise<void>;
     markDispatched?: () => void;
+    timeoutSecs?: number;
   } = {},
 ) {
   if (!node.connectionId) return undefined;
@@ -3418,7 +3421,7 @@ async function executeTreeNodeSqlWithProductionGuard(
       await options.beforeExecute?.();
       if (options.isCancelledBeforeDispatch?.()) throw new Error("Operation cancelled before it was sent to the database.");
       options.markDispatched?.();
-      return options.executeAsScript ? api.executeScript(node.connectionId!, database, sql, options.schema ?? node.schema) : api.executeQuery(node.connectionId!, database, sql, options.schema ?? node.schema, executionId, { timeoutSecs });
+      return options.executeAsScript ? api.executeScript(node.connectionId!, database, sql, options.schema ?? node.schema) : api.executeQuery(node.connectionId!, database, sql, options.schema ?? node.schema, executionId, { timeoutSecs: options.timeoutSecs ?? timeoutSecs });
     },
   });
 }
@@ -4845,7 +4848,7 @@ async function confirmPasteTable() {
           identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId),
           ...dataCopyColumnOptions,
         });
-        const dataExecuted = await executeTreeNodeSqlWithProductionGuard(entry, dataSql, { database: entry.database, schema: entry.schema });
+        const dataExecuted = await executeTreeNodeSqlWithProductionGuard(entry, dataSql, { database: entry.database, schema: entry.schema, timeoutSecs: 0 });
         if (!dataExecuted) {
           pasteCancelled = true;
           break;

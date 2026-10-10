@@ -2148,7 +2148,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.36"
+version = "0.6.38"
 dependencies = [
  "anyhow",
  "axum",
@@ -2164,6 +2164,7 @@ dependencies = [
  "font-kit",
  "futures",
  "grep",
+ "gtk",
  "ignore",
  "libloading 0.8.9",
  "log",
@@ -2232,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.109"
+version = "0.4.112"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2412,6 +2413,7 @@ dependencies = [
  "dbx-sql-core",
  "dbx-types",
  "deadpool-postgres",
+ "encoding_rs",
  "futures",
  "log",
  "openssl",
@@ -2568,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.109"
+version = "0.4.112"
 dependencies = [
  "async-trait",
  "axum",
@@ -2752,7 +2754,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.36"
+version = "0.6.38"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

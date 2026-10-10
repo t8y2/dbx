@@ -6,6 +6,8 @@ import { canReloadUnavailableDataTab, restoredDataTabReloadFilters } from "@/lib
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { extractNeo4jNodeCells, projectNeo4jNodeResult } from "@/lib/neo4j/neo4jNodeResult";
 import { useNeo4jNodeTableResult } from "@/composables/useNeo4jNodeTableResult";
+import { extractGraphCells, graphPropertyFromUpdateResult, type GraphEdge, type GraphNode, type GraphProperty, type GraphResult } from "@/lib/graph/graphResult";
+import { graphAdapterForDatabase } from "@/lib/graph/graphAdapters";
 import { queryResultMessages } from "@/lib/query/queryResultMessages";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
@@ -102,6 +104,7 @@ function preloadDataGridComponent() {
 
 const QueryEditor = defineAsyncComponent({ loader: () => import("@/components/editor/QueryEditor.vue"), loadingComponent: QueryLoadingState, delay: 0 });
 const DataGrid = defineAsyncComponent(loadDataGridComponent);
+const QueryResultTransferDialog = defineAsyncComponent(() => import("@/components/transfer/QueryResultTransferDialog.vue"));
 const RedisKeyBrowser = defineAsyncComponent(() => import("@/components/redis/RedisKeyBrowser.vue"));
 const RedisQueryConsoleOutput = defineAsyncComponent(() => import("@/components/redis/RedisQueryConsoleOutput.vue"));
 const RedisDashboard = defineAsyncComponent(() => import("@/components/redis/RedisDashboard.vue"));
@@ -145,8 +148,10 @@ const SolrAdmin = defineAsyncComponent(() => import("@/components/solr/SolrAdmin
 const PluginFilesystemTab = defineAsyncComponent(() => import("@/components/plugins/PluginFilesystemTab.vue"));
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
+const GraphResultView = defineAsyncComponent(() => import("@/components/graph/GraphResultView.vue"));
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps } from "@/components/layout/querySurfaces";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridRowNumberMode, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -195,6 +200,8 @@ import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
+import { analyzeEditableQuery } from "@/lib/sql/sqlAnalysis";
+import { loadQueryResultTransferSourceDdl } from "@/components/transfer/queryResultTransferSource";
 import { formatDdlForDisplay } from "@/lib/sql/ddlDisplay";
 import { sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
@@ -270,6 +277,7 @@ const emit = defineEmits<ContentAreaSurfaceEmits>();
 const { t } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
+const productionSafetyStore = useProductionSafetyStore();
 /** Clear a consumed editor reveal request so a later normal tab re-visit doesn't re-jump. */
 function clearEditorRevealRequest(tab: { editorRevealRequest?: unknown }): void {
   if (tab.editorRevealRequest !== undefined) {
@@ -390,6 +398,7 @@ const activeResultErrorPosition = computed(() => {
 });
 const activeResultDatabase = computed(() => activeResultExecutionTarget.value?.database ?? props.activeTab.database);
 const activeResultSchema = computed(() => activeResultExecutionTarget.value?.schema ?? props.activeTab.schema);
+const graphViewKey = computed(() => JSON.stringify([props.activeTab.id, props.activeTab.resultViewGeneration, props.activeTab.activeResultRunId, props.activeTab.activeResultIndex, activeResultConnectionId.value, activeResultDatabase.value]));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
 // 表数据工具箱的「导入数据」与侧边栏、对象浏览器共用同一条能力判断：未适配导入的引擎（如 HANA）不出现入口。
 const canOpenTableImport = computed(() => supportsTableImport(activeEffectiveDatabaseType.value));
@@ -632,15 +641,44 @@ function sortQueryGrid(column: string, columnIndex: number, direction: "asc" | "
   else emit("sort", props.activeTab.id, column, columnIndex, direction, whereInput, mode, effectiveOrderBy);
 }
 
-async function fetchGridResultForExport(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) {
+async function fetchGridResultForExport(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, probeRowLimit = false, tabId = props.activeTab.id) {
   const isNeo4j = activeEffectiveDatabaseType.value === "neo4j";
-  const result = await queryStore.fetchTabResultForExport(props.activeTab.id, onProgress);
+  const result = await queryStore.fetchTabResultForExport(tabId, onProgress, probeRowLimit);
   if (!result || !isNeo4j) return result;
   extractNeo4jNodeCells(result);
+  extractGraphCells(result);
   return projectNeo4jNodeResult(result);
+}
+async function loadQueryResultSourceDdl(): Promise<string | undefined> {
+  if (props.activeTab.mode !== "query") return undefined;
+  return loadQueryResultTransferSourceDdl({
+    sql: activeResultExportSql.value,
+    databaseType: activeEffectiveDatabaseType.value,
+    connectionId: activeResultConnectionId.value,
+    database: activeResultDatabase.value,
+    schema: activeResultSchema.value,
+    catalog: props.activeTab.catalog,
+    clientSessionId: props.activeTab.resultClientSessionId ?? props.activeTab.id,
+    txnSessionId: props.activeTab.autoCommit === false ? props.activeTab.txnSessionId : undefined,
+  });
+}
+function openQueryResultTransfer() {
+  if (props.activeTab.result) {
+    queryResultTransferSourceTabId.value = props.activeTab.id;
+    queryResultTransferOpen.value = true;
+  }
+}
+function loadQueryResultForTransfer(): Promise<QueryResult | undefined> {
+  return queryResultTransferSourceTabId.value === props.activeTab.id ? fetchGridResultForExport(undefined, true, queryResultTransferSourceTabId.value) : Promise.resolve(undefined);
 }
 const activeResultSql = computed(() => resultSqlForGrid(props.activeTab));
 const activeResultExportSql = computed(() => queryResultExecutionSql(props.activeTab));
+const activeResultSourceAnalysis = computed(() => analyzeEditableQuery(activeResultExportSql.value));
+const activeResultSourceTable = computed(() => {
+  const analysis = activeResultSourceAnalysis.value;
+  return analysis?.selectStar && !analysis.sources?.length ? analysis.tableName : undefined;
+});
+const activeResultSourceSchema = computed(() => activeResultSourceAnalysis.value?.schema ?? activeResultSchema.value);
 const activeStatementExecutionMarkers = computed(() =>
   statementExecutionMarkers(
     props.activeTab.sql,
@@ -674,6 +712,18 @@ watch(
   },
 );
 const resultArchiveExporting = ref(false);
+const queryResultTransferOpen = ref(false);
+const queryResultTransferSourceTabId = ref<string>();
+watch(
+  () => props.activeTab.id,
+  () => {
+    // The dialog reads the active tab's result and DDL lazily. Close it when
+    // the active tab changes so a pending transfer can never target a
+    // different result than the one the user opened it from.
+    if (queryResultTransferOpen.value) queryResultTransferOpen.value = false;
+    queryResultTransferSourceTabId.value = undefined;
+  },
+);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
 const activeResultRunItem = computed(() => resultRuns.value.find((run) => run.active));
@@ -739,6 +789,8 @@ const redisConsoleResults = computed(() => (props.activeTab.results?.length ? pr
 const canShowRedisConsoleOutput = computed(() => activeEffectiveDatabaseType.value === "redis" && (props.activeTab.isExecuting || redisConsoleResults.value.some((result) => result.execution_error === true || typeof result.redis_console_output === "string")));
 const redisResultViewMode = computed<RedisResultViewMode>(() => (activeEffectiveDatabaseType.value === "redis" ? (props.activeTab.uiState?.redisResultViewMode ?? "grid") : "grid"));
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
+const activeGraphAdapter = computed(() => graphAdapterForDatabase(activeEffectiveDatabaseType.value));
+const canShowGraphOutput = computed(() => !!activeGraphAdapter.value && !!props.activeTab.result?.graph_data?.nodes.length);
 const canShowExplainOutput = computed(() => !!props.activeTab.explainPlan || !!props.activeTab.explainError || !!props.activeTab.explainTableResult || !!props.activeTab.explainTableError || props.activeTab.isExplaining === true);
 // A batch can attach server messages to more than one statement result (for
 // example a `DO $$ RAISE NOTICE $$` block followed by a SELECT). The messages
@@ -753,6 +805,52 @@ const resultMessageCount = computed(() => resultMessages.value.length);
 const canShowMessagesOutput = computed(() => resultMessageCount.value > 0);
 const showStandaloneResultToolbar = computed(() => activeElasticsearchJsonResponse.value || props.activeOutputView !== "result" || (redisResultViewMode.value === "console" && canShowRedisConsoleOutput.value) || !props.activeTab.result || !hasTabularResult.value);
 const standaloneResultToolbarCompact = computed(() => isDataGridToolbarCompact(standaloneResultToolbarWidth.value, standaloneResultToolbarViewportWidth.value));
+
+async function saveGraphProperty(entity: GraphNode | GraphEdge, property: GraphProperty, value: string | boolean): Promise<GraphProperty | undefined> {
+  const connection = activeResultConnection.value;
+  const adapter = activeGraphAdapter.value;
+  if (!adapter || connectionIsEffectivelyReadOnly(connection)) throw new Error(t("graph.unavailable"));
+  const tab = props.activeTab;
+  const result = tab.result;
+  const connectionId = activeResultConnectionId.value;
+  const database = activeResultDatabase.value;
+  if (!result?.graph_data || !connectionId || !database) throw new Error(t("graph.resultChanged"));
+  const generation = tab.resultViewGeneration;
+  const sourceKey = graphViewKey.value;
+  const isCurrent = () => props.activeTab === tab && graphViewKey.value === sourceKey && (generation !== undefined ? !!tab.result?.graph_data : tab.result === result);
+  const statement = adapter.buildPropertyUpdate(entity, property, value);
+  const production = productionContextForDatabase(connection, database);
+  if (production.active) {
+    const confirmed = await productionSafetyStore.requestConfirmation({ sql: statement, connectionName: connection?.name, database, productionDatabases: production.databases, source: t("graph.title") });
+    if (!confirmed) return undefined;
+  }
+  const currentConnection = connectionStore.getConfig(connectionId);
+  if (!isCurrent() || !currentConnection || connectionIsEffectivelyReadOnly(currentConnection)) throw new Error(t("graph.resultChanged"));
+  const response = await api.executeQuery(connectionId, database, statement, undefined, undefined, { maxRows: 1 });
+  if (!isCurrent()) return undefined;
+  if (response.execution_error) throw new Error(response.error?.detail ?? t("graph.updateFailed"));
+  if (response.rows.length === 0) throw new Error(t("graph.conflict"));
+  const updated = graphPropertyFromUpdateResult(response, property);
+  // A failed WHEN condition may still yield the stored value.
+  if (!adapter.matchesPropertyValue(updated, value)) throw new Error(t("graph.conflict"));
+  adapter.applyPropertyUpdate(tab.result!, entity, property, updated);
+  return updated;
+}
+
+async function expandGraphNode(node: GraphNode): Promise<GraphResult | undefined> {
+  const adapter = activeGraphAdapter.value;
+  const tab = props.activeTab;
+  const result = tab.result;
+  const connectionId = activeResultConnectionId.value;
+  const database = activeResultDatabase.value;
+  const generation = tab.resultViewGeneration;
+  const sourceKey = graphViewKey.value;
+  if (!adapter || !connectionId || !database) return undefined;
+  const response = await api.executeQuery(connectionId, database, adapter.buildExpand(node), undefined, undefined, { maxRows: 200 });
+  if (props.activeTab !== tab || graphViewKey.value !== sourceKey || (generation === undefined && tab.result !== result)) return undefined;
+  if (response.execution_error) throw new Error(response.error?.detail ?? t("graph.unavailable"));
+  return extractGraphCells(response).graph_data;
+}
 let standaloneResultToolbarResizeObserver: ResizeObserver | undefined;
 
 function updateStandaloneResultToolbarDimensions() {
@@ -1004,6 +1102,10 @@ watch(
     // view when its own tab finishes executing.
     if (props.editorOnly) return;
     if (props.activeTab.isExecuting) return;
+    if (props.activeOutputView === "graph" && !canShowGraphOutput.value) {
+      emit("update:activeOutputView", props.activeTab.id, "result");
+      return;
+    }
     if (hasExecutionSummary.value && (!hasTabularResult.value || props.activeTab.result?.server_message === true) && props.activeOutputView === "result") {
       const result = props.activeTab.result;
       emit("update:activeOutputView", props.activeTab.id, result ? defaultViewForResult(result) : "summary");
@@ -2007,7 +2109,7 @@ defineExpose({
                     </div>
                   </div>
                 </div>
-                <div v-else-if="showResultRunSelector" class="min-w-0 flex-1">
+                <div v-else-if="showResultRunSelector" class="min-w-0" :class="{ 'flex-1': visibleResultItems.length === 0 }">
                   <DropdownMenu>
                     <DropdownMenuTrigger as-child>
                       <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
@@ -2046,6 +2148,7 @@ defineExpose({
                   :can-export-xlsx="activeOutputView === 'result' && redisResultViewMode === 'grid' && !!activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse"
                   :active-index="activeTab.activeResultIndex ?? 0"
                   :active="activeOutputView === 'result'"
+                  :display-mode="resultRunDisplayMode"
                   @select="selectResultItem"
                   @copy-sql="copySelectedResultSql"
                   @copy-query-sql="copySelectedResultQueries"
@@ -2257,7 +2360,7 @@ defineExpose({
                         <span>{{ t("grid.transposeMultiRowToggle") }}</span>
                       </div>
                       <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                        <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                        <div class="grid min-w-40 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
                           <button
                             type="button"
                             class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
@@ -2364,6 +2467,7 @@ defineExpose({
                 :can-show-result="canShowResultOutput"
                 :can-show-summary="hasExecutionSummary"
                 :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
+                :can-show-graph="canShowGraphOutput"
                 :can-show-messages="canShowMessagesOutput"
                 :can-show-redis-console="canShowRedisConsoleOutput"
                 :result-mode="redisResultViewMode"
@@ -2409,6 +2513,16 @@ defineExpose({
             <ElasticsearchProfilePanel v-else-if="activeOutputView === 'profile' && canShowProfile" class="flex-1 min-h-0" :body="activeElasticsearchProfileBody ?? ''" />
 
             <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result && !activeElasticsearchJsonResponse" class="flex-1 min-h-0" :result="activeTab.result" />
+            <GraphResultView
+              v-else-if="activeOutputView === 'graph' && activeTab.result?.graph_data"
+              :key="graphViewKey"
+              :graph="activeTab.result.graph_data"
+              :rows="activeTab.result.rows"
+              :columns="activeTab.result.columns"
+              :read-only="connectionIsEffectivelyReadOnly(activeResultConnection)"
+              :save-property="saveGraphProperty"
+              :expand-node="expandGraphNode"
+            />
 
             <div v-else-if="activeOutputView === 'summary'" class="flex flex-1 min-h-0 min-w-0 overflow-auto bg-background">
               <div v-if="summaryItems.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
@@ -2587,6 +2701,7 @@ defineExpose({
                 :page-jump-progress="activeTab.resultPageJumpProgress"
                 :on-execute-sql="async (sql: string) => emit('executeSql', activeTab.id, sql)"
                 :full-export-result="fetchGridResultForExport"
+                :transfer-query-result="openQueryResultTransfer"
                 :query-result-export-request="
                   hasNeo4jNodes
                     ? undefined
@@ -2621,6 +2736,7 @@ defineExpose({
                     :can-show-result="canShowResultOutput"
                     :can-show-summary="hasExecutionSummary"
                     :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
+                    :can-show-graph="canShowGraphOutput"
                     :can-show-messages="canShowMessagesOutput"
                     :can-show-redis-console="canShowRedisConsoleOutput"
                     :result-mode="redisResultViewMode"
@@ -2945,7 +3061,7 @@ defineExpose({
                   <span>{{ t("grid.transposeMultiRowToggle") }}</span>
                 </div>
                 <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                  <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                  <div class="grid min-w-40 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
                     <button
                       type="button"
                       class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
@@ -3451,6 +3567,19 @@ defineExpose({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    <QueryResultTransferDialog
+      v-if="activeTab.result"
+      v-model:open="queryResultTransferOpen"
+      :source-connection-id="activeResultConnectionId"
+      :source-database="activeResultDatabase"
+      :source-schema="activeResultSourceSchema"
+      :source-table="activeResultSourceTable"
+      :source-sql="activeResultExportSql"
+      :source-database-type="activeEffectiveDatabaseType"
+      :result="activeTab.result"
+      :load-result="loadQueryResultForTransfer"
+      :load-source-ddl="loadQueryResultSourceDdl"
+    />
   </div>
 </template>
 

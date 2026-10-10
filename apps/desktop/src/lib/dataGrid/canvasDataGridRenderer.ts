@@ -101,6 +101,8 @@ export interface DrawCanvasDataGridOptions {
   colorizeDataTypes?: boolean;
   /** 行列十字高亮目标（原样传入，null 表示开关关闭或无焦点）。只画当前 viewport 内的行/列底色 */
   crosshair?: CrosshairTarget | null;
+  crosshairRowBg?: string;
+  crosshairColBg?: string;
   rightAlignedActionCell?: CanvasRightAlignedActionCell | null;
   booleanDisplayMode?: "checkbox" | "dropdown";
   flatteningMultiLineEnabled: boolean;
@@ -390,6 +392,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     columnTypeVisualKinds,
     colorizeDataTypes = false,
     crosshair,
+    crosshairRowBg: rawCrosshairRowBg,
+    crosshairColBg: rawCrosshairColBg,
     rightAlignedActionCell,
     columnIsBoolean,
     booleanDisplayMode = "dropdown",
@@ -428,6 +432,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
   ctx.clearRect(0, 0, width, height);
 
   const { normalFont, tabularFont, semiboldFont, italicFont, theme, searchFill, currentSearchFill, currentSearchBorder, duplicateHighlightFill, nullHighlightFill } = resolveCanvasRenderState(canvas, isDark, styleKey);
+  const crosshairRowBg = rawCrosshairRowBg?.trim() || theme.cellCrosshairRow;
+  const crosshairColBg = rawCrosshairColBg?.trim() || theme.cellCrosshairCol;
 
   const scrollTop = scroller.scrollTop;
   const scrollLeft = scroller.scrollLeft;
@@ -482,7 +488,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     // 十字行高亮：叠在基础行色之上，但低于整行选中（rowSelectionVisual），
     // 也低于后续 drawCell 的脏格/搜索/选中格填充
     if (crosshair?.rowCrosshair && item.displayIndex === crosshair.rowIndex && !rowSelectionVisual && !item.isDeleted) {
-      ctx.fillStyle = theme.cellCrosshairRow;
+      ctx.fillStyle = crosshairRowBg;
       ctx.fillRect(rowNumberWidth, y, width - rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
     }
 
@@ -568,7 +574,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
 
       // 十字列高亮：整列覆盖，叠在行底色之上；脏格/搜索/选中格填充在其后绘制，优先级更高
       if (crosshair?.columnCrosshair && visibleColIdx === crosshair.visibleColIdx && !selectedFillVisual && !item.isDeleted) {
-        ctx.fillStyle = theme.cellCrosshairCol;
+        ctx.fillStyle = crosshairColBg;
         ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
 

@@ -269,7 +269,7 @@ export function useQueryEditorBatchSelection(options: QueryEditorBatchSelectionO
     }
 
     const mode = selectableItems[0]!.batchSelectionMode!;
-    const candidates = selectableItems.filter((item) => item.batchSelectionMode === mode).map((item) => ({ key: batchColumnSelectionCandidateKey(item), apply: item.apply! }));
+    const candidates = selectableItems.filter((item) => item.batchSelectionMode === mode).map((item) => ({ key: batchColumnSelectionCandidateKey(item), apply: item.batchSelectionApply ?? item.apply! }));
     const key = `${mode}\u0000${from}\u0000${to}\u0000${document}`;
     if (!batchColumnSelectionSession || batchColumnSelectionSession.key !== key) {
       batchColumnSelectionSession = {

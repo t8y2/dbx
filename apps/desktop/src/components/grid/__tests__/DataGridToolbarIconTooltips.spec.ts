@@ -95,7 +95,7 @@ function mountToolbar() {
   );
 }
 
-function mountGrid() {
+function mountGrid(resultOverride?: Partial<QueryResult>) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -108,6 +108,7 @@ function mountGrid() {
     rows: [[1, "Ada"]],
     affected_rows: 0,
     execution_time_ms: 0,
+    ...resultOverride,
   });
   const grid = ref<{ goToColumnToolbarCapability: DataGridToolbarActionCapability }>();
   const host = document.createElement("div");
@@ -211,6 +212,22 @@ describe("data grid icon-only toolbar tooltips", () => {
 
     expect(host.querySelector("[data-column-lookup-panel]")).not.toBeNull();
     expect(host.querySelector('[data-slot="popover-content"]')).toBeNull();
+  });
+
+  it("hides the bottom pagination export menu when the result has no columns", async () => {
+    const { host } = mountGrid({ columns: [], rows: [] });
+    await settle();
+
+    const bottomExportMenu = Array.from(host.querySelectorAll("button")).find((btn) => btn.getAttribute("aria-label") === "Export");
+    expect(bottomExportMenu).toBeUndefined();
+  });
+
+  it("shows the bottom pagination export menu when the result has columns", async () => {
+    const { host } = mountGrid();
+    await settle();
+
+    const bottomExportMenu = Array.from(host.querySelectorAll("button")).find((btn) => btn.getAttribute("aria-label") === "Export");
+    expect(bottomExportMenu).not.toBeUndefined();
   });
 });
 

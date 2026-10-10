@@ -1,4 +1,5 @@
 import type { QueryResult } from "@/types/database";
+import { isGraphCellEnvelope } from "@/lib/graph/graphResult";
 
 type CellValue = QueryResult["rows"][number][number];
 
@@ -35,20 +36,21 @@ function nodeEnvelope(value: unknown): { display: string; properties: Neo4jNodeP
 /** Normalize typed wire cells once, keeping primitive rows and original columns. */
 export function extractNeo4jNodeCells(result: QueryResult): void {
   let rows: QueryResult["rows"] | undefined;
-  let cells: Neo4jNodeCell[] | undefined;
+  let cells: Map<string, Neo4jNodeCell> | undefined;
   result.rows.forEach((row, row_index) => {
     row.forEach((value, column_index) => {
       if (column_index >= result.columns.length) return;
       const cell = nodeEnvelope(value);
       if (!cell) return;
       rows ??= result.rows.map((row) => [...row]);
-      cells ??= [...(result.neo4j_node_cells ?? [])];
-      rows[row_index]![column_index] = cell.display;
-      cells.push({ row_index, column_index, properties: cell.properties });
+      cells ??= new Map((result.neo4j_node_cells ?? []).map((cell) => [`${cell.row_index}:${cell.column_index}`, cell]));
+      // Graph extraction still needs the typed envelope after table metadata extraction.
+      rows[row_index]![column_index] = isGraphCellEnvelope(value) ? value : cell.display;
+      cells.set(`${row_index}:${column_index}`, { row_index, column_index, properties: cell.properties });
     });
   });
   if (rows) result.rows = rows;
-  if (cells) result.neo4j_node_cells = cells;
+  if (cells) result.neo4j_node_cells = [...cells.values()];
 }
 
 export function appendNeo4jNodeCells(previous: QueryResult, segment: QueryResult, appendedRowCount: number): Neo4jNodeCell[] | undefined {

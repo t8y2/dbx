@@ -169,6 +169,19 @@ describe("settingsTransfer", () => {
     expect(result.error.detail).toContain("appLayout");
   });
 
+  it("round-trips sidebarDensity in navigation category and rejects invalid values", () => {
+    const valid = parseSettingsTransferFile(fileWith({ sidebarDensity: "compact" }));
+    expect(valid.ok).toBe(true);
+    if (!valid.ok) return;
+    expect(valid.value.editorSettings.sidebarDensity).toBe("compact");
+    expect(valid.value.categories).toContain("navigation");
+
+    const invalid = parseSettingsTransferFile(fileWith({ sidebarDensity: "ultra-compact" }));
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) return;
+    expect(invalid.error.detail).toContain("sidebarDensity");
+  });
+
   it("rejects pass-through boolean flags with non-boolean values", () => {
     const result = parseSettingsTransferFile(fileWith({ wordWrap: "yes" }));
     expect(result.ok).toBe(false);
@@ -489,6 +502,45 @@ describe("settingsTransfer", () => {
     expect(result.error.detail).toContain("sqlFormatter");
   });
 
+  it("rejects unknown formatter option keys", () => {
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter, layoutEngine: "dbx" } }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("sqlFormatter");
+  });
+
+  it("rejects an invalid value for a formatter option that is present", () => {
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter, layoutStyle: "upstream" } }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("sqlFormatter");
+  });
+
+  it("imports a formatter payload exported before commaPosition existed", () => {
+    // Regression: v0.6.35 made the completeness check require every current
+    // key, so files exported by any earlier version failed to import at all.
+    const legacy: Record<string, unknown> = { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter };
+    delete legacy.commaPosition;
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: legacy }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.sqlFormatter?.commaPosition).toBe("after");
+    expect(result.value.editorSettings.sqlFormatter?.keywordCase).toBe(DEFAULT_EDITOR_SETTINGS.sqlFormatter.keywordCase);
+  });
+
+  it("imports a formatter payload missing both post-transfer keys and defaults them", () => {
+    const legacy: Record<string, unknown> = { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter };
+    delete legacy.commaPosition;
+    delete legacy.layoutStyle;
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: legacy }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.sqlFormatter?.layoutStyle).toBe("dbx");
+    expect(result.value.editorSettings.sqlFormatter?.commaPosition).toBe("after");
+  });
+
   it("rejects malformed sql variable syntax overrides", () => {
     const result = parseSettingsTransferFile(fileWith({ sqlVariableSyntaxOverrides: { mysql: { positional: "yes" } } }));
     expect(result.ok).toBe(false);
@@ -524,5 +576,21 @@ describe("settingsTransfer", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.editorSettings.dataGridZebraRowBg).toBe("#232323");
+  });
+
+  it("round-trips crosshair row and column backgrounds in data category", () => {
+    expect(transferCategoryForKey("dataGridCrosshairRowBg")).toBe("data");
+    expect(transferCategoryForKey("dataGridCrosshairColBg")).toBe("data");
+
+    const text = serializeSettingsTransfer({
+      ...DEFAULT_EDITOR_SETTINGS,
+      dataGridCrosshairRowBg: "#232323",
+      dataGridCrosshairColBg: "#343434",
+    });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.dataGridCrosshairRowBg).toBe("#232323");
+    expect(result.value.editorSettings.dataGridCrosshairColBg).toBe("#343434");
   });
 });

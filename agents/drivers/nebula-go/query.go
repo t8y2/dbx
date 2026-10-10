@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +43,45 @@ type queryPageResult struct {
 type queryCursor struct {
 	result queryResult
 	offset int
+}
+
+type graphVID struct {
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+type graphProperty struct {
+	Owner string `json:"owner,omitempty"`
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	Value any    `json:"value"`
+}
+
+type graphNode struct {
+	ID         string          `json:"id"`
+	VID        graphVID        `json:"vid"`
+	Labels     []string        `json:"labels"`
+	Properties []graphProperty `json:"properties"`
+}
+
+type graphEdge struct {
+	ID         string          `json:"id"`
+	Source     string          `json:"source"`
+	Target     string          `json:"target"`
+	SourceVID  graphVID        `json:"sourceVid"`
+	TargetVID  graphVID        `json:"targetVid"`
+	Type       string          `json:"type"`
+	Rank       string          `json:"rank"`
+	Properties []graphProperty `json:"properties"`
+}
+
+type graphCell struct {
+	Marker       string      `json:"__dbx_graph_cell"`
+	Kind         string      `json:"kind"`
+	Display      string      `json:"display"`
+	Nodes        []graphNode `json:"nodes"`
+	Edges        []graphEdge `json:"edges"`
+	DisplayParts []any       `json:"displayParts,omitempty"`
 }
 
 func (s *agentSession) dispatch(method string, params map[string]json.RawMessage) (any, error) {
@@ -239,7 +280,160 @@ func normalizeValue(value *nebula.ValueWrapper) any {
 			return text
 		}
 	}
+	if value.IsFloat() {
+		if number, err := value.AsFloat(); err == nil {
+			return strconv.FormatFloat(number, 'g', -1, 64)
+		}
+	}
+	if graph := graphCellForValue(value); graph != nil {
+		return graph
+	}
 	return value.String()
+}
+
+func graphCellForValue(value *nebula.ValueWrapper) *graphCell {
+	if !value.IsVertex() && !value.IsEdge() && !value.IsPath() && !value.IsList() && !value.IsSet() && !value.IsMap() {
+		return nil
+	}
+	cell := &graphCell{Marker: "nebula-v1", Kind: value.GetType(), Display: value.String(), Nodes: []graphNode{}, Edges: []graphEdge{}}
+	appendGraphValue(value, cell)
+	if len(cell.Nodes) == 0 && len(cell.Edges) == 0 {
+		return nil
+	}
+	appendGraphDisplay(value, &cell.DisplayParts)
+	return cell
+}
+
+func appendGraphValue(value *nebula.ValueWrapper, cell *graphCell) {
+	if value == nil {
+		return
+	}
+	switch {
+	case value.IsVertex():
+		node, err := value.AsNode()
+		if err == nil {
+			cell.Nodes = append(cell.Nodes, graphNodeFromNebula(node))
+		}
+	case value.IsEdge():
+		edge, err := value.AsRelationship()
+		if err == nil {
+			cell.Edges = append(cell.Edges, graphEdgeFromNebula(edge))
+			cell.Nodes = append(cell.Nodes, graphPlaceholder(edge.GetSrcVertexID()), graphPlaceholder(edge.GetDstVertexID()))
+		}
+	case value.IsPath():
+		path, err := value.AsPath()
+		if err == nil {
+			for _, node := range path.GetNodes() {
+				cell.Nodes = append(cell.Nodes, graphNodeFromNebula(node))
+			}
+			for _, edge := range path.GetRelationships() {
+				cell.Edges = append(cell.Edges, graphEdgeFromNebula(edge))
+			}
+		}
+	case value.IsList():
+		items, err := value.AsList()
+		if err == nil {
+			for i := range items {
+				appendGraphValue(&items[i], cell)
+			}
+		}
+	case value.IsSet():
+		items, err := value.AsDedupList()
+		if err == nil {
+			for i := range items {
+				appendGraphValue(&items[i], cell)
+			}
+		}
+	case value.IsMap():
+		items, err := value.AsMap()
+		if err == nil {
+			for _, item := range items {
+				appendGraphValue(&item, cell)
+			}
+		}
+	}
+}
+
+func graphIdentity(parts ...string) string {
+	encoded, _ := json.Marshal(parts)
+	return string(encoded)
+}
+
+func graphVIDFromNebula(value nebula.ValueWrapper) graphVID {
+	if value.IsString() {
+		text, _ := value.AsString()
+		return graphVID{Type: "string", Value: text}
+	}
+	if value.IsInt() {
+		number, _ := value.AsInt()
+		return graphVID{Type: "int", Value: strconv.FormatInt(number, 10)}
+	}
+	return graphVID{Type: value.GetType(), Value: value.String()}
+}
+
+func graphPlaceholder(value nebula.ValueWrapper) graphNode {
+	vid := graphVIDFromNebula(value)
+	return graphNode{ID: graphIdentity("vertex", vid.Type, vid.Value), VID: vid, Labels: []string{}, Properties: []graphProperty{}}
+}
+
+func graphPropertyFromNebula(owner, name string, value *nebula.ValueWrapper) graphProperty {
+	property := graphProperty{Owner: owner, Name: name, Type: "null"}
+	if value == nil || value.IsNull() {
+		return property
+	}
+	property.Type = value.GetType()
+	switch {
+	case value.IsString():
+		property.Value, _ = value.AsString()
+	case value.IsBool():
+		property.Value, _ = value.AsBool()
+	case value.IsInt():
+		number, _ := value.AsInt()
+		property.Value = strconv.FormatInt(number, 10)
+	case value.IsFloat():
+		number, _ := value.AsFloat()
+		property.Value = strconv.FormatFloat(number, 'g', -1, 64)
+	default:
+		property.Value = value.String()
+	}
+	return property
+}
+
+func graphNodeFromNebula(node *nebula.Node) graphNode {
+	result := graphPlaceholder(node.GetID())
+	result.Labels = append([]string{}, node.GetTags()...)
+	for _, tag := range result.Labels {
+		props, err := node.Properties(tag)
+		if err != nil {
+			continue
+		}
+		for name, value := range props {
+			result.Properties = append(result.Properties, graphPropertyFromNebula(tag, name, value))
+		}
+	}
+	sort.Slice(result.Properties, func(i, j int) bool {
+		if result.Properties[i].Owner == result.Properties[j].Owner {
+			return result.Properties[i].Name < result.Properties[j].Name
+		}
+		return result.Properties[i].Owner < result.Properties[j].Owner
+	})
+	return result
+}
+
+func graphEdgeFromNebula(edge *nebula.Relationship) graphEdge {
+	src := graphPlaceholder(edge.GetSrcVertexID())
+	dst := graphPlaceholder(edge.GetDstVertexID())
+	rank := strconv.FormatInt(edge.GetRanking(), 10)
+	result := graphEdge{
+		ID:     graphIdentity("edge", edge.GetEdgeName(), src.ID, dst.ID, rank),
+		Source: src.ID, Target: dst.ID, SourceVID: src.VID, TargetVID: dst.VID,
+		Type: edge.GetEdgeName(), Rank: rank, Properties: []graphProperty{},
+	}
+	for name, value := range edge.Properties() {
+		result.Properties = append(result.Properties, graphPropertyFromNebula("", name, value))
+	}
+	sort.Slice(result.Properties, func(i, j int) bool { return result.Properties[i].Name < result.Properties[j].Name })
+	return result
 }
 
 type nebulaQueryError struct {

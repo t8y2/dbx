@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.6.36",
+  "version": "0.6.38",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -95,6 +95,8 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "codemirror": "^6.0.2",
+    "cytoscape": "^3.34.3",
+    "cytoscape-fcose": "^2.2.0",
     "dayjs": "^1.11.21",
     "diff": "^9.0.0",
     "dom-to-image-more": "^3.7.2",

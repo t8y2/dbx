@@ -23,7 +23,7 @@ This module replaces the Neo4j JDBC Agent with the official Neo4j Go Driver.
 - Node labels use `CALL db.labels()`.
 - Properties use `db.schema.nodeTypeProperties()` with a sampled-node fallback.
 - Index uniqueness is derived from `SHOW INDEXES ... owningConstraint`, which is compatible with Neo4j 5.x.
-- Query row values retain the previous Agent behavior: scalar and graph values are returned as displayable strings, while null remains null.
+- Scalar query values remain displayable strings and null remains null. Graph values carry a versioned envelope with the original display text, typed identities and properties for the shared graph result view.
 
 ## Validation
 

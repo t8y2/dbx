@@ -91,6 +91,19 @@ function xuguConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function sundbConnection(): ConnectionConfig {
+  return {
+    id: "sundb-1",
+    name: "SUNDB",
+    db_type: "sundb",
+    host: "10.156.156.86",
+    port: 22581,
+    username: "app_user",
+    password: "",
+    database: "vpnccw",
+  } as ConnectionConfig;
+}
+
 function genericJdbcConnection(): ConnectionConfig {
   return {
     id: "jdbc-1",
@@ -641,6 +654,51 @@ describe("connectionStore metadata loading", () => {
       ["schema", "reporting", "reporting"],
       ["saved-sql-root", "tree.queries", undefined],
     ]);
+  });
+
+  it("loads SunDB tables under the discovered schema instead of the catalog name", async () => {
+    // SUNDB's database is a catalog, and the driver matches getTables' schemaPattern
+    // literally, so sending the catalog name returned zero rows and the sidebar showed
+    // an empty "表 0" node (issue #11360). The database node must discover schemas and
+    // every table request must carry that schema.
+    const listSchemaInfos = vi.fn().mockResolvedValue([{ name: "APP", comment: null }]);
+    const listTables = vi.fn().mockResolvedValue([{ name: "ITEMS", table_type: "TABLE", comment: null }]);
+    const listObjects = vi.fn().mockResolvedValue([]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listSchemaInfos,
+      listTables,
+      listObjects,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    const store = useConnectionStore();
+    const connection = sundbConnection();
+    const databaseNode: TreeNode = { id: "sundb-1:vpnccw", label: "vpnccw", type: "database", connectionId: connection.id, database: "vpnccw", isExpanded: false, children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, isExpanded: true, children: [databaseNode] }];
+
+    await store.loadTreeNodeChildren(databaseNode, { force: true });
+
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "vpnccw");
+    expect(listTables).not.toHaveBeenCalled();
+    const schemaNode = databaseNode.children!.find((node) => node.type === "schema")!;
+    expect([schemaNode.label, schemaNode.schema]).toEqual(["APP", "APP"]);
+
+    await store.loadTreeNodeChildren(schemaNode, { force: true });
+
+    const firstTableRequest = listTables.mock.calls[0] as unknown[];
+    expect(firstTableRequest.slice(0, 3)).toEqual([connection.id, "vpnccw", "APP"]);
   });
 
   it.each(["simple", "grouped"] as const)("isolates discovered JDBC schemas, pages and cached objects in %s mode", async (mode) => {

@@ -51,6 +51,7 @@ export type ShortcutActionId =
   | "openSettings"
   | "closeTab"
   | "closeOtherTabs"
+  | "closeWindow"
   | "focusSearch"
   | "quickOpen"
   | "globalSearch"
@@ -85,6 +86,7 @@ export type ShortcutActionId =
   | "pasteSidebarSelection"
   | "editSidebarConnection"
   | "disconnectSidebarConnection"
+  | "disconnectAllActiveConnections"
   | "openDataInNewTab"
   | "viewTableDdl"
   | "sendSelectionToAi"
@@ -474,6 +476,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: closeOtherTabsDefaultShortcut(),
   },
   {
+    id: "closeWindow",
+    labelKey: "settings.shortcutCloseWindow",
+    scope: "global",
+    defaultShortcut: "Shift+Mod+W",
+  },
+  {
     id: "focusSearch",
     labelKey: "settings.shortcutFocusSearch",
     scope: "global",
@@ -652,6 +660,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutToggleZenMode",
     scope: "global",
     defaultShortcut: "Shift+Mod+F12",
+  },
+  {
+    id: "disconnectAllActiveConnections",
+    labelKey: "sidebar.disconnectAllActiveConnections",
+    scope: "global",
+    defaultShortcut: "",
   },
   {
     id: "copySidebarSelection",

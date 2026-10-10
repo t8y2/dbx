@@ -647,6 +647,27 @@ mod tests {
         assert!(!modern_tools.is_empty());
         assert_eq!(manager.sessions.read().await.len(), 1, "2026-07-28 discovery stays stateless");
 
+        for (client, is_modern) in [(&legacy, false), (&modern, true)] {
+            for (method, result) in [
+                ("tools/list", serde_json::to_value(client.list_tools(None).await.unwrap()).unwrap()),
+                ("resources/list", serde_json::to_value(client.list_resources(None).await.unwrap()).unwrap()),
+                (
+                    "resources/templates/list",
+                    serde_json::to_value(client.list_resource_templates(None).await.unwrap()).unwrap(),
+                ),
+            ] {
+                if is_modern {
+                    assert_eq!(result["resultType"], "complete", "{method}");
+                    assert_eq!(result["ttlMs"], 0, "{method}");
+                    assert_eq!(result["cacheScope"], "private", "{method}");
+                } else {
+                    for field in ["resultType", "ttlMs", "cacheScope"] {
+                        assert!(result.get(field).is_none(), "legacy {method} unexpectedly includes {field}");
+                    }
+                }
+            }
+        }
+
         let _ = legacy.cancel().await;
         let _ = modern.cancel().await;
         cancellation.cancel();

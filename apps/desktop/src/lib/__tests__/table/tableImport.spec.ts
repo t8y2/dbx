@@ -99,6 +99,21 @@ describe("tableImport", () => {
     expect(autoMapImportColumns(["column_1", "column_2"], ["column_2", "column_1"], "position")).toEqual({ column_1: "column_2", column_2: "column_1" });
   });
 
+  it("falls back to position mapping in auto mode when no column names match", () => {
+    expect(autoMapImportColumns(["col_a", "col_b", "col_c"], ["id", "name"])).toEqual({
+      col_a: "id",
+      col_b: "name",
+      col_c: "",
+    });
+  });
+
+  it("keeps name-only matches when explicitly using name mode", () => {
+    expect(autoMapImportColumns(["col_a", "col_b"], ["id", "name"], "name")).toEqual({
+      col_a: "",
+      col_b: "",
+    });
+  });
+
   it("skips excess source columns and leaves excess target columns unmapped", () => {
     expect(autoMapImportColumns(["column_1", "column_2", "column_3"], ["id", "name"], "position")).toEqual({ column_1: "id", column_2: "name", column_3: "" });
     expect(autoMapImportColumns(["column_1"], ["id", "name"], "position")).toEqual({ column_1: "id" });

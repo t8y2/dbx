@@ -3,6 +3,9 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::response::sse::{Event, Sse};
 use axum::Json;
+use dbx_core::persistence::task_history::{
+    TaskHistoryStorageError, TaskItemStatus, TaskLifecycleOwner, TransferTaskJournal,
+};
 use dbx_core::transfer::{self, TransferRequest, TransferStatus};
 use futures::stream::Stream;
 use serde::Deserialize;
@@ -15,6 +18,9 @@ use crate::state::WebState;
 const COMPLETED_TRANSFER_CHANNEL_TTL: Duration = Duration::from_secs(60);
 
 fn send_transfer_progress(channel: &TransferProgressChannel, progress: &transfer::TransferProgress) {
+    if progress.terminal {
+        channel.remember_terminal_progress(progress.clone());
+    }
     if let Ok(json) = serde_json::to_string(progress) {
         let kind = if progress.terminal {
             TransferReplayEventKind::Terminal
@@ -42,6 +48,7 @@ fn terminal_transfer_error(req: &TransferRequest, error: impl ToString) -> trans
 }
 
 async fn finish_transfer_channel(state: &Arc<WebState>, transfer_id: &str, channel: &Arc<TransferProgressChannel>) {
+    channel.finish_task_history().await;
     transfer::clear_cancelled(transfer_id).await;
     let state = state.clone();
     let transfer_id = transfer_id.to_string();
@@ -80,59 +87,66 @@ pub async fn start_transfer(
     let req = body.request;
     transfer::validate_transfer_request(&req).map_err(AppError::from)?;
 
-    // Reject transfer early if the target connection is read-only
-    if let Some(name) = dbx_core::query::connection_readonly_name(&state.app, &req.target_connection_id).await {
-        return Err(AppError::from(format!(
-            "Read-only mode: target connection '{}' has read-only protection enabled. Transfer blocked.",
-            name
-        )));
-    }
+    // Demo mode skips connection-backed validation: the simulated web build may not
+    // carry the requested connections, and the spawned task reports failures as
+    // terminal progress events instead of HTTP errors.
+    let (source_db_type, target_db_type) = if state.demo_mode {
+        (dbx_core::models::connection::DatabaseType::Sqlite, dbx_core::models::connection::DatabaseType::Sqlite)
+    } else {
+        // Reject transfer early if the target connection is read-only
+        if let Some(name) = dbx_core::query::connection_readonly_name(&state.app, &req.target_connection_id).await {
+            return Err(AppError::from(format!(
+                "Read-only mode: target connection '{}' has read-only protection enabled. Transfer blocked.",
+                name
+            )));
+        }
 
-    // `drop_target_before_create` rebuilds target tables. Gate it before responding so the
-    // caller sees the error code rather than a progress stream that fails later.
-    if req.drop_target_before_create {
+        let source_db_type =
+            transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError::from)?;
         let target_db_type =
             transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError::from)?;
-        dbx_core::transfer_rebuild::ensure_drop_target_allowed(
-            &state.app,
-            &req.target_connection_id,
-            &req.target_database,
-            target_db_type,
-            req.drop_target_before_create,
-            req.drop_target_confirmed,
-        )
-        .await
-        .map_err(AppError::from)?;
-    }
+        transfer::validate_transfer_database_pair(&req, &source_db_type, &target_db_type).map_err(AppError::from)?;
+
+        // `drop_target_before_create` rebuilds target tables. Gate it before responding so the
+        // caller sees the error code rather than a progress stream that fails later.
+        if req.drop_target_before_create {
+            dbx_core::transfer_rebuild::ensure_drop_target_allowed(
+                &state.app,
+                &req.target_connection_id,
+                &req.target_database,
+                target_db_type,
+                req.drop_target_before_create,
+                req.drop_target_confirmed,
+            )
+            .await
+            .map_err(AppError::from)?;
+        }
+        (source_db_type, target_db_type)
+    };
 
     let transfer_id = req.transfer_id.clone();
+    let history = if state.demo_mode {
+        None
+    } else {
+        match TransferTaskJournal::accept(&state.app.storage, &state.app, &req, TaskLifecycleOwner::Web).await {
+            Ok(history) => history,
+            Err(TaskHistoryStorageError::RunIdConflict) => {
+                return Err(AppError::conflict("TRANSFER_RUN_ID_CONFLICT"));
+            }
+            Err(error) => return Err(AppError::internal(error.code())),
+        }
+    };
 
     // Keep bounded replay state so a web EventSource opened after this POST
     // still receives early table failures and the terminal result.
     let progress_channel = Arc::new(TransferProgressChannel::new());
+    progress_channel.set_task_history_journal(history.clone());
     state.transfer_progress_channels.write().await.insert(transfer_id.clone(), progress_channel.clone());
 
     let app = state.app.clone();
     let state_clone = state.clone();
 
     tokio::spawn(async move {
-        let source_db_type = match transfer::get_db_type(&app, &req.source_connection_id).await {
-            Ok(t) => t,
-            Err(e) => {
-                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
-                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                return;
-            }
-        };
-        let target_db_type = match transfer::get_db_type(&app, &req.target_connection_id).await {
-            Ok(t) => t,
-            Err(e) => {
-                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
-                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                return;
-            }
-        };
-
         // Cross-family object transfers are validated inside transfer_schema_objects:
         // only mechanically rewriteable kinds (views, sequences) are allowed; any
         // other selection fails with a descriptive error. Structure-only data
@@ -352,6 +366,36 @@ pub async fn start_transfer(
             }
         }
 
+        // Overwrite clears each target right before copying it, parents first, which cannot
+        // clear a table another selected table references. Empty those children first now.
+        let overwrite_cleared = match transfer::clear_foreign_key_linked_overwrite_targets(
+            &app,
+            &req,
+            &tables,
+            target_db_type,
+            &target_pool_key,
+        )
+        .await
+        {
+            Ok(cleared) => cleared,
+            Err(e) => {
+                let progress = transfer::TransferProgress {
+                    transfer_id: req.transfer_id.clone(),
+                    table: "overwrite pre-pass".to_string(),
+                    table_index: 0,
+                    total_tables: tables.len(),
+                    rows_transferred: 0,
+                    total_rows: None,
+                    status: TransferStatus::Error,
+                    error: Some(e),
+                    terminal: true,
+                };
+                send_transfer_progress(&progress_channel, &progress);
+                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+                return;
+            }
+        };
+
         for (i, table) in tables.iter().enumerate() {
             if transfer::is_cancelled(&req.transfer_id).await {
                 let progress = transfer::TransferProgress {
@@ -370,10 +414,19 @@ pub async fn start_transfer(
                 return;
             }
 
+            let history_item_index =
+                history.as_ref().and_then(|journal| journal.item_index_for_table(table)).unwrap_or(i);
+            if let Some(journal) = history.as_ref() {
+                journal.start_table(history_item_index).await;
+            }
             let progress_channel_clone = progress_channel.clone();
             let mut last_rows_transferred = 0_u64;
             let mut last_total_rows = None;
-            let result = transfer::transfer_table(
+            let mut source_row_count = None;
+            let mut moved_row_count = None;
+            let history_for_progress = history.as_ref();
+            let history_for_count = history.as_ref();
+            let result = transfer::transfer_table_with_result(
                 &app,
                 &req,
                 table,
@@ -385,23 +438,44 @@ pub async fn start_transfer(
                 &known_foreign_keys,
                 &mut pending_fk_alters,
                 backup_names.as_ref(),
+                overwrite_cleared.contains(table),
                 |progress| {
                     last_rows_transferred = progress.rows_transferred;
                     last_total_rows = progress.total_rows;
+                    moved_row_count = Some(progress.rows_transferred);
+                    if let Some(journal) = history_for_progress {
+                        journal.observe_table_progress(history_item_index, progress.rows_transferred);
+                    }
                     send_transfer_progress(&progress_channel_clone, &progress);
+                },
+                |source_count| {
+                    source_row_count = source_count;
+                    if let Some(journal) = history_for_count {
+                        journal.observe_source_count(history_item_index, source_count);
+                    }
                 },
             )
             .await;
 
             match result {
-                Ok(rows) => {
+                Ok(result) => {
+                    if let Some(journal) = history.as_ref() {
+                        journal
+                            .finish_table(
+                                history_item_index,
+                                TaskItemStatus::Succeeded,
+                                result.source_row_count,
+                                Some(result.moved_rows),
+                            )
+                            .await;
+                    }
                     let progress = transfer::TransferProgress {
                         transfer_id: req.transfer_id.clone(),
                         table: table.clone(),
                         table_index: i,
                         total_tables: tables.len(),
-                        rows_transferred: rows,
-                        total_rows: last_total_rows.or(Some(rows)),
+                        rows_transferred: result.moved_rows,
+                        total_rows: last_total_rows.or(Some(result.moved_rows)),
                         status: TransferStatus::TableDone,
                         error: None,
                         terminal: false,
@@ -410,6 +484,16 @@ pub async fn start_transfer(
                 }
                 Err(e) => {
                     if e == "Cancelled" {
+                        if let Some(journal) = history.as_ref() {
+                            journal
+                                .finish_table(
+                                    history_item_index,
+                                    TaskItemStatus::Cancelled,
+                                    source_row_count,
+                                    moved_row_count,
+                                )
+                                .await;
+                        }
                         let progress = transfer::TransferProgress {
                             transfer_id: req.transfer_id.clone(),
                             table: table.clone(),
@@ -424,6 +508,11 @@ pub async fn start_transfer(
                         send_transfer_progress(&progress_channel, &progress);
                         finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                         return;
+                    }
+                    if let Some(journal) = history.as_ref() {
+                        journal
+                            .finish_table(history_item_index, TaskItemStatus::Failed, source_row_count, moved_row_count)
+                            .await;
                     }
                     failed_tables.push(table.clone());
                     let progress = transfer::TransferProgress {
@@ -476,9 +565,15 @@ pub async fn start_transfer(
         .await
         {
             Ok(outcome) => {
+                if let Some(journal) = history.as_ref() {
+                    journal.record_object_outcome(&outcome).await;
+                }
                 object_outcome = outcome;
             }
             Err(e) if e == "Cancelled" => {
+                if let Some(journal) = history.as_ref() {
+                    journal.record_schema_objects_error(true).await;
+                }
                 let progress = transfer::TransferProgress {
                     transfer_id: req.transfer_id.clone(),
                     table: "schema objects".to_string(),
@@ -495,6 +590,9 @@ pub async fn start_transfer(
                 return;
             }
             Err(e) => {
+                if let Some(journal) = history.as_ref() {
+                    journal.record_schema_objects_error(false).await;
+                }
                 failed_tables.push("schema objects".to_string());
                 let progress = transfer::TransferProgress {
                     transfer_id: req.transfer_id.clone(),
@@ -588,6 +686,7 @@ pub async fn preview_transfer_ownership(
     transfer::validate_transfer_request(&req).map_err(AppError::from)?;
     let source_db_type = transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError::from)?;
     let target_db_type = transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError::from)?;
+    transfer::validate_transfer_database_pair(&req, &source_db_type, &target_db_type).map_err(AppError::from)?;
     let source_pool_key = transfer::ensure_transfer_pool(
         &state.app,
         &req.source_connection_id,
@@ -673,6 +772,7 @@ mod tests {
         default_connect_timeout_secs, default_idle_timeout_secs, default_keepalive_interval_secs,
         default_query_timeout_secs, ConnectionConfig, DatabaseType,
     };
+    use dbx_core::persistence::task_history::{TaskRunItemsQuery, TaskRunStatus, TransferObjectSelectionMode};
     use dbx_core::transfer::{
         TransferContent, TransferMode, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
     };
@@ -701,6 +801,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -801,6 +902,14 @@ mod tests {
         let response = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req })).await.unwrap();
         let _ = response.into_response();
 
+        let duplicate = start_transfer(
+            State(state.clone()),
+            Json(StartTransferRequest { request: transfer_request("src", "dst", &dir) }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(duplicate.status, axum::http::StatusCode::CONFLICT);
+
         // Both HTTP and Tauri call the same Core schema-object stage
         // unconditionally. DataOnly must resolve there to a no-op without an
         // object progress event or database-family fallback.
@@ -837,6 +946,54 @@ mod tests {
             terminal_error.is_none(),
             "DataOnly must complete without a schema-object error, got: {terminal_error:?}"
         );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let task_run = loop {
+            let run = state.app.storage.get_task_run_detail(&transfer_id).await.unwrap();
+            if run.as_ref().is_some_and(|detail| detail.run.status.is_terminal()) {
+                break run.unwrap();
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("task history did not reach a terminal state");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert_eq!(task_run.run.lifecycle_owner, TaskLifecycleOwner::Web);
+        assert_eq!(task_run.run.status, TaskRunStatus::Succeeded);
+        assert!(task_run.run.history_complete);
+        let transfer_details = task_run.transfer.expect("accepted transfer details persisted");
+        assert_eq!(transfer_details.object_selection_mode, TransferObjectSelectionMode::Explicit);
+        assert_eq!(transfer_details.selected_object_count, Some(0));
+        let items = state.app.storage.list_task_run_items(&transfer_id, TaskRunItemsQuery::default()).await.unwrap();
+        assert!(items.items.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn demo_mode_transfer_does_not_write_task_history() {
+        let (mut state, dir) = test_web_state().await;
+        Arc::get_mut(&mut state).unwrap().demo_mode = true;
+        let req = transfer_request("src", "dst", &dir);
+        let transfer_id = req.transfer_id.clone();
+        let _ = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req })).await.unwrap();
+        let channel = {
+            let channels = state.transfer_progress_channels.read().await;
+            channels.get(&transfer_id).cloned().expect("transfer channel registered")
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if channel
+                .latest()
+                .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+                .is_some_and(|progress| progress["terminal"].as_bool() == Some(true))
+            {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("demo transfer did not reach a terminal event");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(state.app.storage.get_task_run_detail(&transfer_id).await.unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -20,6 +20,23 @@ pub async fn get_agent_explain_info_core(
     mode: Option<&str>,
     timeout_secs: Option<u64>,
 ) -> Result<String, String> {
+    get_agent_explain_info_core_with_execution_id(state, connection_id, database, schema, sql, mode, timeout_secs, None)
+        .await
+}
+
+/// DB2 estimated plans run in an isolated session, with optional UI cancellation.
+/// Other dialects retain their existing native acquisition contract.
+#[allow(clippy::too_many_arguments)]
+pub async fn get_agent_explain_info_core_with_execution_id(
+    state: &AppState,
+    connection_id: &str,
+    database: Option<&str>,
+    schema: Option<&str>,
+    sql: &str,
+    mode: Option<&str>,
+    timeout_secs: Option<u64>,
+    execution_id: Option<&str>,
+) -> Result<String, String> {
     let mode = mode.unwrap_or("explain");
     let (database_type, timeout_secs) = {
         let configs = state.configs.read().await;
@@ -32,8 +49,53 @@ pub async fn get_agent_explain_info_core(
         return Err("unsafe".to_string());
     }
 
+    if database_type == DatabaseType::Db2 && !mode.eq_ignore_ascii_case("explain") {
+        return Err("DB2 supports estimated execution plans only".to_string());
+    }
     let database_for_pool = database.filter(|value| !value.trim().is_empty());
-    let pool_key = state.get_or_create_pool(connection_id, database_for_pool).await?;
+    let client_session_id =
+        (database_type == DatabaseType::Db2).then(|| format!("db2-plan-{}:explain", uuid::Uuid::new_v4()));
+    // Install before pool creation: cancellation must also reclaim a late install.
+    let _cleanup_guard = match client_session_id.as_deref() {
+        Some(session_id) => Some(
+            state
+                .workload_session_pool_cleanup_guard(connection_id, database_for_pool, session_id)
+                .await
+                .ok_or_else(|| "DB2 execution plans require an isolated session".to_string())?,
+        ),
+        None => None,
+    };
+    let execution_id = if database_type == DatabaseType::Db2 {
+        execution_id.filter(|id| !id.trim().is_empty()).or(client_session_id.as_deref())
+    } else {
+        None
+    };
+    let registered = execution_id.map(|id| {
+        state.running_queries.register_task(
+            id.to_string(),
+            crate::query_cancel::RunningTaskMetadata {
+                kind: crate::query_cancel::RunningTaskKind::Explain,
+                connection_id: Some(connection_id.to_string()),
+                database: database_for_pool.map(str::to_string),
+                client_session_id: client_session_id.clone(),
+                ..Default::default()
+            },
+        )
+    });
+    let cancel_token = registered.as_ref().map(|registration| registration.token());
+    let pool_creation =
+        state.get_or_create_pool_for_session(connection_id, database_for_pool, client_session_id.as_deref());
+    let pool_key = match cancel_token.as_ref() {
+        Some(token) => tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err("Query canceled".to_string()),
+            result = pool_creation => result?,
+        },
+        None => pool_creation.await?,
+    };
+    if let Some(id) = execution_id {
+        state.running_queries.set_pool_key(id, pool_key.clone());
+    }
 
     enum ExplainTarget {
         Agent(std::sync::Arc<crate::db::agent_driver::PooledAgentClient>),
@@ -63,7 +125,22 @@ pub async fn get_agent_explain_info_core(
         "mode": mode,
     });
     let result: Value = match target {
-        ExplainTarget::Agent(client) => client.lock().await.get_explain_info(params).await?,
+        ExplainTarget::Agent(client) => {
+            let mut client = match cancel_token.as_ref() {
+                Some(token) => tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err("Query canceled".to_string()),
+                    guard = client.lock() => guard,
+                },
+                None => client.lock().await,
+            };
+            if database_type == DatabaseType::Db2 {
+                let timeout = (timeout_secs > 0).then(|| Duration::from_secs(timeout_secs));
+                client.get_explain_info_with_timeout_and_cancel(params, timeout, cancel_token).await?
+            } else {
+                client.get_explain_info(params).await?
+            }
+        }
         ExplainTarget::External { config, session } => {
             let mut params = params;
             params["connection"] = serde_json::to_value(config.as_ref()).map_err(|error| error.to_string())?;

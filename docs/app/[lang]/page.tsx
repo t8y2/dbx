@@ -381,6 +381,8 @@ const i18nText = {
     qiniuSponsorAction: "Visit",
     rainyunSponsorDesc: "RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.",
     rainyunSponsorAction: "Visit",
+    jumpserverSponsorDesc: "JumpServer is a widely popular open-source bastion host.",
+    jumpserverSponsorAction: "Visit",
     easysearchSponsorDesc: "Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.",
     easysearchSponsorAction: "Visit",
     atlasCloudSponsorDesc: "Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.",
@@ -426,6 +428,8 @@ const i18nText = {
     qiniuSponsorAction: "访问",
     rainyunSponsorDesc: "雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。",
     rainyunSponsorAction: "访问",
+    jumpserverSponsorDesc: "广受欢迎的开源堡垒机",
+    jumpserverSponsorAction: "访问",
     easysearchSponsorDesc: "Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。",
     easysearchSponsorAction: "访问",
     atlasCloudSponsorDesc: "Atlas Cloud 为开发者提供统一的多模态 AI API，可通过一个接口访问聊天、图像、视频和音频等 400+ 模型。",
@@ -491,20 +495,20 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
   const softwareStructuredData = buildSoftwareApplicationStructuredData(l, initialDownloadVersion);
   const sponsorItems = [
     {
+      name: "JumpServer",
+      href: "https://www.jumpserver.org/",
+      logo: "/sponsors/jumpserver-card.png",
+      logoClass: "w-full max-w-[120px] object-contain",
+      description: t.jumpserverSponsorDesc,
+      action: t.jumpserverSponsorAction,
+    },
+    {
       name: "RainYun",
       href: "https://www.rainyun.com/MTE5Mjc4Ng==_",
       logo: "https://www.rainyun.com/img/logo.d193755d.png",
       logoClass: "h-10 w-auto max-w-[100px]",
       description: t.rainyunSponsorDesc,
       action: t.rainyunSponsorAction,
-    },
-    {
-      name: "TrustAsia",
-      href: "https://www.trustasia.com/ssl/trustasia/code-signing",
-      logo: "/sponsors/trustasia.png",
-      logoClass: "w-full max-w-[120px] object-contain",
-      description: t.trustasiaSponsorDesc,
-      action: t.trustasiaSponsorAction,
     },
     {
       name: "Jalapeño Cloud",
@@ -537,6 +541,14 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
       logoClass: "w-full max-w-[100px] object-contain",
       description: t.astraflowSponsorDesc,
       action: t.astraflowSponsorAction,
+    },
+    {
+      name: "TrustAsia",
+      href: "https://www.trustasia.com/ssl/trustasia/code-signing",
+      logo: "/sponsors/trustasia.png",
+      logoClass: "w-full max-w-[120px] object-contain",
+      description: t.trustasiaSponsorDesc,
+      action: t.trustasiaSponsorAction,
     },
     {
       name: "Atlas Cloud",

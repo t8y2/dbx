@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
     parseConnectionsImport: vi.fn(),
     applyConnectionsImport: vi.fn(),
     applyDataGripKeychainPasswords: vi.fn(),
+    lastDataGripFallbackUsernamesCount: 0,
     exportConnectionsToFile: vi.fn(),
   },
 }));

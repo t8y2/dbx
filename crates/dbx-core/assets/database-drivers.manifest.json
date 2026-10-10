@@ -1442,7 +1442,7 @@
         "queryExecution": true,
         "metadataBrowse": true,
         "objectBrowser": true,
-        "objectSource": false,
+        "objectSource": true,
         "schemaSearch": true,
         "diagram": true,
         "tableDataEdit": true,
@@ -2087,7 +2087,7 @@
         "sqlFileExecution": true,
         "databaseCreate": false,
         "fieldLineage": true,
-        "sqlExplain": false,
+        "sqlExplain": true,
         "userAdmin": false,
         "driverManagement": true
       }
@@ -2417,6 +2417,10 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 22581,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -2533,7 +2537,7 @@
         "tableDataEdit": true,
         "tableStructureEdit": true,
         "tableImport": true,
-        "dataTransfer": false,
+        "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": false,
         "fieldLineage": false,

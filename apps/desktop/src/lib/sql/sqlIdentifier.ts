@@ -550,7 +550,11 @@ export function requiresMysqlIdentifierQuote(identifier: string, additionalKeywo
 }
 
 export function requiresOracleIdentifierQuote(identifier: string): boolean {
-  return !SIMPLE_ORACLE_IDENTIFIER.test(identifier) || ORACLE_RESERVED_IDENTIFIER_KEYWORDS.has(identifier);
+  return !SIMPLE_ORACLE_IDENTIFIER.test(identifier) || isOracleReservedKeyword(identifier);
+}
+
+export function isOracleReservedKeyword(identifier: string): boolean {
+  return ORACLE_RESERVED_IDENTIFIER_KEYWORDS.has(identifier.toUpperCase());
 }
 
 export function requiresDamengIdentifierQuote(identifier: string): boolean {

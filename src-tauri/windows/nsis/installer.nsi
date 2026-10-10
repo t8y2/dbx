@@ -1,4 +1,5 @@
 Unicode true
+XPStyle on
 ManifestDPIAware true
 ManifestSupportedOS all
 ; Add in `dpiAwareness` `PerMonitorV2` to manifest for Windows 10 1607+ (note this should not affect lower versions since they should be able to ignore this and pick up `dpiAware` `true` set by `ManifestDPIAware true`)
@@ -96,6 +97,12 @@ Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
 Var DbxElevated
+Var DbxIsAdmin
+Var DbxElevationCode
+Var DbxFileProbeError
+Var DbxDirectoryProbeError
+Var DbxFailedFile
+Var DbxWriteFailureAction
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -499,18 +506,33 @@ FunctionEnd
   !include "{{this}}"
 {{/each}}
 
-; Keep the standard write-error actions while explaining how to upgrade legacy
-; installations restored from Program Files without changing the install mode.
-LangString dbxFileWriteError ${LANG_ENGLISH} "Error opening file for writing:$\r$\n$\r$\n$0$\r$\n$\r$\nIf you are upgrading DBX installed under Program Files, abort this installation, right-click the installer, and select Run as administrator.$\r$\n$\r$\nClick Abort to stop the installation,$\r$\nRetry to try again, or$\r$\nIgnore to skip this file."
-LangString dbxFileWriteErrorNoIgnore ${LANG_ENGLISH} "Error opening file for writing:$\r$\n$\r$\n$0$\r$\n$\r$\nIf you are upgrading DBX installed under Program Files, cancel this installation, right-click the installer, and select Run as administrator.$\r$\n$\r$\nClick Retry to try again, or$\r$\nCancel to stop the installation."
-LangString dbxFileWriteError ${LANG_SIMPCHINESE} "无法打开要写入的文件：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升级安装于 Program Files 的 DBX，请中止本次安装，然后右键单击安装程序并选择“以管理员身份运行”。$\r$\n$\r$\n单击“中止”停止安装，$\r$\n单击“重试”再次尝试，或$\r$\n单击“忽略”跳过此文件。"
-LangString dbxFileWriteErrorNoIgnore ${LANG_SIMPCHINESE} "无法打开要写入的文件：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升级安装于 Program Files 的 DBX，请取消本次安装，然后右键单击安装程序并选择“以管理员身份运行”。$\r$\n$\r$\n单击“重试”再次尝试，或$\r$\n单击“取消”停止安装。"
-LangString dbxFileWriteError ${LANG_TRADCHINESE} "無法開啟要寫入的檔案：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升級安裝於 Program Files 的 DBX，請中止本次安裝，然後以滑鼠右鍵按一下安裝程式並選擇「以系統管理員身分執行」。$\r$\n$\r$\n按一下「中止」以停止安裝，$\r$\n按一下「重試」以再次嘗試，或$\r$\n按一下「忽略」以略過此檔案。"
-LangString dbxFileWriteErrorNoIgnore ${LANG_TRADCHINESE} "無法開啟要寫入的檔案：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升級安裝於 Program Files 的 DBX，請取消本次安裝，然後以滑鼠右鍵按一下安裝程式並選擇「以系統管理員身分執行」。$\r$\n$\r$\n按一下「重試」以再次嘗試，或$\r$\n按一下「取消」以停止安裝。"
+; Required application files must never be skipped after a write failure.
+AllowSkipFiles off
+!define DBX_WRITE_CANCEL 2
+!define DBX_WRITE_RETRY 4
+!define DBX_WRITE_MANUAL 1001
+LangString dbxInstallDiagnostics ${LANG_ENGLISH} "Version: ${VERSION}$\r$\nDestination: $INSTDIR$\r$\nDiagnostic code: A$DbxIsAdmin-E$DbxElevationCode-F$DbxFileProbeError-D$DbxDirectoryProbeError"
+LangString dbxInstallDiagnostics ${LANG_SIMPCHINESE} "版本：${VERSION}$\r$\n安装目录：$INSTDIR$\r$\n诊断码：A$DbxIsAdmin-E$DbxElevationCode-F$DbxFileProbeError-D$DbxDirectoryProbeError"
+LangString dbxInstallDiagnostics ${LANG_TRADCHINESE} "版本：${VERSION}$\r$\n安裝目錄：$INSTDIR$\r$\n診斷碼：A$DbxIsAdmin-E$DbxElevationCode-F$DbxFileProbeError-D$DbxDirectoryProbeError"
+LangString dbxFileWriteErrorNoIgnore ${LANG_ENGLISH} "Unable to write this file:$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\nPlease run the installer as administrator."
+LangString dbxFileWriteErrorNoIgnore ${LANG_SIMPCHINESE} "无法写入文件：$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n请以管理员权限运行安装程序。"
+LangString dbxFileWriteErrorNoIgnore ${LANG_TRADCHINESE} "無法寫入檔案：$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n請以系統管理員權限執行安裝程式。"
+LangString dbxFileWriteTitle ${LANG_ENGLISH} "Unable to write an installation file"
+LangString dbxFileWriteTitle ${LANG_SIMPCHINESE} "无法写入安装文件"
+LangString dbxFileWriteTitle ${LANG_TRADCHINESE} "無法寫入安裝檔案"
+LangString dbxManualInstall ${LANG_ENGLISH} "Manual installation"
+LangString dbxManualInstall ${LANG_SIMPCHINESE} "手动安装"
+LangString dbxManualInstall ${LANG_TRADCHINESE} "手動安裝"
+LangString dbxFileWriteError ${LANG_ENGLISH} "$DbxFailedFile$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\nPlease run the installer as administrator."
+LangString dbxFileWriteError ${LANG_SIMPCHINESE} "$DbxFailedFile$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n请以管理员权限运行安装程序。"
+LangString dbxFileWriteError ${LANG_TRADCHINESE} "$DbxFailedFile$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n請以系統管理員權限執行安裝程式。"
+LangString dbxManualInstallFallback ${LANG_ENGLISH} "Yes: open the installer folder and exit. No: retry. Cancel: stop installation."
+LangString dbxManualInstallFallback ${LANG_SIMPCHINESE} "“是”：打开安装包目录并退出；“否”：重试；“取消”：停止安装。"
+LangString dbxManualInstallFallback ${LANG_TRADCHINESE} "「是」：開啟安裝套件目錄並結束；「否」：重試；「取消」：停止安裝。"
 LangString dbxWin7InstallerRequired ${LANG_ENGLISH} "This installer does not support Windows 7 or Windows Server 2012 R2.$\r$\n$\r$\nPlease use the dedicated Windows 7 / Server 2012 R2 package instead.$\r$\n$\r$\nOpen the download now?"
 LangString dbxWin7InstallerRequired ${LANG_SIMPCHINESE} "此安装包不支持 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n请改用 Windows 7 / Server 2012 R2 专用包。$\r$\n$\r$\n是否立即打开下载地址？"
 LangString dbxWin7InstallerRequired ${LANG_TRADCHINESE} "此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n請改用 Windows 7 / Server 2012 R2 專用套件。$\r$\n$\r$\n是否立即開啟下載網址？"
-FileErrorText "$(dbxFileWriteError)" "$(dbxFileWriteErrorNoIgnore)"
+FileErrorText "$(dbxFileWriteErrorNoIgnore)" "$(dbxFileWriteErrorNoIgnore)"
 
 LangString dbxElevationFailed ${LANG_ENGLISH} "Administrator permission is required to install DBX in this folder. Permission was denied or the elevated installer could not be started."
 LangString dbxElevationFailed ${LANG_SIMPCHINESE} "安装到此目录需要管理员权限。授权已被拒绝，或无法启动提权后的安装程序。"
@@ -519,6 +541,119 @@ LangString dbxElevationUserMismatch ${LANG_ENGLISH} "Please approve elevation us
 LangString dbxElevationUserMismatch ${LANG_SIMPCHINESE} "请使用启动安装程序的同一个 Windows 账户授权提权，以确保 DBX 的安装信息和快捷方式保留在正确的用户配置中。"
 LangString dbxElevationUserMismatch ${LANG_TRADCHINESE} "請使用啟動安裝程式的同一個 Windows 帳戶授權提升權限，以確保 DBX 的安裝資訊和捷徑保留在正確的使用者設定中。"
 
+Function DbxUpdateElevationStatus
+  ; Compact support code: A=admin, E=elevation state, F/D=access prechecks.
+  ; E: 0=not requested, 1=already admin, 2=elevated, 3=unconfirmed,
+  ; 4=launch denied/failed, 5=profile mismatch. NA means not checked.
+  System::Call 'shell32::IsUserAnAdmin() i .s'
+  Pop $DbxIsAdmin
+  ${If} $DbxElevated = 1
+    ${If} $DbxIsAdmin != 0
+      StrCpy $DbxElevationCode 2
+    ${Else}
+      StrCpy $DbxElevationCode 3
+    ${EndIf}
+  ${ElseIf} $DbxIsAdmin != 0
+    StrCpy $DbxElevationCode 1
+  ${Else}
+    StrCpy $DbxElevationCode 0
+  ${EndIf}
+FunctionEnd
+
+; Keep extraction failures under our control so a third action can open the
+; installer folder without ever continuing past a failed required-file write.
+!macro DbxExtractFile OPTIONS SOURCE DESTINATION
+  StrCpy $DbxFailedFile "${DESTINATION}"
+  Call DbxUpdateElevationStatus
+  ${Do}
+    Call DbxPrepareFileWrite
+    SetOverwrite try
+    ClearErrors
+    File ${OPTIONS} "${SOURCE}"
+    SetOverwrite on
+    ${IfNot} ${Errors}
+      ${ExitDo}
+    ${EndIf}
+    Call DbxShowWriteError
+    ${If} $DbxWriteFailureAction = ${DBX_WRITE_RETRY}
+      ${Continue}
+    ${ElseIf} $DbxWriteFailureAction = ${DBX_WRITE_MANUAL}
+      Call DbxManualInstall
+    ${EndIf}
+    SetErrorLevel 2
+    Quit
+  ${Loop}
+!macroend
+
+Function DbxPrepareFileWrite
+  Push $0
+  Push $1
+  ; Preserve SetOverwrite on's handling of read-only files when using try to
+  ; capture errors. Keep every other existing file attribute intact.
+  System::Call 'kernel32::GetFileAttributesW(w "$DbxFailedFile") i .r0'
+  ${If} $0 != -1
+    IntOp $1 $0 & 1
+    ${If} $1 != 0
+      IntOp $0 $0 & 0xFFFFFFFE
+      System::Call 'kernel32::SetFileAttributesW(w "$DbxFailedFile", i r0)'
+    ${EndIf}
+  ${EndIf}
+  Pop $1
+  Pop $0
+FunctionEnd
+
+Function DbxShowWriteError
+  Push $0
+  Push $1
+  Push $2
+  Push $3
+  StrCpy $DbxWriteFailureAction ${DBX_WRITE_CANCEL}
+  ; Unattended failures stop installation without opening Explorer or a dialog.
+  ${If} ${Silent}
+    Goto dbx_write_dialog_done
+  ${EndIf}
+
+  ; NSIS uses a 32-bit stub even for x64/arm64 application payloads.
+  ; TASKDIALOGCONFIG is 96 bytes; use the Windows Retry/Cancel buttons plus
+  ; a localized custom Manual installation button. Cancel is the default.
+  ; Size to content so the default narrow layout does not shorten diagnostic paths.
+  System::Call '*(i ${DBX_WRITE_MANUAL}, w "$(dbxManualInstall)") p .r1'
+  System::Call '*(i 96, p $HWNDPARENT, p 0, i 0x1001008, i 0x18, w "$(^Name)", p 65534, w "$(dbxFileWriteTitle)", w "$(dbxFileWriteError)", i 1, p r1, i 2, i 0, p 0, i 0, p 0, p 0, p 0, p 0, p 0, p 0, p 0, p 0, i 0) p .r0'
+  StrCpy $3 -1
+  System::Call 'comctl32::TaskDialogIndirect(p r0, *i .r2, p 0, p 0) i .r3'
+  System::Free $0
+  System::Free $1
+  ${If} $3 = 0
+    StrCpy $DbxWriteFailureAction $2
+  ${Else}
+    ; A safe fallback if the system cannot create a task dialog.
+    MessageBox MB_YESNOCANCEL|MB_ICONSTOP|MB_DEFBUTTON3 "$(dbxFileWriteError)$\r$\n$\r$\n$(dbxManualInstallFallback)" /SD IDCANCEL IDYES dbx_write_manual IDNO dbx_write_retry
+    Goto dbx_write_dialog_done
+    dbx_write_manual:
+      StrCpy $DbxWriteFailureAction ${DBX_WRITE_MANUAL}
+      Goto dbx_write_dialog_done
+    dbx_write_retry:
+      StrCpy $DbxWriteFailureAction ${DBX_WRITE_RETRY}
+  ${EndIf}
+
+  dbx_write_dialog_done:
+    Pop $3
+    Pop $2
+    Pop $1
+    Pop $0
+FunctionEnd
+
+Function DbxManualInstall
+  ClearErrors
+  ExecShell "open" "$WINDIR\explorer.exe" '/select,"$EXEPATH"'
+  ${If} ${Errors}
+    ExecShell "open" "$EXEDIR"
+  ${EndIf}
+  ; This is a failed installation, never a successful update or a skipped file.
+  SetErrorLevel 2
+  Quit
+FunctionEnd
+
 ; Probe without truncating the old executable. Only ACCESS_DENIED requests UAC;
 ; sharing violations still go through CheckIfAppIsRunning and normal retry UI.
 Function DbxEnsureInstallAccess
@@ -526,10 +661,15 @@ Function DbxEnsureInstallAccess
   Push $1
   Push $2
   Push $3
+  Call DbxUpdateElevationStatus
+  StrCpy $DbxFileProbeError "NA"
+  StrCpy $DbxDirectoryProbeError "NA"
   ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
     System::Call 'kernel32::CreateFileW(w "$INSTDIR\${MAINBINARYNAME}.exe", i 0x40000000, i 7, p 0, i 3, i 0, p 0) p .r0 ?e'
     Pop $1
+    StrCpy $DbxFileProbeError $1
     ${If} $0 != -1
+      StrCpy $DbxFileProbeError 0
       System::Call 'kernel32::CloseHandle(p r0)'
     ${ElseIf} $1 = 5
       Goto dbx_elevate
@@ -550,7 +690,9 @@ Function DbxEnsureInstallAccess
     ${EndIf}
   System::Call 'kernel32::GetTempFileNameW(w r2, w "dbx", i 0, w .r3) i .r0 ?e'
   Pop $1
+  StrCpy $DbxDirectoryProbeError $1
   ${If} $0 != 0
+    StrCpy $DbxDirectoryProbeError 0
     Delete "$3"
   ${ElseIf} $1 = 5
     Goto dbx_elevate
@@ -571,7 +713,8 @@ Function DbxEnsureInstallAccess
     ClearErrors
     ExecShell "runas" "$EXEPATH" '/DBX_ELEVATED /DBX_PROFILE="$3" /DBX_LANG=$LANGUAGE $2 /D=$INSTDIR'
     ${If} ${Errors}
-      MessageBox MB_OK|MB_ICONSTOP "$(dbxElevationFailed)" /SD IDOK
+      StrCpy $DbxElevationCode 4
+      MessageBox MB_OK|MB_ICONSTOP "$(dbxElevationFailed)$\r$\n$\r$\n$(dbxInstallDiagnostics)" /SD IDOK
       SetErrorLevel 740
       Pop $3
       Pop $2
@@ -599,7 +742,11 @@ Function .onInit
     ; entered in the UAC credential dialog.
     ${GetOptions} $CMDLINE "/DBX_PROFILE=" $0
     ${If} $0 != $PROFILE
-      MessageBox MB_OK|MB_ICONSTOP "$(dbxElevationUserMismatch)" /SD IDOK
+      StrCpy $DbxFileProbeError "NA"
+      StrCpy $DbxDirectoryProbeError "NA"
+      Call DbxUpdateElevationStatus
+      StrCpy $DbxElevationCode 5
+      MessageBox MB_OK|MB_ICONSTOP "$(dbxElevationUserMismatch)$\r$\n$\r$\n$(dbxInstallDiagnostics)" /SD IDOK
       SetErrorLevel 740
       Quit
     ${EndIf}
@@ -705,7 +852,7 @@ Section WebView2
   ; installer so an existing stale runtime is upgraded without network access.
   !if "${INSTALLWEBVIEW2MODE}" == "offlineInstaller"
     Delete "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
-    File "/oname=$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe" "${WEBVIEW2INSTALLERPATH}"
+    !insertmacro DbxExtractFile '"/oname=$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"' "${WEBVIEW2INSTALLERPATH}" "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
     DetailPrint "$(installingWebview2)"
     ExecWait '"$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe" ${WEBVIEW2INSTALLERARGS} /install' $1
     Delete "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
@@ -754,7 +901,7 @@ Section WebView2
 
       !if "${INSTALLWEBVIEW2MODE}" == "embedBootstrapper"
         Delete "$TEMP\MicrosoftEdgeWebview2Setup.exe"
-        File "/oname=$TEMP\MicrosoftEdgeWebview2Setup.exe" "${WEBVIEW2BOOTSTRAPPERPATH}"
+        !insertmacro DbxExtractFile '"/oname=$TEMP\MicrosoftEdgeWebview2Setup.exe"' "${WEBVIEW2BOOTSTRAPPERPATH}" "$TEMP\MicrosoftEdgeWebview2Setup.exe"
         DetailPrint "$(installingWebview2)"
         StrCpy $6 "$TEMP\MicrosoftEdgeWebview2Setup.exe"
         Goto install_webview2
@@ -815,22 +962,25 @@ Section Install
 
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
+  Call DbxUpdateElevationStatus
+  DetailPrint "$(dbxInstallDiagnostics)"
+
   ; Copy main executable
-  File "${MAINBINARYSRCPATH}"
+  !insertmacro DbxExtractFile "" "${MAINBINARYSRCPATH}" "$INSTDIR\${MAINBINARYNAME}.exe"
   ; MSVC links WebView2Loader statically, while GNU builds may emit a DLL next to the binary.
-  File /nonfatal /a "/oname=WebView2Loader.dll" "${WEBVIEW2LOADERSRCPATH}"
+  !insertmacro DbxExtractFile "/nonfatal /a /oname=WebView2Loader.dll" "${WEBVIEW2LOADERSRCPATH}" "$INSTDIR\WebView2Loader.dll"
 
   ; Copy resources
   {{#each resources_dirs}}
     CreateDirectory "$INSTDIR\\{{this}}"
   {{/each}}
   {{#each resources}}
-    File /a "/oname={{this.[1]}}" "{{no-escape @key}}"
+    !insertmacro DbxExtractFile '/a "/oname={{this.[1]}}"' "{{no-escape @key}}" "$INSTDIR\{{this.[1]}}"
   {{/each}}
 
   ; Copy external binaries
   {{#each binaries}}
-    File /a "/oname={{this}}" "{{no-escape @key}}"
+    !insertmacro DbxExtractFile '/a "/oname={{this}}"' "{{no-escape @key}}" "$INSTDIR\{{this}}"
   {{/each}}
 
   ; Create file associations

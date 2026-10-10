@@ -28,7 +28,11 @@ MongoDB 查询编辑器使用单独的 Mongo Shell 格式化器，不使用本�
 
 ## 默认风格
 
-默认排版规则：能放下的语句保持一行，放不下的按子句逐行展开，子句的后续元素与第一个元素对齐；条件的逻辑操作符放在续行行首；`CREATE TABLE` 的列定义按列对齐。下面的设置用于调整这些规则，**恢复默认值**会回到该风格。
+默认的 `dbx` 排版规则：能放下的语句保持一行，放不下的按子句逐行展开，子句的后续元素与第一个元素对齐；条件的逻辑操作符放在续行行首；`CREATE TABLE` 的列定义按列对齐。下面的设置用于调整这些规则，**恢复默认值**会回到该风格。
+
+把 **排版风格** 设为 `classic` 会改用 sql-formatter 自身的排版，也就是 v0.6.16 之前 DBX 的默认样式。v0.6.16 同时还改过两项默认值，因此还要把 **表达式宽度** 设为 `50`、**FROM 子句布局** 设为换行，才能还原旧输出；等价的 JSON 是 `"expressionWidth": 50`、`"fromClauseLayout": "newLine"`，与 `"layoutStyle": "classic"` 并列。除 Oracle 外结果与 v0.6.15 一致：Oracle 的字节/多字节函数变体（`SUBSTRB`、`INSTR2`、`LENGTHB` 等同族函数）保留较新的修复，会被规范为函数形式。
+
+切换排版风格只切引擎，不会顺带改写其它选项。两种缩进样式（`tabularLeft`、`tabularRight`）在两种风格下都使用 sql-formatter 自身的排版。
 
 ## 配置格式化选项
 
@@ -36,6 +40,7 @@ MongoDB 查询编辑器使用单独的 Mongo Shell 格式化器，不使用本�
 
 | 选项 | 可用值或作用 |
 | --- | --- |
+| 排版风格 | `dbx`（DBX 自研排版，默认）或 `classic`（sql-formatter 上游排版，同 v0.6.15） |
 | 关键字、数据类型、函数、标识符大小写 | `upper`、`lower`、`preserve` |
 | 缩进样式 | `standard`、`tabularLeft`、`tabularRight` |
 | 缩进字符 | 空格或 Tab |
@@ -57,9 +62,10 @@ JSON 模式适合精确编辑、复制或迁移格式化器配置。当前配置
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "formatter": "sql-formatter",
   "options": {
+    "layoutStyle": "dbx",
     "keywordCase": "upper",
     "dataTypeCase": "preserve",
     "functionCase": "preserve",
@@ -68,6 +74,7 @@ JSON 模式适合精确编辑、复制或迁移格式化器配置。当前配置
     "useTabs": false,
     "tabWidth": 2,
     "logicalOperatorNewline": "before",
+    "commaPosition": "after",
     "fromClauseLayout": "sameLine",
     "expressionWidth": 120,
     "linesBetweenQueries": 1,
@@ -82,7 +89,7 @@ JSON 模式适合精确编辑、复制或迁移格式化器配置。当前配置
 JSON 编辑器会实时校验配置。以下情况会阻止应用或导入：
 
 - JSON 语法错误；
-- `version` 不是 `1`；
+- `version` 不是 `1` 或 `2`；
 - `formatter` 不是 `sql-formatter`；
 - `options` 中包含未知字段；
 - 字段值不在当前代码允许的范围内。

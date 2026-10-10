@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   executeQuery: vi.fn(),
   listDataTypes: vi.fn(),
   buildTableStructureChangeSql: vi.fn(),
+  buildCreateTableSql: vi.fn(),
   buildMysqlAutoIncrementSql: vi.fn(),
   getMysqlTableAutoIncrement: vi.fn(),
   executeBatch: vi.fn(),
@@ -230,6 +231,7 @@ vi.mock("@/lib/backend/api", () => ({
   executeQuery: mocks.executeQuery,
   listDataTypes: mocks.listDataTypes,
   buildTableStructureChangeSql: mocks.buildTableStructureChangeSql,
+  buildCreateTableSql: mocks.buildCreateTableSql,
   buildMysqlAutoIncrementSql: mocks.buildMysqlAutoIncrementSql,
   getMysqlTableAutoIncrement: mocks.getMysqlTableAutoIncrement,
   executeBatch: mocks.executeBatch,
@@ -280,7 +282,7 @@ function draft(autoIncrement = false, counter?: { value?: string; originalValue?
   };
 }
 
-async function mountEditor(autoIncrement = false, counter?: { value?: string; originalValue?: string }, draftOverride?: ReturnType<typeof draft>) {
+async function mountEditor(autoIncrement = false, counter?: { value?: string; originalValue?: string }, draftOverride?: ReturnType<typeof draft>, createMode = false) {
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.listDataTypes.mockResolvedValue([]);
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
@@ -291,7 +293,7 @@ async function mountEditor(autoIncrement = false, counter?: { value?: string; or
     connectionId: mocks.connection.id,
     database: "test",
     schema: "test",
-    tableName: "users",
+    tableName: createMode ? undefined : "users",
     draft: draftOverride ?? draft(autoIncrement, counter),
   });
   mountedApps.push(app);
@@ -321,6 +323,7 @@ beforeEach(() => {
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id varchar(255))", cacheStatus: "remote" });
   mocks.invalidateObjectDdl.mockResolvedValue(undefined);
   mocks.loadObjectMetadataFacet.mockResolvedValue({ value: [], cacheStatus: "remote" });
+  mocks.buildCreateTableSql.mockResolvedValue({ statements: ["CREATE TABLE users (id INT PRIMARY KEY AUTO_INCREMENT);"], warnings: [] });
   mocks.getMysqlTableAutoIncrement.mockResolvedValue("10");
   mocks.buildMysqlAutoIncrementSql.mockImplementation(async ({ value }: { value: string }) => `ALTER TABLE \`test\`.\`users\` AUTO_INCREMENT = ${value};`);
   mocks.executeBatch.mockResolvedValue({ affected_rows: 0 });
@@ -498,4 +501,66 @@ describe("TableStructureEditor MySQL AUTO_INCREMENT counter", () => {
     expect(root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")?.value).toBe("20");
     expect(mocks.buildMysqlAutoIncrementSql).not.toHaveBeenCalled();
   });
+});
+
+describe("TableStructureEditor MySQL creation counter", () => {
+  function createDraft(value?: string) {
+    const result = draft(true, { value });
+    result.newTableName = "users";
+    result.columns[0].dataType = "INT";
+    result.columns[0].isPrimaryKey = true;
+    result.columns[0].isNullable = false;
+    return result;
+  }
+
+  it("starts blank and submits edits, clears and toggles without reading server metadata", async () => {
+    const root = await mountEditor(true, undefined, createDraft(), true);
+    const input = root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")!;
+    expect(input).not.toBeNull();
+    expect(input.disabled).toBe(false);
+    expect(input.value).toBe("");
+    expect(input.placeholder).toBe("1");
+    expect(root.textContent).toContain("structureEditor.mysqlAutoIncrementStartHint");
+    expect(root.textContent).not.toContain("contextMenu.mysqlAutoIncrementNonemptyHint");
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: undefined })));
+    input.value = "66";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: "66" })));
+    const label = Array.from(root.querySelectorAll("label")).find((label) => label.textContent?.includes("structureEditor.autoIncrement"))!;
+    const checkbox = label.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(root.querySelector("[data-mysql-auto-increment-editor-trigger]")).toBeNull());
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: undefined })));
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+    const restored = root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")!;
+    expect(restored.value).toBe("66");
+    restored.value = "";
+    restored.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: undefined })));
+    expect(mocks.getMysqlTableAutoIncrement).not.toHaveBeenCalled();
+    expect(mocks.buildMysqlAutoIncrementSql).not.toHaveBeenCalled();
+  });
+
+  it("restores a creation draft without losing integer precision", async () => {
+    const value = "18446744073709551615";
+    const root = await mountEditor(true, undefined, createDraft(value), true);
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: value })));
+    expect(root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")?.value).toBe(value);
+    expect(mocks.getMysqlTableAutoIncrement).not.toHaveBeenCalled();
+  });
+});
+
+it("renders translated creation warnings and prevents execution", async () => {
+  const warning = 'AUTO_INCREMENT column "id" requires a supporting index (first key column for InnoDB).';
+  mocks.buildCreateTableSql.mockResolvedValue({ statements: [], warnings: [warning] });
+  const value = draft(true);
+  value.newTableName = "users";
+  const root = await mountEditor(true, undefined, value, true);
+  await vi.waitFor(() => expect(root.textContent).toContain("structureEditor.mysqlAutoIncrementRequiresIndex"));
+  expect(root.textContent).not.toContain(warning);
+  await expect(mountedEditor?.applyChanges()).resolves.toBe(false);
+  expect(mocks.executeBatch).not.toHaveBeenCalled();
 });

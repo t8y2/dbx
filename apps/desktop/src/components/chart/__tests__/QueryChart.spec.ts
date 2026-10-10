@@ -103,4 +103,61 @@ describe("QueryChart", () => {
     const option = JSON.parse(vchart.getAttribute("data-chart-option") || "{}");
     expect(option.series[0].label.show).toBe(true);
   });
+
+  it("renders check indicators for selected y columns and updates chart option on toggle", async () => {
+    const multiResult: QueryResult = {
+      columns: ["item", "val1", "val2"],
+      rows: [
+        ["A", 10, 20],
+        ["B", 30, 40],
+      ],
+      affected_rows: 2,
+      execution_time_ms: 1,
+    };
+    app = createApp(QueryChart, { result: multiResult });
+    app.mount(container!);
+    await nextTick();
+
+    const trigger = container!.querySelector(".max-w-48") as HTMLButtonElement;
+    expect(trigger).not.toBeNull();
+    trigger.click();
+    await nextTick();
+
+    const items = document.querySelectorAll('[role="menuitemcheckbox"]');
+    expect(items.length).toBe(2);
+
+    // Initial state: first numeric column (val1) is selected, second (val2) is not
+    expect(items[0].getAttribute("aria-checked")).toBe("true");
+    expect(items[0].querySelector("svg")).not.toBeNull();
+    expect(items[1].getAttribute("aria-checked")).toBe("false");
+    expect(items[1].querySelector("svg")).toBeNull();
+
+    const vchart = container!.querySelector("[data-chart-option]") as HTMLDivElement;
+    let option = JSON.parse(vchart.getAttribute("data-chart-option") || "{}");
+    expect(option.series.map((s: { name: string }) => s.name)).toEqual(["val1"]);
+
+    // Click on item 1 (val2) to select it
+    (items[1] as HTMLElement).click();
+    await nextTick();
+
+    expect(items[0].getAttribute("aria-checked")).toBe("true");
+    expect(items[0].querySelector("svg")).not.toBeNull();
+    expect(items[1].getAttribute("aria-checked")).toBe("true");
+    expect(items[1].querySelector("svg")).not.toBeNull();
+
+    option = JSON.parse(vchart.getAttribute("data-chart-option") || "{}");
+    expect(option.series.map((s: { name: string }) => s.name)).toEqual(["val1", "val2"]);
+
+    // Click on item 0 (val1) to deselect it
+    (items[0] as HTMLElement).click();
+    await nextTick();
+
+    expect(items[0].getAttribute("aria-checked")).toBe("false");
+    expect(items[0].querySelector("svg")).toBeNull();
+    expect(items[1].getAttribute("aria-checked")).toBe("true");
+    expect(items[1].querySelector("svg")).not.toBeNull();
+
+    option = JSON.parse(vchart.getAttribute("data-chart-option") || "{}");
+    expect(option.series.map((s: { name: string }) => s.name)).toEqual(["val2"]);
+  });
 });

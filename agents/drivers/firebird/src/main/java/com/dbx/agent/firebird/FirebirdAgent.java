@@ -9,17 +9,78 @@ import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
+import com.dbx.agent.TriggerInfo;
 import java.nio.charset.Charset;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 
 public final class FirebirdAgent extends ConfiguredJdbcAgent {
+    private static final String COMMON_OBJECTS_SQL = """
+        SELECT TRIM(RDB$GENERATOR_NAME) AS OBJECT_NAME, 'SEQUENCE' AS OBJECT_TYPE, NULL AS OBJECT_COMMENT
+          FROM RDB$GENERATORS WHERE COALESCE(RDB$SYSTEM_FLAG, 0) = 0
+        UNION ALL
+        SELECT TRIM(RDB$TRIGGER_NAME), 'TRIGGER', TRIM(RDB$RELATION_NAME)
+          FROM RDB$TRIGGERS WHERE COALESCE(RDB$SYSTEM_FLAG, 0) = 0
+        UNION ALL
+        SELECT TRIM(RDB$INDEX_NAME), 'INDEX', TRIM(RDB$RELATION_NAME)
+          FROM RDB$INDICES WHERE COALESCE(RDB$SYSTEM_FLAG, 0) = 0
+        """.stripIndent().trim();
+
+    static String catalogObjectsSql(int majorVersion) {
+        if (majorVersion < 3) {
+            return COMMON_OBJECTS_SQL + " UNION ALL SELECT TRIM(RDB$FUNCTION_NAME), 'FUNCTION_UDF', TRIM(RDB$MODULE_NAME) FROM RDB$FUNCTIONS WHERE COALESCE(RDB$SYSTEM_FLAG,0)=0";
+        }
+        return COMMON_OBJECTS_SQL + " UNION ALL " + """
+            SELECT TRIM(RDB$PACKAGE_NAME), 'PACKAGE', NULL
+              FROM RDB$PACKAGES WHERE COALESCE(RDB$SYSTEM_FLAG, 0) = 0
+            UNION ALL
+            SELECT CASE WHEN RDB$PACKAGE_NAME IS NULL THEN TRIM(RDB$FUNCTION_NAME)
+                        ELSE TRIM(RDB$PACKAGE_NAME) || '.' || TRIM(RDB$FUNCTION_NAME) END,
+                   CASE WHEN NULLIF(TRIM(RDB$MODULE_NAME),'') IS NULL AND NULLIF(TRIM(RDB$ENGINE_NAME),'') IS NULL
+                        THEN 'FUNCTION_INTERNAL' ELSE 'FUNCTION_UDF' END,
+                   COALESCE(NULLIF(TRIM(RDB$MODULE_NAME), ''), NULLIF(TRIM(RDB$ENGINE_NAME), ''))
+              FROM RDB$FUNCTIONS WHERE COALESCE(RDB$SYSTEM_FLAG, 0) = 0
+            """.stripIndent().trim();
+    }
     private Charset dataCharset;
+
+    @Override
+    public List<TriggerInfo> listTriggers(String schema, String table) {
+        return unchecked(() -> {
+            List<TriggerInfo> triggers = new ArrayList<>();
+            try (PreparedStatement statement = requireConnection().prepareStatement(
+                "SELECT TRIM(RDB$TRIGGER_NAME), RDB$TRIGGER_TYPE FROM RDB$TRIGGERS WHERE RDB$RELATION_NAME = ? AND COALESCE(RDB$SYSTEM_FLAG,0)=0 ORDER BY RDB$TRIGGER_NAME")) {
+                statement.setString(1, table);
+                try (ResultSet result = statement.executeQuery()) {
+                    while (result.next()) {
+                        int type = result.getInt(2);
+                        triggers.add(new TriggerInfo(result.getString(1), triggerEvent(type), type % 2 == 1 ? "BEFORE" : "AFTER"));
+                    }
+                }
+            }
+            return triggers;
+        });
+    }
+
+    static String triggerEvent(int type) {
+        return switch (type) {
+            case 1, 2 -> "INSERT";
+            case 3, 4 -> "UPDATE";
+            case 5, 6 -> "DELETE";
+            case 17, 18 -> "INSERT OR UPDATE";
+            case 25, 26 -> "INSERT OR DELETE";
+            case 27, 28 -> "UPDATE OR DELETE";
+            case 113, 114 -> "INSERT OR UPDATE OR DELETE";
+            default -> Integer.toString(type);
+        };
+    }
 
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
@@ -75,9 +136,44 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
 
     @Override
     public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
-        List<ObjectInfo> objects = super.listObjects(schema, constraints);
+        List<ObjectInfo> objects = new ArrayList<>(super.listObjects(schema, MetadataListConstraints.NONE));
+        // JDBC metadata flattens all Firebird functions into FUNCTION and does
+        // not expose generators, packages, database triggers, or indexes. Use
+        // the Firebird catalogs so the object browser can keep those categories
+        // distinct without changing the table-scoped metadata APIs.
+        for (Iterator<ObjectInfo> iterator = objects.iterator(); iterator.hasNext();) {
+            ObjectInfo object = iterator.next();
+            if ("FUNCTION".equalsIgnoreCase(object.getObject_type())) iterator.remove();
+        }
+        unchecked(() -> {
+            try (PreparedStatement statement = requireConnection().prepareStatement(catalogObjectsSql(requireConnection().getMetaData().getDatabaseMajorVersion()));
+                 ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    String name = trimToNull(resultSet.getString("OBJECT_NAME"));
+                    String type = trimToNull(resultSet.getString("OBJECT_TYPE"));
+                    if (name == null || type == null) continue;
+                    String comment = decodeLegacyText(trimToNull(resultSet.getString("OBJECT_COMMENT")));
+                    ObjectInfo object = new ObjectInfo(name, type, schema, comment);
+                    if ("INDEX".equals(type) || "TRIGGER".equals(type)) {
+                        object.setParent_name(comment);
+                        object.setComment(null);
+                    }
+                    objects.add(object);
+                }
+            }
+            return null;
+        });
         for (ObjectInfo object : objects) object.setComment(decodeLegacyText(object.getComment()));
-        return objects;
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        // Preserve the existing FUNCTION metadata request used by older clients
+        // while exposing the two precise categories to the new object browser.
+        if (normalized.getObjectTypes() != null && normalized.getObjectTypes().contains("FUNCTION")) {
+            for (ObjectInfo object : objects) {
+                if (object.getObject_type().startsWith("FUNCTION_")) object.setObject_type("FUNCTION");
+            }
+        }
+        objects.sort(Comparator.comparing(ObjectInfo::getName).thenComparing(ObjectInfo::getObject_type));
+        return normalized.filterObjects(objects);
     }
     static final String PROCEDURE_SOURCE_SQL = """
         SELECT
@@ -137,6 +233,10 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
 
     @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
+        String requestedType = normalizeObjectSourceType(objectType);
+        if (!"PROCEDURE".equals(requestedType)) {
+            return unchecked(() -> FirebirdObjectSource.read(requireConnection(), schema, name, requestedType, this::decodeLegacyText));
+        }
         String normalizedType = normalizeObjectSourceType(objectType);
         return unchecked(() -> {
             String body = null;
@@ -191,7 +291,7 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
             throw new IllegalArgumentException("Unsupported object type: null");
         }
         String normalized = objectType.trim().toUpperCase(Locale.ROOT);
-        if (!"PROCEDURE".equals(normalized)) {
+        if (!List.of("PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "PACKAGE", "PACKAGE_BODY", "VIEW").contains(normalized)) {
             throw new IllegalArgumentException("Unsupported object type: " + objectType);
         }
         return normalized;

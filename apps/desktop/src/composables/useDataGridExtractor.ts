@@ -374,7 +374,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     }
     if (extractor === "raw") {
       const request = buildRequest(extractor, extractorOptions);
-      return request !== null && request.rows.length * request.selectedColumnIndexes.length === 1;
+      return request !== null && request.rows.length > 0 && request.selectedColumnIndexes.length === 1;
     }
     return selectionData() !== null;
   }

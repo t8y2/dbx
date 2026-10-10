@@ -97,6 +97,7 @@ type connectionRuntime struct {
 	// legacySingleDatabase is set for servers that negotiated Bolt 3 or older:
 	// they have a single default database and reject session database selection.
 	legacySingleDatabase bool
+	legacyGraphIDs       bool
 	references           int
 	closed               bool
 	mu                   sync.Mutex

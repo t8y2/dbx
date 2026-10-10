@@ -8,6 +8,7 @@ import {
   isCancelSearchShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
+  isCloseWindowShortcut,
   isCopySidebarSelectionShortcut,
   isDisconnectSidebarConnectionShortcut,
   isExecuteSqlShortcut,
@@ -293,6 +294,14 @@ test("matches the platform modifier for closing query tabs", () => {
   assert.equal(isCloseTabShortcut({ key: "w", metaKey: true }), true);
   assert.equal(isCloseTabShortcut({ key: "w", ctrlKey: true }), true);
   assert.equal(isCloseTabShortcut({ key: "w", ctrlKey: true }, { closeTab: "Meta+W" } as any), true);
+});
+
+test("matches the shortcut for closing window", () => {
+  assert.equal(isCloseWindowShortcut({ key: "W", metaKey: true, shiftKey: true }), true);
+  assert.equal(isCloseWindowShortcut({ key: "W", ctrlKey: true, shiftKey: true }), true);
+  assert.equal(isCloseWindowShortcut({ key: "w", metaKey: true, shiftKey: true }), true);
+  assert.equal(isCloseWindowShortcut({ key: "w", ctrlKey: true, shiftKey: true }), true);
+  assert.equal(isCloseWindowShortcut({ key: "q", ctrlKey: true }, { closeWindow: "Mod+Q" }), true);
 });
 
 test("matches platform shortcuts for closing other tabs", () => {

@@ -50,7 +50,7 @@ test("load-all selects the last loaded row only after a valid append completes",
   // ES guard and the large-shot confirmation, so extract both bodies.
   const loadAllFn = source.match(/function loadAllRowsAndGoToLast\(\) \{[\s\S]*?\nfunction confirmLoadAllRows\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
   assert.match(loadAllFn, /gridSurfaceBusy\.value \|\| infiniteScrollLoading\.value/);
-  assert.match(loadAllFn, /dataGridLoadAllSegment/);
+  assert.match(loadAllFn, /const segment = nextLoadAllSegment\(\)/);
   assert.match(loadAllFn, /if \(!segment\) \{[\s\S]*?selectAndRevealLastLoadedRow\(\);[\s\S]*?return;/);
   assert.match(loadAllFn, /resolvedDatabaseType\.value === "elasticsearch" \|\| resolvedDatabaseType\.value === "easysearch"/);
   assert.match(loadAllFn, /LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD/);

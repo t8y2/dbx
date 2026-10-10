@@ -227,6 +227,12 @@ impl SqlDialectProfile {
             return Self::sql_server();
         }
 
+        if matches!(db_type, DatabaseType::Db2) {
+            // DB2 block comments nest; cursor extraction must skip the complete
+            // leading comment before handing the query to the Explain gate.
+            return Self { supports_nested_block_comments: true, ..Self::default() };
+        }
+
         if matches!(db_type, DatabaseType::ClickHouse) {
             // ClickHouse documents that C-style block comments nest.
             return Self { supports_nested_block_comments: true, ..Self::default() };
@@ -877,7 +883,12 @@ impl SqlStatementSplitter {
                     }
                 }
                 if let Some(delim) = self.custom_delimiter.clone() {
-                    if self.buffer.ends_with(delim.as_str()) {
+                    // A DELIMITER command can itself end with the active
+                    // delimiter (for example `DELIMITER ;;`). Keep the
+                    // directive intact so the newline handler can switch the
+                    // delimiter instead of emitting a bogus `delimiter`
+                    // statement or advancing past the line start.
+                    if self.buffer.ends_with(delim.as_str()) && !self.on_delimiter_line() {
                         self.buffer.truncate(self.buffer.len() - delim.len());
                         self.push_current_statement(&mut statements);
                     }
@@ -1461,7 +1472,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                 i += ch.len_utf8();
                 if !in_single_quote && !in_double_quote && !in_backtick {
                     if let Some(delimiter) = &custom_delimiter {
-                        if sql[start..i].ends_with(delimiter) {
+                        if sql[start..i].ends_with(delimiter) && !is_on_delimiter_line(sql, start, i, options) {
                             let end = i - delimiter.len();
                             push_statement_range(&mut ranges, sql, start, end, options);
                             start = i;
@@ -6012,6 +6023,45 @@ delimiter ;";
     }
 
     #[test]
+    fn mysql_repeated_delimiter_command_does_not_emit_directive_or_panic() {
+        let sql = r#"DELIMITER ;;
+drop procedure if exists p_ludp_data_table_scripts;;
+delimiter ;;
+create procedure p_ludp_data_table_scripts()
+begin
+    -- 定义变量,存储表及字段存在状态
+   declare filedExist INT DEFAULT 0;
+   declare currentDatabaseName VARCHAR(200) DEFAULT '';
+   declare tableCount INT DEFAULT 0;
+
+end ;;
+call p_ludp_data_table_scripts();"#;
+
+        let expected = vec![
+            "drop procedure if exists p_ludp_data_table_scripts",
+            "create procedure p_ludp_data_table_scripts()\nbegin\n    -- 定义变量,存储表及字段存在状态\n   declare filedExist INT DEFAULT 0;\n   declare currentDatabaseName VARCHAR(200) DEFAULT '';\n   declare tableCount INT DEFAULT 0;\n\nend",
+            "call p_ludp_data_table_scripts();",
+        ];
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Mysql), expected);
+
+        let ranges =
+            split_sql_statement_ranges_with_options(sql, SqlParsingOptions::for_database_type(DatabaseType::Mysql));
+        assert_eq!(ranges.iter().map(|range| range.text.as_str()).collect::<Vec<_>>(), expected);
+
+        let cursor = sql[..sql.find("declare currentDatabaseName").unwrap()].encode_utf16().count();
+        assert_eq!(find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Mysql), expected[1]);
+
+        let mut splitter =
+            SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Mysql));
+        let mut streamed = Vec::new();
+        for ch in sql.chars() {
+            streamed.extend(splitter.push_chunk(&ch.to_string()));
+        }
+        streamed.extend(splitter.finish());
+        assert_eq!(streamed, expected);
+    }
+
+    #[test]
     fn mysql_delimiter_command_skips_empty_custom_delimiter_statement_per_issue_1988() {
         let sql = "\
 select COUNT(1) FROM your_table;
@@ -6117,6 +6167,20 @@ delimiter ;";
         );
     }
 
+    #[test]
+    fn db2_current_statement_skips_complete_nested_comments() {
+        let sql = "/* outer /* inner */ trailing */ SELECT IBMREQD FROM SYSIBM.SYSDUMMY1;";
+        let cursor = sql.encode_utf16().count();
+        assert_eq!(
+            find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Db2),
+            "SELECT IBMREQD FROM SYSIBM.SYSDUMMY1"
+        );
+        let script = "/* outer /* SELECT 99; */ DELETE FROM hidden; */ VALUES 1; VALUES 2;";
+        assert_eq!(
+            split_sql_statements_for_database(script, DatabaseType::Db2),
+            vec!["/* outer /* SELECT 99; */ DELETE FROM hidden; */ VALUES 1", "VALUES 2"]
+        );
+    }
     #[test]
     fn mysql_current_statement_strips_other_leading_block_comments() {
         for comment in ["/* ordinary */", "/*unknown*/", "/* proxy */", "/*PROXY*/"] {

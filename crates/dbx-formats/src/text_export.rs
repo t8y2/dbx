@@ -12,6 +12,36 @@ pub struct QueryResultTextExportData {
     pub rows: Vec<Vec<Value>>,
 }
 
+pub fn normalize_nebula_export_rows(rows: &mut [Vec<Value>]) {
+    for value in rows.iter_mut().flatten() {
+        let graph_cell = value.get("__dbx_graph_cell").and_then(Value::as_str) == Some("nebula-v1")
+            && value.get("kind").is_some_and(Value::is_string)
+            && value.get("nodes").is_some_and(Value::is_array)
+            && value.get("edges").is_some_and(Value::is_array);
+        if graph_cell {
+            if let Some(display) = value.get("display").and_then(Value::as_str) {
+                *value = Value::String(display.to_owned());
+            }
+        }
+    }
+}
+
+pub fn normalize_neo4j_export_rows(rows: &mut [Vec<Value>]) {
+    for value in rows.iter_mut().flatten() {
+        let graph_cell = value.get("__dbx_graph_cell").and_then(Value::as_str) == Some("neo4j-v1")
+            && value.get("kind").is_some_and(Value::is_string)
+            && value.get("nodes").is_some_and(Value::is_array)
+            && value.get("edges").is_some_and(Value::is_array);
+        let node_cell = value.get("__dbx_neo4j_node").and_then(Value::as_str) == Some("v1")
+            && value.get("properties").is_some_and(Value::is_array);
+        if graph_cell || node_cell {
+            if let Some(display) = value.get("display").and_then(Value::as_str) {
+                *value = Value::String(display.to_owned());
+            }
+        }
+    }
+}
+
 pub fn format_json(data: &QueryResultTextExportData) -> Result<String, String> {
     let rows = data
         .rows
@@ -428,7 +458,114 @@ fn chrono_local_now() -> String {
 mod tests {
     use serde_json::{json, Value};
 
-    use super::{format_html, format_json, format_markdown, QueryResultTextExportData};
+    use super::{
+        format_html, format_json, format_markdown, normalize_nebula_export_rows, normalize_neo4j_export_rows,
+        QueryResultTextExportData,
+    };
+
+    #[test]
+    fn nebula_exports_use_display_cells_without_leaking_graph_metadata() {
+        let mut rows = vec![
+            vec![
+                json!({
+                    "__dbx_graph_cell": "nebula-v1", "kind": "vertex", "display": "(:\"player\" {\"name\":\"Tim\"})",
+                    "nodes": [{"id": "vid:1", "labels": ["player"], "properties": [{"name": "name", "value": "Tim"}]}], "edges": []
+                }),
+                json!(false),
+                Value::Null,
+            ],
+            vec![
+                json!({"__dbx_graph_cell": "nebula-v1", "kind": "edge", "display": "[:follow]", "nodes": [], "edges": [{"type": "follow"}]}),
+                json!(7),
+                json!("plain"),
+            ],
+        ];
+        normalize_nebula_export_rows(&mut rows);
+        assert_eq!(rows[0], vec![json!("(:\"player\" {\"name\":\"Tim\"})"), json!(false), Value::Null]);
+        assert_eq!(rows[1], vec![json!("[:follow]"), json!(7), json!("plain")]);
+        let data = QueryResultTextExportData {
+            title: None,
+            columns: vec!["entity".into(), "value".into(), "note".into()],
+            rows,
+        };
+        let exported: Value = serde_json::from_str(&format_json(&data).unwrap()).unwrap();
+        assert_eq!(exported[0]["entity"], json!("(:\"player\" {\"name\":\"Tim\"})"));
+        assert!(!format_markdown(&data).contains("__dbx_graph_cell"));
+    }
+
+    #[test]
+    fn nebula_export_normalization_preserves_ordinary_and_unknown_objects() {
+        let mut rows = vec![vec![
+            json!({"display": "ordinary", "properties": []}),
+            json!({"__dbx_graph_cell": "neo4j-v1", "kind": "vertex", "display": "neo4j", "nodes": [], "edges": []}),
+            json!({"__dbx_graph_cell": "nebula-v2", "kind": "vertex", "display": "future", "nodes": [], "edges": []}),
+            json!({"__dbx_graph_cell": "nebula-v1", "kind": "vertex", "display": 42, "nodes": [], "edges": []}),
+            json!({"__dbx_graph_cell": "nebula-v1", "kind": "vertex", "display": "malformed", "nodes": null, "edges": []}),
+        ]];
+        let original = rows.clone();
+        normalize_nebula_export_rows(&mut rows);
+        assert_eq!(rows[0][0], json!({"display": "ordinary", "properties": []}));
+        assert_eq!(rows[0][1], original[0][1]);
+        assert_eq!(rows[0][2], original[0][2]);
+        assert_eq!(rows[0][3], original[0][3]);
+        assert_eq!(rows[0][4], original[0][4]);
+    }
+
+    #[test]
+    fn neo4j_exports_use_display_cells_without_leaking_graph_metadata() {
+        let displays = [
+            ("vertex", "(:Person {\"count\":9007199254740993})"),
+            ("edge", "[:KNOWS]"),
+            ("path", "{\"nodes\":[],\"relationships\":[]}"),
+            ("map", "{\"count\":9007199254740993,\"node\":{\"labels\":[\"Person\"]}}"),
+        ];
+        let mut rows = displays
+            .iter()
+            .map(|(kind, display)| {
+                vec![
+                    json!({
+                        "__dbx_graph_cell": "neo4j-v1", "kind": kind, "display": display,
+                        "nodes": [], "edges": [], "displayParts": ["internal metadata"]
+                    }),
+                    json!(false),
+                    Value::Null,
+                ]
+            })
+            .collect::<Vec<_>>();
+        rows.push(vec![
+            json!({"__dbx_neo4j_node":"v1", "display":"(:Legacy)", "properties": []}),
+            json!(7),
+            json!("plain"),
+        ]);
+        normalize_neo4j_export_rows(&mut rows);
+        for (index, (_, display)) in displays.iter().enumerate() {
+            assert_eq!(rows[index], vec![json!(display), json!(false), Value::Null]);
+        }
+        assert_eq!(rows[4], vec![json!("(:Legacy)"), json!(7), json!("plain")]);
+        let data = QueryResultTextExportData {
+            title: None,
+            columns: vec!["entity".into(), "value".into(), "note".into()],
+            rows,
+        };
+        let exported: Value = serde_json::from_str(&format_json(&data).unwrap()).unwrap();
+        assert_eq!(exported[0]["entity"], json!(displays[0].1));
+        assert_eq!(exported[1]["entity"], json!("[:KNOWS]"));
+        assert!(!format_markdown(&data).contains("__dbx_graph_cell"));
+    }
+
+    #[test]
+    fn neo4j_export_normalization_preserves_ordinary_and_unknown_objects() {
+        let mut rows = vec![vec![
+            json!({"display":"ordinary", "properties":[]}),
+            json!({"__dbx_graph_cell":"nebula-v1", "kind":"vertex", "display":"nebula", "nodes":[], "edges":[]}),
+            json!({"__dbx_graph_cell":"neo4j-v2", "kind":"vertex", "display":"future", "nodes":[], "edges":[]}),
+            json!({"__dbx_graph_cell":"neo4j-v1", "kind":"vertex", "display":42, "nodes":[], "edges":[]}),
+            json!({"__dbx_graph_cell":"neo4j-v1", "kind":"vertex", "display":"malformed", "nodes":null, "edges":[]}),
+        ]];
+        let original = rows.clone();
+        normalize_neo4j_export_rows(&mut rows);
+        assert_eq!(rows, original);
+    }
 
     #[test]
     fn formats_json_rows_as_objects() {

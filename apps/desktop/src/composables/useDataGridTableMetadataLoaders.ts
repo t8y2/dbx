@@ -1,5 +1,6 @@
 import { computed, type ComputedRef, type Ref } from "vue";
 import * as api from "@/lib/backend/api";
+import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { applyDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
@@ -84,20 +85,27 @@ export interface DataGridTableMetadataLoaderOptions {
 export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLoaderOptions) {
   const { props, state } = options;
 
+  const defaultSchema = () => {
+    if (isSchemaAware(options.resolvedDatabaseType.value)) {
+      return props.tableMeta?.schema || props.schema || "";
+    }
+    return props.tableMeta?.schema || props.schema || props.database || "";
+  };
+
   const currentTableIdentity = (kind: "columns" | "owner" | "indexes" | "foreignKeys" | "constraints") =>
     kind === "foreignKeys"
       ? foreignKeyTableIdentity({
           connectionId: props.connectionId,
           database: props.database,
           catalog: props.tableMeta?.catalog,
-          schema: props.tableMeta?.schema,
+          schema: defaultSchema(),
           tableName: props.tableMeta?.tableName,
         })
       : columnIndexTableIdentity({
           connectionId: props.connectionId,
           database: props.database,
           catalog: props.tableMeta?.catalog,
-          schema: props.tableMeta?.schema,
+          schema: defaultSchema(),
           tableName: props.tableMeta?.tableName,
         });
 
@@ -106,7 +114,7 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
     return {
       connectionId: props.connectionId,
       database: props.database || "",
-      schema: props.tableMeta.schema || props.database || "",
+      schema: defaultSchema(),
       tableName: props.tableMeta.tableName,
       catalog: props.tableMeta.catalog,
       objectType: tableObjectSourceKind(props.tableMeta.tableType),
@@ -123,7 +131,7 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
     // Query execution and source-table metadata can belong to different
     // databases (for example SQL Server three-part table references).
     request.database = props.tableMeta?.database || request.database;
-    request.schema = props.tableMeta?.schema || props.schema || props.database || "";
+    request.schema = defaultSchema();
     options.showTableInfo.value = true;
     state.ddlLoading.value = true;
     try {

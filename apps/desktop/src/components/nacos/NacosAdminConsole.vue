@@ -65,7 +65,7 @@ import { useTheme } from "@/composables/useTheme";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
-import { validateNacosConfigContent, nacosConfigDiagnosticSeverity, nacosConfigValidationBlocksPublish, type NacosConfigDiagnostic } from "@/lib/nacos/nacosConfigValidation";
+import { validateNacosConfigContent, nacosConfigDiagnosticSeverity, nacosConfigValidationHasErrors, type NacosConfigDiagnostic } from "@/lib/nacos/nacosConfigValidation";
 import { loadNacosConfigLanguage, resolveNacosConfigFormat } from "@/lib/nacos/nacosConfigLanguage";
 import { nacosConfigYamlLintDiagnostics, nacosConfigYamlLintExtension } from "@/lib/nacos/nacosConfigYamlLint";
 import { translateNacosYamlDiagnostic } from "@/lib/nacos/nacosYamlDiagnostics";
@@ -879,7 +879,7 @@ function clearConfigValidation(clearHighlight = true) {
 /** True when the open config is YAML, which shows diagnostics through CodeMirror's linter rather than the legacy decoration. */
 const configUsesYamlLint = computed(() => resolveNacosConfigFormat(configType.value, configDataId.value) === "yaml");
 
-const configValidationHasError = computed(() => configValidationDiagnostics.value.some((diagnostic) => nacosConfigDiagnosticSeverity(diagnostic) === "error"));
+const configValidationHasError = computed(() => nacosConfigValidationHasErrors(configValidationDiagnostics.value));
 
 function configDiagnosticTranslate(key: string, params: Record<string, string>) {
   return t(key, params);
@@ -906,25 +906,17 @@ function refreshConfigValidationHighlights(content: string, generation: number, 
   });
 }
 
-function validateCurrentConfig(showSuccess = true): boolean {
-  if (!selectedConfig.value) return true;
+function validateCurrentConfig(): void {
+  if (!selectedConfig.value) return;
   const diagnostics = validateNacosConfigContent(configContent.value, configType.value);
   configValidationDiagnostics.value = diagnostics;
   configValidationHighlightActive = false;
   configEditorView.value?.dispatch({ effects: setConfigValidationHighlight.of([]) });
-  // Only errors block publishing: a parser warning must never trap a config the
-  // user is entitled to publish (#9405).
-  if (nacosConfigValidationBlocksPublish(diagnostics)) {
-    configValidationOpen.value = true;
-    return false;
-  }
-  if (!showSuccess) return true;
   if (diagnostics.length) {
     configValidationOpen.value = true;
-    return true;
+    return;
   }
   toast(t("nacos.validationPassed"), 2000);
-  return true;
 }
 
 function focusConfigValidationDiagnostic() {
@@ -1845,7 +1837,7 @@ async function setConfigFormat(format: string) {
 
 function requestSaveConfig() {
   if (!selectedConfig.value || !canRequestConfigSave.value) return;
-  if (!validateCurrentConfig(false)) return;
+  // Syntax diagnostics are advisory; publish the original content for Nacos to accept or reject.
   if (!isCreatingConfig.value && configContent.value !== originalConfigContent.value) {
     pendingConfigSave.value = true;
     return;

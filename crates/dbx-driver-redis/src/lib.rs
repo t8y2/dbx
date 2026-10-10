@@ -4441,12 +4441,37 @@ where
         return Ok(());
     }
 
+    let fields = items
+        .iter()
+        .map(|item| {
+            base64::engine::general_purpose::STANDARD
+                .decode(&item.field.raw_base64)
+                .map_err(|error| format!("Invalid Redis hash field encoding: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Redis < 7.4 echoes command arguments verbatim in unknown-command errors.
+    // Binary arguments can make that RESP error invalid UTF-8 (or inject CRLF),
+    // so redis-rs fails to parse it before the optional-error fallback can run.
+    // Discover support using ASCII-only arguments before sending unsafe bytes.
+    let unsafe_error_arg =
+        |bytes: &[u8]| std::str::from_utf8(bytes).is_err() || bytes.windows(2).any(|pair| pair == b"\r\n");
+    if unsafe_error_arg(key) || fields.iter().any(|field| unsafe_error_arg(field)) {
+        let info: RedisRawValue = match redis::cmd("COMMAND").arg("INFO").arg("HTTL").query_async(con).await {
+            Ok(info) => info,
+            Err(error) if is_optional_hash_field_expiry_error(&error) => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        };
+        if matches!(info, RedisRawValue::Nil)
+            || matches!(&info, RedisRawValue::Array(commands) if commands.is_empty() || matches!(commands.first(), Some(RedisRawValue::Nil)))
+        {
+            return Ok(());
+        }
+    }
+
     let mut command = redis::cmd("HTTL");
-    command.arg(key).arg("FIELDS").arg(items.len());
-    for item in items.iter() {
-        let field = base64::engine::general_purpose::STANDARD
-            .decode(&item.field.raw_base64)
-            .map_err(|error| format!("Invalid Redis hash field encoding: {error}"))?;
+    command.arg(key).arg("FIELDS").arg(fields.len());
+    for field in fields {
         command.arg(field);
     }
 
@@ -6796,6 +6821,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn binary_hash_ttl_discovery_avoids_unsafe_unknown_command_errors() {
+        for (key, field) in
+            [(b"hash".as_slice(), b"\x03kryo\xf3".as_slice()), (b"hash\xff", b"field"), (b"hash", b"field\r\n")]
+        {
+            let mut items = vec![RedisHashItem {
+                field: redis_blob_from_bytes(field),
+                value: redis_blob_from_bytes(b"\x01value\xff"),
+                field_ttl: None,
+            }];
+            let original = items.clone();
+            let mut con = FakeRedisConnection::new(vec![RedisRawValue::Array(vec![RedisRawValue::Nil])]);
+            super::attach_hash_field_ttls(&mut con, key, &mut items).await.unwrap();
+            assert_eq!(items, original);
+            assert_eq!(con.command_count("COMMAND"), 1);
+            assert_eq!(con.commands.len(), 1);
+            assert!(!con.commands[0].contains("\r\nFIELDS\r\n"));
+            assert!(con.responses.is_empty());
+
+            let mut con = FakeRedisConnection::new(vec![
+                RedisRawValue::Array(vec![RedisRawValue::Array(vec![bulk("httl")])]),
+                httl_response(1, 42),
+            ]);
+            super::attach_hash_field_ttls(&mut con, key, &mut items).await.unwrap();
+            assert_eq!(items[0].field_ttl, Some(42));
+            assert_eq!(con.commands.len(), 2);
+            assert!(con.commands[1].contains("\r\nFIELDS\r\n"));
+            assert!(con.responses.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn binary_hash_command_discovery_only_suppresses_optional_errors() {
+        let mut items = vec![RedisHashItem {
+            field: redis_blob_from_bytes(b"\x03kryo\xf3"),
+            value: text_blob("value"),
+            field_ttl: None,
+        }];
+        let mut con = FakeRedisConnection::with_results(vec![Err(noperm("command"))]);
+        super::attach_hash_field_ttls(&mut con, b"hash", &mut items).await.unwrap();
+        assert_eq!(con.commands.len(), 1);
+        assert_eq!(items[0].field_ttl, None);
+
+        let mut con = FakeRedisConnection::with_results(vec![Err(redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "server error",
+            "unrelated discovery failure".to_string(),
+        )))]);
+        assert!(super::attach_hash_field_ttls(&mut con, b"hash", &mut items)
+            .await
+            .unwrap_err()
+            .contains("unrelated discovery failure"));
+    }
+
+    #[tokio::test]
     async fn hash_load_more_attaches_field_ttl_when_supported() {
         let mut con = FakeRedisConnection::new(vec![
             hscan_response("0", vec![("session", "Ada")]),
@@ -7911,6 +7990,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

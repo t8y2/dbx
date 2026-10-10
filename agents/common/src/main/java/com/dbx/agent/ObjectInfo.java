@@ -8,6 +8,7 @@ public final class ObjectInfo {
     private String schema;
     private String comment;
     private Boolean valid;
+    private String parent_name;
 
     public ObjectInfo() {
         this("", "", null, null, null);
@@ -69,6 +70,14 @@ public final class ObjectInfo {
         this.valid = valid;
     }
 
+    public String getParent_name() {
+        return parent_name;
+    }
+
+    public void setParent_name(String parentName) {
+        this.parent_name = parentName;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -78,12 +87,13 @@ public final class ObjectInfo {
             && Objects.equals(object_type, that.object_type)
             && Objects.equals(schema, that.schema)
             && Objects.equals(comment, that.comment)
+            && Objects.equals(parent_name, that.parent_name)
             && Objects.equals(valid, that.valid);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, object_type, schema, comment, valid);
+        return Objects.hash(name, object_type, schema, comment, valid, parent_name);
     }
 
     @Override

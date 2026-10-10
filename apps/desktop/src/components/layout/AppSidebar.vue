@@ -122,6 +122,10 @@ function locateTabInSidebar(tab: QueryTab) {
   return connectionTreeRef.value?.locateTabInSidebar(tab);
 }
 
+function disconnectAllActiveConnections() {
+  return connectionTreeRef.value?.disconnectAllActiveConnections();
+}
+
 function clearConnectionMultiSelection() {
   applyConnectionMultiSelection(connectionStore, emptyConnectionMultiSelection());
 }
@@ -198,7 +202,7 @@ function confirmCreateSelectedGroup() {
   showCreateSelectedGroupDialog.value = false;
 }
 
-defineExpose({ focusSearch, locateTabInSidebar });
+defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections });
 </script>
 
 <template>

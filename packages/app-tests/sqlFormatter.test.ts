@@ -301,3 +301,39 @@ test("compressSqlText preserves unterminated block comments", () => {
   const sql = "DELETE FROM users /* unfinished";
   assert.equal(compressSqlText(sql), sql);
 });
+
+test("Oracle: formats byte and code-point function variants with functionCase", async () => {
+  const formattedLower = await formatSqlText("SELECT SUBSTR(a, 1), SUBSTRB(b, 1), INSTRB(c, 'x'), LENGTHB(d) FROM dual", "oracle", {
+    functionCase: "lower",
+  });
+  assert.match(formattedLower, /\bsubstr\(/);
+  assert.match(formattedLower, /\bsubstrb\(/);
+  assert.match(formattedLower, /\binstrb\(/);
+  assert.match(formattedLower, /\blengthb\(/);
+
+  const formattedUpper = await formatSqlText("select substr(a, 1), substrb(b, 1), instrb(c, 'x'), lengthb(d) from dual", "oracle", {
+    functionCase: "upper",
+  });
+  assert.match(formattedUpper, /\bSUBSTR\(/);
+  assert.match(formattedUpper, /\bSUBSTRB\(/);
+  assert.match(formattedUpper, /\bINSTRB\(/);
+  assert.match(formattedUpper, /\bLENGTHB\(/);
+});
+
+test("formats SQL preserving original keyword case when keywordCase is preserve (#11382)", async () => {
+  const sql = "select id, name as user_name from users where id = 1 and status in (1, 2) order by id desc limit 10";
+  const formatted = await formatSqlText(sql, "generic", { keywordCase: "preserve" });
+  assert.match(formatted, /^select\b/);
+  assert.match(formatted, /\bas\b/);
+  assert.match(formatted, /\bfrom\b/);
+  assert.match(formatted, /\bwhere\b/);
+  assert.match(formatted, /\band\b/);
+  assert.match(formatted, /\bin\b/);
+  assert.match(formatted, /\border by\b/);
+  assert.match(formatted, /\bdesc\b/);
+  assert.match(formatted, /\blimit\b/);
+  assert.doesNotMatch(formatted, /\bSELECT\b/);
+  assert.doesNotMatch(formatted, /\bFROM\b/);
+  assert.doesNotMatch(formatted, /\bWHERE\b/);
+});
+

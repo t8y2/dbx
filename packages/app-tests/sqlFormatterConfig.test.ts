@@ -72,7 +72,7 @@ test("serializes formatter config as a stable versioned envelope", () => {
     json,
     JSON.stringify(
       {
-        version: 1,
+        version: 2,
         formatter: "sql-formatter",
         options: {
           ...defaultOptionSettings,
@@ -153,9 +153,30 @@ test("ignores legacy editor shortcut fields in formatter config files", () => {
 
 test("rejects malformed formatter config files", () => {
   assert.deepEqual(parseSqlFormatterConfig("{bad json").ok, false);
-  assert.deepEqual(parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: {} })).ok, false);
+  assert.deepEqual(parseSqlFormatterConfig(JSON.stringify({ version: 3, formatter: "sql-formatter", options: {} })).ok, false);
   assert.deepEqual(parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "prettier", options: {} })).ok, false);
   assert.deepEqual(parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { unknown: true } })).ok, false);
+});
+
+test("accepts config versions 1 and 2 and defaults a missing layoutStyle to dbx", () => {
+  const version1 = parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { keywordCase: "lower" } }));
+  assert.equal(version1.ok, true);
+  if (version1.ok) {
+    assert.equal(version1.settings.layoutStyle, "dbx");
+    assert.equal(version1.settings.keywordCase, "lower");
+  }
+
+  const version2 = parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: { layoutStyle: "classic" } }));
+  assert.equal(version2.ok, true);
+  if (version2.ok) assert.equal(version2.settings.layoutStyle, "classic");
+
+  const invalidStyle = parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: { layoutStyle: "upstream" } }));
+  assert.equal(invalidStyle.ok, false);
+  if (!invalidStyle.ok) assert.match(invalidStyle.message, /layoutStyle/);
+
+  assert.equal(normalizeSqlFormatterSettings({}).layoutStyle, "dbx");
+  // layoutStyle is DBX-private and must never reach sql-formatter.
+  assert.equal("layoutStyle" in sqlFormatterOptions({ layoutStyle: "classic" }), false);
 });
 
 test("rejects invalid known formatter option values when parsing config files", () => {

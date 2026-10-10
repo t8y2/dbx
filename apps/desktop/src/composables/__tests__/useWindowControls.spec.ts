@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { macTrafficLightInsetPaddingForScale, macTrafficLightPositionForScale, shouldDrawDesktopWindowFrame, shouldReserveMacTrafficLightInset, shouldShowWindowControls } from "@/composables/useWindowControls";
+import { macTrafficLightInsetPaddingForScale, macTrafficLightPositionForScale, shouldDrawDesktopWindowFrame, shouldDrawLinuxFloatingFrame, shouldReserveMacTrafficLightInset, shouldShowWindowControls } from "@/composables/useWindowControls";
 
 describe("window controls", () => {
   it("shows custom controls for non-macOS desktop windows", () => {
@@ -19,6 +19,20 @@ describe("window controls", () => {
     expect(shouldDrawDesktopWindowFrame(false, true, true)).toBe(false);
     expect(shouldDrawDesktopWindowFrame(true, true, false)).toBe(false);
     expect(shouldDrawDesktopWindowFrame(false, false, false)).toBe(false);
+  });
+
+  it.each([
+    ["restored Linux main window with a compositor", {}, true],
+    ["maximized window", { isMaximized: true }, false],
+    ["fullscreen window", { isFullscreen: true }, false],
+    ["non-Linux platform", { isLinux: false }, false],
+    ["web runtime", { isDesktop: false }, false],
+    ["detached or plugin window (not created transparent)", { isMainWindow: false }, false],
+    ["no compositing manager", { compositing: false }, false],
+    ["login or setup page", { showingAuthPage: true }, false],
+  ])("floating Linux frame: %s", (_name, override, expected) => {
+    const base = { isLinux: true, isDesktop: true, isMainWindow: true, compositing: true, showingAuthPage: false, isMaximized: false, isFullscreen: false };
+    expect(shouldDrawLinuxFloatingFrame({ ...base, ...override })).toBe(expected);
   });
 
   it("reserves traffic light inset only for non-fullscreen macOS desktop windows", () => {

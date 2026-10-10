@@ -188,6 +188,10 @@ export function isCloseOtherTabsShortcut(event: ShortcutLikeEvent, shortcuts?: P
   return matchesShortcut(event, actionShortcut("closeOtherTabs", shortcuts), platform);
 }
 
+export function isCloseWindowShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("closeWindow", shortcuts));
+}
+
 export function isSendSelectionToAiShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("sendSelectionToAi", shortcuts));
 }
@@ -311,6 +315,10 @@ export function isToggleSidebarShortcut(event: ShortcutLikeEvent, shortcuts?: Pa
 
 export function isToggleZenModeShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("toggleZenMode", shortcuts));
+}
+
+export function isDisconnectAllActiveConnectionsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("disconnectAllActiveConnections", shortcuts));
 }
 
 export function isCopySidebarSelectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {

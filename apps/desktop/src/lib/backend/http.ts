@@ -152,6 +152,11 @@ import type {
   HistorySearchRequest,
   HistorySearchResult,
   HistoryConnectionOption,
+  TaskRunDetail,
+  TaskRunItemsPage,
+  TaskRunItemsQuery,
+  TaskRunListQuery,
+  TaskRunPage,
   SqlFileRequest,
   SqlFilePreview,
   SqlFileTable,
@@ -1725,7 +1730,7 @@ export async function buildCreateUserSql(username: string, password: string, tab
   });
 }
 
-export async function getExplainInfo(connectionId: string, database: string | undefined, schema: string | undefined, sql: string, mode: string): Promise<string | undefined> {
+export async function getExplainInfo(connectionId: string, database: string | undefined, schema: string | undefined, sql: string, mode: string, executionId?: string, timeoutSecs?: number): Promise<string | undefined> {
   // Match the Tauri path: transport and Agent failures must remain distinguishable from an empty plan.
   return post<string>("/api/query/get-explain-info", {
     connectionId,
@@ -1733,6 +1738,8 @@ export async function getExplainInfo(connectionId: string, database: string | un
     schema,
     sql,
     mode,
+    ...(executionId ? { executionId } : {}),
+    ...(timeoutSecs === undefined ? {} : { timeoutSecs }),
   });
 }
 
@@ -5304,6 +5311,31 @@ export async function searchHistory(request: HistorySearchRequest): Promise<Hist
 
 export async function loadHistoryConnectionOptions(): Promise<HistoryConnectionOption[]> {
   return get("/api/history/options");
+}
+
+export async function loadTaskRuns(query: TaskRunListQuery = {}): Promise<TaskRunPage> {
+  return get(
+    `/api/task-runs?${qs({
+      limit: query.limit,
+      cursorCreatedAt: query.cursor?.createdAt,
+      cursorRunId: query.cursor?.runId,
+      taskType: query.taskType,
+      status: query.status,
+    })}`,
+  );
+}
+
+export async function loadTaskRun(runId: string): Promise<TaskRunDetail | null> {
+  return get(`/api/task-runs/${encodeURIComponent(runId)}`);
+}
+
+export async function loadTaskRunItems(runId: string, query: TaskRunItemsQuery = {}): Promise<TaskRunItemsPage> {
+  return get(
+    `/api/task-runs/${encodeURIComponent(runId)}/items?${qs({
+      limit: query.limit,
+      afterItemIndex: query.afterItemIndex,
+    })}`,
+  );
 }
 
 export async function loadRedisHistory(limit = 100, offset = 0): Promise<HistoryEntry[]> {

@@ -91,7 +91,7 @@ import {
   type TablePartitionOperationKind,
   type TablePartitionSqlOptions,
 } from "@/lib/table/tableStructureEditorSql";
-import { buildMysqlAutoIncrementCounterStatement, canEditMysqlAutoIncrementCounter, refreshMysqlAutoIncrementCounterDraft } from "@/lib/table/mysqlAutoIncrementCounter";
+import { buildMysqlAutoIncrementCounterStatement, canEditMysqlAutoIncrementCounter, refreshMysqlAutoIncrementCounterDraft, translateMysqlAutoIncrementWarning } from "@/lib/table/mysqlAutoIncrementCounter";
 import { mysqlTableCollationSql, parseMysqlTableCollation } from "@/lib/table/mysqlTableCollation";
 import { MYSQL_STORAGE_ENGINES_SQL, mysqlTableEngineSql, mysqlTableEngineSqlOption, parseMysqlTableEngineMetadata, refreshMysqlTableEngineDraft, supportsMysqlTableEngine } from "@/lib/table/mysqlTableEngine";
 import { INCEPTOR_PHYSICAL_OPTIONS, buildInceptorCreateOptions, emptyTablePhysicalOptions, hasTablePhysicalOptions, pruneTablePhysicalOptions, restoreTablePhysicalOptions } from "@/lib/table/tablePhysicalOptions";
@@ -1209,7 +1209,7 @@ const structureCheckboxClass = "h-[var(--structure-checkbox-size)] w-[var(--stru
 const structureHeaderCellClass = "relative min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-left last:border-r-0";
 const structureCellClass = "min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] last:border-r-0";
 const structureLastCellClass = "min-w-0 overflow-hidden border-b px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
-const structurePropertyListClass = "flex min-w-0 items-center gap-0 overflow-hidden";
+const structurePropertyListClass = "flex w-max min-w-0 items-center gap-0 overflow-hidden";
 const structurePropertyLabelClass = "flex min-w-0 items-center gap-1 whitespace-nowrap";
 const structureActionButtonClass = `${structureIconButtonClass} shrink-0`;
 const structureDensityMenuOpen = ref(false);
@@ -1527,6 +1527,9 @@ function columnCollation(column: EditableStructureColumn): string {
 }
 
 const extendedPropertiesColumnIndex = 10;
+// Widest extended-properties content seen so far. The column is last (no resize
+// handle) and its controls differ per dialect/locale, so a fixed width clips them.
+const extendedPropertiesContentWidth = ref(0);
 const actionButtonGap = 2;
 const columnOrdinalIndicatorGap = 4;
 const columnOrdinalIndicatorTrailingChrome = 3;
@@ -1551,6 +1554,7 @@ const visibleColWidths = computed(() =>
   colLabels.value.map((column) => {
     if (column.key === "actions") return columnActionsWidth.value;
     const width = colWidths.value[column.widthIndex] ?? structureDensityMetric.value.minColumnWidth;
+    if (column.key === "extendedProperties") return Math.max(width, extendedPropertiesContentWidth.value);
     return column.key === "length" && supportsCharacterLengthUnits.value ? Math.max(width, structureDensityMetric.value.minLengthColumnWidth) : width;
   }),
 );
@@ -1893,7 +1897,7 @@ const tableOwnerRolesLoading = ref(false);
 const tableOwnerRolesLoadError = ref("");
 const supportsTableOwner = computed(() => !isCreateMode.value && databaseType.value === "postgres");
 const canEditMysqlAutoIncrement = computed(() => canEditMysqlAutoIncrementCounter(connection.value, isCreateMode.value, columns.value));
-const canBuildMysqlAutoIncrement = computed(() => canEditMysqlAutoIncrement.value && !mysqlAutoIncrementLoading.value && !mysqlAutoIncrementLoadError.value && originalMysqlAutoIncrementValue.value !== undefined);
+const canBuildMysqlAutoIncrement = computed(() => !isCreateMode.value && canEditMysqlAutoIncrement.value && !mysqlAutoIncrementLoading.value && !mysqlAutoIncrementLoadError.value && originalMysqlAutoIncrementValue.value !== undefined);
 const supportsMysqlEngine = computed(() => supportsMysqlTableEngine(connection.value));
 const hasPersistedMysqlAutoIncrementColumn = computed(() => columns.value.some((column) => !column.markedForDrop && (column.original?.extra ?? "").toLowerCase().includes("auto_increment")));
 function isMysqlAutoIncrementCounterColumn(column: EditableStructureColumn): boolean {
@@ -1901,7 +1905,7 @@ function isMysqlAutoIncrementCounterColumn(column: EditableStructureColumn): boo
 }
 function setMysqlAutoIncrement(column: EditableStructureColumn, checked: boolean) {
   column.extra.autoIncrement = checked;
-  if (checked && originalMysqlAutoIncrementValue.value === undefined && !mysqlAutoIncrementLoading.value) {
+  if (!isCreateMode.value && checked && originalMysqlAutoIncrementValue.value === undefined && !mysqlAutoIncrementLoading.value) {
     void loadMysqlAutoIncrementCounter(true);
   }
 }
@@ -2187,9 +2191,21 @@ function updateColumnVirtualRowsDuringScroll(scroller: HTMLElement) {
   virtualScroller.updateVisibleItems?.(false, true);
 }
 
+function updateExtendedPropertiesContentWidth() {
+  const scroller = structureScrollerElement(columnsScrollerRef.value);
+  if (!scroller) return;
+  const chromeWidth = structureDensityMetric.value.cellPaddingX * 2 + 1;
+  let width = extendedPropertiesContentWidth.value;
+  for (const content of scroller.querySelectorAll<HTMLElement>("[data-structure-extended-properties]")) {
+    width = Math.max(width, content.offsetWidth + chromeWidth);
+  }
+  extendedPropertiesContentWidth.value = width;
+}
+
 function onColumnVirtualRowsUpdated() {
   const scroller = structureScrollerElement(columnsScrollerRef.value);
   if (scroller) lastColumnVirtualRenderScrollTop = scroller.scrollTop;
+  void nextTick(updateExtendedPropertiesContentWidth);
 }
 
 function columnVirtualRowsNeedSynchronousUpdate(scroller: HTMLElement): boolean {
@@ -2612,6 +2628,7 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     triggers: triggers.value,
     tableComment: tableComment.value,
     originalTableComment: isCreateMode.value ? undefined : originalTableComment.value,
+    mysqlAutoIncrementValue: isCreateMode.value && canEditMysqlAutoIncrement.value ? mysqlAutoIncrementValue.value || undefined : undefined,
     mysqlEngine: mysqlTableEngineSqlOption({ value: mysqlTableEngine.value, originalValue: originalMysqlTableEngine.value }, isCreateMode.value, supportsMysqlEngine.value && !mysqlTableEngineLoading.value && !mysqlTableEngineLoadError.value),
     transwarpCreate: isCreateMode.value && databaseType.value === "transwarp" ? buildInceptorCreateOptions(physicalOptions.value, columns.value) : undefined,
     tableCollation: mysqlTableDefaultCollation.value || undefined,
@@ -2944,6 +2961,8 @@ async function loadVisibleTableComment(force = false, preserveDraft = false) {
 }
 
 async function loadMysqlAutoIncrementCounter(preserveDraft = false) {
+  // Creation drafts own their counter; there is no server table to refresh.
+  if (isCreateMode.value) return;
   const requestId = ++mysqlAutoIncrementLoadRequestId;
   if (!canEditMysqlAutoIncrement.value || !props.connectionId || !props.database || !props.tableName) {
     mysqlAutoIncrementValue.value = undefined;
@@ -5423,6 +5442,12 @@ watch(activeTab, () => {
 
 watch([activeTab, loading, indexesLoading, visibleColWidths, indexColWidths], observeStructureHorizontalScroller, { deep: true, flush: "post", immediate: true });
 
+// Font sizes change with density, so start measuring again instead of keeping a stale maximum.
+watch(localStructureDensity, () => {
+  extendedPropertiesContentWidth.value = 0;
+});
+watch([columns, localStructureDensity], updateExtendedPropertiesContentWidth, { deep: true, flush: "post" });
+
 watch(
   columns,
   (items) => {
@@ -6065,7 +6090,7 @@ watch(
                           />
                         </td>
                         <td v-if="showExtendedProperties" :class="[structureCellClass, structureColumnSelectionClass('extendedProperties')]">
-                          <div :class="structurePropertyListClass">
+                          <div :class="structurePropertyListClass" data-structure-extended-properties>
                             <!-- Manticore Search: character data type properties -->
                             <template v-if="databaseType === 'manticoresearch'">
                               <template v-if="isManticoreTextColumn(column)">
@@ -6149,8 +6174,8 @@ watch(
                                     variant="ghost"
                                     size="icon"
                                     :class="[structureIconButtonClass, 'mr-1 shrink-0']"
-                                    :title="t('structureEditor.editMysqlAutoIncrementValue', { value: mysqlAutoIncrementValue || '—' })"
-                                    :aria-label="t('structureEditor.editMysqlAutoIncrementValue', { value: mysqlAutoIncrementValue || '—' })"
+                                    :title="t(isCreateMode ? 'structureEditor.editMysqlAutoIncrementStartValue' : 'structureEditor.editMysqlAutoIncrementValue', { value: mysqlAutoIncrementValue || '—' })"
+                                    :aria-label="t(isCreateMode ? 'structureEditor.editMysqlAutoIncrementStartValue' : 'structureEditor.editMysqlAutoIncrementValue', { value: mysqlAutoIncrementValue || '—' })"
                                     data-mysql-auto-increment-editor-trigger
                                   >
                                     <Loader2 v-if="mysqlAutoIncrementLoading" :class="[structureIconClass, 'animate-spin text-muted-foreground']" />
@@ -6159,27 +6184,27 @@ watch(
                                   </Button>
                                 </PopoverTrigger>
                                 <PopoverContent align="start" class="w-80 space-y-2 p-3">
-                                  <label class="block text-xs font-medium text-foreground">{{ t("structureEditor.mysqlAutoIncrementNextValue") }}</label>
+                                  <label class="block text-xs font-medium text-foreground">{{ t(isCreateMode ? "structureEditor.mysqlAutoIncrementStartValue" : "structureEditor.mysqlAutoIncrementNextValue") }}</label>
                                   <Input
                                     :model-value="mysqlAutoIncrementValue"
                                     inputmode="numeric"
                                     pattern="[0-9]*"
                                     autocomplete="off"
                                     data-mysql-auto-increment-counter
-                                    :aria-label="t('structureEditor.mysqlAutoIncrementNextValue')"
-                                    :placeholder="mysqlAutoIncrementLoading ? t('common.loading') : '—'"
+                                    :aria-label="t(isCreateMode ? 'structureEditor.mysqlAutoIncrementStartValue' : 'structureEditor.mysqlAutoIncrementNextValue')"
+                                    :placeholder="isCreateMode ? '1' : mysqlAutoIncrementLoading ? t('common.loading') : '—'"
                                     :title="mysqlAutoIncrementLoadError || undefined"
                                     class="w-full font-mono"
-                                    :disabled="mysqlAutoIncrementLoading || !!mysqlAutoIncrementLoadError || originalMysqlAutoIncrementValue === undefined || saving"
+                                    :disabled="(!isCreateMode && (mysqlAutoIncrementLoading || !!mysqlAutoIncrementLoadError || originalMysqlAutoIncrementValue === undefined)) || saving"
                                     @input.capture="onMysqlAutoIncrementInput"
                                   />
                                   <p v-if="mysqlAutoIncrementLoadError" class="text-xs text-destructive">{{ mysqlAutoIncrementLoadError }}</p>
-                                  <p class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.mysqlAutoIncrementNonemptyHint") }}</p>
+                                  <p class="text-xs leading-5 text-muted-foreground">{{ t(isCreateMode ? "structureEditor.mysqlAutoIncrementStartHint" : "contextMenu.mysqlAutoIncrementNonemptyHint") }}</p>
                                 </PopoverContent>
                               </Popover>
-                              <label :class="[structurePropertyLabelClass, 'flex-1 basis-0']" :title="t('structureEditor.onUpdateCurrentTimestamp')">
+                              <label :class="[structurePropertyLabelClass, 'shrink-0']" :title="t('structureEditor.onUpdateCurrentTimestamp')">
                                 <input v-model="column.extra.onUpdateCurrentTimestamp" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" :disabled="isMysqlGeneratedActive(column)" />
-                                <span class="min-w-0 truncate">{{ t("structureEditor.onUpdateCurrentTimestamp") }}</span>
+                                <span>{{ t("structureEditor.onUpdateCurrentTimestamp") }}</span>
                               </label>
                             </template>
                             <!-- Dameng: IDENTITY -->
@@ -6516,12 +6541,12 @@ watch(
               {{ t("structureEditor.emptyReadonly") }}
             </div>
             <div v-else class="space-y-1.5">
-              <div v-for="constraint in constraintsForTab" :key="constraint.name" class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="constraint.enabled ? '' : 'opacity-60'">
+              <div v-for="constraint in constraintsForTab" :key="constraint.name" class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="constraint.enabled === false ? 'opacity-60' : ''">
                 <div class="flex flex-wrap items-center gap-1.5">
                   <span class="font-mono font-medium">{{ constraint.name }}</span>
                   <Badge variant="outline" class="shrink-0">{{ constraint.constraint_type }}</Badge>
-                  <Badge v-if="!constraint.enabled" variant="outline" class="shrink-0 text-muted-foreground">{{ t("structureEditor.constraintDisabled") }}</Badge>
-                  <Badge v-else-if="!constraint.valid" variant="outline" class="shrink-0 text-muted-foreground">{{ t("structureEditor.constraintNotValidated") }}</Badge>
+                  <Badge variant="outline" class="shrink-0 text-muted-foreground">{{ t(constraint.enabled === true ? "grid.tableInfoConstraintEnabled" : constraint.enabled === false ? "structureEditor.constraintDisabled" : "grid.tableInfoConstraintEnabledUnknown") }}</Badge>
+                  <Badge variant="outline" class="shrink-0 text-muted-foreground">{{ t(constraint.valid === true ? "grid.tableInfoConstraintValidated" : constraint.valid === false ? "structureEditor.constraintNotValidated" : "grid.tableInfoConstraintValidationUnknown") }}</Badge>
                 </div>
                 <div v-if="constraint.columns.length" class="mt-1 truncate font-mono text-muted-foreground">{{ constraint.columns.join(", ") }}</div>
                 <div v-if="constraint.ref_table" class="mt-1 truncate font-mono text-muted-foreground">-> {{ constraint.ref_schema ? `${constraint.ref_schema}.` : "" }}{{ constraint.ref_table }}{{ constraint.ref_columns.length ? `(${constraint.ref_columns.join(", ")})` : "" }}</div>
@@ -6832,7 +6857,7 @@ watch(
           <div v-if="warnings.length" class="mb-2 space-y-1">
             <div v-for="warning in warnings" :key="warning" class="flex gap-1.5 rounded-md border border-yellow-300/40 bg-yellow-500/10 px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] text-[length:var(--structure-font-size)] text-yellow-700 dark:text-yellow-300">
               <AlertTriangle :class="[structureIconClass, 'mt-0.5 shrink-0']" />
-              <span>{{ warning }}</span>
+              <span>{{ translateMysqlAutoIncrementWarning(t, warning) }}</span>
             </div>
           </div>
           <pre v-if="pendingStatements.length" class="select-text whitespace-pre-wrap break-words rounded-md bg-muted/40 p-2.5 font-mono text-[calc(var(--structure-font-size)+1px)] leading-5" v-html="highlightedSql" />

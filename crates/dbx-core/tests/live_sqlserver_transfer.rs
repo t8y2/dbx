@@ -1,8 +1,9 @@
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::transfer::{
-    drop_backup_tables, rename_tables_to_backup, transfer_table, TransferContent, TransferMode,
-    TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
+    clear_foreign_key_linked_overwrite_targets, drop_backup_tables, rename_tables_to_backup,
+    sort_tables_by_fk_dependency_with_foreign_keys, transfer_table, transfer_table_with_result, TransferContent,
+    TransferMode, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -75,6 +76,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> ConnectionConfig {
         production_databases: vec![],
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
+        show_database_links: None,
         database_info: None,
     }
 }
@@ -1007,4 +1009,139 @@ async fn live_sqlserver_database_export_replays_composite_foreign_keys() {
     let _ = std::fs::remove_dir_all(dir);
     cleanup.expect("drop export databases");
     test_result.expect("database export must replay a composite foreign key without 8168");
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at SQL Server"]
+async fn live_sqlserver_transfer_overwrite_replaces_tables_linked_by_foreign_keys() {
+    let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "dbx_sqlserver_demo".to_string());
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-sqlserver-11480-{suffix}");
+    let source_schema = format!("dbx_11480_src_{}", &suffix[..12]);
+    let target_schema = format!("dbx_11480_dst_{}", &suffix[..12]);
+
+    let mut client = sqlserver_connect(&database).await;
+    let mut fixtures = vec![format!("CREATE SCHEMA [{source_schema}]"), format!("CREATE SCHEMA [{target_schema}]")];
+    for schema in [&source_schema, &target_schema] {
+        fixtures.push(format!(
+            "CREATE TABLE [{schema}].[job_details] (id INT NOT NULL CONSTRAINT [PK_11480_job_{schema}] PRIMARY KEY, name NVARCHAR(64) NOT NULL)"
+        ));
+        fixtures.push(format!(
+            "CREATE TABLE [{schema}].[triggers] (id INT NOT NULL CONSTRAINT [PK_11480_trigger_{schema}] PRIMARY KEY, job_id INT NOT NULL \
+             CONSTRAINT [FK_11480_{schema}] FOREIGN KEY REFERENCES [{schema}].[job_details] (id))"
+        ));
+    }
+    fixtures.extend([
+        format!("INSERT INTO [{source_schema}].[job_details] (id, name) VALUES (1, N'first'), (3, N'third')"),
+        format!("INSERT INTO [{source_schema}].[triggers] (id, job_id) VALUES (10, 1), (30, 3)"),
+        format!("INSERT INTO [{target_schema}].[job_details] (id, name) VALUES (1, N'stale'), (2, N'stale')"),
+        format!("INSERT INTO [{target_schema}].[triggers] (id, job_id) VALUES (10, 1), (20, 2)"),
+    ]);
+    for statement in &fixtures {
+        dbx_core::db::sqlserver::execute_batch(&mut client, statement).await.expect("create issue #11480 fixtures");
+    }
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-11480-{suffix}"));
+    std::fs::create_dir_all(&dir).expect("create issue #11480 directory");
+    let storage =
+        dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.expect("open issue #11480 storage");
+    let state = Arc::new(AppState::new(storage));
+    state.configs.write().await.insert(connection_id.clone(), live_sqlserver_config(&connection_id, &database));
+    let pool_key = state.get_or_create_pool(&connection_id, Some(&database)).await.expect("create SQL Server pool");
+    let request = TransferRequest {
+        table_filters: HashMap::new(),
+        transfer_id: format!("live-sqlserver-11480-transfer-{suffix}"),
+        source_connection_id: connection_id.clone(),
+        source_database: database.clone(),
+        source_schema: source_schema.clone(),
+        source_catalog: None,
+        target_connection_id: connection_id.clone(),
+        target_database: database.clone(),
+        target_schema: target_schema.clone(),
+        target_catalog: None,
+        tables: vec!["triggers".to_string(), "job_details".to_string()],
+        create_table: false,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
+        content: TransferContent::DataOnly,
+        objects: Some(Vec::new()),
+        mode: TransferMode::Overwrite,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 1000,
+    };
+
+    // Same sequence as the desktop and web transfer loops: parents first, with the
+    // foreign-key-linked targets emptied children first beforehand.
+    let test_result = async {
+        let (tables, known_foreign_keys) = sort_tables_by_fk_dependency_with_foreign_keys(
+            &state,
+            &connection_id,
+            &database,
+            &source_schema,
+            &request.tables,
+            true,
+        )
+        .await?;
+        let cleared =
+            clear_foreign_key_linked_overwrite_targets(&state, &request, &tables, DatabaseType::SqlServer, &pool_key)
+                .await?;
+        assert_eq!(cleared.len(), 2, "both linked targets are cleared by the pre-pass");
+        for (index, table) in tables.iter().enumerate() {
+            transfer_table_with_result(
+                &state,
+                &request,
+                table,
+                index,
+                &DatabaseType::SqlServer,
+                &DatabaseType::SqlServer,
+                &pool_key,
+                &pool_key,
+                &known_foreign_keys,
+                &mut Vec::new(),
+                None,
+                cleared.contains(table),
+                |_| {},
+                |_| {},
+            )
+            .await?;
+        }
+
+        let jobs = dbx_core::db::sqlserver::execute_query(
+            &mut client,
+            &format!("SELECT id, name FROM [{target_schema}].[job_details] ORDER BY id"),
+        )
+        .await
+        .map_err(|error| format!("read target jobs: {error}"))?;
+        let triggers = dbx_core::db::sqlserver::execute_query(
+            &mut client,
+            &format!("SELECT id, job_id FROM [{target_schema}].[triggers] ORDER BY id"),
+        )
+        .await
+        .map_err(|error| format!("read target triggers: {error}"))?;
+        let jobs =
+            jobs.rows.iter().map(|row| (row[0].as_i64(), row[1].as_str().map(str::to_string))).collect::<Vec<_>>();
+        let triggers = triggers.rows.iter().map(|row| (row[0].as_i64(), row[1].as_i64())).collect::<Vec<_>>();
+        assert_eq!(jobs, vec![(Some(1), Some("first".to_string())), (Some(3), Some("third".to_string()))]);
+        assert_eq!(triggers, vec![(Some(10), Some(1)), (Some(30), Some(3))]);
+        Ok::<_, String>(())
+    }
+    .await;
+
+    let cleanup = dbx_core::db::sqlserver::execute_batch(
+        &mut client,
+        &format!(
+            "IF OBJECT_ID(N'[{target_schema}].[triggers]', N'U') IS NOT NULL DROP TABLE [{target_schema}].[triggers]; \
+             IF OBJECT_ID(N'[{target_schema}].[job_details]', N'U') IS NOT NULL DROP TABLE [{target_schema}].[job_details]; \
+             IF OBJECT_ID(N'[{source_schema}].[triggers]', N'U') IS NOT NULL DROP TABLE [{source_schema}].[triggers]; \
+             IF OBJECT_ID(N'[{source_schema}].[job_details]', N'U') IS NOT NULL DROP TABLE [{source_schema}].[job_details]; \
+             IF SCHEMA_ID(N'{target_schema}') IS NOT NULL DROP SCHEMA [{target_schema}]; \
+             IF SCHEMA_ID(N'{source_schema}') IS NOT NULL DROP SCHEMA [{source_schema}];"
+        ),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(dir);
+    cleanup.expect("cleanup issue #11480 fixtures");
+    test_result.expect("SQL Server overwrite transfer should replace tables linked by foreign keys");
 }

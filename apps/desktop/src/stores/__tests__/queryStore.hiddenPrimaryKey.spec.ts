@@ -34,6 +34,8 @@ const prepareQueryPaginationExecutionPlan = vi.fn(async (options) => ({
 const editorSettings = {
   pageSize: 100,
   autoCalculateTotalRows: false,
+  queryResultMaxRowsEnabled: true,
+  queryResultMaxRows: 100_000,
 };
 
 function deferred<T>() {
@@ -122,6 +124,8 @@ describe("queryStore hidden primary key editing", () => {
     }));
     editorSettings.pageSize = 100;
     editorSettings.autoCalculateTotalRows = false;
+    editorSettings.queryResultMaxRowsEnabled = true;
+    editorSettings.queryResultMaxRows = 100_000;
     executeQuery.mockResolvedValue({
       columns: ["row_count"],
       rows: [[0]],
@@ -953,6 +957,94 @@ describe("queryStore hidden primary key editing", () => {
       { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
     ]);
     await execution;
+  });
+
+  it.each([
+    ["oracle", true],
+    ["oracle", false],
+    ["xugu", true],
+    ["xugu", false],
+  ] as const)("starts a %s query (star=%s) when synonym columns are slow and indexes return no key", async (databaseType, selectStar) => {
+    const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
+    getConnectionConfig.mockReturnValue({ id: "synonym-1", name: "Synonym", db_type: databaseType, database: "APP", query_timeout_secs: 30 });
+    getColumns.mockReturnValue(columnsGate.promise);
+    listIndexes.mockResolvedValue([]);
+    analyzeEditableQueryEditability.mockImplementation(async () => ({
+      editable: true,
+      analysis: {
+        schema: "APP",
+        tableName: "ORDERS_ALIAS",
+        selectStar,
+        columns: selectStar ? [] : [{ sourceName: "NAME", resultName: "NAME" }],
+      },
+    }));
+    executeMulti.mockResolvedValue([
+      {
+        columns: selectStar ? ["ID", "NAME"] : ["NAME"],
+        rows: selectStar ? [[1, "Alice"]] : [["Alice"]],
+        affected_rows: 0,
+        execution_time_ms: 18,
+      },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("synonym-1", "APP", "Query");
+    store.setAutoCommit(tabId, true);
+    vi.useFakeTimers();
+    const sql = `SELECT ${selectStar ? "*" : "NAME"} FROM APP.ORDERS_ALIAS`;
+    const execution = store.executeTabSql(tabId, sql);
+    try {
+      await vi.waitFor(() => expect(getColumns).toHaveBeenCalledOnce());
+      expect(executeMulti).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(executeMulti).toHaveBeenCalledOnce();
+      expect(executeMulti.mock.calls[0]?.[2]).toBe(sql);
+      await execution;
+      expect(store.tabs.find((tab) => tab.id === tabId)?.result?.rows).toEqual(selectStar ? [[1, "Alice"]] : [["Alice"]]);
+
+      columnsGate.resolve([
+        { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ]);
+      const { getCachedTableMetadata } = await import("@/lib/metadata/tableMetadataCache");
+      await vi.waitFor(() => expect(getCachedTableMetadata({ connectionId: "synonym-1", database: "APP", schema: "APP", tableName: "ORDERS_ALIAS", databaseType })?.metadata.columns).toHaveLength(2));
+      expect(getColumns).toHaveBeenCalledOnce();
+      expect(listIndexes).toHaveBeenCalledOnce();
+    } finally {
+      columnsGate.resolve([]);
+      await execution;
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
+  it("shares one Oracle preflight deadline between slow indexes and pending columns", async () => {
+    const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
+    const indexesGate = deferred<Awaited<ReturnType<typeof listIndexes>>>();
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "APP", query_timeout_secs: 30 });
+    getColumns.mockReturnValue(columnsGate.promise);
+    listIndexes.mockReturnValue(indexesGate.promise);
+    analyzeEditableQueryEditability.mockImplementation(async () => ({ editable: true, analysis: { schema: "APP", tableName: "ORDERS_ALIAS", selectStar: true, columns: [] } }));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "APP", "Query");
+    store.setAutoCommit(tabId, true);
+    vi.useFakeTimers();
+    const execution = store.executeTabSql(tabId, "SELECT * FROM APP.ORDERS_ALIAS");
+    try {
+      await vi.waitFor(() => expect(listIndexes).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(500);
+      indexesGate.resolve([]);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(executeMulti).toHaveBeenCalledOnce();
+      await execution;
+    } finally {
+      indexesGate.resolve([]);
+      columnsGate.resolve([]);
+      await execution;
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
   });
 
   it("starts an Oracle star query when index metadata exceeds the preflight budget", async () => {
@@ -1961,6 +2053,52 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.result?.hidden_column_indexes).toEqual([1]);
     await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("primary-key-not-returned"));
     expect(tab.queryAnalysis).toBeUndefined();
+  });
+
+  it.each([
+    { manual: false, tailRows: 0 },
+    { manual: false, tailRows: 1 },
+    { manual: false, tailRows: 4 },
+    { manual: true, tailRows: 0 },
+    { manual: true, tailRows: 1 },
+    { manual: true, tailRows: 4 },
+  ])("accounts for appended rows once (manual=$manual, tail=$tailRows)", async ({ manual, tailRows }) => {
+    editorSettings.queryResultMaxRows = 10;
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false });
+    prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageSql: options.sql,
+      pageLimit: options.pagination.limit,
+      pageOffset: options.pagination.offset,
+      countSql: undefined,
+      useAgentResultSession: false,
+    }));
+    const page = (offset: number, count: number) => ({ columns: ["id"], rows: Array.from({ length: count }, (_, index) => [offset + index]), has_more: false, affected_rows: 0, execution_time_ms: 1 });
+    const execute = manual ? executeInManualTransaction : executeMulti;
+    execute.mockResolvedValueOnce([page(0, 6)]).mockResolvedValueOnce([page(6, tailRows)]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("mysql-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === id)!;
+    if (manual) {
+      tab.autoCommit = false;
+      tab.txnSessionId = "source-transaction";
+    }
+    await store.executeTabSql(id, "SELECT id FROM items", { pagination: { limit: 6, offset: 0 } });
+    await store.executeTabSql(id, "SELECT id FROM items", {
+      pagination: { limit: 4, offset: 6 },
+      preserveResultDuringExecution: true,
+      appendResult: { maxRows: 10 },
+    });
+    expect(tab.result?.rows).toHaveLength(6 + tailRows);
+    expect(tab.result?.truncated === true).toBe(tailRows === 4);
+    expect(tab.resultExecutedPageOffset).toBe(6);
+    expect(tab.resultPageOffset).toBe(0);
+    if (tailRows < 4) {
+      expect((await store.fetchTabResultForExport(id, undefined, true))?.rows).toEqual(tab.result?.rows);
+      expect(execute).toHaveBeenCalledTimes(2);
+    }
+    if (manual) expect(tab.txnSessionId).toBe("source-transaction");
   });
 
   it("removes the generated row number before appending OceanBase Oracle pages", async () => {

@@ -1103,6 +1103,11 @@ async fn export_query_result_core_inner(
             result.rows.truncate(this_page);
         }
         let row_count = result.rows.len();
+        if request.database_type == DatabaseType::Nebula {
+            crate::text_export::normalize_nebula_export_rows(&mut result.rows);
+        } else if request.database_type == DatabaseType::Neo4j {
+            crate::text_export::normalize_neo4j_export_rows(&mut result.rows);
+        }
         let formatted_rows = crate::temporal_format::format_temporal_export_rows_with_string_types_cow(
             &result.rows,
             &page_column_types,

@@ -24,6 +24,7 @@ import {
   type SqlFormatterExpressionWidth,
   type SqlFormatterFromClauseLayout,
   type SqlFormatterIndentStyle,
+  type SqlFormatterLayoutStyle,
   type SqlFormatterLinesBetweenQueries,
   type SqlFormatterLogicalOperatorNewline,
   type SqlFormatterOptionSettings,
@@ -100,10 +101,16 @@ const indentStyleOptions: { value: SqlFormatterIndentStyle; labelKey: string }[]
   { value: "tabularRight", labelKey: "settings.sqlFormatterIndentStyleTabularRight" },
 ];
 
+const layoutStyleOptions: { value: SqlFormatterLayoutStyle; labelKey: string }[] = [
+  { value: "dbx", labelKey: "settings.sqlFormatterLayoutStyleDbx" },
+  { value: "classic", labelKey: "settings.sqlFormatterLayoutStyleClassic" },
+];
+
 const tabWidthOptions: SqlFormatterTabWidth[] = [2, 4];
 const expressionWidthOptions: SqlFormatterExpressionWidth[] = [50, 80, 120];
 const linesBetweenQueriesOptions: SqlFormatterLinesBetweenQueries[] = [0, 1, 2];
 const sqlFormatterOptionLabelKeys: Record<keyof SqlFormatterOptionSettings, string> = {
+  layoutStyle: "settings.sqlFormatterLayoutStyle",
   keywordCase: "settings.sqlFormatterKeywordCase",
   dataTypeCase: "settings.sqlFormatterDataTypeCase",
   functionCase: "settings.sqlFormatterFunctionCase",
@@ -199,6 +206,10 @@ function onIdentifierCase(value: any) {
 
 function onIndentStyle(value: any) {
   if (value === "standard" || value === "tabularLeft" || value === "tabularRight") updateOption("indentStyle", value);
+}
+
+function onLayoutStyle(value: any) {
+  if (value === "dbx" || value === "classic") updateOption("layoutStyle", value);
 }
 
 function onLogicalOperatorNewline(value: any) {
@@ -578,7 +589,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_10rem_12rem]">
+        <div class="grid gap-4 md:grid-cols-4">
           <div class="space-y-2">
             <Label>{{ t("settings.sqlFormatterIndent") }}</Label>
             <div class="grid grid-cols-2 gap-2">
@@ -613,6 +624,20 @@ onBeforeUnmount(() => {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem v-for="option in indentStyleOptions" :key="option.value" :value="option.value">
+                  {{ t(option.labelKey) }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div class="space-y-2">
+            <Label>{{ t("settings.sqlFormatterLayoutStyle") }}</Label>
+            <Select :model-value="settings.layoutStyle" @update:model-value="onLayoutStyle">
+              <SelectTrigger class="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="option in layoutStyleOptions" :key="option.value" :value="option.value">
                   {{ t(option.labelKey) }}
                 </SelectItem>
               </SelectContent>

@@ -29,6 +29,7 @@ public final class JdbcExecutor {
     private final ConcurrentHashMap<String, QuerySession> sessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, QuerySession> tableReadSessions = new ConcurrentHashMap<>();
     private final java.util.Set<Statement> activeStatements = ConcurrentHashMap.newKeySet();
+    private final java.util.Set<NativeOperation> nativeOperations = ConcurrentHashMap.newKeySet();
 
     public JdbcExecutor() {
     }
@@ -37,6 +38,61 @@ public final class JdbcExecutor {
         return AgentExecutionContext.jdbcExecutor();
     }
 
+    /** Latch cancellation across the sequential statements of one native driver operation. */
+    public NativeOperation beginNativeOperation() {
+        NativeOperation operation = new NativeOperation();
+        nativeOperations.add(operation);
+        return operation;
+    }
+
+    public final class NativeOperation implements AutoCloseable {
+        private final java.util.concurrent.atomic.AtomicBoolean cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+
+        private NativeOperation() {
+        }
+
+        public void checkCancelled() {
+            if (cancelled.get()) {
+                throw new java.util.concurrent.CancellationException("Native JDBC operation cancelled");
+            }
+        }
+
+        @Override
+        public void close() {
+            nativeOperations.remove(this);
+        }
+    }
+    /** Register native-driver statements with this session's cancellation boundary. */
+    public <S extends Statement> TrackedStatement<S> trackStatement(S statement) {
+        java.util.Objects.requireNonNull(statement, "statement");
+        activeStatements.add(statement);
+        return new TrackedStatement<>(statement);
+    }
+
+    /** Owns the original JDBC Statement without changing its identity or unwrap behavior. */
+    public final class TrackedStatement<S extends Statement> implements AutoCloseable {
+        private final S statement;
+        private boolean closed;
+
+        private TrackedStatement(S statement) {
+            this.statement = statement;
+        }
+
+        public S statement() {
+            return statement;
+        }
+
+        @Override
+        public void close() throws SQLException {
+            if (closed) return;
+            closed = true;
+            try {
+                statement.close();
+            } finally {
+                activeStatements.remove(statement);
+            }
+        }
+    }
     public static int statementMaxRows(int maxRows) {
         int effectiveMaxRows = Math.max(maxRows, 1);
         return effectiveMaxRows == Integer.MAX_VALUE ? Integer.MAX_VALUE : effectiveMaxRows + 1;
@@ -627,6 +683,9 @@ public final class JdbcExecutor {
     }
 
     public void cancelActiveStatements() {
+        for (NativeOperation operation : nativeOperations) {
+            operation.cancelled.set(true);
+        }
         for (Statement statement : activeStatements) {
             try {
                 statement.cancel();

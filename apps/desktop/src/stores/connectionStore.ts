@@ -318,6 +318,7 @@ function isFlatMqConnection(config: ConnectionConfig | undefined): boolean {
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
 
 interface LocateTableTarget {
+  catalog?: string;
   connectionId: string;
   database: string;
   schema?: string;
@@ -658,6 +659,7 @@ export const useConnectionStore = defineStore("connection", () => {
   } | null>(null);
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
   const tableVGroupLayouts = ref<Record<string, TableVGroupLayout>>({});
+  const lastDataGripFallbackUsernamesCount = ref(0);
   const dirtyTableVGroupScopeKeys = new Set<string>();
   let tableVGroupPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const connectionGroupPaths = computed(() => buildConnectionGroupPathMap(sidebarLayout.value));
@@ -7017,9 +7019,28 @@ export const useConnectionStore = defineStore("connection", () => {
         offset: 0,
         sidebarDisplayMode: useSettingsStore().editorSettings.sidebarObjectDisplay,
         driverProfile: metadataDriverProfile(config),
+        extra: target.catalog ? { catalog: target.catalog } : undefined,
       },
       async () => {
         await ensureConnected(target.connectionId);
+
+        if (target.catalog) {
+          const parent = findDatabaseTreeNode(treeNodes.value, target.connectionId, target.database, target.catalog);
+          if (!parent) return false;
+          let load = beginTreeNodeLoad(parent);
+          try {
+            load = reclaimTreeNodeLoad(load, parent);
+            const tables = await withMetadataLoadTimeout(target.connectionId, listTablesWithOptionalTableNameFilter(target.connectionId, target.database, "", target.tableName, undefined, undefined, undefined, target.catalog), "tables");
+            const current = treeNodeLoadTarget(load);
+            if (!current) return false;
+            const children = buildTableTreeNodes({ nodeId: current.id, connectionId: target.connectionId, database: target.database, catalog: target.catalog, tables });
+            setChildren(current, mergeLocatedTreeChildren(current, current.children ?? [], children, target.connectionId, target.database));
+            current.isExpanded = true;
+            return children.length > 0;
+          } finally {
+            finishTreeNodeLoad(load);
+          }
+        }
 
         const pageSize = sidebarObjectGroupPageSize();
         const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
@@ -9969,12 +9990,22 @@ export const useConnectionStore = defineStore("connection", () => {
       if (picked.local) {
         dataSourcesLocal = await readTextFile(picked.local);
       } else {
-        console.warn("[DataGrip Import] dataSources.local.xml not selected; usernames will fall back to defaults");
+        try {
+          const siblingLocal = picked.dataSources.replace(/[^\\/]+$/, "dataSources.local.xml");
+          dataSourcesLocal = await readTextFile(siblingLocal);
+        } catch {
+          console.warn("[DataGrip Import] dataSources.local.xml not selected or readable; usernames will fall back to defaults");
+        }
       }
       if (picked.forest) {
         dbForestConfig = await readTextFile(picked.forest);
       } else {
-        console.warn("[DataGrip Import] db-forest-config.xml not selected; legacy group tree skipped");
+        try {
+          const siblingForest = picked.dataSources.replace(/[^\\/]+$/, "db-forest-config.xml");
+          dbForestConfig = await readTextFile(siblingForest);
+        } catch {
+          console.warn("[DataGrip Import] db-forest-config.xml not selected or readable; legacy group tree skipped");
+        }
       }
     } else {
       const files = await new Promise<FileList>((resolve, reject) => {
@@ -10077,6 +10108,7 @@ export const useConnectionStore = defineStore("connection", () => {
         };
         pendingDataGripPayload = payload;
         const result = parseDataGripImport(payload);
+        lastDataGripFallbackUsernamesCount.value = result.fallbackUsernamesCount || 0;
         return { connections: result.connections, layout: result.layout };
       }
       if (isDbeaverImportPayload(content)) {
@@ -10436,6 +10468,7 @@ export const useConnectionStore = defineStore("connection", () => {
     applyConnectionsImport,
     importConnectionsFromFile,
     applyDataGripKeychainPasswords,
+    lastDataGripFallbackUsernamesCount,
     applySidebarLayout,
     transferSource,
     schemaDiffSource,

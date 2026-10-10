@@ -578,4 +578,49 @@ describe("TableImportDialog existing targets", () => {
     expect(document.body.textContent).toContain("SQLite / main / existing_target");
     expect(document.body.textContent).not.toContain("main / main");
   });
+
+  it("defaults to position mapping when source column names do not match target table columns, and supports mapping actions", async () => {
+    i18n.global.locale.value = "en";
+    mocks.previewTableImportFile.mockResolvedValue({
+      fileName: "unmatched.csv",
+      filePath: "/tmp/unmatched.csv",
+      fileType: "csv",
+      sizeBytes: 24,
+      columns: ["col_1", "col_2"],
+      rows: [["1", "Alice"]],
+      totalRows: 1,
+      sourceFingerprint: "unmatched",
+    });
+
+    await mountDialog({ prefillTable: "existing_target" });
+    await selectWorkbook("unmatched.csv");
+    await vi.waitFor(() => expect(buttonContaining("Next")?.disabled).toBe(false));
+
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+
+    const selects = [...document.body.querySelectorAll<HTMLSelectElement>("select")];
+    expect(selects.map((s) => s.value)).toEqual(["id", "name"]);
+
+    const skipAllBtn = document.body.querySelector<HTMLButtonElement>('button[data-action="skip-all"]');
+    expect(skipAllBtn).toBeTruthy();
+    skipAllBtn?.click();
+    await flushAsyncUpdates();
+    const skippedSelects = [...document.body.querySelectorAll<HTMLSelectElement>("select")];
+    expect(skippedSelects.map((s) => s.value)).toEqual(["__skip__", "__skip__"]);
+
+    const mapByPositionBtn = document.body.querySelector<HTMLButtonElement>('button[data-action="map-by-position"]');
+    expect(mapByPositionBtn).toBeTruthy();
+    mapByPositionBtn?.click();
+    await flushAsyncUpdates();
+    const positionSelects = [...document.body.querySelectorAll<HTMLSelectElement>("select")];
+    expect(positionSelects.map((s) => s.value)).toEqual(["id", "name"]);
+
+    const mapByNameBtn = document.body.querySelector<HTMLButtonElement>('button[data-action="map-by-name"]');
+    expect(mapByNameBtn).toBeTruthy();
+    mapByNameBtn?.click();
+    await flushAsyncUpdates();
+    const nameSelects = [...document.body.querySelectorAll<HTMLSelectElement>("select")];
+    expect(nameSelects.map((s) => s.value)).toEqual(["__skip__", "__skip__"]);
+  });
 });

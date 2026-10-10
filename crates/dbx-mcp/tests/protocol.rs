@@ -5,12 +5,13 @@ use dbx_core::{
     agent_events::ToolResult, agent_tools::AgentSqlPermissions, models::connection::ConnectionConfig,
     storage::McpGlobalPolicy,
 };
-use dbx_mcp::{DbxBackend, DbxMcpServer, McpScope};
+use dbx_mcp::{with_legacy_discovery_fallback, DbxBackend, DbxMcpServer, McpScope};
 use rmcp::{
     model::{CallToolRequestParams, ReadResourceRequestParams, ResourceContents},
     ServiceExt,
 };
 use serde_json::{json, Map, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
 struct EmptyBackend;
 
@@ -355,6 +356,105 @@ fn postgres_connection(id: &str, name: &str) -> ConnectionConfig {
         "ssl": false
     }))
     .expect("test PostgreSQL connection")
+}
+
+async fn stdio_request(stream: &mut BufReader<DuplexStream>, id: i64, method: &str, params: Value) -> Value {
+    let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    stream.get_mut().write_all(format!("{request}\n").as_bytes()).await.unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_line(&mut line))
+        .await
+        .expect("stdio response timed out")
+        .expect("read stdio response");
+    let response: Value = serde_json::from_str(&line).expect("JSON-RPC response");
+    assert_eq!(response["id"], id);
+    assert!(response.get("error").is_none(), "{method}: {response}");
+    response["result"].clone()
+}
+
+#[tokio::test]
+async fn list_results_include_complete_discriminator_for_modern_stdio_clients() {
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "protocol-test", "version": "0"}
+    });
+    for hide_tools in [false, true] {
+        let backend = PolicyBackend {
+            policy: McpGlobalPolicy { allowed_tool_names: hide_tools.then(Vec::new), ..Default::default() },
+            connections: Vec::new(),
+            group_paths: Ok(HashMap::new()),
+        };
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+        let server_task =
+            tokio::spawn(async move { server.serve(with_legacy_discovery_fallback(server_transport)).await });
+        let mut client = BufReader::new(client_transport);
+        let discovery = stdio_request(&mut client, 1, "server/discover", json!({"_meta": meta})).await;
+        assert!(discovery["supportedVersions"].as_array().unwrap().contains(&json!("2026-07-28")));
+
+        for (index, (method, items)) in [
+            ("tools/list", "tools"),
+            ("resources/list", "resources"),
+            ("resources/templates/list", "resourceTemplates"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let result = stdio_request(&mut client, index as i64 + 2, method, json!({"_meta": meta})).await;
+            assert_eq!(result["resultType"], "complete", "{method} requires resultType on 2026-07-28");
+            assert_eq!(result["ttlMs"], 0, "{method}");
+            assert_eq!(result["cacheScope"], "private", "{method}");
+            assert!(result.get("nextCursor").is_none(), "{method}");
+            assert_eq!(result[items].as_array().unwrap().is_empty(), hide_tools, "{method}");
+        }
+
+        drop(client);
+        server_task.abort();
+    }
+}
+
+#[tokio::test]
+async fn list_results_preserve_legacy_stdio_shapes_after_initialize() {
+    for requested_version in ["2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"] {
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server = DbxMcpServer::with_runtime_options(Arc::new(EmptyBackend), McpScope::default(), false);
+        let server_task =
+            tokio::spawn(async move { server.serve(with_legacy_discovery_fallback(server_transport)).await });
+        let mut client = BufReader::new(client_transport);
+        let initialized = stdio_request(
+            &mut client,
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": requested_version,
+                "capabilities": {},
+                "clientInfo": {"name": "protocol-test", "version": "0"}
+            }),
+        )
+        .await;
+        let negotiated_version = if requested_version == "2026-07-28" { "2025-11-25" } else { requested_version };
+        assert_eq!(initialized["protocolVersion"], negotiated_version);
+        client.get_mut().write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n").await.unwrap();
+
+        for (index, (method, items)) in [
+            ("tools/list", "tools"),
+            ("resources/list", "resources"),
+            ("resources/templates/list", "resourceTemplates"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let result = stdio_request(&mut client, index as i64 + 2, method, json!({})).await;
+            for field in ["resultType", "ttlMs", "cacheScope", "nextCursor"] {
+                assert!(result.get(field).is_none(), "{method} on {negotiated_version} unexpectedly includes {field}");
+            }
+            assert!(!result[items].as_array().unwrap().is_empty(), "{method}");
+        }
+
+        drop(client);
+        server_task.abort();
+    }
 }
 
 #[tokio::test]

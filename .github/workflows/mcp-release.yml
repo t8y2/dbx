@@ -453,7 +453,22 @@ jobs:
             echo "${{ matrix.package-name }}@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+          # npm can accept a publish but leave the version stuck in a staged
+          # (invisible, blocks republication) state; the only recovery is
+          # to drop the staged version and publish again.
+          publish_log="${RUNNER_TEMP}/npm-publish.log"
+          if ! npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance 2>&1 | tee "$publish_log"; then
+            if ! grep -q "previously staged version" "$publish_log"; then
+              exit 1
+            fi
+            if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+              echo "${{ matrix.package-name }}@${VERSION} became visible despite the error; continuing."
+              exit 0
+            fi
+            echo "::warning::npm holds ${{ matrix.package-name }}@${VERSION} in a staged (invisible) state; dropping it and retrying."
+            npm unpublish "${{ matrix.package-name }}@${VERSION}" --force
+            npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+          fi
 
   publish-cli:
     name: Publish @dbx-app/cli
@@ -709,6 +724,25 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          # npm can accept a publish but leave the version stuck in a staged
+          # (invisible, blocks republication) state; the only recovery is
+          # to drop the staged version and publish again.
+          npm_publish_with_staged_recovery() {
+            local publish_log="${RUNNER_TEMP}/npm-publish.log"
+            if ! npm publish "$@" --access public --provenance 2>&1 | tee "$publish_log"; then
+              if ! grep -q "previously staged version" "$publish_log"; then
+                return 1
+              fi
+              if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+                echo "${{ matrix.package-name }}@${VERSION} became visible despite the error; continuing."
+                return 0
+              fi
+              echo "::warning::npm holds ${{ matrix.package-name }}@${VERSION} in a staged (invisible) state; dropping it and retrying."
+              npm unpublish "${{ matrix.package-name }}@${VERSION}" --force
+              npm publish "$@" --access public --provenance
+              return
+            fi
+          }
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             work_dir="$(mktemp -d)"
             trap 'rm -rf "$work_dir"' EXIT
@@ -727,14 +761,14 @@ jobs:
               exit 0
             fi
             cmp "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}" "$work_dir/package/bin/${{ matrix.binary }}"
-            npm publish "$tarball" --access public --provenance --ignore-scripts
+            npm_publish_with_staged_recovery "$tarball" --ignore-scripts
             exit 0
           fi
           if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
             echo "${{ matrix.package-name }}@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+          npm_publish_with_staged_recovery "./packages/${{ matrix.package-dir }}"
 
       - name: Show sccache stats
         if: always()

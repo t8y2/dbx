@@ -1,6 +1,7 @@
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
     implementation 'com.oceanbase:oceanbase-client:2.4.18'
+    testImplementation 'com.google.code.gson:gson:2.12.1'
 }
 
 tasks.named('shadowJar') {

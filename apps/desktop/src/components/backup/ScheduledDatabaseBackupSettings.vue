@@ -20,6 +20,7 @@ import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import {
   DEFAULT_DATABASE_BACKUP_RUN_DIRECTORY_PATTERN,
   DEFAULT_DATABASE_BACKUP_FILE_NAME_PATTERN,
+  databaseBackupFileNamePatternHasRunId,
   databaseBackupFileNamePatternIsValid,
   databaseBackupFilePath,
   databaseBackupRunDirectory,
@@ -33,7 +34,9 @@ import {
   type DatabaseBackupSchedule,
 } from "@/lib/backup/scheduledDatabaseBackup";
 import { databaseBackupTableSelectionScopeKey, normalizeDatabaseBackupTableTargets, type DatabaseBackupTableSelectionState } from "@/lib/backup/scheduledDatabaseBackup";
+import { getLastBackupDirectory, setLastBackupDirectory } from "@/lib/export/exportPath";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 
 const { t, locale } = useI18n();
@@ -45,7 +48,8 @@ const connectionStore = useConnectionStore();
 // unified scheduler task center without deleting anything.
 const SchedulerPage = defineAsyncComponent(() => import("@/components/scheduler/SchedulerPage.vue"));
 const schedulerView = ref(false);
-const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, heartbeat, destinationRoot, error: backupError, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRuns, renameRun, runSchedule, runOneShot, cancelRun } = useScheduledDatabaseBackups();
+const settingsStore = useSettingsStore();
+const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, heartbeat, destinationRoot, error: backupError, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRuns, renameRun, runSchedule, runOneShot, runOneShotBatch, cancelRun } = useScheduledDatabaseBackups();
 const desktop = isTauriRuntime();
 const backgroundEnabled = ref(false);
 const backgroundBusy = ref(false);
@@ -161,13 +165,26 @@ watch(historyConnectionPickerOpen, (open) => {
   if (!open) historyConnectionSearch.value = "";
 });
 
+/**
+ * 解析新建备份时的默认「备份目录」。
+ * 优先级：服务端根目录（Web 端） > 上次备份目录 > 设置中的「首选导出路径」。
+ * Desktop 端后端 root 恒为 null（见 src-tauri/background_backup.rs），
+ * 此前默认值恒为空串，导致每次新建备份都要重新选择目录（issue #11317）。
+ */
+function defaultBackupDestinationDirectory(): string {
+  if (destinationRoot.value) return destinationRoot.value;
+  const remembered = getLastBackupDirectory();
+  if (remembered) return remembered;
+  return settingsStore.editorSettings.preferredExportPath?.trim() || "";
+}
+
 function newBackupConfig(connectionId = sqlConnections.value[0]?.id ?? ""): DatabaseBackupExecutionConfig {
   return {
     connectionId,
     databases: [],
     tableFilterMode: "all",
     tablePatterns: [],
-    destinationDirectory: destinationRoot.value || "",
+    destinationDirectory: defaultBackupDestinationDirectory(),
     includeStructure: true,
     includeData: true,
     includeObjects: true,
@@ -203,6 +220,14 @@ const draft = ref<DatabaseBackupSchedule>(newScheduleDraft());
 const oneShotDraft = ref<DatabaseBackupExecutionConfig>(newBackupConfig());
 const activeDraft = computed<DatabaseBackupExecutionConfig>(() => (oneShotDialogOpen.value ? oneShotDraft.value : draft.value));
 const activeOneShotRun = computed(() => activeRuns.value.find((run) => run.source === "one-shot"));
+// A one-shot backup may target several connections; each one is queued as its own run, which the backend executes in turn.
+const oneShotConnectionIds = ref<string[]>([]);
+const oneShotBatchRunning = ref(false);
+const oneShotBatchRunIds = reactive(new Set<string>());
+let oneShotBatchCancelRequested = false;
+const multipleOneShotConnections = computed(() => oneShotConnectionIds.value.length > 1);
+// Cancel acts on the runs this dialog started: every queued run of a batch, or the active one-shot run otherwise.
+const cancellableOneShotRuns = computed(() => (oneShotBatchRunning.value ? activeRuns.value.filter((run) => oneShotBatchRunIds.has(run.id)) : activeOneShotRun.value ? [activeOneShotRun.value] : []));
 type BackupDialogKind = "schedule" | "one-shot";
 let databaseLoadGeneration = 0;
 
@@ -262,10 +287,16 @@ const oneShotOutputPathPreview = computed(() => {
   return databaseBackupFilePath(oneShotDraft.value.destinationDirectory, t("databaseBackup.oneShotName"), "database", new Date(), "preview01", oneShotDraft.value.outputCompression, oneShotDraft.value.fileNamePattern);
 });
 const canStartOneShot = computed(() => {
+  const multiple = multipleOneShotConnections.value;
   const hasContent = oneShotDraft.value.includeStructure || oneShotDraft.value.includeData || oneShotDraft.value.includeObjects;
-  const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
+  // Database names and exact table lists are per connection, so several connections always back up all databases.
+  const hasDatabaseScope = multiple || allDatabases.value || selectedDatabases.value.length > 0;
   const hasTableScope = tableScopeReady(oneShotDraft.value, oneShotTableSelectionState.value);
-  return !!oneShotDraft.value.connectionId && !!oneShotDraft.value.destinationDirectory.trim() && databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") && hasContent && hasDatabaseScope && hasTableScope && !oneShotStarting.value && !loadingDatabases.value;
+  // Runs started together share a timestamp, so only {runId} keeps their files apart.
+  const hasUniqueFileNames = !multiple || databaseBackupFileNamePatternHasRunId(oneShotDraft.value.fileNamePattern);
+  return (
+    !!oneShotDraft.value.connectionId && !!oneShotDraft.value.destinationDirectory.trim() && databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") && hasContent && hasDatabaseScope && hasTableScope && hasUniqueFileNames && !oneShotStarting.value && !loadingDatabases.value
+  );
 });
 
 function connectionName(connectionId: string): string {
@@ -334,7 +365,8 @@ function scheduleCancellationRequested(scheduleId: string): boolean {
 }
 
 function oneShotCancellationRequested(): boolean {
-  return !!activeOneShotRun.value && cancellingRunIds.has(activeOneShotRun.value.id);
+  const runs = cancellableOneShotRuns.value;
+  return runs.length > 0 && runs.every((run) => cancellingRunIds.has(run.id));
 }
 
 async function loadDatabases(dialog: BackupDialogKind, targetDraft: DatabaseBackupExecutionConfig, preserveSelection: boolean) {
@@ -440,6 +472,31 @@ async function changeConnection(connectionId: string) {
   await loadDatabases(dialog, targetDraft, true);
 }
 
+function toggleOneShotConnection(connectionId: string) {
+  const current = oneShotConnectionIds.value;
+  const selected = new Set(current);
+  if (selected.has(connectionId)) selected.delete(connectionId);
+  else selected.add(connectionId);
+  // Keep the picker order stable and never leave the form without a connection.
+  const next = sqlConnections.value.map((connection) => connection.id).filter((id) => selected.has(id));
+  if (next.length === 0) return;
+  const targetDraft = oneShotDraft.value;
+  if (next.length > 1 && current.length <= 1) {
+    // Invalidate any in-flight database list load and drop the per-connection scope.
+    databaseLoadGeneration++;
+    loadingDatabases.value = false;
+    databaseOptions.value = [];
+    databaseLoadError.value = "";
+    allDatabases.value = true;
+    selectedDatabases.value = [];
+    if (targetDraft.tableFilterMode === "selected") targetDraft.tableFilterMode = "all";
+    targetDraft.selectedTables = [];
+    oneShotTableSelectionState.value = { scopeKey: "", ready: false };
+  }
+  oneShotConnectionIds.value = next;
+  targetDraft.connectionId = next[0]!;
+}
+
 async function setAllDatabases(value: boolean) {
   allDatabases.value = value;
   databaseLoadError.value = "";
@@ -461,8 +518,13 @@ function toggleDatabase(database: string) {
 
 async function chooseDestination() {
   const { open } = await import("@tauri-apps/plugin-dialog");
-  const selected = await open({ directory: true, multiple: false, title: t("databaseBackup.selectDestination") });
-  if (typeof selected === "string") activeDraft.value.destinationDirectory = selected;
+  // 传入当前目录，让系统选择框直接定位到上次使用的位置（issue #11317）
+  const selected = await open({ directory: true, multiple: false, defaultPath: activeDraft.value.destinationDirectory || undefined, title: t("databaseBackup.selectDestination") });
+  if (typeof selected === "string") {
+    activeDraft.value.destinationDirectory = selected;
+    // 记住本次选择，作为下次新建备份的默认目录
+    setLastBackupDirectory(selected);
+  }
 }
 
 async function submitSchedule() {
@@ -470,6 +532,7 @@ async function submitSchedule() {
   saving.value = true;
   try {
     if (desktop) await api.recordDatabaseExportDestination(draft.value.destinationDirectory);
+    if (desktop) setLastBackupDirectory(draft.value.destinationDirectory);
     await saveSchedule({
       ...draft.value,
       databases: allDatabases.value ? [] : [...selectedDatabases.value],
@@ -489,8 +552,15 @@ async function openOneShotBackup() {
   scheduleDialogOpen.value = false;
   const nextDraft = newBackupConfig();
   oneShotDraft.value = nextDraft;
+  oneShotConnectionIds.value = nextDraft.connectionId ? [nextDraft.connectionId] : [];
   resetDatabaseScope(nextDraft);
   oneShotDialogOpen.value = true;
+}
+
+function toastRunResult(run: DatabaseBackupRun) {
+  if (run.status === "success") toast(t("databaseBackup.runSuccess", { count: run.files.length }), 3000);
+  else if (run.status === "cancelled") toast(t("databaseBackup.runCancelled"), 3000);
+  else toast(t("databaseBackup.runFailed", { error: run.error ? translateBackendError(t, run.error) : t("databaseBackup.unknownError") }), 5000);
 }
 
 async function startOneShotBackup() {
@@ -498,6 +568,11 @@ async function startOneShotBackup() {
   oneShotStarting.value = true;
   try {
     if (desktop) await api.recordDatabaseExportDestination(oneShotDraft.value.destinationDirectory);
+    if (desktop) setLastBackupDirectory(oneShotDraft.value.destinationDirectory);
+    if (multipleOneShotConnections.value) {
+      await startOneShotBatch();
+      return;
+    }
     const run = await runOneShot(
       {
         ...oneShotDraft.value,
@@ -508,9 +583,7 @@ async function startOneShotBackup() {
     );
     if (!run) return;
     oneShotDialogOpen.value = false;
-    if (run.status === "success") toast(t("databaseBackup.runSuccess", { count: run.files.length }), 3000);
-    else if (run.status === "cancelled") toast(t("databaseBackup.runCancelled"), 3000);
-    else toast(t("databaseBackup.runFailed", { error: run.error ? translateBackendError(t, run.error) : t("databaseBackup.unknownError") }), 5000);
+    toastRunResult(run);
   } catch (error: any) {
     toast(translateBackendError(t, error), 5000);
   } finally {
@@ -518,9 +591,39 @@ async function startOneShotBackup() {
   }
 }
 
+async function startOneShotBatch() {
+  oneShotBatchRunning.value = true;
+  oneShotBatchCancelRequested = false;
+  try {
+    const configs = oneShotConnectionIds.value.map((connectionId) => ({
+      ...oneShotDraft.value,
+      connectionId,
+      databases: [],
+      ...backupTablePayload(oneShotDraft.value),
+    }));
+    const { runs: finished, enqueueErrors } = await runOneShotBatch(configs, t("databaseBackup.oneShotName"), (run) => {
+      oneShotBatchRunIds.add(run.id);
+      // Cancel was requested while later connections were still being queued.
+      if (oneShotBatchCancelRequested) void cancelRun(run.id).catch(() => {});
+    });
+    if (finished.length === 0 && enqueueErrors.length > 0) {
+      toast(translateBackendError(t, enqueueErrors[0]!.error), 5000);
+      return;
+    }
+    oneShotDialogOpen.value = false;
+    const count = (status: DatabaseBackupRun["status"]) => finished.filter((run) => run.status === status).length;
+    toast(t("databaseBackup.batchRunSummary", { success: count("success"), failed: count("failed") + enqueueErrors.length, cancelled: count("cancelled") }), 5000);
+  } finally {
+    oneShotBatchRunning.value = false;
+    oneShotBatchRunIds.clear();
+  }
+}
+
 async function cancelActiveOneShotBackup() {
-  const run = activeOneShotRun.value;
-  if (run && (await cancelRun(run.id))) toast(t("databaseBackup.cancelRequested"), 2500);
+  oneShotBatchCancelRequested = true;
+  const runs = cancellableOneShotRuns.value.filter((run) => !cancellingRunIds.has(run.id));
+  const results = await Promise.all(runs.map((run) => cancelRun(run.id)));
+  if (results.some(Boolean)) toast(t("databaseBackup.cancelRequested"), 2500);
 }
 
 async function requestCancelRun(runId: string) {
@@ -682,418 +785,420 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
   </div>
 
   <template v-else>
-  <div class="flex flex-col gap-6">
-    <div class="flex flex-wrap items-center justify-between gap-3">
-      <div class="min-w-0">
-        <h3 class="text-base font-semibold">{{ t("databaseBackup.schedules") }}</h3>
-        <p class="mt-1 text-sm text-muted-foreground">{{ t(desktop ? "databaseBackup.backgroundLoginScope" : "databaseBackup.serverRuntime") }}</p>
-        <p v-if="!canCreateSchedule" class="mt-1 text-xs text-muted-foreground">{{ t("databaseBackup.noSupportedConnections") }}</p>
-      </div>
-      <div class="flex flex-wrap items-center justify-end gap-2">
-        <Button variant="outline" size="sm" data-backup-open-scheduler @click="schedulerView = true">{{ t("scheduler.backupMigration.openScheduler") }}</Button>
-        <Button variant="outline" size="sm" :disabled="!canCreateSchedule" :title="canCreateSchedule ? t('databaseBackup.oneShotBackup') : t('databaseBackup.noSupportedConnections')" @click="openOneShotBackup">
-          <Play class="mr-2 h-4 w-4" />
-          {{ t("databaseBackup.oneShotBackup") }}
-        </Button>
-        <Button size="sm" :disabled="!canCreateSchedule" :title="canCreateSchedule ? t('databaseBackup.addSchedule') : t('databaseBackup.noSupportedConnections')" @click="openCreateSchedule">
-          <Plus class="mr-2 h-4 w-4" />
-          {{ t("databaseBackup.addSchedule") }}
-        </Button>
-      </div>
-    </div>
-
-    <div class="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
-      <div class="min-w-0 space-y-1">
-        <Label>{{ t("databaseBackup.backgroundWorker") }}</Label>
-        <p class="text-xs text-muted-foreground">{{ heartbeat ? t("databaseBackup.workerLastSeen", { time: formatDate(heartbeat) }) : t("databaseBackup.workerStarting") }}</p>
-        <p v-if="destinationRoot" class="break-all text-xs text-muted-foreground">{{ t("databaseBackup.serverDestination", { path: destinationRoot }) }}</p>
-      </div>
-      <Switch v-if="desktop" :model-value="backgroundEnabled" :disabled="backgroundBusy" :aria-label="t('databaseBackup.backgroundWorker')" @update:model-value="changeBackground" />
-    </div>
-    <p v-if="backupError" class="break-words text-sm text-destructive">{{ backupError }}</p>
-    <div class="overflow-hidden rounded-md border border-border/70">
-      <div v-if="schedules.length === 0" class="flex min-h-44 flex-col items-center justify-center gap-3 px-4 py-8 text-center text-muted-foreground">
-        <DatabaseBackup class="h-8 w-8 opacity-60" />
-        <div>
-          <div class="text-sm font-medium text-foreground">{{ t("databaseBackup.noSchedules") }}</div>
-          <p class="mt-1 text-sm">{{ t("databaseBackup.noSchedulesHint") }}</p>
-        </div>
-        <div class="flex flex-wrap justify-center gap-2">
-          <Button variant="outline" size="sm" :disabled="!canCreateSchedule" @click="openOneShotBackup"><Play class="mr-2 h-4 w-4" />{{ t("databaseBackup.oneShotBackup") }}</Button>
-          <Button size="sm" :disabled="!canCreateSchedule" @click="openCreateSchedule"><Plus class="mr-2 h-4 w-4" />{{ t("databaseBackup.addSchedule") }}</Button>
-        </div>
-      </div>
-      <div v-for="schedule in schedules" :key="schedule.id" class="grid gap-3 border-b border-border/70 px-4 py-3 last:border-b-0 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
-        <div class="min-w-0">
-          <div class="flex min-w-0 flex-wrap items-center gap-2">
-            <span class="truncate text-sm font-medium">{{ schedule.name }}</span>
-            <Badge variant="outline" class="font-normal">{{ connectionName(schedule.connectionId) }}</Badge>
-            <Badge v-if="activeScheduleIds.has(schedule.id)" variant="secondary" class="font-normal">{{ scheduleCancellationRequested(schedule.id) ? t("databaseBackup.cancelling") : t("databaseBackup.status.running") }}</Badge>
-          </div>
-          <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-            <span>{{ frequencyLabel(schedule) }}</span>
-            <span>{{ databaseScopeLabel(schedule) }}</span>
-            <span v-if="schedule.tableFilterMode !== 'all'">{{ tableScopeLabel(schedule) }}</span>
-            <span>{{ t("databaseBackup.nextRun", { time: formatDate(schedule.nextRunAt) }) }}</span>
-            <span>{{ t("databaseBackup.keepRuns", { count: schedule.retentionCount }) }}</span>
-          </div>
-        </div>
-        <div class="flex items-center justify-end gap-1">
-          <Switch :model-value="schedule.enabled" :disabled="activeScheduleIds.has(schedule.id)" :title="schedule.enabled ? t('databaseBackup.disable') : t('databaseBackup.enable')" @update:model-value="(value: boolean) => changeScheduleEnabled(schedule.id, value)" />
-          <Button
-            v-if="activeRunForSchedule(schedule.id)"
-            variant="ghost"
-            size="icon"
-            class="h-8 w-8"
-            :disabled="scheduleCancellationRequested(schedule.id)"
-            :title="scheduleCancellationRequested(schedule.id) ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')"
-            @click="requestCancelRun(activeRunForSchedule(schedule.id)!.id)"
-          >
-            <Loader2 v-if="scheduleCancellationRequested(schedule.id)" class="h-4 w-4 animate-spin" />
-            <Square v-else class="h-4 w-4" />
-          </Button>
-          <Button v-else variant="ghost" size="icon" class="h-8 w-8" :title="t('databaseBackup.runNow')" @click="runNow(schedule)">
-            <Play class="h-4 w-4" />
-          </Button>
-          <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="activeScheduleIds.has(schedule.id)" :title="t('databaseBackup.edit')" @click="openEditSchedule(schedule)">
-            <Pencil class="h-4 w-4" />
-          </Button>
-          <Button variant="ghost" size="icon" class="h-8 w-8 text-muted-foreground hover:text-destructive" :disabled="activeScheduleIds.has(schedule.id)" :title="t('databaseBackup.delete')" @click="requestDeleteSchedule(schedule)">
-            <Trash2 class="h-4 w-4" />
-          </Button>
-        </div>
-      </div>
-    </div>
-
-    <div class="flex flex-col gap-3">
+    <div class="flex flex-col gap-6">
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <h3 class="text-base font-semibold">{{ t("databaseBackup.history") }}</h3>
+        <div class="min-w-0">
+          <h3 class="text-base font-semibold">{{ t("databaseBackup.schedules") }}</h3>
+          <p class="mt-1 text-sm text-muted-foreground">{{ t(desktop ? "databaseBackup.backgroundLoginScope" : "databaseBackup.serverRuntime") }}</p>
+          <p v-if="!canCreateSchedule" class="mt-1 text-xs text-muted-foreground">{{ t("databaseBackup.noSupportedConnections") }}</p>
+        </div>
         <div class="flex flex-wrap items-center justify-end gap-2">
-          <Popover v-model:open="historyConnectionPickerOpen">
-            <PopoverTrigger as-child>
-              <Button data-backup-history-connection-picker type="button" variant="outline" role="combobox" :aria-expanded="historyConnectionPickerOpen" class="min-w-52 justify-between font-normal">
-                <span class="truncate">{{ selectedHistoryConnectionName }}</span>
-                <ChevronDown class="ml-2 h-4 w-4 shrink-0 opacity-50" />
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent align="end" class="w-[var(--reka-popover-trigger-width)] p-1">
-              <div class="relative">
-                <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input v-model="historyConnectionSearch" data-backup-history-connection-search class="h-9 pl-8" :aria-label="t('databaseBackup.searchHistoryConnections')" :placeholder="t('databaseBackup.searchHistoryConnections')" />
-              </div>
-              <div class="max-h-60 overflow-y-auto py-1">
-                <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none" @click="selectHistoryConnection('')">
-                  <Check class="h-4 w-4 shrink-0" :class="historyConnectionId ? 'opacity-0' : 'opacity-100'" />
-                  <span class="min-w-0 flex-1 truncate">{{ t("databaseBackup.allConnections") }}</span>
-                </button>
-                <button
-                  v-for="connection in filteredHistoryConnections"
-                  :key="connection.id"
-                  type="button"
-                  class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
-                  @click="selectHistoryConnection(connection.id)"
-                >
-                  <Check class="h-4 w-4 shrink-0" :class="connection.id === historyConnectionId ? 'opacity-100' : 'opacity-0'" />
-                  <span class="min-w-0 flex-1 truncate">{{ connection.name }}</span>
-                </button>
-                <div v-if="filteredHistoryConnections.length === 0" class="px-2 py-2 text-sm text-muted-foreground">{{ t("databaseBackup.noMatchingConnections") }}</div>
-              </div>
-            </PopoverContent>
-          </Popover>
-          <Select v-model="historyBackupMethod">
-            <SelectTrigger class="w-36" :aria-label="t('databaseBackup.backupMethod')"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">{{ t("databaseBackup.allBackupMethods") }}</SelectItem>
-              <SelectItem value="manual">{{ t("databaseBackup.manualTrigger") }}</SelectItem>
-              <SelectItem value="scheduled">{{ t("databaseBackup.scheduledTrigger") }}</SelectItem>
-              <SelectItem value="one-shot">{{ t("databaseBackup.oneShotTrigger") }}</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select v-model="historyStatus">
-            <SelectTrigger class="w-32" :aria-label="t('databaseBackup.backupStatus')"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">{{ t("databaseBackup.allStatuses") }}</SelectItem>
-              <SelectItem value="running">{{ t("databaseBackup.status.running") }}</SelectItem>
-              <SelectItem value="success">{{ t("databaseBackup.status.success") }}</SelectItem>
-              <SelectItem value="failed">{{ t("databaseBackup.status.failed") }}</SelectItem>
-              <SelectItem value="cancelled">{{ t("databaseBackup.status.cancelled") }}</SelectItem>
-            </SelectContent>
-          </Select>
+          <Button variant="outline" size="sm" data-backup-open-scheduler @click="schedulerView = true">{{ t("scheduler.backupMigration.openScheduler") }}</Button>
+          <Button variant="outline" size="sm" :disabled="!canCreateSchedule" :title="canCreateSchedule ? t('databaseBackup.oneShotBackup') : t('databaseBackup.noSupportedConnections')" @click="openOneShotBackup">
+            <Play class="mr-2 h-4 w-4" />
+            {{ t("databaseBackup.oneShotBackup") }}
+          </Button>
+          <Button size="sm" :disabled="!canCreateSchedule" :title="canCreateSchedule ? t('databaseBackup.addSchedule') : t('databaseBackup.noSupportedConnections')" @click="openCreateSchedule">
+            <Plus class="mr-2 h-4 w-4" />
+            {{ t("databaseBackup.addSchedule") }}
+          </Button>
         </div>
       </div>
-      <div v-if="selectableFilteredRuns.length > 0" class="flex flex-wrap items-center gap-3 rounded-md border border-border/70 bg-muted/20 px-3 py-2">
-        <label class="flex cursor-pointer items-center gap-2 text-sm">
-          <input data-backup-history-select-all type="checkbox" class="h-4 w-4 rounded border-border accent-primary" :checked="allSelectableRunsSelected" @change="toggleAllFilteredRuns(($event.target as HTMLInputElement).checked)" />
-          {{ t("databaseBackup.selectAllFiltered") }}
-        </label>
-        <span v-if="selectedRuns.length > 0" class="text-sm text-muted-foreground">{{ t("databaseBackup.selectedRuns", { count: selectedRuns.length }) }}</span>
-        <Button v-if="selectedRuns.length > 0" data-backup-delete-selected variant="destructive" size="sm" @click="requestDeleteSelectedRuns">
-          <Trash2 class="mr-2 h-4 w-4" />
-          {{ t("databaseBackup.deleteSelected") }}
-        </Button>
+
+      <div class="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
+        <div class="min-w-0 space-y-1">
+          <Label>{{ t("databaseBackup.backgroundWorker") }}</Label>
+          <p class="text-xs text-muted-foreground">{{ heartbeat ? t("databaseBackup.workerLastSeen", { time: formatDate(heartbeat) }) : t("databaseBackup.workerStarting") }}</p>
+          <p v-if="destinationRoot" class="break-all text-xs text-muted-foreground">{{ t("databaseBackup.serverDestination", { path: destinationRoot }) }}</p>
+        </div>
+        <Switch v-if="desktop" :model-value="backgroundEnabled" :disabled="backgroundBusy" :aria-label="t('databaseBackup.backgroundWorker')" @update:model-value="changeBackground" />
       </div>
+      <p v-if="backupError" class="break-words text-sm text-destructive">{{ backupError }}</p>
       <div class="overflow-hidden rounded-md border border-border/70">
-        <div v-if="filteredRuns.length === 0" class="px-4 py-8 text-center text-sm text-muted-foreground">{{ historyConnectionId || historyBackupMethod !== "all" || historyStatus !== "all" ? t("databaseBackup.noFilteredHistory") : t("databaseBackup.noHistory") }}</div>
-        <template v-for="run in filteredRuns" :key="run.id">
-          <div class="grid gap-2 border-b border-border/70 px-3 py-3 last:border-b-0 md:grid-cols-[auto_auto_minmax(0,1fr)_auto] md:items-center">
-            <input
-              data-backup-history-select
-              type="checkbox"
-              class="h-4 w-4 rounded border-border accent-primary"
-              :checked="selectedRunIds.has(run.id)"
-              :disabled="activeRunIds.has(run.id)"
-              :aria-label="t('databaseBackup.selectRun', { name: run.displayName || run.scheduleName })"
-              @change="toggleRunSelected(run.id, ($event.target as HTMLInputElement).checked)"
-            />
-            <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="run.files.length === 0" :title="t('databaseBackup.showFiles')" @click="toggleRunExpanded(run.id)">
-              <ChevronDown v-if="expandedRunIds.has(run.id)" class="h-4 w-4" />
-              <ChevronRight v-else class="h-4 w-4" />
-            </Button>
-            <div class="min-w-0">
-              <div class="flex min-w-0 flex-wrap items-center gap-2">
-                <span class="truncate text-sm font-medium">{{ run.displayName || run.scheduleName }}</span>
-                <Badge :variant="runStatusVariant(run.status)" class="font-normal">{{ displayedRunStatusLabel(run) }}</Badge>
-                <Badge variant="outline" class="font-normal">{{ run.source === "one-shot" ? t("databaseBackup.oneShotTrigger") : run.trigger === "scheduled" ? t("databaseBackup.scheduledTrigger") : t("databaseBackup.manualTrigger") }}</Badge>
-              </div>
-              <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                <span>{{ run.connectionName || connectionName(run.connectionId) }}</span>
-                <span>{{ formatDate(run.startedAt) }}</span>
-                <span>{{ t("databaseBackup.fileCount", { count: run.files.length }) }}</span>
-                <span v-if="run.error" class="break-all text-destructive">{{ translateBackendError(t, run.error) }}</span>
-              </div>
-              <div v-if="activeRunIds.has(run.id)" class="mt-2 flex items-center gap-2">
-                <div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted" role="progressbar" :aria-label="t('databaseBackup.progress')" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="run.progressPercent ?? 0">
-                  <div class="h-full rounded-full bg-primary transition-[width] duration-300" :style="{ width: `${run.progressPercent ?? 0}%` }" />
-                </div>
-                <span class="w-9 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ run.progressPercent ?? 0 }}%</span>
-              </div>
+        <div v-if="schedules.length === 0" class="flex min-h-44 flex-col items-center justify-center gap-3 px-4 py-8 text-center text-muted-foreground">
+          <DatabaseBackup class="h-8 w-8 opacity-60" />
+          <div>
+            <div class="text-sm font-medium text-foreground">{{ t("databaseBackup.noSchedules") }}</div>
+            <p class="mt-1 text-sm">{{ t("databaseBackup.noSchedulesHint") }}</p>
+          </div>
+          <div class="flex flex-wrap justify-center gap-2">
+            <Button variant="outline" size="sm" :disabled="!canCreateSchedule" @click="openOneShotBackup"><Play class="mr-2 h-4 w-4" />{{ t("databaseBackup.oneShotBackup") }}</Button>
+            <Button size="sm" :disabled="!canCreateSchedule" @click="openCreateSchedule"><Plus class="mr-2 h-4 w-4" />{{ t("databaseBackup.addSchedule") }}</Button>
+          </div>
+        </div>
+        <div v-for="schedule in schedules" :key="schedule.id" class="grid gap-3 border-b border-border/70 px-4 py-3 last:border-b-0 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+          <div class="min-w-0">
+            <div class="flex min-w-0 flex-wrap items-center gap-2">
+              <span class="truncate text-sm font-medium">{{ schedule.name }}</span>
+              <Badge variant="outline" class="font-normal">{{ connectionName(schedule.connectionId) }}</Badge>
+              <Badge v-if="activeScheduleIds.has(schedule.id)" variant="secondary" class="font-normal">{{ scheduleCancellationRequested(schedule.id) ? t("databaseBackup.cancelling") : t("databaseBackup.status.running") }}</Badge>
             </div>
-            <div class="flex items-center justify-end gap-1">
-              <Button
-                v-if="activeRunIds.has(run.id) && run.source === 'one-shot'"
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8"
-                :disabled="cancellingRunIds.has(run.id)"
-                :title="cancellingRunIds.has(run.id) ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')"
-                @click="requestCancelRun(run.id)"
-              >
-                <Loader2 v-if="cancellingRunIds.has(run.id)" class="h-4 w-4 animate-spin" />
-                <Square v-else class="h-4 w-4" />
-              </Button>
-              <Loader2 v-else-if="activeRunIds.has(run.id)" class="mr-2 h-4 w-4 animate-spin text-primary" />
-              <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="activeRunIds.has(run.id)" :title="t('databaseBackup.renameBackup')" @click="requestRenameRun(run)">
-                <Pencil class="h-4 w-4" />
-              </Button>
-              <Button v-if="run.files[0]" variant="ghost" size="icon" class="h-8 w-8" :title="t(desktop ? 'databaseBackup.revealFile' : 'common.download')" @click="revealBackup(run.files[0])">
-                <component :is="desktop ? FolderOpen : Download" class="h-4 w-4" />
-              </Button>
-              <Button variant="ghost" size="icon" class="h-8 w-8 text-muted-foreground hover:text-destructive" :disabled="activeRunIds.has(run.id)" :title="t('databaseBackup.deleteBackup')" @click="requestDeleteRun(run)">
-                <Trash2 class="h-4 w-4" />
-              </Button>
+            <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              <span>{{ frequencyLabel(schedule) }}</span>
+              <span>{{ databaseScopeLabel(schedule) }}</span>
+              <span v-if="schedule.tableFilterMode !== 'all'">{{ tableScopeLabel(schedule) }}</span>
+              <span>{{ t("databaseBackup.nextRun", { time: formatDate(schedule.nextRunAt) }) }}</span>
+              <span>{{ t("databaseBackup.keepRuns", { count: schedule.retentionCount }) }}</span>
             </div>
           </div>
-          <div v-if="expandedRunIds.has(run.id) && run.files.length > 0" class="border-b border-border/70 bg-muted/20 px-4 py-2 last:border-b-0">
-            <div v-for="file in run.files" :key="file.filePath" class="grid gap-2 border-b border-border/50 py-2 last:border-b-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+          <div class="flex items-center justify-end gap-1">
+            <Switch :model-value="schedule.enabled" :disabled="activeScheduleIds.has(schedule.id)" :title="schedule.enabled ? t('databaseBackup.disable') : t('databaseBackup.enable')" @update:model-value="(value: boolean) => changeScheduleEnabled(schedule.id, value)" />
+            <Button
+              v-if="activeRunForSchedule(schedule.id)"
+              variant="ghost"
+              size="icon"
+              class="h-8 w-8"
+              :disabled="scheduleCancellationRequested(schedule.id)"
+              :title="scheduleCancellationRequested(schedule.id) ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')"
+              @click="requestCancelRun(activeRunForSchedule(schedule.id)!.id)"
+            >
+              <Loader2 v-if="scheduleCancellationRequested(schedule.id)" class="h-4 w-4 animate-spin" />
+              <Square v-else class="h-4 w-4" />
+            </Button>
+            <Button v-else variant="ghost" size="icon" class="h-8 w-8" :title="t('databaseBackup.runNow')" @click="runNow(schedule)">
+              <Play class="h-4 w-4" />
+            </Button>
+            <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="activeScheduleIds.has(schedule.id)" :title="t('databaseBackup.edit')" @click="openEditSchedule(schedule)">
+              <Pencil class="h-4 w-4" />
+            </Button>
+            <Button variant="ghost" size="icon" class="h-8 w-8 text-muted-foreground hover:text-destructive" :disabled="activeScheduleIds.has(schedule.id)" :title="t('databaseBackup.delete')" @click="requestDeleteSchedule(schedule)">
+              <Trash2 class="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex flex-col gap-3">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <h3 class="text-base font-semibold">{{ t("databaseBackup.history") }}</h3>
+          <div class="flex flex-wrap items-center justify-end gap-2">
+            <Popover v-model:open="historyConnectionPickerOpen">
+              <PopoverTrigger as-child>
+                <Button data-backup-history-connection-picker type="button" variant="outline" role="combobox" :aria-expanded="historyConnectionPickerOpen" class="min-w-52 justify-between font-normal">
+                  <span class="truncate">{{ selectedHistoryConnectionName }}</span>
+                  <ChevronDown class="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="end" class="w-[var(--reka-popover-trigger-width)] p-1">
+                <div class="relative">
+                  <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input v-model="historyConnectionSearch" data-backup-history-connection-search class="h-9 pl-8" :aria-label="t('databaseBackup.searchHistoryConnections')" :placeholder="t('databaseBackup.searchHistoryConnections')" />
+                </div>
+                <div class="max-h-60 overflow-y-auto py-1">
+                  <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none" @click="selectHistoryConnection('')">
+                    <Check class="h-4 w-4 shrink-0" :class="historyConnectionId ? 'opacity-0' : 'opacity-100'" />
+                    <span class="min-w-0 flex-1 truncate">{{ t("databaseBackup.allConnections") }}</span>
+                  </button>
+                  <button
+                    v-for="connection in filteredHistoryConnections"
+                    :key="connection.id"
+                    type="button"
+                    class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+                    @click="selectHistoryConnection(connection.id)"
+                  >
+                    <Check class="h-4 w-4 shrink-0" :class="connection.id === historyConnectionId ? 'opacity-100' : 'opacity-0'" />
+                    <span class="min-w-0 flex-1 truncate">{{ connection.name }}</span>
+                  </button>
+                  <div v-if="filteredHistoryConnections.length === 0" class="px-2 py-2 text-sm text-muted-foreground">{{ t("databaseBackup.noMatchingConnections") }}</div>
+                </div>
+              </PopoverContent>
+            </Popover>
+            <Select v-model="historyBackupMethod">
+              <SelectTrigger class="w-36" :aria-label="t('databaseBackup.backupMethod')"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{{ t("databaseBackup.allBackupMethods") }}</SelectItem>
+                <SelectItem value="manual">{{ t("databaseBackup.manualTrigger") }}</SelectItem>
+                <SelectItem value="scheduled">{{ t("databaseBackup.scheduledTrigger") }}</SelectItem>
+                <SelectItem value="one-shot">{{ t("databaseBackup.oneShotTrigger") }}</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select v-model="historyStatus">
+              <SelectTrigger class="w-32" :aria-label="t('databaseBackup.backupStatus')"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{{ t("databaseBackup.allStatuses") }}</SelectItem>
+                <SelectItem value="running">{{ t("databaseBackup.status.running") }}</SelectItem>
+                <SelectItem value="success">{{ t("databaseBackup.status.success") }}</SelectItem>
+                <SelectItem value="failed">{{ t("databaseBackup.status.failed") }}</SelectItem>
+                <SelectItem value="cancelled">{{ t("databaseBackup.status.cancelled") }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <div v-if="selectableFilteredRuns.length > 0" class="flex flex-wrap items-center gap-3 rounded-md border border-border/70 bg-muted/20 px-3 py-2">
+          <label class="flex cursor-pointer items-center gap-2 text-sm">
+            <input data-backup-history-select-all type="checkbox" class="h-4 w-4 rounded border-border accent-primary" :checked="allSelectableRunsSelected" @change="toggleAllFilteredRuns(($event.target as HTMLInputElement).checked)" />
+            {{ t("databaseBackup.selectAllFiltered") }}
+          </label>
+          <span v-if="selectedRuns.length > 0" class="text-sm text-muted-foreground">{{ t("databaseBackup.selectedRuns", { count: selectedRuns.length }) }}</span>
+          <Button v-if="selectedRuns.length > 0" data-backup-delete-selected variant="destructive" size="sm" @click="requestDeleteSelectedRuns">
+            <Trash2 class="mr-2 h-4 w-4" />
+            {{ t("databaseBackup.deleteSelected") }}
+          </Button>
+        </div>
+        <div class="overflow-hidden rounded-md border border-border/70">
+          <div v-if="filteredRuns.length === 0" class="px-4 py-8 text-center text-sm text-muted-foreground">{{ historyConnectionId || historyBackupMethod !== "all" || historyStatus !== "all" ? t("databaseBackup.noFilteredHistory") : t("databaseBackup.noHistory") }}</div>
+          <template v-for="run in filteredRuns" :key="run.id">
+            <div class="grid gap-2 border-b border-border/70 px-3 py-3 last:border-b-0 md:grid-cols-[auto_auto_minmax(0,1fr)_auto] md:items-center">
+              <input
+                data-backup-history-select
+                type="checkbox"
+                class="h-4 w-4 rounded border-border accent-primary"
+                :checked="selectedRunIds.has(run.id)"
+                :disabled="activeRunIds.has(run.id)"
+                :aria-label="t('databaseBackup.selectRun', { name: run.displayName || run.scheduleName })"
+                @change="toggleRunSelected(run.id, ($event.target as HTMLInputElement).checked)"
+              />
+              <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="run.files.length === 0" :title="t('databaseBackup.showFiles')" @click="toggleRunExpanded(run.id)">
+                <ChevronDown v-if="expandedRunIds.has(run.id)" class="h-4 w-4" />
+                <ChevronRight v-else class="h-4 w-4" />
+              </Button>
               <div class="min-w-0">
-                <div class="truncate text-xs font-medium">{{ file.displayName }}</div>
-                <div class="truncate text-xs text-muted-foreground" :title="file.filePath">{{ file.filePath }}</div>
+                <div class="flex min-w-0 flex-wrap items-center gap-2">
+                  <span class="truncate text-sm font-medium">{{ run.displayName || run.scheduleName }}</span>
+                  <Badge :variant="runStatusVariant(run.status)" class="font-normal">{{ displayedRunStatusLabel(run) }}</Badge>
+                  <Badge variant="outline" class="font-normal">{{ run.source === "one-shot" ? t("databaseBackup.oneShotTrigger") : run.trigger === "scheduled" ? t("databaseBackup.scheduledTrigger") : t("databaseBackup.manualTrigger") }}</Badge>
+                </div>
+                <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                  <span>{{ run.connectionName || connectionName(run.connectionId) }}</span>
+                  <span>{{ formatDate(run.startedAt) }}</span>
+                  <span>{{ t("databaseBackup.fileCount", { count: run.files.length }) }}</span>
+                  <span v-if="run.error" class="break-all text-destructive">{{ translateBackendError(t, run.error) }}</span>
+                </div>
+                <div v-if="activeRunIds.has(run.id)" class="mt-2 flex items-center gap-2">
+                  <div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted" role="progressbar" :aria-label="t('databaseBackup.progress')" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="run.progressPercent ?? 0">
+                    <div class="h-full rounded-full bg-primary transition-[width] duration-300" :style="{ width: `${run.progressPercent ?? 0}%` }" />
+                  </div>
+                  <span class="w-9 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ run.progressPercent ?? 0 }}%</span>
+                </div>
               </div>
               <div class="flex items-center justify-end gap-1">
-                <Button variant="ghost" size="icon" class="h-7 w-7" :title="t(desktop ? 'databaseBackup.revealFile' : 'common.download')" @click="revealBackup(file)">
-                  <component :is="desktop ? FolderOpen : Download" class="h-3.5 w-3.5" />
+                <Button
+                  v-if="activeRunIds.has(run.id) && run.source === 'one-shot'"
+                  variant="ghost"
+                  size="icon"
+                  class="h-8 w-8"
+                  :disabled="cancellingRunIds.has(run.id)"
+                  :title="cancellingRunIds.has(run.id) ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')"
+                  @click="requestCancelRun(run.id)"
+                >
+                  <Loader2 v-if="cancellingRunIds.has(run.id)" class="h-4 w-4 animate-spin" />
+                  <Square v-else class="h-4 w-4" />
                 </Button>
-                <Button variant="outline" size="sm" class="h-7" :disabled="run.status !== 'success'" @click="restoreBackup(run, file)">
-                  <RotateCcw class="mr-1.5 h-3.5 w-3.5" />
-                  {{ t("databaseBackup.restore") }}
+                <Loader2 v-else-if="activeRunIds.has(run.id)" class="mr-2 h-4 w-4 animate-spin text-primary" />
+                <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="activeRunIds.has(run.id)" :title="t('databaseBackup.renameBackup')" @click="requestRenameRun(run)">
+                  <Pencil class="h-4 w-4" />
+                </Button>
+                <Button v-if="run.files[0]" variant="ghost" size="icon" class="h-8 w-8" :title="t(desktop ? 'databaseBackup.revealFile' : 'common.download')" @click="revealBackup(run.files[0])">
+                  <component :is="desktop ? FolderOpen : Download" class="h-4 w-4" />
+                </Button>
+                <Button variant="ghost" size="icon" class="h-8 w-8 text-muted-foreground hover:text-destructive" :disabled="activeRunIds.has(run.id)" :title="t('databaseBackup.deleteBackup')" @click="requestDeleteRun(run)">
+                  <Trash2 class="h-4 w-4" />
                 </Button>
               </div>
             </div>
-          </div>
-        </template>
+            <div v-if="expandedRunIds.has(run.id) && run.files.length > 0" class="border-b border-border/70 bg-muted/20 px-4 py-2 last:border-b-0">
+              <div v-for="file in run.files" :key="file.filePath" class="grid gap-2 border-b border-border/50 py-2 last:border-b-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                <div class="min-w-0">
+                  <div class="truncate text-xs font-medium">{{ file.displayName }}</div>
+                  <div class="truncate text-xs text-muted-foreground" :title="file.filePath">{{ file.filePath }}</div>
+                </div>
+                <div class="flex items-center justify-end gap-1">
+                  <Button variant="ghost" size="icon" class="h-7 w-7" :title="t(desktop ? 'databaseBackup.revealFile' : 'common.download')" @click="revealBackup(file)">
+                    <component :is="desktop ? FolderOpen : Download" class="h-3.5 w-3.5" />
+                  </Button>
+                  <Button variant="outline" size="sm" class="h-7" :disabled="run.status !== 'success'" @click="restoreBackup(run, file)">
+                    <RotateCcw class="mr-1.5 h-3.5 w-3.5" />
+                    {{ t("databaseBackup.restore") }}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
-  </div>
 
-  <Dialog v-model:open="scheduleDialogOpen">
-    <DialogContent class="dbx-backup-dialog dbx-form-dialog dbx-form-dialog--lg max-h-[min(760px,calc(var(--dbx-viewport-height)-32px))] max-w-[min(720px,calc(100vw-32px))] overflow-x-hidden overflow-y-auto pr-8 [scrollbar-gutter:stable]">
-      <DialogHeader>
-        <DialogTitle>{{ editingScheduleId ? t("databaseBackup.editSchedule") : t("databaseBackup.addSchedule") }}</DialogTitle>
-      </DialogHeader>
+    <Dialog v-model:open="scheduleDialogOpen">
+      <DialogContent class="dbx-backup-dialog dbx-form-dialog dbx-form-dialog--lg max-h-[min(760px,calc(var(--dbx-viewport-height)-32px))] max-w-[min(720px,calc(100vw-32px))] overflow-x-hidden overflow-y-auto pr-8 [scrollbar-gutter:stable]">
+        <DialogHeader>
+          <DialogTitle>{{ editingScheduleId ? t("databaseBackup.editSchedule") : t("databaseBackup.addSchedule") }}</DialogTitle>
+        </DialogHeader>
 
-      <div class="backup-schedule-form grid gap-5 py-1">
-        <div class="space-y-2">
-          <Label>{{ t("databaseBackup.scheduleName") }}</Label>
-          <Input v-model="draft.name" />
+        <div class="backup-schedule-form grid gap-5 py-1">
+          <div class="space-y-2">
+            <Label>{{ t("databaseBackup.scheduleName") }}</Label>
+            <Input v-model="draft.name" />
+          </div>
+
+          <DatabaseBackupConfigFields
+            :draft="draft"
+            :connections="sqlConnections"
+            :all-databases="allDatabases"
+            :selected-databases="selectedDatabases"
+            :database-options="databaseOptions"
+            :table-patterns-input="tablePatternsInput"
+            :loading-databases="loadingDatabases"
+            :database-load-error="databaseLoadError"
+            :run-directory-pattern="draft.runDirectoryPattern"
+            :run-directory-pattern-valid="databaseBackupRunDirectoryPatternIsValid(draft.runDirectoryPattern || '')"
+            :output-path-preview="scheduleOutputPathPreview"
+            @change-connection="changeConnection"
+            @choose-destination="chooseDestination"
+            @toggle-database="toggleDatabase"
+            @update:all-databases="setAllDatabases"
+            @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
+            @table-selection-state="(state) => (scheduleTableSelectionState = state)"
+            @update:run-directory-pattern="(value: string) => (draft.runDirectoryPattern = value)"
+          />
+
+          <div class="grid gap-4 sm:grid-cols-3">
+            <div class="space-y-2">
+              <Label>{{ t("databaseBackup.frequency") }}</Label>
+              <Select v-model="draft.frequency">
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="hourly">{{ t("databaseBackup.frequencyHourly") }}</SelectItem>
+                  <SelectItem value="daily">{{ t("databaseBackup.frequencyDaily") }}</SelectItem>
+                  <SelectItem value="weekly">{{ t("databaseBackup.frequencyWeekly") }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div v-if="draft.frequency === 'hourly'" class="space-y-2">
+              <Label>{{ t("databaseBackup.intervalHours") }}</Label>
+              <Input v-model.number="draft.intervalHours" type="number" min="1" max="168" />
+            </div>
+            <div v-else class="space-y-2">
+              <Label>{{ t("databaseBackup.time") }}</Label>
+              <Input v-model="draft.timeOfDay" type="time" />
+            </div>
+            <div v-if="draft.frequency === 'weekly'" class="space-y-2">
+              <Label>{{ t("databaseBackup.weekday") }}</Label>
+              <Select :model-value="String(draft.weekday)" @update:model-value="(value: any) => (draft.weekday = Number(value))">
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="weekday in weekdays" :key="weekday.value" :value="String(weekday.value)">{{ weekday.label }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div class="space-y-2">
+              <Label>{{ t("databaseBackup.retention") }}</Label>
+              <Input v-model.number="draft.retentionCount" type="number" min="1" max="100" />
+            </div>
+          </div>
+          <div class="space-y-2">
+            <Label>{{ t("databaseBackup.timeZone") }}</Label>
+            <Input v-model="draft.timeZone" :aria-invalid="!!previewError" />
+            <p v-if="previewError" class="text-xs text-destructive">{{ previewError }}</p>
+            <div v-else class="text-xs text-muted-foreground">{{ t("databaseBackup.nextRunPreview", { time: formatDate(nextRunPreview.toISOString()) }) }}</div>
+          </div>
+
+          <div class="flex items-center justify-between gap-4 border-t border-border/70 pt-4">
+            <div>
+              <Label>{{ t("databaseBackup.enabled") }}</Label>
+              <div class="mt-1 text-xs text-muted-foreground">{{ t("databaseBackup.savedTimeZoneHint") }}</div>
+            </div>
+            <Switch v-model="draft.enabled" />
+          </div>
         </div>
 
+        <DialogFooter>
+          <Button variant="outline" @click="scheduleDialogOpen = false">{{ t("common.cancel") }}</Button>
+          <Button :disabled="!canSave" @click="submitSchedule">
+            <Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />
+            {{ t("common.save") }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="oneShotDialogOpen">
+      <DialogContent class="dbx-backup-dialog dbx-form-dialog dbx-form-dialog--lg max-h-[min(760px,calc(var(--dbx-viewport-height)-32px))] max-w-[min(720px,calc(100vw-32px))] overflow-x-hidden overflow-y-auto pr-8 [scrollbar-gutter:stable]">
+        <DialogHeader>
+          <DialogTitle>{{ t("databaseBackup.oneShotBackup") }}</DialogTitle>
+          <p class="text-sm text-muted-foreground">{{ t("databaseBackup.oneShotDescription") }}</p>
+        </DialogHeader>
+
         <DatabaseBackupConfigFields
-          :draft="draft"
+          :draft="oneShotDraft"
           :connections="sqlConnections"
+          multi-select-connections
+          :selected-connection-ids="oneShotConnectionIds"
           :all-databases="allDatabases"
           :selected-databases="selectedDatabases"
           :database-options="databaseOptions"
           :table-patterns-input="tablePatternsInput"
           :loading-databases="loadingDatabases"
           :database-load-error="databaseLoadError"
-          :run-directory-pattern="draft.runDirectoryPattern"
-          :run-directory-pattern-valid="databaseBackupRunDirectoryPatternIsValid(draft.runDirectoryPattern || '')"
-          :output-path-preview="scheduleOutputPathPreview"
-          @change-connection="changeConnection"
+          :output-path-preview="oneShotOutputPathPreview"
+          @toggle-connection="toggleOneShotConnection"
           @choose-destination="chooseDestination"
           @toggle-database="toggleDatabase"
           @update:all-databases="setAllDatabases"
           @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
-          @table-selection-state="(state) => (scheduleTableSelectionState = state)"
-          @update:run-directory-pattern="(value: string) => (draft.runDirectoryPattern = value)"
+          @table-selection-state="(state) => (oneShotTableSelectionState = state)"
         />
 
-        <div class="grid gap-4 sm:grid-cols-3">
-          <div class="space-y-2">
-            <Label>{{ t("databaseBackup.frequency") }}</Label>
-            <Select v-model="draft.frequency">
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="hourly">{{ t("databaseBackup.frequencyHourly") }}</SelectItem>
-                <SelectItem value="daily">{{ t("databaseBackup.frequencyDaily") }}</SelectItem>
-                <SelectItem value="weekly">{{ t("databaseBackup.frequencyWeekly") }}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div v-if="draft.frequency === 'hourly'" class="space-y-2">
-            <Label>{{ t("databaseBackup.intervalHours") }}</Label>
-            <Input v-model.number="draft.intervalHours" type="number" min="1" max="168" />
-          </div>
-          <div v-else class="space-y-2">
-            <Label>{{ t("databaseBackup.time") }}</Label>
-            <Input v-model="draft.timeOfDay" type="time" />
-          </div>
-          <div v-if="draft.frequency === 'weekly'" class="space-y-2">
-            <Label>{{ t("databaseBackup.weekday") }}</Label>
-            <Select :model-value="String(draft.weekday)" @update:model-value="(value: any) => (draft.weekday = Number(value))">
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="weekday in weekdays" :key="weekday.value" :value="String(weekday.value)">{{ weekday.label }}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div class="space-y-2">
-            <Label>{{ t("databaseBackup.retention") }}</Label>
-            <Input v-model.number="draft.retentionCount" type="number" min="1" max="100" />
-          </div>
-        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="oneShotDialogOpen = false">{{ oneShotStarting ? t("common.close") : t("common.cancel") }}</Button>
+          <Button v-if="oneShotStarting" variant="destructive" :disabled="cancellableOneShotRuns.length === 0 || oneShotCancellationRequested()" :title="oneShotCancellationRequested() ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')" @click="cancelActiveOneShotBackup">
+            <Loader2 v-if="oneShotCancellationRequested()" class="mr-2 h-4 w-4 animate-spin" />
+            <Square v-else class="mr-2 h-4 w-4" />
+            {{ oneShotCancellationRequested() ? t("databaseBackup.cancelling") : t("databaseBackup.cancel") }}
+          </Button>
+          <Button v-else :disabled="!canStartOneShot" @click="startOneShotBackup">
+            {{ t("databaseBackup.startBackup") }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="deleteScheduleDialogOpen">
+      <DialogContent class="max-w-md">
+        <DialogHeader
+          ><DialogTitle>{{ t("databaseBackup.deleteSchedule") }}</DialogTitle></DialogHeader
+        >
+        <p class="text-sm text-muted-foreground">{{ t("databaseBackup.deleteScheduleConfirm", { name: pendingDeleteSchedule?.name || "" }) }}</p>
+        <DialogFooter>
+          <Button variant="outline" @click="deleteScheduleDialogOpen = false">{{ t("common.cancel") }}</Button>
+          <Button variant="destructive" @click="confirmDeleteSchedule">{{ t("databaseBackup.delete") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="deleteRunDialogOpen">
+      <DialogContent class="max-w-md">
+        <DialogHeader
+          ><DialogTitle>{{ t("databaseBackup.deleteBackup") }}</DialogTitle></DialogHeader
+        >
+        <p class="text-sm text-muted-foreground">
+          {{
+            pendingDeleteRunIds.length === 1
+              ? t("databaseBackup.deleteBackupConfirm", { count: runs.find((run) => run.id === pendingDeleteRunIds[0])?.files.length || 0 })
+              : t("databaseBackup.deleteBackupsConfirm", { count: pendingDeleteRunIds.length, files: pendingDeleteRunIds.reduce((total, runId) => total + (runs.find((run) => run.id === runId)?.files.length || 0), 0) })
+          }}
+        </p>
+        <DialogFooter>
+          <Button variant="outline" @click="deleteRunDialogOpen = false">{{ t("common.cancel") }}</Button>
+          <Button variant="destructive" @click="confirmDeleteRuns">{{ t("databaseBackup.delete") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="renameRunDialogOpen">
+      <DialogContent class="max-w-md">
+        <DialogHeader
+          ><DialogTitle>{{ t("databaseBackup.renameBackup") }}</DialogTitle></DialogHeader
+        >
         <div class="space-y-2">
-          <Label>{{ t("databaseBackup.timeZone") }}</Label>
-          <Input v-model="draft.timeZone" :aria-invalid="!!previewError" />
-          <p v-if="previewError" class="text-xs text-destructive">{{ previewError }}</p>
-          <div v-else class="text-xs text-muted-foreground">{{ t("databaseBackup.nextRunPreview", { time: formatDate(nextRunPreview.toISOString()) }) }}</div>
+          <Label>{{ t("databaseBackup.backupName") }}</Label>
+          <Input v-model="renameRunName" autofocus @keyup.enter="confirmRenameRun" />
         </div>
-
-        <div class="flex items-center justify-between gap-4 border-t border-border/70 pt-4">
-          <div>
-            <Label>{{ t("databaseBackup.enabled") }}</Label>
-            <div class="mt-1 text-xs text-muted-foreground">{{ t("databaseBackup.savedTimeZoneHint") }}</div>
-          </div>
-          <Switch v-model="draft.enabled" />
-        </div>
-      </div>
-
-      <DialogFooter>
-        <Button variant="outline" @click="scheduleDialogOpen = false">{{ t("common.cancel") }}</Button>
-        <Button :disabled="!canSave" @click="submitSchedule">
-          <Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />
-          {{ t("common.save") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="oneShotDialogOpen">
-    <DialogContent class="dbx-backup-dialog dbx-form-dialog dbx-form-dialog--lg max-h-[min(760px,calc(var(--dbx-viewport-height)-32px))] max-w-[min(720px,calc(100vw-32px))] overflow-x-hidden overflow-y-auto pr-8 [scrollbar-gutter:stable]">
-      <DialogHeader>
-        <DialogTitle>{{ t("databaseBackup.oneShotBackup") }}</DialogTitle>
-        <p class="text-sm text-muted-foreground">{{ t("databaseBackup.oneShotDescription") }}</p>
-      </DialogHeader>
-
-      <DatabaseBackupConfigFields
-        :draft="oneShotDraft"
-        :connections="sqlConnections"
-        :all-databases="allDatabases"
-        :selected-databases="selectedDatabases"
-        :database-options="databaseOptions"
-        :table-patterns-input="tablePatternsInput"
-        :loading-databases="loadingDatabases"
-        :database-load-error="databaseLoadError"
-        :output-path-preview="oneShotOutputPathPreview"
-        @change-connection="changeConnection"
-        @choose-destination="chooseDestination"
-        @toggle-database="toggleDatabase"
-        @update:all-databases="setAllDatabases"
-        @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
-        @table-selection-state="(state) => (oneShotTableSelectionState = state)"
-      />
-
-      <DialogFooter>
-        <Button variant="outline" @click="oneShotDialogOpen = false">{{ oneShotStarting ? t("common.close") : t("common.cancel") }}</Button>
-        <Button v-if="oneShotStarting" variant="destructive" :disabled="!activeOneShotRun || oneShotCancellationRequested()" :title="oneShotCancellationRequested() ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')" @click="cancelActiveOneShotBackup">
-          <Loader2 v-if="oneShotCancellationRequested()" class="mr-2 h-4 w-4 animate-spin" />
-          <Square v-else class="mr-2 h-4 w-4" />
-          {{ oneShotCancellationRequested() ? t("databaseBackup.cancelling") : t("databaseBackup.cancel") }}
-        </Button>
-        <Button v-else :disabled="!canStartOneShot" @click="startOneShotBackup">
-          {{ t("databaseBackup.startBackup") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="deleteScheduleDialogOpen">
-    <DialogContent class="max-w-md">
-      <DialogHeader
-        ><DialogTitle>{{ t("databaseBackup.deleteSchedule") }}</DialogTitle></DialogHeader
-      >
-      <p class="text-sm text-muted-foreground">{{ t("databaseBackup.deleteScheduleConfirm", { name: pendingDeleteSchedule?.name || "" }) }}</p>
-      <DialogFooter>
-        <Button variant="outline" @click="deleteScheduleDialogOpen = false">{{ t("common.cancel") }}</Button>
-        <Button variant="destructive" @click="confirmDeleteSchedule">{{ t("databaseBackup.delete") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="deleteRunDialogOpen">
-    <DialogContent class="max-w-md">
-      <DialogHeader
-        ><DialogTitle>{{ t("databaseBackup.deleteBackup") }}</DialogTitle></DialogHeader
-      >
-      <p class="text-sm text-muted-foreground">
-        {{
-          pendingDeleteRunIds.length === 1
-            ? t("databaseBackup.deleteBackupConfirm", { count: runs.find((run) => run.id === pendingDeleteRunIds[0])?.files.length || 0 })
-            : t("databaseBackup.deleteBackupsConfirm", { count: pendingDeleteRunIds.length, files: pendingDeleteRunIds.reduce((total, runId) => total + (runs.find((run) => run.id === runId)?.files.length || 0), 0) })
-        }}
-      </p>
-      <DialogFooter>
-        <Button variant="outline" @click="deleteRunDialogOpen = false">{{ t("common.cancel") }}</Button>
-        <Button variant="destructive" @click="confirmDeleteRuns">{{ t("databaseBackup.delete") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="renameRunDialogOpen">
-    <DialogContent class="max-w-md">
-      <DialogHeader
-        ><DialogTitle>{{ t("databaseBackup.renameBackup") }}</DialogTitle></DialogHeader
-      >
-      <div class="space-y-2">
-        <Label>{{ t("databaseBackup.backupName") }}</Label>
-        <Input v-model="renameRunName" autofocus @keyup.enter="confirmRenameRun" />
-      </div>
-      <DialogFooter>
-        <Button variant="outline" @click="renameRunDialogOpen = false">{{ t("common.cancel") }}</Button>
-        <Button :disabled="!renameRunName.trim()" @click="confirmRenameRun">{{ t("common.save") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
+        <DialogFooter>
+          <Button variant="outline" @click="renameRunDialogOpen = false">{{ t("common.cancel") }}</Button>
+          <Button :disabled="!renameRunName.trim()" @click="confirmRenameRun">{{ t("common.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </template>
 </template>
 

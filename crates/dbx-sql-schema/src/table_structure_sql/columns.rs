@@ -83,14 +83,15 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                             }
                         }
                         None => {}
-                        Some((_, original_storage)) => {
-                            if normalize_mysql_generated_storage(generated.storage.as_deref()) != original_storage {
-                                warnings.push(format!(
-                                    "Column \"{}\": MySQL cannot switch a generated column between VIRTUAL and STORED in place; the column must be dropped and re-added.",
-                                    column.name
-                                ));
-                            }
+                        Some((_, original_storage))
+                            if normalize_mysql_generated_storage(generated.storage.as_deref()) != original_storage =>
+                        {
+                            warnings.push(format!(
+                                "Column \"{}\": MySQL cannot switch a generated column between VIRTUAL and STORED in place; the column must be dropped and re-added.",
+                                column.name
+                            ));
                         }
+                        Some(_) => {}
                     }
                 }
             } else if let Some((_, original_storage)) = original_generated {

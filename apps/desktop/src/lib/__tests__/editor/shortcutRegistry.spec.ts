@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { isCloseAllTabsShortcut } from "@/lib/editor/keyboardShortcuts";
 import {
   closeOtherTabsDefaultShortcut,
   countShortcutConflictPairs,
@@ -289,6 +290,25 @@ describe("shortcutRegistry editor actions", () => {
     expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.closeWindow, "MacIntel")).toBe("Shift+Cmd+W");
     expect(normalizeShortcutSettings({ closeWindow: "Mod+Alt+W" }).closeWindow).toBe("Mod+Alt+W");
     expect(normalizeShortcutSettings({ closeWindow: "" }).closeWindow).toBe("");
+  });
+
+  it("registers closeAllTabs as an unbound global shortcut that users can assign", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "closeAllTabs");
+    expect(definition).toMatchObject({
+      id: "closeAllTabs",
+      labelKey: "contextMenu.closeAllTabs",
+      scope: "global",
+      defaultShortcut: "",
+    });
+    // 无默认键位：保持未绑定状态，由用户在设置里自行分配
+    expect(DEFAULT_SHORTCUT_SETTINGS.closeAllTabs).toBe("");
+    expect(normalizeShortcutSettings({}).closeAllTabs).toBe("");
+    expect(normalizeShortcutSettings({ closeAllTabs: "Shift+Mod+Alt+W" }).closeAllTabs).toBe("Shift+Mod+Alt+W");
+    expect(normalizeShortcutSettings({ closeAllTabs: "" }).closeAllTabs).toBe("");
+    const event = { key: "w", shiftKey: true, metaKey: true, altKey: true };
+    // 显式分配后生效；默认未绑定时永不触发
+    expect(isCloseAllTabsShortcut(event, { closeAllTabs: "Shift+Mod+Alt+W" }, "MacIntel")).toBe(true);
+    expect(isCloseAllTabsShortcut(event, {}, "MacIntel")).toBe(false);
   });
 
   it("normalizes custom, cleared, and invalid modifier-only shortcuts", () => {

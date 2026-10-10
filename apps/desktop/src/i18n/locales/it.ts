@@ -11100,7 +11100,7 @@ export default withEnglishFallback({
       cancel: "Annulla esecuzione",
       cancelling: "Annullamento in corso…",
       delete: "Elimina",
-      deleteConfirm: "Eliminare l'attività \"{name}\"? La cronologia delle esecuzioni e i log di questa attività verranno conservati.",
+      deleteConfirm: 'Eliminare l\'attività "{name}"? La cronologia delle esecuzioni e i log di questa attività verranno conservati.',
       disable: "Disabilita",
       edit: "Modifica",
       enable: "Abilita",

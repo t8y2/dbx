@@ -428,11 +428,7 @@ test("host.openScheduler is gated behind host.scheduler and only opens the creat
   const document = (await request("frame-document", { frameId: frame.id })).value;
   const call = (method, params) => request("bridge", { frameId: frame.id, channel: document.channel, method, params });
 
-  assert.equal(
-    (await call("host.openScheduler", { providerId: "io.dbx.ssh.tasks", triggerId: "io.dbx.ssh.tasks/execute", mode: "create" })).status,
-    400,
-    "the permission must gate the scheduler host api",
-  );
+  assert.equal((await call("host.openScheduler", { providerId: "io.dbx.ssh.tasks", triggerId: "io.dbx.ssh.tasks/execute", mode: "create" })).status, 400, "the permission must gate the scheduler host api");
 
   const { request: allowedRequest } = await fixture(t, false, {
     pluginManifest: { ...manifest, permissions: [...manifest.permissions, "host.scheduler"] },
@@ -451,11 +447,7 @@ test("host.openScheduler is gated behind host.scheduler and only opens the creat
   assert.deepEqual(opened.value, {
     mockOpenScheduler: { providerId: "io.dbx.ssh.tasks", triggerId: "io.dbx.ssh.tasks/execute", connectionId: "conn-1", mode: "create" },
   });
-  assert.equal(
-    (await allowed("host.openScheduler", { providerId: "io.dbx.ssh.tasks", triggerId: "t", mode: "enable" })).status,
-    400,
-    "the first version only ever opens the create form",
-  );
+  assert.equal((await allowed("host.openScheduler", { providerId: "io.dbx.ssh.tasks", triggerId: "t", mode: "enable" })).status, 400, "the first version only ever opens the create form");
 });
 test("loopback endpoint rejects cross-origin, forged Host, CSRF and unowned frames", async (t) => {
   const { host, request, headers } = await fixture(t);

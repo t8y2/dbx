@@ -1,0 +1,59 @@
+{
+  "summary": "这个改动把已有的 OceanBase Oracle 触发器也纳入结构化编辑的只读限制，和 Oracle 一样，已有触发器不能再用结构化表单改名称、时机、事件和正文；新建草稿仍可编辑。另补齐了 Web 迁移 demo-mode 的测试夹具，但界面上主要可见的是触发器编辑权限变化。",
+  "scenes": [
+    {
+      "title": "打开已有触发器的结构编辑",
+      "shots": [
+        {
+          "file": "01-shop-database-browser.png",
+          "caption": "打开商店连接后的数据库浏览页",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-triggers-section.png",
+          "caption": "结构页里的触发器区域",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-audit-log-table-open.png",
+          "caption": "打开审计表后的数据网格",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "对照查看新建草稿仍可编辑",
+      "shots": [
+        {
+          "file": "04-new-trigger-draft-structure.png",
+          "caption": "结构页中新建触发器草稿的编辑入口",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "打开已有触发器的结构编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开已有触发器的结构编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main\" (0 in the page)",
+    "打开已有触发器的结构编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开已有触发器的结构编辑 · click button: nothing visible matches button with \"结构\" (0 in the page)",
+    "打开已有触发器的结构编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"triggers\" (0 in the page)",
+    "打开已有触发器的结构编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"audit_log\" (0 in the page)",
+    "对照查看新建草稿仍可编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "对照查看新建草稿仍可编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "对照查看新建草稿仍可编辑 · click button: nothing visible matches button with \"结构\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "沙盒里只有 SQLite，没有 OceanBase Oracle 连接，所以不能直接展示该数据库类型下已有触发器表单字段变灰/只读的真实效果；只能在支持该类型的数据库连接中验证。",
+  "interactive": true
+}

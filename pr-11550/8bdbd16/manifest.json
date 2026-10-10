@@ -1,0 +1,42 @@
+{
+  "summary": "这个 PR 在 Oracle / OceanBase Oracle 的表结构编辑里新增了 UNIQUE、外键和主键的专用编辑器，支持先预览 DDL、再确认执行，并在结果区回读当前约束、受影响对象和恢复 SQL。它还区分 Oracle 与 OceanBase 的行为差异，例如 OceanBase 隐藏部分状态选项、主键和 UNIQUE 的支持索引处理不同。",
+  "scenes": [
+    {
+      "title": "Oracle 表结构里的约束编辑器入口",
+      "shots": [
+        {
+          "file": "01-sqlite-orders-grid.png",
+          "caption": "当前沙盒里的订单表数据网格",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "Oracle 结构编辑器中新增的约束面板",
+      "shots": [
+        {
+          "file": "02-oracle-editor-unseen.png",
+          "caption": "Oracle / OceanBase Oracle 约束编辑入口的位置",
+          "width": 2880
+        }
+      ],
+      "derailed": false
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle 表结构里的约束编辑器入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 表结构里的约束编辑器入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 表结构里的约束编辑器入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 表结构里的约束编辑器入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 表结构里的约束编辑器入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里强调“准确区分唯一约束与普通索引、超长新名称门禁修复、删除旧支持索引后重新创建失败前的限制检查”等更细的 Oracle/OceanBase 约束索引边界，但前端可直接展示的主要是新增编辑器与预览/结果流程；这些更偏后端校验细节，界面上不能完整单独验证。",
+  "unseen": "沙盒里没有 Oracle / OceanBase 服务器连接，只有 SQLite 种子数据；因此新增的 Oracle 约束编辑器在真实入口下无法实际打开到可用数据，也无法验证这些 API 的真实回读、DDL 门禁和依赖预检，只能在代码层说明其位置和入口。",
+  "interactive": true
+}

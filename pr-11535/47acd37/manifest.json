@@ -1,0 +1,46 @@
+{
+  "summary": "本次 PR 让 OceanBase Oracle 的 SQL 补全能按输入搜索独立的 PROCEDURE/FUNCTION，并修复带引号名称、字面通配符和切换 schema 后旧补全结果回弹的问题；前端还会在相关上下文变更时立即让旧请求失效。",
+  "scenes": [
+    {
+      "title": "OceanBase Oracle 补全过程",
+      "shots": [
+        {
+          "file": "01-orders-grid-open.png",
+          "caption": "打开订单表后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-quoted-routine-completion.png",
+          "caption": "查看带引号过程名称的补全候选",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-wildcard-routine-completion.png",
+          "caption": "查看字面通配符名称的补全候选",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "OceanBase Oracle 补全过程 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase Oracle 补全过程 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase Oracle 补全过程 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase Oracle 补全过程 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase Oracle 补全过程 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "OceanBase Oracle 补全过程 · click button[data-slot='button']: nothing visible matches button[data-slot='button'] with \"新建查询\" (0 in the page)",
+    "OceanBase Oracle 补全过程 · type textarea, [contenteditable='true']: nothing visible matches textarea, [contenteditable='true'] (0 in the page)",
+    "OceanBase Oracle 补全过程 · type textarea, [contenteditable='true']: nothing visible matches textarea, [contenteditable='true'] (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“中文、名称内双引号、字面通配符、上限及实际点击选入”这些都属于补全行为，diff 里确实有对应修复；没有额外的 UI 功能性描述与 diff 明显不符。",
+  "unseen": "这次改动主要作用在 OceanBase Oracle 的过程/函数补全与后端候选筛选，沙盒里没有可连接的 OceanBase/Oracle 实库，所以只能在编辑器里演示补全逻辑的入口，不能展示真实数据库候选来自服务端的完整效果。",
+  "interactive": true
+}

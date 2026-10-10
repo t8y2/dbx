@@ -1,0 +1,50 @@
+{
+  "summary": "这个 PR 扩展了 Schema Diff 的程序对象比较/部署能力，新增了 Oracle / OceanBase Oracle 的包规格、包体和触发器比较，并在部署页加入只读预览、阻断原因、依赖与验证结果展示。它还把程序对象的标识和前后端传输字段统一起来，避免把不同种类的对象混淆。",
+  "scenes": [
+    {
+      "title": "对比页中的 Oracle 程序对象",
+      "shots": [
+        {
+          "file": "01-shop-database-expanded.png",
+          "caption": "查看商店连接展开后的树节点",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-products-grid-open.png",
+          "caption": "打开 products 表后的数据网格",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "部署页中的只读预览与验证信息",
+      "shots": [
+        {
+          "file": "03-deploy-readonly-validation-state.png",
+          "caption": "打开部署预览后查看只读提示、阻断信息和验证结果的位置",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "对比页中的 Oracle 程序对象 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "对比页中的 Oracle 程序对象 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "对比页中的 Oracle 程序对象 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "对比页中的 Oracle 程序对象 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "对比页中的 Oracle 程序对象 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"products\" (0 in the page)",
+    "部署页中的只读预览与验证信息 · click button[data-slot=\"button\"]: nothing visible matches button[data-slot=\"button\"] with \"新建查询\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“Oracle 原行为和任意输入 SQL 的严格守卫保留”“失败保留步骤与恢复材料”等，但本次前端主要能看到的是比较/部署页的展示与禁选逻辑；那些守卫更多体现在后端与测试里，UI 上无法单独验证。",
+  "unseen": "Sandbox 里没有 Oracle / OceanBase Oracle 真实连接，也没有可用的服务器数据库或编译失败场景，所以包规格、包体、触发器的真实比较与部署验证、以及读回后启用/恢复流程都无法在此环境完整跑通。",
+  "interactive": true
+}

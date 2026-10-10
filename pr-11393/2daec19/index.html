@@ -1,0 +1,17 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11393 界面预览 · 2daec19</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11393 界面预览</h1><p class="m">commit 2daec19 · <a href="https://github.com/t8y2/dbx/pull/11393">回到 PR</a> · 本 PR 让 OceanBase Oracle 在表结构编辑器里获得“已有无主键表添加主键”的能力，前端能力判断和后端 DDL 生成都对齐到了 Oracle 的添加主键流程。对已有主键的替换、删除等限制仍保留。</p>
+<p class="warn">⚠️ 这次录制有 6 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-table-grid-open.png" alt="打开表后的数据网格与结构相关入口"><figcaption>⚠️ 查看 OceanBase Oracle 结构编辑能力 · 打开表后的数据网格与结构相关入口</figcaption></figure>
+<figure class="shaky"><img src="02-structure-editor-view.png" alt="查看结构编辑器里的主键与列选项"><figcaption>⚠️ 进入表结构编辑器看主键开关 · 查看结构编辑器里的主键与列选项</figcaption></figure>
+<figure><img src="03-oceanbase-oracle-unseen-placeholder.png" alt="这里应展示 OceanBase Oracle 已有无主键表添加主键的编辑位置，但沙盒没有该服务器连接"><figcaption>说明真实 OceanBase Oracle 位置 · 这里应展示 OceanBase Oracle 已有无主键表添加主键的编辑位置，但沙盒没有该服务器连接</figcaption></figure>
+</main></html>

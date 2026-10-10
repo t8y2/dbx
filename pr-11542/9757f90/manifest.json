@@ -1,0 +1,42 @@
+{
+  "summary": "OceanBase Oracle 的对象列表和表详情开始展示基于全局统计的估计行数，并补充来源、采集时间与时效状态；同时该数据库类型的对象列表改为按服务器分页加载，底部出现“加载更多”和已加载数量提示。",
+  "scenes": [
+    {
+      "title": "打开表详情并查看估计行数",
+      "shots": [
+        {
+          "file": "01-table-overview-with-row-statistics.png",
+          "caption": "打开订单表后的详情面板，查看行数相关信息",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "查看 OceanBase 分页位置",
+      "shots": [
+        {
+          "file": "02-connection-dialog-placeholder.png",
+          "caption": "新建连接入口，展示这里可以进入数据库连接配置",
+          "width": 2880
+        }
+      ],
+      "derailed": false
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "打开表详情并查看估计行数 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开表详情并查看估计行数 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开表详情并查看估计行数 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开表详情并查看估计行数 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开表详情并查看估计行数 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“表列表和详情原先缺少行数来源及统计状态”，与本分支新增的实际表现一致；未发现额外 UI 承诺与 diff 不符的地方。",
+  "unseen": "这个录屏只能在 OceanBase Oracle 连接上完整看到新行数状态和服务器分页；沙盒没有真实 OceanBase，只能用现成的 SQLite 连接演示进入表详情的普通界面，无法实测 OceanBase 统计来源接口、分页请求和“估计/过期”状态的真实数据。",
+  "interactive": true
+}

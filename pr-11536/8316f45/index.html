@@ -1,0 +1,18 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11536 界面预览 · 8316f45</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11536 界面预览</h1><p class="m">commit 8316f45 · <a href="https://github.com/t8y2/dbx/pull/11536">回到 PR</a> · 这个 PR 让 OceanBase Oracle 的 SQL 补全也支持包成员树与重载身份：包成员按 routine_id 区分，补全能保留参数顺序、方向、默认值和返回类型，且对带引号的包名/成员名更准确。左侧树和编辑器补全结果都会受影响。</p>
+<p class="warn">⚠️ 这次录制有 9 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-editor-rest.png" alt="显示编辑器与左侧树的当前状态"><figcaption>⚠️ 包成员树与重载标识 · 显示编辑器与左侧树的当前状态</figcaption></figure>
+<figure class="shaky"><img src="02-tree-expanded-analytics.png" alt="显示不同连接下树节点展开后的状态"><figcaption>⚠️ 包成员树与重载标识 · 显示不同连接下树节点展开后的状态</figcaption></figure>
+<figure class="shaky"><img src="03-oceanbase-routine-completion.png" alt="查看带引号的补全上下文与候选列表"><figcaption>⚠️ OceanBase 补全上下文与包成员分流 · 查看带引号的补全上下文与候选列表</figcaption></figure>
+<figure class="shaky"><img src="04-package-member-completion.png" alt="查看 OceanBase 包成员补全与签名展示"><figcaption>⚠️ OceanBase 补全上下文与包成员分流 · 查看 OceanBase 包成员补全与签名展示</figcaption></figure>
+</main></html>

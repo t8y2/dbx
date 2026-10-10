@@ -1,0 +1,65 @@
+{
+  "summary": "这个 PR 为 OceanBase Oracle 的对象列表和侧栏对象树引入了条件分页加载：按名称/注释/类型在 Agent 侧做有界分页，保持数据库顺序，并在对象浏览器底部提供“加载更多”；同时搜索中使用正则会直接提示不支持。",
+  "scenes": [
+    {
+      "title": "对象浏览器分页与继续加载",
+      "shots": [
+        {
+          "file": "01-ob-browser-initial.png",
+          "caption": "打开对象浏览器后的列表区域",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-ob-browser-search-results.png",
+          "caption": "对象浏览器按搜索条件分页后的列表与底部提示",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-ob-browser-after-load-more.png",
+          "caption": "继续加载后的对象列表与分页按钮状态",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "侧栏对象树分页",
+      "shots": [
+        {
+          "file": "04-sidebar-paged-tree.png",
+          "caption": "对象树/侧栏中的分页加载位置",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "05-sidebar-search-with-more.png",
+          "caption": "侧栏搜索结果里保留分页继续加载节点",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "对象浏览器分页与继续加载 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "对象浏览器分页与继续加载 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "对象浏览器分页与继续加载 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "对象浏览器分页与继续加载 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "对象浏览器分页与继续加载 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "对象浏览器分页与继续加载 · type input[data-object-search-input]: nothing visible matches input[data-object-search-input] (0 in the page)",
+    "对象浏览器分页与继续加载 · click button[data-object-load-more]: nothing visible matches button[data-object-load-more] (0 in the page)",
+    "侧栏对象树分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "侧栏对象树分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“注释搜索前置 #11448 已合并”不属于本次可见改动；此外“并发 DDL 后从第一页刷新”在界面上没有新增独立入口，只是分页/刷新逻辑的行为变化。",
+  "unseen": "这里无法展示 OceanBase/OB Oracle 真实后端分页，因为沙盒只有 SQLite；因此只能在对象浏览器和侧栏上演示该 PR 新增的分页 UI、搜索提示和“加载更多”状态，不能验证真实 OceanBase 代理请求。",
+  "interactive": true
+}

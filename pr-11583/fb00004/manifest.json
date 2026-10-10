@@ -1,0 +1,55 @@
+{
+  "summary": "这次改动让页面内的搜索/跳转输入框在获得焦点时切换为不透明的主题背景，避免在壁纸半透明时文字变得难读。受影响的有编辑器查找替换、跳转行、表格搜索栏，以及文本内容搜索栏。",
+  "scenes": [
+    {
+      "title": "编辑器搜索与跳转行",
+      "shots": [
+        {
+          "file": "01-editor-search-focused.png",
+          "caption": "查看编辑器查找输入框获得焦点后的背景",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-goto-line-focused.png",
+          "caption": "查看跳转行输入框获得焦点后的背景",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "表格搜索栏",
+      "shots": [
+        {
+          "file": "03-datagrid-search-focused.png",
+          "caption": "查看表格搜索栏获得焦点后的背景",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "编辑器搜索与跳转行 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "编辑器搜索与跳转行 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "编辑器搜索与跳转行 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "编辑器搜索与跳转行 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "编辑器搜索与跳转行 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "编辑器搜索与跳转行 · click button: nothing visible matches button with \"查询编辑器\" (0 in the page)",
+    "编辑器搜索与跳转行 · press : keyboard.press: Unknown key: \"Ctrl\"",
+    "编辑器搜索与跳转行 · press : keyboard.press: Unknown key: \"Ctrl\"",
+    "表格搜索栏 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "表格搜索栏 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "表格搜索栏 · click button[data-slot=\"button\"]: nothing visible matches button[data-slot=\"button\"] with \"搜索\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "截图环境里没有开启可配置壁纸/高透明背景的入口，也无法直接验证“半透明壁纸下”的可读性问题；但可以在现有界面打开这些搜索面板，看到它们获得焦点时的背景类与样式位置。",
+  "interactive": true
+}

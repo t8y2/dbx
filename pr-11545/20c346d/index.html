@@ -1,0 +1,16 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11545 界面预览 · 20c346d</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11545 界面预览</h1><p class="m">commit 20c346d · <a href="https://github.com/t8y2/dbx/pull/11545">回到 PR</a> · 这个 PR 让 OceanBase Oracle 连接支持 BLOB 有界预览、按需读取原始字节分块，以及大值引用在事务边界和取消时的失效/释放处理；同时还补了按上下文解析表/同义词列元数据的能力。界面层面主要体现在该驱动下大 LOB 查询结果会先显示截断预览，并能继续取全文。</p>
+
+
+<figure><img src="01-home-screen.png" alt="打开应用后的首页，查看现有连接与历史入口"><figcaption>连接页查看大值预览入口 · 打开应用后的首页，查看现有连接与历史入口</figcaption></figure>
+<figure><img src="02-no-oceanbase-lob.png" alt="当前沙盒仅有 SQLite 连接，展示无法进入 OceanBase Oracle 大值预览的场景"><figcaption>说明当前沙盒无法演示 OceanBase LOB · 当前沙盒仅有 SQLite 连接，展示无法进入 OceanBase Oracle 大值预览的场景</figcaption></figure>
+</main></html>

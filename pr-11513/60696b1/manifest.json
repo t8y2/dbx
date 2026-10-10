@@ -1,0 +1,74 @@
+{
+  "summary": "这个 PR 给 PostgreSQL 用户自定义类型增加了可视化管理能力：在对象浏览器里可新建、编辑、删除类型，并支持草稿、预览 SQL、删除确认和会话保留。它还把对象面板的缓存改成可保留未完成修改的 KeepAlive，避免切换标签时丢失编辑状态。",
+  "scenes": [
+    {
+      "title": "类型面板的新建与编辑入口",
+      "shots": [
+        {
+          "file": "01-types-list-entry-point.png",
+          "caption": "查看类型列表入口位置",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-create-type-button.png",
+          "caption": "查看类型列表中的新建入口",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-type-panel-actions.png",
+          "caption": "查看类型面板中的编辑与删除入口",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "打开类型编辑并查看预览",
+      "shots": [
+        {
+          "file": "04-custom-type-view.png",
+          "caption": "查看自定义类型详情面板",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "05-custom-type-edit-form.png",
+          "caption": "查看新增的类型编辑表单和 SQL 预览",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "06-custom-type-edit-preview.png",
+          "caption": "查看修改后重新生成的预览 SQL 与表单状态",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "类型面板的新建与编辑入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "类型面板的新建与编辑入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "类型面板的新建与编辑入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "类型面板的新建与编辑入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "类型面板的新建与编辑入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"types\" (0 in the page)",
+    "类型面板的新建与编辑入口 · click button[data-slot=\"button\"]: nothing visible matches button[data-slot=\"button\"] with \"创建类型\" (0 in the page)",
+    "类型面板的新建与编辑入口 · click button: nothing visible matches button with \"关闭\" (0 in the page)",
+    "打开类型编辑并查看预览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开类型编辑并查看预览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"types\" (0 in the page)",
+    "打开类型编辑并查看预览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"status\" (0 in the page)",
+    "打开类型编辑并查看预览 · click button[title=\"customType.editor.edit\"]: nothing visible matches button[title=\"customType.editor.edit\"] (0 in the page)",
+    "打开类型编辑并查看预览 · type input[aria-label=\"customType.editor.namePlaceholder\"]: nothing visible matches input[aria-label=\"customType.editor.namePlaceholder\"] (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里写的是“新增 pg 数据库自定义类型的新增，删除和修改功能”，与代码一致；未见额外的按钮、设置或独立页面。",
+  "unseen": "沙盒里没有 PostgreSQL 连接、也没有真正的 pg 自定义类型数据，因此新建/编辑/删除的完整工作流只能在对象浏览器的 PostgreSQL 场景位置展示，无法实际对真实 PG 类型执行。",
+  "interactive": true
+}

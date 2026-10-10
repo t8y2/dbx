@@ -1,0 +1,30 @@
+{
+  "summary": "在 PostgreSQL 连接的数据库节点下新增了 3 个可浏览的组节点：外部数据包装器、外部服务器、用户映射。展开后可看到对应对象列表，点击或右键可打开详情对话框，并展示字段信息与 DDL 预览。",
+  "scenes": [
+    {
+      "title": "树中出现 FDW 组节点",
+      "shots": [
+        {
+          "file": "01-postgres-fdw-groups-entry.png",
+          "caption": "展示数据库节点下新增的 FDW 相关 group 入口",
+          "width": 1120,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "树中出现 FDW 组节点 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "树中出现 FDW 组节点 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "树中出现 FDW 组节点 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "树中出现 FDW 组节点 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "PR 说明里提到“扩展 / 事件触发器已确立的全链路架构模式”以及 Kingbase fallback 等后端链路，这些都不是单纯前端可见点；另外描述里说“截图/录屏已附”，但 diff 本身只提供了页面实现，没有实际录屏内容。",
+  "unseen": "沙盒里没有 PostgreSQL/Kingbase 服务器连接，只有 SQLite 种子数据，所以无法实际展开这 3 个新 group、加载对象列表或打开对应详情对话框。这里只能展示数据库树中该功能入口所在位置。",
+  "interactive": true
+}

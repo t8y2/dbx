@@ -1,0 +1,54 @@
+{
+  "summary": "新增了编辑器工具栏里的“会话与阻塞链”入口，并弹出一个只读对话框，展示 Oracle / OceanBase Oracle 的会话快照、SQL ID、阻塞关系和阻塞链。对话框还支持刷新、自动刷新、取消采样，并显示采样窗口、过期和权限/超时等限制说明。",
+  "scenes": [
+    {
+      "title": "Oracle 工具栏入口",
+      "shots": [
+        {
+          "file": "01-events-grid.png",
+          "caption": "打开事件表后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-session-blocking-dialog.png",
+          "caption": "会话与阻塞链窗口初始状态",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "Oracle 会话快照",
+      "shots": [
+        {
+          "file": "03-session-blocking-snapshot.png",
+          "caption": "展示采样窗口、会话表和阻塞链内容",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "Oracle 工具栏入口 · click button: nothing visible matches button with \"会话与阻塞链\" (0 in the page)",
+    "Oracle 会话快照 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 会话快照 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "Oracle 会话快照 · click button: nothing visible matches button with \"会话与阻塞链\" (0 in the page)",
+    "Oracle 会话快照 · click button: nothing visible matches button with \"刷新\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“按实例或租户身份建立关系、显示读取限制和过期快照、刷新有频率、超时和行数上限、切换连接丢弃旧响应、只采集 SQL ID、不提供终止会话/回滚/解锁”，这些在 diff 里都有；但提到“OCI/JDBC 工具栏入口”属于测试与验收语境，不是新增的单独 UI 文案或页面。",
+  "unseen": "",
+  "interactive": true
+}

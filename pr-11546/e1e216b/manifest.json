@@ -1,0 +1,42 @@
+{
+  "summary": "这个 PR 在 Oracle 表结构页新增了“编辑主键”交互：可按列顺序选择/重排主键列，预览将执行的 DDL，并在应用后回读实际状态与恢复信息。界面还增加了是否在成功后移除原支持索引的选项，并把这些文案本地化到中文。",
+  "scenes": [
+    {
+      "title": "Oracle 结构页入口",
+      "shots": [
+        {
+          "file": "01-oracle-structure-entry.png",
+          "caption": "打开表结构页，查看 Oracle 主键编辑器入口",
+          "width": 2456,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "主键编辑与预览",
+      "shots": [],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle 结构页入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 结构页入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 结构页入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 结构页入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 结构页入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "主键编辑与预览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "主键编辑与预览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "主键编辑与预览 · click button: nothing visible matches button with \"编辑主键\" (0 in the page)",
+    "主键编辑与预览 · shot section[aria-label='编辑主键']: nothing visible matches section[aria-label='编辑主键'] (0 in the page)",
+    "主键编辑与预览 · click button: nothing visible matches button with \"预览 DDL\" (0 in the page)",
+    "主键编辑与预览 · shot section[aria-label='编辑主键']: nothing visible matches section[aria-label='编辑主键'] (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“联合主键移除列、检查数据冲突、引用和索引后执行并读回状态、默认保留原索引”等都基本有体现；但它说“完整 CI、Oracle 实库和 GUI 验收待完成”属于说明性文字，不是 UI 变更。另“演示迁移测试连接夹具”不在可见界面上。",
+  "unseen": "沙盒里没有 Oracle 服务器连接，只有 SQLite 种子数据，所以这个功能的真实 Oracle 预检、DDL 预览与执行、外键/索引依赖检查都无法在现有数据上实际走通；只能展示结构页里 Oracle 专用编辑器出现的位置，不能演示真正的 Oracle 结果。",
+  "interactive": true
+}

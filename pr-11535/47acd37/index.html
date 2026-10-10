@@ -1,0 +1,17 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11535 界面预览 · 47acd37</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11535 界面预览</h1><p class="m">commit 47acd37 · <a href="https://github.com/t8y2/dbx/pull/11535">回到 PR</a> · 本次 PR 让 OceanBase Oracle 的 SQL 补全能按输入搜索独立的 PROCEDURE/FUNCTION，并修复带引号名称、字面通配符和切换 schema 后旧补全结果回弹的问题；前端还会在相关上下文变更时立即让旧请求失效。</p>
+<p class="warn">⚠️ 这次录制有 8 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-orders-grid-open.png" alt="打开订单表后的数据网格"><figcaption>⚠️ OceanBase Oracle 补全过程 · 打开订单表后的数据网格</figcaption></figure>
+<figure class="shaky"><img src="02-quoted-routine-completion.png" alt="查看带引号过程名称的补全候选"><figcaption>⚠️ OceanBase Oracle 补全过程 · 查看带引号过程名称的补全候选</figcaption></figure>
+<figure class="shaky"><img src="03-wildcard-routine-completion.png" alt="查看字面通配符名称的补全候选"><figcaption>⚠️ OceanBase Oracle 补全过程 · 查看字面通配符名称的补全候选</figcaption></figure>
+</main></html>

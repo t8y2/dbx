@@ -1,0 +1,51 @@
+{
+  "summary": "修复了表结构编辑器在切换到“触发器”页再返回“字段”页时，横向滚动条的测量时机过早导致滚动条消失的问题。现在会额外延后一轮 tick 再测量，以适配 TabsContent 的延迟挂载。",
+  "scenes": [
+    {
+      "title": "字段页初始横向滚动条",
+      "shots": [
+        {
+          "file": "01-structure-columns-horizontal-scrollbar-i.png",
+          "caption": "查看字段页底部的横向滚动条",
+          "width": 2456,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "切到触发器再返回字段",
+      "shots": [
+        {
+          "file": "02-structure-triggers-tab.png",
+          "caption": "查看触发器页",
+          "width": 2456,
+          "warn": true
+        },
+        {
+          "file": "03-structure-columns-horizontal-scrollbar-a.png",
+          "caption": "查看返回字段页后的横向滚动条",
+          "width": 2456,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "字段页初始横向滚动条 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "字段页初始横向滚动条 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "字段页初始横向滚动条 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "字段页初始横向滚动条 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "字段页初始横向滚动条 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"audit_log\" (0 in the page)",
+    "切到触发器再返回字段 · click button: nothing visible matches button with \"触发器\" (0 in the page)",
+    "切到触发器再返回字段 · click button: nothing visible matches button with \"字段\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "",
+  "interactive": true
+}

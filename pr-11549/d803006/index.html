@@ -1,0 +1,20 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11549 界面预览 · d803006</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11549 界面预览</h1><p class="m">commit d803006 · <a href="https://github.com/t8y2/dbx/pull/11549">回到 PR</a> · 这个 PR 在 Oracle / OceanBase Oracle 的表结构编辑里新增了三类约束编辑器：主键、外键和 CHECK。它们都支持先预览 DDL，再执行并读回实际状态，执行结果里会显示部分成功、恢复 SQL 和实际约束状态；同时 OceanBase 版会隐藏 Oracle 专属的延迟选项和主键旧索引处理。</p>
+<p class="warn">⚠️ 这次录制有 17 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-oracle-table-structure-overview.png" alt="查看订单表的结构页，定位约束编辑区"><figcaption>⚠️ Oracle 约束编辑器入口 · 查看订单表的结构页，定位约束编辑区</figcaption></figure>
+<figure class="shaky"><img src="02-foreign-key-editor.png" alt="展示外键编辑器里的列对顺序、引用表和 Oracle 专属选项"><figcaption>⚠️ Oracle 约束编辑器入口 · 展示外键编辑器里的列对顺序、引用表和 Oracle 专属选项</figcaption></figure>
+<figure class="shaky"><img src="03-check-editor-entry.png" alt="展示 CHECK 约束编辑器入口"><figcaption>⚠️ CHECK 约束编辑与预览 · 展示 CHECK 约束编辑器入口</figcaption></figure>
+<figure class="shaky"><img src="04-check-preview-ddl.png" alt="查看 CHECK 约束的 DDL 预览、影响对象和恢复 SQL"><figcaption>⚠️ CHECK 约束编辑与预览 · 查看 CHECK 约束的 DDL 预览、影响对象和恢复 SQL</figcaption></figure>
+<figure class="shaky"><img src="05-foreign-key-editor.png" alt="展示外键编辑器里的列对顺序、引用表和 Oracle 专属选项"><figcaption>⚠️ 外键与主键编辑结果 · 展示外键编辑器里的列对顺序、引用表和 Oracle 专属选项</figcaption></figure>
+<figure class="shaky"><img src="06-primary-key-editor.png" alt="展示主键编辑器里的列顺序、预览和恢复信息"><figcaption>⚠️ 外键与主键编辑结果 · 展示主键编辑器里的列顺序、预览和恢复信息</figcaption></figure>
+</main></html>

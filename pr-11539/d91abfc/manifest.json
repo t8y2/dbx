@@ -1,0 +1,49 @@
+{
+  "summary": "这次 PR 给 OceanBase Oracle 增加了按元数据克隆表结构的专用流程：克隆前会弹出说明与目标 schema 输入，执行时改为逐步 DDL 并展示复制/排除内容。侧栏对象列表也改成 OceanBase 的分页加载，新增“加载更多”和分页搜索提示，且关闭了这类列表里的部分排序交互。",
+  "scenes": [
+    {
+      "title": "OceanBase 克隆确认",
+      "shots": [
+        {
+          "file": "01-sidebar-tree-expanded.png",
+          "caption": "侧边栏连接树展开到数据库层，查看各连接下的 main 默认库",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "OceanBase 对象分页",
+      "shots": [
+        {
+          "file": "02-events-grid-initial.png",
+          "caption": "打开 events 表后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-paged-object-browser-footer.png",
+          "caption": "对象列表底部的分页加载区域，查看加载更多与顺序提示",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "OceanBase 克隆确认 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 克隆确认 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main\" (0 in the page)",
+    "OceanBase 对象分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“侧栏/对象页克隆及两处仅结构粘贴四入口”，但前端实际可见的是对象浏览器里的克隆/粘贴相关入口与侧栏对话框，没有额外新增四个独立入口页；另外描述里说“虚拟列拒绝无目标”，前端只能看到克隆前确认与失败提示，真正的元数据校验发生在后端/构建逻辑。",
+  "unseen": "",
+  "interactive": true
+}

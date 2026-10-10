@@ -1,0 +1,53 @@
+{
+  "summary": "这个 PR 给 Oracle / OceanBase Oracle 增加了“无效对象”入口页：可以分页查看无效对象，点选后读取编译错误和源码，并支持先预览再显式编译单个对象。另新增 Oracle 类型源码/元数据面板，能在类型和类型体页面直接展示配对定义、依赖和授权信息。",
+  "scenes": [
+    {
+      "title": "打开无效对象面板",
+      "shots": [
+        {
+          "file": "01-table-page-baseline.png",
+          "caption": "打开表页后的常规内容，作为对照。",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-oracle-invalid-menu-entry.png",
+          "caption": "菜单中出现的无效对象入口；当前沙盒连接不是 Oracle 时也能看见入口位置。",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "类型源码与元数据面板",
+      "shots": [
+        {
+          "file": "03-connection-dialog-entry.png",
+          "caption": "连接对话框位置；沙盒没有 Oracle 服务器，无法完成到真实 Oracle 面板的进入。",
+          "width": 2880
+        },
+        {
+          "file": "04-oracle-panel-unseen-placeholder.png",
+          "caption": "这里应展示 Oracle 类型源码/元数据面板的位置，但沙盒没有 Oracle 类型对象，无法实测内容。",
+          "width": 2880
+        }
+      ],
+      "derailed": false
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "打开无效对象面板 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开无效对象面板 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开无效对象面板 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开无效对象面板 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开无效对象面板 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“取消不宣称回滚，连接切换丢弃旧响应”这些行为，diff 确实有对应实现；但“OB TYPE/VIEW未确认编译形式继续禁用”在 UI 上只对无效对象面板的编译按钮生效，页面里没有单独说明这一点。",
+  "unseen": "沙盒里没有 Oracle / OceanBase Oracle 服务器连接，只有 SQLite 种子数据，所以“无效对象列表”“ALL_ERRORS/ALL_SOURCE”“Oracle 类型详情”和显式编译的实际数据内容都无法在真实后端上展示；只能显示入口和空/不支持状态。 ",
+  "interactive": true
+}

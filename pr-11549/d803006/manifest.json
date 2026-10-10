@@ -1,0 +1,85 @@
+{
+  "summary": "这个 PR 在 Oracle / OceanBase Oracle 的表结构编辑里新增了三类约束编辑器：主键、外键和 CHECK。它们都支持先预览 DDL，再执行并读回实际状态，执行结果里会显示部分成功、恢复 SQL 和实际约束状态；同时 OceanBase 版会隐藏 Oracle 专属的延迟选项和主键旧索引处理。",
+  "scenes": [
+    {
+      "title": "Oracle 约束编辑器入口",
+      "shots": [
+        {
+          "file": "01-oracle-table-structure-overview.png",
+          "caption": "查看订单表的结构页，定位约束编辑区",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-foreign-key-editor.png",
+          "caption": "展示外键编辑器里的列对顺序、引用表和 Oracle 专属选项",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "CHECK 约束编辑与预览",
+      "shots": [
+        {
+          "file": "03-check-editor-entry.png",
+          "caption": "展示 CHECK 约束编辑器入口",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "04-check-preview-ddl.png",
+          "caption": "查看 CHECK 约束的 DDL 预览、影响对象和恢复 SQL",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "外键与主键编辑结果",
+      "shots": [
+        {
+          "file": "05-foreign-key-editor.png",
+          "caption": "展示外键编辑器里的列对顺序、引用表和 Oracle 专属选项",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "06-primary-key-editor.png",
+          "caption": "展示主键编辑器里的列顺序、预览和恢复信息",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle 约束编辑器入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 约束编辑器入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 约束编辑器入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 约束编辑器入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 约束编辑器入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "Oracle 约束编辑器入口 · click button: nothing visible matches button with \"编辑外键\" (0 in the page)",
+    "CHECK 约束编辑与预览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "CHECK 约束编辑与预览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"daily_stats\" (0 in the page)",
+    "CHECK 约束编辑与预览 · click button: nothing visible matches button with \"设置\" (0 in the page)",
+    "CHECK 约束编辑与预览 · click button: nothing visible matches button with \"添加 CHECK\" (0 in the page)",
+    "CHECK 约束编辑与预览 · type textarea[data-expression]: nothing visible matches textarea[data-expression] (0 in the page)",
+    "CHECK 约束编辑与预览 · click button: nothing visible matches button with \"预览 DDL\" (0 in the page)",
+    "外键与主键编辑结果 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "外键与主键编辑结果 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "外键与主键编辑结果 · click button: nothing visible matches button with \"编辑外键\" (0 in the page)",
+    "外键与主键编辑结果 · click button: nothing visible matches button with \"预览 DDL\" (0 in the page)",
+    "外键与主键编辑结果 · click button: nothing visible matches button with \"编辑主键\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“CHECK 新增、修改、删除和状态切换”与“外键保护修复”，实现里对应的是新的结构页编辑器与读回/保护逻辑，但没有新增独立按钮页或全局设置；另外描述中的“NOT NULL 仍由列编辑器处理”没有在界面上新增任何可见入口，只是通过 CHECK 编辑器避免把 NOT NULL 当成 CHECK 来改。",
+  "unseen": "",
+  "interactive": true
+}

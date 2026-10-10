@@ -1,0 +1,53 @@
+{
+  "summary": "这个 PR 给 OceanBase Oracle 的对象列表加了服务端分页与“加载更多”，并在触发器相关界面里按真实 owner 区分同名触发器，显示 owner.名称。另一个变化是表信息/导出侧开始展示并保留完整触发器信息，分页搜索时正则会被明确提示不支持。",
+  "scenes": [
+    {
+      "title": "OceanBase 对象分页提示",
+      "shots": [
+        {
+          "file": "01-orders-table-view.png",
+          "caption": "查看订单表的数据网格和右侧信息面板",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-events-table-view.png",
+          "caption": "查看事件表的数据网格，用于对照分页对象列表相关改动",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "触发器信息展示",
+      "shots": [
+        {
+          "file": "03-orders-table-info.png",
+          "caption": "查看表信息面板里的触发器区域，观察触发器名称展示位置",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "触发器信息展示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "触发器信息展示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到的“预览、复制、存储选项切换和保存后的脚本一致”“读取失败时阻断部分脚本”都属于导出/测试行为，本次可见改动里主要能看到对象浏览器分页提示、加载更多、触发器 owner 显示；其余是后端/测试验证，界面里不直接出现独立按钮或新页面。",
+  "unseen": "这套沙盒只有 SQLite，没有 OceanBase Oracle 实库，所以无法直接展示真实的 OceanBase 对象分页、触发器 owner、以及表 DDL 导出的完整触发器源码效果；只能在对象浏览器界面和现有表/触发器面板上展示相关 UI 位置。",
+  "interactive": true
+}

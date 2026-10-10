@@ -1,0 +1,18 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11560 界面预览 · 9ad8c06</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11560 界面预览</h1><p class="m">commit 9ad8c06 · <a href="https://github.com/t8y2/dbx/pull/11560">回到 PR</a> · 这个 PR 给 Oracle / OceanBase Oracle 增加了“无效对象”入口页：可以分页查看无效对象，点选后读取编译错误和源码，并支持先预览再显式编译单个对象。另新增 Oracle 类型源码/元数据面板，能在类型和类型体页面直接展示配对定义、依赖和授权信息。</p>
+<p class="warn">⚠️ 这次录制有 5 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-table-page-baseline.png" alt="打开表页后的常规内容，作为对照。"><figcaption>⚠️ 打开无效对象面板 · 打开表页后的常规内容，作为对照。</figcaption></figure>
+<figure class="shaky"><img src="02-oracle-invalid-menu-entry.png" alt="菜单中出现的无效对象入口；当前沙盒连接不是 Oracle 时也能看见入口位置。"><figcaption>⚠️ 打开无效对象面板 · 菜单中出现的无效对象入口；当前沙盒连接不是 Oracle 时也能看见入口位置。</figcaption></figure>
+<figure><img src="03-connection-dialog-entry.png" alt="连接对话框位置；沙盒没有 Oracle 服务器，无法完成到真实 Oracle 面板的进入。"><figcaption>类型源码与元数据面板 · 连接对话框位置；沙盒没有 Oracle 服务器，无法完成到真实 Oracle 面板的进入。</figcaption></figure>
+<figure><img src="04-oracle-panel-unseen-placeholder.png" alt="这里应展示 Oracle 类型源码/元数据面板的位置，但沙盒没有 Oracle 类型对象，无法实测内容。"><figcaption>类型源码与元数据面板 · 这里应展示 Oracle 类型源码/元数据面板的位置，但沙盒没有 Oracle 类型对象，无法实测内容。</figcaption></figure>
+</main></html>

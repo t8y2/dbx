@@ -1,0 +1,76 @@
+{
+  "summary": "这个 PR 调整了侧栏里的 Ctrl+F 搜索定位逻辑：当当前激活的是数据库、schema 或表节点时，会优先聚焦该作用域下的局部表搜索框，而不是总是回到侧栏顶部的全局搜索。它还让局部表搜索框支持用 Escape 快速退出/清空当前搜索，并在树侧栏焦点分发里优先拦截这个快捷键。",
+  "scenes": [
+    {
+      "title": "在数据库节点按 Ctrl+F",
+      "shots": [
+        {
+          "file": "01-database-node-selected.png",
+          "caption": "数据库节点选中后的侧栏状态",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-local-table-search-focused.png",
+          "caption": "按下 Ctrl+F 后，查看局部表搜索框是否被聚焦",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "在表节点按 Ctrl+F",
+      "shots": [
+        {
+          "file": "03-table-node-selected.png",
+          "caption": "选中表节点后的侧栏状态",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "04-table-search-focused.png",
+          "caption": "按下 Ctrl+F 后对应表搜索框被聚焦的状态",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "Escape 处理局部表搜索",
+      "shots": [
+        {
+          "file": "05-table-search-with-text.png",
+          "caption": "局部表搜索框已有输入内容的状态",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "06-table-search-after-escape.png",
+          "caption": "按下 Escape 后局部表搜索框的状态",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "在数据库节点按 Ctrl+F · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "在数据库节点按 Ctrl+F · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "在数据库节点按 Ctrl+F · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "在数据库节点按 Ctrl+F · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "在表节点按 Ctrl+F · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "在表节点按 Ctrl+F · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "Escape 处理局部表搜索 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Escape 处理局部表搜索 · type input[data-sidebar-table-search-parent-id]: nothing visible matches input[data-sidebar-table-search-parent-id] (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "",
+  "interactive": true
+}

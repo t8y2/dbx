@@ -1,0 +1,50 @@
+{
+  "summary": "MCP 工具权限列表新增了两个连接管理项：`dbx_get_connection` 和 `dbx_update_connection`，并补齐了对应的本地化标签与权限选择逻辑。前端设置页里与 MCP 工具权限相关的开关会把这两个工具单独列出、可独立勾选。",
+  "scenes": [
+    {
+      "title": "打开 MCP 工具权限设置",
+      "shots": [
+        {
+          "file": "01-plugin-center-settings.png",
+          "caption": "查看插件中心设置页",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-plugin-center-settings-scrolled.png",
+          "caption": "查看设置页下方内容",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "查看新增工具项",
+      "shots": [
+        {
+          "file": "03-mcp-connection-tool-options.png",
+          "caption": "查看新增的连接详情与修改权限项",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "打开 MCP 工具权限设置 · click button[data-slot=\"button\"]: nothing visible matches button[data-slot=\"button\"] with \"设置\" (0 in the page)",
+    "打开 MCP 工具权限设置 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"设置\" (0 in the page)",
+    "查看新增工具项 · click button[data-slot=\"button\"]: nothing visible matches button[data-slot=\"button\"] with \"设置\" (0 in the page)",
+    "查看新增工具项 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"设置\" (0 in the page)",
+    "查看新增工具项 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"MCP\" (0 in the page)",
+    "查看新增工具项 · scroll : nothing visible matches div.connection-tree-content div with \"dbx_get_connection\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "这次 PR 主要改的是 MCP 工具权限目录与文案；沙盒里没有单独暴露新增的设置页视觉差异入口，且没有可演示的 AI/MCP 实际工具调用界面，所以只能在设置里的 MCP 权限目录看到条目变化。",
+  "interactive": true
+}

@@ -1,0 +1,17 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11556 界面预览 · 8dd9728</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11556 界面预览</h1><p class="m">commit 8dd9728 · <a href="https://github.com/t8y2/dbx/pull/11556">回到 PR</a> · 本 PR 为 Oracle / OceanBase Oracle 的类型对象增加了只读“类型元数据”面板，并把类型/类型体的源码打开与对象列表都改为保留精确 owner 与 TYPE/TYPE BODY 身份。面板会显示状态、配对定义、可见依赖和授权，并区分可见、空、未知、无权限和失败。</p>
+<p class="warn">⚠️ 这次录制有 5 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-object-browser-entry.png" alt="打开对象浏览器后的页面，用来对照类型对象入口位置"><figcaption>⚠️ Oracle 类型对象入口 · 打开对象浏览器后的页面，用来对照类型对象入口位置</figcaption></figure>
+<figure><img src="02-new-connection-dialog.png" alt="新建连接对话框，用来展示目前沙盒没有可完成的 Oracle 连接"><figcaption>Oracle 类型元数据面板 · 新建连接对话框，用来展示目前沙盒没有可完成的 Oracle 连接</figcaption></figure>
+<figure><img src="03-oracle-type-metadata-unseen.png" alt="Oracle 类型元数据面板对应的位置在这里，但沙盒没有可用 Oracle / OceanBase Oracle 数据可展示"><figcaption>Oracle 类型元数据面板 · Oracle 类型元数据面板对应的位置在这里，但沙盒没有可用 Oracle / OceanBase Oracle 数据可展示</figcaption></figure>
+</main></html>

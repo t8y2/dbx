@@ -1,0 +1,16 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11569 界面预览 · c30700c</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11569 界面预览</h1><p class="m">commit c30700c · <a href="https://github.com/t8y2/dbx/pull/11569">回到 PR</a> · 这个 PR 为 Oracle / OceanBase Oracle 连接新增了“用户、角色与授权”页，并在其中内嵌了用户变更的预览、执行与读回结果展示；同时把 Oracle 家族连接的用户管理入口切到这套新界面。页面还能读取并筛选授权来源、角色关系与字典可见性状态。</p>
+<p class="warn">⚠️ 这次录制有 9 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-oracle-user-admin-page.png" alt="打开后的 Oracle 用户管理页，查看用户、角色与授权区域"><figcaption>⚠️ Oracle 用户管理页 · 打开后的 Oracle 用户管理页，查看用户、角色与授权区域</figcaption></figure>
+<figure class="shaky"><img src="02-oracle-user-change-preview.png" alt="查看预览对话框里的 SQL 与状态复核信息"><figcaption>⚠️ 用户变更预览与执行 · 查看预览对话框里的 SQL 与状态复核信息</figcaption></figure>
+</main></html>

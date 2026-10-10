@@ -1,0 +1,59 @@
+{
+  "summary": "这个 PR 让 OceanBase Oracle 的 SQL 补全也支持包成员树与重载身份：包成员按 routine_id 区分，补全能保留参数顺序、方向、默认值和返回类型，且对带引号的包名/成员名更准确。左侧树和编辑器补全结果都会受影响。",
+  "scenes": [
+    {
+      "title": "包成员树与重载标识",
+      "shots": [
+        {
+          "file": "01-editor-rest.png",
+          "caption": "显示编辑器与左侧树的当前状态",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-tree-expanded-analytics.png",
+          "caption": "显示不同连接下树节点展开后的状态",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "OceanBase 补全上下文与包成员分流",
+      "shots": [
+        {
+          "file": "03-oceanbase-routine-completion.png",
+          "caption": "查看带引号的补全上下文与候选列表",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "04-package-member-completion.png",
+          "caption": "查看 OceanBase 包成员补全与签名展示",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "包成员树与重载标识 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "包成员树与重载标识 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "包成员树与重载标识 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"主库 main 默认库\" (0 in the page)",
+    "包成员树与重载标识 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "包成员树与重载标识 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"products\" (0 in the page)",
+    "包成员树与重载标识 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)",
+    "包成员树与重载标识 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 补全上下文与包成员分流 · type textarea: nothing visible matches textarea (0 in the page)",
+    "OceanBase 补全上下文与包成员分流 · type textarea: nothing visible matches textarea (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "沙盒里没有 OceanBase Oracle 真实连接，也没有真实 Agent/Core 的联调环境；因此包成员元数据与补全返回值只能在代码层存在，无法在界面里直接复现真实 OceanBase 包树/重载签名来源。",
+  "interactive": true
+}

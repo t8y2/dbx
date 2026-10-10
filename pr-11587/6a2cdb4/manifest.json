@@ -1,0 +1,57 @@
+{
+  "summary": "这个 PR 给数据网格的保存流程增加了 ROWID 删除冲突提示：当 OceanBase/Oracle 的 ROWID 删除实际影响行数少于选中行数时，会清空待删除状态、刷新结果，并弹出中文 toast。与此同时，通配符查询和导出在 OceanBase 上改为始终沿用同一个结果游标，避免分页时把真实的 `__dbx_row_num` 列和分页辅助列混淆。",
+  "scenes": [
+    {
+      "title": "ROWID 删除冲突提示",
+      "shots": [
+        {
+          "file": "01-orders-grid-before-save.png",
+          "caption": "打开订单表后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-rowid-conflict-place.png",
+          "caption": "这里是保存后会出现 ROWID 冲突提示的位置",
+          "width": 2456,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "通配符分页与导出沿用游标",
+      "shots": [
+        {
+          "file": "03-events-grid-page-one.png",
+          "caption": "打开 events 表第一页的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "04-wildcard-cursor-place.png",
+          "caption": "这里是 OceanBase 通配符分页与导出沿用同一结果游标的位置",
+          "width": 2456,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "ROWID 删除冲突提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "ROWID 删除冲突提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "ROWID 删除冲突提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "ROWID 删除冲突提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "ROWID 删除冲突提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "通配符分页与导出沿用游标 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "通配符分页与导出沿用游标 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "这次改动还涉及 OceanBase/Oracle 的 ROWID 保存冲突与通配符分页/导出会话复用，但当前种子数据里没有真实的 OceanBase 服务器数据库，无法在 GUI 里直接触发真实驱动返回的冲突或后端游标复用差异；只能通过沙盒里的 SQLite 页面展示数据网格位置，不能实测该数据库类型的行为。",
+  "interactive": true
+}

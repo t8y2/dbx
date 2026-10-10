@@ -1,0 +1,31 @@
+{
+  "summary": "这个 PR 在 Oracle / OceanBase Oracle 的表结构编辑里新增了主键、外键的专用编辑器，并接入了预览、执行与失败后回读恢复信息的流程。界面会显示按列顺序调整、删除/保留支持索引、OceanBase 差异提示，以及外键编辑的复合列、引用对象和状态选项。",
+  "scenes": [
+    {
+      "title": "Oracle/OceanBase 结构编辑入口",
+      "shots": [
+        {
+          "file": "01-orders-grid-before.png",
+          "caption": "打开订单表后的数据网格",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle/OceanBase 结构编辑入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle/OceanBase 结构编辑入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle/OceanBase 结构编辑入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle/OceanBase 结构编辑入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle/OceanBase 结构编辑入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“低权限账号预检”与 Oracle/OceanBase 的权限门禁改进；这些能力主要体现在编辑器预检与报错上，但当前沙盒没有 Oracle/OceanBase 服务端，无法验证真实权限路径。",
+  "unseen": "沙盒只有 SQLite 连接，无法进入 Oracle / OceanBase Oracle 的主键、外键编辑器，因此本次新增的界面只能在代码里确认，不能在当前环境实机展示。",
+  "interactive": true
+}

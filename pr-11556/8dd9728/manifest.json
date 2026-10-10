@@ -1,0 +1,47 @@
+{
+  "summary": "本 PR 为 Oracle / OceanBase Oracle 的类型对象增加了只读“类型元数据”面板，并把类型/类型体的源码打开与对象列表都改为保留精确 owner 与 TYPE/TYPE BODY 身份。面板会显示状态、配对定义、可见依赖和授权，并区分可见、空、未知、无权限和失败。",
+  "scenes": [
+    {
+      "title": "Oracle 类型对象入口",
+      "shots": [
+        {
+          "file": "01-object-browser-entry.png",
+          "caption": "打开对象浏览器后的页面，用来对照类型对象入口位置",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "Oracle 类型元数据面板",
+      "shots": [
+        {
+          "file": "02-new-connection-dialog.png",
+          "caption": "新建连接对话框，用来展示目前沙盒没有可完成的 Oracle 连接",
+          "width": 2880
+        },
+        {
+          "file": "03-oracle-type-metadata-unseen.png",
+          "caption": "Oracle 类型元数据面板对应的位置在这里，但沙盒没有可用 Oracle / OceanBase Oracle 数据可展示",
+          "width": 2880
+        }
+      ],
+      "derailed": false
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle 类型对象入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 类型对象入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 类型对象入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 类型对象入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 类型对象入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“普通 HTTP 缺少 randomUUID 时曾无法发请求并持续加载，现在使用兼容 UUID，初始化失败明确结束加载”，但这组 diff 里没有对应的全局兼容 UUID 修复；只看到新面板内部改用 uuid 生成 execution id。",
+  "unseen": "沙盒没有 Oracle / OceanBase Oracle 真实连接，也没有对应类型对象可浏览，因此无法实际展示类型元数据面板、TYPE/TYPE BODY 源码或对象列表回归。",
+  "interactive": true
+}

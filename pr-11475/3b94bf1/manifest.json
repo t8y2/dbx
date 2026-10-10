@@ -1,0 +1,66 @@
+{
+  "summary": "这次改动让 OceanBase Oracle 的同义词/引用名在补全、语义诊断和表元数据里保留真实解析目标身份，并把当前 schema 单独传递，避免把同义词当成普通本地表处理。界面上主要能看到 SQL 编辑器里的列补全更准确，表详情/编辑相关元数据会跟着真实目标表走。",
+  "scenes": [
+    {
+      "title": "打开编辑器查看现有树与入口",
+      "shots": [
+        {
+          "file": "01-home-screen.png",
+          "caption": "应用打开后的首页，确认左侧连接树和编辑器入口都在",
+          "width": 2880
+        },
+        {
+          "file": "02-customers-grid-open.png",
+          "caption": "customers 表打开后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-sql-editor-completion-context.png",
+          "caption": "SQL 编辑器中输入查询前缀后的状态，观察补全上下文",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "查看数据网格的表元数据",
+      "shots": [
+        {
+          "file": "04-orders-grid-metadata.png",
+          "caption": "订单表打开后的数据网格，查看表头、网格工具栏和元数据区域",
+          "width": 2880
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "在 SQL 编辑器里看补全上下文",
+      "shots": [
+        {
+          "file": "05-sql-editor-before-completion.png",
+          "caption": "SQL 编辑器中输入查询前缀后的状态，观察补全是否弹出并与当前连接上下文一致",
+          "width": 2880
+        }
+      ],
+      "derailed": false
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "打开编辑器查看现有树与入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开编辑器查看现有树与入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开编辑器查看现有树与入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开编辑器查看现有树与入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开编辑器查看现有树与入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)",
+    "查看数据网格的表元数据 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "查看数据网格的表元数据 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到 OceanBase 通过同义词访问对象时列元数据为空、后续补全和行定位丢失真实基表身份，这部分与 diff 一致；但“DBLink 字典入口的可用实例”“远端探测拒绝分支的真实实例验收”在这个沙盒里没有可连接的服务器库，无法在 GUI 中完成。",
+  "unseen": "这次 UI 验收的关键场景是 OceanBase Oracle 连接上的同义词补全、诊断和行定位；当前沙盒只有 SQLite，两条已保存连接也都是 SQLite，没有 OceanBase / Oracle 实例，所以无法直接复现 PR 里的同义词解析效果。",
+  "interactive": true
+}

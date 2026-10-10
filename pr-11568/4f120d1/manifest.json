@@ -1,0 +1,68 @@
+{
+  "summary": "本 PR 为 Oracle / OceanBase Oracle 的触发器新增了完整定义编辑入口，支持在结构化字段与完整源码之间切换、预览完整 DDL、保存后保留恢复材料，并在表结构页/对象浏览中把触发器按真实所有者显示出来。另在 OceanBase Oracle 的对象列表中加入了分页加载与分页搜索提示，且禁用了不适用的正则搜索与部分排序操作。",
+  "scenes": [
+    {
+      "title": "Oracle 触发器完整定义编辑",
+      "shots": [
+        {
+          "file": "01-customers-structure-before.png",
+          "caption": "customers 表结构页，查看触发器列表",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-trigger-definition-dialog.png",
+          "caption": "完整触发器定义编辑对话框，查看结构化字段、完整源码与恢复入口",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-trigger-definition-preview.png",
+          "caption": "完整 DDL 预览，查看保存前的触发器替换语句",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "OceanBase Oracle 对象分页",
+      "shots": [
+        {
+          "file": "04-events-grid.png",
+          "caption": "事件表数据网格，展示大表场景",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "05-object-browser-paging-placeholder.png",
+          "caption": "对象浏览区域，展示分页加载相关控件和提示位置",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle 触发器完整定义编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 触发器完整定义编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 触发器完整定义编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 触发器完整定义编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 触发器完整定义编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)",
+    "Oracle 触发器完整定义编辑 · click button: nothing visible matches button with \"结构\" (0 in the page)",
+    "Oracle 触发器完整定义编辑 · click button: nothing visible matches button with \"编辑触发器定义\" (0 in the page)",
+    "Oracle 触发器完整定义编辑 · click button: nothing visible matches button with \"完整源码\" (0 in the page)",
+    "Oracle 触发器完整定义编辑 · click button: nothing visible matches button with \"预览完整 DDL\" (0 in the page)",
+    "OceanBase Oracle 对象分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase Oracle 对象分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "OceanBase Oracle 对象分页 · click button: nothing visible matches button with \"对象\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“已有 Oracle/OB 触发器可编辑受支持字段或完整源码，保留未修改定义并保存原定义供恢复”与“刷新会阻止打开完整定义并提示先处理草稿”，这些在 diff 中是通过新对话框、保存保护和草稿检查实现的；未发现额外独立的“刷新提示页/设置项”。",
+  "unseen": "",
+  "interactive": true
+}

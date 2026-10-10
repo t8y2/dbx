@@ -1,0 +1,59 @@
+{
+  "summary": "这个 PR 让 OceanBase Oracle 的对象浏览按数据库顺序分页加载，并在列表里透出对象有效状态；同时对象列表搜索在分页模式下不再支持正则，且显示“已加载多少个对象”的分页提示。另对权限失败的执行错误分类做了修正，普通无权限编译会更准确地显示为 SQL 权限错误。",
+  "scenes": [
+    {
+      "title": "OceanBase 对象列表分页与有效状态",
+      "shots": [
+        {
+          "file": "01-ob-events-opened.png",
+          "caption": "查看事件表分支已展开的左侧树",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-ob-daily-stats-browser.png",
+          "caption": "打开表后查看对象浏览区域",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "分页搜索与正则提示",
+      "shots": [
+        {
+          "file": "03-ob-search-default.png",
+          "caption": "对象浏览搜索框与列表初始状态",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "04-ob-search-regex-warning.png",
+          "caption": "查看分页搜索不支持正则时的提示",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "OceanBase 对象列表分页与有效状态 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象列表分页与有效状态 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main\" (0 in the page)",
+    "OceanBase 对象列表分页与有效状态 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象列表分页与有效状态 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象列表分页与有效状态 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "OceanBase 对象列表分页与有效状态 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"daily_stats\" (0 in the page)",
+    "分页搜索与正则提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "分页搜索与正则提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "分页搜索与正则提示 · type input[data-object-search-input]: nothing visible matches input[data-object-search-input] (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“错误位置核验用例”“独立编译由 #11454 负责”等偏验证/CI 内容，不是本次 UI 改动；另外它强调真实普通账号执行无权限编译的错误分类修正，但界面上只会体现在错误提示分类，不能直接从静态页面看出具体 cause 链。",
+  "unseen": "",
+  "interactive": true
+}

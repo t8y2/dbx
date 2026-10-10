@@ -1,0 +1,58 @@
+{
+  "summary": "这个 PR 在界面上把“明文导出配置”改成了带凭据开关的确认弹窗，并把连接类型选择器的数据库分类导航改成了默认“全部”视图，支持在全部分类下浏览完整目录、减少重复项。",
+  "scenes": [
+    {
+      "title": "明文导出凭据开关",
+      "shots": [
+        {
+          "file": "01-unencrypted-export-default.png",
+          "caption": "查看不加密导出时的默认提示和凭据选项",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-unencrypted-export-with-credentials.png",
+          "caption": "查看勾选后的文案和警告样式",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "连接类型选择器的全部视图",
+      "shots": [
+        {
+          "file": "03-connection-picker-all.png",
+          "caption": "查看数据库类型选择器默认的全部分类视图",
+          "width": 2880
+        },
+        {
+          "file": "04-connection-picker-category-all.png",
+          "caption": "查看全部分类下的完整数据库类型目录",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "明文导出凭据开关 · click button: nothing visible matches button with \"导出连接配置\" (0 in the page)",
+    "明文导出凭据开关 · click button: nothing visible matches button with \"导出连接配置\" (0 in the page)",
+    "明文导出凭据开关 · click button: nothing visible matches button with \"导出连接配置\" (0 in the page)",
+    "明文导出凭据开关 · click button: nothing visible matches button with \"导出配置\" (0 in the page)",
+    "明文导出凭据开关 · click button: nothing visible matches button with \"不加密导出\" (0 in the page)",
+    "明文导出凭据开关 · click input[type=checkbox]: nothing visible matches input[type=checkbox] (0 in the page)",
+    "明文导出凭据开关 · click button: nothing visible matches button with \"取消\" (0 in the page)",
+    "连接类型选择器的全部视图 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "连接类型选择器的全部视图 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到的 OAuth 远程资源服务器、MCP / Linux Streamable HTTP、代理/系统服务部署等内容没有对应的前端界面改动可展示；本次可见的前端变化主要是配置导出弹窗和连接选择器。",
+  "unseen": "OAuth 服务端、CI/workflow、CLI 和后端权限/导入逻辑不在这个浏览器界面里，沙箱也没有外部 IdP、服务器数据库或插件/JDBC 运行时，所以这些部分只能在代码里看，不能通过页面截图验证。",
+  "interactive": true
+}

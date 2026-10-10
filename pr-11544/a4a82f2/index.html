@@ -1,0 +1,18 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11544 界面预览 · a4a82f2</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11544 界面预览</h1><p class="m">commit a4a82f2 · <a href="https://github.com/t8y2/dbx/pull/11544">回到 PR</a> · 这次改动让 OceanBase Oracle 的查询与表浏览在遇到大 CLOB 时先显示有界预览，后续可按需读取完整内容，并且在数据网格保存、取消和导出时更稳妥地释放这类大值资源。编辑器的列补全与诊断也改为更尊重 OceanBase 的当前 schema / 同义词上下文。</p>
+<p class="warn">⚠️ 这次录制有 9 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-customers-grid-open.png" alt="打开 customers 表后的数据网格"><figcaption>⚠️ 大值预览与按需入口 · 打开 customers 表后的数据网格</figcaption></figure>
+<figure class="shaky"><img src="02-events-grid-open.png" alt="打开 events 表后的数据网格"><figcaption>⚠️ 大值预览与按需入口 · 打开 events 表后的数据网格</figcaption></figure>
+<figure class="shaky"><img src="03-orders-grid-open.png" alt="打开订单表后的数据网格，观察保存和行状态反馈入口"><figcaption>⚠️ 保存时的行级反馈 · 打开订单表后的数据网格，观察保存和行状态反馈入口</figcaption></figure>
+<figure><img src="04-oceanbase-context-unseen.png" alt="显示编辑器所在位置，说明本次改动也影响 OceanBase Oracle 的补全和诊断上下文"><figcaption>OceanBase 补全与诊断上下文 · 显示编辑器所在位置，说明本次改动也影响 OceanBase Oracle 的补全和诊断上下文</figcaption></figure>
+</main></html>

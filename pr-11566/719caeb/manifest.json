@@ -1,0 +1,46 @@
+{
+  "summary": "把结果集导航弹层里的列表内容抽成了共享子组件，并在“列表模式”和“All results”两处复用；同时保留并统一了搜索过滤、空状态、当前项勾选和键盘导航行为。",
+  "scenes": [
+    {
+      "title": "结果集下拉弹层复用",
+      "shots": [
+        {
+          "file": "01-events-grid-open.png",
+          "caption": "打开 events 表后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-result-set-tabs.png",
+          "caption": "结果集导航出现在编辑器上方",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-all-results-popover.png",
+          "caption": "查看共享后的结果集弹层内容",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "结果集下拉弹层复用 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结果集下拉弹层复用 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结果集下拉弹层复用 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结果集下拉弹层复用 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结果集下拉弹层复用 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "结果集下拉弹层复用 · type textarea, input[aria-label=\"SQL\"]: nothing visible matches textarea, input[aria-label=\"SQL\"] (0 in the page)",
+    "结果集下拉弹层复用 · click button: nothing visible matches button with \"运行\" (0 in the page)",
+    "结果集下拉弹层复用 · click button: nothing visible matches button with \"All results\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "",
+  "interactive": true
+}

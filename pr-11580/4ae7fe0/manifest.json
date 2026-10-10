@@ -1,0 +1,43 @@
+{
+  "summary": "侧边栏搜索现在会在非当前激活的已连接连接上继续搜索，但只限于用户已经打开过的数据库；激活连接仍保持原来的“打开/未打开”搜索规则。这样可以让多个连接的同名表在搜索结果里同时出现，而不是只看当前连接。",
+  "scenes": [
+    {
+      "title": "侧边栏搜索初始状态",
+      "shots": [
+        {
+          "file": "01-sidebar-search-before.png",
+          "caption": "查看应用打开后的侧边栏与搜索框初始状态",
+          "width": 1120
+        }
+      ],
+      "derailed": false
+    },
+    {
+      "title": "在连接间切换并观察搜索",
+      "shots": [
+        {
+          "file": "02-sidebar-tree-two-connections.png",
+          "caption": "查看两个已连接连接的表树都已展开",
+          "width": 1120,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "在连接间切换并观察搜索 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "在连接间切换并观察搜索 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main\" (0 in the page)",
+    "在连接间切换并观察搜索 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "在连接间切换并观察搜索 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "在连接间切换并观察搜索 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"products\" (0 in the page)",
+    "在连接间切换并观察搜索 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“多个 MySQL 连接”和“eval-a 到 eval-d”的验证场景，但这次前端改动本身只是在侧边栏搜索范围逻辑上做了调整，没有新增这些连接或 UI 文案。",
+  "unseen": "",
+  "interactive": true
+}

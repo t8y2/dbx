@@ -1,0 +1,16 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11541 界面预览 · 8465ee3</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11541 界面预览</h1><p class="m">commit 8465ee3 · <a href="https://github.com/t8y2/dbx/pull/11541">回到 PR</a> · 这个 PR 给 OceanBase Oracle 的对象重命名加了更严格的受控流程：视图重命名现在会先校验当前 schema、再回读新旧名称状态；过程/函数重命名改为五步计划，失败时保留原定义快照并阻止继续编辑。界面上还新增了重命名警告、失败提示和“重命名后源码快照只读”的状态文案。</p>
+<p class="warn">⚠️ 这次录制有 9 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-oceanbase-rename-warning.png" alt="查看重命名对话框中的新增提示文案"><figcaption>⚠️ OceanBase 视图重命名提示 · 查看重命名对话框中的新增提示文案</figcaption></figure>
+<figure class="shaky"><img src="02-snapshot-placeholder-entry.png" alt="查看查询/编辑区域所在位置，作为重命名后只读快照状态的对照位置"><figcaption>⚠️ 视图源码快照只读 · 查看查询/编辑区域所在位置，作为重命名后只读快照状态的对照位置</figcaption></figure>
+</main></html>

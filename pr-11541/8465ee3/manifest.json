@@ -1,0 +1,47 @@
+{
+  "summary": "这个 PR 给 OceanBase Oracle 的对象重命名加了更严格的受控流程：视图重命名现在会先校验当前 schema、再回读新旧名称状态；过程/函数重命名改为五步计划，失败时保留原定义快照并阻止继续编辑。界面上还新增了重命名警告、失败提示和“重命名后源码快照只读”的状态文案。",
+  "scenes": [
+    {
+      "title": "OceanBase 视图重命名提示",
+      "shots": [
+        {
+          "file": "01-oceanbase-rename-warning.png",
+          "caption": "查看重命名对话框中的新增提示文案",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "视图源码快照只读",
+      "shots": [
+        {
+          "file": "02-snapshot-placeholder-entry.png",
+          "caption": "查看查询/编辑区域所在位置，作为重命名后只读快照状态的对照位置",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "OceanBase 视图重命名提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 视图重命名提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 视图重命名提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 视图重命名提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 视图重命名提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)",
+    "OceanBase 视图重命名提示 · click button: nothing visible matches button with \"重命名\" (0 in the page)",
+    "视图源码快照只读 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "视图源码快照只读 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"daily_stats\" (0 in the page)",
+    "视图源码快照只读 · click button: nothing visible matches button with \"查询历史\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里说“视图改名响应丢失后，旧编辑页还可能误用原名称保存”“提示读回实际状态”，diff 里对应做了回读和快照冻结，但没有新增一个专门的“读回实际状态”按钮或独立页面；而且“保存旧编辑页草稿”是通过只读快照实现，不是继续按旧身份保存。",
+  "unseen": "这次改动核心还包含 OceanBase Oracle 过程/函数的五步编译与授权恢复、以及跨 schema/权限读回分支；沙盒里没有真实 OceanBase Oracle 实库，无法验证这些 DDL 在目标数据库里的真实执行结果，只能展示 UI 警告、预览和受控重命名对话框。",
+  "interactive": true
+}

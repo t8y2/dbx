@@ -1,0 +1,17 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11537 界面预览 · 8f3da22</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11537 界面预览</h1><p class="m">commit 8f3da22 · <a href="https://github.com/t8y2/dbx/pull/11537">回到 PR</a> · 这次改动让 OceanBase Oracle 的执行计划在界面上明确显示为“估算执行计划”，并把表格里的“实际行数”改成“预估行数”等估算语义。另有一处输入参数识别修正，避免 `CONNECT_BY_ROOT` 被误当成参数前缀。</p>
+<p class="warn">⚠️ 这次录制有 7 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-explain-plan-current-title.png" alt="查看执行计划页的当前标题与列头"><figcaption>⚠️ 估算计划标题与列名 · 查看执行计划页的当前标题与列头</figcaption></figure>
+<figure><img src="02-oceanbase-oracle-estimated-plan-unseen.png" alt="OceanBase Oracle 的估算执行计划显示位置"><figcaption>OceanBase Oracle 估算文案 · OceanBase Oracle 的估算执行计划显示位置</figcaption></figure>
+<figure class="shaky"><img src="03-connect-by-root-parameter-boundary-unsee.png" alt="参数边界修正对应的位置（代码逻辑在界面上不可直接验证）"><figcaption>⚠️ 参数识别边界修正 · 参数边界修正对应的位置（代码逻辑在界面上不可直接验证）</figcaption></figure>
+</main></html>

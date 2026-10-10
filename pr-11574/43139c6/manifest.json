@@ -1,0 +1,42 @@
+{
+  "summary": "这个 PR 在 OceanBase Oracle 的结构编辑器里，按服务端版本收紧索引类型选项：版本已知且为 4.2.5 系列时才开放函数索引，并把函数索引改成逐项表达式编辑、支持上移下移和增删。后端也会读取 ALL_IND_EXPRESSIONS 回填表达式与顺序，并在生成 DDL 时按版本/类型做校验。",
+  "scenes": [
+    {
+      "title": "OceanBase 索引类型限制",
+      "shots": [
+        {
+          "file": "01-oceanbase-index-capability-state.png",
+          "caption": "查看 OceanBase Oracle 索引能力提示与索引编辑区",
+          "width": 2456,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "函数索引表达式编辑",
+      "shots": [],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "OceanBase 索引类型限制 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 索引类型限制 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 索引类型限制 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 索引类型限制 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 索引类型限制 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"products\" (0 in the page)",
+    "OceanBase 索引类型限制 · click [data-tab-value=\"indexes\"], [value=\"indexes\"]: nothing visible matches [data-tab-value=\"indexes\"], [value=\"indexes\"] with \"索引\" (0 in the page)",
+    "函数索引表达式编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "函数索引表达式编辑 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "函数索引表达式编辑 · click [data-tab-value=\"indexes\"], [value=\"indexes\"]: nothing visible matches [data-tab-value=\"indexes\"], [value=\"indexes\"] with \"索引\" (0 in the page)",
+    "函数索引表达式编辑 · click [data-select-option=\"FUNCTION-BASED NORMAL\"]: nothing visible matches [data-select-option=\"FUNCTION-BASED NORMAL\"] (0 in the page)",
+    "函数索引表达式编辑 · shot [data-oceanbase-index-expressions]: nothing visible matches [data-oceanbase-index-expressions] (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“前后端按版本使用相同索引类型限制”“版本未知仅展示、不重建”“表达式字典缺失或无权不能冒充引擎不支持”，这些都在 diff 里体现；没有明显不一致。",
+  "unseen": "沙盒里只有 SQLite，没有 OceanBase Oracle 连接，也拿不到真实的 ALL_IND_EXPRESSIONS 和版本元数据，所以只能展示改好的编辑器界面与普通/函数索引逻辑，无法核验真实数据库回读和服务器端权限/版本分支。",
+  "interactive": true
+}

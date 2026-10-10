@@ -1,0 +1,47 @@
+{
+  "summary": "这个 PR 为 Oracle / OceanBase Oracle 连接新增了“用户、角色与授权”页，并在其中内嵌了用户变更的预览、执行与读回结果展示；同时把 Oracle 家族连接的用户管理入口切到这套新界面。页面还能读取并筛选授权来源、角色关系与字典可见性状态。",
+  "scenes": [
+    {
+      "title": "Oracle 用户管理页",
+      "shots": [
+        {
+          "file": "01-oracle-user-admin-page.png",
+          "caption": "打开后的 Oracle 用户管理页，查看用户、角色与授权区域",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "用户变更预览与执行",
+      "shots": [
+        {
+          "file": "02-oracle-user-change-preview.png",
+          "caption": "查看预览对话框里的 SQL 与状态复核信息",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle 用户管理页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 用户管理页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 用户管理页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 用户管理页 · click button: nothing visible matches button with \"用户管理\" (0 in the page)",
+    "用户变更预览与执行 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "用户变更预览与执行 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"用户管理\" (0 in the page)",
+    "用户变更预览与执行 · click button: nothing visible matches button with \"用户变更\" (0 in the page)",
+    "用户变更预览与执行 · click select[aria-label=\"用户动作\"]: nothing visible matches select[aria-label=\"用户动作\"] (0 in the page)",
+    "用户变更预览与执行 · click button: nothing visible matches button with \"预览用户变更\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“连接池带超时获取方式”“密码仅临时使用”“失败保留实际状态和恢复限制”等后端行为，UI 里只能看到相关提示和结果回读，无法直接验证连接池实现本身；另外它提到 Oracle/OceanBase Oracle 的“创建、修改、锁定/解锁、改密和删除”都有预览与执行，UI 确实提供这些动作，但删除的安全拒绝、状态复核和改密后的登录验证都只能通过结果文案间接判断。",
+  "unseen": "",
+  "interactive": true
+}

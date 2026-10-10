@@ -1,0 +1,44 @@
+{
+  "summary": "这个 PR 在 Oracle / OceanBase Oracle 连接下新增了“用户、角色与授权”管理页，并在表结构页给 Oracle 表补了“对象权限”入口。页面可预览再执行用户变更、角色变更和对象授权撤销/授予，并把授权来源区分为直接、角色继承和 PUBLIC。",
+  "scenes": [
+    {
+      "title": "Oracle 用户与授权页",
+      "shots": [
+        {
+          "file": "01-shop-database-browser.png",
+          "caption": "打开商店连接后的数据库浏览页",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "Oracle 权限预览与执行",
+      "shots": [
+        {
+          "file": "02-oracle-security-admin-loaded.png",
+          "caption": "查看用户、角色与授权页面",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle 用户与授权页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 用户与授权页 · click button: nothing visible matches button with \"users\" (0 in the page)",
+    "Oracle 用户与授权页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 权限预览与执行 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 权限预览与执行 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)",
+    "Oracle 权限预览与执行 · click button: nothing visible matches button with \"对象权限\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“用户预览角色/授权变更 → 目标身份与权限检查 → 执行和实际结果”，这些都在代码里实现了；但它把“实库授权来源、grantor 语义、级联影响及部分失败恢复”仍列为待验收，不能当成已完成的界面承诺。",
+  "unseen": "",
+  "interactive": true
+}

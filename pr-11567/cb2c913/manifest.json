@@ -1,0 +1,58 @@
+{
+  "summary": "在 Oracle 和 OceanBase Oracle 连接的查询工具栏里新增了“运行诊断”入口，打开后可以按游标/请求显式查找诊断、采集并保存记录，并在弹窗中查看和对比已保存的诊断结果。配套补上了本地历史持久化、分页加载和取消/超时等状态展示，并区分 Oracle 累计统计与 OceanBase 审计请求的身份与指标口径。",
+  "scenes": [
+    {
+      "title": "Oracle 工具栏入口",
+      "shots": [
+        {
+          "file": "01-oracle-toolbar-with-diagnostics.png",
+          "caption": "查看查询编辑器工具栏中的运行诊断入口",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "运行诊断弹窗",
+      "shots": [
+        {
+          "file": "02-runtime-diagnostics-dialog.png",
+          "caption": "查看运行诊断弹窗初始内容",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "OceanBase Oracle 请求诊断",
+      "shots": [
+        {
+          "file": "03-runtime-diagnostics-oceanbase-form.png",
+          "caption": "查看 OceanBase Oracle 的 Trace ID 和时间范围输入区",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "运行诊断弹窗 · click button: nothing visible matches button with \"运行诊断\" (0 in the page)",
+    "OceanBase Oracle 请求诊断 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase Oracle 请求诊断 · click button: nothing visible matches button with \"运行诊断\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“比较”更像是新增了专门比较视图，但 diff 只是允许在弹窗里勾选两条记录并排显示，没有单独的比较页或比较按钮文案以外的专用流程。说明里还强调“保存真实指标或明确的未采集状态”，这部分在代码里有，但 UI 只通过数值/“未采集”文本展示，未见额外的强提示。",
+  "unseen": "",
+  "interactive": true
+}

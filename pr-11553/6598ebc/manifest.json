@@ -1,0 +1,46 @@
+{
+  "summary": "数据传输对话框新增了 Oracle/OceanBase Oracle 的包规格/包体迁移支持：对象树里可单独选择包规格和包体，迁移前会显示依赖与冲突预检，执行结果页也会展示每个对象的编译、读回验证和恢复信息。",
+  "scenes": [
+    {
+      "title": "打开数据传输并查看包对象入口",
+      "shots": [
+        {
+          "file": "01-transfer-dialog-open.png",
+          "caption": "查看数据传输对话框的对象选择区域",
+          "width": 2880
+        }
+      ],
+      "derailed": false
+    },
+    {
+      "title": "查看包规格与包体的预检提示",
+      "shots": [
+        {
+          "file": "02-package-preview-unseen.png",
+          "caption": "查看包规格/包体预检与冲突策略的位置",
+          "width": 2880
+        }
+      ],
+      "derailed": false
+    },
+    {
+      "title": "查看迁移进度里的对象结果",
+      "shots": [
+        {
+          "file": "03-transfer-progress-unseen.png",
+          "caption": "查看对象迁移结果在进度对话框中的展示位置",
+          "width": 2880
+        }
+      ],
+      "derailed": false
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“依赖预检和执行后读回、保留旧定义备份、失败显式恢复”，这些都在 diff 中；没有看到额外的独立“恢复”按钮或单独恢复页面，恢复是作为失败后的提示/结果信息呈现。",
+  "unseen": "这次改动的核心是 Oracle / OceanBase Oracle 包对象迁移；沙盒里只有 SQLite，没有 Oracle 或 OceanBase 连接，因此无法真实打开包规格/包体节点、查看完整计划或跑到对象结果页。",
+  "interactive": true
+}

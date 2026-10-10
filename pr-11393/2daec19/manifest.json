@@ -1,0 +1,55 @@
+{
+  "summary": "本 PR 让 OceanBase Oracle 在表结构编辑器里获得“已有无主键表添加主键”的能力，前端能力判断和后端 DDL 生成都对齐到了 Oracle 的添加主键流程。对已有主键的替换、删除等限制仍保留。",
+  "scenes": [
+    {
+      "title": "查看 OceanBase Oracle 结构编辑能力",
+      "shots": [
+        {
+          "file": "01-table-grid-open.png",
+          "caption": "打开表后的数据网格与结构相关入口",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "进入表结构编辑器看主键开关",
+      "shots": [
+        {
+          "file": "02-structure-editor-view.png",
+          "caption": "查看结构编辑器里的主键与列选项",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "说明真实 OceanBase Oracle 位置",
+      "shots": [
+        {
+          "file": "03-oceanbase-oracle-unseen-placeholder.png",
+          "caption": "这里应展示 OceanBase Oracle 已有无主键表添加主键的编辑位置，但沙盒没有该服务器连接",
+          "width": 2880
+        }
+      ],
+      "derailed": false
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "查看 OceanBase Oracle 结构编辑能力 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "查看 OceanBase Oracle 结构编辑能力 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "查看 OceanBase Oracle 结构编辑能力 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "查看 OceanBase Oracle 结构编辑能力 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "查看 OceanBase Oracle 结构编辑能力 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"products\" (0 in the page)",
+    "进入表结构编辑器看主键开关 · click button: nothing visible matches button with \"结构\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到的真实 OceanBase Oracle 验收、前端截图/录屏和产品错误界面，在这份 diff 里没有直接体现；另外它强调了“替换、删除、第二主键和外键编辑继续受限”，但本次前端改动主要只展示了 addPrimaryKey 放开。",
+  "unseen": "沙盒里没有 OceanBase Oracle 服务器连接，只有 SQLite 种子数据，因此无法在真实 OceanBase Oracle 上实际点开并验证结构编辑器里的添加主键交互，只能展示能力逻辑对应的 UI 位置。",
+  "interactive": true
+}

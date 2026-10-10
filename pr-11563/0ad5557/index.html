@@ -1,0 +1,18 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11563 界面预览 · 0ad5557</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11563 界面预览</h1><p class="m">commit 0ad5557 · <a href="https://github.com/t8y2/dbx/pull/11563">回到 PR</a> · 在 SQL 编辑器工具栏里新增了 Oracle 专用的“运行诊断”入口按钮，点开后可按 SQL ID 查找游标，读取并保存累计运行统计；弹窗里还能查看已保存的诊断记录并重新打开。</p>
+<p class="warn">⚠️ 这次录制有 7 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-oracle-toolbar-hidden-on-sqlite.png" alt="查看 SQLite 连接下的编辑器工具栏"><figcaption>⚠️ Oracle 工具栏入口 · 查看 SQLite 连接下的编辑器工具栏</figcaption></figure>
+<figure class="shaky"><img src="02-runtime-diagnostics-entry-where-it-would.png" alt="查看工具栏区域，说明 Oracle 连接时这里会出现运行诊断入口"><figcaption>⚠️ Oracle 工具栏入口 · 查看工具栏区域，说明 Oracle 连接时这里会出现运行诊断入口</figcaption></figure>
+<figure class="shaky"><img src="03-runtime-diagnostics-dialog.png" alt="查看运行诊断弹窗的标题、说明和 SQL ID 输入区"><figcaption>⚠️ 打开运行诊断弹窗 · 查看运行诊断弹窗的标题、说明和 SQL ID 输入区</figcaption></figure>
+<figure class="shaky"><img src="04-runtime-diagnostics-records-area.png" alt="查看弹窗下方的诊断记录列表、重新加载和更多加载按钮位置"><figcaption>⚠️ 诊断记录区域 · 查看弹窗下方的诊断记录列表、重新加载和更多加载按钮位置</figcaption></figure>
+</main></html>

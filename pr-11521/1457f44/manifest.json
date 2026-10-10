@@ -1,0 +1,38 @@
+{
+  "summary": "结果集子 Tab 切换前会先派发统一的 `dbx:before-tab-switch` 事件，用来让网格在结果索引或结果批次变化前保存视图状态。PR 还补了回归测试，约束这两个切换入口都必须先发事件再更新结果。",
+  "scenes": [
+    {
+      "title": "结果集切换前后",
+      "shots": [
+        {
+          "file": "01-orders-grid-before-switch.png",
+          "caption": "打开订单表后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-orders-grid-after-switch.png",
+          "caption": "切换结果集后的数据网格",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "结果集切换前后 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结果集切换前后 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main\" (0 in the page)",
+    "结果集切换前后 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结果集切换前后 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结果集切换前后 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "结果集切换前后 · click div[data-editor-content] button, div[data-editor-content] [data-slot=\"button\"]: nothing visible matches div[data-editor-content] button, div[data-editor-content] [data-slot=\"button\"] with \"结果\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "这个改动主要是切换前的状态保存时机，肉眼未必直接看到差异；在沙盒里可通过切换同一 SQL 的不同结果集子 Tab，观察返回页签时网格是否还能保持原滚动位置与选中状态来验证。",
+  "interactive": true
+}

@@ -1,0 +1,19 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11475 界面预览 · 3b94bf1</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11475 界面预览</h1><p class="m">commit 3b94bf1 · <a href="https://github.com/t8y2/dbx/pull/11475">回到 PR</a> · 这次改动让 OceanBase Oracle 的同义词/引用名在补全、语义诊断和表元数据里保留真实解析目标身份，并把当前 schema 单独传递，避免把同义词当成普通本地表处理。界面上主要能看到 SQL 编辑器里的列补全更准确，表详情/编辑相关元数据会跟着真实目标表走。</p>
+<p class="warn">⚠️ 这次录制有 7 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure><img src="01-home-screen.png" alt="应用打开后的首页，确认左侧连接树和编辑器入口都在"><figcaption>打开编辑器查看现有树与入口 · 应用打开后的首页，确认左侧连接树和编辑器入口都在</figcaption></figure>
+<figure class="shaky"><img src="02-customers-grid-open.png" alt="customers 表打开后的数据网格"><figcaption>⚠️ 打开编辑器查看现有树与入口 · customers 表打开后的数据网格</figcaption></figure>
+<figure class="shaky"><img src="03-sql-editor-completion-context.png" alt="SQL 编辑器中输入查询前缀后的状态，观察补全上下文"><figcaption>⚠️ 打开编辑器查看现有树与入口 · SQL 编辑器中输入查询前缀后的状态，观察补全上下文</figcaption></figure>
+<figure><img src="04-orders-grid-metadata.png" alt="订单表打开后的数据网格，查看表头、网格工具栏和元数据区域"><figcaption>查看数据网格的表元数据 · 订单表打开后的数据网格，查看表头、网格工具栏和元数据区域</figcaption></figure>
+<figure><img src="05-sql-editor-before-completion.png" alt="SQL 编辑器中输入查询前缀后的状态，观察补全是否弹出并与当前连接上下文一致"><figcaption>在 SQL 编辑器里看补全上下文 · SQL 编辑器中输入查询前缀后的状态，观察补全是否弹出并与当前连接上下文一致</figcaption></figure>
+</main></html>

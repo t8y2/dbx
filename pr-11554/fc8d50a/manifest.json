@@ -1,0 +1,53 @@
+{
+  "summary": "这次改动把数据传输能力扩展到 Oracle/OceanBase Oracle 的包规格、包体、私有同义词和公共同义词，并在传输对话框里加入了对象冲突策略、依赖/预检提示以及对象级执行结果展示。后端还会为这些对象生成独立预检与迁移计划，失败时保留恢复信息。",
+  "scenes": [
+    {
+      "title": "打开数据传输对话框",
+      "shots": [
+        {
+          "file": "01-data-transfer-dialog.png",
+          "caption": "查看数据传输对话框中的对象选择区域和新增的对象类型提示",
+          "width": 2336
+        }
+      ],
+      "derailed": false
+    },
+    {
+      "title": "查看对象冲突策略和依赖提示",
+      "shots": [
+        {
+          "file": "02-transfer-options-and-hints.png",
+          "caption": "查看对象冲突策略和依赖提示区域",
+          "width": 2336,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "查看传输进度里的对象结果区",
+      "shots": [
+        {
+          "file": "03-transfer-progress-object-results-placeho.png",
+          "caption": "查看传输进度对话框中新增加的对象结果展示区域位置",
+          "width": 2336
+        }
+      ],
+      "derailed": false
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "查看对象冲突策略和依赖提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "查看对象冲突策略和依赖提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "查看对象冲突策略和依赖提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "查看对象冲突策略和依赖提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "查看对象冲突策略和依赖提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "沙盒里没有 Oracle / OceanBase Oracle 连接，也没有能真正触发这类对象迁移的服务端数据库，所以只能展示数据传输对话框中新增加的对象类型、冲突策略和结果区域，无法实际跑通包/同义词的预检与执行。",
+  "interactive": true
+}

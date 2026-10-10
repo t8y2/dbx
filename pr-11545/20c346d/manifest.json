@@ -1,0 +1,35 @@
+{
+  "summary": "这个 PR 让 OceanBase Oracle 连接支持 BLOB 有界预览、按需读取原始字节分块，以及大值引用在事务边界和取消时的失效/释放处理；同时还补了按上下文解析表/同义词列元数据的能力。界面层面主要体现在该驱动下大 LOB 查询结果会先显示截断预览，并能继续取全文。",
+  "scenes": [
+    {
+      "title": "连接页查看大值预览入口",
+      "shots": [
+        {
+          "file": "01-home-screen.png",
+          "caption": "打开应用后的首页，查看现有连接与历史入口",
+          "width": 2880
+        }
+      ],
+      "derailed": false
+    },
+    {
+      "title": "说明当前沙盒无法演示 OceanBase LOB",
+      "shots": [
+        {
+          "file": "02-no-oceanbase-lob.png",
+          "caption": "当前沙盒仅有 SQLite 连接，展示无法进入 OceanBase Oracle 大值预览的场景",
+          "width": 2880
+        }
+      ],
+      "derailed": false
+    }
+  ],
+  "video": null,
+  "poster": null,
+  "errors": [],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“读取、复制与下载区分预览和全文”“连续编辑两列 LOB 时保留第一列草稿和撤销状态”等更完整的交互，但这段 diff 里没看到对应前端下载/复制 UI 或双列编辑器状态表现的改动；此外它还补了同义词列元数据解析，描述里没有专门强调。",
+  "unseen": "这里是沙盒 SQLite 环境，没有 OceanBase Oracle 连接、没有 BLOB/CLOB 大对象结果，也没有该驱动的 LOB 预览/分块读取入口可实测；相关改动只能在代码层说明，无法在当前页面真实展示。",
+  "interactive": false
+}

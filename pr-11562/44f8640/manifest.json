@@ -1,0 +1,72 @@
+{
+  "summary": "这次改动把 Oracle / OceanBase Oracle 的类型（TYPE/TYPE BODY）纳入对象浏览、源码查看和 Schema Diff 流程，并在比较/部署界面补充了类型元数据、依赖与阻断原因展示。部署结果页也新增了针对 Oracle routine 的校验/回读信息，执行前会更严格地阻止不完整或不安全的计划。",
+  "scenes": [
+    {
+      "title": "类型对象浏览",
+      "shots": [
+        {
+          "file": "01-table-grid-baseline.png",
+          "caption": "打开表后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-events-grid-open.png",
+          "caption": "打开分析库事件表后的数据网格",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "Schema Diff 中的 Oracle 类型提示",
+      "shots": [
+        {
+          "file": "03-schema-diff-entry-unseen.png",
+          "caption": "Schema Diff 入口与 Oracle 类型提示位置；当前沙盒没有 Oracle 数据源，无法进入真实比较页面",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "对象源码里的类型元数据面板",
+      "shots": [
+        {
+          "file": "04-object-panel-baseline.png",
+          "caption": "对象页面的常规状态",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "05-oracle-type-metadata-unseen.png",
+          "caption": "Oracle 类型元数据面板的位置；当前沙盒没有 TYPE/TYPE BODY 对象，无法展示实际内容",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "类型对象浏览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "类型对象浏览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "类型对象浏览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "类型对象浏览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "类型对象浏览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)",
+    "类型对象浏览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "类型对象浏览 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "Schema Diff 中的 Oracle 类型提示 · click button: nothing visible matches button with \"设置\" (0 in the page)",
+    "对象源码里的类型元数据面板 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "对象源码里的类型元数据面板 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "沙盒里没有 Oracle 或 OceanBase Oracle 实例，所以只能打开这些能力在界面中的入口，无法真实读取类型元数据、比较类型定义或验证部署回读状态。",
+  "interactive": true
+}

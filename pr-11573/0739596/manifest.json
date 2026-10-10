@@ -1,0 +1,56 @@
+{
+  "summary": "这次改动让 OceanBase Oracle 的对象浏览与表信息区开始区分触发器 owner，并为该数据库的对象列表引入分页加载、按数据库顺序展示与搜索时的分页续载逻辑。触发器名称现在会按“owner.名称”显示，表的导出/对象源码读取也会带上完整触发器源码和启停状态。",
+  "scenes": [
+    {
+      "title": "OceanBase 对象列表分页",
+      "shots": [
+        {
+          "file": "01-analytics-browser-open.png",
+          "caption": "打开分析连接后的数据库浏览页",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-analytics-main-expanded.png",
+          "caption": "展开默认库后的对象树",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-events-grid.png",
+          "caption": "打开 events 表后的数据网格和右侧信息区",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "触发器 owner 显示",
+      "shots": [
+        {
+          "file": "04-orders-table-info.png",
+          "caption": "打开订单表后的表信息面板，查看触发器列表里的显示名称",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "OceanBase 对象列表分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象列表分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "OceanBase 对象列表分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象列表分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "触发器 owner 显示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "触发器 owner 显示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述提到视图、物化视图、过程、函数、触发器和序列的“执行前核对 owner、名称、类型及定义”以及“程序和触发器必须 VALID 且无 ALL_ERRORS 错误、序列核对六项静态配置”等后端校验；这些在当前前端界面里没有单独的新按钮或可见校验页可直接展示，UI 侧主要能看到的是对象列表分页、触发器 owner 显示和对象源码/导出内容变化。",
+  "unseen": "PR 里真正的 OceanBase Oracle 源码读取与迁移验证依赖数据库对象和触发器元数据；沙盒只有 SQLite 两个连接，没有 OceanBase/Oracle、也没有对应的目标库或实库迁移流程，所以只能展示对象浏览器和表信息面板里触发器 owner/分页相关的 UI 结果，无法验证真实 OceanBase 迁移 RPC。",
+  "interactive": true
+}

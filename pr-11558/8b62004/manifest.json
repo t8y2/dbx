@@ -1,0 +1,75 @@
+{
+  "summary": "新增了 Oracle/OceanBase Oracle 的调度作业管理页，并把它接入到连接侧栏菜单与内容区标签页中。页面支持查看 Scheduler/旧式 DBMS_JOB、预览创建/编辑/启用/禁用/删除，以及在预览里单独展示计划影响。",
+  "scenes": [
+    {
+      "title": "从连接菜单打开调度作业页",
+      "shots": [
+        {
+          "file": "01-oracle-jobs-page.png",
+          "caption": "打开调度作业页后的界面",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "查看作业详情与旧式作业",
+      "shots": [
+        {
+          "file": "02-oracle-jobs-list.png",
+          "caption": "作业列表与旧式 DBMS_JOB 分区",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-oracle-job-details.png",
+          "caption": "作业详情、启用/禁用/删除按钮与读回信息",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "预览计划影响",
+      "shots": [
+        {
+          "file": "04-schedule-impact-preview.png",
+          "caption": "预览弹窗中单独显示计划影响与旧下次运行时间",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "从连接菜单打开调度作业页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "从连接菜单打开调度作业页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "从连接菜单打开调度作业页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "从连接菜单打开调度作业页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "从连接菜单打开调度作业页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)",
+    "从连接菜单打开调度作业页 · click button: nothing visible matches button with \"调度作业\" (0 in the page)",
+    "查看作业详情与旧式作业 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "查看作业详情与旧式作业 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "查看作业详情与旧式作业 · click button: nothing visible matches button with \"调度作业\" (0 in the page)",
+    "查看作业详情与旧式作业 · click button: nothing visible matches button with \"Daily.Job\" (0 in the page)",
+    "预览计划影响 · click button: nothing visible matches button with \"新建禁用作业\" (0 in the page)",
+    "预览计划影响 · type input[aria-label=\"精确 owner\"]: nothing visible matches input[aria-label=\"精确 owner\"] (0 in the page)",
+    "预览计划影响 · type input[aria-label=\"精确作业名称\"]: nothing visible matches input[aria-label=\"精确作业名称\"] (0 in the page)",
+    "预览计划影响 · type textarea: nothing visible matches textarea (0 in the page)",
+    "预览计划影响 · type textarea: nothing visible matches textarea (0 in the page)",
+    "预览计划影响 · type input[aria-label=\"开始时间（含时区偏移）\"]: nothing visible matches input[aria-label=\"开始时间（含时区偏移）\"] (0 in the page)",
+    "预览计划影响 · type input[aria-label=\"调度表达式\"]: nothing visible matches input[aria-label=\"调度表达式\"] (0 in the page)",
+    "预览计划影响 · click button: nothing visible matches button with \"预览定义\" (0 in the page)",
+    "预览计划影响 · click button: nothing visible matches button with \"取消\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“数据库菜单接入”，但这次改动实际是在连接侧栏的右键/上下文菜单里增加“调度作业”；另外没有看到独立的“数据库菜单”页面入口。",
+  "unseen": "",
+  "interactive": true
+}

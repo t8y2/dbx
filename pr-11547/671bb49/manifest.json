@@ -1,0 +1,49 @@
+{
+  "summary": "在 Oracle / OceanBase Oracle 的表结构页里新增了“编辑主键”内联编辑器，可按列顺序调整或清空主键，并在预览后展示受影响对象、DDL、执行结果和恢复 SQL。后端同时接入了主键预览/执行接口，支持 OceanBase 的 MODIFY PRIMARY KEY 路径及 Oracle 的替换流程与失败读回。",
+  "scenes": [
+    {
+      "title": "结构页打开主键编辑器",
+      "shots": [
+        {
+          "file": "01-structure-page.png",
+          "caption": "订单表结构页中的主键编辑入口",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-oracle-primary-key-editor-place.png",
+          "caption": "这里会显示 Oracle / OceanBase Oracle 的主键编辑器，但当前沙盒没有这类连接，因此只能展示入口位置",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "Oracle 主键编辑区域",
+      "shots": [
+        {
+          "file": "03-oracle-primary-key-editor-place.png",
+          "caption": "这里会显示 Oracle / OceanBase Oracle 的主键编辑器，但当前沙盒没有这类连接，因此只能展示入口位置",
+          "width": 2880
+        }
+      ],
+      "derailed": false
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "结构页打开主键编辑器 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结构页打开主键编辑器 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结构页打开主键编辑器 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"展开\" (0 in the page)",
+    "结构页打开主键编辑器 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结构页打开主键编辑器 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "结构页打开主键编辑器 · click button: nothing visible matches button with \"结构\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "这个改动依赖 Oracle 或 OceanBase Oracle 连接；当前沙盒只有 SQLite，两类数据库都未连接，所以无法真实打开该编辑器并验证主键变更流程。",
+  "interactive": true
+}

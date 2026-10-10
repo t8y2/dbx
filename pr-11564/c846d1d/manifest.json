@@ -1,0 +1,47 @@
+{
+  "summary": "这个 PR 给连接/数据库/表/视图/SQL 编辑器的右键菜单加了“分组菜单”和“完整菜单”两种呈现，并新增了一个可保存的自定义面板，用来勾选一级操作、调整顺序和分组顺序。它还让长菜单自动限高滚动，并保留当前右键目标在切换布局后继续可用。",
+  "scenes": [
+    {
+      "title": "连接右键菜单分组",
+      "shots": [],
+      "derailed": true
+    },
+    {
+      "title": "编辑器右键菜单与自定义面板",
+      "shots": [],
+      "derailed": true
+    },
+    {
+      "title": "长菜单滚动",
+      "shots": [],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "连接右键菜单分组 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "连接右键菜单分组 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "连接右键菜单分组 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "连接右键菜单分组 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "连接右键菜单分组 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)",
+    "连接右键菜单分组 · shot [data-dbx-context-menu]: nothing visible matches [data-dbx-context-menu] (0 in the page)",
+    "连接右键菜单分组 · click button: nothing visible matches button with \"使用完整菜单\" (0 in the page)",
+    "连接右键菜单分组 · shot [data-dbx-context-menu]: nothing visible matches [data-dbx-context-menu] (0 in the page)",
+    "编辑器右键菜单与自定义面板 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "编辑器右键菜单与自定义面板 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "编辑器右键菜单与自定义面板 · shot [data-dbx-context-menu]: nothing visible matches [data-dbx-context-menu] (0 in the page)",
+    "编辑器右键菜单与自定义面板 · click button: nothing visible matches button with \"自定义分组菜单…\" (0 in the page)",
+    "编辑器右键菜单与自定义面板 · shot [role=\"dialog\"]: nothing visible matches [role=\"dialog\"] (0 in the page)",
+    "长菜单滚动 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "长菜单滚动 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "长菜单滚动 · click div[data-toolbar-action=\"addRow\"]: nothing visible matches div[data-toolbar-action=\"addRow\"] (0 in the page)",
+    "长菜单滚动 · click button[aria-label=\"新增行\"]: nothing visible matches button[aria-label=\"新增行\"] (0 in the page)",
+    "长菜单滚动 · shot [data-dbx-context-menu]: nothing visible matches [data-dbx-context-menu] (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“SQL 编辑器的完整菜单在矮窗口下会超出可视区域”与“完整模式保留原布局，不提供分组自定义入口”都在本次改动里有体现；没有明显与 diff 不符的点。",
+  "unseen": "PR 描述提到多种服务器数据库的完整菜单路径、AI/插件/JDBC/SSH 相关入口，但这个沙盒没有这些连接与驱动，无法在真实对象上展示对应菜单项；只能在现有 SQLite 连接、数据库和表的菜单上验证分组、自定义与滚动。",
+  "interactive": true
+}

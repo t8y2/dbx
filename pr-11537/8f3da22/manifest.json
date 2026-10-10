@@ -1,0 +1,56 @@
+{
+  "summary": "这次改动让 OceanBase Oracle 的执行计划在界面上明确显示为“估算执行计划”，并把表格里的“实际行数”改成“预估行数”等估算语义。另有一处输入参数识别修正，避免 `CONNECT_BY_ROOT` 被误当成参数前缀。",
+  "scenes": [
+    {
+      "title": "估算计划标题与列名",
+      "shots": [
+        {
+          "file": "01-explain-plan-current-title.png",
+          "caption": "查看执行计划页的当前标题与列头",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "OceanBase Oracle 估算文案",
+      "shots": [
+        {
+          "file": "02-oceanbase-oracle-estimated-plan-unseen.png",
+          "caption": "OceanBase Oracle 的估算执行计划显示位置",
+          "width": 1120
+        }
+      ],
+      "derailed": false
+    },
+    {
+      "title": "参数识别边界修正",
+      "shots": [
+        {
+          "file": "03-connect-by-root-parameter-boundary-unsee.png",
+          "caption": "参数边界修正对应的位置（代码逻辑在界面上不可直接验证）",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "估算计划标题与列名 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "估算计划标题与列名 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "估算计划标题与列名 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "估算计划标题与列名 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "估算计划标题与列名 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "估算计划标题与列名 · click button: nothing visible matches button with \"执行\" (0 in the page)",
+    "参数识别边界修正 · click button: nothing visible matches button with \"全局搜索\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "沙盒里只有 SQLite 连接，无法真实打开 OceanBase Oracle 连接来触发这条新文案和计划路径；只能在代码层确认相关文本与逻辑。",
+  "interactive": true
+}

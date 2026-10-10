@@ -1,0 +1,46 @@
+{
+  "summary": "本 PR 让 OceanBase Oracle 的对象浏览改为服务器分页加载，并在分页对象搜索时隐藏排序控件、显示“已加载 N 个对象”的提示，还禁止了物化视图改名的前端入口。后端同时修正了分页的顺序与上下文保持，并对 OceanBase Oracle 的物化视图重命名直接返回未验证错误。",
+  "scenes": [
+    {
+      "title": "OceanBase 对象分页提示",
+      "shots": [
+        {
+          "file": "01-oceanbase-paging-footer.png",
+          "caption": "查看对象浏览页底部的分页信息与继续加载按钮",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "物化视图改名入口检查",
+      "shots": [
+        {
+          "file": "02-rename-entry-view.png",
+          "caption": "查看视图对象页中的重命名相关入口位置",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象分页提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "物化视图改名入口检查 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "物化视图改名入口检查 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"v_daily_revenue\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里说“前端 objectRenameSql 5 项通过”“GUI 验证”等，属于测试/验证结论，界面本身看不出来；此外“与已隐藏入口保持一致”的入口在当前沙盒里本来就未展示，不能单独在页面上验证为新增。",
+  "unseen": "",
+  "interactive": true
+}

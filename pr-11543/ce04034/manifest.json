@@ -1,0 +1,70 @@
+{
+  "summary": "这个 PR 为 OceanBase Oracle 增加了对象列表的分页加载与搜索分页支持，隐藏了部分不适用的排序/筛选交互，并在表信息面板里把行数与空间统计拆成更细的 OceanBase 专用来源、Leader 口径、索引和 LOB 分项显示。",
+  "scenes": [
+    {
+      "title": "OceanBase 对象列表分页",
+      "shots": [
+        {
+          "file": "01-shop-tree-expanded.png",
+          "caption": "商店连接展开后的对象树",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-analytics-tree-expanded.png",
+          "caption": "分析连接展开后的对象树",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-oceanbase-unseen-entry.png",
+          "caption": "这里是 OceanBase Oracle 对象列表分页与加载更多按钮会出现的位置",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "表信息里的 OceanBase 行数与空间统计",
+      "shots": [
+        {
+          "file": "04-events-grid.png",
+          "caption": "事件表打开后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "05-table-info-panel.png",
+          "caption": "表信息面板中的统计区域",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "06-oceanbase-space-unseen.png",
+          "caption": "这里是 OceanBase Oracle 会显示行数来源、Leader 口径、已分配空间、索引和 LOB 分项的表信息位置",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "OceanBase 对象列表分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象列表分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象列表分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象列表分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 对象列表分页 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "表信息里的 OceanBase 行数与空间统计 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "表信息里的 OceanBase 行数与空间统计 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "表信息里的 OceanBase 行数与空间统计 · click button: nothing visible matches button with \"信息\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“列表和详情缺少可解释的空间统计、来源、Leader 范围及表、索引、LOB 独立分项、缺失值保留未知”，这些在前端改动里基本都做了；但“CTE 换行转义引发的 ORA-00900”属于后端修复，前端无法直接单独验证。",
+  "unseen": "这次改动只对 OceanBase Oracle 生效，但当前沙盒没有 OceanBase 连接，只能打开 SQLite 两个连接，无法在真实 OceanBase 上看到新分页查询、行数统计回退和空间统计来源字段的实际返回内容。",
+  "interactive": true
+}

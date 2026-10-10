@@ -1,0 +1,43 @@
+{
+  "summary": "这次改动让 OceanBase Oracle 的对象重命名更完整：包会同时处理规格和包体，并把“旧包清理”拆成可单独确认的第二步；同时，视图和例程重命名后会把旧源码保留成只读快照，不再可直接编辑或运行。",
+  "scenes": [
+    {
+      "title": "包重命名与旧包清理",
+      "shots": [
+        {
+          "file": "01-orders-object-page.png",
+          "caption": "查看订单表对象页顶部与右键入口",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-rename-dialog-before.png",
+          "caption": "查看重命名对话框中的新名称输入与新增的确认区域",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-rename-dialog-warning-preview.png",
+          "caption": "查看重命名说明、预览 SQL 和旧包清理确认区",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "包重命名与旧包清理 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "包重命名与旧包清理 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "包重命名与旧包清理 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "包重命名与旧包清理 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "包重命名与旧包清理 · click div[role='menuitem'], button: nothing visible matches div[role='menuitem'], button with \"重命名\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“成员和重载直接通过字典核验，不依赖 #11424 的成员树”，但这次前端可见改动没有新增可见的成员树核验界面；另外说到“Oracle 与 OceanBase Oracle”整体支持，但实际前端展开的 UI 变化主要集中在 OceanBase Oracle 相关重命名提示与包/视图/例程流程。",
+  "unseen": "沙盒里没有 Oracle 或 OceanBase 实库，只能用 SQLite 数据集展示界面入口和通用重命名对话框，无法真实验证这些 OceanBase Oracle DDL、字典读回和授权/依赖核验是否按后端计划执行。",
+  "interactive": true
+}

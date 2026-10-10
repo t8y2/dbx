@@ -1,0 +1,36 @@
+{
+  "summary": "这次改动修正了 Oracle / OceanBase Oracle 参数扫描：不再把表达式和 DDL 里的 `@参数` 误判成 DBLink，保留真实的模板参数提取与替换；同时更严格保留远程例程链接上下文。",
+  "scenes": [
+    {
+      "title": "Oracle 参数识别说明",
+      "shots": [
+        {
+          "file": "01-start-page.png",
+          "caption": "初始首页，保留作为进入编辑器前的对照",
+          "width": 2456
+        },
+        {
+          "file": "02-table-grid.png",
+          "caption": "打开订单表后的数据网格",
+          "width": 2456,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle 参数识别说明 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 参数识别说明 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 参数识别说明 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 参数识别说明 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 参数识别说明 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "PR 描述提到“GUI 或实库验收”尚未进行，但这次实际改动只在参数解析逻辑和回归测试里，没有新增可直接点开的界面功能。",
+  "unseen": "这个变化本身是 SQL 参数识别规则，界面上没有单独的新控件可展示；只能在 Oracle/OceanBase Oracle 的 SQL 编辑器里通过输入相关语句间接验证，但沙盒里没有这些服务器数据库连接可完成。",
+  "interactive": true
+}

@@ -1,0 +1,16 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11550 界面预览 · 8bdbd16</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11550 界面预览</h1><p class="m">commit 8bdbd16 · <a href="https://github.com/t8y2/dbx/pull/11550">回到 PR</a> · 这个 PR 在 Oracle / OceanBase Oracle 的表结构编辑里新增了 UNIQUE、外键和主键的专用编辑器，支持先预览 DDL、再确认执行，并在结果区回读当前约束、受影响对象和恢复 SQL。它还区分 Oracle 与 OceanBase 的行为差异，例如 OceanBase 隐藏部分状态选项、主键和 UNIQUE 的支持索引处理不同。</p>
+<p class="warn">⚠️ 这次录制有 5 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-sqlite-orders-grid.png" alt="当前沙盒里的订单表数据网格"><figcaption>⚠️ Oracle 表结构里的约束编辑器入口 · 当前沙盒里的订单表数据网格</figcaption></figure>
+<figure><img src="02-oracle-editor-unseen.png" alt="Oracle / OceanBase Oracle 约束编辑入口的位置"><figcaption>Oracle 结构编辑器中新增的约束面板 · Oracle / OceanBase Oracle 约束编辑入口的位置</figcaption></figure>
+</main></html>

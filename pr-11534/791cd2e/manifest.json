@@ -1,0 +1,60 @@
+{
+  "summary": "这个 PR 主要让 OceanBase Oracle 的星号查询和完成/诊断更准确地保留“当前 schema”和“真实解析目标”的分离，避免把同义词、业务别名和物理 ROWID 混在一起；同时在 ROWID 删除并发冲突时，保存结果会显示实际影响行数并保留冲突提示。",
+  "scenes": [
+    {
+      "title": "OceanBase 星号查询保留别名与隐藏定位列",
+      "shots": [
+        {
+          "file": "01-shop-database-browser.png",
+          "caption": "商店连接的数据库浏览页",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-orders-grid-before.png",
+          "caption": "打开订单表后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-events-grid.png",
+          "caption": "分析表的数据网格",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "ROWID 保存冲突提示",
+      "shots": [
+        {
+          "file": "04-orders-grid-editable.png",
+          "caption": "进入可编辑的数据网格",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "OceanBase 星号查询保留别名与隐藏定位列 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 星号查询保留别名与隐藏定位列 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 星号查询保留别名与隐藏定位列 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 星号查询保留别名与隐藏定位列 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 星号查询保留别名与隐藏定位列 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "OceanBase 星号查询保留别名与隐藏定位列 · click button[data-slot=\"button\"]: nothing visible matches button[data-slot=\"button\"] with \"设置\" (0 in the page)",
+    "OceanBase 星号查询保留别名与隐藏定位列 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "OceanBase 星号查询保留别名与隐藏定位列 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "ROWID 保存冲突提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "ROWID 保存冲突提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“真实主键优先”“隐藏定位列不进入普通复制和 CSV 导出”“恢复一致”等更偏验证结论的内容，diff 里没有直接新增对应的可见 UI 功能入口；另外“并发删除已经被其他会话移除的行时”在界面上表现为保存提示，而不是单独新增一个删除结果页。",
+  "unseen": "",
+  "interactive": true
+}

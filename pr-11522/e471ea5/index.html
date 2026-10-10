@@ -1,0 +1,20 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#11522 界面预览 · e471ea5</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#11522 界面预览</h1><p class="m">commit e471ea5 · <a href="https://github.com/t8y2/dbx/pull/11522">回到 PR</a> · 这个 PR 调整了侧栏里的 Ctrl+F 搜索定位逻辑：当当前激活的是数据库、schema 或表节点时，会优先聚焦该作用域下的局部表搜索框，而不是总是回到侧栏顶部的全局搜索。它还让局部表搜索框支持用 Escape 快速退出/清空当前搜索，并在树侧栏焦点分发里优先拦截这个快捷键。</p>
+<p class="warn">⚠️ 这次录制有 8 步没能按计划执行；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure class="shaky"><img src="01-database-node-selected.png" alt="数据库节点选中后的侧栏状态"><figcaption>⚠️ 在数据库节点按 Ctrl+F · 数据库节点选中后的侧栏状态</figcaption></figure>
+<figure class="shaky"><img src="02-local-table-search-focused.png" alt="按下 Ctrl+F 后，查看局部表搜索框是否被聚焦"><figcaption>⚠️ 在数据库节点按 Ctrl+F · 按下 Ctrl+F 后，查看局部表搜索框是否被聚焦</figcaption></figure>
+<figure class="shaky"><img src="03-table-node-selected.png" alt="选中表节点后的侧栏状态"><figcaption>⚠️ 在表节点按 Ctrl+F · 选中表节点后的侧栏状态</figcaption></figure>
+<figure class="shaky"><img src="04-table-search-focused.png" alt="按下 Ctrl+F 后对应表搜索框被聚焦的状态"><figcaption>⚠️ 在表节点按 Ctrl+F · 按下 Ctrl+F 后对应表搜索框被聚焦的状态</figcaption></figure>
+<figure class="shaky"><img src="05-table-search-with-text.png" alt="局部表搜索框已有输入内容的状态"><figcaption>⚠️ Escape 处理局部表搜索 · 局部表搜索框已有输入内容的状态</figcaption></figure>
+<figure class="shaky"><img src="06-table-search-after-escape.png" alt="按下 Escape 后局部表搜索框的状态"><figcaption>⚠️ Escape 处理局部表搜索 · 按下 Escape 后局部表搜索框的状态</figcaption></figure>
+</main></html>

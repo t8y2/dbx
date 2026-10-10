@@ -1,0 +1,63 @@
+{
+  "summary": "在 SQL 编辑器工具栏里新增了 Oracle 专用的“运行诊断”入口按钮，点开后可按 SQL ID 查找游标，读取并保存累计运行统计；弹窗里还能查看已保存的诊断记录并重新打开。",
+  "scenes": [
+    {
+      "title": "Oracle 工具栏入口",
+      "shots": [
+        {
+          "file": "01-oracle-toolbar-hidden-on-sqlite.png",
+          "caption": "查看 SQLite 连接下的编辑器工具栏",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-runtime-diagnostics-entry-where-it-would.png",
+          "caption": "查看工具栏区域，说明 Oracle 连接时这里会出现运行诊断入口",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "打开运行诊断弹窗",
+      "shots": [
+        {
+          "file": "03-runtime-diagnostics-dialog.png",
+          "caption": "查看运行诊断弹窗的标题、说明和 SQL ID 输入区",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "诊断记录区域",
+      "shots": [
+        {
+          "file": "04-runtime-diagnostics-records-area.png",
+          "caption": "查看弹窗下方的诊断记录列表、重新加载和更多加载按钮位置",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 工具栏入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "打开运行诊断弹窗 · click button[data-slot=\"button\"][aria-label=\"运行诊断\"]: nothing visible matches button[data-slot=\"button\"][aria-label=\"运行诊断\"] (0 in the page)",
+    "诊断记录区域 · click button[data-slot=\"button\"][aria-label=\"运行诊断\"]: nothing visible matches button[data-slot=\"button\"][aria-label=\"运行诊断\"] (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“选择实例、child、游标地址和加载时间匹配的目标”以及“前后复核身份”，但界面实际先按 SQL ID 查找目标，再在结果表中点选目标，不是单独的实例/child/地址/时间输入组合。",
+  "unseen": "这项功能只对 Oracle 连接显示；沙盒里没有 Oracle 实库，所以只能展示入口、弹窗结构和空/示例态，无法验证真实 GV$SQL、GV$SQL_PLAN_STATISTICS_ALL 的采集结果。",
+  "interactive": true
+}

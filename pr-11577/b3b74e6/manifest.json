@@ -1,0 +1,57 @@
+{
+  "summary": "这次改动修复了数据网格导出/复制里的时间值处理：Oracle/OceanBase Oracle 的时间型单元格在复制插入语句时会保留真实值并正确识别带空格的时区偏移，同时时间导出不会把 NULL 误格式化成文本。另一个变化是右键复制时会固定使用触发菜单时点击的单元格目标，而不是菜单关闭后被改写的目标。",
+  "scenes": [
+    {
+      "title": "复制时保持点击目标",
+      "shots": [
+        {
+          "file": "01-orders-grid-before-copy.png",
+          "caption": "打开订单表后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-orders-grid-after-copy-target.png",
+          "caption": "展示订单表网格中的单元格复制入口位置",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "时间导出保留 NULL",
+      "shots": [
+        {
+          "file": "03-daily-stats-grid.png",
+          "caption": "打开日统计表后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "04-export-menu-temporal-null.png",
+          "caption": "查看时间导出相关入口与数据网格",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "复制时保持点击目标 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "复制时保持点击目标 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main\" (0 in the page)",
+    "复制时保持点击目标 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "复制时保持点击目标 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "复制时保持点击目标 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)",
+    "时间导出保留 NULL · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "时间导出保留 NULL · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"daily_stats\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "实库里的 Oracle/OceanBase Oracle 时区时间 INSERT 语义和剪贴板回读细节在当前沙盒里无法直接验收；这里没有 Oracle/OB 服务器连接，只能在 SQLite 数据和前端导出/复制流程上展示对应行为。",
+  "interactive": true
+}

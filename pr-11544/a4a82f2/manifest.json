@@ -1,0 +1,64 @@
+{
+  "summary": "这次改动让 OceanBase Oracle 的查询与表浏览在遇到大 CLOB 时先显示有界预览，后续可按需读取完整内容，并且在数据网格保存、取消和导出时更稳妥地释放这类大值资源。编辑器的列补全与诊断也改为更尊重 OceanBase 的当前 schema / 同义词上下文。",
+  "scenes": [
+    {
+      "title": "大值预览与按需入口",
+      "shots": [
+        {
+          "file": "01-customers-grid-open.png",
+          "caption": "打开 customers 表后的数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-events-grid-open.png",
+          "caption": "打开 events 表后的数据网格",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "保存时的行级反馈",
+      "shots": [
+        {
+          "file": "03-orders-grid-open.png",
+          "caption": "打开订单表后的数据网格，观察保存和行状态反馈入口",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "OceanBase 补全与诊断上下文",
+      "shots": [
+        {
+          "file": "04-oceanbase-context-unseen.png",
+          "caption": "显示编辑器所在位置，说明本次改动也影响 OceanBase Oracle 的补全和诊断上下文",
+          "width": 2456
+        }
+      ],
+      "derailed": false
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "大值预览与按需入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "大值预览与按需入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "大值预览与按需入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "大值预览与按需入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "大值预览与按需入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)",
+    "大值预览与按需入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "大值预览与按需入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"events\" (0 in the page)",
+    "保存时的行级反馈 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "保存时的行级反馈 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"orders\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到的“查看、复制、编辑和导出按需读取全文”“连续编辑两列 CLOB 保留撤销状态”“关闭 CLOB 详情后迟到响应不回写”等具体 UI 行为，diff 里有对应底层支持，但前端可直接展示的完整交互只覆盖了大值预览、网格/补全/诊断的上下文修正与导出下载入口；另外描述里提到“导出公式防护 reader.bytes() 修复”“Java CI 三个测试 Proxy 修复”属于非 UI 或测试侧，不是这次页面可见改动。",
+  "unseen": "沙盒里没有 OceanBase Oracle 服务器和真实 CLOB 字段，因此无法直接在 GUI 里演示“按需读全文/完整导出/大值释放”的真实数据库路径；只能展示相关入口和现有 SQLite 页面，说明这些能力在代码里已经接入但本环境不能实证。",
+  "interactive": true
+}

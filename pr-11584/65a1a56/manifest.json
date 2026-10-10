@@ -1,0 +1,45 @@
+{
+  "summary": "这个 PR 修复了结构编辑器里在“字段/列”与其他结构页签之间切换后，横向滚动条会丢失、并且列区横向滚动位置无法恢复的问题。它还在列虚拟列表更新时主动刷新横向滚动条状态，以保证页签切回后界面能继续正确显示滚动条。",
+  "scenes": [
+    {
+      "title": "结构页签切换前的列滚动状态",
+      "shots": [
+        {
+          "file": "01-structure-columns-scrollbar-visible.png",
+          "caption": "打开表结构编辑器后的字段页签与横向滚动条",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-structure-triggers-tab.png",
+          "caption": "切换到触发器页签后的结构面板",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "03-structure-columns-scroll-restored.png",
+          "caption": "切回字段页签后的横向滚动条与滚动位置",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "结构页签切换前的列滚动状态 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结构页签切换前的列滚动状态 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结构页签切换前的列滚动状态 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结构页签切换前的列滚动状态 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "结构页签切换前的列滚动状态 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"products\" (0 in the page)",
+    "结构页签切换前的列滚动状态 · click button, [data-slot=\"button\"]: nothing visible matches button, [data-slot=\"button\"] with \"触发器\" (0 in the page)",
+    "结构页签切换前的列滚动状态 · click button, [data-slot=\"button\"]: nothing visible matches button, [data-slot=\"button\"] with \"字段\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "",
+  "interactive": true
+}

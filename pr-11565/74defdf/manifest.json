@@ -1,0 +1,37 @@
+{
+  "summary": "新增了 Oracle / OceanBase Oracle 连接的只读权限查看页，用来展示当前账号可见的用户、角色、系统授权、对象授权、列授权及其来源，并标出受限、失败和截断状态。左侧连接树的“用户管理”入口现在在 Oracle 家族连接下会打开这页，而不是通用用户管理页。",
+  "scenes": [
+    {
+      "title": "Oracle 权限页入口",
+      "shots": [
+        {
+          "file": "01-customers-grid.png",
+          "caption": "查看表数据网格",
+          "width": 2880,
+          "warn": true
+        },
+        {
+          "file": "02-new-connection-dialog.png",
+          "caption": "查看连接类型入口",
+          "width": 2880,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Oracle 权限页入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 权限页入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 权限页入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 权限页入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 权限页入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“选择主体或对象 → 读取字典 → 标明可见范围 → 展示授权来源”，与实现基本一致；没有看到额外的独立按钮、AI、插件或其他前置入口。",
+  "unseen": "沙盒里只有 SQLite 连接，无法打开 Oracle / OceanBase Oracle 实连接来验证新页面；因此这页只能在对应数据库类型连接下展示。",
+  "interactive": true
+}

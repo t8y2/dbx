@@ -1,0 +1,41 @@
+{
+  "summary": "这个 PR 新增了 Oracle / OceanBase Oracle 的 TYPE 定义查看与编辑入口，并在对象源码、侧边栏和编辑器里显示类型元数据面板、支持读取完整类型规格/体以及审阅后执行读回。还把 Oracle 类型纳入对象树和源码读取能力，并保留类型 tab 的精确身份与只读状态。",
+  "scenes": [
+    {
+      "title": "对象树里的类型入口",
+      "shots": [
+        {
+          "file": "01-connection-expanded-no-types.png",
+          "caption": "查看该 SQLite 连接展开后的对象树状态",
+          "width": 1120,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "Oracle 类型元数据面板位置",
+      "shots": [
+        {
+          "file": "02-welcome-without-oracle-connection.png",
+          "caption": "当前欢迎页里没有 Oracle 连接，先停在这里说明无法继续验证类型面板",
+          "width": 2456,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "对象树里的类型入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "对象树里的类型入口 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "Oracle 类型元数据面板位置 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“依赖保护及执行读回”“覆盖依赖不可读、并发修改和编译失败”等行为，diff 里确实有这类逻辑，但前端可见的主要新增点是类型元数据面板与类型编辑器；另外描述里强调 Oracle 与 OceanBase Oracle，UI 中类型入口也确实只对这两类数据库出现。",
+  "unseen": "沙盒里没有 Oracle / OceanBase Oracle 连接，不能真实打开“类型元数据”面板或“类型定义”编辑器，也无法展示后端 `/schema/oracle-type-details` 和类型 DDL 读回的真实结果；当前只能看到 Oracle 类型入口在对象树里出现的位置。",
+  "interactive": true
+}

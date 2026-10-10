@@ -1,0 +1,54 @@
+{
+  "summary": "这个 PR 给 OceanBase Oracle 的普通视图改名加了保护：改名时会提示不可回滚，并在改名结果不确定或响应丢失时，把旧源码固定成只读快照，阻止继续保存/执行旧身份的内容。同时，侧栏对象页和打开的源码标签也会在视图改名后进入快照状态，避免旧标签被误恢复成可编辑对象。",
+  "scenes": [
+    {
+      "title": "视图改名提示",
+      "shots": [
+        {
+          "file": "01-view-object-page.png",
+          "caption": "打开视图后的对象页",
+          "width": 2456,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "旧源码快照",
+      "shots": [
+        {
+          "file": "02-data-page-baseline.png",
+          "caption": "对象页的常规状态",
+          "width": 2456,
+          "warn": true
+        },
+        {
+          "file": "03-source-snapshot-placeholder.png",
+          "caption": "源码快照提示出现的位置",
+          "width": 2456,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "视图改名提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "视图改名提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "视图改名提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "视图改名提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "视图改名提示 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"v_daily_revenue\" (0 in the page)",
+    "视图改名提示 · click button: nothing visible matches button with \"重命名\" (0 in the page)",
+    "视图改名提示 · shot [role='dialog']: nothing visible matches [role='dialog'] (0 in the page)",
+    "旧源码快照 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "旧源码快照 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"daily_stats\" (0 in the page)",
+    "旧源码快照 · click button: nothing visible matches button with \"SQL 库\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述里提到“两个入口”“未保存草稿保留”等，和实际改动一致；没有明显不符项。",
+  "unseen": "沙盒只有 SQLite，没有 OceanBase Oracle，因此无法真实演示视图改名的数据库回读、响应丢失分支和权限校验提示；只能在代码层对应位置展示改名对话框和源码页的只读快照表现。",
+  "interactive": true
+}

@@ -1,0 +1,45 @@
+{
+  "summary": "这次修复让 OceanBase Oracle 的表结构编辑器在读取和编辑字段时保留字符长度单位（BYTE/CHAR），并且 NUMBER 的负 scale 也能完整显示和回填。前端还把 OceanBase Oracle 识别为支持长度单位的数据库类型。",
+  "scenes": [
+    {
+      "title": "打开 SQLite 表结构编辑器",
+      "shots": [
+        {
+          "file": "01-structure-editor-opened.png",
+          "caption": "打开 customers 表后的结构编辑器",
+          "width": 2456,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    },
+    {
+      "title": "查看长度单位控件",
+      "shots": [
+        {
+          "file": "02-length-unit-controls.png",
+          "caption": "查看字段类型与长度单位相关控件",
+          "width": 2456,
+          "warn": true
+        }
+      ],
+      "derailed": true
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "打开 SQLite 表结构编辑器 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开 SQLite 表结构编辑器 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开 SQLite 表结构编辑器 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"products\" (0 in the page)",
+    "打开 SQLite 表结构编辑器 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "打开 SQLite 表结构编辑器 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"customers\" (0 in the page)",
+    "查看长度单位控件 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"main 默认库\" (0 in the page)",
+    "查看长度单位控件 · click div.connection-tree-content div: nothing visible matches div.connection-tree-content div with \"products\" (0 in the page)"
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "需要 OceanBase Oracle 数据源才能直接看到元数据读取和结构编辑回填效果；当前沙箱只有 SQLite 连接，无法在真实 OceanBase Oracle 连接上复现。",
+  "interactive": true
+}

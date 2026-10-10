@@ -1793,12 +1793,45 @@ jobs:
           cat RELEASE_NOTES.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ steps.release-token.outputs.token }}
-          files: release/*
-          body_path: RELEASE_NOTES.md
-          make_latest: false
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Idempotent release publish: create the release only when missing and
+          # upload only assets it does not have yet, in small spaced batches.
+          # Re-uploading the full set on every retry trips GitHub secondary
+          # rate limits and dropped connections strand the whole job.
+          if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+              --notes-file RELEASE_NOTES.md --latest=false >/dev/null
+          else
+            gh release create "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --title "$TAG_NAME" \
+              --notes-file RELEASE_NOTES.md --latest=false
+          fi
+
+          mapfile -t existing < <(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name')
+          declare -A have=()
+          for name in "${existing[@]:-}"; do
+            [ -n "$name" ] && have["$name"]=1
+          done
+
+          missing=()
+          for f in release/*; do
+            [ -n "${have["$(basename "$f")"]:-}" ] || missing+=("$f")
+          done
+          echo "release already has ${#existing[@]} assets; uploading ${#missing[@]} missing"
+
+          batch_size=5
+          i=0
+          while [ "$i" -lt "${#missing[@]}" ]; do
+            gh release upload "$TAG_NAME" "${missing[@]:$i:$batch_size}" --repo "$GITHUB_REPOSITORY"
+            i=$((i + batch_size))
+            if [ "$i" -lt "${#missing[@]}" ]; then sleep 20; fi
+          done
+          echo "uploaded ${#missing[@]} assets in batches of $batch_size"
 
       - name: Update agents-latest GitHub release
         env:

@@ -99,6 +99,7 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
         timeout_secs: Some(30),
         keyset_optimization_enabled: false,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-clickhouse-query-export-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),

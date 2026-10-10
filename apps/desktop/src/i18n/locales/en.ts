@@ -7174,6 +7174,7 @@ export default {
     trimValues: "Trim values",
     emptyStringAsNull: "Empty string as NULL",
     emptyStringAsNullHint: "When checked, empty fields import as NULL and \\N becomes plain text; otherwise empty fields stay as empty strings and \\N imports as NULL.",
+    emptyStringAsNullExcelHint: "When checked, empty strings are imported as NULL; otherwise, they are preserved as empty strings.",
     conflictPolicy: "On primary-key conflict",
     conflictError: "Stop with an error",
     skipDuplicateRows: "Skip duplicate rows",

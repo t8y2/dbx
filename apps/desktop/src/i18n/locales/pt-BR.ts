@@ -6339,6 +6339,7 @@ export default withEnglishFallback({
     trimValues: "Trim values",
     emptyStringAsNull: "Empty string as NULL",
     emptyStringAsNullHint: "Quando marcado, campos vazios são importados como NULL e \\N passa a ser texto; caso contrário, permanecem como strings vazias e \\N é importado como NULL.",
+    emptyStringAsNullExcelHint: "Quando marcado, strings vazias são importadas como NULL; caso contrário, permanecem como strings vazias.",
     jsonShape: "JSON rows",
     jsonShapeAuto: "Auto-detect",
     jsonShapeObjects: "Objects",

@@ -650,4 +650,39 @@ describe("TableImportDialog batch selection", () => {
     expect(document.body.textContent).not.toContain("Title row must be before the data start row");
     expect(button("Next").disabled).toBe(false);
   });
+
+  it("renders empty string as null option for Excel source and passes it to parse options (#11608)", async () => {
+    let capturedOptions: any = null;
+    mocks.previewTableImportFile.mockImplementation((_source, options) => {
+      capturedOptions = options;
+      return Promise.resolve({
+        fileName: "rows.xlsx",
+        filePath: "/tmp/rows.xlsx",
+        sourceRef: "workbook-source",
+        fileType: "excel",
+        sizeBytes: 10,
+        columns: ["id", "name"],
+        rows: [[1, "test"]],
+        totalRows: 1,
+        totalRowsExact: true,
+        sourceFingerprint: "rows-Sheet1",
+        sheets: ["Sheet1"],
+      });
+    });
+    await mountDialog([new File(["workbook"], "rows.xlsx")]);
+    expect(button("Next").disabled).toBe(false);
+
+    const emptyStringCheckbox = [...document.body.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((el) => el.parentElement?.textContent?.includes("Empty string as NULL"));
+    expect(emptyStringCheckbox).toBeTruthy();
+    expect(emptyStringCheckbox!.checked).toBe(false);
+
+    emptyStringCheckbox!.click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await flushAsyncUpdates();
+
+    expect(capturedOptions?.parseOptions?.emptyStringAsNull).toBe(true);
+
+    await startImport();
+    expect(mocks.importTableFile.mock.calls.at(-1)?.[0].parseOptions.emptyStringAsNull).toBe(true);
+  });
 });

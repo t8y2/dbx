@@ -6163,6 +6163,7 @@ export default withEnglishFallback({
     trimValues: "Değerleri kırp",
     emptyStringAsNull: "Boş dizeyi NULL say",
     emptyStringAsNullHint: "İşaretlendiğinde boş alanlar NULL olarak içe aktarılır ve \\N düz metin olur; aksi halde boş alanlar boş dize kalır ve \\N NULL olarak içe aktarılır.",
+    emptyStringAsNullExcelHint: "İşaretlendiğinde boş dizeler NULL olarak içe aktarılır; aksi halde boş dize olarak korunur.",
     jsonShape: "JSON satırları",
     jsonShapeAuto: "Otomatik algıla",
     jsonShapeObjects: "Nesneler",

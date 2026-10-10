@@ -7159,6 +7159,7 @@ export default withEnglishFallback({
     trimValues: "裁剪空白",
     emptyStringAsNull: "空字符串作为 NULL",
     emptyStringAsNullHint: "勾选后空字段一律按 NULL 导入（此时文件里的 \\N 按普通文本导入）；不勾选则空字段保留为空字符串，并把 \\N 按 NULL 导入。",
+    emptyStringAsNullExcelHint: "勾选后空字符串识别为 NULL；不勾选则保留为空字符串。",
     conflictPolicy: "主键冲突时",
     conflictError: "停止并报错",
     skipDuplicateRows: "跳过重复行",

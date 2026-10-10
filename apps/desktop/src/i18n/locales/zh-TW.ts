@@ -5674,6 +5674,7 @@ export default withEnglishFallback({
     trimValues: "裁剪空白",
     emptyStringAsNull: "空字串作為 NULL",
     emptyStringAsNullHint: "勾選後空欄位一律以 NULL 匯入（此時檔案裡的 \\N 以一般文字匯入）；不勾選則空欄位保留為空字串，並把 \\N 以 NULL 匯入。",
+    emptyStringAsNullExcelHint: "勾選後空字串識別為 NULL；不勾選則保留為空字串。",
     conflictPolicy: "主鍵衝突時",
     conflictError: "停止並回報錯誤",
     skipDuplicateRows: "略過重複列",

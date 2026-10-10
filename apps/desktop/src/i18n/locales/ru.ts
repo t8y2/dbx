@@ -7530,6 +7530,7 @@ export default withEnglishFallback({
     trimValues: "Обрезать значения",
     emptyStringAsNull: "Пустая строка как NULL",
     emptyStringAsNullHint: "Если включено, пустые поля импортируются как NULL, а \\N считается обычным текстом; иначе пустые поля остаются пустыми строками, а \\N импортируется как NULL.",
+    emptyStringAsNullExcelHint: "Если включено, пустые строки импортируются как NULL; иначе сохраняются как пустые строки.",
     jsonShape: "Строки JSON",
     jsonShapeAuto: "Автоопределение",
     jsonShapeObjects: "Объекты",

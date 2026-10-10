@@ -6936,6 +6936,7 @@ export default withEnglishFallback({
     trimValues: "Pangkas nilai",
     emptyStringAsNull: "String kosong sebagai NULL",
     emptyStringAsNullHint: "Jika dicentang, bidang kosong diimpor sebagai NULL dan \\N menjadi teks biasa; jika tidak, bidang kosong tetap berupa string kosong dan \\N diimpor sebagai NULL.",
+    emptyStringAsNullExcelHint: "Jika dicentang, string kosong diimpor sebagai NULL; jika tidak, tetap berupa string kosong.",
     conflictPolicy: "Saat terjadi konflik kunci utama",
     conflictError: "Hentikan dengan galat",
     skipDuplicateRows: "Lewati baris duplikat",

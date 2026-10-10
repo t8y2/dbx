@@ -6538,6 +6538,7 @@ export default withEnglishFallback({
     trimValues: "Trim values",
     emptyStringAsNull: "Empty string as NULL",
     emptyStringAsNullHint: "Si se activa, los campos vacíos se importan como NULL y \\N pasa a ser texto; si no, los campos vacíos se mantienen como cadenas vacías y \\N se importa como NULL.",
+    emptyStringAsNullExcelHint: "Si se activa, las cadenas vacías se importan como NULL; si no, se mantienen como cadenas vacías.",
     conflictPolicy: "Ante conflicto de clave primaria",
     conflictError: "Detener con error",
     skipDuplicateRows: "Omitir filas duplicadas",

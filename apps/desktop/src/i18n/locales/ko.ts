@@ -6137,6 +6137,7 @@ export default withEnglishFallback({
     trimValues: "값 양끝 공백 제거",
     emptyStringAsNull: "빈 문자열을 NULL로",
     emptyStringAsNullHint: "체크하면 빈 필드를 NULL로 가져오고 \\N은 일반 텍스트가 됩니다. 해제하면 빈 필드는 빈 문자열로 유지되고 \\N은 NULL로 가져옵니다.",
+    emptyStringAsNullExcelHint: "체크하면 빈 문자열을 NULL로 가져옵니다. 해제하면 빈 문자열로 유지됩니다.",
     jsonShape: "JSON 행",
     jsonShapeAuto: "자동 감지",
     jsonShapeObjects: "객체",

@@ -6282,6 +6282,7 @@ export default withEnglishFallback({
     trimValues: "Dəyərlərin əvvəlindəki və sonundakı boşluqları sil",
     emptyStringAsNull: "Boş sətri NULL kimi qəbul et",
     emptyStringAsNullHint: "İşarələndikdə boş sahələr NULL kimi idxal olunur və \\N adi mətn olur; əks halda boş sahələr boş sətir qalır və \\N NULL kimi idxal olunur.",
+    emptyStringAsNullExcelHint: "İşarələndikdə boş sətirlər NULL kimi idxal olunur; əks halda boş sətir kimi saxlanılır.",
     jsonShape: "JSON sətirləri",
     jsonShapeAuto: "Avtomatik müəyyən et",
     jsonShapeObjects: "Obyektlər",

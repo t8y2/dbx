@@ -6356,6 +6356,7 @@ export default withEnglishFallback({
     trimValues: "Trim values",
     emptyStringAsNull: "Empty string as NULL",
     emptyStringAsNullHint: "チェックすると空フィールドを NULL として取り込み、\\N は通常のテキストになります。チェックしない場合は空フィールドは空文字列のままとなり、\\N を NULL として取り込みます。",
+    emptyStringAsNullExcelHint: "チェックすると空文字列を NULL として取り込みます。チェックしない場合は空文字列のまま保持します。",
     jsonShape: "JSON rows",
     jsonShapeAuto: "Auto-detect",
     jsonShapeObjects: "Objects",

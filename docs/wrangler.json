@@ -24,12 +24,6 @@
       "/en/issues/"
     ]
   },
-  "r2_buckets": [
-    {
-      "binding": "ISSUE_IMAGES",
-      "bucket_name": "dbx"
-    }
-  ],
   "durable_objects": {
     "bindings": [
       {

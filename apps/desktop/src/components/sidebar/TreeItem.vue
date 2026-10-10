@@ -79,7 +79,7 @@ import { findTreeNodeById } from "@/lib/sql/newQueryContext";
 import { resolveTableVGroupDropTarget, setTableVGroupDropTargetNodeId, tableVGroupDropTargetNodeId } from "@/lib/sidebar/sidebarTableVGroupDrag";
 import { connectionDisplayUrlScheme } from "@/lib/connection/connectionPresentation";
 import { redactConnectionStringSecrets } from "@/lib/connection/connectionStringRedaction";
-import { isFocusSearchShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCancelSearchShortcut, isFocusSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { encodeSpannerResourcePath } from "@/lib/connection/spannerResourcePath";
 import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
@@ -1078,6 +1078,16 @@ function onTableSearchControlKeydown(event: KeyboardEvent) {
     const input = control?.querySelector<HTMLInputElement>("[data-sidebar-table-search-parent-id]");
     input?.focus();
     input?.select();
+    event.stopPropagation();
+    return;
+  }
+  if (isCancelSearchShortcut(event)) {
+    if (tableSearchValue.value) {
+      event.preventDefault();
+      clearTableSearchQuery();
+    }
+    event.stopPropagation();
+    return;
   }
   event.stopPropagation();
 }

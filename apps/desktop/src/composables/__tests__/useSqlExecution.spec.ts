@@ -193,6 +193,7 @@ describe("useSqlExecution", () => {
     const authStore = useAuthStore();
     authStore.isAdmin = false;
     authStore.permissions = ["query.read"];
+
     const execution = useSqlExecution({
       activeTab: computed(() => activeTab.value),
       activeConnection: computed(() => activeConnection.value),
@@ -203,7 +204,9 @@ describe("useSqlExecution", () => {
     await execution.tryExecute();
 
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
+    expect(toast).not.toHaveBeenCalled();
   });
+  
   it("executes Neo4j graph patterns without a SQL parameter dialog", async () => {
     const sql = 'MATCH (p:Person)-[:WORK_IN]->(c:Company{name:"星云科技"})\nRETURN p.name, p.job, c.name';
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("neo4j"), sql });

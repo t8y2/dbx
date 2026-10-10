@@ -143,7 +143,7 @@ defineExpose({ focusInput, inputEl: inputRef });
         <GripVertical class="pointer-events-none h-4 w-4" />
       </button>
 
-      <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring" data-no-drag @pointerdown.stop>
+      <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:bg-background-solid focus-within:border-ring focus-within:ring-1 focus-within:ring-ring" data-no-drag @pointerdown.stop>
         <input
           ref="inputRef"
           data-text-content-search-input

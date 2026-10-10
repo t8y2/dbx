@@ -75,4 +75,9 @@ describe("QueryEditor search shortcuts", () => {
     expect(editorSearchPanelSource).toContain('e.key === "Enter" && !e.shiftKey');
     expect(editorSearchPanelSource).toContain('e.key === "Enter" && e.shiftKey');
   });
+
+  it("uses solid background on focus to maintain readability with translucent wallpapers (#11511)", () => {
+    expect(editorSearchPanelSource).toContain("focus-within:bg-background-solid");
+    expect(editorSearchPanelSource).toMatch(/\.editor-search-panel--editor\s+:deep\(\.border-input:focus-within\)\s*\{\s*background:\s*var\(--background-solid,\s*var\(--background\)\);/);
+  });
 });

@@ -64,7 +64,7 @@ defineExpose({
 
 <template>
   <Transition enter-active-class="transition-opacity duration-150" leave-active-class="transition-opacity duration-100" enter-from-class="opacity-0" leave-to-class="opacity-0">
-    <div v-if="props.open" data-grid-search-bar class="absolute top-1 right-2 z-20 max-w-[calc(100%-1rem)] px-2 py-1 bg-background border rounded-md shadow-md" @keydown.esc.stop.prevent="emit('close')">
+    <div v-if="props.open" data-grid-search-bar class="absolute top-1 right-2 z-20 max-w-[calc(100%-1rem)] px-2 py-1 bg-background focus-within:bg-background-solid border rounded-md shadow-md" @keydown.esc.stop.prevent="emit('close')">
       <div class="flex items-center gap-1 min-w-0">
         <button
           v-if="props.replaceAvailable !== undefined"
@@ -171,12 +171,12 @@ defineExpose({
         <button data-grid-replace-all type="button" class="h-6 border rounded px-2 text-xs disabled:opacity-40" :disabled="!props.replaceAvailable || props.replaceBusy || !props.replaceMatchCount" @click="emit('replaceAll')">{{ t("editor.search.replaceAll") }}</button>
       </div>
       <div v-if="replaceOpen" class="flex flex-wrap items-center gap-1 mt-1 text-xs">
-        <select v-model="replaceScope" data-grid-replace-scope class="min-w-0 h-6 max-w-full rounded border bg-background px-1" :aria-label="t('grid.replaceScope')">
+        <select v-model="replaceScope" data-grid-replace-scope class="min-w-0 h-6 max-w-full rounded border bg-background focus:bg-background-solid px-1" :aria-label="t('grid.replaceScope')">
           <option value="loaded">{{ t("grid.replaceLoadedResults") }}</option>
           <option value="column">{{ t("grid.replaceCurrentColumn") }}</option>
           <option value="selection">{{ t("grid.replaceSelectedCells") }}</option>
         </select>
-        <select v-if="replaceScope === 'column'" v-model.number="replaceColumn" data-grid-replace-column class="h-6 min-w-0 flex-1 max-w-48 rounded border bg-background px-1" :aria-label="t('grid.replaceCurrentColumn')">
+        <select v-if="replaceScope === 'column'" v-model.number="replaceColumn" data-grid-replace-column class="h-6 min-w-0 flex-1 max-w-48 rounded border bg-background focus:bg-background-solid px-1" :aria-label="t('grid.replaceCurrentColumn')">
           <option :value="-1" disabled>{{ t("grid.replaceChooseColumn") }}</option>
           <option v-for="(column, index) in props.columns" :key="index" :value="index">{{ column }}</option>
         </select>

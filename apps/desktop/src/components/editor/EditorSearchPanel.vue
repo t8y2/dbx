@@ -502,7 +502,7 @@ defineExpose({
         <button class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="showReplace ? t('editor.search.collapseReplace') : t('editor.search.expandReplace')" @click="showReplace = !showReplace">
           <ChevronRight class="h-4 w-4 transition-transform" :class="showReplace && 'rotate-90'" />
         </button>
-        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
+        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:bg-background-solid focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
           <input
             ref="searchInputRef"
             v-model="searchText"
@@ -558,7 +558,7 @@ defineExpose({
       </div>
       <div v-if="showReplace" class="flex items-center gap-1">
         <div class="h-7 w-7 shrink-0" />
-        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
+        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:bg-background-solid focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
           <input
             ref="replaceInputRef"
             v-model="replaceText"
@@ -637,6 +637,10 @@ defineExpose({
   border-color: var(--input);
   border-radius: var(--dbx-radius-fixed-5);
   box-shadow: 0 1px 0 color-mix(in srgb, var(--foreground) 3%, transparent) inset;
+}
+
+.editor-search-panel--editor :deep(.border-input:focus-within) {
+  background: var(--background-solid, var(--background));
 }
 
 .editor-search-panel--editor :deep(.focus-within\:border-ring:focus-within) {

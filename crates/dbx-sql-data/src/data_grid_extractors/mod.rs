@@ -9,6 +9,7 @@ mod json;
 mod raw;
 mod sql;
 
+use crate::data_grid_sql::unique_column_info_match;
 pub use contract::*;
 use delimited::{write_dsv, write_one_row};
 use document::{write_html, write_markdown, write_pretty, write_xml};
@@ -136,22 +137,13 @@ fn build_context(request: &DataGridExtractRequest) -> Result<ExtractContext<'_>,
             })?;
         }
     }
-    let column_info_by_name = request
-        .table_meta
-        .as_ref()
-        .and_then(|table_meta| table_meta.columns.as_ref())
-        .map(|columns| {
-            columns
-                .iter()
-                .map(|info| (normalized_name(info.name.as_str()).to_ascii_uppercase(), info))
-                .collect::<std::collections::HashMap<_, _>>()
-        })
-        .unwrap_or_default();
+    let column_info =
+        request.table_meta.as_ref().and_then(|table_meta| table_meta.columns.as_deref()).unwrap_or_default();
     let selected_column_info = selected_columns
         .iter()
         .map(|column| {
             let source_name = column.source_name.as_deref().unwrap_or(&column.display_name);
-            column_info_by_name.get(&normalized_name(source_name).to_ascii_uppercase()).copied()
+            unique_column_info_match(request.database_type, column_info, source_name)
         })
         .collect();
     Ok(ExtractContext { request, selected_columns, selected_source_indexes, selected_column_info })

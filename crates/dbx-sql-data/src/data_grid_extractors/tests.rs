@@ -742,6 +742,51 @@ fn builds_updates_with_hidden_primary_keys_and_selected_columns() {
 }
 
 #[test]
+fn sql_updates_keep_legacy_case_insensitive_primary_key_resolution() {
+    let mut request = request(DataGridExtractorId::SqlUpdates);
+    request.columns = vec![column("ID", 0), column("id", 1), column("name", 2)];
+    request.selected_column_indexes = vec![1, 2];
+    request.rows = vec![vec![json!(1), json!(99), json!("Ada")]];
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "quoted_ids".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: Some(vec![
+            DataGridColumnInfo {
+                name: "ID".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                column_default: None,
+                extra: None,
+            },
+            DataGridColumnInfo {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+            DataGridColumnInfo {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+        ]),
+    });
+
+    let result = extract_data_grid_selection(request).expect("SQL UPDATE extraction");
+
+    assert_eq!(result.text, "UPDATE \"quoted_ids\" SET \"name\" = 'Ada' WHERE \"ID\" = 1;");
+}
+
+#[test]
 fn sql_copy_honors_kingbase_mysql_compat_connection_identifier_quote() {
     let table_meta = DataGridTableMeta {
         catalog: None,
@@ -1429,7 +1474,7 @@ fn sql_insert_primary_key_exclusion_omits_postgres_serial_key() {
 }
 
 #[test]
-fn sql_insert_primary_key_exclusion_keeps_manual_composite_key_members() {
+fn sql_insert_primary_key_exclusion_removes_manual_composite_key_members() {
     let mut request = request(DataGridExtractorId::SqlInserts);
     request.table_meta = Some(DataGridTableMeta {
         catalog: None,
@@ -1471,8 +1516,191 @@ fn sql_insert_primary_key_exclusion_keeps_manual_composite_key_members() {
 
     let result = extract_data_grid_selection(request).expect("SQL INSERT extraction");
 
-    assert_eq!(result.text, "INSERT INTO \"daily_stats\" (\"stat_date\", \"name\") VALUES ('2026-08-18', 'Ada');");
+    assert_eq!(result.text, "INSERT INTO \"daily_stats\" (\"name\") VALUES ('Ada');");
+    assert_eq!(result.omitted_columns, vec!["id", "stat_date"]);
+}
+
+#[test]
+fn sql_insert_primary_key_exclusion_matches_unique_case_insensitive_mysql_primary_key_names() {
+    let mut request = request(DataGridExtractorId::SqlInserts);
+    request.database_type = Some(DatabaseType::Mysql);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: Some(vec![
+            DataGridColumnInfo {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+            DataGridColumnInfo {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+        ]),
+    });
+    request.columns = vec![column("id", 0), column("name", 1)];
+    request.selected_column_indexes = vec![0, 1];
+    request.rows = vec![vec![json!(1), json!("Ada")]];
+    request.options.sql.exclude_primary_keys_from_insert = true;
+
+    let result = extract_data_grid_selection(request).expect("SQL INSERT extraction");
+
+    assert_eq!(result.text, "INSERT INTO `users` (`name`) VALUES ('Ada');");
     assert_eq!(result.omitted_columns, vec!["id"]);
+}
+
+#[test]
+fn sql_insert_preserves_case_insensitive_mysql_identity_primary_key_columns() {
+    let mut request = request(DataGridExtractorId::SqlInserts);
+    request.database_type = Some(DatabaseType::Mysql);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: Some(vec![DataGridColumnInfo {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            is_nullable: false,
+            is_primary_key: false,
+            column_default: None,
+            extra: Some("auto_increment".to_string()),
+        }]),
+    });
+    request.columns = vec![column("id", 0)];
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![vec![json!(1)]];
+
+    let result = extract_data_grid_selection(request).expect("SQL INSERT extraction");
+
+    assert_eq!(result.text, "INSERT INTO `users` (`id`) VALUES (1);");
+    assert!(result.omitted_columns.is_empty());
+}
+
+#[test]
+fn sql_insert_primary_key_exclusion_preserves_case_distinct_postgres_columns() {
+    let mut request = request(DataGridExtractorId::SqlInserts);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: Some("public".to_string()),
+        table_name: "quoted_ids".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: Some(vec![
+            DataGridColumnInfo {
+                name: "ID".to_string(),
+                data_type: "text".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                column_default: None,
+                extra: None,
+            },
+            DataGridColumnInfo {
+                name: "id".to_string(),
+                data_type: "text".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+            DataGridColumnInfo {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+        ]),
+    });
+    request.columns = vec![column("ID", 0), column("id", 1), column("name", 2)];
+    request.selected_column_indexes = vec![0, 1, 2];
+    request.rows = vec![vec![json!("key"), json!("lowercase"), json!("Ada")]];
+    request.options.sql.exclude_primary_keys_from_insert = true;
+
+    let result = extract_data_grid_selection(request).expect("SQL INSERT extraction");
+
+    assert_eq!(result.text, "INSERT INTO \"public\".\"quoted_ids\" (\"id\", \"name\") VALUES ('lowercase', 'Ada');");
+    assert_eq!(result.omitted_columns, vec!["ID"]);
+}
+
+#[test]
+fn sql_insert_primary_key_exclusion_uses_exact_postgres_names_with_incomplete_metadata() {
+    let mut request = request(DataGridExtractorId::SqlInserts);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "quoted_ids".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: Some(vec![DataGridColumnInfo {
+            name: "ID".to_string(),
+            data_type: "integer".to_string(),
+            is_nullable: false,
+            is_primary_key: true,
+            column_default: None,
+            extra: Some("identity".to_string()),
+        }]),
+    });
+    request.columns = vec![column("id", 0), column("name", 1)];
+    request.selected_column_indexes = vec![0, 1];
+    request.rows = vec![vec![json!("lowercase"), json!("Ada")]];
+    request.options.sql.exclude_primary_keys_from_insert = true;
+
+    let result = extract_data_grid_selection(request).expect("SQL INSERT extraction");
+
+    assert_eq!(result.text, "INSERT INTO \"quoted_ids\" (\"id\", \"name\") VALUES ('lowercase', 'Ada');");
+    assert!(result.omitted_columns.is_empty());
+}
+
+#[test]
+fn sql_insert_uses_exact_column_metadata_for_case_distinct_identity_columns() {
+    let mut request = request(DataGridExtractorId::SqlInserts);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "quoted_ids".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: Some(vec![
+            DataGridColumnInfo {
+                name: "id".to_string(),
+                data_type: "text".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+            DataGridColumnInfo {
+                name: "ID".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                column_default: None,
+                extra: Some("identity".to_string()),
+            },
+        ]),
+    });
+    request.columns = vec![column("id", 0)];
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![vec![json!("lowercase")]];
+
+    let result = extract_data_grid_selection(request).expect("SQL INSERT extraction");
+
+    assert_eq!(result.text, "INSERT INTO \"quoted_ids\" (\"id\") VALUES ('lowercase');");
+    assert!(result.omitted_columns.is_empty());
 }
 
 #[test]

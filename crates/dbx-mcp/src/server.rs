@@ -18,6 +18,9 @@ use crate::backend::{format_query_result, new_connection_config, parse_database_
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
 use crate::transaction::{TransactionFailure, TransactionResult, TransactionStatus};
+use dbx_core::persistence::connection_management::{
+    connection_details, safe_connection_error, safe_connection_text, validate_connection_patch,
+};
 use dbx_core::{
     agent_tools::{
         format_query_result_as_text, normalize_sql_for_confirmation, QueryCellWindow, MAX_EXECUTE_QUERY_ROWS,
@@ -218,7 +221,8 @@ pub struct TransactionSessionRequest {
     pub session_id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AddConnectionRequest {
     pub name: String,
     pub db_type: String,
@@ -235,6 +239,43 @@ pub struct AddConnectionRequest {
     pub ssl: bool,
     #[schemars(extend("type" = "string"))]
     pub driver_profile: Option<String>,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImportConnectionsRequest {
+    #[schemars(
+        description = "Owner-only JSON export path on the local DBX host. Never send credentials in tool arguments."
+    )]
+    pub file_path: String,
+    #[schemars(
+        description = "Optional owner-only passphrase file for a dbx-encrypted export; never a literal passphrase."
+    )]
+    pub passphrase_file: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Preview is the default. Set true only after approving persistent connection and credential import."
+    )]
+    pub confirmed: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetConnectionRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct UpdateConnectionRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(
+        description = "Partial settings object: name, note, host, port, username, password, database, driver_profile, ssl, read_only, save_password, is_production, connect_timeout_secs, query_timeout_secs, idle_timeout_secs, keepalive_interval_secs. Omitted fields and all other credentials are preserved. Empty password explicitly clears it; null clears database or driver_profile. IDs and database types cannot change."
+    )]
+    #[schemars(extend("type" = "object"))]
+    pub changes: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -247,6 +288,11 @@ pub struct DuplicateConnectionRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RemoveConnectionRequest {
+    #[serde(default)]
+    #[schemars(
+        description = "Set true only after confirming removal of the saved connection and its credentials. This cannot be undone; database contents are unaffected."
+    )]
+    pub confirmed: bool,
     #[schemars(description = "Name of the DBX connection when connection_id is not provided")]
     #[schemars(extend("type" = "string"))]
     pub connection_name: Option<String>,
@@ -889,6 +935,16 @@ impl DbxMcpServer {
         Self::build(backend, scope, web_mode, plugin_tools_mode, sessions, pending_salesforce_writes)
     }
 
+    /// Keep the template's backend and tool routing while binding request state
+    /// to the authenticated principal's partition.
+    pub(crate) fn with_isolated_state(
+        &self,
+        sessions: Arc<McpSessionStore>,
+        pending_salesforce_writes: Arc<PendingSalesforceWrites>,
+    ) -> Self {
+        Self { sessions, pending_salesforce_writes, ..self.clone() }
+    }
+
     fn build(
         backend: Arc<dyn DbxBackend>,
         scope: McpScope,
@@ -902,8 +958,12 @@ impl DbxMcpServer {
         // startup paths, so select the same provider before any TLS tool call.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut tool_router = Self::tool_router();
+        if web_mode || scope.enabled() {
+            tool_router.disable_route("dbx_import_connections");
+        }
         if scope.enabled() {
             tool_router.disable_route("dbx_add_connection");
+            tool_router.disable_route("dbx_update_connection");
             tool_router.disable_route("dbx_duplicate_connection");
             tool_router.disable_route("dbx_remove_connection");
         }
@@ -1232,7 +1292,7 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_list_connections",
-        description = "List database connections configured in DBX. Returns connection IDs, names, group paths, database types, endpoints, selected databases, and saved connection notes."
+        description = "List database connections configured in DBX. Returns connection IDs, names, group paths, database types, endpoints, selected databases, read-only flags, and saved connection notes."
     )]
     async fn list_connections(
         &self,
@@ -1256,7 +1316,7 @@ impl DbxMcpServer {
                     .collect::<Vec<_>>();
                 text(format_connections(&rows))
             }
-            Err(error) => backend_tool_error("CONNECTION_LOAD_ERROR", error),
+            Err(error) => backend_tool_error("CONNECTION_LOAD_ERROR", safe_connection_error(&error)),
         }
     }
 
@@ -2645,6 +2705,108 @@ impl DbxMcpServer {
         text(format_schema_context(&connection.name, &database, &schema, &tables, truncated))
     }
 
+    #[tool(
+        name = "dbx_get_connection",
+        description = "Get a saved connection's settings without connecting to its database. Passwords, tokens, DSNs and other credential-bearing settings are omitted."
+    )]
+    async fn get_connection(&self, Parameters(request): Parameters<GetConnectionRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_get_connection").await {
+            return error;
+        }
+        if !management_selector_is_safe(&request.selector) {
+            return tool_error("INVALID_CONNECTION", "Use a connection ID or name, not a URL or DSN.");
+        }
+        match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => {
+                let details = connection_details(&resolved.connection);
+                let mut result = text(details.to_string());
+                result.structured_content = Some(details);
+                result
+            }
+            Err(error) => safe_management_tool_error(error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_update_connection",
+        description = "Partially update a saved connection configuration. Omitted settings and credentials are preserved. Respects global MCP read-only mode and connection scope."
+    )]
+    async fn update_connection(&self, Parameters(request): Parameters<UpdateConnectionRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_update_connection").await {
+            return error;
+        }
+        // Also guard direct calls, rather than relying only on tools/list route hiding.
+        if self.scope.enabled() {
+            return tool_error("CONNECTION_OUT_OF_SCOPE", "Connection management is disabled in scoped sessions.");
+        }
+        let policy = match self.load_policy().await {
+            Ok(policy) => policy,
+            Err(error) => return error,
+        };
+        if policy.read_only {
+            return tool_error(
+                "MCP_READ_ONLY",
+                "DBX global MCP read-only mode is enabled. Connection management is not allowed.",
+            );
+        }
+        if let Err(error) = validate_connection_patch(&request.changes) {
+            return backend_tool_error("INVALID_CONNECTION", error);
+        }
+        if !management_selector_is_safe(&request.selector) {
+            return tool_error("INVALID_CONNECTION", "Use a connection ID or name, not a URL or DSN.");
+        }
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return safe_management_tool_error(error),
+        };
+        match self.backend.update_connection_for_mcp(&resolved.connection.id, request.changes).await {
+            Ok(config) => {
+                let details = connection_details(&config);
+                let mut result = text(details.to_string());
+                result.structured_content = Some(details);
+                result
+            }
+            Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", safe_connection_error(&error)),
+        }
+    }
+
+    #[tool(
+        name = "dbx_import_connections",
+        description = "Preview or atomically import a local DBX connection export. Add-only and offline; never connects to databases. Results contain counts and warnings, never credentials."
+    )]
+    async fn import_connections(&self, Parameters(request): Parameters<ImportConnectionsRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_import_connections").await {
+            return error;
+        }
+        let policy = match self.load_policy().await {
+            Ok(policy) => policy,
+            Err(error) => return error,
+        };
+        if request.confirmed && policy.read_only {
+            return tool_error("MCP_READ_ONLY", "Global MCP read-only mode blocks imports.");
+        }
+        if policy.allowed_connection_ids.is_some() || !policy.allowed_group_ids.is_empty() {
+            return tool_error("CONNECTION_OUT_OF_SCOPE", "Import is disabled by scoped policy.");
+        }
+        let input = match dbx_core::persistence::connection_import::read_import_file_with_passphrase(
+            std::path::Path::new(&request.file_path),
+            false,
+            request.passphrase_file.as_deref().map(std::path::Path::new),
+        ) {
+            Ok(value) => value,
+            Err(error) => return backend_tool_error("INVALID_CONNECTION_IMPORT", safe_connection_error(&error)),
+        };
+        match self.backend.import_connections_for_mcp(input, !request.confirmed).await {
+            Ok(report) => {
+                let value = serde_json::to_value(report).expect("serializable report");
+                let mut result = text(value.to_string());
+                result.structured_content = Some(value);
+                result
+            }
+            Err(error) => backend_tool_error("CONNECTION_STORE_ERROR", safe_connection_error(&error)),
+        }
+    }
+
     #[tool(name = "dbx_add_connection", description = "Add a new database connection to DBX")]
     async fn add_connection(&self, Parameters(request): Parameters<AddConnectionRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_add_connection").await {
@@ -2662,20 +2824,25 @@ impl DbxMcpServer {
         }
         let connections = match self.backend.load_connections().await {
             Ok(connections) => connections,
-            Err(error) => return tool_error("CONNECTION_LOAD_ERROR", error),
+            Err(error) => return backend_tool_error("CONNECTION_LOAD_ERROR", safe_connection_error(&error)),
         };
         if connections.iter().any(|connection| connection.name.eq_ignore_ascii_case(&request.name)) {
-            return text(format!("Connection \"{}\" already exists.", request.name));
+            return tool_error("CONNECTION_ALREADY_EXISTS", "Connection name already exists.");
         }
         let db_type = match parse_database_type(&request.db_type) {
             Ok(db_type) => db_type,
-            Err(error) => return tool_error("INVALID_CONNECTION_TYPE", error),
+            Err(_) => return tool_error("INVALID_CONNECTION_TYPE", "Unsupported database type."),
         };
         let port = match request.port.or_else(|| database_manifest::default_port(&db_type)) {
             Some(port) => port,
-            None => return text("Port is required for this database type."),
+            None => {
+                return tool_error(
+                    "INVALID_CONNECTION",
+                    "Port is required for this database type; use 0 for a file-based database.",
+                )
+            }
         };
-        let config = match new_connection_config(
+        let mut config = match new_connection_config(
             Uuid::new_v4().to_string(),
             request.name,
             db_type,
@@ -2688,11 +2855,16 @@ impl DbxMcpServer {
             request.driver_profile,
         ) {
             Ok(config) => config,
-            Err(error) => return tool_error("INVALID_CONNECTION", error),
+            Err(_) => return tool_error("INVALID_CONNECTION", "Invalid connection settings."),
         };
+        config.read_only = request.read_only;
         match self.backend.add_connection_for_mcp(config).await {
-            Ok(config) => text(format!("Connection \"{}\" added (id: {}).", config.name, config.id)),
-            Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", error),
+            Ok(config) => text(format!(
+                "Connection \"{}\" added (id: {}).",
+                safe_connection_text(&config.name),
+                safe_connection_text(&config.id)
+            )),
+            Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", safe_connection_error(&error)),
         }
     }
 
@@ -2719,7 +2891,7 @@ impl DbxMcpServer {
         }
         let connections = match self.backend.load_connections().await {
             Ok(connections) => connections,
-            Err(error) => return tool_error("CONNECTION_LOAD_ERROR", error),
+            Err(error) => return backend_tool_error("CONNECTION_LOAD_ERROR", safe_connection_error(&error)),
         };
         let group_paths = match self.load_group_paths_for_policy(&policy).await {
             Ok(paths) => paths,
@@ -2759,8 +2931,12 @@ impl DbxMcpServer {
             return tool_error("CONNECTION_ALREADY_EXISTS", format!("Connection \"{new_name}\" already exists."));
         }
         match self.backend.duplicate_connection_for_mcp(&source.id, &Uuid::new_v4().to_string(), new_name).await {
-            Ok(copy) => text(format!("Connection \"{}\" duplicated (id: {}).", copy.name, copy.id)),
-            Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", error),
+            Ok(copy) => text(format!(
+                "Connection \"{}\" duplicated (id: {}).",
+                safe_connection_text(&copy.name),
+                safe_connection_text(&copy.id)
+            )),
+            Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", safe_connection_error(&error)),
         }
     }
 
@@ -2781,7 +2957,7 @@ impl DbxMcpServer {
         }
         let connections = match self.backend.load_connections().await {
             Ok(connections) => connections,
-            Err(error) => return tool_error("CONNECTION_LOAD_ERROR", error),
+            Err(error) => return backend_tool_error("CONNECTION_LOAD_ERROR", safe_connection_error(&error)),
         };
         let target = if let Some(id) = request.connection_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
             connections.iter().find(|connection| connection.id == id).cloned()
@@ -2822,10 +2998,17 @@ impl DbxMcpServer {
                 format!("Connection \"{}\" is not allowed by DBX MCP settings.", target.id),
             );
         }
+        if !request.confirmed {
+            return tool_error("CONFIRMATION_REQUIRED", "Removing this saved connection also deletes its stored credentials and cannot be undone. Confirm the exact connection, then retry with confirmed=true. Database contents are unaffected.");
+        }
         match self.backend.remove_connection_for_mcp(&target.id).await {
-            Ok(true) => text(format!("Connection \"{}\" (id: {}) removed.", target.name, target.id)),
+            Ok(true) => text(format!(
+                "Connection \"{}\" (id: {}) removed.",
+                safe_connection_text(&target.name),
+                safe_connection_text(&target.id)
+            )),
             Ok(false) => tool_error("CONNECTION_NOT_FOUND", format!("Connection \"{}\" not found.", target.name)),
-            Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", error),
+            Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", safe_connection_error(&error)),
         }
     }
 
@@ -4092,9 +4275,31 @@ fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {}", message.into()))])
 }
 
+fn safe_management_tool_error(error: CallToolResult) -> CallToolResult {
+    let detail = error
+        .content
+        .iter()
+        .filter_map(|content| content.as_text())
+        .map(|content| content.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    backend_tool_error("CONNECTION_STORE_ERROR", safe_connection_error(&detail))
+}
+
+fn management_selector_is_safe(selector: &ConnectionSelector) -> bool {
+    [selector.connection_id.as_deref(), selector.connection_name.as_deref()]
+        .into_iter()
+        .flatten()
+        .all(|value| safe_connection_text(value) == value)
+}
+
 fn backend_tool_error(default_code: &str, error: impl Into<String>) -> CallToolResult {
     let error = error.into();
     for code in [
+        "INVALID_CONNECTION",
+        "AMBIGUOUS_CONNECTION",
+        "CONNECTION_NOT_FOUND",
+        "CONNECTION_ALREADY_EXISTS",
         "MCP_POLICY_UNAVAILABLE",
         "MCP_READ_ONLY",
         "CONNECTION_OUT_OF_SCOPE",
@@ -5064,20 +5269,29 @@ fn ambiguous_connections(name: &str, connections: &[dbx_core::models::connection
     let lines = connections
         .iter()
         .map(|connection| {
-            format!("- {}: {:?} @ {}:{}", connection.id, connection.db_type, connection.host, connection.port)
+            format!(
+                "- {}: {:?} @ {}:{}",
+                safe_connection_text(&connection.id),
+                connection.db_type,
+                safe_connection_text(&connection.host),
+                connection.port
+            )
         })
         .collect::<Vec<_>>()
         .join("\n");
-    format!("Multiple connections found with name \"{name}\". Please specify connection_id:\n{lines}")
+    format!(
+        "Multiple connections found with name \"{}\". Please specify connection_id:\n{lines}",
+        safe_connection_text(name)
+    )
 }
 
 fn format_connections(connections: &[ConnectionSummary]) -> String {
     let mut output = String::from(
-        "| ID | Name | Group Path | Type | Host | Port | Database | Note |\n| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| ID | Name | Group Path | Type | Host | Port | Database | Read only | Note |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     );
     for connection in connections {
         output.push_str(&format!(
-            "\n| {} | {} | {} | {} | {} | {} | {} | {} |",
+            "\n| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             escape_cell(&connection.id),
             escape_cell(&connection.name),
             escape_cell(&connection.group_path.join(" / ")),
@@ -5085,6 +5299,7 @@ fn format_connections(connections: &[ConnectionSummary]) -> String {
             escape_cell(&connection.host),
             connection.port,
             escape_cell(&connection.database),
+            connection.read_only,
             escape_cell(&connection.note),
         ));
     }
@@ -6438,13 +6653,14 @@ mod tests {
             port: 5432,
             database: "app".to_string(),
             group_path: vec!["Project|A".to_string(), "Staging\nWest".to_string()],
+            read_only: true,
             note: "Application | staging\nRead-only queries".to_string(),
         }]);
         assert!(output.contains("id\\|1"));
         assert!(output.contains("local pg"));
         assert!(output.contains("Project\\|A / Staging West"));
-        assert!(output.contains("| Database | Note |"));
-        assert!(output.contains("| Application \\| staging Read-only queries |"));
+        assert!(output.contains("| Database | Read only | Note |"));
+        assert!(output.contains("| app | true | Application \\| staging Read-only queries |"));
         assert_eq!(output.lines().count(), 3);
     }
 
@@ -6454,9 +6670,9 @@ mod tests {
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 25);
+        assert_eq!(tools.len(), 28);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 26);
         #[cfg(feature = "mq-admin")]
         assert!(names.contains(&"dbx_peek_messages"));
         #[cfg(not(feature = "mq-admin"))]
@@ -6473,8 +6689,11 @@ mod tests {
         assert!(names.contains(&"dbx_commit_transaction"));
         assert!(names.contains(&"dbx_rollback_transaction"));
         assert!(names.contains(&"dbx_add_connection"));
+        assert!(names.contains(&"dbx_get_connection"));
+        assert!(names.contains(&"dbx_update_connection"));
         assert!(names.contains(&"dbx_duplicate_connection"));
         assert!(names.contains(&"dbx_remove_connection"));
+        assert!(names.contains(&"dbx_import_connections"));
         assert!(names.contains(&"dbx_execute_redis_command"));
         assert!(names.contains(&"dbx_salesforce_current_user"));
         assert!(names.contains(&"dbx_salesforce_prepare_write"));
@@ -6726,10 +6945,12 @@ mod tests {
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 20);
+        assert_eq!(names.len(), 21);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(names.len(), 18);
+        assert_eq!(names.len(), 19);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
+        assert!(!names.iter().any(|name| name == "dbx_update_connection"));
+        assert!(names.iter().any(|name| name == "dbx_get_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
         assert!(!names.iter().any(|name| name == "dbx_open_table"));
@@ -9208,6 +9429,50 @@ mod tests {
 
         let replayed =
             server.salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token })).await;
+        assert!(result_text(&replayed).contains("CONFIRM_TOKEN_INVALID"), "{replayed:?}");
+        assert_eq!(backend.recorded_arguments.lock().unwrap().len(), 1, "a replayed token must not write again");
+    }
+
+    #[tokio::test]
+    async fn salesforce_confirmation_tokens_are_isolated_and_survive_server_recreation() {
+        let backend = salesforce_server(salesforce_dml_policy(true, false), None);
+        let template =
+            DbxMcpServer::with_plugin_tools_mode(backend.clone(), McpScope::default(), false, PluginToolsMode::Flat);
+        let principal_a_sessions = McpSessionStore::new();
+        let principal_a_writes = PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL);
+        let principal_a = template.with_isolated_state(principal_a_sessions.clone(), principal_a_writes.clone());
+        let principal_b = template
+            .with_isolated_state(McpSessionStore::new(), PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL));
+        let prepared = principal_a
+            .salesforce_prepare_write(prepare_request("update", "Account", Some("001x"), Some(json!({"Name": "Acme"}))))
+            .await;
+        assert_ne!(prepared.is_error, Some(true), "{prepared:?}");
+        let token = confirm_token(&prepared);
+        let statement = prepared.structured_content.as_ref().unwrap()["statement"].as_str().unwrap().to_string();
+
+        // Another principal must neither execute nor consume this token.
+        let rejected = principal_b
+            .salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token.clone() }))
+            .await;
+        assert_eq!(rejected.is_error, Some(true));
+        assert!(result_text(&rejected).contains("CONFIRM_TOKEN_INVALID"), "{rejected:?}");
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+
+        // Stateless HTTP constructs another server for the next request while
+        // retaining the same authenticated principal's pending-write state.
+        let principal_a_next_request = template.with_isolated_state(principal_a_sessions, principal_a_writes);
+        let applied = principal_a_next_request
+            .salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token.clone() }))
+            .await;
+        assert_ne!(applied.is_error, Some(true), "{applied:?}");
+        let recorded = backend.recorded_arguments.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "exactly one write reached the backend: {recorded:?}");
+        assert_eq!(recorded[0].0, "execute_query");
+        assert_eq!(recorded[0].1["sql"].as_str(), Some(statement.as_str()));
+
+        let replayed =
+            principal_a.salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token })).await;
+        assert_eq!(replayed.is_error, Some(true));
         assert!(result_text(&replayed).contains("CONFIRM_TOKEN_INVALID"), "{replayed:?}");
         assert_eq!(backend.recorded_arguments.lock().unwrap().len(), 1, "a replayed token must not write again");
     }

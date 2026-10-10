@@ -1,0 +1,56 @@
+name: Fork OAuth principal regression
+
+on:
+  push:
+    branches: [fix/oauth-upstream-20261009]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-oauth-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mcp:
+    if: github.repository == 'xue-ding-e/dbx'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt
+      - name: System build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libfontconfig1-dev libsecret-1-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fork-oauth-mcp
+          cache-on-failure: true
+      - name: Format candidate and retain exact formatting diff
+        run: |
+          rustfmt --edition 2021 --config skip_children=true crates/dbx-mcp/src/{http,http_auth,http_principals,oauth,server,backend,lib}.rs crates/dbx-mcp/tests/protocol.rs
+          git diff --binary > "$RUNNER_TEMP/oauth-format.patch"
+          cat "$RUNNER_TEMP/oauth-format.patch"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oauth-format-${{ github.sha }}
+          path: ${{ runner.temp }}/oauth-format.patch
+          retention-days: 7
+      - name: Locked MCP compile and unit regressions
+        run: cargo test --locked -p dbx-mcp --lib
+      - name: Protocol and connection regressions
+        run: cargo test --locked -p dbx-mcp --test protocol --test connection_crud --test connection_import
+      - name: Require committed formatting
+        if: always()
+        run: git diff --exit-code

@@ -89,6 +89,16 @@ describe("MCP tool permission selection", () => {
     expect(MCP_TOOL_OPTIONS.map((tool) => tool.name).sort()).toEqual(registeredToolNames);
   });
 
+  it("keeps connection details and configuration updates independently switchable", () => {
+    expect(MCP_TOOL_OPTIONS.find((tool) => tool.name === "dbx_import_connections")?.labelKey).toBe("settings.mcpToolImportConnections");
+    expect(MCP_TOOL_OPTIONS.find((tool) => tool.name === "dbx_get_connection")?.labelKey).toBe("settings.mcpToolGetConnection");
+    expect(MCP_TOOL_OPTIONS.find((tool) => tool.name === "dbx_update_connection")?.labelKey).toBe("settings.mcpToolUpdateConnection");
+    const withoutUpdates = toggleMcpAllowedToolName(null, "dbx_update_connection", false);
+    expect(withoutUpdates).not.toContain("dbx_update_connection");
+    expect(withoutUpdates).toContain("dbx_get_connection");
+    expect(toggleMcpAllowedToolName(withoutUpdates, "dbx_update_connection", true)).toContain("dbx_update_connection");
+  });
+
   it("keeps the Salesforce tools individually switchable, writes included", () => {
     expect(MCP_TOOL_OPTIONS.filter((tool) => tool.name.startsWith("dbx_salesforce_")).map((tool) => [tool.name, tool.labelKey])).toEqual([
       ["dbx_salesforce_current_user", "settings.mcpToolSalesforceCurrentUser"],

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PostgreSQL Fault Lab</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,sans-serif}body{margin:0;padding:24px;color:var(--color-text-primary,#dce9f0);background:var(--color-bg-primary,#102331)}h1{font-size:23px;margin:0 0 8px}h2{font-size:16px;margin:0 0 12px}.muted{color:var(--color-text-secondary,#9eb2c0);font-size:13px}.layout{display:grid;grid-template-columns:minmax(250px,340px) 1fr;gap:18px;margin-top:22px}.card{border:1px solid var(--color-border,#315064);border-radius:12px;padding:18px;margin-bottom:16px;background:var(--color-bg-secondary,#183344)}label{display:block;font-size:12px;margin:12px 0 5px}input,select,button{font:inherit;color:inherit;border-radius:6px;border:1px solid var(--color-border,#416175);padding:8px;background:var(--color-bg-primary,#102331)}input,select{width:100%;box-sizing:border-box}button{cursor:pointer;background:var(--color-bg-tertiary,#274b60)}button:disabled{opacity:.4;cursor:not-allowed}.danger{border-color:#d99264}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.barrier{border-left:3px solid #f5bf72;padding:10px;margin-bottom:10px}.badge{padding:4px 8px;border-radius:20px;background:#284f56;color:#b7efdd;font-size:12px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin:8px 0}.event{padding:9px 0;border-bottom:1px solid var(--color-border,#315064);font-size:12px}.error{color:#ffb4a5;white-space:pre-wrap;min-height:18px}#capabilities{max-height:200px;overflow:auto}small{font-size:11px}@media(max-width:760px){.layout{grid-template-columns:1fr}body{padding:14px}}
+</style></head><body>
+<div class="row"><h1>PostgreSQL Fault Lab</h1><span class="badge" id="mode">Disconnected</span></div>
+<div class="muted">Experimental · PostgreSQL 17 · loopback · synthetic data only</div>
+<p class="muted">Point your unmodified GORM / pgx app at the proxy. No SQL or parameter values are displayed. Unsupported wire paths close the connection.</p>
+<div class="row"><button id="refresh">Refresh</button><span id="address" class="muted">Open a saved fault-lab connection in DBX</span></div><p id="error" class="error" role="alert"></p>
+<div class="layout"><section><div class="card"><h2>Arm a bounded rule</h2>
+<label for="application">Application name (exact match)</label><input id="application" value="lab_gorm" maxlength="256">
+<label for="command">SQL command (optional)</label><input id="command" value="SELECT" placeholder="SELECT / INSERT / COMMIT / SYNC">
+<label for="phase">Boundary</label><select id="phase"><option value="execute">Before execution</option><option value="commit">Before COMMIT / implicit Sync</option><option value="connect">Before upstream connection</option></select>
+<label for="action">Action</label><select id="action"><option value="pause">Pause</option><option value="abort">Abort connection</option><option value="drop">Drop connection</option></select>
+<div class="row"><div style="flex:1"><label for="hits">Hits (1–100)</label><input id="hits" type="number" min="1" max="100" value="1"></div><div style="flex:1"><label for="ttl">Rule TTL (seconds)</label><input id="ttl" type="number" min="1" max="300" value="60"></div></div>
+<p class="muted">Pauses expire after 15 seconds and close both sockets. A rule never fabricates a database success or rollback.</p><button id="arm" class="danger" disabled>Arm rule</button></div>
+<div class="card"><h2>CLI connection</h2><p class="muted">Ephemeral capabilities expire when this connection closes. Keep injection access private.</p><button id="show-cli">Show CLI endpoints</button><pre id="capabilities"></pre></div></section>
+<section><div class="card"><h2>Paused operations</h2><div id="pauses" class="muted">No paused operations</div></div><div class="card"><h2>Active rules</h2><div id="rules" class="muted">No armed rules</div></div><div class="card"><h2>Transaction and protocol events</h2><div id="events" class="muted">No events yet</div></div></section></div>
+<script>
+(() => {
+  const $ = id => document.getElementById(id)
+  let bridge, connectionId = '', writable = false, busy = false, revision = 0
+  const showError = error => { $('error').textContent = error?.message || String(error || '') }
+  async function invoke(method, params = {}) {
+    if (!bridge || !connectionId) throw new Error('Open a saved fault-lab connection in DBX first')
+    return bridge.invoke('lab/' + method, { ...params, connectionId })
+  }
+  function line(container, text, className = '') {
+    const el = document.createElement('div'); el.className = className; el.textContent = text; container.appendChild(el); return el
+  }
+  function button(container, text, action) {
+    const b = document.createElement('button'); b.textContent = text; b.disabled = !writable
+    b.onclick = () => task(async () => { await action(); await refresh() }); container.appendChild(b)
+  }
+  function render(snapshot) {
+    writable = snapshot.allowInjection === true
+    $('mode').textContent = writable ? 'Injection enabled' : 'Observe only'
+    $('arm').disabled = !writable || busy
+    $('address').textContent = `${snapshot.address} · ${snapshot.sessions.length} active connection(s)`
+    $('pauses').replaceChildren(); $('rules').replaceChildren(); $('events').replaceChildren()
+    if (!snapshot.pauses.length) line($('pauses'), 'No paused operations')
+    snapshot.pauses.forEach(p => {
+      const row = line($('pauses'), `${p.id} · ${p.connectionId} · expires ${new Date(p.deadline).toLocaleTimeString()}`, 'barrier')
+      const buttons = document.createElement('div'); buttons.className = 'row'; row.appendChild(buttons)
+      button(buttons, 'Resume', () => invoke('resume', { id: p.id }))
+      button(buttons, 'Abort connection', () => invoke('abort', { id: p.id }))
+    })
+    if (!snapshot.rules.length) line($('rules'), 'No armed rules')
+    snapshot.rules.forEach(r => {
+      const row = line($('rules'), `${r.id} · ${r.phase} → ${r.action} · ${r.hits} hit(s) remaining`, 'event')
+      line(row, JSON.stringify(r.selector), 'muted'); button(row, 'Delete rule', () => invoke('delete_rule', { id: r.id }))
+    })
+    if (!snapshot.events.length) line($('events'), 'No events yet')
+    snapshot.events.slice(-80).reverse().forEach(e => {
+      const row = line($('events'), `${e.sequence} · ${e.connectionId || ''} · ${e.kind} ${e.command || ''}`, 'event')
+      if (e.outcome || e.sqlState) line(row, `${e.outcome || ''} ${e.sqlState || ''}`, 'muted')
+      if (e.sqlHash) line(row, `SQL fingerprint ${e.sqlHash.slice(0, 16)}…`, 'muted')
+    })
+  }
+  async function refresh() { const current = revision; const r = await invoke('snapshot'); if (current === revision) render(r.snapshot) }
+  async function task(fn) {
+    if (busy) return
+    const current = revision
+    busy = true; $('arm').disabled = true; showError('')
+    try { await fn() } catch (error) { if (current === revision) showError(error) }
+    finally { busy = false; $('arm').disabled = !writable }
+  }
+  $('refresh').onclick = () => task(refresh)
+  $('arm').onclick = () => task(async () => {
+    const application = $('application').value.trim(); if (!application) throw new Error('An exact application name is required')
+    const rule = { selector: { application }, phase: $('phase').value, action: $('action').value, hits: Number($('hits').value), ttlMs: Number($('ttl').value) * 1000 }
+    const command = $('command').value.trim().toUpperCase(); if (command) rule.selector.command = command
+    await invoke('add_rule', { rule }); await refresh()
+  })
+  $('phase').onchange = () => {
+    if ($('phase').value === 'commit') $('command').value = 'COMMIT'
+    if ($('phase').value === 'connect') { $('command').value = ''; $('action').value = 'drop' }
+  }
+  $('show-cli').onclick = () => task(async () => { const current = revision; const result = await invoke('cli_endpoints'); if (current === revision) $('capabilities').textContent = JSON.stringify(result, null, 2) })
+  function contextChanged(context) {
+    revision++; connectionId = context?.connectionId || ''; writable = false; $('capabilities').textContent = ''; $('arm').disabled = true
+    $('mode').textContent = 'Loading'; $('pauses').replaceChildren(); $('rules').replaceChildren(); $('events').replaceChildren()
+    const current = revision; refresh().catch(error => { if (current === revision) showError(error) })
+  }
+  async function init() {
+    bridge = window.dbxPlugin
+    if (!bridge) { showError('This workbench runs inside the DBX plugin host'); return }
+    await bridge.ready
+    contextChanged(bridge.context)
+    bridge.onContext(contextChanged)
+  }
+  init().catch(showError)
+})()
+
+</script></body></html>

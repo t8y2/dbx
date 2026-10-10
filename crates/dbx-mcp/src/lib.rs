@@ -4,6 +4,8 @@ pub mod backend;
 pub mod diagnostics;
 pub mod http;
 pub mod http_auth;
+mod http_principals;
+pub mod oauth;
 pub mod paths;
 pub mod plugin_tools;
 pub mod runtime;

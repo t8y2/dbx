@@ -467,9 +467,9 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 25);
+    assert_eq!(names.len(), 28);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 23);
+    assert_eq!(names.len(), 26);
     #[cfg(feature = "mq-admin")]
     assert!(names.contains(&"dbx_peek_messages"));
     #[cfg(not(feature = "mq-admin"))]
@@ -477,6 +477,7 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     assert!(names.contains(&"dbx_list_connections"));
     assert!(names.contains(&"dbx_list_databases"));
     assert!(names.contains(&"dbx_duplicate_connection"));
+    assert!(names.contains(&"dbx_import_connections"));
     assert!(names.contains(&"dbx_execute_redis_command"));
     assert!(names.contains(&"dbx_salesforce_current_user"));
     assert!(names.contains(&"dbx_salesforce_prepare_write"));
@@ -875,8 +876,8 @@ async fn connection_group_path_failure_preserves_connection_listing() {
     assert_ne!(listed.is_error, Some(true));
     assert!(listed_text.contains("| ID | Name | Group Path |"));
     assert!(listed_text.contains("local-db"));
-    assert!(listed_text.contains("| Database | Note |"));
-    assert!(listed_text.contains("| :memory: |  |"));
+    assert!(listed_text.contains("| Database | Read only | Note |"));
+    assert!(listed_text.contains("| :memory: | false |  |"));
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();
@@ -885,6 +886,7 @@ async fn connection_group_path_failure_preserves_connection_listing() {
 #[tokio::test]
 async fn runtime_connection_scope_preserves_group_paths() {
     let mut scoped = test_connection("scoped", "shared-db");
+    scoped.read_only = true;
     scoped.note = "业务库 | TEST\n只读查询".to_string();
     let mut outside = test_connection("outside", "shared-db");
     outside.note = "Out-of-scope connection note".to_string();
@@ -911,7 +913,7 @@ async fn runtime_connection_scope_preserves_group_paths() {
     assert!(listed_text.contains("| scoped | shared-db | Project / Production |"));
     assert!(!listed_text.contains("outside"));
     assert!(!listed_text.contains("Project / Staging"));
-    assert!(listed_text.contains("业务库 \\| TEST 只读查询"));
+    assert!(listed_text.contains("| :memory: | true | 业务库 \\| TEST 只读查询 |"));
     assert!(!listed_text.contains("Out-of-scope connection note"));
     assert_eq!(listed_text.lines().count(), 3);
 

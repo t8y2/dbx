@@ -1,0 +1,90 @@
+name: Fork remote MCP and desktop builds
+
+on:
+  push:
+    branches: [feat/authenticated-remote-mcp]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-remote-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    if: github.repository == 'xue-ding-e/dbx'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: linux-x86_64
+          - os: windows-2022
+            label: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_RELEASE_LTO: 'false'
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev libfontconfig1-dev libsecret-1-dev
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build desktop without updater signing
+        id: desktop_build
+        continue-on-error: true
+        env:
+          CXXFLAGS: ${{ runner.os == 'Windows' && '/std:c++17 /EHsc' || '' }}
+        run: pnpm tauri build --no-bundle --ci --features custom-protocol,duckdb-sidecar,sqlite-bundled -- --no-default-features
+      - name: Stage desktop executable separately
+        if: steps.desktop_build.outcome == 'success'
+        shell: bash
+        run: |
+          mkdir -p staging/desktop
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp target/release/dbx.exe staging/desktop/DBX.exe
+          else
+            cp target/release/dbx staging/desktop/DBX
+          fi
+          cp LICENSE staging/desktop/
+          cp deploy/mcp/README.md staging/desktop/REMOTE-MCP.md
+          printf '%s\n' "$GITHUB_SHA" > staging/desktop/SOURCE_COMMIT
+      - name: Build CLI and MCP services
+        run: cargo build --locked --release -p dbx-cli -p dbx-mcp --no-default-features --features dbx-cli/duckdb-sidecar,dbx-mcp/sqlite-bundled
+      - name: Verify binary versions and stage service
+        shell: bash
+        run: |
+          mkdir -p staging/service/bin
+          printf '%s\n' '${{ steps.desktop_build.outcome }}' > staging/DESKTOP_BUILD_STATUS
+          ext=''
+          if [ "$RUNNER_OS" = Windows ]; then ext='.exe'; fi
+          "target/release/dbx${ext}" --version
+          "target/release/dbx-mcp${ext}" --version
+          cp "target/release/dbx${ext}" "target/release/dbx-mcp${ext}" staging/service/bin/
+          cp -R deploy/mcp staging/service/deploy
+          cp LICENSE staging/service/
+          printf '%s\n' "$GITHUB_SHA" > staging/service/SOURCE_COMMIT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbx-${{ matrix.label }}-desktop-and-service
+          path: staging/
+          if-no-files-found: error
+          retention-days: 7

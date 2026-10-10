@@ -67,7 +67,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -450,12 +450,18 @@ const objectFilters = computed<ObjectFilter[]>(() =>
     .map(([filter]) => filter),
 );
 const showObjectFilter = computed(() => objectFilters.value.length > 2);
+// A scope that holds a single object kind makes "全部 14" and "表 14" the same number, so the
+// strip is dropped as redundant — which used to drop the only object count the toolbar could
+// show at all (t8y2/dbx#11624, the common MySQL "tables only" database). Keep that one kind's
+// count visible on its own instead; it stays a value, not a filter control, because with a
+// single kind there is no 全部 chip left for the user to reset the selection back to.
+const singleKindFilter = computed<ObjectFilter | null>(() => (objectFilters.value.length === 2 ? (objectFilters.value.find((filter) => filter !== "all") ?? null) : null));
 // Measured condensation for the header row: tier 1 moves the sort/view/checkbox
 // controls into the overflow menu, tier 2 additionally moves the object type
 // filter there and drops the database chip. See useToolbarOverflow for the
 // tier contract.
 const toolbarRef = ref<HTMLElement | null>(null);
-const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.database, () => selectedSchema.value, () => needsSchema.value, () => showObjectFilter.value]);
+const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.database, () => selectedSchema.value, () => needsSchema.value, () => showObjectFilter.value, () => singleKindFilter.value]);
 const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
 const showInlineSortAndView = computed(() => toolbarTier.value < 1);
 const showInlineCheckboxToggle = computed(() => toolbarTier.value < 1);
@@ -3856,7 +3862,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             <X class="h-3 w-3" />
           </button>
         </div>
-        <div v-if="showObjectFilter && showInlineObjectFilter" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
+        <div v-if="showObjectFilter && showInlineObjectFilter" data-object-filter-chips class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
           <button
             v-for="filter in objectFilters"
             :key="filter"
@@ -3868,6 +3874,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             {{ filterLabel(filter) }}
           </button>
         </div>
+        <span v-else-if="singleKindFilter && showInlineObjectFilter" data-object-filter-count class="shrink-0 whitespace-nowrap text-xs tabular-nums text-muted-foreground">{{ filterLabel(singleKindFilter) }}</span>
       </div>
       <SearchableSelect
         v-if="needsSchema"
@@ -3951,6 +3958,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <template v-if="showObjectFilter && toolbarTier >= 2">
           <DropdownMenuSeparator />
           <DropdownMenuCheckboxItem v-for="filter in objectFilters" :key="filter" :model-value="objectFilter === filter" @select.prevent @update:model-value="selectObjectFilter(filter)">{{ filterLabel(filter) }}</DropdownMenuCheckboxItem>
+        </template>
+        <template v-else-if="singleKindFilter && toolbarTier >= 2">
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel data-object-filter-count>{{ filterLabel(singleKindFilter) }}</DropdownMenuLabel>
         </template>
       </ToolbarOverflowMenu>
     </div>

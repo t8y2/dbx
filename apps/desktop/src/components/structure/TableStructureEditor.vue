@@ -5441,6 +5441,15 @@ watch(activeTab, () => {
 });
 
 watch([activeTab, loading, indexesLoading, visibleColWidths, indexColWidths], observeStructureHorizontalScroller, { deep: true, flush: "post", immediate: true });
+// Tabs can restore their scroller after the active-tab watcher has already run.
+watch(
+  [columnsScrollerRef, indexesScrollerRef],
+  () => {
+    restoreStructureScrollPosition();
+    observeStructureHorizontalScroller();
+  },
+  { flush: "post" },
+);
 
 // Font sizes change with density, so start measuring again instead of keeping a stale maximum.
 watch(localStructureDensity, () => {

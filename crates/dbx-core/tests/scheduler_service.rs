@@ -175,6 +175,94 @@ async fn service_resident_stop_and_restart() {
     assert_eq!(error.code, "session_not_found");
 }
 
+/// Regression pin (CI: `engine condition not reached in time`): a stop
+/// delivery and a restart dispatch race for the same row. The restart run
+/// reuses the `stopping` row the moment its plugin session comes up; the
+/// in-flight stop settle must yield instead of stomping the row back to
+/// `stopped` — supervision would otherwise go blind to a live session.
+#[tokio::test]
+async fn resident_stop_settle_does_not_clobber_a_reused_session_row() {
+    let (_dir, store) = temp_store();
+    let registry = Arc::new(dbx_core::scheduler::TaskExecutorRegistry::new());
+    let resident = TestResidentExecutor::new();
+    registry.register_resident("dbx.test", Arc::new(resident.clone()));
+    let engine = engine(&store, registry.clone(), "worker-1");
+    let service = SchedulerService::new(store.clone(), registry);
+
+    save(&store, resident_task("t1", 5)).await;
+    let run = service.run_now("t1").await.unwrap();
+    drive_until(&engine, || async { store.list_sessions().await.map(|s| !s.is_empty()).unwrap_or(false) }).await;
+    let session_id = store.list_sessions().await.unwrap()[0].id.clone();
+
+    // First stop settles normally (ungated delivery).
+    service.resident_stop(&session_id).await.unwrap();
+    drive_until(&engine, || async {
+        store.list_sessions().await.map(|s| s.iter().any(|s| s.state == ResidentState::Stopped)).unwrap_or(false)
+    })
+    .await;
+    assert_eq!(store.get_run(run.id).await.unwrap().status, TaskRunStatus::Cancelled);
+
+    // Choreograph the race deterministically: park the restart's `start`
+    // before the engine reuses the row, and park the reconcile's stop
+    // delivery after it recorded the old session — so the row reuse lands
+    // while the reconcile still holds its stale `stopping` snapshot.
+    resident.gate_next_stop();
+    resident.gate_next_start();
+    let restart = service.resident_restart(&session_id).await.unwrap();
+    {
+        let watcher = resident.clone();
+        tokio::spawn(async move {
+            while watcher.stops().len() < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            watcher.release_start();
+        });
+    }
+    {
+        let watcher_store = store.clone();
+        let watcher = resident.clone();
+        let watcher_run = restart.id.clone();
+        tokio::spawn(async move {
+            loop {
+                let reused = watcher_store
+                    .list_sessions()
+                    .await
+                    .map(|rows| rows.iter().any(|row| row.run_id == watcher_run && row.state == ResidentState::Running))
+                    .unwrap_or(false);
+                if reused {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            watcher.release_stop();
+        });
+    }
+    engine.tick().await.expect("engine tick");
+
+    // The superseded stop must not stomp the reused row: the restart's
+    // session stays running (and under probe) with its new run.
+    let row = store
+        .list_sessions()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.run_id == restart.id)
+        .expect("restart run must own a session row");
+    assert_eq!(row.state, ResidentState::Running, "stop settle must yield to the restart reuse");
+    assert_eq!(resident.starts().len(), 2, "restart started a fresh plugin session");
+    let old_plugin_session = resident.starts()[0].clone();
+    assert_eq!(
+        resident.stops(),
+        vec![old_plugin_session.clone(), old_plugin_session],
+        "both stop deliveries target the old plugin session, never the reused one"
+    );
+
+    // The restarted session then finishes normally.
+    resident.set_state(&row.session_id, ResidentState::Stopped);
+    let finished = drive_until_terminal(&engine, &store, &restart.id, &[TaskRunStatus::Success]).await;
+    assert_eq!(finished.status, TaskRunStatus::Success);
+}
+
 #[tokio::test]
 async fn service_crud_and_validation_paths() {
     let (_dir, store) = temp_store();

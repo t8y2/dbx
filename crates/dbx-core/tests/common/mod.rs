@@ -161,6 +161,10 @@ pub struct TestResidentExecutor {
     pub stops: Arc<Mutex<Vec<String>>>,
     start_counter: Arc<Mutex<u32>>,
     hang_start: Arc<Mutex<bool>>,
+    gate_stop: Arc<Mutex<bool>>,
+    stop_gate: Arc<tokio::sync::Notify>,
+    gate_start: Arc<Mutex<bool>>,
+    start_gate: Arc<tokio::sync::Notify>,
 }
 
 impl TestResidentExecutor {
@@ -174,6 +178,30 @@ impl TestResidentExecutor {
 
     pub fn set_hang_start(&self, hang: bool) {
         *self.hang_start.lock().unwrap() = hang;
+    }
+
+    /// Parks the NEXT `stop` delivery after it has been recorded (as if the
+    /// plugin backend is slow to acknowledge) until `release_stop` is called.
+    /// Lets a test hold the engine's stop delivery open while other state
+    /// changes land.
+    pub fn gate_next_stop(&self) {
+        *self.gate_stop.lock().unwrap() = true;
+    }
+
+    pub fn release_stop(&self) {
+        *self.gate_stop.lock().unwrap() = false;
+        self.stop_gate.notify_one();
+    }
+
+    /// Parks the NEXT `start` after its bookkeeping but before the engine
+    /// reuses/creates the session row, until `release_start` is called.
+    pub fn gate_next_start(&self) {
+        *self.gate_start.lock().unwrap() = true;
+    }
+
+    pub fn release_start(&self) {
+        *self.gate_start.lock().unwrap() = false;
+        self.start_gate.notify_one();
     }
 
     pub fn starts(&self) -> Vec<String> {
@@ -198,12 +226,21 @@ impl ResidentExecutor for TestResidentExecutor {
             context.cancellation.cancelled().await;
             return Err(TaskError::cancelled("resident start stopped by cancellation"));
         }
-        let mut counter = self.start_counter.lock().unwrap();
-        *counter += 1;
-        let session_id = format!("sess-{counter}");
-        drop(counter);
+        let session_id = {
+            let mut counter = self.start_counter.lock().unwrap();
+            *counter += 1;
+            format!("sess-{counter}")
+        };
         self.starts.lock().unwrap().push(session_id.clone());
         self.states.lock().unwrap().insert(session_id.clone(), ResidentState::Running);
+        // One-shot gate: park before handing the session back, so the engine's
+        // row reuse/creation stays pending while a test arranges a race.
+        loop {
+            if !*self.gate_start.lock().unwrap() {
+                break;
+            }
+            self.start_gate.notified().await;
+        }
         Ok(ResidentSession {
             id: String::new(),
             task_id: String::new(),
@@ -221,6 +258,14 @@ impl ResidentExecutor for TestResidentExecutor {
     async fn stop(&self, session: &ResidentSession) -> Result<(), TaskError> {
         self.stops.lock().unwrap().push(session.session_id.clone());
         self.states.lock().unwrap().insert(session.session_id.clone(), ResidentState::Stopped);
+        // One-shot gate: park after recording the delivery so a test can land
+        // other state changes while this stop is still "acknowledging".
+        loop {
+            if !*self.gate_stop.lock().unwrap() {
+                break;
+            }
+            self.stop_gate.notified().await;
+        }
         Ok(())
     }
 

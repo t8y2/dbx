@@ -1283,6 +1283,23 @@ impl SchedulerStore {
         .await
     }
 
+    /// Settles a `stopping` resident session to `stopped` — atomically, and
+    /// only while the row is still `stopping`. Returns `false` when the row
+    /// moved on (a restart dispatch reused it for a newer plugin session), so
+    /// a stop delivery can never clobber a live session row.
+    pub async fn settle_stopping_session(&self, session_id: String, restart_count: u32) -> Result<bool, TaskError> {
+        self.access(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE task_runtime_sessions SET state='stopped', restart_count=?, updated_at=? WHERE id=? AND state='stopping'",
+                    params![restart_count, rfc3339(Utc::now()), session_id],
+                )
+                .map_err(|error| TaskError::unavailable(error.to_string()))?;
+            Ok(updated > 0)
+        })
+        .await
+    }
+
     pub async fn delete_session(&self, session_id: String) -> Result<(), TaskError> {
         self.access(move |conn| {
             conn.execute("DELETE FROM task_runtime_sessions WHERE id=?", [session_id])

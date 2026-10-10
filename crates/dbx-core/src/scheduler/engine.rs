@@ -659,8 +659,17 @@ impl SchedulerEngine {
                 log::warn!("[scheduler] resident stop delivery failed for {}: {error}", session.session_id);
             }
         }
-        let _ =
-            self.store.update_session_state(session.id.clone(), ResidentState::Stopped, session.restart_count).await;
+        // The stop delivery races with a restart dispatch reusing this row:
+        // a `stopping` row still counts as active, so the restart run's
+        // plugin session comes up on it (state back to `running`, new
+        // run id). The settle is an atomic compare-and-set on `stopping` —
+        // a row that moved on is a live session again and stays under probe.
+        let settled =
+            self.store.settle_stopping_session(session.id.clone(), session.restart_count).await.unwrap_or(false);
+        if !settled {
+            log::info!("[scheduler] resident stop for {} superseded (row reused by a newer session)", session.id);
+            return;
+        }
         let _ = self
             .store
             .finish_run(

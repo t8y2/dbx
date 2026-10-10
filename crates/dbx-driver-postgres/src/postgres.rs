@@ -2125,6 +2125,7 @@ async fn execute_select_prepared(
             .filter_map(|(index, col_type)| (*col_type == PgColType::Geometry).then_some(index)),
     );
     let mut truncated = false;
+    let mut degraded_encoding_rows = 0usize;
 
     let rows_start = Instant::now();
     while let Some(row_result) = stream.next().await {
@@ -2136,6 +2137,9 @@ async fn execute_select_prepared(
             break;
         }
         let row = row_result?;
+        if row.has_degraded_text_values() {
+            degraded_encoding_rows += 1;
+        }
         let mut values = Vec::with_capacity(row.columns().len());
         let mut row_srids = vec![None; row.columns().len()];
         for (i, row_srid) in row_srids.iter_mut().enumerate() {
@@ -2159,6 +2163,22 @@ async fn execute_select_prepared(
     );
 
     let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
+    // A legacy-text connection (#11646) keeps undecodable values — masked or
+    // truncated multi-byte text — as stored instead of failing the query; say
+    // so once, without echoing any field data.
+    let messages = if degraded_encoding_rows > 0 {
+        vec![QueryMessage {
+            severity: "WARNING".to_string(),
+            message: format!(
+                "{degraded_encoding_rows} row(s) contain text that is not decodable in the connection's legacy text encoding; such values were kept as stored."
+            ),
+            code: None,
+            detail: None,
+            hint: None,
+        }]
+    } else {
+        Vec::new()
+    };
     Ok(PreparedSelectOutcome::Complete(Box::new(QueryResult {
         columns,
         column_types,
@@ -2174,7 +2194,7 @@ async fn execute_select_prepared(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
-        messages: Vec::new(),
+        messages,
     })))
 }
 
@@ -8726,7 +8746,12 @@ pub async fn execute_query_with_max_rows(
 
     match result {
         Ok(mut result) => {
-            result.messages = drain_postgres_notices(client).await;
+            // A row-driven warning (e.g. #11646 legacy-text degradation) is
+            // already attached to the result; keep it and append the server
+            // notices raised by this statement.
+            let mut messages = std::mem::take(&mut result.messages);
+            messages.extend(drain_postgres_notices(client).await);
+            result.messages = messages;
             Ok(result)
         }
         Err(error) => {

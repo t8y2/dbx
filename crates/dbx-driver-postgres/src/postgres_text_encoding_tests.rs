@@ -136,8 +136,32 @@ async fn legacy_encoding_live_read_filter_write_metadata_and_export() {
     let columns = get_columns(&pool, &schema, "中文表").await.unwrap();
     assert_eq!(columns[0].name, "中文列");
     assert_eq!(columns[0].comment.as_deref(), Some("中文注释"));
-    let error = execute_query(&pool, "SELECT 'caf'||chr(233)").await.unwrap_err();
-    assert!(error.contains("Invalid gb18030 bytes"), "{error}");
+    // #11646: a value that cannot be decoded (here chr(233) is a lone byte
+    // outside any GB18030 sequence) is kept as stored text and the query
+    // surfaces one warning instead of failing.
+    let result = execute_query(&pool, "SELECT 'caf'||chr(233)").await.unwrap();
+    assert_eq!(result.rows[0][0], "café");
+    assert_eq!(result.messages.len(), 1, "one degradation warning: {:?}", result.messages);
+    assert_eq!(result.messages[0].severity, "WARNING");
+    assert!(result.messages[0].message.contains("1 row(s)"), "{:?}", result.messages[0].message);
+    assert!(
+        !result.messages[0].message.contains("caf"),
+        "warning must not echo field data: {:?}",
+        result.messages[0].message
+    );
+
+    // The issue's byte-level repro: masking a GB18030 value on LATIN1 carrier
+    // leaves half a character (`d5` + asterisks); the whole SELECT must still
+    // return both columns, the valid one fully decoded.
+    let result = execute_query(
+        &pool,
+        "SELECT convert_from(decode('d6d0cec4', 'hex'), 'LATIN1') AS valid_text, left(convert_from(decode('d5c5c8fd', 'hex'), 'LATIN1'), 1) || '*****' AS masked_text",
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.rows[0][0], "中文");
+    assert_eq!(result.rows[0][1], "Õ*****");
+    assert_eq!(result.messages.len(), 1, "masked text warns once: {:?}", result.messages);
 
     let normal = connect_with_max_connections(&base, Duration::from_secs(5), 1).await.unwrap();
     let result = execute_query(&normal, "SELECT 'caf'||chr(233),current_setting('client_encoding')").await.unwrap();

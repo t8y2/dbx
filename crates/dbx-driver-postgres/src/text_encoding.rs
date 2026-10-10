@@ -32,19 +32,32 @@ impl TextEncoding {
         }
     }
 
-    pub fn decode(self, text: &str) -> Result<String, String> {
+    /// Decodes LATIN1-carried bytes in `text`. Undecodable text — a masked or
+    /// truncated multi-byte sequence leaves lone lead bytes that can never
+    /// round-trip (#11646) — is returned as stored instead of failing the
+    /// whole result set. `degraded` is set whenever the raw text was kept.
+    fn decode_tracked(self, text: &str, degraded: &mut bool) -> String {
         if text.is_ascii() {
-            return Ok(text.to_owned());
+            return text.to_owned();
         }
-        let bytes = text
-            .chars()
-            .map(|c| u8::try_from(u32::from(c)))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| "PostgreSQL legacy text contains characters outside ISO-8859-1".to_string())?;
-        self.0
-            .decode_without_bom_handling_and_without_replacement(&bytes)
-            .map(|s| s.into_owned())
-            .ok_or_else(|| format!("Invalid {} bytes in PostgreSQL legacy text", self.0.name()))
+        let bytes = match text.chars().map(|c| u8::try_from(u32::from(c))).collect::<Result<Vec<_>, _>>() {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                *degraded = true;
+                return text.to_owned();
+            }
+        };
+        match self.0.decode_without_bom_handling_and_without_replacement(&bytes) {
+            Some(decoded) => decoded.into_owned(),
+            None => {
+                *degraded = true;
+                text.to_owned()
+            }
+        }
+    }
+
+    pub fn decode(self, text: &str) -> Result<String, String> {
+        Ok(self.decode_tracked(text, &mut false))
     }
 
     pub fn encode(self, text: &str) -> Result<String, String> {
@@ -107,7 +120,7 @@ impl TextEncoding {
                 }
                 Token::SingleQuotedString(value) if json_cast => {
                     let json = value.replace("''", "'");
-                    let encoded = self.transform_json(json.as_bytes(), true)?;
+                    let encoded = self.transform_json(json.as_bytes(), true, &mut false)?;
                     let encoded = String::from_utf8(encoded).map_err(|e| e.to_string())?;
                     result.push('\'');
                     result.push_str(&encoded.replace('\'', "''"));
@@ -198,45 +211,56 @@ impl TextEncoding {
         }
     }
 
-    fn transform(self, ty: &Type, raw: &[u8], encode: bool) -> Result<Vec<u8>, String> {
+    fn transform(self, ty: &Type, raw: &[u8], encode: bool, degraded: &mut bool) -> Result<Vec<u8>, String> {
         match ty.kind() {
-            Kind::Domain(inner) => return self.transform(inner, raw, encode),
-            Kind::Array(inner) => return self.transform_array(inner, raw, encode),
-            Kind::Enum(_) => return self.transform_text(raw, encode),
+            Kind::Domain(inner) => return self.transform(inner, raw, encode, degraded),
+            Kind::Array(inner) => return self.transform_array(inner, raw, encode, degraded),
+            Kind::Enum(_) => return self.transform_text(raw, encode, degraded),
             _ => {}
         }
         if *ty == Type::JSON {
-            return self.transform_json(raw, encode);
+            return self.transform_json(raw, encode, degraded);
         }
         if matches!(*ty, Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN) {
-            return self.transform_text(raw, encode);
+            return self.transform_text(raw, encode, degraded);
         }
         if *ty == Type::JSONB {
             let Some((&1, value)) = raw.split_first() else {
                 return Err("Invalid PostgreSQL jsonb version".into());
             };
             let mut result = vec![1];
-            result.extend(self.transform_json(value, encode)?);
+            result.extend(self.transform_json(value, encode, degraded)?);
             return Ok(result);
         }
         Ok(raw.to_vec())
     }
 
-    fn transform_json(self, raw: &[u8], encode: bool) -> Result<Vec<u8>, String> {
-        fn visit(codec: TextEncoding, value: &mut serde_json::Value, encode: bool) -> Result<(), String> {
-            let text = |s: &str| if encode { codec.encode(s) } else { codec.decode(s) };
+    fn transform_json(self, raw: &[u8], encode: bool, degraded: &mut bool) -> Result<Vec<u8>, String> {
+        fn visit(
+            codec: TextEncoding,
+            value: &mut serde_json::Value,
+            encode: bool,
+            degraded: &mut bool,
+        ) -> Result<(), String> {
+            let text = |s: &str, degraded: &mut bool| {
+                if encode {
+                    codec.encode(s)
+                } else {
+                    Ok(codec.decode_tracked(s, degraded))
+                }
+            };
             match value {
-                serde_json::Value::String(s) => *s = text(s)?,
+                serde_json::Value::String(s) => *s = text(s, degraded)?,
                 serde_json::Value::Array(values) => {
                     for v in values {
-                        visit(codec, v, encode)?;
+                        visit(codec, v, encode, degraded)?;
                     }
                 }
                 serde_json::Value::Object(object) => {
                     let mut result = serde_json::Map::new();
                     for (key, mut value) in std::mem::take(object) {
-                        visit(codec, &mut value, encode)?;
-                        result.insert(text(&key)?, value);
+                        visit(codec, &mut value, encode, degraded)?;
+                        result.insert(text(&key, degraded)?, value);
                     }
                     *object = result;
                 }
@@ -245,16 +269,16 @@ impl TextEncoding {
             Ok(())
         }
         let mut value = serde_json::from_slice(raw).map_err(|e| e.to_string())?;
-        visit(self, &mut value, encode)?;
+        visit(self, &mut value, encode, degraded)?;
         serde_json::to_vec(&value).map_err(|e| e.to_string())
     }
 
-    fn transform_text(self, raw: &[u8], encode: bool) -> Result<Vec<u8>, String> {
+    fn transform_text(self, raw: &[u8], encode: bool, degraded: &mut bool) -> Result<Vec<u8>, String> {
         let text = std::str::from_utf8(raw).map_err(|_| "Invalid UTF-8 in PostgreSQL text protocol")?;
-        Ok(if encode { self.encode(text)? } else { self.decode(text)? }.into_bytes())
+        Ok(if encode { self.encode(text)? } else { self.decode_tracked(text, degraded) }.into_bytes())
     }
 
-    fn transform_array(self, inner: &Type, raw: &[u8], encode: bool) -> Result<Vec<u8>, String> {
+    fn transform_array(self, inner: &Type, raw: &[u8], encode: bool, degraded: &mut bool) -> Result<Vec<u8>, String> {
         fn int(raw: &[u8], pos: &mut usize) -> Result<i32, String> {
             let end = pos.checked_add(4).ok_or("Invalid PostgreSQL array length")?;
             let bytes = raw.get(*pos..end).ok_or("Truncated PostgreSQL array")?;
@@ -292,7 +316,7 @@ impl TextEncoding {
                 .ok_or("Invalid PostgreSQL array element")?;
             let bytes = raw.get(pos..end).ok_or("Truncated PostgreSQL array element")?;
             pos = end;
-            let value = self.transform(inner, bytes, encode)?;
+            let value = self.transform(inner, bytes, encode, degraded)?;
             result
                 .extend(i32::try_from(value.len()).map_err(|_| "PostgreSQL array element is too large")?.to_be_bytes());
             result.extend(value);
@@ -387,13 +411,28 @@ pub struct Row {
     // per-row Vec<String> would tax every result row of every ordinary query.
     names: Option<Vec<String>>,
     values: Option<Vec<Option<Vec<u8>>>>,
+    // Set when at least one text value could not be decoded in the
+    // connection's legacy encoding and was kept as stored text instead
+    // (#11646). The query result surface turns this into a single warning.
+    degraded_text_values: bool,
 }
 impl Row {
     pub(crate) fn new(original: tokio_postgres::Row, encoding: Option<TextEncoding>) -> Result<Self, PgError> {
-        let (names, values) = match encoding {
-            None => (None, None),
+        let (names, values, degraded_text_values) = match encoding {
+            None => (None, None, false),
             Some(e) => {
-                let names = original.columns().iter().map(|c| e.decode(c.name())).collect::<Result<_, _>>()?;
+                let mut degraded = false;
+                let names = original
+                    .columns()
+                    .iter()
+                    .map(|c| {
+                        let name = e.decode_tracked(c.name(), &mut degraded);
+                        if !c.name().is_ascii() && name == c.name() {
+                            degraded = true;
+                        }
+                        name
+                    })
+                    .collect::<Vec<_>>();
                 let values = Some(
                     original
                         .columns()
@@ -404,14 +443,28 @@ impl Row {
                                 return Ok(None);
                             }
                             let value: Option<Raw> = original.try_get(i)?;
-                            value.map(|raw| e.transform(c.type_(), &raw.0, false)).transpose().map_err(PgError::from)
+                            value
+                                .map(|raw| {
+                                    let mut cell_degraded = false;
+                                    let transformed = e.transform(c.type_(), &raw.0, false, &mut cell_degraded)?;
+                                    degraded |= cell_degraded;
+                                    Ok::<Vec<u8>, String>(transformed)
+                                })
+                                .transpose()
+                                .map_err(PgError::from)
                         })
                         .collect::<Result<_, PgError>>()?,
                 );
-                (Some(names), values)
+                (Some(names), values, degraded)
             }
         };
-        Ok(Self { original, names, values })
+        Ok(Self { original, names, values, degraded_text_values })
+    }
+
+    /// Whether at least one text value in this row was kept as stored text
+    /// because it could not be decoded in the connection's legacy encoding.
+    pub(crate) fn has_degraded_text_values(&self) -> bool {
+        self.degraded_text_values
     }
     pub fn columns(&self) -> &[tokio_postgres::Column] {
         self.original.columns()
@@ -462,7 +515,7 @@ impl ToSql for Param<'_> {
         let null = self.inner.to_sql_checked(ty, &mut buffer)?;
         if matches!(null, IsNull::No) {
             if let Some(e) = self.encoding {
-                out.extend(e.transform(ty, &buffer, true).map_err(std::io::Error::other)?);
+                out.extend(e.transform(ty, &buffer, true, &mut false).map_err(std::io::Error::other)?);
             } else {
                 out.extend(buffer);
             }
@@ -703,19 +756,59 @@ mod tests {
         let carrier: String = [0xd6, 0xd0, 0xce, 0xc4, 0x94, 0x39, 0xfc, 0x36].into_iter().map(char::from).collect();
         assert_eq!(codec.decode(&carrier).unwrap(), "中文😀");
         assert_eq!(codec.encode("中文😀").unwrap(), carrier);
-        assert!(codec.decode("café").is_err());
-        assert!(codec.decode("中文").is_err());
         let utf8 = TextEncoding(encoding_rs::UTF_8);
         assert_eq!(utf8.decode(&utf8.encode("中文\u{80}").unwrap()).unwrap(), "中文\u{80}");
+    }
+
+    // #11646: masked or truncated multi-byte text leaves lone GB18030 lead
+    // bytes that can never round-trip. Decoding keeps such values as stored
+    // text and reports the degradation instead of failing the whole query.
+    #[test]
+    fn undecodable_text_degrades_to_stored_bytes_and_sets_the_flag() {
+        let codec = TextEncoding(encoding_rs::GB18030);
+
+        // A complete value still decodes, without flagging.
+        let carrier: String = [0xd6, 0xd0, 0xce, 0xc4].into_iter().map(char::from).collect();
+        let mut degraded = false;
+        assert_eq!(codec.decode_tracked(&carrier, &mut degraded), "中文");
+        assert!(!degraded);
+
+        // Half a masked character (`d5` from `d5c5c8fd`) is kept as stored.
+        let masked: String = [0xd5].into_iter().map(char::from).collect();
+        assert_eq!(codec.decode_tracked(&masked, &mut degraded), masked);
+        assert!(degraded);
+
+        // Non-ASCII text outside the LATIN1 byte range is kept as stored too.
+        let mut degraded = false;
+        assert_eq!(codec.decode_tracked("café", &mut degraded), "café");
+        assert!(degraded);
+
+        // ASCII short-circuits without flagging.
+        let mut degraded = false;
+        assert_eq!(codec.decode_tracked("plain", &mut degraded), "plain");
+        assert!(!degraded);
     }
 
     #[test]
     fn json_transcoding_preserves_escaping_and_nulls() {
         let codec = TextEncoding(encoding_rs::GB18030);
         let value = serde_json::json!({"中文": ["乗\\folder", "😀", null, 42]});
-        let encoded = codec.transform_json(&serde_json::to_vec(&value).unwrap(), true).unwrap();
-        let decoded = codec.transform_json(&encoded, false).unwrap();
+        let encoded = codec.transform_json(&serde_json::to_vec(&value).unwrap(), true, &mut false).unwrap();
+        let decoded = codec.transform_json(&encoded, false, &mut false).unwrap();
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(), value);
+
+        // An undecodable string stored in a JSON column (bad bytes were
+        // written by something else, so only the decode side runs) degrades
+        // to the stored text and propagates the flag; valid siblings are
+        // still decoded.
+        let masked: String = [0xd5].into_iter().map(char::from).collect();
+        let stored = format!(r#"{{"中文":"中文","masked":"{masked}"}}"#);
+        let mut degraded = false;
+        let decoded = codec.transform_json(stored.as_bytes(), false, &mut degraded).unwrap();
+        let decoded = serde_json::from_slice::<serde_json::Value>(&decoded).unwrap();
+        assert_eq!(decoded["中文"], "中文");
+        assert_eq!(decoded["masked"], masked);
+        assert!(degraded);
     }
 
     #[test]

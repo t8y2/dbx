@@ -2584,6 +2584,7 @@ export default withEnglishFallback({
     generateEmptyString: "Cadena vacía",
     generateNull: "NULL",
     generateCurrentDatetime: "Fecha y hora actuales",
+    generateCurrentDatetimeMilliseconds: "Fecha y hora actuales (milisegundos)",
     generateCurrentDate: "Fecha actual",
     generateUuidV4: "UUID v4",
     generateUuidV7: "UUID v7",

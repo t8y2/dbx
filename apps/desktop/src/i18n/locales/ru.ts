@@ -2654,6 +2654,7 @@ export default withEnglishFallback({
     generateEmptyString: "Пустая строка",
     generateNull: "NULL",
     generateCurrentDatetime: "Текущие дата и время",
+    generateCurrentDatetimeMilliseconds: "Текущие дата и время (мс)",
     generateCurrentDate: "Текущая дата",
     generateUuidV4: "UUID v4",
     generateUuidV7: "UUID v7",

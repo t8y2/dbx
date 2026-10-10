@@ -2695,6 +2695,7 @@ export default withEnglishFallback({
     generateEmptyString: "空字符串",
     generateNull: "NULL",
     generateCurrentDatetime: "当前日期时间",
+    generateCurrentDatetimeMilliseconds: "当前日期时间（毫秒）",
     generateCurrentDate: "当前日期",
     generateUuidV4: "UUID v4",
     generateUuidV7: "UUID v7",

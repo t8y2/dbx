@@ -17,6 +17,12 @@ describe("generateCellValues", () => {
     expect(generateCellValues("date", 2, { now })).toEqual(["2026-07-16", "2026-07-16"]);
   });
 
+  it("appends three-digit milliseconds when requested", () => {
+    const now = new Date(2026, 6, 16, 9, 8, 7, 123);
+    expect(generateCellValues("datetime-ms", 2, { now })).toEqual(["2026-07-16 09:08:07.123", "2026-07-16 09:08:07.123"]);
+    expect(generateCellValues("datetime-ms", 1, { now: new Date(2026, 6, 16, 9, 8, 7) })).toEqual(["2026-07-16 09:08:07.000"]);
+  });
+
   it("generates one UUID per cell", () => {
     let index = 0;
     expect(generateCellValues("uuid", 3, { uuidFactory: () => `uuid-${++index}` })).toEqual(["uuid-1", "uuid-2", "uuid-3"]);

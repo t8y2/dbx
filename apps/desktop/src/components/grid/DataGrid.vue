@@ -9913,6 +9913,11 @@ function generateSelectionMenuItems(disabled: boolean): ContextMenuItem[] {
       disabled,
     },
     {
+      label: t("grid.generateCurrentDatetimeMilliseconds"),
+      action: () => applyGeneratedSelectionValue("datetime-ms"),
+      disabled,
+    },
+    {
       label: t("grid.generateCurrentDate"),
       action: () => applyGeneratedSelectionValue("date"),
       disabled,
@@ -15490,6 +15495,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                       <DropdownMenuItem @click="applyGeneratedDetailValue('empty')">{{ t("grid.generateEmptyString") }}</DropdownMenuItem>
                       <DropdownMenuItem @click="applyGeneratedDetailValue('null')">{{ t("grid.generateNull") }}</DropdownMenuItem>
                       <DropdownMenuItem @click="applyGeneratedDetailValue('datetime')">{{ t("grid.generateCurrentDatetime") }}</DropdownMenuItem>
+                      <DropdownMenuItem @click="applyGeneratedDetailValue('datetime-ms')">{{ t("grid.generateCurrentDatetimeMilliseconds") }}</DropdownMenuItem>
                       <DropdownMenuItem @click="applyGeneratedDetailValue('date')">{{ t("grid.generateCurrentDate") }}</DropdownMenuItem>
                       <DropdownMenuItem @click="applyGeneratedDetailValue('uuid')">{{ t("grid.generateUuidV4") }}</DropdownMenuItem>
                       <DropdownMenuItem @click="applyGeneratedDetailValue('uuid-v7')">{{ t("grid.generateUuidV7") }}</DropdownMenuItem>

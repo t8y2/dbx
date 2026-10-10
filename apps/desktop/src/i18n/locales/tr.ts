@@ -2306,6 +2306,7 @@ export default withEnglishFallback({
     generateEmptyString: "Boş Dize",
     generateNull: "NULL",
     generateCurrentDatetime: "Geçerli Tarih-Saat",
+    generateCurrentDatetimeMilliseconds: "Geçerli Tarih-Saat (Milisaniye)",
     generateCurrentDate: "Geçerli Tarih",
     generateUuidV4: "UUID v4",
     generateUuidV7: "UUID v7",

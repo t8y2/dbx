@@ -2532,6 +2532,7 @@ export default withEnglishFallback({
     generateEmptyString: "빈 문자열",
     generateNull: "NULL",
     generateCurrentDatetime: "현재 날짜/시간",
+    generateCurrentDatetimeMilliseconds: "현재 날짜/시간(밀리초)",
     generateCurrentDate: "현재 날짜",
     generateUuidV4: "UUID v4",
     generateUuidV7: "UUID v7",

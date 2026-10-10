@@ -7578,6 +7578,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "結果表格聚焦時生效",
     shortcutScopeHintSearch: "搜尋框聚焦時生效",
     shortcutScopeHintSidebar: "側邊欄聚焦時生效",
+    shortcutScopeDebug: "PL/SQL 偵錯器",
+    shortcutScopeHintDebug: "偵錯器佔用目前分頁時生效",
     shortcutGroupCount: "{count} 項",
     shortcutGroupCollapse: "摺疊分組",
     shortcutGroupExpand: "展開分組",

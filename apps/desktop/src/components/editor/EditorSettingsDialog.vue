@@ -9,6 +9,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import {
   AlertTriangle,
   ArrowLeft,
+  Bug,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -2276,8 +2277,10 @@ const visibleShortcutConflictPairCount = computed(() => countShortcutConflictPai
 const visibleCrossScopeShortcutPairCount = computed(() => countShortcutConflictPairs(visibleCrossScopeShortcutConflicts.value));
 
 // 二级归类：快捷键页签按作用域分组展示。顺序即运行时优先级——越外层先响应，
-// 用户读到的顺序与事件实际分发顺序一致。
-const SHORTCUT_SCOPE_ORDER: readonly ShortcutScope[] = ["global", "editor", "grid", "search", "sidebar"];
+// 用户读到的顺序与事件实际分发顺序一致。`debug` 排在最外层是因为 `App.vue` 的
+// 调试分支位于 quickOpen 等 global 分支之前：调试标签页里 `Mod+P` 归 Step over，
+// 调试页之外才轮到 global 的 quickOpen（与 ODC 的 debugMode 守卫一致）。
+const SHORTCUT_SCOPE_ORDER: readonly ShortcutScope[] = ["debug", "global", "editor", "grid", "search", "sidebar"];
 
 function shortcutScopeLabelKey(scope: ShortcutScope): string {
   return `settings.shortcutScope${scope[0].toUpperCase()}${scope.slice(1)}`;
@@ -2289,6 +2292,8 @@ function shortcutScopeHintKey(scope: ShortcutScope): string {
 
 function shortcutScopeIcon(scope: ShortcutScope) {
   switch (scope) {
+    case "debug":
+      return Bug;
     case "global":
       return Globe;
     case "editor":

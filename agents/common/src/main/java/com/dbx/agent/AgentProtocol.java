@@ -65,8 +65,12 @@ public final class AgentProtocol {
     public static final String METHOD_PL_DEBUG_STEP_OVER = "pl_debug_step_over";
     public static final String METHOD_PL_DEBUG_STEP_IN = "pl_debug_step_in";
     public static final String METHOD_PL_DEBUG_STEP_OUT = "pl_debug_step_out";
+    public static final String METHOD_PL_DEBUG_RESUME_IGNORE_BREAKPOINTS = "pl_debug_resume_ignore_breakpoints";
     public static final String METHOD_PL_DEBUG_ABORT = "pl_debug_abort";
     public static final String METHOD_PL_DEBUG_GET_VARIABLES = "pl_debug_get_variables";
+    public static final String METHOD_PL_DEBUG_SET_VALUE = "pl_debug_set_value";
+    public static final String METHOD_PL_DEBUG_SET_EXCEPTION_BREAKPOINT = "pl_debug_set_exception_breakpoint";
+    public static final String METHOD_PL_DEBUG_SET_BREAKPOINT_ENABLED = "pl_debug_set_breakpoint_enabled";
     public static final String METHOD_PL_DEBUG_GET_STACK = "pl_debug_get_stack";
     public static final String METHOD_PL_DEBUG_GET_LOG = "pl_debug_get_log";
     public static final String METHOD_PL_DEBUG_CLOSE = "pl_debug_close";

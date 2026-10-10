@@ -8258,6 +8258,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "結果グリッドにフォーカス時",
     shortcutScopeHintSearch: "検索フィールドにフォーカス時",
     shortcutScopeHintSidebar: "サイドバーにフォーカス時",
+    shortcutScopeDebug: "PL/SQL デバッガー",
+    shortcutScopeHintDebug: "デバッガーが現在のタブのとき有効",
     shortcutGroupCount: "{count} 件",
     shortcutGroupCollapse: "グループを折りたたむ",
     shortcutGroupExpand: "グループを展開",

@@ -22,6 +22,10 @@ const props = defineProps<{
   schema?: string;
   /** Routine parameters as parsed from the object source by the caller. */
   params: PlDebugParam[];
+  /** True while the caller is still resolving `params` from database metadata. */
+  loading?: boolean;
+  /** Metadata lookup failure, reported instead of the empty-parameter hint. */
+  loadError?: string | null;
   database: string;
   connectionId: string;
 }>();
@@ -32,12 +36,18 @@ const editableParams = ref<PlDebugParam[]>([]);
 const starting = ref(false);
 const errorMessage = ref<string | null>(null);
 
-watch(open, (isOpen) => {
-  if (isOpen) {
+// Seed the editable rows on open and whenever the caller publishes parameters
+// afterwards: the launch dialog resolves them with a metadata query, so they can
+// arrive after the dialog is already visible.
+watch(
+  () => [open.value, props.params] as const,
+  ([isOpen]) => {
+    if (!isOpen) return;
     editableParams.value = props.params.map((param) => ({ ...param }));
     errorMessage.value = null;
-  }
-});
+  },
+  { immediate: true },
+);
 
 const title = computed(() => {
   const target = props.packageName ? `${props.packageName}.${props.objectName}` : (props.objectName ?? "");
@@ -93,12 +103,16 @@ async function startDebug() {
                 <span v-else class="text-muted-foreground">—</span>
               </td>
             </tr>
-            <tr v-if="editableParams.length === 0">
+            <tr v-if="loading && editableParams.length === 0">
+              <td colspan="4" class="px-2 py-3 text-center text-muted-foreground"><Loader2 class="mr-1 inline h-3 w-3 animate-spin" />{{ t("plDebug.launch.loading") }}</td>
+            </tr>
+            <tr v-else-if="editableParams.length === 0">
               <td colspan="4" class="px-2 py-3 text-center text-muted-foreground">{{ t("plDebug.params.empty") }}</td>
             </tr>
           </tbody>
         </table>
       </div>
+      <p v-if="loadError" class="text-xs text-destructive">{{ loadError }}</p>
       <p v-if="errorMessage" class="text-xs text-destructive">{{ errorMessage }}</p>
       <DialogFooter>
         <Button variant="outline" :disabled="starting" @click="open = false">

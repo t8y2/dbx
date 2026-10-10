@@ -152,10 +152,76 @@ pub async fn pl_debug_list_breakpoints_core(state: &AppState, debug_id: &str) ->
     guard.pl_debug_list_breakpoints::<Value>(debug_id, Some(PL_DEBUG_QUICK_TIMEOUT)).await
 }
 
+/// Enables or disables one existing breakpoint in place (DBMS_DEBUG
+/// ENABLE_BREAKPOINT / DISABLE_BREAKPOINT) instead of deleting and re-setting
+/// it, so the local condition / ignore count and the server breakpoint number
+/// survive the toggle.
+///
+/// The agent response body is forwarded as-is: it carries `ok` / `result` /
+/// `message` plus `serverSupported`, where `serverSupported = false` means the
+/// server exposes no enable/disable primitive (not an error) and the caller must
+/// keep its client-side fallback. Served by both the oceanbase-oracle (Java)
+/// agent and the oracle-go agent.
+pub async fn pl_debug_set_breakpoint_enabled_core(
+    state: &AppState,
+    debug_id: &str,
+    breakpoint_number: i64,
+    enabled: bool,
+) -> Result<Value, String> {
+    let client = pl_debug_client(state, debug_id).await?;
+    let mut guard = client.lock().await;
+    guard
+        .pl_debug_set_breakpoint_enabled::<Value>(debug_id, breakpoint_number, enabled, Some(PL_DEBUG_QUICK_TIMEOUT))
+        .await
+}
+
 pub async fn pl_debug_resume_core(state: &AppState, debug_id: &str) -> Result<Value, String> {
     let client = pl_debug_client(state, debug_id).await?;
     let mut guard = client.lock().await;
     guard.pl_debug_resume::<Value>(debug_id, Some(PL_DEBUG_TIMEOUT)).await
+}
+
+/// Runs the debuggee to completion while ignoring every remaining breakpoint
+/// (ODC's `resumeIgnoreBreakpoints`, the helper package's `DBX_CNT_EXIT`). The
+/// blocking budget matches the other continuation calls because the agent only
+/// returns once the interpreter has exited.
+///
+/// Both the oceanbase-oracle (Java) agent and the oracle-go agent serve this
+/// operation: the Java side has the `pl_debug_resume_ignore_breakpoints`
+/// request branch backed by
+/// `AgentProtocol.METHOD_PL_DEBUG_RESUME_IGNORE_BREAKPOINTS`.
+pub async fn pl_debug_resume_ignore_breakpoints_core(state: &AppState, debug_id: &str) -> Result<Value, String> {
+    let client = pl_debug_client(state, debug_id).await?;
+    let mut guard = client.lock().await;
+    guard.pl_debug_resume_ignore_breakpoints::<Value>(debug_id, Some(PL_DEBUG_TIMEOUT)).await
+}
+
+/// Assigns a new value to the variable `name` in the given frame/slot. The
+/// agent response body (`{ok, result, message, snapshot}`) is forwarded
+/// unchanged.
+pub async fn pl_debug_set_value_core(
+    state: &AppState,
+    debug_id: &str,
+    name: &str,
+    frame: i64,
+    index: i64,
+    value: &str,
+) -> Result<Value, String> {
+    let client = pl_debug_client(state, debug_id).await?;
+    let mut guard = client.lock().await;
+    guard.pl_debug_set_value::<Value>(debug_id, name, frame, index, value, Some(PL_DEBUG_QUICK_TIMEOUT)).await
+}
+
+/// Enables or disables breaking on exceptions; the agent response body is
+/// forwarded unchanged.
+pub async fn pl_debug_set_exception_breakpoint_core(
+    state: &AppState,
+    debug_id: &str,
+    enabled: bool,
+) -> Result<Value, String> {
+    let client = pl_debug_client(state, debug_id).await?;
+    let mut guard = client.lock().await;
+    guard.pl_debug_set_exception_breakpoint::<Value>(debug_id, enabled, Some(PL_DEBUG_QUICK_TIMEOUT)).await
 }
 
 pub async fn pl_debug_step_over_core(state: &AppState, debug_id: &str) -> Result<Value, String> {
@@ -182,10 +248,16 @@ pub async fn pl_debug_abort_core(state: &AppState, debug_id: &str) -> Result<Val
     guard.pl_debug_abort::<Value>(debug_id, Some(PL_DEBUG_TIMEOUT)).await
 }
 
-pub async fn pl_debug_get_variables_core(state: &AppState, debug_id: &str) -> Result<Value, String> {
+/// `frame` selects the stack frame to read variables from; `None` lets the
+/// agent use its default (frame 0).
+pub async fn pl_debug_get_variables_core(
+    state: &AppState,
+    debug_id: &str,
+    frame: Option<i64>,
+) -> Result<Value, String> {
     let client = pl_debug_client(state, debug_id).await?;
     let mut guard = client.lock().await;
-    let result = guard.pl_debug_get_variables::<Value>(debug_id, Some(PL_DEBUG_QUICK_TIMEOUT)).await?;
+    let result = guard.pl_debug_get_variables::<Value>(debug_id, frame, Some(PL_DEBUG_QUICK_TIMEOUT)).await?;
     // OceanBase serializes GET_VALUES as a JSON object; Oracle returns the
     // legacy `*name*type*value` delimited text. Normalize both here so the
     // frontend always receives a flat variables array.

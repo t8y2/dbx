@@ -24,6 +24,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -36,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 class OceanBaseOracleAgentTest {
     @Test
@@ -261,11 +263,35 @@ class OceanBaseOracleAgentTest {
 
         agent.executeQuery("INSERT INTO ITEMS (ID) VALUES (1)", null, new ExecuteQueryOptions(10, null, 0));
 
-        Assertions.assertEquals(List.of(
+        Assertions.assertEquals(withDbmsOutputEnable(
             "ALTER SESSION SET ob_query_timeout = 3216672000000000",
             "INSERT INTO ITEMS (ID) VALUES (1)"
         ), sql);
-        Assertions.assertEquals(List.of(), queryTimeouts);
+        Assertions.assertEquals(withDbmsOutputEnableTimeout(), queryTimeouts);
+    }
+
+    /**
+     * Every statement now opens the capture gate, so the first statement on a
+     * physical connection runs {@code DBMS_OUTPUT.ENABLE} before it: that is the
+     * Go agent's behaviour too, and it is what lets a SELECT that calls a
+     * printing function be captured.
+     */
+    private static List<String> withDbmsOutputEnable(String... statements) {
+        List<String> expected = new ArrayList<>();
+        expected.add("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;");
+        expected.addAll(List.of(statements));
+        return expected;
+    }
+
+    /**
+     * The ENABLE probe carries its own 5s statement timeout, so the recorded
+     * statement timeouts start with it.
+     */
+    private static List<Integer> withDbmsOutputEnableTimeout(Integer... timeouts) {
+        List<Integer> expected = new ArrayList<>();
+        expected.add(5);
+        expected.addAll(List.of(timeouts));
+        return expected;
     }
 
     @Test
@@ -321,7 +347,7 @@ class OceanBaseOracleAgentTest {
         agent.startTableRead("SELECT 3 FROM DUAL", null, new QueryPageOptions(10, null, 10, 14));
         Assertions.assertDoesNotThrow(() -> agent.beforePooledConnectionReturn(connection));
 
-        Assertions.assertEquals(List.of(
+        Assertions.assertEquals(withDbmsOutputEnable(
             "ALTER SESSION SET ob_query_timeout = 12000000",
             "SELECT 1 FROM DUAL",
             "ALTER SESSION SET ob_query_timeout = 13000000",
@@ -330,7 +356,7 @@ class OceanBaseOracleAgentTest {
             "SELECT 3 FROM DUAL",
             "ALTER SESSION SET ob_query_timeout = 3216672000000000"
         ), sql);
-        Assertions.assertEquals(List.of(12, 13, 14), queryTimeouts);
+        Assertions.assertEquals(withDbmsOutputEnableTimeout(12, 13, 14), queryTimeouts);
     }
 
     @Test
@@ -356,7 +382,7 @@ class OceanBaseOracleAgentTest {
         agent.startTableRead("SELECT 3 FROM DUAL", null, new QueryPageOptions(10, null, 10, 14));
         Assertions.assertDoesNotThrow(() -> agent.beforePooledConnectionReturn(connection));
 
-        Assertions.assertEquals(List.of(
+        Assertions.assertEquals(withDbmsOutputEnable(
             "ALTER SESSION SET ob_query_timeout = 12000000",
             "SELECT 1 FROM DUAL",
             "ALTER SESSION SET ob_query_timeout = 13000000",
@@ -364,7 +390,7 @@ class OceanBaseOracleAgentTest {
             "ALTER SESSION SET ob_query_timeout = 14000000",
             "SELECT 3 FROM DUAL"
         ), sql);
-        Assertions.assertEquals(List.of(12, 13, 14), queryTimeouts);
+        Assertions.assertEquals(withDbmsOutputEnableTimeout(12, 13, 14), queryTimeouts);
     }
 
     @Test
@@ -381,8 +407,11 @@ class OceanBaseOracleAgentTest {
         );
 
         Assertions.assertSame(alterError, error.getCause());
-        Assertions.assertEquals(List.of("ALTER SESSION SET ob_query_timeout = 12000000"), sql);
-        Assertions.assertTrue(queryTimeouts.isEmpty());
+        Assertions.assertEquals(
+            withDbmsOutputEnable("ALTER SESSION SET ob_query_timeout = 12000000"),
+            sql
+        );
+        Assertions.assertEquals(withDbmsOutputEnableTimeout(), queryTimeouts);
     }
 
     @Test
@@ -401,6 +430,682 @@ class OceanBaseOracleAgentTest {
             List.of(Arrays.asList("0x012aff", null, "plain text")),
             result.getRows()
         );
+    }
+
+    @Test
+    void enablesDbmsOutputOncePerPhysicalConnectionBeforeTheStatement() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        agent.executeQuery("BEGIN DBMS_OUTPUT.PUT_LINE('one'); END;", null, new ExecuteQueryOptions(10, null, 0));
+        agent.executeQuery("BEGIN DBMS_OUTPUT.PUT_LINE('two'); END;", null, new ExecuteQueryOptions(10, null, 0));
+
+        Assertions.assertEquals(1, session.enableAttempts, "ENABLE must run once per physical connection");
+        Assertions.assertEquals(
+            List.of(
+                "BEGIN DBMS_OUTPUT.ENABLE(1000000); END;",
+                "ALTER SESSION SET ob_query_timeout = 3216672000000000",
+                "BEGIN DBMS_OUTPUT.PUT_LINE('one'); END;",
+                "ALTER SESSION SET ob_query_timeout = 3216672000000000",
+                "BEGIN DBMS_OUTPUT.PUT_LINE('two'); END;"
+            ),
+            session.executedSql
+        );
+        Assertions.assertEquals(List.of(5_000, 1_234), session.networkTimeouts, "the probe timeout must be restored");
+    }
+
+    @Test
+    void enablesDbmsOutputAgainForADifferentPhysicalConnection() {
+        DbmsOutputSession first = new DbmsOutputSession();
+        DbmsOutputSession second = new DbmsOutputSession();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, first.connection());
+        agent.executeQuery("BEGIN NULL; END;", null, new ExecuteQueryOptions(10, null, 0));
+
+        TestSupport.setPrivateConnection(agent, second.connection());
+        agent.executeQuery("BEGIN NULL; END;", null, new ExecuteQueryOptions(10, null, 0));
+
+        Assertions.assertEquals(1, first.enableAttempts);
+        Assertions.assertEquals(1, second.enableAttempts);
+    }
+
+    @Test
+    void dbmsOutputEnableFailureIsNotRetriedAndLeavesQueryResultsIntact() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        session.enableFails = true;
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        QueryResult first = agent.executeQuery("BEGIN PRINT_ONE; END;", null, new ExecuteQueryOptions(10, null, 0));
+        QueryResult second = agent.executeQuery("BEGIN PRINT_TWO; END;", null, new ExecuteQueryOptions(10, null, 0));
+
+        Assertions.assertEquals(1, session.enableAttempts, "a failed ENABLE must not be retried");
+        Assertions.assertEquals(List.of(5_000, 1_234), session.networkTimeouts, "the probe timeout must be restored");
+        Assertions.assertEquals(7, first.getAffected_rows());
+        Assertions.assertEquals(7, second.getAffected_rows());
+        Assertions.assertEquals(0, session.getLineCalls, "no drain is attempted once ENABLE failed");
+        Assertions.assertTrue(first.getMessages().isEmpty());
+        Assertions.assertTrue(second.getMessages().isEmpty());
+        Assertions.assertEquals(
+            List.of(
+                "BEGIN DBMS_OUTPUT.ENABLE(1000000); END;",
+                "ALTER SESSION SET ob_query_timeout = 3216672000000000",
+                "BEGIN PRINT_ONE; END;",
+                "ALTER SESSION SET ob_query_timeout = 3216672000000000",
+                "BEGIN PRINT_TWO; END;"
+            ),
+            session.executedSql,
+            "both statements must still run without a second ENABLE"
+        );
+    }
+
+    @Test
+    void drainsDbmsOutputLinesInOrderUntilStatusOne() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        session.buffer.addAll(List.of("first line", "", "third line"));
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        QueryResult result = agent.executeQuery(
+            "BEGIN DBMS_OUTPUT.PUT_LINE('x'); END;", null, new ExecuteQueryOptions(10, null, 0)
+        );
+
+        Assertions.assertEquals(
+            List.of(
+                Map.of("severity", "INFO", "message", "first line"),
+                Map.of("severity", "INFO", "message", ""),
+                Map.of("severity", "INFO", "message", "third line")
+            ),
+            result.getMessages()
+        );
+        // Three lines plus the terminal status = 1 poll.
+        Assertions.assertEquals(1, session.getLineCalls, "batched fetch: one round trip carries the whole buffer");
+    }
+
+    @Test
+    void attachesDbmsOutputToTheStatementThatProducedIt() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        session.printedBySqlMarker.put("PRINT_ONE", "from first");
+        session.printedBySqlMarker.put("PRINT_TWO", "from second");
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        QueryResult first = agent.executeQuery("BEGIN PRINT_ONE; END;", null, new ExecuteQueryOptions(10, null, 0));
+        QueryResult second = agent.executeQuery("BEGIN PRINT_TWO; END;", null, new ExecuteQueryOptions(10, null, 0));
+
+        Assertions.assertEquals(
+            List.of(Map.of("severity", "INFO", "message", "from first")),
+            first.getMessages()
+        );
+        Assertions.assertEquals(
+            List.of(Map.of("severity", "INFO", "message", "from second")),
+            second.getMessages()
+        );
+    }
+
+    /**
+     * E1: a plain {@code SELECT} can print too, because it may call a stored
+     * function that writes to {@code DBMS_OUTPUT}. The Go agent enables and
+     * drains on every statement; the Java agent used to gate both on the
+     * statement kind (BEGIN/DECLARE/CALL/EXEC), so a session whose first
+     * statement was {@code SELECT f() FROM dual} never enabled the buffer and the
+     * function's lines were lost for good.
+     */
+    @Test
+    void capturesDbmsOutputFromASelectThatCallsAPrintingFunction() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        session.printedBySqlMarker.put("PRINT_F", "from the function");
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        QueryResult result = agent.executeQuery(
+            "SELECT PRINT_F FROM DUAL", null, new ExecuteQueryOptions(10, null, 0)
+        );
+
+        Assertions.assertEquals(1, session.enableAttempts, "the SELECT must enable the buffer");
+        Assertions.assertTrue(
+            session.executedSql.contains("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;"),
+            "ENABLE must run before the SELECT, not after it"
+        );
+        Assertions.assertEquals(
+            List.of(Map.of("severity", "INFO", "message", "from the function")),
+            result.getMessages()
+        );
+        Assertions.assertTrue(
+            session.preparedSql.contains(OceanBaseOracleAgent.DBMS_OUTPUT_GET_LINE_SQL),
+            "the SELECT must drain through the GET_LINE wrapper"
+        );
+    }
+
+    /**
+     * The plain-query path must not pay more than one probe round trip: a query
+     * that printed nothing is drained once, gets no messages, and leaves the
+     * "messages" key absent rather than an empty array.
+     */
+    @Test
+    void drainsEveryStatementOnceAndKeepsPlainQueriesCheap() throws Exception {
+        DbmsOutputSession session = new DbmsOutputSession();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        QueryResult result = agent.executeQuery("SELECT 1 FROM DUAL", null, new ExecuteQueryOptions(10, null, 0));
+
+        Assertions.assertEquals(1, session.enableAttempts);
+        Assertions.assertEquals(1, session.getLineCalls, "an empty buffer costs exactly the probe");
+        Assertions.assertTrue(result.getMessages().isEmpty());
+        Assertions.assertNull(privateField(result, "messages"));
+    }
+
+    /**
+     * A data-modifying statement is captured as well: the printing function can be
+     * called from an INSERT, so gating on BEGIN/CALL/EXEC alone would lose it.
+     */
+    @Test
+    void capturesDbmsOutputFromAnInsertIntoSelect() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        session.printedBySqlMarker.put("INSERT INTO T VALUES (PRINT_F)", "from the insert");
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        QueryResult result = agent.executeQuery(
+            "INSERT INTO T VALUES (PRINT_F)", null, new ExecuteQueryOptions(10, null, 0)
+        );
+
+        Assertions.assertEquals(
+            List.of(Map.of("severity", "INFO", "message", "from the insert")),
+            result.getMessages()
+        );
+    }
+
+    /**
+     * The drain is the same GET_LINE wrapper the Go agent's helper package uses:
+     * a local VARCHAR2(32767) so an over-long line leaves the buffer before the
+     * assignment to the OUT register can fail.
+     */
+    @Test
+    void drainsThroughTheVarchar32767GetLineWrapper() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        session.buffer.add("one line");
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        agent.executeQuery("BEGIN NULL; END;", null, new ExecuteQueryOptions(10, null, 0));
+
+        Assertions.assertTrue(
+            session.preparedSql.contains(OceanBaseOracleAgent.DBMS_OUTPUT_GET_LINE_SQL),
+            "the drain must use the agent's GET_LINE wrapper"
+        );
+    }
+
+    @Test
+    void omitsTheMessagesKeyWhenDbmsOutputIsEmpty() throws Exception {
+        DbmsOutputSession session = new DbmsOutputSession();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        QueryResult result = agent.executeQuery(
+            "BEGIN DBMS_OUTPUT.DISABLE; END;", null, new ExecuteQueryOptions(10, null, 0)
+        );
+
+        Assertions.assertTrue(result.getMessages().isEmpty());
+        // JsonRpcServer serializes QueryResult fields with a plain Gson, which
+        // drops nulls; a null backing field is therefore an absent "messages" key.
+        Assertions.assertNull(privateField(result, "messages"));
+    }
+
+    @Test
+    void truncatesDbmsOutputAtTheDrainCapAndReportsIt() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        session.buffer.addAll(List.of("one", "two", "three", "four", "five"));
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        setField(agent, "dbmsOutputMaxLines", 3);
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        QueryResult result = agent.executeQuery(
+            "BEGIN PRINT_MANY; END;", null, new ExecuteQueryOptions(10, null, 0)
+        );
+
+        Assertions.assertEquals(
+            List.of(
+                Map.of("severity", "INFO", "message", "one"),
+                Map.of("severity", "INFO", "message", "two"),
+                Map.of("severity", "INFO", "message", "three"),
+                Map.of("severity", "INFO", "message", OceanBaseOracleAgent.dbmsOutputTruncatedMessage(3))
+            ),
+            result.getMessages()
+        );
+        // The probe, the three attached lines and the one line past the cap: the
+        // fourth line is what proves the buffer is bigger than 3, and it is
+        // consumed, not attached.
+        Assertions.assertEquals(1, session.getLineCalls, "batched fetch: one round trip carries the whole buffer");
+        Assertions.assertEquals(
+            1,
+            session.clearCalls,
+            "the lines behind the cap belong to this statement, not to the next one"
+        );
+        Assertions.assertTrue(session.buffer.isEmpty());
+    }
+
+    /**
+     * The Java twin of the Go agent's "exactly the bound is not truncation": a
+     * buffer of exactly {@code dbmsOutputMaxLines} lines must be reported whole,
+     * with no notice, because the drain only stops early when it actually left
+     * something behind.
+     */
+    @Test
+    void keepsABufferOfExactlyTheDrainCapUntruncated() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        for (int line = 1; line <= 3; line++) {
+            session.buffer.add("line " + line);
+        }
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        setField(agent, "dbmsOutputMaxLines", 3);
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        QueryResult result = agent.executeQuery(
+            "BEGIN PRINT_MANY; END;", null, new ExecuteQueryOptions(10, null, 0)
+        );
+
+        Assertions.assertEquals(3, result.getMessages().size());
+        Assertions.assertEquals(
+            List.of(
+                Map.of("severity", "INFO", "message", "line 1"),
+                Map.of("severity", "INFO", "message", "line 2"),
+                Map.of("severity", "INFO", "message", "line 3")
+            ),
+            result.getMessages()
+        );
+        // Probe(1) + cap(3) + the read that finds nothing left; the empty result
+        // is what proves exactly three lines were waiting.
+        Assertions.assertEquals(1, session.getLineCalls, "batched fetch: one round trip carries the whole buffer");
+        Assertions.assertEquals(0, session.clearCalls, "an exhausted buffer needs no purge");
+        Assertions.assertTrue(session.buffer.isEmpty());
+    }
+
+    /**
+     * The cap boundary at a size the fake can drive exactly: a buffer of exactly
+     * {@code dbmsOutputMaxLines} lines is reported whole with no notice, and one
+     * more line turns into the notice inside the same response -- the alignment
+     * question E2 answers. The same boundary at the real cap of 10000 is verified
+     * against a live server, where the block's payload budget also applies
+     * (see the Java line report's E2 evidence).
+     */
+    @Test
+    void reportsTheCapBoundaryExactlyAtNLineAndAtOneLinePastIt() {
+        DbmsOutputSession exact = new DbmsOutputSession();
+        for (int line = 1; line <= 5; line++) {
+            exact.buffer.add("line " + line);
+        }
+        OceanBaseOracleAgent exactAgent = new OceanBaseOracleAgent();
+        setField(exactAgent, "dbmsOutputMaxLines", 5);
+        TestSupport.setPrivateConnection(exactAgent, exact.connection());
+
+        QueryResult exactResult = exactAgent.executeQuery(
+            "BEGIN PRINT_MANY; END;", null, new ExecuteQueryOptions(10, null, 0)
+        );
+
+        Assertions.assertEquals(5, exactResult.getMessages().size(), "exactly N is not truncation");
+        Assertions.assertEquals(
+            Map.of("severity", "INFO", "message", "line 5"),
+            exactResult.getMessages().get(4)
+        );
+        Assertions.assertEquals(0, exact.clearCalls);
+
+        DbmsOutputSession over = new DbmsOutputSession();
+        for (int line = 1; line <= 6; line++) {
+            over.buffer.add("line " + line);
+        }
+        OceanBaseOracleAgent overAgent = new OceanBaseOracleAgent();
+        setField(overAgent, "dbmsOutputMaxLines", 5);
+        TestSupport.setPrivateConnection(overAgent, over.connection());
+
+        QueryResult overResult = overAgent.executeQuery(
+            "BEGIN PRINT_MANY; END;", null, new ExecuteQueryOptions(10, null, 0)
+        );
+
+        Assertions.assertEquals(6, overResult.getMessages().size(), "N attached plus the one line past the cap");
+        Assertions.assertEquals(
+            Map.of("severity", "INFO", "message", "line 5"),
+            overResult.getMessages().get(4)
+        );
+        Assertions.assertEquals(
+            Map.of("severity", "INFO", "message", OceanBaseOracleAgent.dbmsOutputTruncatedMessage(5)),
+            overResult.getMessages().get(5),
+            "the truncation notice must be the last message"
+        );
+        Assertions.assertEquals(1, over.clearCalls, "the leftovers must be purged");
+        Assertions.assertTrue(over.buffer.isEmpty());
+    }
+
+    /**
+     * The truncation notice used to be the 512th entry the shared cap allowed;
+     * that cap now has to admit the whole aligned drain plus its notice.
+     */
+    @Test
+    void theSharedMessageCapAdmitsTheAlignedDrainPlusItsNotice() {
+        QueryResult result = new QueryResult();
+        for (int index = 0; index < 10_001; index++) {
+            result.addInformationalMessage("line " + index, null);
+        }
+        Assertions.assertEquals(10_001, result.getMessages().size());
+        QueryResult overflowing = new QueryResult();
+        for (int index = 0; index < 10_002; index++) {
+            overflowing.addInformationalMessage("line " + index, null);
+        }
+        Assertions.assertEquals(10_001, overflowing.getMessages().size());
+    }
+
+    @Test
+    void reEnablesDbmsOutputAfterTheScriptDisabledIt() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        session.printedBySqlMarker.put("PRINT_AFTER", "after disable");
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        agent.executeQuery("BEGIN DBMS_OUTPUT.PUT_LINE('one'); END;", null, new ExecuteQueryOptions(10, null, 0));
+        agent.executeQuery("BEGIN DBMS_OUTPUT.DISABLE; END;", null, new ExecuteQueryOptions(10, null, 0));
+        QueryResult after = agent.executeQuery("BEGIN PRINT_AFTER; END;", null, new ExecuteQueryOptions(10, null, 0));
+
+        // The DISABLE purged the buffer, so the next statement on the same pooled
+        // connection must enable it again instead of printing into a dead buffer.
+        Assertions.assertEquals(2, session.enableAttempts, "ENABLE must run again after DISABLE");
+        Assertions.assertEquals(
+            List.of(Map.of("severity", "INFO", "message", "after disable")),
+            after.getMessages()
+        );
+    }
+
+    @Test
+    void reEnablesDbmsOutputOnlyWhenTheDisableCallIsRealCode() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        session.printedBySqlMarker.put("PRINT_AFTER", "after comments");
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        agent.executeQuery("BEGIN NULL; -- DBMS_OUTPUT.DISABLE\nEND;", null, new ExecuteQueryOptions(10, null, 0));
+        agent.executeQuery("BEGIN /* DBMS_OUTPUT.DISABLE */ NULL; END;", null, new ExecuteQueryOptions(10, null, 0));
+        QueryResult after = agent.executeQuery("BEGIN PRINT_AFTER; END;", null, new ExecuteQueryOptions(10, null, 0));
+
+        Assertions.assertEquals(1, session.enableAttempts, "a commented-out DISABLE must not reset the session");
+        Assertions.assertEquals(
+            List.of(Map.of("severity", "INFO", "message", "after comments")),
+            after.getMessages()
+        );
+    }
+
+    @Test
+    void detectsDbmsOutputDisableCallsOutsideCommentsAndLiterals() {
+        Assertions.assertTrue(OceanBaseOracleAgent.disablesDbmsOutput("BEGIN DBMS_OUTPUT.DISABLE; END;"));
+        Assertions.assertTrue(OceanBaseOracleAgent.disablesDbmsOutput("begin dbms_output . disable ; end;"));
+        Assertions.assertTrue(OceanBaseOracleAgent.disablesDbmsOutput("BEGIN \"DBMS_OUTPUT\".\"DISABLE\"; END;"));
+        Assertions.assertFalse(OceanBaseOracleAgent.disablesDbmsOutput(null));
+        Assertions.assertFalse(
+            OceanBaseOracleAgent.disablesDbmsOutput("BEGIN DBMS_OUTPUT.PUT_LINE('DBMS_OUTPUT.DISABLE'); END;")
+        );
+        Assertions.assertFalse(OceanBaseOracleAgent.disablesDbmsOutput("-- DBMS_OUTPUT.DISABLE\nBEGIN NULL; END;"));
+        Assertions.assertFalse(OceanBaseOracleAgent.disablesDbmsOutput("/* DBMS_OUTPUT.DISABLE */ BEGIN NULL; END;"));
+        Assertions.assertFalse(OceanBaseOracleAgent.disablesDbmsOutput("SELECT 'x--y' FROM T /* DBMS_OUTPUT */"));
+    }
+
+    @Test
+    void drainsTheBufferOfAFailedStatementSoTheNextStatementDoesNotInheritIt() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        session.printedBySqlMarker.put("PRINT_FAIL", "from the failed statement");
+        session.printedBySqlMarker.put("PRINT_AFTER", "from the next statement");
+        session.failOnMarker = "PRINT_FAIL";
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        Assertions.assertThrows(RuntimeException.class, () -> agent.executeQuery(
+            "BEGIN PRINT_FAIL; END;", null, new ExecuteQueryOptions(10, null, 0)
+        ));
+        Assertions.assertTrue(session.buffer.isEmpty(), "the failed statement's lines must be drained, not kept");
+
+        QueryResult next = agent.executeQuery("BEGIN PRINT_AFTER; END;", null, new ExecuteQueryOptions(10, null, 0));
+
+        Assertions.assertEquals(
+            List.of(Map.of("severity", "INFO", "message", "from the next statement")),
+            next.getMessages(),
+            "the failed statement's output must never be reported against the next statement"
+        );
+    }
+
+    @Test
+    void alignsTheDrainWithTheMessageCapAndPurgesTheLeftoverBuffer() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        for (int line = 1; line <= 600; line++) {
+            session.buffer.add("line " + line);
+        }
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        QueryResult result = agent.executeQuery(
+            "BEGIN PRINT_MANY; END;", null, new ExecuteQueryOptions(10, null, 0)
+        );
+
+        // 600 lines fit inside the aligned cap of 10000, so all of them are
+        // attached: the batch that carries them, then the read that finds the
+        // buffer empty.
+        Assertions.assertEquals(2, session.getLineCalls, "one batch plus the terminal read");
+        Assertions.assertEquals(600, result.getMessages().size(), "every line fits inside the aligned cap, so none is dropped and no truncation notice is added");
+        Assertions.assertEquals(
+            Map.of("severity", "INFO", "message", "line 600"),
+            result.getMessages().get(599)
+        );
+        // The whole buffer fit inside the aligned cap, so the terminal read found it
+        // empty: nothing was left behind and there was nothing to purge. The purge
+        // path belongs to a drain that stops on its own line bound with lines queued.
+        Assertions.assertEquals(0, session.clearCalls, "an exhausted buffer leaves no leftovers to purge");
+        Assertions.assertTrue(session.buffer.isEmpty());
+    }
+
+    @Test
+    void keepsDrainingAfterAnOversizeLineHitsTheOutBufferLimit() {
+        DbmsOutputSession session = new DbmsOutputSession();
+        String oversize = "x".repeat(5_000);
+        session.buffer.addAll(List.of("before", oversize, "after"));
+        session.oversizeLines.add(oversize);
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        QueryResult result = agent.executeQuery(
+            "BEGIN PRINT_LONG; END;", null, new ExecuteQueryOptions(10, null, 0)
+        );
+
+        Assertions.assertEquals(
+            List.of(
+                Map.of("severity", "INFO", "message", "before"),
+                Map.of("severity", "INFO", "message", "after"),
+                Map.of("severity", "INFO", "message", OceanBaseOracleAgent.DBMS_OUTPUT_OVERSIZE_LINE_MESSAGE)
+            ),
+            result.getMessages(),
+            "the lines behind an over-long line must still be captured; the batch "
+                + "reports the line it could not deliver behind the lines it did"
+        );
+        Assertions.assertEquals(0, session.clearCalls, "a dropped line does not truncate the buffer");
+    }
+
+    @Test
+    void plDebugProbeRejectsAUserWithoutDebugConnectSession() {
+        PlDebugProbeSession session = PlDebugProbeSession.fullyDebugcapable();
+        // The Go agent's real-world defect: EXECUTE on DBMS_DEBUG is granted to
+        // PUBLIC, so the dictionary lists every subroutine while the session holds
+        // no DBMS_DEBUG privilege at all.
+        session.sessionPrivileges = new ArrayList<>(List.of("CREATE SESSION"));
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        Map<String, Object> probe = agent.plDebugProbe();
+
+        assertUnsupportedExplains(probe);
+        Assertions.assertEquals(Boolean.FALSE, probe.get("debugConnectSession"));
+        Assertions.assertEquals(Boolean.TRUE, probe.get("dbmsDebug"), "dictionary visibility must stay reported");
+        String reason = String.valueOf(probe.get("reason"));
+        Assertions.assertTrue(reason.contains("DEBUG CONNECT SESSION"), reason);
+        Assertions.assertTrue(reason.contains("APP_USER"), reason);
+        Assertions.assertTrue(reason.contains("GRANT DEBUG CONNECT SESSION TO \"APP_USER\""), reason);
+        Assertions.assertTrue(reason.contains("ORA-01031"), reason);
+        // The verdict is Oracle-first, so a server that does not use this
+        // privilege has to be able to recognise the false negative.
+        Assertions.assertTrue(reason.contains("ignored"), reason);
+    }
+
+    @Test
+    void plDebugProbeAcceptsADirectGrantAsPositiveEvidence() {
+        PlDebugProbeSession session = PlDebugProbeSession.fullyDebugcapable();
+        session.sessionPrivileges = null;
+        session.userSysPrivileges = new ArrayList<>(
+            List.of("CREATE SESSION", "DEBUG CONNECT SESSION", "DEBUG ANY PROCEDURE")
+        );
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        Map<String, Object> probe = agent.plDebugProbe();
+
+        Assertions.assertEquals(Boolean.TRUE, probe.get("supported"));
+        Assertions.assertEquals(Boolean.TRUE, probe.get("debugConnectSession"));
+        Assertions.assertEquals(Boolean.TRUE, probe.get("debugAnyProcedure"));
+        Assertions.assertFalse(probe.containsKey("reason"));
+        Assertions.assertFalse(probe.containsKey("warnings"));
+    }
+
+    @Test
+    void plDebugProbeTreatsAReadableDirectGrantViewWithoutThePrivilegeAsUnknown() {
+        // USER_SYS_PRIVS holds direct grants only: a user whose DEBUG CONNECT
+        // SESSION comes from a role shows nothing there, so a miss must not be
+        // read as "granted nothing".
+        PlDebugProbeSession session = PlDebugProbeSession.fullyDebugcapable();
+        session.sessionPrivileges = null;
+        session.userSysPrivileges = new ArrayList<>(List.of("CREATE SESSION"));
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        Map<String, Object> probe = agent.plDebugProbe();
+
+        Assertions.assertEquals(Boolean.TRUE, probe.get("supported"), "a direct-grant miss must not veto");
+        Assertions.assertFalse(probe.containsKey("reason"));
+        Assertions.assertFalse(probe.containsKey("debugConnectSession"), "the privilege stays unverified");
+        String warning = String.valueOf(probe.get("warnings"));
+        Assertions.assertTrue(warning.contains("could not be verified"), warning);
+        Assertions.assertTrue(warning.contains("role"), warning);
+    }
+
+    @Test
+    void plDebugProbeWarnsWhenDebugAnyProcedureIsMissing() {
+        PlDebugProbeSession session = PlDebugProbeSession.fullyDebugcapable();
+        session.sessionPrivileges = new ArrayList<>(List.of("CREATE SESSION", "DEBUG CONNECT SESSION"));
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        Map<String, Object> probe = agent.plDebugProbe();
+
+        Assertions.assertEquals(Boolean.TRUE, probe.get("supported"), "the privilege only limits foreign objects");
+        Assertions.assertEquals(Boolean.FALSE, probe.get("debugAnyProcedure"));
+        Assertions.assertFalse(probe.containsKey("reason"));
+        String warning = String.valueOf(probe.get("warnings"));
+        Assertions.assertTrue(warning.contains("DEBUG ANY PROCEDURE"), warning);
+        Assertions.assertTrue(warning.contains("GRANT DEBUG ANY PROCEDURE TO \"APP_USER\""), warning);
+    }
+
+    @Test
+    void plDebugProbeKeepsTheDictionaryVerdictWhenThePrivilegeViewQueryThrows() {
+        PlDebugProbeSession session = PlDebugProbeSession.fullyDebugcapable();
+        // Both privilege queries raise (no view, or no right to read it): the
+        // question is unanswerable, which is not the same as "granted nothing".
+        session.sessionPrivileges = null;
+        session.userSysPrivileges = null;
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        Map<String, Object> probe = agent.plDebugProbe();
+
+        Assertions.assertEquals(Boolean.TRUE, probe.get("supported"), "an unreadable view must not veto");
+        Assertions.assertFalse(probe.containsKey("reason"));
+        Assertions.assertFalse(probe.containsKey("debugConnectSession"));
+        String warning = String.valueOf(probe.get("warnings"));
+        Assertions.assertTrue(warning.contains("could not be verified"), warning);
+        Assertions.assertTrue(warning.contains("SESSION_PRIVS"), warning);
+    }
+
+    @Test
+    void plDebugProbeRejectsAReadablePrivilegeViewThatGrantedNothing() {
+        // Oracle answers SELECT PRIVILEGE FROM SESSION_PRIVS with zero rows for a
+        // user that was never granted DEBUG CONNECT SESSION, and
+        // DBMS_DEBUG.INITIALIZE then raises ORA-01031. A successful empty answer
+        // is therefore the missing grant, not an unknown one.
+        PlDebugProbeSession withoutGrant = PlDebugProbeSession.fullyDebugcapable();
+        withoutGrant.sessionPrivileges = new ArrayList<>();
+        OceanBaseOracleAgent first = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(first, withoutGrant.connection());
+
+        Map<String, Object> emptyViewProbe = first.plDebugProbe();
+
+        assertUnsupportedExplains(emptyViewProbe);
+        Assertions.assertEquals(Boolean.FALSE, emptyViewProbe.get("debugConnectSession"));
+        String reason = String.valueOf(emptyViewProbe.get("reason"));
+        Assertions.assertTrue(reason.contains("DEBUG CONNECT SESSION"), reason);
+        Assertions.assertTrue(reason.contains("GRANT DEBUG CONNECT SESSION TO \"APP_USER\""), reason);
+        // The OceanBase escape hatch: the false negative has to be recognisable.
+        Assertions.assertTrue(reason.contains("ignored"), reason);
+    }
+
+    @Test
+    void plDebugProbeReportsMissingSubroutinesAndDbmsOutputWithAReason() {
+        PlDebugProbeSession missingSubroutines = PlDebugProbeSession.fullyDebugcapable();
+        missingSubroutines.debugProcedures.retainAll(List.of("INITIALIZE", "GET_VALUES"));
+        missingSubroutines.sessionPrivileges = new ArrayList<>(List.of("DEBUG CONNECT SESSION"));
+        OceanBaseOracleAgent first = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(first, missingSubroutines.connection());
+
+        Map<String, Object> missingProbe = first.plDebugProbe();
+
+        assertUnsupportedExplains(missingProbe);
+        Assertions.assertTrue(
+            String.valueOf(missingProbe.get("reason")).contains("missing required subroutines"),
+            String.valueOf(missingProbe.get("reason"))
+        );
+        Assertions.assertEquals(
+            List.of("ATTACH_SESSION", "DEBUG_ON", "DEBUG_OFF", "SET_TIMEOUT_BEHAVIOUR", "SET_BREAKPOINT", "CONTINUE"),
+            missingProbe.get("missingProcedures")
+        );
+
+        PlDebugProbeSession invisibleOutput = PlDebugProbeSession.fullyDebugcapable();
+        invisibleOutput.outputProcedures.clear();
+        invisibleOutput.sessionPrivileges = new ArrayList<>(List.of("DEBUG CONNECT SESSION", "DEBUG ANY PROCEDURE"));
+        OceanBaseOracleAgent second = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(second, invisibleOutput.connection());
+
+        Map<String, Object> outputProbe = second.plDebugProbe();
+
+        assertUnsupportedExplains(outputProbe);
+        Assertions.assertEquals(Boolean.FALSE, outputProbe.get("dbmsOutput"));
+        String outputReason = String.valueOf(outputProbe.get("reason"));
+        Assertions.assertTrue(outputReason.contains("DBMS_OUTPUT"), outputReason);
+        Assertions.assertTrue(outputReason.contains("GRANT EXECUTE ON DBMS_OUTPUT TO \"APP_USER\""), outputReason);
+    }
+
+    private static void assertUnsupportedExplains(Map<String, Object> probe) {
+        Assertions.assertEquals(Boolean.FALSE, probe.get("supported"));
+        Object reason = probe.get("reason");
+        Assertions.assertNotNull(reason, "every supported=false verdict must carry a reason");
+        Assertions.assertFalse(String.valueOf(reason).isBlank(), "the reason must be actionable");
+    }
+
+    @Test
+    void plDebugProbeWarnsAboutMissingGetValuesWithoutDisablingTheDebugger() {
+        PlDebugProbeSession session = PlDebugProbeSession.fullyDebugcapable();
+        session.debugProcedures.remove("GET_VALUES");
+        session.sessionPrivileges = new ArrayList<>(List.of("DEBUG CONNECT SESSION", "DEBUG ANY PROCEDURE"));
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, session.connection());
+
+        Map<String, Object> probe = agent.plDebugProbe();
+
+        Assertions.assertEquals(Boolean.TRUE, probe.get("supported"));
+        Assertions.assertEquals(Boolean.FALSE, probe.get("variablesSupported"));
+        Assertions.assertFalse(probe.containsKey("reason"), "a degraded feature is not an unsupported server");
+        Assertions.assertTrue(probe.get("warnings").toString().contains("GET_VALUES"));
     }
 
     @Test
@@ -1279,6 +1984,266 @@ class OceanBaseOracleAgentTest {
         Assertions.assertTrue(sql.get(3).contains("ALL_TAB_SUBPARTITIONS"));
     }
 
+    /**
+     * Fake OceanBase session answering the two DBMS_OUTPUT calls the agent uses.
+     * A statement appends the lines whose marker its SQL text contains, and
+     * {@code DBMS_OUTPUT.GET_LINE} hands the buffer back one line at a time and
+     * then reports {@code status = 1}, exactly like Oracle's buffer.
+     */
+    private static final class DbmsOutputSession {
+        /** The statement that purges the buffer, as the agent writes it. */
+        static final String CLEAR_SQL = "BEGIN DBMS_OUTPUT.DISABLE; DBMS_OUTPUT.ENABLE(1000000); END;";
+
+        final List<String> executedSql = new ArrayList<>();
+        /** Every {@code prepareCall} text, so the drain's own call can be asserted. */
+        final List<String> preparedSql = new ArrayList<>();
+        /** Lines scripted per statement, keyed by a marker inside its SQL text. */
+        final Map<String, String> printedBySqlMarker = new java.util.LinkedHashMap<>();
+        /** Lines already buffered, consumed by GET_LINE. */
+        final List<String> buffer = new ArrayList<>();
+        /** Lines the OUT buffer cannot hold: the read fails with ORA-06502. */
+        final List<String> oversizeLines = new ArrayList<>();
+        final List<Integer> networkTimeouts = new ArrayList<>();
+        /** Statement text that must fail, after it has printed its lines. */
+        String failOnMarker;
+        boolean enableFails;
+        int enableAttempts;
+        int getLineCalls;
+        int clearCalls;
+        /** Lines the last batched fetch returned, as the real block's payload would. */
+        List<String> currentBatch = new ArrayList<>();
+        /** The line bound the drain passed as {@code :1}. */
+        int lastBatchLimit;
+        /** True while the last batch met a line the block cannot deliver. */
+        boolean droppedBatch;
+        /** True while the last batch stopped on the payload budget, not on an empty buffer. */
+        boolean leftoverBatch;
+        /** True when the last batch's read found the session buffer empty. */
+        boolean bufferExhausted;
+        /** Set when GET_LINE must report status 1 because a script disabled the buffer. */
+        boolean bufferDisabled;
+
+        Connection connection() {
+            Statement statement = proxy(Statement.class, (method, args) -> {
+                switch (method.getName()) {
+                    case "execute":
+                        String statementSql = String.valueOf(args[0]);
+                        executedSql.add(statementSql);
+                        if (CLEAR_SQL.equals(statementSql)) {
+                            clearCalls += 1;
+                            buffer.clear();
+                        } else if (statementSql.contains("DBMS_OUTPUT.ENABLE")) {
+                            enableAttempts += 1;
+                            if (enableFails) {
+                                throw new SQLException("DBMS_OUTPUT is not available", "42000", 1044);
+                            }
+                        } else {
+                            for (Map.Entry<String, String> printed : printedBySqlMarker.entrySet()) {
+                                if (statementSql.contains(printed.getKey())) {
+                                    buffer.add(printed.getValue());
+                                    break;
+                                }
+                            }
+                            if (failOnMarker != null && statementSql.contains(failOnMarker)) {
+                                throw new SQLException("ORA-00933: SQL command not properly ended", "42000", 933);
+                            }
+                        }
+                        return false;
+                    case "getUpdateCount":
+                        return 7;
+                    case "setQueryTimeout":
+                    case "setMaxRows":
+                    case "setFetchSize":
+                    case "close":
+                        return null;
+                    default:
+                        return defaultValue(method.getReturnType());
+                }
+            });
+            CallableStatement call = proxy(CallableStatement.class, (method, args) -> {
+                switch (method.getName()) {
+                    case "registerOutParameter":
+                    case "close":
+                        return null;
+                    case "setInt":
+                        // :1 is the batch's line bound; the fake serves up to it.
+                        if (((Number) args[0]).intValue() == 1) {
+                            lastBatchLimit = ((Number) args[1]).intValue();
+                        }
+                        return null;
+                    case "execute":
+                        getLineCalls += 1;
+                        currentBatch = new ArrayList<>();
+                        droppedBatch = false;
+                        leftoverBatch = false;
+                        // The block reads up to :1 lines: it stops when the line
+                        // bound is reached or the buffer reports itself empty, and
+                        // whatever is left is reported through :5. The caller
+                        // passes :1 one line past its own bound, which is what
+                        // makes the truncation decision possible.
+                        int lineBound = lastBatchLimit > 0 ? lastBatchLimit : Integer.MAX_VALUE;
+                        int payloadBytes = 0;
+                        if (!bufferDisabled) {
+                            while (!buffer.isEmpty() && currentBatch.size() < lineBound) {
+                                if (!currentBatch.isEmpty()
+                                    && payloadBytes >= OceanBaseOracleAgent.DBMS_OUTPUT_BATCH_BYTES) {
+                                    leftoverBatch = true;
+                                    break;
+                                }
+                                String next = buffer.remove(0);
+                                if (oversizeLines.contains(next)) {
+                                    // A line the OUT register cannot hold is
+                                    // dropped by the block and reported through :6.
+                                    droppedBatch = true;
+                                    continue;
+                                }
+                                currentBatch.add(next);
+                                payloadBytes += next.length() + 1;
+                            }
+                            leftoverBatch = leftoverBatch || !buffer.isEmpty();
+                        }
+                        // The block discovers "the buffer is empty" on the read
+                        // that follows the last line, which is what this call was:
+                        // the fake only reports it when nothing is left.
+                        bufferExhausted = buffer.isEmpty() || bufferDisabled;
+                        return false;
+                    case "getString":
+                        if (((Number) args[0]).intValue() == 6) {
+                            return droppedBatch
+                                ? "1" + OceanBaseOracleAgent.DBMS_OUTPUT_DROP_SEPARATOR
+                                : "";
+                        }
+                        StringBuilder payload = new StringBuilder();
+                        for (String line : currentBatch) {
+                            payload.append(line).append('\n');
+                        }
+                        return payload.toString();
+                    case "getInt":
+                        int parameter = ((Number) args[0]).intValue();
+                        if (parameter == 4) {
+                            // :4 is "the session buffer reported itself empty":
+                            // Oracle reports that on the read AFTER the last line.
+                            return bufferExhausted ? 1 : 0;
+                        }
+                        // :5 says a line was left because the payload budget or the
+                        // line bound stopped the batch.
+                        return leftoverBatch ? 1 : 0;
+                    default:
+                        return defaultValue(method.getReturnType());
+                }
+            });
+            return proxy(Connection.class, (method, args) -> {
+                switch (method.getName()) {
+                    case "createStatement":
+                        return statement;
+                    case "prepareCall":
+                        preparedSql.add(String.valueOf(args[0]));
+                        return call;
+                    case "getNetworkTimeout":
+                        return 1_234;
+                    case "setNetworkTimeout":
+                        networkTimeouts.add(((Number) args[1]).intValue());
+                        return null;
+                    case "isClosed":
+                        return false;
+                    default:
+                        return defaultValue(method.getReturnType());
+                }
+            });
+        }
+    }
+
+    /**
+     * Fake session answering the dictionary, privilege and user queries the
+     * PL/SQL capability probe runs. Privilege lists model the rows of a
+     * privilege view; a null list makes that view unreadable.
+     */
+    private static final class PlDebugProbeSession {
+        final List<String> debugProcedures = new ArrayList<>();
+        final List<String> outputProcedures = new ArrayList<>(List.of("ENABLE", "GET_LINE", "PUT_LINE"));
+        /** Rows of SESSION_PRIVS; null makes the view fail. */
+        List<String> sessionPrivileges = new ArrayList<>(List.of("CREATE SESSION", "DEBUG CONNECT SESSION"));
+        /** Rows of USER_SYS_PRIVS; null makes the view fail. */
+        List<String> userSysPrivileges = new ArrayList<>(List.of("CREATE SESSION", "DEBUG CONNECT SESSION"));
+        String user = "APP_USER";
+
+        static PlDebugProbeSession fullyDebugcapable() {
+            PlDebugProbeSession session = new PlDebugProbeSession();
+            session.debugProcedures.addAll(List.of(
+                "INITIALIZE", "ATTACH_SESSION", "DEBUG_ON", "DEBUG_OFF",
+                "SET_TIMEOUT_BEHAVIOUR", "SET_BREAKPOINT", "CONTINUE", "GET_VALUES"
+            ));
+            return session;
+        }
+
+        Connection connection() {
+            return proxy(Connection.class, (method, args) -> {
+                if ("prepareStatement".equals(method.getName())) {
+                    return statement(String.valueOf(args[0]));
+                }
+                if ("isClosed".equals(method.getName())) {
+                    return false;
+                }
+                return defaultValue(method.getReturnType());
+            });
+        }
+
+        private PreparedStatement statement(String statementSql) {
+            String[] bound = {null};
+            return proxy(PreparedStatement.class, (method, args) -> {
+                switch (method.getName()) {
+                    case "setString":
+                        bound[0] = String.valueOf(args[1]);
+                        return null;
+                    case "executeQuery":
+                        return query(statementSql, bound[0]);
+                    case "close":
+                        return null;
+                    default:
+                        return defaultValue(method.getReturnType());
+                }
+            });
+        }
+
+        private ResultSet query(String statementSql, String boundValue) throws SQLException {
+            String normalized = statementSql.toUpperCase(Locale.ROOT);
+            if (normalized.contains("ALL_PROCEDURES")) {
+                List<String> procedures = "DBMS_DEBUG".equalsIgnoreCase(boundValue)
+                    ? debugProcedures
+                    : outputProcedures;
+                return resultSet(new String[]{"PROCEDURE_NAME"}, rowsOf(procedures));
+            }
+            if (normalized.contains("ALL_OBJECTS")) {
+                return resultSet(new String[]{"COUNT(*)"}, new Object[][]{{0}});
+            }
+            if (normalized.contains("SESSION_PRIVS")) {
+                return rowsOfPrivileges(sessionPrivileges);
+            }
+            if (normalized.contains("USER_SYS_PRIVS")) {
+                return rowsOfPrivileges(userSysPrivileges);
+            }
+            if (normalized.contains("USER FROM DUAL")) {
+                return resultSet(new String[]{"USER"}, new Object[][]{{user}});
+            }
+            throw new AssertionError("unexpected probe SQL: " + statementSql);
+        }
+
+        private static ResultSet rowsOfPrivileges(List<String> privileges) throws SQLException {
+            if (privileges == null) {
+                throw new SQLException("privilege view unavailable");
+            }
+            return resultSet(new String[]{"PRIVILEGE"}, rowsOf(privileges));
+        }
+    }
+
+    private static Object[][] rowsOf(List<String> values) {
+        Object[][] rows = new Object[values.size()][];
+        for (int index = 0; index < values.size(); index++) {
+            rows[index] = new Object[]{values.get(index)};
+        }
+        return rows;
+    }
+
     private static ResultSet columnResultSet(Object[][] rows) {
         return resultSet(
             new String[]{
@@ -1801,6 +2766,12 @@ class OceanBaseOracleAgentTest {
         }
     }
 
+    private static Object privateField(Object target, String name) throws ReflectiveOperationException {
+        var field = target.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
+    }
+
     private static <T> T proxy(Class<T> type, MethodHandler handler) {
         InvocationHandler invocationHandler = new InvocationHandler() {
             @Override
@@ -1827,3 +2798,16 @@ class OceanBaseOracleAgentTest {
         Object handle(Method method, Object[] args) throws Throwable;
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -8148,6 +8148,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "결과 그리드에 포커스 시 적용",
     shortcutScopeHintSearch: "검색 필드에 포커스 시 적용",
     shortcutScopeHintSidebar: "사이드바에 포커스 시 적용",
+    shortcutScopeDebug: "PL/SQL 디버거",
+    shortcutScopeHintDebug: "디버거가 활성 탭일 때 적용",
     shortcutGroupCount: "{count}개",
     shortcutGroupCollapse: "그룹 접기",
     shortcutGroupExpand: "그룹 펼치기",

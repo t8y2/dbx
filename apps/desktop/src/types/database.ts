@@ -2176,7 +2176,8 @@ export interface QueryTab {
     | "dolt-version-control"
     | "plugin-workbench"
     | "plugin-filesystem"
-    | "database-search";
+    | "database-search"
+    | "debug";
   pluginWorkbench?: {
     /** Host command that created this tab; distinct commands can share a workbench. */
     commandId?: string;

@@ -429,11 +429,43 @@ public final class JsonRpcServer {
         if (AgentProtocol.METHOD_PL_DEBUG_STEP_OUT.equals(method)) {
             return agent.plDebugStepOut(params.get("debugId").getAsString());
         }
+        if (AgentProtocol.METHOD_PL_DEBUG_RESUME_IGNORE_BREAKPOINTS.equals(method)) {
+            return agent.plDebugResumeIgnoreBreakpoints(params.get("debugId").getAsString());
+        }
         if (AgentProtocol.METHOD_PL_DEBUG_ABORT.equals(method)) {
             return agent.plDebugAbort(params.get("debugId").getAsString());
         }
         if (AgentProtocol.METHOD_PL_DEBUG_GET_VARIABLES.equals(method)) {
-            return agent.plDebugGetVariables(params.get("debugId").getAsString());
+            return agent.plDebugGetVariables(
+                params.get("debugId").getAsString(),
+                intOrDefault(params, "frame", 0)
+            );
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_SET_VALUE.equals(method)) {
+            String name = stringOrNull(params, "name");
+            if (name == null || name.trim().isEmpty()) {
+                throw new IllegalArgumentException("variable name is required");
+            }
+            return agent.plDebugSetValue(
+                params.get("debugId").getAsString(),
+                name,
+                intOrDefault(params, "frame", 0),
+                intOrDefault(params, "index", 0),
+                stringOrNull(params, "value")
+            );
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_SET_EXCEPTION_BREAKPOINT.equals(method)) {
+            return agent.plDebugSetExceptionBreakpoint(
+                params.get("debugId").getAsString(),
+                booleanOrDefault(params, "enabled", false)
+            );
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_SET_BREAKPOINT_ENABLED.equals(method)) {
+            return agent.plDebugSetBreakpointEnabled(
+                params.get("debugId").getAsString(),
+                intOrDefault(params, "breakpointNumber", 0),
+                booleanOrDefault(params, "enabled", false)
+            );
         }
         if (AgentProtocol.METHOD_PL_DEBUG_GET_STACK.equals(method)) {
             return agent.plDebugGetStack(params.get("debugId").getAsString());

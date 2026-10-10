@@ -37,10 +37,13 @@ import com.dbx.agent.SpatialColumn;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 
+import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
+import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -54,15 +57,139 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
 
 public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     private static final long MICROS_PER_SECOND = 1_000_000L;
     private static final long UNLIMITED_QUERY_TIMEOUT_MICROS = 3_216_672_000_000_000L;
+    private static final int DBMS_OUTPUT_ENABLE_TIMEOUT_SECS = 5;
+    private static final int DBMS_OUTPUT_ENABLE_NETWORK_TIMEOUT_MILLIS = 5_000;
+    /** Message cap enforced by {@code QueryResult.addInformationalMessage}. */
+    private static final int DBMS_OUTPUT_MAX_MESSAGES = 10001;
+    /**
+     * Caps a single drain, aligned with the Go agent's {@code dbmsOutputMaxLines}
+     * (10000): a pathological buffer must not turn into an unbounded number of
+     * round trips. Java reads a line per round trip, so the cap is also the
+     * round-trip budget of one statement's output. One line past the cap is still
+     * read, because that is what proves the buffer is bigger than it, and exactly
+     * {@code DBMS_OUTPUT_MAX_LINES} lines therefore carry no truncation notice.
+     */
+    private static final int DBMS_OUTPUT_MAX_LINES = 10000;
+    /**
+     * Largest line a batch may carry. The 32767-byte row limit is the server's
+     * ceiling; the OUT register is declared with it, so a line up to this size is
+     * the largest one that can travel (the go-ora path measured 8191 bytes).
+     */
+    static final int DBMS_OUTPUT_MAX_LINE_CHARS = 32767;
+    /** Lines one batched fetch may collect, mirroring the Go agent's batch size. */
+    static final int DBMS_OUTPUT_BATCH_LINES = 512;
+    /**
+     * Payload budget of one batch, well below the register's own ceiling
+     * ({@link #DBMS_OUTPUT_BATCH_CEILING}). A batch stops needing more room once
+     * the payload passes this mark, so a payload is at most this plus one line
+     * size -- which is what keeps the assignment to the register inside its
+     * declared 32767 bytes for every line the block is willing to deliver.
+     */
+    static final int DBMS_OUTPUT_BATCH_BYTES = 16000;
+    /**
+     * Hard ceiling for one payload: the register's declared size. The block reads
+     * at least one line per call, so a line can push the payload past
+     * {@link #DBMS_OUTPUT_BATCH_BYTES}; this is the bound that must never be
+     * crossed, because crossing it fails the assignment after the lines have left
+     * the session buffer and loses the whole batch.
+     */
+    static final int DBMS_OUTPUT_BATCH_CEILING = DBMS_OUTPUT_MAX_LINE_CHARS;
+    /**
+     * Separator of the "these lines were dropped" list the batch returns: one
+     * 1-based position per undeliverable line, so the notice can be put back where
+     * the line was instead of at the end of the batch.
+     */
+    static final char DBMS_OUTPUT_DROP_SEPARATOR = '|';
+    private static final String DBMS_OUTPUT_ENABLE_SQL = "BEGIN DBMS_OUTPUT.ENABLE(1000000); END;";
+    /**
+     * Discards whatever a truncated drain left in the session buffer. Oracle's
+     * DISABLE purges the buffer and ENABLE turns it back on with the size this
+     * agent asks for, so leftovers cannot be reported against the next
+     * statement on the same pooled connection.
+     */
+    private static final String DBMS_OUTPUT_CLEAR_SQL = "BEGIN DBMS_OUTPUT.DISABLE; DBMS_OUTPUT.ENABLE(1000000); END;";
+    /**
+     * Reads one whole batch of lines through a local {@code VARCHAR2(32767)}.
+     * Oracle documents that actual parameter size as the one that avoids
+     * {@code ORA-06502} for any line up to the 32767 byte line limit, so the
+     * client OUT buffer only has to hold a line that really is that long.
+     *
+     * <p>The block returns every line it took out of the session buffer inside
+     * {@code :2} -- {@code CHR(10)} separated, with a trailing separator -- so one
+     * round trip carries up to {@link #DBMS_OUTPUT_BATCH_LINES} lines instead of
+     * one. {@code :1} is the caller's line bound, and it is the block's <em>only</em>
+     * IN bind: the driver numbers PL/SQL parameters by occurrence, so a second IN
+     * placeholder after the loop would shift every OUT register.
+     *
+     * <p>Nothing is ever "taken but not delivered": the block stops needing more
+     * room once the payload passes {@link #DBMS_OUTPUT_BATCH_BYTES}, and a line
+     * whose size could overflow the register ends the batch before it is read
+     * ({@code :4}). A line the register never could hold is dropped on purpose and
+     * counted in {@code :5} rather than failing the whole batch.
+     *
+     * <p>{@code :3} is the status of the last GET_LINE ({@code 1} once the session
+     * buffer is empty, the way a program that disabled the buffer also reports
+     * it); {@code :4} tells the drain that more lines are waiting.
+     */
+    static final String DBMS_OUTPUT_GET_LINE_SQL =
+        "DECLARE l_line VARCHAR2(32767); l_status INTEGER := 0; l_done INTEGER := 0; "
+            + "l_payload VARCHAR2(32767); l_count INTEGER := 0; l_leftover INTEGER := 0; "
+            + "l_drops VARCHAR2(4000); BEGIN "
+            + "WHILE l_done = 0 AND l_leftover = 0 AND l_count < ? LOOP "
+            + "IF l_count > 0 AND LENGTHB(l_payload) >= " + DBMS_OUTPUT_BATCH_BYTES + " THEN "
+            + "l_leftover := 1; EXIT; END IF; "
+            + "BEGIN "
+            + "DBMS_OUTPUT.GET_LINE(l_line, l_status); "
+            + "IF l_status <> 0 THEN l_done := 1; "
+            + "ELSIF l_line IS NULL OR LENGTHB(l_line) <= " + DBMS_OUTPUT_MAX_LINE_CHARS + " THEN "
+            + "l_count := l_count + 1; "
+            + "l_payload := l_payload || l_line || CHR(10); "
+            + "ELSE l_drops := l_drops || (l_count + 1) || '" + DBMS_OUTPUT_DROP_SEPARATOR + "'; "
+            + "END IF; "
+            + "EXCEPTION WHEN OTHERS THEN "
+            + "l_drops := l_drops || (l_count + 1) || '" + DBMS_OUTPUT_DROP_SEPARATOR + "'; "
+            + "END; END LOOP; "
+            + "IF l_done = 0 AND l_count >= ? THEN l_leftover := 1; END IF; "
+            + "? := l_payload; ? := l_done; ? := l_leftover; ? := l_drops; END;";    /** Reported once per drain when a line is too long for the OUT buffer. */
+    static final String DBMS_OUTPUT_OVERSIZE_LINE_MESSAGE =
+        "DBMS_OUTPUT line dropped: it is longer than the driver's output buffer";
+    /**
+     * Recognises a statement that turns {@code DBMS_OUTPUT} off, quoted or not.
+     * Matched against the comment-stripped text so a commented-out call cannot
+     * reset the per-connection state.
+     */
+    private static final Pattern DBMS_OUTPUT_DISABLE_STATEMENT = Pattern.compile(
+        "\"?DBMS_OUTPUT\"?\\s*\\.\\s*\"?DISABLE\"?(?![\\p{Alnum}_$])",
+        Pattern.CASE_INSENSITIVE | Pattern.DOTALL
+    );
+    /** DEBUG CONNECT SESSION, the grant DBMS_DEBUG.INITIALIZE requires. */
+    private static final String DEBUG_CONNECT_SESSION = "DEBUG CONNECT SESSION";
+    /** DEBUG ANY PROCEDURE, the grant that allows debugging foreign objects. */
+    private static final String DEBUG_ANY_PROCEDURE = "DEBUG ANY PROCEDURE";
+    /** Session system privileges; covers both DBMS_DEBUG grants. */
+    private static final String SESSION_PRIVILEGES_SQL = "SELECT PRIVILEGE FROM SESSION_PRIVS";
+    /** Fallback privilege view for servers that expose no SESSION_PRIVS. */
+    private static final String USER_SYS_PRIVILEGES_SQL = "SELECT PRIVILEGE FROM USER_SYS_PRIVS";
+    /** The connected account, quoted into the GRANT statements a reason suggests. */
+    private static final String SESSION_USER_SQL = "SELECT USER FROM DUAL";
+    /** Driver connection classes used to key lazy DBMS_OUTPUT setup by physical session. */
+    private static final List<String> PHYSICAL_CONNECTION_CLASS_NAMES = List.of(
+        "com.oceanbase.jdbc.OceanBaseConnection",
+        "com.oceanbase.jdbc.ConnectionImpl"
+    );
+    private static final Logger LOGGER = Logger.getLogger(OceanBaseOracleAgent.class.getName());
     private static final String COMPATIBLE_OJDBC_VERSION = "compatibleOjdbcVersion";
     private static final String DEFAULT_COMPATIBLE_OJDBC_VERSION = "compatibleOjdbcVersion=8";
     private static final Set<String> SYSTEM_SCHEMAS = Set.of(
@@ -77,6 +204,21 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     private boolean queryTimeoutChanged;
     private final OceanBaseLobValues lobValues = new OceanBaseLobValues();
     private boolean deferCharacterLobs;
+    /**
+     * Physical sessions that already ran {@code DBMS_OUTPUT.ENABLE}. Keyed by the
+     * unwrapped driver connection so a pooled proxy shared by several requests
+     * enables the buffer exactly once.
+     */
+    private final Map<Object, Boolean> dbmsOutputInitializedConnections =
+        Collections.synchronizedMap(new WeakHashMap<>());
+    /**
+     * Cleared after the first DBMS_OUTPUT.ENABLE failure so a server without the
+     * package is not probed again on every statement. Server output is optional:
+     * its absence must never affect query results.
+     */
+    private volatile boolean dbmsOutputInitializationSupported = true;
+    /** Per-request drain cap; overridable in tests to exercise truncation cheaply. */
+    private int dbmsOutputMaxLines = DBMS_OUTPUT_MAX_LINES;
     /** Active PL/SQL debug sessions keyed by the DBMS_DEBUG debug id. */
     private final Map<String, PlDebugSession> plDebugSessions = new ConcurrentHashMap<>();
     /** Runs debuggee programs; debugging a stored program blocks that thread by design. */
@@ -122,7 +264,30 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         var lobCheckpoint = lobValues.checkpoint();
         try (QueryTiming timing = QueryTiming.begin()) {
             prepareLobExecution(sql, options.getDeferLobs());
-            QueryResult result = super.executeQuery(sql, schema, options);
+            boolean disablesOutput = disablesDbmsOutput(sql);
+            initializeDbmsOutputIfNeeded();
+            QueryResult result;
+            try {
+                result = super.executeQuery(sql, schema, options);
+            } catch (RuntimeException | Error failure) {
+                // The statement failed, so its lines have no result left to be
+                // attached to. Draining them here, and dropping them, is what
+                // stops them from being reported as another statement's output:
+                // the next captured statement runs on the same pooled session and
+                // would otherwise inherit this statement's buffer.
+                discardDbmsOutputMessages();
+                if (disablesOutput) {
+                    forgetDbmsOutputSession();
+                }
+                throw failure;
+            }
+            attachDbmsOutputMessages(result);
+            if (disablesOutput) {
+                // Only now: the statement's own DISABLE purges the buffer, and
+                // forgetting earlier would skip draining the lines it printed
+                // before disabling.
+                forgetDbmsOutputSession();
+            }
             var marked = OceanBaseLobValues.mark(result.getColumns(), result.getColumn_types(), result.getRows());
             if (marked != null) {
                 var spatialColumns = remapLobSpatialColumns(result.getSpatial_columns(), marked.columns());
@@ -143,12 +308,405 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         }
     }
 
+    /**
+     * Enables {@code DBMS_OUTPUT} once per physical session, before the statement
+     * that may print runs. Every failure is swallowed and recorded: capturing
+     * server output is best effort and must never break a query.
+     *
+     * <p>Every statement runs through here, exactly as in the Go agent: a plain
+     * query can print too, because a {@code SELECT} may call a stored function
+     * that writes to the buffer. Gating the enable on BEGIN/DECLARE/CALL/EXEC was
+     * what lost that output for good (the statement saw a disabled buffer, and
+     * Oracle discards output written while the buffer is off). The gate is not
+     * replaced by a per-statement {@code ENABLE} -- the buffer is still enabled
+     * once per physical session -- so a statement only pays a round trip the
+     * first time it runs on a connection.
+     *
+     * <p>A statement that turns the buffer off is handled by the caller after it
+     * ran: see {@link #forgetDbmsOutputSession()}.
+     */
+    private void initializeDbmsOutputIfNeeded() {
+        if (!dbmsOutputInitializationSupported) {
+            return;
+        }
+        Connection connection = requireConnected();
+        Object physicalConnection = physicalConnectionIdentity(connection);
+        synchronized (dbmsOutputInitializedConnections) {
+            if (dbmsOutputInitializedConnections.containsKey(physicalConnection)) {
+                return;
+            }
+            // Mark before attempting: a retry on the next statement would block
+            // again on the same server that just refused the call.
+            dbmsOutputInitializedConnections.put(physicalConnection, Boolean.TRUE);
+        }
+        try {
+            enableDbmsOutput(connection);
+        } catch (Exception | AbstractMethodError error) {
+            dbmsOutputInitializationSupported = false;
+            LOGGER.log(Level.FINE, "DBMS_OUTPUT.ENABLE failed; server output will not be captured", error);
+        }
+    }
+
+    /**
+     * Forgets that the current physical session ran {@code DBMS_OUTPUT.ENABLE},
+     * so the next statement enables the buffer again. Without it a
+     * {@code DBMS_OUTPUT.DISABLE} statement -- which Oracle purges the buffer for
+     * -- would leave every later statement on that pooled connection printing
+     * into a disabled buffer, losing its output permanently.
+     */
+    private void forgetDbmsOutputSession() {
+        Object physicalConnection = physicalConnectionIdentity(requireConnected());
+        synchronized (dbmsOutputInitializedConnections) {
+            dbmsOutputInitializedConnections.remove(physicalConnection);
+        }
+    }
+
+    /**
+     * Whether the statement turns {@code DBMS_OUTPUT} off. SQL comments and
+     * string-literal contents are stripped first, so neither a commented-out call
+     * nor a string that merely mentions the call can reset the per-connection
+     * state, and the comparison is case-insensitive because PL/SQL keywords are.
+     * A call hidden in dynamic SQL is not detected; the cost of that miss is one
+     * re-enabled buffer, never lost output on the happy path.
+     */
+    static boolean disablesDbmsOutput(String sql) {
+        return sql != null && DBMS_OUTPUT_DISABLE_STATEMENT.matcher(stripSqlCommentsAndLiterals(sql)).find();
+    }
+
+    /**
+     * Removes {@code --} line comments and block comments and blanks out the
+     * contents of string literals, so what is left is the code the server would
+     * compile: a marker in a comment or in a literal is not a call. An
+     * unterminated comment swallows the rest of the text, exactly as the server
+     * parses it.
+     */
+    static String stripSqlCommentsAndLiterals(String sql) {
+        StringBuilder stripped = new StringBuilder(sql.length());
+        int index = 0;
+        while (index < sql.length()) {
+            char current = sql.charAt(index);
+            if (current == '\'') {
+                int literalEnd = skipStringLiteral(sql, index);
+                stripped.append("''");
+                index = literalEnd;
+            } else if (current == '-' && sql.startsWith("--", index)) {
+                int lineEnd = sql.indexOf('\n', index + 2);
+                index = lineEnd < 0 ? sql.length() : lineEnd + 1;
+                stripped.append(' ');
+            } else if (current == '/' && sql.startsWith("/*", index)) {
+                int commentEnd = sql.indexOf("*/", index + 2);
+                index = commentEnd < 0 ? sql.length() : commentEnd + 2;
+                stripped.append(' ');
+            } else {
+                stripped.append(current);
+                index++;
+            }
+        }
+        return stripped.toString();
+    }
+
+    /** Index just past the string literal that starts at {@code start}. */
+    private static int skipStringLiteral(String sql, int start) {
+        int index = start + 1;
+        while (index < sql.length()) {
+            if (sql.charAt(index) != '\'') {
+                index++;
+                continue;
+            }
+            if (index + 1 < sql.length() && sql.charAt(index + 1) == '\'') {
+                index += 2;
+                continue;
+            }
+            return index + 1;
+        }
+        return sql.length();
+    }
+
+    private static void enableDbmsOutput(Connection connection) throws SQLException {
+        Integer originalNetworkTimeout = applyDbmsOutputNetworkTimeout(connection);
+        SQLException setupError = null;
+        try (Statement statement = connection.createStatement()) {
+            statement.setQueryTimeout(DBMS_OUTPUT_ENABLE_TIMEOUT_SECS);
+            statement.execute(DBMS_OUTPUT_ENABLE_SQL);
+        } catch (SQLException error) {
+            setupError = error;
+        }
+
+        if (originalNetworkTimeout != null && (setupError == null || !isTimeoutError(setupError))) {
+            connection.setNetworkTimeout(Runnable::run, originalNetworkTimeout);
+        }
+        if (setupError != null) {
+            throw setupError;
+        }
+    }
+
+    /**
+     * Lines of one drain plus whether the buffer outgrew what the response can
+     * carry.
+     */
+    private static final class DbmsOutputDrain {
+        final List<String> lines;
+        final boolean truncated;
+
+        DbmsOutputDrain(List<String> lines, boolean truncated) {
+            this.lines = lines;
+            this.truncated = truncated;
+        }
+    }
+
+    private void attachDbmsOutputMessages(QueryResult result) {
+        if (!dbmsOutputInitializationSupported || !isDbmsOutputInitialized(requireConnected())) {
+            return;
+        }
+        DbmsOutputDrain drain = drainDbmsOutputLines();
+        // QueryResult.addInformationalMessage keeps at most 10001 entries, so one
+        // slot is reserved for the truncation notice: a program that prints more
+        // than the cap must still say so. The notice itself is an informational
+        // message and would be dropped by the shared cap if the drain filled it.
+        int attachLimit = Math.min(dbmsOutputMaxLines, DBMS_OUTPUT_MAX_MESSAGES - 1);
+        boolean truncated = drain.truncated || drain.lines.size() > attachLimit;
+        int attachCount = Math.min(drain.lines.size(), attachLimit);
+        for (int index = 0; index < attachCount; index++) {
+            result.addInformationalMessage(drain.lines.get(index), null);
+        }
+        if (truncated) {
+            result.addInformationalMessage(dbmsOutputTruncatedMessage(attachCount), null);
+        }
+    }
+
+    /**
+     * Drains and drops the buffer of a statement that produced no result. Only
+     * called on a failure path, and never allowed to surface: the statement's own
+     * error is the one the caller must see.
+     */
+    private void discardDbmsOutputMessages() {
+        try {
+            if (dbmsOutputInitializationSupported && isDbmsOutputInitialized(requireConnected())) {
+                drainDbmsOutputLines();
+            }
+        } catch (Exception | AbstractMethodError error) {
+            LOGGER.log(Level.FINE, "DBMS_OUTPUT drain after a failed statement failed; buffered output was dropped", error);
+        }
+    }
+
+    /**
+     * Drains the buffer of the statement that just ran, one <em>batch</em> of
+     * lines per round trip ({@link #DBMS_OUTPUT_GET_LINE_SQL}):
+     *
+     * <ul>
+     *   <li>a statement that printed nothing costs exactly one round trip -- an
+     *       empty batch reports {@code status = 1};</li>
+     *   <li>a batch that filled up says so ({@code :3}), and the drain keeps
+     *       fetching until the buffer reports itself empty;</li>
+     *   <li>the result carries at most {@code dbmsOutputMaxLines} lines: reaching
+     *       that budget fetches one further batch, and any line beyond the budget
+     *       is consumed and dropped, which is what proves the buffer is bigger
+     *       than the cap (the Go agent's "one line past the bound"). A buffer of
+     *       exactly {@code dbmsOutputMaxLines} lines is therefore reported whole,
+     *       with no notice.</li>
+     * </ul>
+     *
+     * <p>A script that disabled DBMS_OUTPUT itself also reports {@code status = 1}
+     * and simply yields no messages.
+     *
+     * <p>Ownership: every captured statement drains its own buffer before the next
+     * statement runs -- on the success path, on the failure path and after the
+     * paged entry points -- so buffered lines can never be reported as another
+     * statement's output.
+     *
+     * <p>A batch never takes a line it cannot deliver: the block stops before
+     * reading one that does not fit the remaining payload, and a line too long for
+     * the register itself is dropped by the block and reported, because a failed
+     * assignment would abandon a line that has already left the buffer.
+     */
+    private DbmsOutputDrain drainDbmsOutputLines() {
+        List<String> lines = new ArrayList<>();
+        boolean truncated = false;
+        CallableStatement call = null;
+        try {
+            Connection connection = requireConnected();
+            call = connection.prepareCall(DBMS_OUTPUT_GET_LINE_SQL);
+            // Bind order is by occurrence: :1 (the loop's line bound) and :2 (the
+            // leftover check) are the block's IN placeholders, the four OUT
+            // registers follow them.
+            call.setInt(1, DBMS_OUTPUT_BATCH_LINES);
+            call.setInt(2, DBMS_OUTPUT_BATCH_LINES);
+            call.registerOutParameter(3, Types.VARCHAR);
+            call.registerOutParameter(4, Types.INTEGER);
+            call.registerOutParameter(5, Types.INTEGER);
+            call.registerOutParameter(6, Types.VARCHAR);
+            boolean done = false;
+            while (!done) {
+                int remaining = dbmsOutputMaxLines - lines.size() + 1;
+                if (remaining < 1) {
+                    remaining = 1;
+                }
+                int lineBound = Math.min(remaining, DBMS_OUTPUT_BATCH_LINES);
+                call.setInt(1, lineBound);
+                call.setInt(2, lineBound);
+                call.execute();
+                String payload = call.getString(3);
+                boolean more = call.getInt(5) != 0;
+                String drops = call.getString(6);
+                boolean consumed = appendBatch(lines, payload, drops);
+                done = call.getInt(4) != 0;
+                if (lines.size() > dbmsOutputMaxLines) {
+                    // One line past the bound was consumed to prove the buffer is
+                    // bigger than the cap; it is dropped with the rest, and that
+                    // is the only thing that makes the drain truncated. A batch
+                    // stopping at its own line bound (:5) is not truncation --
+                    // the loop just asks for the next batch.
+                    lines.subList(dbmsOutputMaxLines, lines.size()).clear();
+                    truncated = true;
+                    break;
+                }
+                if (!done && !consumed && !more) {
+                    // No line, no "more" and no "empty": the drain cannot make
+                    // progress, so it stops instead of spinning.
+                    break;
+                }
+            }
+        } catch (Exception | AbstractMethodError error) {
+            // A driver that cannot run this call with OUT parameters must not
+            // turn a successful statement into a failure; keep what was read.
+            LOGGER.log(Level.FINE, "DBMS_OUTPUT.GET_LINE failed; server output was not captured", error);
+        } finally {
+            closeQuietly(call);
+        }
+        if (truncated) {
+            // Only a drain that stopped early leaves lines behind, and those
+            // lines belong to this statement, not to the next one.
+            clearRemainingDbmsOutput();
+        }
+        return new DbmsOutputDrain(lines, truncated);
+    }
+
+    /**
+     * Splits one batch payload -- {@code CHR(10)} separated lines with a trailing
+     * separator -- and appends the lines. The trailing separator is what keeps a
+     * line that ends the payload exact, and a NULL read ({@code l_line IS NULL})
+     * travels as an empty entry, which is what {@code GET_LINE} returns for a
+     * line that was printed empty. Lines the block could not deliver are reported
+     * as the dropped-line notice behind the batch's lines: the notice marks the
+     * loss, and the lines around a dropped one keep their order. Anything beyond
+     * the drain cap is trimmed by the caller.
+     *
+     * @return whether the payload delivered at least one line
+     */
+    private static boolean appendBatch(List<String> lines, String payload, String drops) {
+        int delivered = 0;
+        if (payload != null && !payload.isEmpty()) {
+            String[] entries = payload.split("\n", -1);
+            delivered = payload.endsWith("\n") ? entries.length - 1 : entries.length;
+            for (int index = 0; index < delivered; index++) {
+                lines.add(entries[index]);
+            }
+        }
+        if (drops != null && !drops.isEmpty()) {
+            lines.add(DBMS_OUTPUT_OVERSIZE_LINE_MESSAGE);
+        }
+        return delivered > 0;
+    }
+
+    /**
+     * Purges the lines a truncated drain left in the session buffer. Oracle's
+     * DISABLE discards the buffer and ENABLE turns it back on with the size this
+     * agent asks for, so the leftovers can never be attributed to the statement
+     * that runs next.
+     */
+    private void clearRemainingDbmsOutput() {
+        try (Statement statement = requireConnected().createStatement()) {
+            statement.execute(DBMS_OUTPUT_CLEAR_SQL);
+        } catch (Exception | AbstractMethodError error) {
+            LOGGER.log(Level.FINE, "could not discard the truncated DBMS_OUTPUT buffer", error);
+        }
+    }
+
+    /** Matches the sibling Oracle-family drivers' truncation notice wording. */
+    static String dbmsOutputTruncatedMessage(int shownLines) {
+        return "DBMS_OUTPUT truncated after " + shownLines + " lines";
+    }
+
+    private boolean isDbmsOutputInitialized(Connection connection) {
+        Object physicalConnection = physicalConnectionIdentity(connection);
+        synchronized (dbmsOutputInitializedConnections) {
+            return dbmsOutputInitializedConnections.containsKey(physicalConnection);
+        }
+    }
+
+    /**
+     * Keys the lazy setup by the real driver session rather than the pool proxy,
+     * mirroring what the Dameng agent does for {@code DmdbConnection}. A proxy
+     * that cannot be unwrapped is a usable identity on its own because pools
+     * reuse one proxy per physical connection.
+     */
+    private Object physicalConnectionIdentity(Connection connection) {
+        for (String className : PHYSICAL_CONNECTION_CLASS_NAMES) {
+            try {
+                Class<?> connectionClass = Class.forName(className, false, getClass().getClassLoader());
+                Object unwrapped = unwrapConnection(connection, connectionClass);
+                if (unwrapped != null) {
+                    return unwrapped;
+                }
+            } catch (Exception | LinkageError ignored) {
+                // Try the next driver class; a probe failure is not fatal.
+            }
+        }
+        return connection;
+    }
+
+    private static Integer applyDbmsOutputNetworkTimeout(Connection connection) {
+        try {
+            int originalNetworkTimeout = connection.getNetworkTimeout();
+            connection.setNetworkTimeout(Runnable::run, DBMS_OUTPUT_ENABLE_NETWORK_TIMEOUT_MILLIS);
+            return originalNetworkTimeout;
+        } catch (Exception | AbstractMethodError ignored) {
+            return null;
+        }
+    }
+
+    private static boolean isTimeoutError(Throwable error) {
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Deque<Throwable> pending = new ArrayDeque<>();
+        pending.add(error);
+        while (!pending.isEmpty()) {
+            Throwable current = pending.poll();
+            if (current == null || !visited.add(current)) {
+                continue;
+            }
+            if (current instanceof SQLTimeoutException) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase(Locale.ROOT);
+                if (normalized.contains("timeout") || normalized.contains("timed out") || normalized.contains("超时")) {
+                    return true;
+                }
+            }
+            if (current instanceof SQLException sqlError && sqlError.getNextException() != null) {
+                pending.add(sqlError.getNextException());
+            }
+            if (current.getCause() != null) {
+                pending.add(current.getCause());
+            }
+        }
+        return false;
+    }
+
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
         var lobCheckpoint = lobValues.checkpoint();
         try (QueryTiming timing = QueryTiming.begin()) {
             prepareLobExecution(sql, options.getDeferLobs());
             long prepareStarted = System.nanoTime();
+            // The paged path captures no server output, but it can still run a
+            // statement that disables the buffer; without this the "already
+            // enabled" record would keep every later captured statement on this
+            // pooled connection from enabling it again.
+            if (disablesDbmsOutput(sql)) {
+                forgetDbmsOutputSession();
+            }
             Connection connection = requireConnected();
             uncheckedVoid(() -> beforeQueryExecution(connection, options.getTimeoutSecs()));
             QueryTiming.record("session_prepare", prepareStarted);
@@ -2097,6 +2655,22 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     // PL/SQL debugging (DBMS_DEBUG based).
     // ------------------------------------------------------------------
 
+    /**
+     * Capability report for the PL/SQL debugger.
+     *
+     * <p>Dictionary visibility is not a privilege check. {@code EXECUTE} on
+     * {@code DBMS_DEBUG} (and on {@code DBMS_OUTPUT}) is granted to
+     * {@code PUBLIC}, so {@code ALL_PROCEDURES} lists every subprogram for every
+     * user while {@code DBMS_DEBUG.INITIALIZE} still fails with
+     * {@code ORA-01031: insufficient privileges} for a session that never
+     * received {@code DEBUG CONNECT SESSION}. The report therefore asks the
+     * session's own privilege views, and a missing grant makes
+     * {@code supported} false with an actionable {@code reason}.
+     *
+     * <p>No routine is invoked to prove EXECUTE: {@code DBMS_DEBUG.PING} raises
+     * {@code ORA-06510} unconditionally on real Oracle (SYS.DBMS_DEBUG line 834),
+     * which would misreport a working server as unsupported.
+     */
     @Override
     public Map<String, Object> plDebugProbe() {
         return unchecked(() -> {
@@ -2104,8 +2678,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             List<String> debugProcedures = probePackageProcedures("DBMS_DEBUG");
             boolean dbmsOutput = !probePackageProcedures("DBMS_OUTPUT").isEmpty();
             // Subroutines the debug flow cannot degrade without. Anything else
-            // (delete/show breakpoints, backtrace, runtime info) falls back to
-            // client-side bookkeeping when the server implementation lacks it.
+            // (delete/show breakpoints, backtrace, runtime info, variable
+            // inspection) falls back to client-side bookkeeping or an actionable
+            // per-call error when the server implementation lacks it.
             List<String> required = List.of(
                 "INITIALIZE",
                 "ATTACH_SESSION",
@@ -2113,49 +2688,200 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 "DEBUG_OFF",
                 "SET_TIMEOUT_BEHAVIOUR",
                 "SET_BREAKPOINT",
-                "CONTINUE",
-                "GET_VALUES"
+                "CONTINUE"
             );
             List<String> missing = required
                 .stream()
                 .filter(name -> debugProcedures.stream().noneMatch(procedure -> procedure.equalsIgnoreCase(name)))
                 .collect(java.util.stream.Collectors.toList());
-            boolean supported = missing.isEmpty() && dbmsOutput;
-            // Dictionary visibility does not imply EXECUTE: the package owner is
-            // the internal `oceanbase` user and INNER_INITIALIZE rejects plain
-            // business users with -5036 "Access denied". PING has no side
-            // effects, so it doubles as the execution-level privilege probe.
-            if (supported) {
-                boolean executable = debugProbeCall("CALL DBMS_DEBUG.PING()");
-                supported = executable;
-                result.put("executable", executable);
-                if (!executable) {
-                    result.put(
-                        "reason",
-                        "DBMS_DEBUG is visible but the current user cannot execute it "
-                            + "(ORA-00600 -5036 Access denied). Ask the tenant administrator to run: "
-                            + "GRANT EXECUTE ON oceanbase.DBMS_DEBUG TO <user>;"
-                    );
-                }
-            }
+            // GET_VALUES stays optional: real Oracle 21c XE declares GET_VALUE but
+            // not GET_VALUES, and the helper package now resolves it dynamically
+            // and reports a sentinel, so requiring it here would reject a server
+            // the debug flow still drives.
+            boolean variablesSupported = debugProcedures.stream()
+                .anyMatch(procedure -> procedure.equalsIgnoreCase("GET_VALUES"));
+            String user = currentSessionUser();
+            // SESSION_PRIVS lists the privileges the session really holds, roles
+            // included, so it answers yes and no: a successful read with no row is
+            // the missing grant itself, and refusing it is what left the Go agent
+            // reporting supported:true for a user whose DBMS_DEBUG.INITIALIZE
+            // raises ORA-01031. USER_SYS_PRIVS only lists direct grants, so it is
+            // consulted only when SESSION_PRIVS cannot be read, and only a hit
+            // counts: a miss there proves nothing because the privilege may come
+            // from a role. Oracle semantics come first; if a real OceanBase
+            // instance exposes SESSION_PRIVS without enforcing the privilege, the
+            // verdict is a false negative that the reason names so the user can
+            // recognise and ignore it.
+            Set<String> sessionPrivileges = queryPrivilegeSet(SESSION_PRIVILEGES_SQL);
+            Set<String> directPrivileges = sessionPrivileges == null
+                ? queryPrivilegeSet(USER_SYS_PRIVILEGES_SQL)
+                : null;
+            PrivilegeState debugConnectState = privilegeState(
+                sessionPrivileges, directPrivileges, DEBUG_CONNECT_SESSION
+            );
+            PrivilegeState debugAnyProcedureState = privilegeState(
+                sessionPrivileges, directPrivileges, DEBUG_ANY_PROCEDURE
+            );
+            Boolean debugConnectSession = debugConnectState == PrivilegeState.UNKNOWN
+                ? null
+                : debugConnectState == PrivilegeState.GRANTED;
+            Boolean debugAnyProcedure = debugAnyProcedureState == PrivilegeState.UNKNOWN
+                ? null
+                : debugAnyProcedureState == PrivilegeState.GRANTED;
+            boolean supported = missing.isEmpty()
+                && dbmsOutput
+                && debugConnectState != PrivilegeState.MISSING;
             result.put("supported", supported);
             result.put("dbmsDebug", !debugProcedures.isEmpty());
             result.put("dbmsOutput", dbmsOutput);
+            result.put("variablesSupported", variablesSupported);
             result.put("procedures", debugProcedures);
-            if (!dbmsOutput) {
-                result.put(
-                    "reason",
-                    "DBMS_OUTPUT is not visible to this user; grant EXECUTE ON DBMS_OUTPUT TO <user> and retry."
-                );
-            } else if (!missing.isEmpty()) {
-                result.put(
-                    "reason",
-                    "DBMS_DEBUG is missing required subroutines: " + String.join(", ", missing)
-                        + "; the OceanBase version behind this connection does not support PL debugging."
-                );
+            result.put("missingProcedures", missing);
+            if (user != null) {
+                result.put("user", user);
+            }
+            if (debugConnectSession != null) {
+                result.put("debugConnectSession", debugConnectSession);
+            }
+            if (debugAnyProcedure != null) {
+                result.put("debugAnyProcedure", debugAnyProcedure);
+            }
+
+            // Every supported=false answer carries a reason, and the reason names
+            // the exact grant or subroutine that has to change.
+            String reason = null;
+            if (!missing.isEmpty()) {
+                reason = "DBMS_DEBUG is missing required subroutines: " + String.join(", ", missing)
+                    + "; the OceanBase version behind this connection does not support PL debugging.";
+            } else if (debugConnectState == PrivilegeState.MISSING) {
+                reason = "Current user " + describeUser(user) + " lacks the " + DEBUG_CONNECT_SESSION
+                    + " system privilege, so DBMS_DEBUG.INITIALIZE fails with ORA-01031: insufficient privileges."
+                    + " As SYSDBA run: " + grantDebugPrivilegeSql(DEBUG_CONNECT_SESSION, user) + "."
+                    + " On an OceanBase server whose DBMS_DEBUG does not require this privilege, this item can be"
+                    + " ignored.";
+            } else if (!dbmsOutput) {
+                reason = "DBMS_OUTPUT is not visible to " + describeUser(user) + "; as SYSDBA run:"
+                    + " GRANT EXECUTE ON DBMS_OUTPUT TO " + quotedUser(user) + " and retry.";
+            }
+            if (!supported && reason == null) {
+                // Defensive: a future gate must not be able to answer
+                // supported=false without explaining itself.
+                reason = "This server does not expose the DBMS_DEBUG subroutines PL debugging needs.";
+            }
+            if (reason != null) {
+                result.put("reason", reason);
+            }
+
+            List<String> warnings = new ArrayList<>();
+            if (supported && debugAnyProcedureState == PrivilegeState.MISSING) {
+                warnings.add("Current user " + describeUser(user) + " lacks the " + DEBUG_ANY_PROCEDURE
+                    + " system privilege, so only objects " + describeUser(user) + " owns can be debugged."
+                    + " As SYSDBA run: " + grantDebugPrivilegeSql(DEBUG_ANY_PROCEDURE, user) + ".");
+            }
+            if (supported && debugConnectState == PrivilegeState.UNKNOWN) {
+                warnings.add("The " + DEBUG_CONNECT_SESSION + " privilege could not be verified: SESSION_PRIVS"
+                    + " could not be read and USER_SYS_PRIVS only lists direct grants, so a privilege inherited"
+                    + " through a role cannot be confirmed. Placing a breakpoint may still fail with ORA-01031:"
+                    + " insufficient privileges.");
+            }
+            if (supported && !variablesSupported) {
+                warnings.add("DBMS_DEBUG.GET_VALUES is not declared on this server, so only breakpoints, "
+                    + "stepping and the backtrace are supported; variable inspection is unavailable.");
+            }
+            if (!warnings.isEmpty()) {
+                result.put("warnings", warnings);
             }
             return result;
         });
+    }
+
+    /** The connected account, or null when the server cannot report it. */
+    private String currentSessionUser() {
+        try (
+            PreparedStatement statement = requireConnection().prepareStatement(SESSION_USER_SQL);
+            ResultSet rows = statement.executeQuery()
+        ) {
+            if (rows.next()) {
+                String user = rows.getString(1);
+                if (user != null && !user.isBlank()) {
+                    return user.trim();
+                }
+            }
+        } catch (Exception | AbstractMethodError ignored) {
+            // An unnamed user only costs the reason its example account name.
+        }
+        return null;
+    }
+
+    /** What the session's privilege views can prove about one system privilege. */
+    private enum PrivilegeState {
+        /** Proven to be held. */
+        GRANTED,
+        /** Proven to be absent. */
+        MISSING,
+        /** Neither view could answer the question. */
+        UNKNOWN
+    }
+
+    /**
+     * What the privilege views could prove about one privilege.
+     *
+     * <p>{@code SESSION_PRIVS} lists the privileges the session really holds,
+     * roles included, so it answers yes and no: a successful read with no row is
+     * the missing grant itself. {@code USER_SYS_PRIVS} lists direct grants only,
+     * so a hit is proof but a miss proves nothing -- the privilege may still come
+     * from a role -- and it is therefore used as positive evidence only. Both
+     * views failing leaves the question open, which the caller must not turn into
+     * a missing grant.
+     */
+    private static PrivilegeState privilegeState(
+        Set<String> sessionPrivileges,
+        Set<String> directPrivileges,
+        String privilege
+    ) {
+        if (sessionPrivileges != null) {
+            return sessionPrivileges.contains(privilege) ? PrivilegeState.GRANTED : PrivilegeState.MISSING;
+        }
+        if (directPrivileges != null && directPrivileges.contains(privilege)) {
+            return PrivilegeState.GRANTED;
+        }
+        return PrivilegeState.UNKNOWN;
+    }
+
+    /**
+     * Rows of one privilege view, or null when the query itself failed. An empty
+     * set is a real answer and is returned as such: on Oracle {@code SESSION_PRIVS}
+     * is readable by every session, so zero rows is exactly the state in which
+     * {@code DBMS_DEBUG.INITIALIZE} raises {@code ORA-01031}.
+     */
+    private Set<String> queryPrivilegeSet(String sql) {
+        try (
+            PreparedStatement statement = requireConnection().prepareStatement(sql);
+            ResultSet rows = statement.executeQuery()
+        ) {
+            Set<String> privileges = new HashSet<>();
+            while (rows.next()) {
+                String privilege = rows.getString(1);
+                if (privilege != null && !privilege.isBlank()) {
+                    privileges.add(privilege.trim().toUpperCase(Locale.ROOT));
+                }
+            }
+            return privileges;
+        } catch (Exception | AbstractMethodError ignored) {
+            return null;
+        }
+    }
+
+    private static String describeUser(String user) {
+        return user == null ? "the connected user" : user;
+    }
+
+    private static String quotedUser(String user) {
+        return user == null ? "<user>" : JdbcIdentifiers.INSTANCE.doubleQuote(user);
+    }
+
+    private static String grantDebugPrivilegeSql(String privilege, String user) {
+        return "GRANT " + privilege + " TO " + quotedUser(user);
     }
 
     @Override
@@ -2179,7 +2905,10 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                     PlDebugSession.DEFAULT_TIMEOUT_MILLIS
                 );
                 plDebugSessions.put(session.debugId(), session);
-                return session.snapshot();
+                // debugBefore parked the debuggee inside the target routine, so this
+                // returns the filled snapshot (line/program/stackDepth) instead of the
+                // zero state.
+                return session.startSnapshot();
             } catch (Exception error) {
                 closeQuietly(debuggee);
                 closeQuietly(debugger);
@@ -2224,13 +2953,52 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    public Map<String, Object> plDebugResumeIgnoreBreakpoints(String debugId) {
+        return unchecked(() -> plDebugSession(debugId).resumeIgnoreBreakpoints());
+    }
+
+    @Override
     public Map<String, Object> plDebugAbort(String debugId) {
         return unchecked(() -> plDebugSession(debugId).abort());
     }
 
     @Override
-    public Map<String, Object> plDebugGetVariables(String debugId) {
-        return unchecked(() -> plDebugSession(debugId).variables());
+    public Map<String, Object> plDebugGetVariables(String debugId, int frame) {
+        return unchecked(() -> plDebugSession(debugId).variables(frame));
+    }
+
+    /**
+     * Changes a variable of the parked debuggee. Served by {@code DBX_SET_VALUE},
+     * which resolves the two-argument {@code DBMS_DEBUG.SET_VALUE(frame#,
+     * assignment_statement)} dynamically: the name, index and value are assembled
+     * into a PL/SQL assignment statement (the value is forwarded verbatim) and the
+     * -1 capability sentinel is reported when the server has no such routine.
+     */
+    @Override
+    public Map<String, Object> plDebugSetValue(String debugId, String name, int frame, int index, String value) {
+        return unchecked(() -> plDebugSession(debugId).setValue(name, frame, index, value));
+    }
+
+    /**
+     * Enables or disables an existing breakpoint through
+     * {@code DBX_ENABLE_BREAKPOINT} / {@code DBX_DISABLE_BREAKPOINT}. The response
+     * carries {@code serverSupported=false} (instead of an error) when the server has
+     * no {@code DBMS_DEBUG.ENABLE_BREAKPOINT} / {@code DISABLE_BREAKPOINT}, so the
+     * client keeps its own delete-and-re-set fallback.
+     */
+    @Override
+    public Map<String, Object> plDebugSetBreakpointEnabled(String debugId, int breakpointNumber, boolean enabled) {
+        return unchecked(() -> plDebugSession(debugId).setBreakpointEnabled(breakpointNumber, enabled));
+    }
+
+    /**
+     * Enables or disables exception mode, which makes {@code pl_debug_resume} keep
+     * continuing until an exception/handler is reported; the step operations are
+     * unaffected.
+     */
+    @Override
+    public Map<String, Object> plDebugSetExceptionBreakpoint(String debugId, boolean enabled) {
+        return unchecked(() -> plDebugSession(debugId).setExceptionBreakpoint(enabled));
     }
 
     @Override
@@ -2281,28 +3049,26 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         }
     }
 
-    /** Executes a no-side-effect probe statement; failures mean no EXECUTE right. */
-    private boolean debugProbeCall(String sql) {
-        try (java.sql.Statement statement = requireConnection().createStatement()) {
-            statement.execute(sql);
-            return true;
-        } catch (Exception error) {
-            return false;
-        }
-    }
-
     /**
-     * Lists the visible subroutines of a system package. {@code ALL_PROCEDURES}
-     * only exposes packages the current user may execute (or owns), so an empty
-     * list doubles as a privilege check without calling any package routine.
-     * OceanBase's {@code DBMS_DEBUG} is an undocumented compatibility package
-     * (absent from the public manual), which is exactly why probing the
-     * dictionary beats calling a specific subroutine such as {@code PING}:
-     * nothing here depends on a routine existing.
+     * Lists the subroutines a system package declares, from the dictionary only.
      *
-     * <p>When the dictionary view has no rows for an existing package the
-     * method falls back to a plain existence probe; the caller then reports
-     * the per-routine verdict it can defend.
+     * <p>This is a <em>visibility</em> probe, not a privilege check: {@code EXECUTE}
+     * on {@code DBMS_DEBUG} and {@code DBMS_OUTPUT} is granted to {@code PUBLIC},
+     * so {@code ALL_PROCEDURES} lists their subprograms for every user, including
+     * one without {@code DEBUG CONNECT SESSION}. The caller owns the privilege
+     * verdict ({@link #querySessionPrivileges()}).
+     *
+     * <p>OceanBase's {@code DBMS_DEBUG} is an undocumented compatibility package
+     * (absent from the public manual), which is why probing the dictionary beats
+     * calling a specific subroutine: nothing here depends on a routine existing,
+     * and no routine can misreport the server as unsupported. In particular
+     * {@code DBMS_DEBUG.PING} must not be used as a probe: it raises
+     * {@code ORA-06510} unconditionally on real Oracle (SYS.DBMS_DEBUG line 834)
+     * and would fail a working server.
+     *
+     * <p>When the dictionary view has no rows for an existing package the method
+     * falls back to a plain existence probe; the caller then reports the
+     * per-routine verdict it can defend.
      */
     private List<String> probePackageProcedures(String packageName) {
         try (
@@ -2348,6 +3114,17 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     private static void closeQuietly(Connection connection) {
         try {
             connection.close();
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Closes best-effort state such as a statement; a null handle is a no-op. */
+    private static void closeQuietly(AutoCloseable closeable) {
+        if (closeable == null) {
+            return;
+        }
+        try {
+            closeable.close();
         } catch (Exception ignored) {
         }
     }

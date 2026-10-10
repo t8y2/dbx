@@ -8168,6 +8168,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "Nəticə cədvəli fokusda olduqda keçərlidir",
     shortcutScopeHintSearch: "Axtarış sahəsi fokusda olduqda keçərlidir",
     shortcutScopeHintSidebar: "Yan panel fokusda olduqda keçərlidir",
+    shortcutScopeDebug: "PL/SQL sazlayıcısı",
+    shortcutScopeHintDebug: "Sazlayıcı aktiv tabda olduqda keçərlidir",
     shortcutGroupCount: "{count} əməliyyat",
     shortcutGroupCollapse: "Qrupu yığ",
     shortcutGroupExpand: "Qrupu genişləndir",

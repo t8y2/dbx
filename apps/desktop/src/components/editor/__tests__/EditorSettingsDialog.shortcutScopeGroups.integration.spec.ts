@@ -212,7 +212,9 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     hoisted.shortcuts = defaults();
     const host = await mountShortcutsTab();
 
-    expect(groupLabels(host)).toEqual(["settings.shortcutScopeGlobal", "settings.shortcutScopeEditor", "settings.shortcutScopeGrid", "settings.shortcutScopeSearch", "settings.shortcutScopeSidebar"]);
+    // `debug` leads: App.vue claims the PL/SQL debugger step keys before the
+    // global quickOpen branch, so the debug scope is the outermost tier.
+    expect(groupLabels(host)).toEqual(["settings.shortcutScopeDebug", "settings.shortcutScopeGlobal", "settings.shortcutScopeEditor", "settings.shortcutScopeGrid", "settings.shortcutScopeSearch", "settings.shortcutScopeSidebar"]);
 
     // Scope moved into the group header — rows must not repeat it.
     const rendered = rows(host);
@@ -408,8 +410,9 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     });
 
     // Only scopes that actually have actions render, but whatever renders must be
-    // a sub-sequence of the dispatch order (global -> editor -> grid -> search -> sidebar).
-    const dispatchOrder = ["global", "editor", "grid", "search", "sidebar"];
+    // a sub-sequence of the dispatch order. `debug` leads because App.vue claims
+    // the debugger step keys before the global quickOpen branch.
+    const dispatchOrder = ["debug", "global", "editor", "grid", "search", "sidebar"];
     for (const scope of rendered) expect(scopes).toContain(scope);
     const positions = rendered.map((scope) => dispatchOrder.indexOf(scope));
     expect(positions).toEqual([...positions].sort((a, b) => a - b));

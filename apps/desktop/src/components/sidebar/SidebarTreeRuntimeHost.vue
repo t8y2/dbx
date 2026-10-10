@@ -72,6 +72,7 @@ import {
   GitBranch,
   Sparkles,
   Link2,
+  Bug,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
@@ -147,6 +148,7 @@ import {
   isSingleDatabase,
   schemaNodeHasLoadableName,
 } from "@/lib/database/databaseCapabilities";
+import { supportsPlDebugRoutine } from "@/lib/database/databaseFeatureSupport";
 import {
   copyDisplayPathForTreeNode,
   copyNameForTreeNode,
@@ -525,6 +527,7 @@ const emit = defineEmits<{
   "open-elasticsearch-index-metadata": [node: TreeNode, kind: ElasticsearchIndexMetadataKind];
   "open-object-source": [node: TreeNode, initialEditing: boolean];
   "open-procedure": [node: TreeNode];
+  "open-pl-debug": [node: TreeNode];
   "open-settings": [initialTab: string];
   "open-data": [node: TreeNode, requireSelection: boolean, openMode: DataTabOpenMode, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>];
   "open-visible-databases": [node: TreeNode];
@@ -2940,6 +2943,15 @@ function openProcedureExecution() {
   const node = activeNode.value;
   if (node.type !== "procedure" || !node.connectionId || !node.database) return;
   emit("open-procedure", node);
+}
+
+function openPlDebugRoutine() {
+  const node = activeNode.value;
+  if ((node.type !== "procedure" && node.type !== "function") || !node.connectionId || !node.database) return;
+  // The launching host (ConnectionTree) runs the capability probe and the
+  // INVALID-object pre-check through `launchPlDebug`; the node carries `valid`
+  // so that gate sees the object's status without another lookup.
+  emit("open-pl-debug", node);
 }
 
 async function openDatabaseObjectDependencies() {
@@ -6877,6 +6889,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     const isPackageMember = node.parentType === "package" && !!node.parentName;
     if (node.type === "procedure" && !isPackageMember) {
       items.push({ label: t("contextMenu.executeProcedure"), action: openProcedureExecution, icon: Play });
+    }
+    if (supportsPlDebugRoutine(currentDatabaseType())) {
+      items.push({ label: t("contextMenu.debugRoutine"), action: openPlDebugRoutine, icon: Bug });
     }
     if (!isPackageMember && currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });

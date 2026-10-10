@@ -8,6 +8,8 @@ export interface LoadRoutineParametersOptions {
   databaseType?: DatabaseType;
   schema?: string;
   routineName: string;
+  /** Set when the routine is a member of a package rather than a standalone object. */
+  packageName?: string;
 }
 
 export async function loadRoutineParameters(options: LoadRoutineParametersOptions): Promise<RoutineParameter[]> {
@@ -39,7 +41,7 @@ export function supportsRoutineParameterMetadata(databaseType?: DatabaseType): b
   );
 }
 
-export function routineParametersQuery(options: Pick<LoadRoutineParametersOptions, "database" | "databaseType" | "schema" | "routineName">): string | null {
+export function routineParametersQuery(options: Pick<LoadRoutineParametersOptions, "database" | "databaseType" | "schema" | "routineName" | "packageName">): string | null {
   if (!supportsRoutineParameterMetadata(options.databaseType)) return null;
   const effectiveSchema = options.schema || (options.databaseType === "postgres" ? "public" : "") || (options.databaseType === "mysql" || options.databaseType === "doris" || options.databaseType === "starrocks" ? options.database : "");
   const schema = quoteSqlLiteral(effectiveSchema);
@@ -126,6 +128,15 @@ WHERE o.type IN ('P', 'PC')
 ORDER BY p.parameter_id;`.trim();
   }
   if (options.databaseType === "oracle" || options.databaseType === "dameng" || options.databaseType === "oceanbase-oracle") {
+    // Package members are reported as OBJECT_NAME = <package> plus
+    // PROCEDURE_NAME = <member>, so a member needs the extra predicates:
+    // filtering on OBJECT_NAME alone would return every routine of the package.
+    const packageFilter = options.packageName
+      ? `
+  AND PACKAGE_NAME = UPPER(${quoteSqlLiteral(options.packageName)})
+  AND PROCEDURE_NAME = UPPER(${name})`
+      : "";
+    const object = options.packageName ? quoteSqlLiteral(options.packageName) : name;
     return `
 SELECT
   ARGUMENT_NAME AS "name",
@@ -135,7 +146,7 @@ SELECT
   DEFAULTED AS "has_default"
 FROM ALL_ARGUMENTS
 WHERE OWNER = UPPER(${schema})
-  AND OBJECT_NAME = UPPER(${name})
+  AND OBJECT_NAME = UPPER(${object})${packageFilter}
   AND POSITION > 0
 ORDER BY SEQUENCE;`.trim();
   }

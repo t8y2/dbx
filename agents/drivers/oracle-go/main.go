@@ -345,6 +345,9 @@ type queryResult struct {
 	AffectedRows    int64    `json:"affected_rows"`
 	ExecutionTimeMS int64    `json:"execution_time_ms"`
 	Truncated       bool     `json:"truncated"`
+	// Messages carries DBMS_OUTPUT lines this statement produced. It is omitted
+	// entirely when the statement produced none.
+	Messages []queryMessage `json:"messages,omitempty"`
 }
 
 func (r queryResult) MarshalJSON() ([]byte, error) {
@@ -380,6 +383,9 @@ type queryPageResult struct {
 	Truncated       bool     `json:"truncated"`
 	SessionID       *string  `json:"session_id"`
 	HasMore         bool     `json:"has_more"`
+	// Messages carries DBMS_OUTPUT lines this statement produced. It is omitted
+	// entirely when the statement produced none.
+	Messages []queryMessage `json:"messages,omitempty"`
 }
 
 func (r queryPageResult) MarshalJSON() ([]byte, error) {
@@ -563,8 +569,23 @@ type server struct {
 	legacyLOBFetchDeferred bool
 	// manualConn + manualTx pin one physical Oracle session for interactive
 	// commit/rollback control across multiple execute_query RPCs.
-	manualConn             *sql.Conn
-	manualTx               *sql.Tx
+	manualConn *sql.Conn
+	manualTx   *sql.Tx
+	// statementConn is the physical connection pinned for the normal statement
+	// currently executing. DBMS_OUTPUT is enabled on it once and drained from it
+	// before the result is returned, so buffered lines always come from the
+	// session that ran the statement. Dispatch serializes one agent session, so
+	// only one statement uses it at a time.
+	statementConn *sql.Conn
+	// statementCtx is the context the current statement and its DBMS_OUTPUT
+	// capture run under. cancel_session cancels it, which also interrupts the
+	// pre-statement ENABLE and the drain.
+	statementCtx    context.Context
+	statementCancel context.CancelFunc
+	dbmsOutput      dbmsOutputTracker
+	// dbmsOutputBinding is the OUT register size the DBMS_OUTPUT capture reads
+	// its batched payload back into (see dbms_output.go).
+	dbmsOutputBinding      dbmsOutputBinding
 	sessions               map[string]*querySession
 	tableReadSessions      map[string]*querySession
 	nextSessionID          int64
@@ -716,6 +737,9 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 			return nil, false, err
 		}
 		session.server.cancelActiveQuery()
+		// A PL/SQL debug session blocks inside DBMS_DEBUG on the server, not in a
+		// tracked query, so the cancel has to drop its connections as well.
+		session.server.cancelPlDebugCalls()
 		return map[string]bool{"ok": true}, false, nil
 	case "test_connection":
 		return newServer().dispatch(method, params)
@@ -1018,6 +1042,9 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "pl_debug_resume":
 		result, err := s.plDebugResume(stringParam(params, "debugId"))
 		return result, false, err
+	case "pl_debug_resume_ignore_breakpoints":
+		result, err := s.plDebugResumeIgnoreBreakpoints(stringParam(params, "debugId"))
+		return result, false, err
 	case "pl_debug_step_over":
 		result, err := s.plDebugStepOver(stringParam(params, "debugId"))
 		return result, false, err
@@ -1031,7 +1058,16 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		result, err := s.plDebugAbort(stringParam(params, "debugId"))
 		return result, false, err
 	case "pl_debug_get_variables":
-		result, err := s.plDebugGetVariables(stringParam(params, "debugId"))
+		result, err := s.plDebugGetVariables(stringParam(params, "debugId"), intParam(params, "frame"))
+		return result, false, err
+	case "pl_debug_set_value":
+		result, err := s.plDebugSetValue(stringParam(params, "debugId"), params)
+		return result, false, err
+	case "pl_debug_set_exception_breakpoint":
+		result, err := s.plDebugSetExceptionBreakpoint(stringParam(params, "debugId"), boolParam(params, "enabled"))
+		return result, false, err
+	case "pl_debug_set_breakpoint_enabled":
+		result, err := s.plDebugSetBreakpointEnabled(stringParam(params, "debugId"), params)
 		return result, false, err
 	case "pl_debug_get_stack":
 		result, err := s.plDebugGetStack(stringParam(params, "debugId"))
@@ -1177,6 +1213,9 @@ func (s *server) ensureLegacyOracleLOBFetch() error {
 	s.db = db
 	s.params = effectiveParams
 	s.legacyLOBFetchDeferred = false
+	// The replacement pool opens new physical connections, which need their own
+	// DBMS_OUTPUT.ENABLE.
+	s.dbmsOutput.reset()
 	if oldDB != nil {
 		_ = oldDB.Close()
 	}
@@ -1228,6 +1267,9 @@ func (s *server) disconnect() error {
 	s.closeAllQuerySessions()
 	_ = s.rollbackManualTransactionQuiet()
 	s.legacyLOBFetchDeferred = false
+	// The pool is going away; drop the per-connection DBMS_OUTPUT bookkeeping so
+	// closed connections are not kept alive by it.
+	s.dbmsOutput.reset()
 	if s.db == nil {
 		return nil
 	}
@@ -3942,8 +3984,19 @@ func restoreOracleCurrentSchema(conn *sql.Conn, schema string) {
 // ---------------------------------------------------------------------------
 
 // plDebugProbe lists the visible DBMS_DEBUG / DBMS_OUTPUT subroutines through
-// the dictionary; an empty DBMS_DEBUG list means the package is not visible
-// to this user and debugging is unavailable.
+// the dictionary and then checks the privilege that actually decides whether
+// DBMS_DEBUG can be initialized.
+//
+// Dictionary visibility alone proves nothing: EXECUTE ON DBMS_DEBUG is granted to
+// PUBLIC, so ALL_PROCEDURES lists every subroutine for every user even when
+// DBMS_DEBUG.INITIALIZE raises ORA-01031 (insufficient privileges) because the
+// session lacks DEBUG CONNECT SESSION. Oracle 21c XE was verified to report
+// supported:true with an empty missingProcedures list for a user whose
+// SESSION_PRIVS held neither DEBUG CONNECT SESSION nor DEBUG ANY PROCEDURE.
+// The probe therefore reads SESSION_PRIVS (the privileges the session really
+// holds, roles included) and reports an actionable reason when the debugging
+// privilege is absent. DEBUG ANY PROCEDURE is only a warning: debugging objects
+// this user owns works without it.
 func (s *server) plDebugProbe() map[string]interface{} {
 	response := map[string]interface{}{}
 	debugProcedures := s.plDebugPackageProcedures("DBMS_DEBUG")
@@ -3953,7 +4006,18 @@ func (s *server) plDebugProbe() map[string]interface{} {
 	response["procedures"] = debugProcedures
 	required := []string{
 		"INITIALIZE", "ATTACH_SESSION", "DEBUG_ON", "DEBUG_OFF",
-		"SET_TIMEOUT_BEHAVIOUR", "SET_BREAKPOINT", "CONTINUE", "GET_VALUES",
+		"SET_TIMEOUT_BEHAVIOUR", "SET_BREAKPOINT", "CONTINUE",
+	}
+	// Optional routines degrade a single feature instead of disabling PL
+	// debugging. GET_VALUES is the one that matters: it is an OceanBase
+	// Oracle-mode extension, and stock Oracle (21c XE verified) declares
+	// GET_VALUE but not GET_VALUES. Listing it as required made the probe report
+	// "unsupported" on an instance whose breakpoints, stepping and backtrace all
+	// work, which blocked debugging entirely.
+	optional := []string{
+		"GET_VALUES", "GET_VALUE", "DELETE_BREAKPOINT", "PRINT_BACKTRACE",
+		"SHOW_BREAKPOINTS", "GET_RUNTIME_INFO", "SYNCHRONIZE", "SET_TIMEOUT",
+		"TARGET_PROGRAM_RUNNING",
 	}
 	missing := []string{}
 	seen := map[string]bool{}
@@ -3965,14 +4029,100 @@ func (s *server) plDebugProbe() map[string]interface{} {
 			missing = append(missing, name)
 		}
 	}
-	supported := len(missing) == 0 && len(outputProcedures) > 0
-	response["supported"] = supported
-	if len(outputProcedures) == 0 {
-		response["reason"] = "DBMS_OUTPUT is not visible to this user; grant EXECUTE ON DBMS_OUTPUT and retry."
-	} else if len(missing) > 0 {
-		response["reason"] = "DBMS_DEBUG is missing required subroutines: " + strings.Join(missing, ", ")
+	missingOptional := []string{}
+	for _, name := range optional {
+		if !seen[name] {
+			missingOptional = append(missingOptional, name)
+		}
 	}
+	response["missingProcedures"] = missing
+	response["missingOptionalProcedures"] = missingOptional
+	// variablesSupported tells the client whether get_variables can return
+	// anything at all, so it can hide/disable just that feature.
+	response["variablesSupported"] = seen["GET_VALUES"]
+	supported := len(missing) == 0 && len(outputProcedures) > 0
+	reason := ""
+	if len(outputProcedures) == 0 {
+		reason = "DBMS_OUTPUT is not visible to this user; grant EXECUTE ON DBMS_OUTPUT and retry."
+	} else if len(missing) > 0 {
+		reason = "DBMS_DEBUG is missing required subroutines: " + strings.Join(missing, ", ")
+	}
+	warnings := []string{}
+	privileges, privilegesKnown := s.plDebugProbeSessionPrivileges()
+	if privilegesKnown {
+		if !privileges["DEBUG CONNECT SESSION"] && reason == "" {
+			supported = false
+			grantee := s.plDebugProbeGrantee()
+			reason = fmt.Sprintf(
+				"current user %s lacks DEBUG CONNECT SESSION, so DBMS_DEBUG.INITIALIZE raises ORA-01031 (insufficient privileges); "+
+					"the DBMS_DEBUG subroutines are visible only because EXECUTE is granted to PUBLIC. "+
+					"As SYSDBA run: GRANT DEBUG CONNECT SESSION TO %s;",
+				grantee, grantee,
+			)
+		}
+		if !privileges["DEBUG ANY PROCEDURE"] {
+			grantee := s.plDebugProbeGrantee()
+			warnings = append(warnings, fmt.Sprintf(
+				"DEBUG ANY PROCEDURE is not granted to %s, so only objects this user owns can be debugged; "+
+					"as SYSDBA run: GRANT DEBUG ANY PROCEDURE TO %s;",
+				grantee, grantee,
+			))
+		}
+	} else {
+		warnings = append(warnings, "SESSION_PRIVS could not be read, so the PL/SQL debugging privileges were not verified; "+
+			"supported reflects DBMS_DEBUG/DBMS_OUTPUT dictionary visibility only.")
+	}
+	if reason != "" {
+		response["reason"] = reason
+	}
+	if len(warnings) > 0 {
+		response["warnings"] = warnings
+	}
+	response["supported"] = supported
 	return response
+}
+
+// plDebugProbeSessionPrivileges returns the system privileges the current session
+// holds, keyed by their upper-case name. The boolean is false when the privilege
+// view is unavailable (a server without SESSION_PRIVS, or no right to read it), so
+// the probe can fall back to dictionary visibility instead of claiming that a
+// privilege is missing.
+func (s *server) plDebugProbeSessionPrivileges() (map[string]bool, bool) {
+	privileges := map[string]bool{}
+	if s.db == nil {
+		return privileges, false
+	}
+	rows, err := s.db.Query("SELECT PRIVILEGE FROM SESSION_PRIVS")
+	if err != nil {
+		return privileges, false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var privilege string
+		if err := rows.Scan(&privilege); err == nil {
+			if name := strings.ToUpper(strings.TrimSpace(privilege)); name != "" {
+				privileges[name] = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return privileges, false
+	}
+	return privileges, true
+}
+
+// plDebugProbeGrantee returns the current user for the GRANT hints, or a generic
+// placeholder when the server cannot report it.
+func (s *server) plDebugProbeGrantee() string {
+	if s.db != nil {
+		var user string
+		if err := s.db.QueryRow("SELECT USER FROM DUAL").Scan(&user); err == nil {
+			if trimmed := strings.TrimSpace(user); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return "<user>"
 }
 
 func (s *server) plDebugPackageProcedures(packageName string) []string {
@@ -4033,7 +4183,9 @@ func (s *server) plDebugStart(params map[string]json.RawMessage) (map[string]int
 	s.plDebugMu.Lock()
 	s.plDebugSessions[session.debugID] = session
 	s.plDebugMu.Unlock()
-	return session.snapshot(""), nil
+	// debugBefore parked the debuggee inside the target routine, so this returns
+	// the filled snapshot (line/program/stackDepth) instead of the zero state.
+	return session.startSnapshot(), nil
 }
 
 func (s *server) plDebugSetBreakpoints(debugID string, params map[string]json.RawMessage) (interface{}, error) {
@@ -4080,6 +4232,14 @@ func (s *server) plDebugResume(debugID string) (interface{}, error) {
 	return session.resume()
 }
 
+func (s *server) plDebugResumeIgnoreBreakpoints(debugID string) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	return session.resumeIgnoreBreakpoints()
+}
+
 func (s *server) plDebugStepOver(debugID string) (interface{}, error) {
 	session, err := s.plDebugSession(debugID)
 	if err != nil {
@@ -4112,12 +4272,68 @@ func (s *server) plDebugAbort(debugID string) (interface{}, error) {
 	return session.abort()
 }
 
-func (s *server) plDebugGetVariables(debugID string) (interface{}, error) {
+func (s *server) plDebugGetVariables(debugID string, frame int) (interface{}, error) {
 	session, err := s.plDebugSession(debugID)
 	if err != nil {
 		return nil, err
 	}
-	return session.variables()
+	return session.variables(frame)
+}
+
+// plDebugSetValue changes the value of a variable in the parked debuggee. It is
+// served by DBX_SET_VALUE, which resolves the two-argument
+// DBMS_DEBUG.SET_VALUE(frame#, assignment_statement) dynamically: the name, index
+// and value are assembled into a PL/SQL assignment statement (the value is
+// forwarded verbatim) and the wrapper answers with the -1 capability sentinel when
+// the server has no such routine.
+func (s *server) plDebugSetValue(debugID string, params map[string]json.RawMessage) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Name  string `json:"name"`
+		Frame int    `json:"frame"`
+		Index int    `json:"index"`
+		Value string `json:"value"`
+	}
+	if err := decodeParams(params, &payload); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(payload.Name) == "" {
+		return nil, errors.New("variable name is required")
+	}
+	return session.setValue(payload.Name, payload.Frame, payload.Index, payload.Value)
+}
+
+// plDebugSetBreakpointEnabled enables or disables an existing breakpoint through
+// DBX_ENABLE_BREAKPOINT / DBX_DISABLE_BREAKPOINT. The response carries
+// serverSupported=false (instead of an error) when the server has no such
+// primitive, so the client can keep its own delete-and-re-set fallback.
+func (s *server) plDebugSetBreakpointEnabled(debugID string, params map[string]json.RawMessage) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		BreakpointNumber int  `json:"breakpointNumber"`
+		Enabled          bool `json:"enabled"`
+	}
+	if err := decodeParams(params, &payload); err != nil {
+		return nil, err
+	}
+	return session.setBreakpointEnabled(payload.BreakpointNumber, payload.Enabled)
+}
+
+// plDebugSetExceptionBreakpoint enables or disables exception mode, which makes
+// pl_debug_resume keep continuing until an exception/handler is reported; the
+// step operations are unaffected.
+func (s *server) plDebugSetExceptionBreakpoint(debugID string, enabled bool) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	return session.setExceptionBreakpoint(enabled), nil
 }
 
 func (s *server) plDebugGetStack(debugID string) (interface{}, error) {
@@ -4152,23 +4368,44 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (queryRes
 	if err := decodeParams(params, &payload); err != nil {
 		return queryResult{}, err
 	}
-	db, err := s.requireDB()
+	var result queryResult
+	var execErr error
+	// The transaction and the DBMS_OUTPUT drain share one pinned physical
+	// connection, so the lines written by these statements are readable here.
+	// The op returns a single result, so every statement's output is reported on
+	// it; per-statement results (one op call each) keep their own output. The
+	// statements are joined for the DBMS_OUTPUT.DISABLE check, with a newline
+	// between them so a trailing line comment cannot swallow the next statement.
+	messages := s.withStatementDBMSOutput(strings.Join(payload.Statements, "\n"), func() error {
+		result, execErr = s.runTransactionStatements(payload.Statements, payload.Schema)
+		return execErr
+	})
+	if execErr != nil {
+		return queryResult{}, execErr
+	}
+	result.Messages = messages
+	return result, nil
+}
+
+// runTransactionStatements executes the statements of one one-shot transaction
+// on the connection the caller pinned and commits them together.
+func (s *server) runTransactionStatements(statements []string, schema string) (queryResult, error) {
+	if _, err := s.requireDB(); err != nil {
+		return queryResult{}, err
+	}
+	tx, err := s.beginStatementTx(context.Background())
 	if err != nil {
 		return queryResult{}, err
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return queryResult{}, err
-	}
-	if strings.TrimSpace(payload.Schema) != "" {
-		if _, err := tx.Exec("ALTER SESSION SET CURRENT_SCHEMA = " + quoteIdentifier(payload.Schema)); err != nil {
+	if strings.TrimSpace(schema) != "" {
+		if _, err := tx.Exec("ALTER SESSION SET CURRENT_SCHEMA = " + quoteIdentifier(schema)); err != nil {
 			tx.Rollback()
 			return queryResult{}, err
 		}
 	}
 	var affected int64
 	start := time.Now()
-	for _, statement := range payload.Statements {
+	for _, statement := range statements {
 		statement = trimStatementSQL(statement)
 		if statement == "" {
 			continue
@@ -4211,6 +4448,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 			Truncated:       result.Truncated,
 			SessionID:       nil,
 			HasMore:         false,
+			Messages:        result.Messages,
 		}, err
 	}
 	result, session, err := s.runPagedOracleSelect(sqlText, opts, pageSize, start)
@@ -4453,6 +4691,22 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	if maxRows <= 0 {
 		maxRows = defaultMaxRows
 	}
+	var result queryResult
+	var err error
+	// The statement and the DBMS_OUTPUT drain share one pinned physical
+	// connection, so the lines belong to this statement's Oracle session. The
+	// statement's text also tells the capture whether it disabled the buffer.
+	messages := s.withStatementDBMSOutput(sqlText, func() error {
+		result, err = s.runExecuteQuery(sqlText, maxRows, opts, start)
+		return err
+	})
+	result.Messages = messages
+	return result, err
+}
+
+// runExecuteQuery runs one already-trimmed statement on the connection the
+// caller pinned and returns its result.
+func (s *server) runExecuteQuery(sqlText string, maxRows int, opts queryOptions, start time.Time) (queryResult, error) {
 	if isQuerySQL(sqlText) {
 		result, err := s.executeSelect(sqlText, maxRows, opts.TimeoutSecs, opts.DeferLOBs)
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
@@ -4461,7 +4715,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	if _, err := s.requireDB(); err != nil {
 		return queryResult{}, err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.statementContext())
 	var timer *time.Timer
 	if opts.TimeoutSecs > 0 {
 		var t *time.Timer
@@ -4499,6 +4753,11 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 func (s *server) execContext(ctx context.Context, sqlText string) (sql.Result, error) {
 	if s.manualTx != nil {
 		return s.manualTx.ExecContext(ctx, sqlText)
+	}
+	if s.statementConn != nil {
+		// Run on the pinned physical connection so the DBMS_OUTPUT this
+		// statement writes can be drained from the same Oracle session.
+		return s.statementConn.ExecContext(ctx, sqlText)
 	}
 	db, err := s.requireDB()
 	if err != nil {
@@ -5618,7 +5877,7 @@ func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs in
 	if _, err := s.requireDB(); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.statementContext())
 	var timer *time.Timer
 	if timeoutSecs > 0 {
 		var t *time.Timer
@@ -5660,6 +5919,10 @@ func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs in
 	}()
 	if s.manualTx != nil {
 		rows, queryErr = s.manualTx.QueryContext(ctx, sqlText, args...)
+	} else if s.statementConn != nil {
+		// Run on the pinned physical connection so the DBMS_OUTPUT this
+		// statement writes can be drained from the same Oracle session.
+		rows, queryErr = s.statementConn.QueryContext(ctx, sqlText, args...)
 	} else {
 		db, err := s.requireDB()
 		if err != nil {
@@ -5692,9 +5955,12 @@ func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs in
 
 func (s *server) cancelActiveQuery() {
 	s.activeCancelMu.Lock()
-	cancels := make([]context.CancelFunc, 0, len(s.activeRows)+1)
+	cancels := make([]context.CancelFunc, 0, len(s.activeRows)+2)
 	if s.activeCancel != nil {
 		cancels = append(cancels, s.activeCancel)
+	}
+	if s.statementCancel != nil {
+		cancels = append(cancels, s.statementCancel)
 	}
 	for _, cancel := range s.activeRows {
 		cancels = append(cancels, cancel)

@@ -9635,6 +9635,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "Действует, когда фокус в таблице результатов",
     shortcutScopeHintSearch: "Действует, когда фокус в поле поиска",
     shortcutScopeHintSidebar: "Действует, когда фокус на боковой панели",
+    shortcutScopeDebug: "Отладчик PL/SQL",
+    shortcutScopeHintDebug: "Действует, когда отладчик занимает активную вкладку",
     shortcutGroupCount: "{count} действий",
     shortcutGroupCollapse: "Свернуть группу",
     shortcutGroupExpand: "Развернуть группу",

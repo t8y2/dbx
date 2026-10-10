@@ -33,6 +33,8 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitionRightSidebarPanels, useSettingsStore, type RightSidebarPanelId, type RightSidebarPanelState } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
+import { usePlDebugStore } from "@/stores/plDebugStore";
+import { resolvePlDebugStepShortcut, type PlDebugStepCommand } from "@/lib/editor/plDebugStepShortcut";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
@@ -251,6 +253,13 @@ const editorFontFamilyStyle = useEditorFontFamilyStyle();
 const { uiFontFamilyPreview } = useUiFontFamilyPreview();
 const savedSqlStore = useSavedSqlStore();
 const promptTemplateStore = usePromptTemplateStore();
+const plDebugStore = usePlDebugStore();
+/** 调试单步命令 → store 动作；显式映射，改命令名时编译期就会报错而不是静默失配。 */
+const plDebugStepRunners: Record<PlDebugStepCommand, () => void> = {
+  stepInto: () => void plDebugStore.stepIn(),
+  stepOut: () => void plDebugStore.stepOut(),
+  stepOver: () => void plDebugStore.stepOver(),
+};
 let pluginTitleLocaleGeneration = 0;
 watch(appLocale, async (locale) => {
   const generation = ++pluginTitleLocaleGeneration;
@@ -4274,6 +4283,23 @@ async function handleKeydown(e: KeyboardEvent) {
 
   const shortcuts = settingsStore.editorSettings.shortcuts;
   if (showTabSwitcher.value) return;
+  // PL/SQL 调试器单步快捷键（ODC 对齐：Mod+I 进入 / Mod+O 跳出 / Mod+P 跳过）。
+  // 这里是**唯一的上下文闸门**：只有前台标签页就是调试器、且有停住的会话可单步
+  // 时才认领这三个键；其余情况判定返回 null，事件继续往下走 —— 调试页之外
+  // Mod+P 照旧是 quickOpen、Mod+I 与 Mod+O 不触发任何东西。
+  // 必须排在 quickOpen 分支之前：ODC 的同三个 action 也是被 debugMode 守卫后
+  // 优先于常规按键，调试态里让 Step over 赢下 Ctrl+P 才是 1:1 对齐。
+  const plDebugStep = resolvePlDebugStepShortcut(e, {
+    isDebugTab: activeTab.value?.mode === "debug",
+    canStep: plDebugStore.hasSession && !plDebugStore.busy,
+    shortcuts,
+  });
+  if (plDebugStep) {
+    e.preventDefault();
+    e.stopPropagation();
+    plDebugStepRunners[plDebugStep]();
+    return;
+  }
   if (isFocusWhereShortcut(e, shortcuts) && !showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
     const target = e.target instanceof Element ? e.target : null;
     if (!target?.closest('[role="dialog"], [role="alertdialog"]') && contentAreaRef.value?.focusWhere()) {

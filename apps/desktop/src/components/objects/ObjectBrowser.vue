@@ -60,6 +60,7 @@ import {
   WrapText,
   X,
   Wrench,
+  Bug,
 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import i18n from "@/i18n";
@@ -80,7 +81,8 @@ import * as api from "@/lib/backend/api";
 import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, PgTablePartitioning, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
-import { supportsAiAssistantContext, supportsDataDictionary, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
+import { supportsAiAssistantContext, supportsDataDictionary, supportsPlDebugRoutine, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
+import { launchPlDebug } from "@/components/debug/plDebugLaunch";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
@@ -1788,6 +1790,21 @@ function openProcedureExecution(row: ObjectBrowserRow) {
   if (row.type !== "PROCEDURE") return;
   procedureExecutionTarget.value = row;
   showProcedureExecutionConfirm.value = true;
+}
+
+function openPlDebugRoutine(row: ObjectBrowserRow) {
+  if (row.type !== "PROCEDURE" && row.type !== "FUNCTION") return;
+  // The capability probe and the INVALID-object pre-check both live in
+  // `launchPlDebug`, so every entry point goes through the same gate.
+  void launchPlDebug({
+    connectionId: props.connection.id,
+    database: props.database,
+    databaseType: effectiveDatabaseType.value,
+    schema: row.schema || selectedSchema.value,
+    objectType: row.type,
+    objectName: row.name,
+    valid: row.valid,
+  });
 }
 
 function openProcedureExecutionSql(sql: string) {
@@ -3905,6 +3922,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 function getProcFuncMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
     ...(item.type === "PROCEDURE" ? [{ label: t("contextMenu.executeProcedure"), action: () => openProcedureExecution(item), icon: Play }] : []),
+    ...(supportsPlDebugRoutine(effectiveDatabaseType.value) ? [{ label: t("contextMenu.debugRoutine"), action: () => openPlDebugRoutine(item), icon: Bug }] : []),
     ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),

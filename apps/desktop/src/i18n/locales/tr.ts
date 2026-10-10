@@ -8069,6 +8069,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "Sonuç tablosu odaktayken geçerli",
     shortcutScopeHintSearch: "Arama alanı odaktayken geçerli",
     shortcutScopeHintSidebar: "Kenar çubuğu odaktayken geçerli",
+    shortcutScopeDebug: "PL/SQL hata ayıklayıcısı",
+    shortcutScopeHintDebug: "Hata ayıklayıcı etkin sekmeyi kullanırken geçerli",
     shortcutGroupCount: "{count} eylem",
     shortcutGroupCollapse: "Grubu daralt",
     shortcutGroupExpand: "Grubu genişlet",

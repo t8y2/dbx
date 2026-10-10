@@ -8269,6 +8269,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "Si applica con la griglia dei risultati attiva",
     shortcutScopeHintSearch: "Si applica con il campo di ricerca attivo",
     shortcutScopeHintSidebar: "Si applica con la barra laterale attiva",
+    shortcutScopeDebug: "Debugger PL/SQL",
+    shortcutScopeHintDebug: "Si applica mentre il debugger occupa la scheda attiva",
     shortcutGroupCount: "{count} azioni",
     shortcutGroupCollapse: "Comprimi gruppo",
     shortcutGroupExpand: "Espandi gruppo",

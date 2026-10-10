@@ -205,7 +205,7 @@ impl AgentRuntimeClient {
         }
         let response = response?;
         decode_agent_response(
-            response,
+            normalize_agent_query_messages_in_response(response, method),
             self.handshake.supports(AgentCapability::StructuredErrorV1),
             params.get("agentSessionId").and_then(Value::as_str),
         )
@@ -356,6 +356,96 @@ fn decode_agent_response<T: DeserializeOwned>(
         message: format!("Failed to deserialize agent result: {e}"),
         reason: ContractViolationReason::InvalidResult,
     })
+}
+
+/// Methods whose agent result is a query result and therefore may carry the
+/// optional top-level `messages` array (Oracle `DBMS_OUTPUT`, SQL Server
+/// `PRINT`/`RAISERROR`, notices/warnings).
+///
+/// MQ methods (`mq_peek_messages` and friends) reuse the `messages` key for
+/// actual message rows, so they must never be normalized here.
+fn agent_method_carries_query_messages(method: &str) -> bool {
+    [
+        AgentMethod::ExecuteQuery,
+        AgentMethod::ExecuteQueryPage,
+        AgentMethod::FetchQueryPage,
+        AgentMethod::ExecuteBatch,
+        AgentMethod::ExecuteTransaction,
+    ]
+    .iter()
+    .any(|candidate| candidate.as_str() == method)
+}
+
+/// Normalizes a query-method agent response's `result.messages` in place.
+fn normalize_agent_query_messages_in_response(mut response: Value, method: &str) -> Value {
+    if !agent_method_carries_query_messages(method) {
+        return response;
+    }
+    if let Some(result) = response.get_mut("result") {
+        normalize_agent_query_messages(result);
+    }
+    response
+}
+
+/// Tolerates the shapes different agent generations emit for the optional
+/// server-message array of a query result.
+///
+/// [`dbx_types::QueryResult::messages`] is a `Vec<QueryMessage>` whose entries
+/// require `severity` and `message`, and a `Vec` rejects `null`. A missing key
+/// already defaults to empty, but `"messages": null` (Go agents marshal nil
+/// slices) or an entry without `severity`/`message` would otherwise fail the
+/// whole result deserialization. Such payloads are dropped instead, mirroring
+/// the documented "omit the key when there is no output" contract; a bare
+/// string entry is coerced into `{ severity: "INFO", message }`.
+fn normalize_agent_query_messages(result: &mut Value) {
+    let Some(object) = result.as_object_mut() else {
+        return;
+    };
+    let normalized: Option<Vec<Value>> = object
+        .get("messages")
+        .and_then(|messages| messages.as_array())
+        .map(|entries| entries.iter().filter_map(normalized_agent_query_message).collect());
+    match normalized {
+        Some(entries) if !entries.is_empty() => {
+            object.insert("messages".to_string(), Value::Array(entries));
+        }
+        _ => {
+            object.remove("messages");
+        }
+    }
+}
+
+/// Coerces one `messages` entry into the `{ severity, message }` shape the
+/// shared `QueryMessage` type requires, preserving any extra fields it carries.
+/// `None` drops entries that carry no usable message.
+fn normalized_agent_query_message(entry: &Value) -> Option<Value> {
+    let (severity, message) = match entry {
+        Value::String(message) => ("INFO".to_string(), message.clone()),
+        Value::Object(fields) => {
+            let message = match fields.get("message") {
+                Some(Value::String(message)) => message.clone(),
+                Some(Value::Null) | None => return None,
+                Some(other) => other.to_string(),
+            };
+            let severity = match fields.get("severity") {
+                Some(Value::String(severity)) if !severity.is_empty() => severity.clone(),
+                _ => "INFO".to_string(),
+            };
+            (severity, message)
+        }
+        _ => return None,
+    };
+    match entry {
+        Value::Object(_) => {
+            let mut normalized = entry.clone();
+            if let Some(fields) = normalized.as_object_mut() {
+                fields.insert("severity".to_string(), Value::String(severity));
+                fields.insert("message".to_string(), Value::String(message));
+            }
+            Some(normalized)
+        }
+        _ => Some(serde_json::json!({ "severity": severity, "message": message })),
+    }
 }
 
 const AGENT_RPC_ERROR_DATA_MARKER: &str = "\nDBX_AGENT_ERROR_DATA:";
@@ -1251,8 +1341,28 @@ pub enum AgentMethod {
     PlDebugStart,
     PlDebugSetBreakpoints,
     PlDebugDeleteBreakpoints,
+    // Enables or disables one existing breakpoint in place (DBMS_DEBUG
+    // ENABLE_BREAKPOINT / DISABLE_BREAKPOINT) instead of deleting and re-setting
+    // it. The response body carries `serverSupported`: false means the server
+    // exposes no such primitive and the caller keeps its client-side fallback
+    // (delete + re-set). Served by both the oceanbase-oracle (Java) agent and the
+    // oracle-go agent, which expose the matching
+    // `pl_debug_set_breakpoint_enabled` request branch and
+    // AgentProtocol.METHOD_PL_DEBUG_SET_BREAKPOINT_ENABLED constant.
+    PlDebugSetBreakpointEnabled,
     PlDebugListBreakpoints,
     PlDebugResume,
+    // Runs the debuggee to completion while ignoring every remaining
+    // breakpoint (ODC's resumeIgnoreBreakpoints / CNT_EXIT). Served by both the
+    // oracle-go agent and the oceanbase-oracle (Java) agent, which exposes the
+    // matching `pl_debug_resume_ignore_breakpoints` request branch and
+    // AgentProtocol.METHOD_PL_DEBUG_RESUME_IGNORE_BREAKPOINTS constant.
+    PlDebugResumeIgnoreBreakpoints,
+    // Assigns a new value to a variable in a debug frame (ODC's setValue),
+    // addressed by frame/index plus the variable name.
+    PlDebugSetValue,
+    // Enables or disables breaking on exceptions (ODC's setExceptionBreakpoint).
+    PlDebugSetExceptionBreakpoint,
     PlDebugStepOver,
     PlDebugStepIn,
     PlDebugStepOut,
@@ -1361,8 +1471,12 @@ impl AgentMethod {
             Self::PlDebugStart => "pl_debug_start",
             Self::PlDebugSetBreakpoints => "pl_debug_set_breakpoints",
             Self::PlDebugDeleteBreakpoints => "pl_debug_delete_breakpoints",
+            Self::PlDebugSetBreakpointEnabled => "pl_debug_set_breakpoint_enabled",
             Self::PlDebugListBreakpoints => "pl_debug_list_breakpoints",
             Self::PlDebugResume => "pl_debug_resume",
+            Self::PlDebugResumeIgnoreBreakpoints => "pl_debug_resume_ignore_breakpoints",
+            Self::PlDebugSetValue => "pl_debug_set_value",
+            Self::PlDebugSetExceptionBreakpoint => "pl_debug_set_exception_breakpoint",
             Self::PlDebugStepOver => "pl_debug_step_over",
             Self::PlDebugStepIn => "pl_debug_step_in",
             Self::PlDebugStepOut => "pl_debug_step_out",
@@ -1946,6 +2060,8 @@ impl AgentDriverClient {
         // Read response from stdout (blocking, with timeout)
         let mut reader = self.stdout.take().ok_or("Agent stdout not available")?;
 
+        // Captured as a `bool` because the blocking closure must stay `'static`.
+        let carries_query_messages = agent_method_carries_query_messages(method);
         let mut response_task = tokio::task::spawn_blocking(move || {
             let (line, resp) = match read_agent_json_response(&mut reader) {
                 Ok(response) => response,
@@ -1956,7 +2072,11 @@ impl AgentDriverClient {
             let result = if let Some(err) = resp.get("error") {
                 Err(format_agent_rpc_error(err))
             } else if let Some(result_val) = resp.get("result") {
-                serde_json::from_value::<T>(result_val.clone())
+                let mut result_val = result_val.clone();
+                if carries_query_messages {
+                    normalize_agent_query_messages(&mut result_val);
+                }
+                serde_json::from_value::<T>(result_val)
                     .map_err(|e| format!("Failed to deserialize agent result: {e}"))
             } else {
                 Err(format!("Agent response missing both 'result' and 'error': {line}"))
@@ -2663,12 +2783,87 @@ impl AgentDriverClient {
             .await
     }
 
+    /// Enables or disables one existing breakpoint in place (DBMS_DEBUG
+    /// ENABLE_BREAKPOINT / DISABLE_BREAKPOINT) instead of deleting and re-setting
+    /// it, so the server keeps the breakpoint number. The response body
+    /// (`{ok, result, message, serverSupported, ...}`) is forwarded as-is:
+    /// `serverSupported = false` is the capability sentinel, not an error, and
+    /// tells the caller to keep its client-side fallback.
+    pub async fn pl_debug_set_breakpoint_enabled<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        breakpoint_number: i64,
+        enabled: bool,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let params = serde_json::json!({
+            "debugId": debug_id,
+            "breakpointNumber": breakpoint_number,
+            "enabled": enabled,
+        });
+        self.call_method_with_timeout(AgentMethod::PlDebugSetBreakpointEnabled, params, timeout_duration).await
+    }
+
     pub async fn pl_debug_resume<T: DeserializeOwned + Send + 'static>(
         &mut self,
         debug_id: &str,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
         self.call_method_with_timeout(AgentMethod::PlDebugResume, pl_debug_params(debug_id, None), timeout_duration).await
+    }
+
+    /// Runs the debuggee to completion, ignoring every remaining breakpoint
+    /// (ODC's `resumeIgnoreBreakpoints`, helper procedure `DBX_CNT_EXIT`). Like
+    /// the other continuation calls this blocks until the interpreter exits, so
+    /// it uses the debug session timeout.
+    pub async fn pl_debug_resume_ignore_breakpoints<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::PlDebugResumeIgnoreBreakpoints,
+            pl_debug_params(debug_id, None),
+            timeout_duration,
+        )
+        .await
+    }
+
+    /// Assigns `value` to the variable `name` in frame `frame` (variable slot
+    /// `index`). The agent's response body is forwarded as-is.
+    pub async fn pl_debug_set_value<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        name: &str,
+        frame: i64,
+        index: i64,
+        value: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let params = serde_json::json!({
+            "debugId": debug_id,
+            "name": name,
+            "frame": frame,
+            "index": index,
+            "value": value,
+        });
+        self.call_method_with_timeout(AgentMethod::PlDebugSetValue, params, timeout_duration).await
+    }
+
+    /// Enables or disables breaking on exceptions for the debug session. The
+    /// agent's response body is forwarded as-is.
+    pub async fn pl_debug_set_exception_breakpoint<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        enabled: bool,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::PlDebugSetExceptionBreakpoint,
+            pl_debug_params(debug_id, Some(("enabled", Value::Bool(enabled)))),
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn pl_debug_step_over<T: DeserializeOwned + Send + 'static>(
@@ -2703,13 +2898,20 @@ impl AgentDriverClient {
         self.call_method_with_timeout(AgentMethod::PlDebugAbort, pl_debug_params(debug_id, None), timeout_duration).await
     }
 
+    /// `frame` selects the stack frame whose variables are read; the agent
+    /// defaults to frame 0 when it is omitted.
     pub async fn pl_debug_get_variables<T: DeserializeOwned + Send + 'static>(
         &mut self,
         debug_id: &str,
+        frame: Option<i64>,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method_with_timeout(AgentMethod::PlDebugGetVariables, pl_debug_params(debug_id, None), timeout_duration)
-            .await
+        self.call_method_with_timeout(
+            AgentMethod::PlDebugGetVariables,
+            pl_debug_params(debug_id, frame.map(|frame| ("frame", Value::from(frame)))),
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn pl_debug_get_stack<T: DeserializeOwned + Send + 'static>(
@@ -3977,7 +4179,7 @@ mod tests {
         agent_schema_table_params, agent_supports_capability, agent_transaction_params, append_legacy_error_context,
         decode_agent_response, format_agent_process_error, format_agent_startup_error, is_agent_rpc_response_error,
         is_retryable_agent_startup_error, is_unsupported_handshake_error, legacy_agent_call_error,
-        mongo_collection_params, mongo_database_params, mongo_document_id_params, parse_agent_java_opts,
+        mongo_collection_params, mongo_database_params, mongo_document_id_params, normalize_agent_query_messages_in_response, parse_agent_java_opts,
         read_agent_json_response, read_agent_line, read_agent_line_with_limit, start_stderr_collector,
         validate_dameng_java_system_properties, AgentCallError, AgentCapability, AgentDriverClient, AgentErrorCategory,
         AgentErrorContext, AgentErrorStage, AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod,
@@ -6272,6 +6474,83 @@ for line in sys.stdin:
         let result: crate::types::QueryResult = serde_json::from_value(json).expect("deserialize agent result");
         assert_eq!(result.column_types, vec!["int4".to_string(), "geometry".to_string()]);
         assert_eq!(result.rows[0][1], serde_json::json!("POINT(116.397 39.908)"));
+    }
+
+    #[test]
+    fn agent_query_result_passes_dbms_output_messages_through() {
+        // Oracle agents report the DBMS_OUTPUT buffer as one entry per line.
+        // The shared QueryResult type already owns the `messages` field, so the
+        // agent result only has to be reachable through this decode corridor.
+        let response = normalize_agent_query_messages_in_response(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "columns": ["ID"],
+                    "rows": [[1]],
+                    "affected_rows": 0,
+                    "execution_time_ms": 4,
+                    "messages": [{ "severity": "INFO", "message": "line one" }]
+                }
+            }),
+            AgentMethod::ExecuteQuery.as_str(),
+        );
+        let result: crate::types::QueryResult = decode_agent_response(response, false, None).unwrap();
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].severity, "INFO");
+        assert_eq!(result.messages[0].message, "line one");
+    }
+
+    #[test]
+    fn agent_query_result_tolerates_null_and_partial_messages() {
+        // Go agents marshal a nil message slice as `null`; some generations
+        // omit `severity`. Neither may fail the whole query result.
+        let response = normalize_agent_query_messages_in_response(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "columns": [],
+                    "rows": [],
+                    "affected_rows": 0,
+                    "execution_time_ms": 1,
+                    "messages": [null, { "message": "no severity" }, "bare string", { "severity": "WARNING", "message": 7 }]
+                }
+            }),
+            AgentMethod::ExecuteQuery.as_str(),
+        );
+        let result: crate::types::QueryResult = decode_agent_response(response, false, None).unwrap();
+        let rendered: Vec<String> =
+            result.messages.iter().map(|message| format!("{}:{}", message.severity, message.message)).collect();
+        assert_eq!(rendered, vec!["INFO:no severity", "INFO:bare string", "WARNING:7"]);
+
+        let null_response = normalize_agent_query_messages_in_response(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "columns": [], "rows": [], "affected_rows": 0, "execution_time_ms": 1, "messages": null }
+            }),
+            AgentMethod::ExecuteQuery.as_str(),
+        );
+        let null_result: crate::types::QueryResult = decode_agent_response(null_response, false, None).unwrap();
+        assert!(null_result.messages.is_empty());
+    }
+
+    #[test]
+    fn agent_mq_results_keep_their_own_messages_payload() {
+        // MQ methods reuse `messages` for real message rows; normalization must
+        // not rewrite them into `{ severity, message }`.
+        let response = normalize_agent_query_messages_in_response(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "messages": [{ "partition": 0, "offset": 7 }] }
+            }),
+            "mq_peek_messages",
+        );
+        let result: serde_json::Value = decode_agent_response(response, false, None).unwrap();
+        assert_eq!(result["messages"][0]["offset"], serde_json::json!(7));
+        assert_eq!(result["messages"][0]["severity"], serde_json::Value::Null);
     }
 
     #[test]

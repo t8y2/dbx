@@ -95,9 +95,12 @@ export type ShortcutActionId =
   | "openDataInNewTab"
   | "viewTableDdl"
   | "sendSelectionToAi"
-  | "sqlIntentionActions";
+  | "sqlIntentionActions"
+  | "stepInto"
+  | "stepOut"
+  | "stepOver";
 
-export type ShortcutScope = "global" | "editor" | "grid" | "search" | "sidebar";
+export type ShortcutScope = "global" | "editor" | "grid" | "search" | "sidebar" | "debug";
 
 export interface ShortcutDefinition {
   id: ShortcutActionId;
@@ -749,6 +752,38 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutSqlIntentionActions",
     scope: "editor",
     defaultShortcut: "Shift+Mod+Enter",
+  },
+  // PL/SQL 调试器的单步快捷键，与 ODC 客户端逐字对齐
+  // （`odc-client-ref/src/page/Workspace/components/PLPage/index.tsx:375-395`：
+  // `pl_executeSql` 之后的三个 Monaco `addAction`，`run` 全部被 `debugMode` 守卫）：
+  //   CtrlCmd+KeyI → PL_DEBUG_STEP_IN   （进入子程序）
+  //   CtrlCmd+KeyO → PL_DEBUG_STEP_OUT  （跳出子程序）
+  //   CtrlCmd+KeyP → PL_DEBUG_STEP_SKIP （逐语句跳过，即 Step over）
+  // ODC 用 `CtrlCmd`＝macOS 的 ⌘ / Windows·Linux 的 Ctrl，正是注册表的 `Mod`。
+  //
+  // 这三个键只在调试标签页被认领（`App.vue` 的 debug 分支，判定集中在
+  // `lib/editor/plDebugStepShortcut.ts`），调试页之外逐位保留各自的既有绑定 ——
+  // 尤其是 `Mod+P` 仍然是 global 作用域的 `quickOpen`。因此它们独占 `debug`
+  // 作用域：与 `quickOpen` 的同键重叠落进「跨作用域提示」档
+  // （`findCrossScopeShortcutConflicts`，设置界面只做黄色提示），而不是同作用域
+  // 的阻断性冲突。
+  {
+    id: "stepInto",
+    labelKey: "plDebug.toolbar.stepIn",
+    scope: "debug",
+    defaultShortcut: "Mod+I",
+  },
+  {
+    id: "stepOut",
+    labelKey: "plDebug.toolbar.stepOut",
+    scope: "debug",
+    defaultShortcut: "Mod+O",
+  },
+  {
+    id: "stepOver",
+    labelKey: "plDebug.toolbar.stepOver",
+    scope: "debug",
+    defaultShortcut: "Mod+P",
   },
 ];
 

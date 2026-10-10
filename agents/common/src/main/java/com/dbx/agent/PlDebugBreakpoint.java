@@ -18,6 +18,22 @@ public class PlDebugBreakpoint {
     private Integer line;
     private Integer breakpointNumber;
     private String kind;
+    /**
+     * Optional overload disambiguation attributes, mirrored from
+     * {@code DBMS_DEBUG.PROGRAM_INFO}. Both stay {@code null} when the caller did
+     * not provide them, which is what makes the server-side overload warning
+     * applicable; an empty signature or a negative sequence is a supplied value
+     * that simply carries no disambiguation.
+     */
+    private String signature;
+    private Integer sequence;
+    /**
+     * Non-fatal diagnostic attached to a created breakpoint (an overloaded target
+     * armed without signature/sequence, or overload attributes the server cannot
+     * store). The breakpoint is still created: a warning never turns into a
+     * failure.
+     */
+    private String warning;
 
     public PlDebugBreakpoint() {
     }
@@ -60,5 +76,29 @@ public class PlDebugBreakpoint {
 
     public void setKind(String kind) {
         this.kind = kind;
+    }
+
+    public String getSignature() {
+        return signature;
+    }
+
+    public void setSignature(String signature) {
+        this.signature = signature;
+    }
+
+    public Integer getSequence() {
+        return sequence;
+    }
+
+    public void setSequence(Integer sequence) {
+        this.sequence = sequence;
+    }
+
+    public String getWarning() {
+        return warning;
+    }
+
+    public void setWarning(String warning) {
+        this.warning = warning;
     }
 }

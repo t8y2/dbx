@@ -352,6 +352,23 @@ export function rejectsAliasReferenceInHaving(dbType?: string): boolean {
 }
 
 /**
+ * Database types with a PL/SQL debugger. The desktop app drives DBMS_DEBUG over
+ * a second session, and only the Oracle agent implements the `pl_debug_*`
+ * operations.
+ *
+ * OceanBase Oracle Mode (`oceanbase-oracle`) also ships a Java `pl_debug_*`
+ * implementation, but it has never been exercised against a real OceanBase
+ * instance, so its debug entry stays hidden until that verification happens.
+ * Re-adding it here is all that is needed to expose the entry again.
+ */
+const PL_DEBUG_DATABASE_TYPES: ReadonlySet<string> = new Set(["oracle"]);
+
+/** Returns true when the PL/SQL debugger can attach to this engine. */
+export function supportsPlDebugRoutine(dbType?: string): boolean {
+  return !!dbType && PL_DEBUG_DATABASE_TYPES.has(dbType);
+}
+
+/**
  * Returns true if the database type participates in Oracle's schema-change
  * compensation under manual transactions. Toolbar/dirty-bit gating must use
  * `usesProvenReadOnlyStickyTransactionState` instead.

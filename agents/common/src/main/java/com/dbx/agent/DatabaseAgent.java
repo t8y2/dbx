@@ -391,11 +391,43 @@ public interface DatabaseAgent {
         throw new UnsupportedOperationException("PL/SQL debugging is not supported");
     }
 
+    default Map<String, Object> plDebugResumeIgnoreBreakpoints(String debugId) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
     default Map<String, Object> plDebugAbort(String debugId) {
         throw new UnsupportedOperationException("PL/SQL debugging is not supported");
     }
 
-    default Map<String, Object> plDebugGetVariables(String debugId) {
+    default Map<String, Object> plDebugGetVariables(String debugId, int frame) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    /**
+     * Changes the value of a variable in the parked debuggee; served by
+     * {@code DBX_SET_VALUE}, which resolves {@code DBMS_DEBUG.SET_VALUE}
+     * dynamically and fails with an explicit message when the server has no such
+     * routine.
+     */
+    default Map<String, Object> plDebugSetValue(String debugId, String name, int frame, int index, String value) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    /**
+     * Enables or disables an existing breakpoint; served by
+     * {@code DBX_ENABLE_BREAKPOINT} / {@code DBX_DISABLE_BREAKPOINT}, which resolve
+     * {@code DBMS_DEBUG.ENABLE_BREAKPOINT} / {@code DISABLE_BREAKPOINT} dynamically
+     * and report {@code serverSupported=false} when the server has neither.
+     */
+    default Map<String, Object> plDebugSetBreakpointEnabled(String debugId, int breakpointNumber, boolean enabled) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    /**
+     * Enables or disables exception mode, which makes resume keep continuing until
+     * an exception/handler is reported; the step operations are unaffected.
+     */
+    default Map<String, Object> plDebugSetExceptionBreakpoint(String debugId, boolean enabled) {
         throw new UnsupportedOperationException("PL/SQL debugging is not supported");
     }
 

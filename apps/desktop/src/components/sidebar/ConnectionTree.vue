@@ -44,6 +44,7 @@ import { pruneTreeSelectionToVisibleNodeIds } from "@/lib/sidebar/sidebarTreeSel
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
 import { isInternalDorisCatalog, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionObjectTreeNodeSchema, connectionShouldDiscoverJdbcSchemas, connectionUsesConnectionRootSchemaMode, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { launchPlDebug } from "@/components/debug/plDebugLaunch";
 import {
   activeTabSidebarTarget,
   expandSidebarLocatePath,
@@ -2235,6 +2236,23 @@ function openSidebarProcedure(node: TreeNode) {
   sidebarProcedureOpen.value = true;
 }
 
+function openSidebarPlDebug(node: TreeNode) {
+  if ((node.type !== "procedure" && node.type !== "function") || !node.connectionId || !node.database) return;
+  const packageMember = node.parentType === "package" && !!node.parentName;
+  // `valid === false` is the dictionary's INVALID status: the capability probe
+  // still runs, but the launch itself is refused with a dedicated message.
+  void launchPlDebug({
+    connectionId: node.connectionId,
+    database: node.database,
+    databaseType: effectiveDatabaseTypeForConnection(store.getConfig(node.connectionId)),
+    schema: (packageMember ? node.parentSchema : node.schema) || node.schema,
+    objectType: node.type === "function" ? "FUNCTION" : "PROCEDURE",
+    objectName: node.objectName || node.label,
+    packageName: packageMember ? node.parentName : undefined,
+    valid: node.valid,
+  });
+}
+
 function openSidebarData(node: TreeNode, requireSelection: boolean, openMode: "default" | "new-tab", runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>) {
   const target = createSidebarActionTarget(node);
   runSidebarDataOpenImmediately(
@@ -2706,6 +2724,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
       @open-elasticsearch-index-metadata="openSidebarElasticsearchIndexMetadata"
       @open-object-source="openSidebarObjectSource"
       @open-procedure="openSidebarProcedure"
+      @open-pl-debug="openSidebarPlDebug"
       @open-settings="openSidebarSettings"
       @open-data="openSidebarData"
       @open-visible-databases="openSidebarVisibleDatabases"

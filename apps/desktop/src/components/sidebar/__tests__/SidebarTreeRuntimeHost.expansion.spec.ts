@@ -165,6 +165,36 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(database.isExpanded).toBe(false);
   });
 
+  it("expands a collapsed database and opens the object browser on single-click", async () => {
+    const database: TreeNode = {
+      id: "mysql:dbx_test",
+      label: "dbx_test",
+      type: "database",
+      connectionId: "mysql",
+      database: "dbx_test",
+      isExpanded: false,
+      children: [],
+    };
+    settingsStore.editorSettings.sidebarActivation = "single";
+    settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = true;
+    connectionStore.treeNodes = [database];
+    connectionStore.loadTables.mockImplementation(async () => {
+      database.isExpanded = true;
+    });
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: database, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.handleRowClick(database, 1);
+    await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledWith("mysql", "dbx_test", undefined, undefined, undefined, false, undefined, undefined));
+    await vi.waitFor(() => expect(database.isExpanded).toBe(true));
+  });
+
   it("does not collapse an expanded database on click in single-click activation mode", async () => {
     const database: TreeNode = {
       id: "mysql:dbx_test",

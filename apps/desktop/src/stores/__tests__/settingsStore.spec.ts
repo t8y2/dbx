@@ -35,6 +35,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ resultTabPreferComments: "false" } as any).resultTabPreferComments).toBe(true);
   });
 
+  it("defaults browsing objects when activating a database or schema", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation).toBe(true);
+    expect(normalizeEditorSettings({}).sidebarBrowseObjectsOnDatabaseActivation).toBe(true);
+    expect(normalizeEditorSettings({ sidebarBrowseObjectsOnDatabaseActivation: false }).sidebarBrowseObjectsOnDatabaseActivation).toBe(false);
+  });
+
   it("defaults webLogoPosition to left and validates positions (#11053)", () => {
     expect(DEFAULT_EDITOR_SETTINGS.webLogoPosition).toBe("left");
     expect(normalizeEditorSettings({}).webLogoPosition).toBe("left");

@@ -54,6 +54,7 @@ const emit = defineEmits<{
   copyValue: [];
   commit: [];
   cancel: [];
+  close: [];
   save: [];
   setNull: [];
   copyColumnName: [];
@@ -64,6 +65,7 @@ const { geometryPreviewOpen, geometryCanvas, detailsEditorContainer, sideJsonPre
   detail: toRef(props, "detail"),
   editValue: detailEditValue,
   onCancel: () => emit("cancel"),
+  onClose: () => emit("close"),
   // 详情编辑器里按 Ctrl/Cmd+S 与 temporal 编辑器的 ctrl+s 路径保持一致：
   // 先 emit commit（把草稿落成待保存变更），再 emit save（触发网格保存）。
   onSave: () => {

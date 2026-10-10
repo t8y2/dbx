@@ -98,6 +98,7 @@ watch(jsonPreviewContainer, async (element) => {
     jsonPreviewEditor = useCellDetailEditor({
       language: "json",
       readOnly: true,
+      onEscape: () => (open.value = false),
       editorTheme: () => settingsStore.editorSettings.theme,
       appAppearance: () => (isDark.value ? "dark" : "light"),
       appPalette: () => themePalette.value,

@@ -7092,6 +7092,23 @@ function closeCellDetails() {
   detailCell.value = null;
 }
 
+function escapeCellDetails() {
+  // Portalled overlays may keep focus in the grid. Let their own Escape handlers win.
+  // Context menus close during capture, but remain mounted until Vue's next update.
+  if (document.querySelector("[data-dbx-context-menu], [data-slot='dialog-content'][data-state='open'], [data-slot='popover-content'][data-state='open'], [data-slot='dropdown-menu-content'][data-state='open']")) return false;
+  // Preserve the editors' existing Escape behavior even when a toolbar button has focus.
+  if (isEditingDetail.value) {
+    if (activeCellDetailTab.value === "valueEditor") {
+      if (detailTemporalEditorConfig.value) cancelValueEditorEdit();
+      else restoreDetailOriginalValue();
+    } else cancelDetailEdit();
+    return true;
+  }
+  closeCellDetails();
+  nextTick(() => gridRef.value?.focus({ preventScroll: true }));
+  return true;
+}
+
 function toggleMongoJsonPreview() {
   if (!canShowMongoJsonPreview.value) return;
   showMongoJsonPreview.value = !showMongoJsonPreview.value;
@@ -9054,6 +9071,8 @@ function showCellDetails(rowIndex: number, colIndex: number) {
   activeCellDetailTab.value = defaultCellDetailTab();
   showCellDetail.value = true;
   hydrateCellDetailTarget(detailCell.value);
+  // Move focus off the trigger so Escape can close the newly opened panel.
+  gridRef.value?.focus({ preventScroll: true });
 }
 
 function showCellDetailsForVisibleCell(rowIndex: number, visibleColIdx: number, actualColIdx: number) {
@@ -10392,6 +10411,15 @@ function openCellDetailSearch(): boolean {
 
 async function onGridKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
+
+  const target = event.target;
+  if (event.key === "Escape" && !event.isComposing && showCellDetail.value && target instanceof Element && (target === gridRef.value || target.closest("[data-cell-detail-panel]"))) {
+    if (escapeCellDetails()) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    return;
+  }
 
   if (isFocusWhereShortcut(event, settingsStore.editorSettings.shortcuts) && focusWhere()) {
     event.preventDefault();
@@ -15398,6 +15426,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           <!-- Cell Detail Drawer -->
           <div
             v-if="showCellDetail && activeCellDetail"
+            data-cell-detail-panel
             class="relative flex flex-col bg-background min-w-0"
             :class="[cellDetailPanelIsBottom ? 'col-start-1 row-start-2 border-t' : 'col-start-4 row-start-1 border-l', { 'detail-drawer-resizing': isResizingDetail }]"
             :style="detailPanelStyle"
@@ -15450,6 +15479,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 @copy-value="copyDetailCurrentValue"
                 @commit="commitDetailEdit"
                 @cancel="cancelDetailEdit"
+                @close="escapeCellDetails"
                 @save="onTemporalCellEditorSave"
                 @set-null="setDetailNull"
                 @copy-column-name="copyDetailColumnName"

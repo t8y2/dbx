@@ -1190,6 +1190,7 @@ fn parse_explain_verbosity(args: &[String]) -> Result<String, String> {
 
 fn normalized_json(input: &str) -> Result<String, String> {
     let transformed = transform_shell_regex_literals(input.trim())?;
+    let transformed = transform_ejson_deserialize(&transformed)?;
     let transformed = transform_shell_constructors(&transformed)?;
     let value: Value =
         json5::from_str(&transformed).map_err(|error| format!("Invalid MongoDB JSON argument: {error}"))?;
@@ -1403,6 +1404,68 @@ const SHELL_CONSTRUCTORS: [&str; 11] = [
     "MinKey",
     "MaxKey",
 ];
+
+/// Rewrite `EJSON.deserialize(<argument>)` to just `<argument>`, mirroring the
+/// webview's `replaceMongoEjsonDeserialize` (`packages/mongo-shell/src/json.ts`).
+///
+/// The "Copy -> SQL Inserts" action formats every BSON value that extended JSON
+/// cannot spell directly through `EJSON.deserialize({...})` (see
+/// `formatMongoShellLiteral`). The editor already unwraps those calls, but the
+/// statement is re-parsed here before execution, so the same unwrapping has to
+/// happen before json5 sees the text; otherwise the copy action emits statements
+/// its own editor rejects (#11666).
+fn transform_ejson_deserialize(input: &str) -> Result<String, String> {
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        let ch = input[index..].chars().next().ok_or("Invalid MongoDB argument.")?;
+        if matches!(ch, '"' | '\'') {
+            // Copy quoted text verbatim so a quoted `EJSON.deserialize` stays data.
+            let start = index;
+            index += ch.len_utf8();
+            let mut escaped = false;
+            while index < input.len() {
+                let current = input[index..].chars().next().ok_or("Invalid MongoDB argument.")?;
+                index += current.len_utf8();
+                if escaped {
+                    escaped = false;
+                } else if current == '\\' {
+                    escaped = true;
+                } else if current == ch {
+                    break;
+                }
+            }
+            output.push_str(&input[start..index]);
+            continue;
+        }
+        let Some(open) = ejson_deserialize_open_paren(input, index) else {
+            output.push(ch);
+            index += ch.len_utf8();
+            continue;
+        };
+        let close = matching_paren(input, open).ok_or("Unclosed MongoDB EJSON.deserialize call.")?;
+        let arguments = split_top_level(&input[open + 1..close]);
+        // The shell also accepts `EJSON.deserialize(json, options)`. DBX's copy
+        // action only emits the one-argument form, and silently dropping options
+        // such as `relaxed` would change the value that is written, so the extra
+        // argument is rejected the same way the webview parser rejects it.
+        if arguments.len() != 1 || arguments[0].is_empty() {
+            return Err("MongoDB EJSON.deserialize requires exactly one argument.".to_string());
+        }
+        output.push_str(&arguments[0]);
+        index = close + 1;
+    }
+    Ok(output)
+}
+
+/// Byte offset of the `(` when `EJSON.deserialize(` starts at `index`.
+fn ejson_deserialize_open_paren(input: &str, index: usize) -> Option<usize> {
+    let rest = input[index..].strip_prefix("EJSON")?;
+    let rest = rest.trim_start().strip_prefix('.')?;
+    let rest = rest.trim_start().strip_prefix("deserialize")?;
+    let rest = rest.trim_start();
+    rest.starts_with('(').then(|| input.len() - rest.len())
+}
 
 fn transform_shell_constructors(input: &str) -> Result<String, String> {
     let mut output = String::with_capacity(input.len());
@@ -2725,6 +2788,62 @@ mod tests {
         assert!(parse("db.products.insert({name: 'demo'}, {writeConcern: {w: 1}})").is_err());
         assert!(parse("db.products.insert()").is_err());
         assert!(parse("db.products.insert('demo')").is_err());
+    }
+
+    /// The "Copy -> SQL Inserts" action wraps BSON values that extended JSON
+    /// cannot spell directly in `EJSON.deserialize({...})`. The webview parser
+    /// already unwraps them, so this parser has to accept the same statements or
+    /// the copy action produces SQL its own editor rejects (#11666).
+    #[test]
+    fn unwraps_ejson_deserialize_arguments_in_writes() {
+        assert_eq!(
+            parse(
+                r#"db.getCollection("test").insert({
+  "type": EJSON.deserialize({
+    "$numberInt": "999999"
+  }),
+  "refid": "27507"
+})"#
+            )
+            .unwrap(),
+            MongoCommand::Insert {
+                collection: "test".to_string(),
+                documents: r#"{"type":{"$numberInt":"999999"},"refid":"27507"}"#.to_string(),
+            }
+        );
+        // The unwrapped argument still goes through the shell-constructor rewrite.
+        assert_eq!(
+            parse(r#"db.products.insertOne({_id: EJSON.deserialize({"$oid": "507f1f77bcf86cd799439011"}), at: ISODate("2026-01-01T00:00:00Z")})"#).unwrap(),
+            MongoCommand::Insert {
+                collection: "products".to_string(),
+                documents: r#"{"_id":{"$oid":"507f1f77bcf86cd799439011"},"at":{"$date":"2026-01-01T00:00:00Z"}}"#
+                    .to_string(),
+            }
+        );
+        assert_eq!(
+            parse(r#"db.products.updateOne({_id: 1}, {$set: {price: EJSON.deserialize({"$numberDecimal":"12.34"})}})"#)
+                .unwrap(),
+            MongoCommand::Update {
+                collection: "products".to_string(),
+                filter: r#"{"_id":1}"#.to_string(),
+                update: r#"{"$set":{"price":{"$numberDecimal":"12.34"}}}"#.to_string(),
+                options: None,
+                many: false,
+            }
+        );
+        // Quoted text is data, not a call to rewrite.
+        assert_eq!(
+            parse(r#"db.products.insert({note: "EJSON.deserialize({})", id: 1})"#).unwrap(),
+            MongoCommand::Insert {
+                collection: "products".to_string(),
+                documents: r#"{"note":"EJSON.deserialize({})","id":1}"#.to_string(),
+            }
+        );
+        // `EJSON.deserialize(json, options)` is rejected rather than silently
+        // dropping options such as `relaxed`.
+        assert!(parse(r#"db.products.insert({a: EJSON.deserialize({"$numberInt":"1"}, {relaxed: true})})"#).is_err());
+        assert!(parse("db.products.insert({a: EJSON.deserialize()})").is_err());
+        assert!(parse("db.products.insert({a: EJSON.deserialize({})})").is_ok());
     }
 
     #[test]

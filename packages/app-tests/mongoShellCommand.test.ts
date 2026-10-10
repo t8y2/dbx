@@ -914,6 +914,31 @@ test("parseMongoWriteCommand unwraps EJSON.deserialize values", () => {
   });
 });
 
+test("parseMongoWriteCommand accepts the copied insert form that wraps BSON values in EJSON.deserialize", () => {
+  // "Copy -> SQL Inserts" formats values extended JSON cannot spell directly
+  // through `EJSON.deserialize({...})`. The statement is re-parsed by the Rust
+  // parser before execution, so both parsers must accept this exact shape
+  // (#11666).
+  assert.deepEqual(
+    parseMongoWriteCommand(`db.getCollection("test").insert({
+  "type": EJSON.deserialize({
+    "$numberInt": "999999"
+  }),
+  "refid": "27507"
+})`),
+    {
+      kind: "insert",
+      collection: "test",
+      docsJson: `{
+  "type": {
+    "$numberInt": "999999"
+  },
+  "refid": "27507"
+}`,
+    },
+  );
+});
+
 test("parseMongoWriteCommand accepts legacy insert commands", () => {
   assert.deepEqual(
     parseMongoWriteCommand(`db.getCollection("accounting_reconciliations").insert({

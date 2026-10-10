@@ -17,6 +17,8 @@ const props = defineProps<{
   driverStoreActive?: boolean;
   pluginCenterOpen?: boolean;
   pluginCenterActive?: boolean;
+  schedulerPageOpen?: boolean;
+  schedulerPageActive?: boolean;
   settingsPageOpen?: boolean;
   settingsPageActive?: boolean;
   agentDriverUpdateCount?: number;
@@ -31,6 +33,8 @@ const emit = defineEmits<{
   "close-driver-store": [];
   "activate-plugin-center": [];
   "close-plugin-center": [];
+  "activate-scheduler-page": [];
+  "close-scheduler-page": [];
   "activate-settings-page": [];
   "close-settings-page": [];
   "activate-tab": [tabId: string];
@@ -132,7 +136,7 @@ watch(
   },
 );
 
-type SpecialRegularSurface = "driverStore" | "pluginCenter" | "settings";
+type SpecialRegularSurface = "driverStore" | "pluginCenter" | "scheduler" | "settings";
 
 function closeSpecialRegularSurfaces(keep?: SpecialRegularSurface) {
   if (keep !== "driverStore" && props.driverStoreOpen) {
@@ -140,6 +144,9 @@ function closeSpecialRegularSurfaces(keep?: SpecialRegularSurface) {
   }
   if (keep !== "pluginCenter" && props.pluginCenterOpen) {
     emit("close-plugin-center");
+  }
+  if (keep !== "scheduler" && props.schedulerPageOpen) {
+    emit("close-scheduler-page");
   }
   if (keep !== "settings" && props.settingsPageOpen) {
     emit("close-settings-page");
@@ -162,6 +169,10 @@ function closeOtherActiveTabs() {
   }
   if (props.pluginCenterActive) {
     closeSpecialRegularSurfaces("pluginCenter");
+    return;
+  }
+  if (props.schedulerPageActive) {
+    closeSpecialRegularSurfaces("scheduler");
     return;
   }
 
@@ -209,7 +220,7 @@ function handleCancelClose() {
 <template>
   <!-- Targets remain mounted while inactive so the original group bars can
        move here without losing their local presentation state. -->
-  <div v-show="driverStoreActive || pluginCenterActive || settingsPageActive" data-special-page-workspace class="flex min-h-0 min-w-0 flex-1 overflow-hidden" :class="layoutClass">
+  <div v-show="driverStoreActive || pluginCenterActive || schedulerPageActive || settingsPageActive" data-special-page-workspace class="flex min-h-0 min-w-0 flex-1 overflow-hidden" :class="layoutClass">
     <div data-special-page-navigation class="flex min-h-0 min-w-0 shrink-0 flex-col overflow-auto" :style="navigationStyle">
       <div v-for="group in queryStore.groups" :key="group.id" :ref="(element) => setTabBarTarget(group.id, element)" :data-special-page-tab-target="group.id" class="flex min-h-0 min-w-0" :class="isVerticalLayout ? 'flex-1' : 'shrink-0'" />
     </div>

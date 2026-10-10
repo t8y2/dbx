@@ -1,0 +1,333 @@
+// @vitest-environment happy-dom
+
+import { createApp, h, nextTick, reactive, type App } from "vue";
+import { createPinia } from "pinia";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import i18n from "../../../i18n";
+import { useSettingsStore } from "@/stores/settingsStore";
+
+const mocks = vi.hoisted(() => ({
+  getTask: vi.fn(),
+  saveTask: vi.fn(),
+  createTask: vi.fn(),
+  toast: vi.fn(),
+}));
+
+vi.mock("@/lib/scheduler/schedulerApi", () => ({
+  schedulerErrorCode: (error: unknown) => (error instanceof Error && error.message.startsWith("version_conflict") ? "version_conflict" : undefined),
+  getTask: mocks.getTask,
+  saveTask: mocks.saveTask,
+  createTask: mocks.createTask,
+}));
+
+vi.mock("@/composables/useToast", () => ({
+  useToast: () => ({ toast: mocks.toast }),
+}));
+
+import SchedulerTaskEditor from "../SchedulerTaskEditor.vue";
+import { resetHighRiskAcknowledgementsForTests } from "@/lib/scheduler/schedulerDraft";
+import type { SchedulerTaskProviderDescriptor, TaskDefinition } from "@/lib/scheduler/schedulerTypes";
+
+const mountedApps: App[] = [];
+
+const providers: SchedulerTaskProviderDescriptor[] = [
+  {
+    providerId: "io.dbx.ssh.tasks",
+    label: "SSH Tasks",
+    pluginId: "io.dbx.ssh",
+    connectionProviders: ["io.dbx.ssh.connection"],
+    allowMultipleConnections: true,
+    capabilities: ["run", "cancel", "logs"],
+    triggers: [{ id: "execute", label: "Execute Command", mode: "run", risk: "high", fields: [{ key: "command", label: "Command", type: "textarea", required: true }] }],
+  },
+  {
+    providerId: "io.dbx.files.tasks",
+    label: "Files Tasks",
+    pluginId: "io.dbx.files",
+    connectionProviders: ["io.dbx.files.connection"],
+    allowMultipleConnections: false,
+    capabilities: ["run"],
+    triggers: [
+      {
+        id: "sync",
+        label: "Sync Directory",
+        mode: "run",
+        fields: [
+          { key: "source_connection_id", label: "Source connection", type: "text", required: true, options_action: "host/connections" },
+          { key: "source_path", label: "Source path", type: "text", required: true },
+        ],
+      },
+    ],
+  },
+];
+
+const connections = [
+  { id: "conn-prod", name: "prod-web-01", db_type: "mysql", host: "h", port: 3306, username: "u", password: "p" },
+  { id: "conn-backup", name: "backup-host", db_type: "postgres", host: "h", port: 5432, username: "u", password: "p" },
+  { id: "conn-ssh-1", name: "ssh-host-1", host: "h", port: 22, username: "u", password: "p", plugin_id: "io.dbx.ssh", plugin_connection_provider: "io.dbx.ssh.connection", plugin_connection_type: "ssh" },
+  { id: "conn-ssh-2", name: "ssh-host-2", host: "h", port: 22, username: "u", password: "p", plugin_id: "io.dbx.ssh", plugin_connection_provider: "io.dbx.ssh.connection", plugin_connection_type: "ssh" },
+  { id: "conn-files-1", name: "nas-storage", host: "h", port: 22, username: "u", password: "p", plugin_id: "io.dbx.files", plugin_connection_provider: "io.dbx.files.connection", plugin_connection_type: "files" },
+] as const;
+
+function cronTask(): TaskDefinition {
+  const now = new Date().toISOString();
+  return {
+    id: "task-1",
+    name: "检查 nginx",
+    providerType: "plugin",
+    providerId: "io.dbx.ssh.tasks",
+    target: { connectionId: "conn-prod" },
+    trigger: { type: "cron", expression: "*/5 * * * *", timeZone: "Asia/Shanghai" },
+    execution: { mode: "run", timeoutSeconds: 60, concurrency: "forbid", retry: { maxAttempts: 1, backoffSeconds: 30, backoffStrategy: "fixed" }, misfire: "coalesce", restart: null },
+    configVersion: 1,
+    config: { __triggerId: "io.dbx.ssh.tasks/execute", command: "systemctl is-active nginx" },
+    enabled: true,
+    createdAt: now,
+    updatedAt: now,
+    nextRunAt: null,
+    lastRunAt: null,
+    lastRunStatus: null,
+    version: 7,
+  };
+}
+
+/** Files task: its sync trigger requires its own host/connections field. */
+function filesTask(): TaskDefinition {
+  const now = new Date().toISOString();
+  return {
+    ...cronTask(),
+    id: "files-task-1",
+    name: "目录同步",
+    providerId: "io.dbx.files.tasks",
+    target: { connectionId: "conn-files-1" },
+    config: { __triggerId: "io.dbx.files.tasks/sync", sourceConnectionId: "conn-files-1", sourcePath: "/data" },
+  };
+}
+
+async function mountEditor(props: Record<string, unknown>) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const app = createApp(SchedulerTaskEditor, {
+    providers,
+    connections,
+    "onUpdate:open": (value: boolean) => Object.assign(props, { open: value }),
+    onSaved: () => {},
+    ...props,
+  });
+  mountedApps.push(app);
+  app.use(createPinia());
+  app.use(i18n);
+  app.mount(container);
+  await nextTick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await nextTick();
+  return document.body;
+}
+
+async function flush() {
+  await nextTick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await nextTick();
+}
+
+beforeEach(() => {
+  mocks.getTask.mockReset();
+  mocks.saveTask.mockReset();
+  mocks.createTask.mockReset();
+  mocks.toast.mockReset();
+  // Session memory would leak an acknowledgement across specs otherwise.
+  resetHighRiskAcknowledgementsForTests();
+});
+
+afterEach(() => {
+  while (mountedApps.length) mountedApps.pop()?.unmount();
+  document.body.innerHTML = "";
+});
+
+describe("SchedulerTaskEditor", () => {
+  it("requires the high-risk acknowledgement before saving", async () => {
+    const container = await mountEditor({ open: true, task: cronTask() });
+    const save = container.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!;
+    expect(save.disabled).toBe(true);
+    expect(container.querySelector("[data-scheduler-editor-risk-high]")).toBeTruthy();
+    const ack = container.querySelector<HTMLInputElement>("[data-scheduler-editor-risk-ack]")!;
+    ack.checked = true;
+    ack.dispatchEvent(new Event("change"));
+    await flush();
+    expect(container.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!.disabled).toBe(false);
+  });
+
+  it("collapses the connection binding into a form that manages its own connections", async () => {
+    // The files sync trigger requires its own host/connections select — the
+    // 源/目标 selects in the config form ARE the connection binding, so the
+    // editor's separate section would be redundant copy of the same choice.
+    const formManaged = await mountEditor({ open: true, task: filesTask() });
+    expect(formManaged.querySelector("[data-scheduler-editor-connection]")).toBeNull();
+
+    // Plain providers keep the binding section.
+    const plain = await mountEditor({ open: true, task: cronTask() });
+    expect(plain.querySelector("[data-scheduler-editor-connection]")).not.toBeNull();
+  });
+
+  it("keeps a saved high-risk task acknowledged for the rest of the session", async () => {
+    mocks.saveTask.mockResolvedValue(cronTask());
+    const container = await mountEditor({ open: true, task: cronTask() });
+    const ack = container.querySelector<HTMLInputElement>("[data-scheduler-editor-risk-ack]")!;
+    ack.checked = true;
+    ack.dispatchEvent(new Event("change"));
+    await flush();
+    container.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!.click();
+    await flush();
+    expect(mocks.saveTask).toHaveBeenCalledTimes(1);
+
+    // Reopening the same task does not ask for the confirmation again — the
+    // hint stays, the box comes back pre-checked and save is enabled.
+    const reopened = await mountEditor({ open: true, task: cronTask() });
+    expect(reopened.querySelector("[data-scheduler-editor-risk-high]")).toBeTruthy();
+    expect(reopened.querySelector<HTMLInputElement>("[data-scheduler-editor-risk-ack]")!.checked).toBe(true);
+    expect(reopened.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!.disabled).toBe(false);
+  });
+
+  it("persists an edited cron timezone on save", async () => {
+    mocks.saveTask.mockResolvedValue(cronTask());
+    useSettingsStore;
+    const container = await mountEditor({ open: true, task: cronTask() });
+    const ack = container.querySelector<HTMLInputElement>("[data-scheduler-editor-risk-ack]")!;
+    ack.checked = true;
+    ack.dispatchEvent(new Event("change"));
+    await flush();
+    const zoneInput = container.querySelector<HTMLInputElement>("[data-scheduler-trigger-timezone]")!;
+    expect(zoneInput.value).toBe("Asia/Shanghai");
+    zoneInput.value = "America/Los_Angeles";
+    zoneInput.dispatchEvent(new Event("input"));
+    await flush();
+    container.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!.click();
+    await flush();
+    expect(mocks.saveTask).toHaveBeenCalledTimes(1);
+    const saved = mocks.saveTask.mock.calls[0]![0] as TaskDefinition;
+    expect(saved.trigger).toEqual({ type: "cron", expression: "*/5 * * * *", timeZone: "America/Los_Angeles" });
+    expect(saved.version).toBe(7);
+  });
+
+  it("surfaces a version conflict and reloads the stored version", async () => {
+    mocks.saveTask.mockRejectedValue(new Error("version_conflict: stored version 8"));
+    const container = await mountEditor({ open: true, task: cronTask() });
+    const ack = container.querySelector<HTMLInputElement>("[data-scheduler-editor-risk-ack]")!;
+    ack.checked = true;
+    ack.dispatchEvent(new Event("change"));
+    await flush();
+    container.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!.click();
+    await flush();
+    expect(container.querySelector("[data-scheduler-editor-conflict]")).toBeTruthy();
+    mocks.getTask.mockResolvedValue({ ...cronTask(), version: 8, name: "renamed elsewhere" });
+    container.querySelector<HTMLButtonElement>("[data-scheduler-editor-conflict] button")!.click();
+    await flush();
+    expect(mocks.getTask).toHaveBeenCalledWith("task-1");
+    expect(container.querySelector("[data-scheduler-editor-conflict]")).toBeNull();
+  });
+
+  it("flags a missing required connection from the provider declaration", async () => {
+    const task = { ...cronTask(), target: { connectionId: "" } };
+    const container = await mountEditor({ open: true, task });
+    expect(container.querySelector("[data-scheduler-editor-connection]")).toBeTruthy();
+    const validation = container.querySelector("[data-scheduler-editor-validation]")?.textContent ?? "";
+    expect(validation.length).toBeGreaterThan(0);
+    expect(container.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!.disabled).toBe(true);
+  });
+
+  it("renders no provider options without discovery results (no hardcoded fallback)", async () => {
+    const container = await mountEditor({ open: true, task: null, providers: [] });
+    expect(container.querySelector("[data-scheduler-editor-provider]")).toBeTruthy();
+    expect(container.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!.disabled).toBe(true);
+  });
+
+  it("narrows connections to the provider's declared plugin connections and supports multi-select", async () => {
+    const task = { ...cronTask(), providerId: "io.dbx.ssh.tasks", config: { __triggerId: "io.dbx.ssh.tasks/execute", command: "uptime" } } as unknown as TaskDefinition;
+    const container = await mountEditor({ open: true, task });
+    await flush();
+
+    // Only SSH plugin connections remain; the mysql/postgres rows are hidden.
+    const options = [...container.querySelectorAll<HTMLElement>("[data-scheduler-editor-connection-option]")].map((option) => option.dataset.schedulerEditorConnectionOption);
+    expect(options).toEqual(["conn-ssh-1", "conn-ssh-2"]);
+
+    // The provider declares allow_multiple_connections → chips toggle.
+    container.querySelector<HTMLElement>('[data-scheduler-editor-connection-option="conn-ssh-1"]')!.click();
+    await flush();
+    container.querySelector<HTMLElement>('[data-scheduler-editor-connection-option="conn-ssh-2"]')!.click();
+    await flush();
+    expect(container.querySelectorAll('[data-scheduler-editor-connection-option][class*="border-primary"]')).toHaveLength(2);
+
+    // Search narrows the chips.
+    const search = container.querySelector<HTMLInputElement>("[data-scheduler-editor-connection-search]")!;
+    search.value = "ssh-host-2";
+    search.dispatchEvent(new Event("input"));
+    await flush();
+    expect([...container.querySelectorAll("[data-scheduler-editor-connection-option]")]).toHaveLength(1);
+  });
+
+  it("keeps the single-connection tree picker for providers without the multi flag", async () => {
+    const task = { ...cronTask(), providerId: "io.dbx.files.tasks", config: { __triggerId: "io.dbx.files.tasks/sync" } } as unknown as TaskDefinition;
+    const container = await mountEditor({ open: true, task });
+    await flush();
+    // No declaration → unfiltered single-select picker, no chip board.
+    expect(container.querySelector("[data-scheduler-editor-connection-multi]")).toBeNull();
+  });
+
+  // The app reuses ONE mounted editor across open/close cycles (the specs
+  // above mount fresh), so every reopen must reset the ephemeral state —
+  // draft, form values, conflict banner and the connection-chip search.
+  it("resets ephemeral state between sessions on one mounted instance", async () => {
+    const state = reactive<{ open: boolean; task: TaskDefinition | null }>({ open: false, task: null });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const app = createApp({
+      setup() {
+        return () =>
+          h(SchedulerTaskEditor, {
+            open: state.open,
+            task: state.task,
+            providers,
+            connections,
+            "onUpdate:open": (value: boolean) => {
+              state.open = value;
+            },
+            onSaved: () => {},
+          });
+      },
+    });
+    mountedApps.push(app);
+    app.use(createPinia());
+    app.use(i18n);
+    app.mount(container);
+    await flush();
+
+    const nameInput = () => document.body.querySelector<HTMLInputElement>("[data-scheduler-editor-name]")!;
+    const searchInput = () => document.body.querySelector<HTMLInputElement>("[data-scheduler-editor-connection-search]")!;
+
+    // Session 1: edit an SSH task, filter the connection chips.
+    state.task = cronTask();
+    state.open = true;
+    await flush();
+    expect(searchInput()).toBeTruthy();
+    searchInput().value = "ssh-host-2";
+    searchInput().dispatchEvent(new Event("input"));
+    await flush();
+    expect(searchInput().value).toBe("ssh-host-2");
+
+    // Session 2: reopen on another task — the search must come back empty.
+    state.open = false;
+    await flush();
+    state.task = { ...cronTask(), id: "task-2", name: "second" };
+    state.open = true;
+    await flush();
+    expect(searchInput().value).toBe("", "the chip search must reset on reopen");
+
+    // Session 3: create mode on the same instance starts from an empty name.
+    state.open = false;
+    await flush();
+    state.task = null;
+    state.open = true;
+    await flush();
+    expect(nameInput().value).toBe("", "a second create must start from an empty name");
+  });
+});

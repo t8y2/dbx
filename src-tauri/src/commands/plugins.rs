@@ -334,6 +334,22 @@ pub async fn invoke_plugin(
     state.plugin_host.invoke(&plugin_id, &method, params, None, timeout).await
 }
 
+/// Plugin-backed directory picker for manifest form fields
+/// (`picker.source: "plugin"`). Resolves the referenced stored connection
+/// server-side (secrets never leave this process) and forwards the browse
+/// call to the plugin over the generic invokePlugin channel.
+#[tauri::command]
+pub async fn invoke_plugin_path_browse(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+    method: String,
+    connection_id: String,
+    path: String,
+    locale: Option<String>,
+) -> Result<serde_json::Value, String> {
+    state.invoke_plugin_path_browse(&plugin_id, &method, &connection_id, &path, locale.as_deref()).await
+}
+
 #[tauri::command]
 pub async fn invoke_plugin_connection_action(
     state: State<'_, Arc<AppState>>,

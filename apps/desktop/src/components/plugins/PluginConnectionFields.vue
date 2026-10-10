@@ -135,15 +135,26 @@ watch(
 
 function selectOptionsFor(field: PluginFormField): PluginFormFieldOption[] | null {
   if (!field.options_action) return null;
-  const options = dynamicOptions.value[field.key];
-  if (!options || options.length === 0) return null;
+  // Static options (declared in the manifest) lead, fetched options follow,
+  // deduped by value with the first occurrence winning — the same merge the
+  // scheduler form renders, so a dynamic select can carry a reserved value
+  // that exists without any fetched option (e.g. files tasks' `local`).
+  const merged: PluginFormFieldOption[] = [];
+  const seen = new Set<string>();
+  for (const option of [...(field.options ?? []), ...(dynamicOptions.value[field.key] ?? [])]) {
+    const value = String(option.value);
+    if (seen.has(value)) continue;
+    seen.add(value);
+    merged.push(option);
+  }
+  if (merged.length === 0) return null;
   // Keep a stored value visible even when its profile disappeared so the
   // dialog does not silently look "unset" on reopen.
   const current = fieldValue(field);
-  if (current !== undefined && current !== "" && !options.some((option) => String(option.value) === String(current))) {
-    return [{ value: String(current), label: String(current) }, ...options];
+  if (current !== undefined && current !== "" && !seen.has(String(current))) {
+    return [{ value: String(current), label: String(current) }, ...merged];
   }
-  return options;
+  return merged;
 }
 
 // ---------------------------------------------------------------------------

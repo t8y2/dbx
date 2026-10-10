@@ -83,6 +83,8 @@ export interface DesktopSettings {
    *  AI then receives the skill listing even with nothing selected. Default off. */
   custom_ai_skill_auto_enabled?: boolean | null;
   sidebar_table_page_size?: number | null;
+  /** Register the app as an OS login item (launch at login); default off. */
+  launch_at_login: boolean;
 }
 
 export interface McpGlobalPolicy {
@@ -165,6 +167,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   custom_ai_skill_root: null,
   custom_ai_skill_auto_enabled: false,
   sidebar_table_page_size: DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
+  launch_at_login: false,
 };
 
 export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
@@ -273,6 +276,7 @@ export function normalizeDesktopSettings(settings: Partial<DesktopSettings> | nu
     custom_ai_skill_root: settings?.custom_ai_skill_root?.trim() || DEFAULT_DESKTOP_SETTINGS.custom_ai_skill_root,
     custom_ai_skill_auto_enabled: settings?.custom_ai_skill_auto_enabled ?? DEFAULT_DESKTOP_SETTINGS.custom_ai_skill_auto_enabled,
     sidebar_table_page_size: sidebarTablePageSize,
+    launch_at_login: settings?.launch_at_login ?? DEFAULT_DESKTOP_SETTINGS.launch_at_login,
   };
 }
 
@@ -1165,6 +1169,7 @@ export interface ToolbarItems {
   dataTransfer: boolean;
   driverManager: boolean;
   pluginCenter: boolean;
+  scheduler: boolean;
   sqlFile: boolean;
   schemaDiff: boolean;
   dataCompare: boolean;
@@ -1187,6 +1192,7 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   dataTransfer: true,
   driverManager: true,
   pluginCenter: true,
+  scheduler: true,
   sqlFile: true,
   schemaDiff: true,
   dataCompare: true,
@@ -1798,6 +1804,7 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     dataTransfer: items.dataTransfer ?? defaults.dataTransfer,
     driverManager: items.driverManager ?? defaults.driverManager,
     pluginCenter: items.pluginCenter ?? defaults.pluginCenter,
+    scheduler: items.scheduler ?? defaults.scheduler,
     sqlFile: items.sqlFile ?? defaults.sqlFile,
     schemaDiff: items.schemaDiff ?? defaults.schemaDiff,
     dataCompare: items.dataCompare ?? defaults.dataCompare,

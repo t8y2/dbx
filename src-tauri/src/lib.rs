@@ -1,7 +1,9 @@
 mod background_backup;
+mod background_scheduler;
 mod commands;
 mod data_dir;
 pub use background_backup::run_if_requested as run_backup_worker_if_requested;
+pub use background_scheduler::run_if_requested as run_scheduler_worker_if_requested;
 mod db;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
@@ -1496,6 +1498,12 @@ fn route_external_commands(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The scheduler worker re-enters this binary with --scheduler-worker (or
+    // DBX_PROCESS_ROLE); it runs before any Tauri/WebView initialization and
+    // this function returns when it finishes (ADR §11).
+    if run_scheduler_worker_if_requested() {
+        return;
+    }
     // Metadata/completion command chains nest very large async futures and can
     // exhaust tokio's default 2 MiB worker stack, which aborts the process with
     // STATUS_STACK_OVERFLOW. Share the roomier stack the backup worker and Web
@@ -1567,6 +1575,9 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // OS login-item support (launch at login); driven only by the
+        // launch_at_login desktop setting via commands::app_settings.
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
@@ -1749,6 +1760,14 @@ pub fn run() {
                 }
                 Err(error) => log::error!("[database-backup] worker startup failed: {error}"),
             }
+            // Background scheduler worker (ADR §11/§12): spawn + supervise the
+            // detached worker only when scheduler.background.enabled is on;
+            // flag-off installs nothing and changes no behavior. Never fails
+            // app startup.
+            background_scheduler::register_tauri_event_sink(app.handle().clone());
+            let scheduler_worker = background_scheduler::BackgroundScheduler::new(data_dir.clone());
+            tauri::async_runtime::block_on(scheduler_worker.start());
+            app.manage(scheduler_worker);
             let mcp_http_server = Arc::new(commands::mcp_http_server::McpHttpServerState::new(data_dir.clone()));
             app.manage(mcp_http_server.clone());
             let mcp_http_state = state.clone();
@@ -2059,6 +2078,7 @@ pub fn run() {
             commands::plugins::list_active_plugins,
             commands::plugins::stop_plugin,
             commands::plugins::invoke_plugin,
+            commands::plugins::invoke_plugin_path_browse,
             commands::plugin_download::download_plugin_file,
             commands::plugin_download::cancel_plugin_download,
             commands::plugins::invoke_plugin_connection_action,
@@ -2093,6 +2113,21 @@ pub fn run() {
             commands::schema_cache::save_schema_cache,
             commands::schema_cache::load_schema_cache,
             commands::schema_cache::delete_schema_cache_prefix,
+            commands::scheduler::scheduler_list_tasks,
+            commands::scheduler::scheduler_get_task,
+            commands::scheduler::scheduler_save_task,
+            commands::scheduler::scheduler_delete_task,
+            commands::scheduler::scheduler_run_task,
+            commands::scheduler::scheduler_cancel_run,
+            commands::scheduler::scheduler_enable_task,
+            commands::scheduler::scheduler_disable_task,
+            commands::scheduler::scheduler_list_runs,
+            commands::scheduler::scheduler_get_run,
+            commands::scheduler::scheduler_get_run_logs,
+            commands::scheduler::scheduler_list_artifacts,
+            commands::scheduler::scheduler_resident_action,
+            commands::scheduler::scheduler_list_resident_sessions,
+            commands::scheduler::scheduler_worker_status,
             commands::tab_runtime_cache::save_tab_runtime_cache,
             commands::tab_runtime_cache::load_tab_runtime_cache,
             commands::tab_runtime_cache::list_tab_runtime_cache_metadata,
@@ -2719,6 +2754,12 @@ pub fn run() {
                     tauri::async_runtime::block_on(async {
                         if let Some(backups) = app_handle.try_state::<background_backup::BackgroundBackup>() {
                             backups.shutdown().await;
+                        }
+                        // Stops supervising only: the detached scheduler
+                        // worker keeps running so enabled tasks survive the
+                        // UI closing (ADR §1.4/§11).
+                        if let Some(scheduler) = app_handle.try_state::<background_scheduler::BackgroundScheduler>() {
+                            scheduler.shutdown().await;
                         }
                         if let Some(server) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>()
                         {

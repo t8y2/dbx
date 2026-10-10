@@ -4,6 +4,8 @@ import docs from "./docs/zh-CN";
 import { dataDictionaryZhCN as dataDictionary } from "./dataDictionaryMessages";
 import { consul } from "./consulZhCN";
 import { meilisearchManagementZhCN } from "./meilisearchManagement";
+import { schedulerZhCN as scheduler } from "./schedulerMessages";
+import { pluginPathPickerZhCN as pluginPathPicker } from "./pluginPathPickerMessages";
 import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 
 export default withEnglishFallback({
@@ -7470,6 +7472,7 @@ export default withEnglishFallback({
     cancelledLabel: "已取消，已写入的行保留在表中",
   },
   tableToolbox: {
+    browser: "网页预览",
     browserFiltered: "网页预览（当前结果）",
     browserSelected: "网页预览（选中行）",
     openWith: "打开方式",
@@ -8327,6 +8330,8 @@ export default withEnglishFallback({
     showTrayIconDescription: "关闭后不显示图标，但关闭窗口仍会像之前一样隐藏到后台。",
     quitOnClose: "关闭窗口时退出程序",
     quitOnCloseDescription: "开启后，点击窗口关闭按钮将彻底退出 DBX，而不是隐藏到系统托盘。",
+    launchAtLogin: "开机自动启动",
+    launchAtLoginDescription: "将 DBX 注册为系统登录项，开机自动启动，重启后后台计划任务仍会继续运行。",
     closeActionPromptTitle: "关闭窗口",
     closeActionPromptDescription: "请选择点击关闭按钮时的行为。之后可在「设置 → 外观」中修改。",
     closeActionQuit: "退出程序",
@@ -11750,5 +11755,11 @@ export default withEnglishFallback({
     checking: "正在检查本地数据安全状态…",
     authFailed: "无法检查 DBX 登录状态。",
     retry: "重试",
+  },
+  scheduler: {
+    ...scheduler,
+  },
+  pluginPathPicker: {
+    ...pluginPathPicker,
   },
 });

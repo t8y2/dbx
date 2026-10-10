@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { InstalledPlugin, PluginConnectionProviderContribution, PluginFormFieldValue } from "@/types/database";
+import type { InstalledPlugin, PluginConnectionProviderContribution, PluginFormFieldValue, PluginContribution, PluginTaskProviderContribution } from "@/types/database";
 import {
   buildPluginConnectionConfig,
   createFrontendPluginRegistry,
@@ -597,5 +597,287 @@ describe("FrontendPluginRegistry", () => {
 
     expect(config.external_config).toEqual({ authentication: "private-key" });
     expect(config.id).toBe("ssh-1");
+  });
+});
+
+describe("task-provider localization", () => {
+  it("localizes trigger labels and their config fields from the trigger map", () => {
+    const plugin = installedPlugin("io.dbx.ssh");
+    plugin.manifest.localizations = {
+      "zh-CN": {
+        contributions: {
+          "io.dbx.ssh.tasks": {
+            label: "定时 SSH 命令",
+            triggers: {
+              execute: {
+                label: "执行命令",
+                fields: { command: { label: "命令" } },
+              },
+            },
+          },
+        },
+      },
+    };
+    plugin.manifest.contributions = [
+      {
+        type: "task-provider",
+        id: "io.dbx.ssh.tasks",
+        label: "Scheduled SSH commands",
+        connection_providers: ["io.dbx.ssh.connection"],
+        allow_multiple_connections: true,
+        capabilities: ["run"],
+        triggers: [
+          {
+            id: "execute",
+            label: "Execute command",
+            mode: "run",
+            fields: [
+              { key: "command", label: "Command", type: "textarea", binding: "config", required: true },
+              { key: "timeout_seconds", label: "Timeout (seconds)", type: "number", binding: "config" },
+            ],
+          },
+        ],
+      } as unknown as PluginContribution,
+    ];
+
+    const definition = createFrontendPluginRegistry([plugin], "zh-CN").listPlugins()[0]!;
+    const contribution = definition.contributions[0] as PluginTaskProviderContribution;
+    expect(contribution.label).toBe("定时 SSH 命令");
+    const trigger = contribution.triggers[0]!;
+    expect(trigger.label).toBe("执行命令");
+    expect(trigger.fields.find((field) => field.key === "command")?.label).toBe("命令");
+    // Fields without a translation keep the manifest text.
+    expect(trigger.fields.find((field) => field.key === "timeout_seconds")?.label).toBe("Timeout (seconds)");
+  });
+
+  it("falls back to the contribution-level fields map (the flat shape existing manifests ship)", () => {
+    const plugin = installedPlugin("io.dbx.files");
+    plugin.manifest.localizations = {
+      "zh-CN": {
+        contributions: {
+          "io.dbx.files.tasks": {
+            label: "文件任务",
+            fields: { source_path: { label: "源路径" } },
+          },
+        },
+      },
+    };
+    plugin.manifest.contributions = [
+      {
+        type: "task-provider",
+        id: "io.dbx.files.tasks",
+        label: "Files Tasks",
+        triggers: [
+          {
+            id: "sync",
+            label: "Directory sync",
+            mode: "run",
+            fields: [{ key: "source_path", label: "Source path", type: "text", binding: "config", required: true }],
+          },
+        ],
+      } as unknown as PluginContribution,
+    ];
+
+    const definition = createFrontendPluginRegistry([plugin], "zh-CN").listPlugins()[0]!;
+    const trigger = (definition.contributions[0] as PluginTaskProviderContribution).triggers[0]!;
+    expect(trigger.label).toBe("Directory sync");
+    expect(trigger.fields[0]!.label).toBe("源路径");
+  });
+
+  it("merges trigger field descriptions, placeholders and select options in the requested locale", () => {
+    const plugin = installedPlugin("io.dbx.files");
+    plugin.manifest.localizations = {
+      "zh-CN": {
+        contributions: {
+          "io.dbx.files.tasks": {
+            triggers: {
+              sync: {
+                label: "目录同步",
+                fields: {
+                  source_path: { label: "源路径", description: "来源目录", placeholder: "/data" },
+                  destination_connection_id: { label: "目标连接 ID", placeholder: "（跟随源连接）" },
+                  mode: { label: "复制对象", options: { file: "单个文件", directory: "目录" } },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    plugin.manifest.contributions = [
+      {
+        type: "task-provider",
+        id: "io.dbx.files.tasks",
+        label: "Files Tasks",
+        triggers: [
+          {
+            id: "sync",
+            label: "Directory sync",
+            mode: "run",
+            fields: [
+              { key: "source_path", label: "Source path", type: "text", binding: "config", required: true, description: "Source directory", placeholder: "/data" },
+              { key: "destination_connection_id", label: "Destination connection id", type: "text", binding: "config", placeholder: "(source connection)" },
+              {
+                key: "mode",
+                label: "What to copy",
+                type: "select",
+                binding: "config",
+                options: [
+                  { label: "Single file", value: "file" },
+                  { label: "Directory", value: "directory" },
+                ],
+              },
+            ],
+          },
+        ],
+      } as unknown as PluginContribution,
+    ];
+
+    const definition = createFrontendPluginRegistry([plugin], "zh-CN").listPlugins()[0]!;
+    const trigger = (definition.contributions[0] as PluginTaskProviderContribution).triggers[0]!;
+    const sourcePath = trigger.fields.find((field) => field.key === "source_path")!;
+    expect(sourcePath.label).toBe("源路径");
+    expect(sourcePath.description).toBe("来源目录");
+    expect(sourcePath.placeholder).toBe("/data");
+    expect(trigger.fields.find((field) => field.key === "destination_connection_id")?.placeholder).toBe("（跟随源连接）");
+    const mode = trigger.fields.find((field) => field.key === "mode")!;
+    expect(mode.options).toEqual([
+      { label: "单个文件", value: "file" },
+      { label: "目录", value: "directory" },
+    ]);
+  });
+
+  it("localizes the empty_label of a form field, keeping the declared default otherwise", () => {
+    const plugin = installedPlugin("io.dbx.files");
+    plugin.manifest.localizations = {
+      "zh-CN": {
+        contributions: {
+          "io.dbx.files.tasks": {
+            triggers: {
+              sync: {
+                fields: {
+                  source_connection_id: { empty_label: "（跟随任务连接）" },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    plugin.manifest.contributions = [
+      {
+        type: "task-provider",
+        id: "io.dbx.files.tasks",
+        label: "Files Tasks",
+        triggers: [
+          {
+            id: "sync",
+            label: "Directory sync",
+            mode: "run",
+            fields: [
+              { key: "source_connection_id", label: "Source connection id", type: "text", binding: "config", empty_label: "(task connection)" },
+              { key: "untranslated", label: "Untranslated", type: "text", binding: "config", empty_label: "(source connection)" },
+            ],
+          },
+        ],
+      } as unknown as PluginContribution,
+    ];
+
+    const definition = createFrontendPluginRegistry([plugin], "zh-CN").listPlugins()[0]!;
+    const trigger = (definition.contributions[0] as PluginTaskProviderContribution).triggers[0]!;
+    expect(trigger.fields.find((field) => field.key === "source_connection_id")?.empty_label).toBe("（跟随任务连接）");
+    // Fields the localization does not cover keep the manifest original.
+    expect(trigger.fields.find((field) => field.key === "untranslated")?.empty_label).toBe("(source connection)");
+  });
+
+  it("localizes trigger group labels by group id, keeping the declared fallback otherwise", () => {
+    const plugin = installedPlugin("io.dbx.files");
+    plugin.manifest.localizations = {
+      "zh-CN": {
+        contributions: {
+          "io.dbx.files.tasks": {
+            triggers: {
+              copy: {
+                groups: {
+                  source: { label: "源" },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    plugin.manifest.contributions = [
+      {
+        type: "task-provider",
+        id: "io.dbx.files.tasks",
+        label: "Files Tasks",
+        triggers: [
+          {
+            id: "copy",
+            label: "Copy",
+            mode: "run",
+            groups: [
+              { id: "source", label: "Source" },
+              { id: "target", label: "Target" },
+            ],
+            fields: [{ key: "source_path", label: "Source path", type: "text", binding: "config", group: "source" }],
+          },
+        ],
+      } as unknown as PluginContribution,
+    ];
+
+    const definition = createFrontendPluginRegistry([plugin], "zh-CN").listPlugins()[0]!;
+    const trigger = (definition.contributions[0] as PluginTaskProviderContribution).triggers[0]!;
+    expect(trigger.groups).toEqual([
+      { id: "source", label: "源" },
+      // Groups the localization does not cover keep the manifest original.
+      { id: "target", label: "Target" },
+    ]);
+    // Triggers without groups stay group-less (no phantom empty list).
+    expect(trigger.groups).toHaveLength(2);
+  });
+
+  it("keeps the English manifest originals for an unknown locale", () => {
+    const plugin = installedPlugin("io.dbx.ssh");
+    plugin.manifest.localizations = {
+      "zh-CN": {
+        contributions: {
+          "io.dbx.ssh.tasks": {
+            label: "定时 SSH 命令",
+            triggers: {
+              execute: {
+                label: "执行命令",
+                fields: { command: { label: "命令", description: "要执行的命令", placeholder: "uptime" } },
+              },
+            },
+          },
+        },
+      },
+    };
+    plugin.manifest.contributions = [
+      {
+        type: "task-provider",
+        id: "io.dbx.ssh.tasks",
+        label: "Scheduled SSH commands",
+        triggers: [
+          {
+            id: "execute",
+            label: "Execute command",
+            mode: "run",
+            fields: [{ key: "command", label: "Command", type: "textarea", binding: "config", required: true, description: "Command to run", placeholder: "uptime" }],
+          },
+        ],
+      } as unknown as PluginContribution,
+    ];
+
+    const definition = createFrontendPluginRegistry([plugin], "fr-FR").listPlugins()[0]!;
+    const contribution = definition.contributions[0] as PluginTaskProviderContribution;
+    expect(contribution.label).toBe("Scheduled SSH commands");
+    const trigger = contribution.triggers[0]!;
+    expect(trigger.label).toBe("Execute command");
+    expect(trigger.fields[0]!.label).toBe("Command");
+    expect(trigger.fields[0]!.description).toBe("Command to run");
+    expect(trigger.fields[0]!.placeholder).toBe("uptime");
   });
 });

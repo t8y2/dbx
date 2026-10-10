@@ -16,6 +16,10 @@
 [env]
 # Enable SQLite's built-in math functions for rusqlite's bundled libsqlite3.
 LIBSQLITE3_FLAGS = "SQLITE_ENABLE_MATH_FUNCTIONS"
+# Debug builds put deep serde/driver/state call chains on libtest's spawned
+# threads, which overflow the default stack in the export, transfer and agent
+# test suites. Raise the floor for every thread spawned by cargo-run tools.
+RUST_MIN_STACK = "33554432"
 
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"

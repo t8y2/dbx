@@ -4,7 +4,9 @@ import { dataDictionaryEn as dataDictionary } from "./dataDictionaryMessages";
 import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 import { meilisearchManagementEn } from "./meilisearchManagement";
+import { schedulerEn as scheduler } from "./schedulerMessages";
 import { mongodbDatabaseDumpEn as mongoDump } from "./mongodbDatabaseDump";
+import { pluginPathPickerEn as pluginPathPicker } from "./pluginPathPickerMessages";
 
 const consul = {
   ...consulUiMessages,
@@ -7485,6 +7487,7 @@ export default {
     cancelledLabel: "Cancelled; rows already written remain in the table",
   },
   tableToolbox: {
+    browser: "Web preview",
     browserFiltered: "Web preview (current result)",
     browserSelected: "Web preview (selected rows)",
     openWith: "Open with",
@@ -8342,6 +8345,8 @@ export default {
     showTrayIconDescription: "When disabled, no icon is shown, but closing the window still hides DBX in the background as before.",
     quitOnClose: "Quit when closing window",
     quitOnCloseDescription: "When enabled, clicking the close button exits DBX completely instead of hiding it to the tray. You can change this later in Appearance settings.",
+    launchAtLogin: "Launch at login",
+    launchAtLoginDescription: "Register DBX with the OS so it starts automatically at login, keeping background scheduler tasks running after a reboot.",
     closeActionPromptTitle: "Close window",
     closeActionPromptDescription: "Choose what happens when you click the close button. You can change this later in Settings > Appearance.",
     closeActionQuit: "Quit DBX",
@@ -11770,5 +11775,11 @@ export default {
     checking: "Checking local data security status…",
     authFailed: "Unable to check DBX authentication.",
     retry: "Retry",
+  },
+  scheduler: {
+    ...scheduler,
+  },
+  pluginPathPicker: {
+    ...pluginPathPicker,
   },
 };

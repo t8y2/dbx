@@ -270,6 +270,7 @@ describe("plugin command registry (PR-A4)", () => {
     // §11: reserved identity fields are host-authored — forged values never pass.
     expect(entry.context.workbenchId).toBe(entry.id);
     expect(entry.context.restored).toBe(false);
+    // bottom dock entries always carry the host-authored dock surface (the old "panel").
     expect(entry.context.surface).toBe("dock");
   });
 });

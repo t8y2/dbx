@@ -192,6 +192,8 @@ const groupExecutableSql = computed(() => {
         @close-settings="toolbar.closeSettingsPage()"
         @activate-plugin-center="toolbar.activatePluginCenter()"
         @close-plugin-center="toolbar.closePluginCenter()"
+        @activate-scheduler="toolbar.activateSchedulerPage()"
+        @close-scheduler="toolbar.closeSchedulerPage()"
         @activate-driver-store="toolbar.activateDriverStore()"
         @close-driver-store="toolbar.closeDriverStore()"
       />

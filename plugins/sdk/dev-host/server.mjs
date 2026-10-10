@@ -314,6 +314,17 @@ export async function createMockHost(options) {
         requirePermission(manifest, "host.workbench");
         return { mockHostOpenFrame: await serialize(() => openFrame(session, p.context?.connectionId || frame.connectionId, p.contributionId, p.context)) };
       }
+      case "host.openScheduler": {
+        // The dev host mirrors the real first-version gate: the permission
+        // opens the (mocked) scheduler UI with a pre-filled create form. The
+        // dev host has no scheduler, so the request only ever resolves to a
+        // marker — there is no create/enable write path to expose.
+        requirePermission(manifest, "host.scheduler");
+        if (p.mode !== "create" || typeof p.providerId !== "string" || !p.providerId || typeof p.triggerId !== "string" || !p.triggerId) {
+          throw new Error("host.openScheduler requires providerId, triggerId and mode: 'create'");
+        }
+        return { mockOpenScheduler: { providerId: p.providerId, triggerId: p.triggerId, connectionId: p.connectionId ?? null, mode: "create" } };
+      }
       case "host.reopenConnection": {
         if (typeof p.connectionId !== "string" || !p.connectionId) throw new Error("connectionId is invalid");
         return { ok: true, mockReopenConnection: p.connectionId };

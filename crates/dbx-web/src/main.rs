@@ -599,6 +599,7 @@ async fn serve() -> Result<(), String> {
         .route("/database-backups", post(routes::scheduled_backup::command))
         .route("/database-backups/{id}/files/{index}", get(routes::scheduled_backup::download))
         .route("/database-backups/{id}/files/{index}/restore", post(routes::scheduled_backup::prepare_restore))
+        .merge(routes::scheduler::router())
         // Auth
         // Auth payloads are tiny password strings: cap them far below the
         // global limit so the extractor cannot buffer an unauthenticated DoS
@@ -666,6 +667,7 @@ async fn serve() -> Result<(), String> {
         .route("/plugins/stop", post(routes::plugins::stop_plugin))
         .route("/plugins/invoke", post(routes::plugins::invoke_plugin))
         .route("/plugins/connection-action", post(routes::plugins::invoke_plugin_connection_action))
+        .route("/plugins/path-browse", post(routes::plugins::invoke_plugin_path_browse))
         .route("/plugins/notify", post(routes::plugins::notify_plugin))
         .route("/plugins/binary", post(routes::plugins::send_plugin_binary))
         .route("/plugins/filesystem/list", post(routes::plugins::list_plugin_filesystem_entries))

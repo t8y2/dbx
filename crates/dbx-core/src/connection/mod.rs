@@ -3805,6 +3805,67 @@ impl AppState {
         result
     }
 
+    /// Server-side resolver for manifest field pickers that declare
+    /// `source: "plugin"` (scheduler/connection forms asking the plugin to
+    /// browse its own storage tree).
+    ///
+    /// The frontend only ever sends the connection id: this method resolves
+    /// the stored connection (with hydrated secrets) through the same
+    /// `get_or_create_pool` chain the scheduler plugin executor uses — the
+    /// plugin's `connection/connect` receives the lifecycle payload there —
+    /// and then invokes `method` with just the connection id, so secrets
+    /// never reach the webview, logs, or events. The method rides the same
+    /// generic invokePlugin channel as form-field `options_action`; `task/*`
+    /// stays frozen for the scheduler task RPC contract.
+    pub async fn invoke_plugin_path_browse(
+        &self,
+        plugin_id: &str,
+        method: &str,
+        connection_id: &str,
+        path: &str,
+        locale: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        if method.starts_with("task/") {
+            return Err("Path browse must use a non-task plugin method (task/* is the frozen scheduler RPC namespace)"
+                .to_string());
+        }
+        if method.starts_with("host/") {
+            return Err("Path browse must use a plugin method; host/* is the host-reserved namespace".to_string());
+        }
+        let connection_id = connection_id.trim();
+        if connection_id.is_empty() {
+            return Err("Path browse requires a connection id".to_string());
+        }
+        if path.len() > 4_096 || path.chars().any(char::is_control) {
+            return Err("Path browse received an invalid path".to_string());
+        }
+        // A stored connection resolves server-side (ownership checked, pool
+        // opened, secrets hydrated); an id the host does not know is a
+        // plugin-reserved alias (e.g. the files tasks' `local` side) and is
+        // forwarded as-is — the plugin is the authority on its own sides, its
+        // binding either synthesizes the connection or rejects the id, and no
+        // host state is consulted or leaked either way.
+        if let Some(connection) =
+            self.storage.load_connections().await?.into_iter().find(|config| config.id == connection_id)
+        {
+            if connection.db_type != DatabaseType::Plugin || connection.plugin_id.as_deref() != Some(plugin_id) {
+                return Err(format!("Connection '{connection_id}' is not owned by plugin '{plugin_id}'"));
+            }
+            // Opens (or reuses) the plugin connection server-side: hydrates the
+            // stored config and drives the plugin's connection/connect, so the
+            // browse call below can address the open session by id alone.
+            self.get_or_create_pool(connection_id, None)
+                .await
+                .map_err(|error| format!("Cannot open connection {connection_id}: {error}"))?;
+        }
+        let params = serde_json::json!({
+            "connectionId": connection_id,
+            "path": path,
+            "locale": locale,
+        });
+        self.plugin_host.invoke(plugin_id, method, params, None, Some(std::time::Duration::from_secs(60))).await
+    }
+
     pub async fn connect_redis_sentinel(
         &self,
         connection_id: &str,
@@ -8256,6 +8317,41 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         (AppState::new(storage), dir)
+    }
+
+    #[tokio::test]
+    async fn path_browse_forwards_unknown_connection_ids_to_the_plugin_as_reserved_aliases() {
+        let (state, dir) = test_app_state().await;
+        // `local` matches no stored connection: the id must reach the plugin
+        // layer (its engine synthesizes the reserved local side) instead of
+        // dying in the host resolver as "Connection 'local' was not found".
+        let error = state
+            .invoke_plugin_path_browse("io.dbx.files", "files/listDirs", "local", "/data", None)
+            .await
+            .unwrap_err();
+        assert!(!error.contains("was not found"), "alias must not die in the host resolver: {error}");
+
+        // The frozen task namespace stays guarded either way.
+        let error =
+            state.invoke_plugin_path_browse("io.dbx.files", "task/execute", "local", "/data", None).await.unwrap_err();
+        assert!(error.contains("task/*"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn path_browse_rejects_stored_connections_owned_by_other_plugins() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "conn-mysql".to_owned();
+        config.name = "mysql-1".to_owned();
+        state.storage.save_connections(&[config]).await.unwrap();
+
+        let error = state
+            .invoke_plugin_path_browse("io.dbx.files", "files/listDirs", "conn-mysql", "/data", None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("is not owned by plugin"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

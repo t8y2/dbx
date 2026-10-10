@@ -387,6 +387,26 @@ function localizeContribution(contribution: PluginContribution, localization: Pl
       label: localizedRequiredText(action.label, localization?.actions?.[action.id]?.label),
       description: localizedOptionalText(action.description, localization?.actions?.[action.id]?.description),
     }));
+  } else if (localized.type === "task-provider") {
+    // Task triggers localize by the provider-local trigger id. Field
+    // translations may sit under the trigger (new shape) or in the
+    // contribution-level `fields` map (the flat shape existing manifests
+    // already ship), so the lookup falls back to the flat map.
+    localized.triggers = localized.triggers?.map((trigger) => {
+      const triggerLocalization = localization?.triggers?.[trigger.id];
+      const fieldLocalization = (key: string) => triggerLocalization?.fields?.[key] ?? localization?.fields?.[key];
+      return {
+        ...trigger,
+        label: localizedRequiredText(trigger.label, triggerLocalization?.label),
+        fields: trigger.fields.map((field) => localizeField(field, fieldLocalization(field.key))),
+        // Group sections localize by the group id declared on the trigger's
+        // `groups` list; the fallback keeps the manifest's source label.
+        groups: trigger.groups?.map((group) => ({
+          ...group,
+          label: localizedRequiredText(group.label, triggerLocalization?.groups?.[group.id]?.label),
+        })),
+      };
+    });
   } else if (localized.type === "workbench" || localized.type === "command" || localized.type === "result-view") {
     // Workbench, command and result-view contributions all resolve their icon
     // asset path the same way.
@@ -402,6 +422,7 @@ function localizeField(field: PluginFormField, localization?: PluginFormFieldLoc
     label: localizedRequiredText(field.label, localization.label),
     description: localizedOptionalText(field.description, localization.description),
     placeholder: localizedOptionalText(field.placeholder, localization.placeholder),
+    empty_label: localizedOptionalText(field.empty_label, localization.empty_label),
     options: field.options?.map((option) => ({ ...option, label: localizedRequiredText(option.label, localization.options?.[option.value]) })),
   };
 }

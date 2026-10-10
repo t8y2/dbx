@@ -2,6 +2,8 @@ import { redisGroupingZhTW as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpZhTW as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementZhTW } from "./meilisearchManagement";
+import { schedulerZhTW as scheduler } from "./schedulerMessages";
+import { pluginPathPickerZhTW as pluginPathPicker } from "./pluginPathPickerMessages";
 import docs from "./docs/zh-TW";
 import { dataDictionaryZhTW as dataDictionary } from "./dataDictionaryMessages";
 import { consulZhTWMessages } from "./consulZhTW";
@@ -5988,6 +5990,7 @@ export default withEnglishFallback({
     cancelledLabel: "已取消，已寫入的列保留在表中",
   },
   tableToolbox: {
+    browser: "網頁預覽",
     browserFiltered: "網頁預覽（目前結果）",
     browserSelected: "網頁預覽（選取的列）",
     openWith: "開啟方式",
@@ -6752,6 +6755,8 @@ export default withEnglishFallback({
     showTrayIconDescription: "關閉後不顯示圖示，但關閉視窗仍會像之前一樣隱藏到後台。",
     quitOnClose: "關閉視窗時退出程式",
     quitOnCloseDescription: "開啟後，點擊視窗關閉按鈕將徹底退出 DBX，而不是隱藏到系統匣。",
+    launchAtLogin: "開機自動啟動",
+    launchAtLoginDescription: "將 DBX 註冊為系統登入項目，開機自動啟動，重新開機後背景排程任務仍會繼續執行。",
     closeActionPromptTitle: "關閉視窗",
     closeActionPromptDescription: "請選擇點擊關閉按鈕時的行為。之後可在「設定 → 外觀」中修改。",
     closeActionQuit: "退出程式",
@@ -11117,5 +11122,11 @@ export default withEnglishFallback({
       settingsFollower: "設定（Follower）",
       noDetails: "此 Core 沒有複製詳細資料。",
     },
+  },
+  scheduler: {
+    ...scheduler,
+  },
+  pluginPathPicker: {
+    ...pluginPathPicker,
   },
 });

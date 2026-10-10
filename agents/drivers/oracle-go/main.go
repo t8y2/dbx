@@ -1019,6 +1019,9 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "execute_transaction":
 		result, err := s.executeTransaction(params)
 		return result, false, err
+	case "execute_batch":
+		result, err := s.executeBatch(params)
+		return result, false, err
 	case "begin_manual_transaction":
 		return map[string]bool{"ok": true}, false, s.beginManualTransaction(stringParam(params, "schema"))
 	case "commit_manual_transaction":
@@ -1189,7 +1192,7 @@ func shouldUseLegacyOracleLOBFetch(params connectParams, majorVersion int, versi
 
 func oracleMethodMayReadLOB(method string) bool {
 	switch method {
-	case "get_table_ddl", "execute_query", "execute_query_page", "start_table_read", "execute_transaction":
+	case "get_table_ddl", "execute_query", "execute_query_page", "start_table_read", "execute_transaction", "execute_batch":
 		return true
 	default:
 		return false
@@ -4385,6 +4388,46 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (queryRes
 	}
 	result.Messages = messages
 	return result, nil
+}
+
+// executeBatch runs a multi-statement script in one call, the way the protocol's
+// execute_batch defines it: every statement is executed on its own, exactly as a
+// sequence of execute_query calls would run it (schema switch, LOB handling and the
+// DBMS_OUTPUT capture included), and the reply is the merged outcome the Rust caller
+// decodes -- no columns and no rows, the affected-row count summed, and the wall-clock
+// time of the whole script.
+//
+// It is deliberately not executeTransaction. A batch commits statement by statement, so a
+// failure keeps everything before it, which is the difference the protocol draws between a
+// batch and an atomic transaction; routing a batch through the transaction path would
+// silently roll back statements the caller expects to have kept.
+func (s *server) executeBatch(params map[string]json.RawMessage) (queryResult, error) {
+	start := time.Now()
+	schema := stringParam(params, "schema")
+	var affected int64
+	for _, statement := range stringSliceParam(params, "statements") {
+		// Whitespace-only and delimiter-only statements are skipped rather than executed:
+		// Oracle answers an empty statement with ORA-00900, and the newline a script leaves
+		// after its last ';' is enough to produce one. This mirrors the one-shot transaction
+		// path, so the same script behaves the same way in both modes. A comment-only
+		// statement is NOT skipped here -- trimStatementSQL does not strip comments, and the
+		// transaction path does not either.
+		if trimStatementSQL(statement) == "" {
+			continue
+		}
+		result, err := s.executeQuery(queryOptions{SQL: statement, Schema: schema})
+		if err != nil {
+			return queryResult{}, err
+		}
+		affected += result.AffectedRows
+	}
+	return queryResult{
+		Columns:         []string{},
+		ColumnTypes:     []string{},
+		Rows:            [][]any{},
+		AffectedRows:    affected,
+		ExecutionTimeMS: time.Since(start).Milliseconds(),
+	}, nil
 }
 
 // runTransactionStatements executes the statements of one one-shot transaction

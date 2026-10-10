@@ -1751,7 +1751,7 @@ func TestShouldUseLegacyOracleLOBFetchOnlyForLegacyServers(t *testing.T) {
 }
 
 func TestOracleMethodMayReadLOB(t *testing.T) {
-	for _, method := range []string{"get_table_ddl", "execute_query", "execute_query_page", "start_table_read", "execute_transaction"} {
+	for _, method := range []string{"get_table_ddl", "execute_query", "execute_query_page", "start_table_read", "execute_transaction", "execute_batch"} {
 		if !oracleMethodMayReadLOB(method) {
 			t.Fatalf("%s should enable deferred legacy LOB reads", method)
 		}
@@ -4007,6 +4007,83 @@ func TestManualTransactionBlocksOneShotTransaction(t *testing.T) {
 	}
 }
 
+func TestExecuteBatchRunsEveryStatementWithoutATransaction(t *testing.T) {
+	db, driver := openOracleManualTxTestDB(t)
+	s := newServer()
+	s.db = db
+
+	resp, _ := s.handleLine(`{"jsonrpc":"2.0","id":1,"method":"execute_batch","params":{"statements":["UPDATE t SET a = 1","UPDATE t SET a = 2"]}}`)
+	if resp.Error != nil {
+		t.Fatalf("execute_batch rpc: %v", resp.Error)
+	}
+	data, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result queryResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	// The Rust caller decodes one merged QueryResult for a batch (execute_multi_agent), so
+	// the reply carries no result set and the affected rows are summed across statements.
+	if len(result.Columns) != 0 || len(result.Rows) != 0 {
+		t.Fatalf("a batch reply must carry no result set, got columns=%v rows=%v", result.Columns, result.Rows)
+	}
+	if result.AffectedRows != 2 {
+		t.Fatalf("affected rows = %d, want 2 (one per statement)", result.AffectedRows)
+	}
+	for _, statement := range []string{"UPDATE t SET a = 1", "UPDATE t SET a = 2"} {
+		if !contains(driver.execs, statement) {
+			t.Fatalf("statement %q never reached the server; execs=%v", statement, driver.execs)
+		}
+	}
+	// A batch is not a transaction. Routing it through execute_transaction would open one
+	// and roll back the statements preceding a failure, which the protocol says a batch
+	// keeps; so neither the commit nor the rollback path may be taken here.
+	if driver.committed || driver.rolledBack {
+		t.Fatalf("a batch must not open a transaction: committed=%v rolledBack=%v", driver.committed, driver.rolledBack)
+	}
+}
+
+func TestExecuteBatchSkipsBlankAndDelimiterOnlyStatements(t *testing.T) {
+	db, driver := openOracleManualTxTestDB(t)
+	s := newServer()
+	s.db = db
+
+	resp, _ := s.handleLine(`{"jsonrpc":"2.0","id":1,"method":"execute_batch","params":{"statements":["","   ",";","UPDATE t SET a = 1"]}}`)
+	if resp.Error != nil {
+		t.Fatalf("execute_batch rpc: %v", resp.Error)
+	}
+	for _, exec := range driver.execs {
+		if strings.TrimSpace(exec) == "" || strings.TrimSpace(exec) == ";" {
+			t.Fatalf("an empty statement reached the server: %q", exec)
+		}
+	}
+	updates := 0
+	for _, exec := range driver.execs {
+		if exec == "UPDATE t SET a = 1" {
+			updates++
+		}
+	}
+	if updates != 1 {
+		t.Fatalf("the real statement should run exactly once, got %d (execs=%v)", updates, driver.execs)
+	}
+}
+
+func TestExecuteBatchPropagatesAFailedStatement(t *testing.T) {
+	db, driver := openOracleManualTxTestDB(t)
+	driver.execErr = errors.New("ORA-00942: table or view does not exist")
+	s := newServer()
+	s.db = db
+
+	_, err := s.executeBatch(map[string]json.RawMessage{
+		"statements": json.RawMessage(`["UPDATE t SET a = 1"]`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "ORA-00942") {
+		t.Fatalf("a failed statement must surface its error, got %v", err)
+	}
+}
+
 func TestRuntimeHandshakeAdvertisesTransactionCapability(t *testing.T) {
 	runtime := newRuntimeServer()
 	resp, shutdown := runtime.handleLine(`{"jsonrpc":"2.0","id":7,"method":"handshake","params":{"appVersion":"dev"}}`)
@@ -4056,6 +4133,9 @@ type oracleManualTxDriver struct {
 	rolledBack bool
 	execs      []string
 	queries    []string
+	// execErr, when set, is returned for every ExecContext call. Tests use it to make one
+	// statement of a batch fail without standing up another scripted driver.
+	execErr error
 }
 
 func openOracleManualTxTestDB(t *testing.T) (*sql.DB, *oracleManualTxDriver) {
@@ -4112,6 +4192,9 @@ func (c *oracleManualTxConn) ExecContext(_ context.Context, query string, _ []dr
 	c.driver.execs = append(c.driver.execs, query)
 	if schema, ok := strings.CutPrefix(query, "ALTER SESSION SET CURRENT_SCHEMA = "); ok {
 		c.schema = strings.Trim(schema, `"`)
+	}
+	if c.driver.execErr != nil {
+		return nil, c.driver.execErr
 	}
 	return driver.RowsAffected(1), nil
 }

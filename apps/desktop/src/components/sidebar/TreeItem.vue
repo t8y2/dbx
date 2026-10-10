@@ -480,7 +480,7 @@ function visibleLabel(node: TreeNode): string {
 }
 
 function hasActiveObjectNameFilter(node: TreeNode): boolean {
-  if (!supportsSidebarObjectNameFilter(node) || !node.connectionId || !node.database) return false;
+  if (!supportsSidebarObjectNameFilter(node) || !node.connectionId || node.database == null) return false;
   const filter = connectionStore.tableNameFilterForScope({
     connectionId: node.connectionId,
     database: node.database,

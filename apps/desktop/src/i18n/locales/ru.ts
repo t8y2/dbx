@@ -2175,6 +2175,8 @@ export default withEnglishFallback({
     copyExtractorInsertRowByRow: "По одному оператору на строку",
     copyExtractorPrettyJson: "Форматировать JSON",
     copyExtractorCamelCaseJsonFields: "Преобразовать поля snake_case в camelCase",
+    copyExtractorValuesOnlyJsonArray: "Только значения (один столбец)",
+    copyExtractorValuesOnlyJsonArrayHint: "Создаёт JSON-массив со значениями выбранного столбца вместо объектов. Для нескольких столбцов вывод остаётся объектами.",
     copyExtractorPreview: "Предпросмотр (текущее выделение)",
     copyExtractorEmptySelection: "Выберите данные, чтобы увидеть результат извлечения.",
     copyExtractorUnsupportedSelection: "Это извлечение требует одинакового набора столбцов в каждой строке.",

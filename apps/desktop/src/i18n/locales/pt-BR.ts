@@ -2756,6 +2756,8 @@ export default withEnglishFallback({
     copyExtractorInsertRowByRow: "Uma instrução por linha",
     copyExtractorPrettyJson: "JSON formatado",
     copyExtractorCamelCaseJsonFields: "Converter campos snake_case para camelCase",
+    copyExtractorValuesOnlyJsonArray: "Somente valores (coluna única)",
+    copyExtractorValuesOnlyJsonArrayHint: "Gera um array JSON apenas com os valores da coluna selecionada em vez de objetos. Seleções com várias colunas continuam gerando objetos.",
     copyExtractorPreview: "Visualizar (seleção atual)",
     copyExtractorEmptySelection: "Selecione dados para visualizar os resultados da extração.",
     copyExtractorUnsupportedSelection: "O extrator atual exige que as mesmas colunas sejam selecionadas para cada linha.",

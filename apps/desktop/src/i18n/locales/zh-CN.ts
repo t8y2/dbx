@@ -2211,6 +2211,8 @@ export default withEnglishFallback({
     copyExtractorInsertRowByRow: "每行一条语句",
     copyExtractorPrettyJson: "格式化 JSON",
     copyExtractorCamelCaseJsonFields: "下划线字段名转为小驼峰",
+    copyExtractorValuesOnlyJsonArray: "仅保留值（单列）",
+    copyExtractorValuesOnlyJsonArrayHint: "复制为仅含所选列值的 JSON 数组，而不是对象；多列选择仍输出对象。",
     copyExtractorPreview: "预览（当前选择）",
     copyExtractorEmptySelection: "请选择数据后预览提取结果。",
     copyExtractorUnsupportedSelection: "当前提取器要求每一行选择相同的列。",

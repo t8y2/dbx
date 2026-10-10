@@ -594,7 +594,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         next !== "@" &&
         sql[i - 1] !== "@" &&
         !separatedOracleDatabaseLinks.has(i) &&
-        !isOracleDatabaseLinkMarker(sql, i, databaseType) &&
+        !isDatabaseLinkMarker(sql, i, databaseType) &&
         !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) &&
         !nativeSqlServerParameters.declared.has(name.toLowerCase()) &&
         !nativeSqlServerParameters.ignoredStarts.has(i)
@@ -781,8 +781,9 @@ function isDuckDbCompactPrefixAliasSeparator(sql: string, index: number, databas
   return PARAMETER_NAME_CHAR_RE.test(previous) || previous === '"';
 }
 
-function isOracleDatabaseLinkMarker(sql: string, index: number, databaseType: DatabaseType | undefined): boolean {
-  if (!supportsOracleDatabaseLinks(databaseType) || index === 0) return false;
+function isDatabaseLinkMarker(sql: string, index: number, databaseType: DatabaseType | undefined): boolean {
+  // 达梦也支持紧邻对象名的 table@link 语法，链接名不能作为输入参数提取或替换。
+  if ((!supportsOracleDatabaseLinks(databaseType) && databaseType !== "dameng") || index === 0) return false;
   const previous = sql[index - 1];
   return PARAMETER_NAME_CHAR_RE.test(previous) || previous === "$" || previous === "#" || previous === '"';
 }

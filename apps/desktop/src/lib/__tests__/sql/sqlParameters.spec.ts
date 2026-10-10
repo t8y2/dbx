@@ -310,7 +310,13 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters("select @amount/2, @total / 4")).toEqual(["amount", "total"]);
   });
 
-  it.each(["oracle", "oceanbase-oracle"] as const)("ignores %s database links while preserving standalone at-sign placeholders", (databaseType) => {
+  it("does not treat the Dameng DBLink in issue #11247 as a parameter", () => {
+    const sql = "select * from test.table_name@dm1";
+    expect(extractSqlParameterDescriptors(sql, { databaseType: "dameng" })).toEqual([]);
+    expect(substituteSqlParameters(sql, { dm1: { kind: "string", value: "WRONG" } }, { databaseType: "dameng" })).toBe(sql);
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("ignores %s database links while preserving standalone at-sign placeholders", (databaseType) => {
     const sql = 'SELECT * FROM HR.EMPLOYEES@REMOTE_DB, "AUDIT_LOG"@ARCHIVE_DB WHERE tenant_id = @tenant_id';
     expect(extractSqlParameters("SELECT 1 FROM DUAL@WDHIS160;", { databaseType })).toEqual([]);
     expect(extractSqlParameters(sql, { databaseType })).toEqual(["tenant_id"]);
@@ -318,7 +324,7 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters("SELECT * FROM EMPLOYEES@REMOTE_DB", { databaseType: "postgres" })).toEqual(["REMOTE_DB"]);
   });
 
-  it.each(["oracle", "oceanbase-oracle"] as const)("preserves %s links, quoted names, strings and comments during substitution", (databaseType) => {
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("preserves %s links, quoted names, strings and comments during substitution", (databaseType) => {
     const sql = `SELECT '@literal' FROM "Hr"."Audit Log"@ARCHIVE_DB /* @comment */ WHERE "Id" = :id AND tenant_id = @tenant_id -- @tail`;
     expect(extractSqlParameters(sql, { databaseType })).toEqual(["id", "tenant_id"]);
     expect(

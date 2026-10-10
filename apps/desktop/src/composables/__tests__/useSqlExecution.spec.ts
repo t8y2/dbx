@@ -878,10 +878,12 @@ SELECT @value AS Message;`;
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
   });
 
-  it("executes Oracle database-link queries without opening the parameter dialog", async () => {
-    const sql = "SELECT 1 FROM DUAL@WDHIS160;";
-    const activeTab = ref<QueryTab | undefined>(queryTab("ORCL"));
-    const activeConnection = ref<ConnectionConfig | undefined>(connection("oracle"));
+  it.each([
+    { databaseType: "oracle", database: "ORCL", sql: "SELECT 1 FROM DUAL@WDHIS160;" },
+    { databaseType: "dameng", database: "test", sql: "select * from test.table_name@dm1" },
+  ] as const)("executes $databaseType database-link queries without opening the parameter dialog", async ({ databaseType, database, sql }) => {
+    const activeTab = ref<QueryTab | undefined>(queryTab(database));
+    const activeConnection = ref<ConnectionConfig | undefined>(connection(databaseType));
     const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
     const queryStore = useQueryStore();
     const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {

@@ -3365,7 +3365,7 @@ pub async fn get_table_comment(
     Ok(rows.first().and_then(|row| row.get::<&str, _>(0)).filter(|s| !s.is_empty()).map(|s| s.to_string()))
 }
 
-fn sqlserver_table_comment_sql(schema: &str, table: &str) -> String {
+pub fn sqlserver_table_comment_sql(schema: &str, table: &str) -> String {
     let s = schema.replace('\'', "''");
     let t = table.replace('\'', "''");
     format!(

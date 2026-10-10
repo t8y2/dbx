@@ -1,6 +1,6 @@
 use super::{
-    get_table_ddl_core, list_databases_core, list_object_statistics_core, AppState, ConnectionConfig, DatabaseType,
-    PoolKind,
+    get_table_comment_core, get_table_ddl_core, list_databases_core, list_object_statistics_core, AppState,
+    ConnectionConfig, DatabaseType, PoolKind,
 };
 use crate::db::agent_driver::{AgentDriverClient, PooledAgentClient};
 use serde_json::{json, Value};
@@ -265,6 +265,24 @@ async fn enumeration_legacy_sqlserver_reuses_connection_metadata_across_database
     assert!(Arc::ptr_eq(&metadata, &fixture.pool(&metadata_key).await));
     assert_eq!(fixture.requests("connect").len(), 1);
     assert_eq!(metadata_key, "conn:role:metadata");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn legacy_sqlserver_table_comment_reads_extended_property_through_agent_query() {
+    let fixture = AgentFixture::new(DatabaseType::SqlServer).await;
+
+    let comment = get_table_comment_core(&fixture.state, "conn", "sales", "dbo", "orders").await.unwrap();
+
+    // The fixture answers every query with a first string cell of `EVENTS`.
+    assert_eq!(comment.as_deref(), Some("EVENTS"));
+    let queries = fixture.requests("execute_query");
+    assert_eq!(queries.len(), 1);
+    let sql = queries[0]["params"]["sql"].as_str().unwrap();
+    assert!(sql.contains("sys.extended_properties"), "{sql}");
+    assert!(sql.contains("N'MS_Description'"), "{sql}");
+    assert!(sql.contains("QUOTENAME('dbo') + '.' + QUOTENAME('orders')"), "{sql}");
+    assert_eq!(queries[0]["params"]["database"], "sales");
     fixture.shutdown().await;
 }
 

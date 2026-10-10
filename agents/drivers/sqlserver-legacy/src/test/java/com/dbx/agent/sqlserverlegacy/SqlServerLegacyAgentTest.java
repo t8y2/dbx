@@ -445,6 +445,27 @@ class SqlServerLegacyAgentTest {
     }
 
     @Test
+    void modernSqlServerColumnCommentsComeFromExtendedProperties() {
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        TestSupport.setPrivateConnection(agent, sqlServer2000CommentConnection(
+            null,
+            Arrays.asList(
+                Arrays.asList("NAME", "Display name", "MS_Description")
+            ),
+            null
+        ));
+        setSqlServer2000Mode(agent, false);
+
+        List<ColumnInfo> columns = agent.getColumns("dbo", "USERS");
+
+        // mssql-jdbc reports NULL REMARKS for every SQL Server column, so the
+        // MS_Description written by the structure editor must be merged in.
+        Assertions.assertEquals("Display name", columns.get(1).getComment());
+        Assertions.assertNull(columns.get(0).getComment());
+        Assertions.assertEquals("JDBC remark", columns.get(2).getComment());
+    }
+
+    @Test
     void sqlServer2000ColumnCommentsFailSoftWhenCatalogThrowsRuntimeError() {
         SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
         TestSupport.setPrivateConnection(agent, sqlServer2000CommentConnection(
@@ -725,6 +746,17 @@ class SqlServerLegacyAgentTest {
         Assertions.assertTrue(sql.contains("ep.minor_id = 0"));
         Assertions.assertTrue(sql.contains("ep.name = N'MS_Description'"));
         Assertions.assertTrue(sql.contains("s.name = ? AND t.name = ?"));
+    }
+
+    @Test
+    void columnCommentQueryReadsColumnExtendedPropertiesOnly() {
+        String sql = SqlServerLegacyAgent.columnCommentsSql();
+
+        Assertions.assertTrue(sql.contains("sys.extended_properties"));
+        Assertions.assertTrue(sql.contains("ep.class = 1"), "index comments share major_id/minor_id with columns");
+        Assertions.assertTrue(sql.contains("ep.minor_id = c.column_id"));
+        Assertions.assertTrue(sql.contains("ep.name = N'MS_Description'"));
+        Assertions.assertTrue(sql.contains("s.name = ? AND o.name = ?"));
     }
 
     @Test

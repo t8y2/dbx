@@ -3898,9 +3898,10 @@ fn sqlserver_legacy_column_comment_change_uses_legacy_extended_properties() {
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 1);
+    assert!(result.statements[0].starts_with("IF @@MICROSOFTVERSION / 16777216 >= 9 EXEC (N'"));
     assert!(result.statements[0].contains("::fn_listextendedproperty"));
     assert!(result.statements[0].contains("EXEC sp_addextendedproperty"));
-    assert!(!result.statements[0].contains("sys.extended_properties"));
+    assert!(result.statements[0].contains("EXEC sys.sp_addextendedproperty"));
 }
 
 #[test]

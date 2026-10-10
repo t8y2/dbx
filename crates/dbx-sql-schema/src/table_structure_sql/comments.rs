@@ -103,29 +103,30 @@ pub fn build_sqlserver_table_comment_sql_for_profile(
     let escaped_qualified = qualified_table.replace('\'', "''");
     let escaped_schema = schema_name.replace('\'', "''");
     let escaped_table = table_name.replace('\'', "''");
-    let (exists, levels, procedure_prefix) = if is_sqlserver_legacy_profile(driver_profile) {
-        (
-            format!(
-                "EXISTS (SELECT 1 FROM ::fn_listextendedproperty(N'MS_Description', N'USER', N'{escaped_schema}', N'TABLE', N'{escaped_table}', NULL, NULL))"
-            ),
-            format!(
-                "@level0type=N'USER', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}'"
-            ),
-            "",
-        )
-    } else {
-        (
-            format!(
-                "EXISTS (SELECT 1 FROM sys.extended_properties AS ep WHERE ep.class = 1 AND ep.major_id = OBJECT_ID(N'{escaped_qualified}') AND ep.minor_id = 0 AND ep.name = N'MS_Description')"
-            ),
-            format!(
-                "@level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}'"
-            ),
-            "sys.",
-        )
-    };
-
-    build_sqlserver_extended_property_comment_sql(&exists, &levels, new_comment, procedure_prefix)
+    let modern = build_sqlserver_extended_property_comment_sql(
+        &format!(
+            "EXISTS (SELECT 1 FROM sys.extended_properties AS ep WHERE ep.class = 1 AND ep.major_id = OBJECT_ID(N'{escaped_qualified}') AND ep.minor_id = 0 AND ep.name = N'MS_Description')"
+        ),
+        &format!(
+            "@level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}'"
+        ),
+        new_comment,
+        "sys.",
+    );
+    if !is_sqlserver_legacy_profile(driver_profile) {
+        return modern;
+    }
+    let sql2000 = build_sqlserver_extended_property_comment_sql(
+        &format!(
+            "EXISTS (SELECT 1 FROM ::fn_listextendedproperty(N'MS_Description', N'USER', N'{escaped_schema}', N'TABLE', N'{escaped_table}', NULL, NULL))"
+        ),
+        &format!(
+            "@level0type=N'USER', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}'"
+        ),
+        new_comment,
+        "",
+    );
+    sqlserver_version_switched_comment_sql(modern, sql2000)
 }
 
 pub(super) fn build_sqlserver_index_comment_sql_for_profile(
@@ -141,29 +142,30 @@ pub(super) fn build_sqlserver_index_comment_sql_for_profile(
     let escaped_schema = schema_name.replace('\'', "''");
     let escaped_table = table_name.replace('\'', "''");
     let escaped_idx = index_name.replace('\'', "''");
-    let (exists, levels, procedure_prefix) = if is_sqlserver_legacy_profile(driver_profile) {
-        (
-            format!(
-                "EXISTS (SELECT 1 FROM ::fn_listextendedproperty(N'MS_Description', N'USER', N'{escaped_schema}', N'TABLE', N'{escaped_table}', N'INDEX', N'{escaped_idx}'))"
-            ),
-            format!(
-                "@level0type=N'USER', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'INDEX', @level2name=N'{escaped_idx}'"
-            ),
-            "",
-        )
-    } else {
-        (
-            format!(
-                "EXISTS (SELECT 1 FROM sys.extended_properties AS ep INNER JOIN sys.indexes AS i ON i.object_id = ep.major_id AND i.index_id = ep.minor_id WHERE ep.class = 7 AND ep.major_id = OBJECT_ID(N'{escaped_qualified}') AND i.name = N'{escaped_idx}' AND ep.name = N'MS_Description')"
-            ),
-            format!(
-                "@level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'INDEX', @level2name=N'{escaped_idx}'"
-            ),
-            "sys.",
-        )
-    };
-
-    build_sqlserver_extended_property_comment_sql(&exists, &levels, new_comment, procedure_prefix)
+    let modern = build_sqlserver_extended_property_comment_sql(
+        &format!(
+            "EXISTS (SELECT 1 FROM sys.extended_properties AS ep INNER JOIN sys.indexes AS i ON i.object_id = ep.major_id AND i.index_id = ep.minor_id WHERE ep.class = 7 AND ep.major_id = OBJECT_ID(N'{escaped_qualified}') AND i.name = N'{escaped_idx}' AND ep.name = N'MS_Description')"
+        ),
+        &format!(
+            "@level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'INDEX', @level2name=N'{escaped_idx}'"
+        ),
+        new_comment,
+        "sys.",
+    );
+    if !is_sqlserver_legacy_profile(driver_profile) {
+        return modern;
+    }
+    let sql2000 = build_sqlserver_extended_property_comment_sql(
+        &format!(
+            "EXISTS (SELECT 1 FROM ::fn_listextendedproperty(N'MS_Description', N'USER', N'{escaped_schema}', N'TABLE', N'{escaped_table}', N'INDEX', N'{escaped_idx}'))"
+        ),
+        &format!(
+            "@level0type=N'USER', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'INDEX', @level2name=N'{escaped_idx}'"
+        ),
+        new_comment,
+        "",
+    );
+    sqlserver_version_switched_comment_sql(modern, sql2000)
 }
 
 pub fn build_sqlserver_column_comment_sql(
@@ -189,29 +191,43 @@ pub fn build_sqlserver_column_comment_sql_for_profile(
     let escaped_schema = schema_name.replace('\'', "''");
     let escaped_table = table_name.replace('\'', "''");
     let escaped_col = column_name.replace('\'', "''");
-    let (exists, levels, procedure_prefix) = if is_sqlserver_legacy_profile(driver_profile) {
-        (
-            format!(
-                "EXISTS (SELECT 1 FROM ::fn_listextendedproperty(N'MS_Description', N'USER', N'{escaped_schema}', N'TABLE', N'{escaped_table}', N'COLUMN', N'{escaped_col}'))"
-            ),
-            format!(
-                "@level0type=N'USER', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'COLUMN', @level2name=N'{escaped_col}'"
-            ),
-            "",
-        )
-    } else {
-        (
-            format!(
-                "EXISTS (SELECT 1 FROM sys.extended_properties AS ep WHERE ep.class = 1 AND ep.major_id = OBJECT_ID(N'{escaped_qualified}') AND ep.minor_id = COLUMNPROPERTY(OBJECT_ID(N'{escaped_qualified}'), N'{escaped_col}', 'ColumnId') AND ep.name = N'MS_Description')"
-            ),
-            format!(
-                "@level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'COLUMN', @level2name=N'{escaped_col}'"
-            ),
-            "sys.",
-        )
-    };
+    let modern = build_sqlserver_extended_property_comment_sql(
+        &format!(
+            "EXISTS (SELECT 1 FROM sys.extended_properties AS ep WHERE ep.class = 1 AND ep.major_id = OBJECT_ID(N'{escaped_qualified}') AND ep.minor_id = COLUMNPROPERTY(OBJECT_ID(N'{escaped_qualified}'), N'{escaped_col}', 'ColumnId') AND ep.name = N'MS_Description')"
+        ),
+        &format!(
+            "@level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'COLUMN', @level2name=N'{escaped_col}'"
+        ),
+        new_comment,
+        "sys.",
+    );
+    if !is_sqlserver_legacy_profile(driver_profile) {
+        return modern;
+    }
+    let sql2000 = build_sqlserver_extended_property_comment_sql(
+        &format!(
+            "EXISTS (SELECT 1 FROM ::fn_listextendedproperty(N'MS_Description', N'USER', N'{escaped_schema}', N'TABLE', N'{escaped_table}', N'COLUMN', N'{escaped_col}'))"
+        ),
+        &format!(
+            "@level0type=N'USER', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'COLUMN', @level2name=N'{escaped_col}'"
+        ),
+        new_comment,
+        "",
+    );
+    sqlserver_version_switched_comment_sql(modern, sql2000)
+}
 
-    build_sqlserver_extended_property_comment_sql(&exists, &levels, new_comment, procedure_prefix)
+/// The legacy driver serves SQL Server 2000 through current releases. Since
+/// SQL Server 2005, the `USER` level only resolves when a database user shares
+/// the schema name, so non-`dbo` schemas fail with Msg 15135. Choose the level
+/// on the server instead, and keep each branch in dynamic SQL so SQL Server
+/// 2000 never compiles the `sys.` catalog references.
+fn sqlserver_version_switched_comment_sql(modern: Vec<String>, sql2000: Vec<String>) -> Vec<String> {
+    let dynamic = |statements: Vec<String>| {
+        let sql = statements.concat();
+        format!("EXEC (N'{}')", sql.trim_end_matches(';').replace('\'', "''"))
+    };
+    vec![format!("IF @@MICROSOFTVERSION / 16777216 >= 9 {} ELSE {};", dynamic(modern), dynamic(sql2000))]
 }
 
 fn is_sqlserver_legacy_profile(driver_profile: Option<&str>) -> bool {
@@ -331,26 +347,37 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_legacy_column_comment_uses_sql_server_2000_compatibility_syntax() {
+    fn sqlserver_legacy_column_comment_picks_extended_property_level_by_server_version() {
         let statements = build_sqlserver_column_comment_sql_for_profile(
-            "[dbo].[Categories]",
-            Some("dbo"),
+            "[app].[Categories]",
+            Some("app"),
             "Categories",
             "CategoryID",
-            "test",
+            "owner's test",
             Some("sqlserver-legacy"),
         );
 
         assert_eq!(statements.len(), 1);
         let sql = &statements[0];
-        assert!(sql.contains("::fn_listextendedproperty"), "legacy property lookup: {sql}");
-        assert!(sql.contains("@level0type=N'USER'"), "legacy hierarchy: {sql}");
-        assert!(sql.contains("EXEC sp_updateextendedproperty"), "legacy update procedure: {sql}");
-        assert!(sql.contains("ELSE EXEC sp_addextendedproperty"), "legacy add procedure: {sql}");
-        assert!(
-            !sql.contains("sys.extended_properties"),
-            "SQL Server 2005+ catalog view leaked into legacy SQL: {sql}"
+        let (modern, sql2000) = sql
+            .strip_prefix("IF @@MICROSOFTVERSION / 16777216 >= 9 EXEC (N'")
+            .and_then(|rest| rest.split_once("') ELSE EXEC (N'"))
+            .unwrap_or_else(|| panic!("version switch: {sql}"));
+        assert!(modern.contains("sys.extended_properties"), "2005+ property lookup: {sql}");
+        assert!(modern.contains("@level0type=N''SCHEMA'', @level0name=N''app''"), "2005+ hierarchy: {sql}");
+        assert!(modern.contains("EXEC sys.sp_updateextendedproperty"), "2005+ update procedure: {sql}");
+        assert!(!modern.contains("N''USER''"), "USER level fails for non-dbo schemas on 2005+: {sql}");
+        assert!(sql2000.contains("::fn_listextendedproperty"), "legacy property lookup: {sql}");
+        assert!(sql2000.contains("@level0type=N''USER''"), "legacy hierarchy: {sql}");
+        assert!(sql2000.contains("ELSE EXEC sp_addextendedproperty"), "legacy add procedure: {sql}");
+        assert!(!sql2000.contains("sys."), "SQL Server 2005+ catalog leaked into the 2000 branch: {sql}");
+        assert!(sql.contains("@value=N''owner''''s test''"), "comment escaped for dynamic SQL: {sql}");
+        assert!(sql.ends_with("');"), "{sql}");
+        assert_eq!(
+            crate::sql::split_sql_statements_for_database(sql, crate::models::connection::DatabaseType::SqlServer)
+                .len(),
+            1,
+            "version-switched comment upsert must remain one executable statement: {sql}"
         );
-        assert!(!sql.contains("EXEC sys."), "SQL Server 2005+ procedure qualification leaked into legacy SQL: {sql}");
     }
 }

@@ -1223,7 +1223,26 @@ async fn get_table_comment_core_for_session(
                             timeout,
                         )
                         .await?;
-                    return oracle_table_comment_from_query_result(result);
+                    return single_table_comment_from_query_result(result);
+                }
+                if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::SqlServer) {
+                    // JDBC `REMARKS` is always NULL on SQL Server, so the legacy Agent's
+                    // table list cannot supply the `MS_Description` written by the editor.
+                    let sql = db::sqlserver::sqlserver_table_comment_sql(schema, table);
+                    let timeout = agent_metadata_timeout(db_config.as_ref());
+                    let mut client = client.lock().await;
+                    let result = client
+                        .execute_query_with_timeout::<db::QueryResult>(
+                            agent_execute_query_params(
+                                &sql,
+                                Some(database),
+                                Some(schema),
+                                QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
+                            ),
+                            timeout,
+                        )
+                        .await?;
+                    return single_table_comment_from_query_result(result);
                 }
                 if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
                     let timeout = agent_metadata_timeout(db_config.as_ref());
@@ -1246,7 +1265,7 @@ async fn get_table_comment_core_for_session(
                             timeout,
                         )
                         .await?;
-                    return oracle_table_comment_from_query_result(result);
+                    return single_table_comment_from_query_result(result);
                 }
             }
         }
@@ -1327,7 +1346,7 @@ fn tdengine_table_comment_cache_key(database: &str, schema: &str, filter: &str) 
     serde_json::json!([database, schema, filter.trim().to_lowercase()]).to_string()
 }
 
-fn oracle_table_comment_from_query_result(result: db::QueryResult) -> Result<Option<String>, String> {
+fn single_table_comment_from_query_result(result: db::QueryResult) -> Result<Option<String>, String> {
     Ok(result
         .rows
         .first()
@@ -3122,16 +3141,16 @@ mod tests {
         oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
         oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
         oracle_object_statistics_user_segments_sql, oracle_synonym_target_from_query_result, oracle_synonym_target_sql,
-        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_sql,
-        presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
-        reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
-        should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
-        table_comments_from_query_result, table_name_filter_matches, tdengine_table_comment_like_pattern,
-        tdengine_table_comment_sql, tdengine_table_comments_sql, uses_mongodb_agent_collection_listing,
-        visible_schema_filter, ExternalDriverStatisticsDialect, MetadataErrorAction, MysqlTableListSource,
-        OracleObjectRef, OracleSynonymResolver, ReferenceKeyInfo, TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL,
-        ORACLE_SYNONYM_MAX_DEPTH, TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        oracle_table_comment_sql, oracle_table_comments_sql, presto_like_columns_from_query_result,
+        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
+        presto_like_tables_from_query_result, reference_key_columns_from_indexes, reference_keys_from_indexes,
+        replace_metadata_runtime, should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
+        single_table_comment_from_query_result, table_comments_from_query_result, table_name_filter_matches,
+        tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
+        uses_mongodb_agent_collection_listing, visible_schema_filter, ExternalDriverStatisticsDialect,
+        MetadataErrorAction, MysqlTableListSource, OracleObjectRef, OracleSynonymResolver, ReferenceKeyInfo,
+        TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL, ORACLE_SYNONYM_MAX_DEPTH, TDENGINE_COMMENT_SEARCH_TIMEOUT,
+        TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
     use super::{
@@ -5647,7 +5666,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn oracle_table_comment_from_query_result_returns_optional_non_blank_comment() {
+    fn single_table_comment_from_query_result_returns_optional_non_blank_comment() {
         let result = db::QueryResult {
             columns: vec!["COMMENTS".to_string()],
             column_types: Vec::new(),
@@ -5666,7 +5685,7 @@ for line in sys.stdin:
             messages: Vec::new(),
         };
 
-        assert_eq!(oracle_table_comment_from_query_result(result).unwrap().as_deref(), Some("Customer table"));
+        assert_eq!(single_table_comment_from_query_result(result).unwrap().as_deref(), Some("Customer table"));
 
         let empty = db::QueryResult {
             columns: vec!["COMMENTS".to_string()],
@@ -5686,7 +5705,7 @@ for line in sys.stdin:
             messages: Vec::new(),
         };
 
-        assert_eq!(oracle_table_comment_from_query_result(empty).unwrap(), None);
+        assert_eq!(single_table_comment_from_query_result(empty).unwrap(), None);
     }
 
     #[test]
@@ -11464,7 +11483,7 @@ async fn external_driver_oracle_table_comment(
             agent_metadata_timeout(Some(config)),
         )
         .await?;
-    oracle_table_comment_from_query_result(result)
+    single_table_comment_from_query_result(result)
 }
 
 async fn db2_agent_table_ddl(

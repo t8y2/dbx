@@ -11,6 +11,7 @@ import {
   jsonToXmlText,
   jsonToYamlText,
   normalizeRedisJsonDraft,
+  parseRedisJsonDetail,
   preferredRedisValueFormat,
   redisClipboardSafeText,
   redisJsonValueText,
@@ -410,5 +411,58 @@ describe("redisValuePresentation", () => {
 
   it("uses a valid fallback tag for empty JSON keys", () => {
     expect(jsonToXmlText({ "": 1 })).toBe('<?xml version="1.0" encoding="UTF-8"?>\n<root>\n  <item>1</item>\n</root>');
+  });
+
+  it("unwraps serialized JSON strings into structured JSON containers (issue #11636)", () => {
+    const serializedObject = '"{\\"abc\\":\\"\\"}"';
+    const detail = parseRedisJsonDetail(serializedObject);
+    expect(detail).not.toBeNull();
+    expect(detail?.formattedText).toBe('{\n  "abc": ""\n}');
+    expect(detail?.value).toEqual({ abc: "" });
+    expect(detail?.serializedLevel).toBe(1);
+
+    const serializedArray = '"[{\\"id\\":1},{\\"id\\":2}]"';
+    const arrayDetail = parseRedisJsonDetail(serializedArray);
+    expect(arrayDetail).not.toBeNull();
+    expect(arrayDetail?.value).toEqual([{ id: 1 }, { id: 2 }]);
+    expect(arrayDetail?.serializedLevel).toBe(1);
+
+    // Double-serialized JSON string unwraps through multiple levels
+    const doubleSerialized = JSON.stringify(JSON.stringify(JSON.stringify({ nested: true })));
+    const doubleDetail = parseRedisJsonDetail(doubleSerialized);
+    expect(doubleDetail).not.toBeNull();
+    expect(doubleDetail?.value).toEqual({ nested: true });
+    expect(doubleDetail?.serializedLevel).toBe(2);
+  });
+
+  it("auto-detects serialized JSON containers and sets format to json (issue #11636)", () => {
+    const memberDetail = formatRedisMemberDetail('"{\\"abc\\":\\"\\"}"', { allowJsonText: true });
+    expect(memberDetail.json).toBeDefined();
+    expect(isRedisJsonContainerValue(memberDetail.json?.value)).toBe(true);
+    expect(autoRedisValueFormat(memberDetail, null)).toBe("json");
+  });
+
+  it("normalizes serialized JSON drafts with serializedLevel (issue #11636)", () => {
+    const draft = '{\n  "abc": "xyz"\n}';
+    expect(normalizeRedisJsonDraft(draft, 1)).toEqual({
+      ok: true,
+      compactText: '"{\\"abc\\":\\"xyz\\"}"',
+    });
+    expect(normalizeRedisJsonDraft(draft, 2)).toEqual({
+      ok: true,
+      compactText: '"\\"{\\\\\\"abc\\\\\\":\\\\\\"xyz\\\\\\"}\\""',
+    });
+  });
+
+  it("keeps serialized scalar strings as plain text without unwrapping", () => {
+    const scalarString = '"hello world"';
+    const detail = parseRedisJsonDetail(scalarString);
+    expect(detail?.formattedText).toBe('"hello world"');
+    expect(detail?.value).toBe("hello world");
+    expect(detail?.serializedLevel).toBeUndefined();
+    expect(isRedisJsonContainerValue(detail?.value)).toBe(false);
+
+    const memberDetail = formatRedisMemberDetail(scalarString, { allowJsonText: true });
+    expect(autoRedisValueFormat(memberDetail, null)).toBe("utf8");
   });
 });

@@ -29,4 +29,14 @@ describe("native RedisJSON editor", () => {
     const saved = normalizeRedisJsonDraft(opened.json!.formattedText);
     expect(saved).toEqual({ ok: true, compactText: DUPLICATE_MEMBER_COMPACT });
   });
+
+  it("string and hash serialized JSON editor open+save keeps serialized quotes intact (issue #11636)", () => {
+    const SERIALIZED_COMPACT = '"{\\"role\\":\\"reader\\",\\"role\\":\\"writer\\"}"';
+    const opened = formatRedisMemberDetail(SERIALIZED_COMPACT, { allowJsonText: true });
+    expect(opened.json?.formattedText).toBe(DUPLICATE_MEMBER_PRETTY);
+    expect(opened.json?.serializedLevel).toBe(1);
+
+    const saved = normalizeRedisJsonDraft(opened.json!.formattedText, opened.json!.serializedLevel);
+    expect(saved).toEqual({ ok: true, compactText: SERIALIZED_COMPACT });
+  });
 });

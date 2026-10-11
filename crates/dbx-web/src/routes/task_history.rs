@@ -19,6 +19,10 @@ pub struct TaskRunListParams {
     pub cursor_run_id: Option<String>,
     pub task_type: Option<TaskType>,
     pub status: Option<TaskRunStatus>,
+    pub started_at_from: Option<String>,
+    pub started_at_before: Option<String>,
+    pub source_query: Option<String>,
+    pub target_query: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,7 +41,16 @@ pub async fn list_task_runs(
         (None, None) => None,
         _ => return Err(AppError::bad_request("Both cursorCreatedAt and cursorRunId are required.")),
     };
-    let query = TaskRunListQuery { limit: params.limit, cursor, task_type: params.task_type, status: params.status };
+    let query = TaskRunListQuery {
+        limit: params.limit,
+        cursor,
+        task_type: params.task_type,
+        status: params.status,
+        started_at_from: params.started_at_from,
+        started_at_before: params.started_at_before,
+        source_query: params.source_query,
+        target_query: params.target_query,
+    };
     state.app.storage.list_task_runs(query).await.map(Json).map_err(|error| AppError::internal(error.code()))
 }
 
@@ -72,4 +85,42 @@ pub async fn list_task_run_items(
         .await
         .map(Json)
         .map_err(|error| AppError::internal(error.code()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaskRunListParams;
+    use dbx_core::persistence::task_history::TaskRunStatus;
+
+    #[test]
+    fn task_run_list_params_deserialize_filter_contract_and_keep_old_queries_valid() {
+        let params: TaskRunListParams = serde_json::from_str(
+            r#"{
+                "limit": 25,
+                "cursorCreatedAt": "2025-01-01T00:00:00.000Z",
+                "cursorRunId": "run-1",
+                "status": "partial_failed",
+                "startedAtFrom": "2025-01-01T00:00:00.000Z",
+                "startedAtBefore": "2025-01-02T00:00:00.000Z",
+                "sourceQuery": "source-db",
+                "targetQuery": "target-db"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(params.limit, Some(25));
+        assert_eq!(params.cursor_created_at.as_deref(), Some("2025-01-01T00:00:00.000Z"));
+        assert_eq!(params.cursor_run_id.as_deref(), Some("run-1"));
+        assert_eq!(params.status, Some(TaskRunStatus::PartialFailed));
+        assert_eq!(params.started_at_from.as_deref(), Some("2025-01-01T00:00:00.000Z"));
+        assert_eq!(params.started_at_before.as_deref(), Some("2025-01-02T00:00:00.000Z"));
+        assert_eq!(params.source_query.as_deref(), Some("source-db"));
+        assert_eq!(params.target_query.as_deref(), Some("target-db"));
+
+        let legacy: TaskRunListParams = serde_json::from_str("{}").unwrap();
+        assert!(legacy.started_at_from.is_none());
+        assert!(legacy.started_at_before.is_none());
+        assert!(legacy.source_query.is_none());
+        assert!(legacy.target_query.is_none());
+    }
 }

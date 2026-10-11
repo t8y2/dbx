@@ -626,6 +626,24 @@ pub fn build_database_search_sql(
 }
 
 #[tauri::command]
+pub fn build_database_structure_search_sql(
+    options: dbx_core::database_structure_search_sql::DatabaseStructureSearchSqlOptions,
+) -> Result<Option<dbx_core::database_structure_search_sql::DatabaseStructureSearchSql>, String> {
+    Ok(dbx_core::database_structure_search_sql::build_database_structure_search_sql(options))
+}
+
+#[tauri::command]
+pub fn supports_database_structure_search(
+    database_type: Option<dbx_core::models::connection::DatabaseType>,
+    driver_profile: Option<String>,
+) -> Result<bool, String> {
+    Ok(dbx_core::database_structure_search_sql::supports_database_structure_search(
+        database_type,
+        driver_profile.as_deref(),
+    ))
+}
+
+#[tauri::command]
 pub fn build_search_result_where(
     options: dbx_core::database_search_sql::SearchResultWhereOptions,
 ) -> Result<String, String> {

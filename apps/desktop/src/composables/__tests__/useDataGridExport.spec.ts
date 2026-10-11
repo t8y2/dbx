@@ -1022,7 +1022,7 @@ describe("useDataGridExport prepared row statements", () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
     const excludePrimaryKeys = {
       ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, skipGeneratedColumns: false, excludePrimaryKeysFromInsert: true },
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, skipGeneratedColumns: false, primaryKeyMode: "exclude-generated" },
     };
 
     const state = createExportState(autoIncrementTable, ["id"], matrix, [1], undefined, undefined, [], excludePrimaryKeys);
@@ -1048,7 +1048,7 @@ describe("useDataGridExport prepared row statements", () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
     const excludePrimaryKeys = {
       ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-generated" },
     };
 
     const state = createExportState(serialTable, ["id"], matrix, [1], undefined, undefined, [], excludePrimaryKeys);
@@ -1103,7 +1103,7 @@ describe("useDataGridExport prepared row statements", () => {
     expect(createExportState(table, ["created_at"], matrix, ["2026-09-30 10:00:00"]).canCopyWithExtractor("sql-inserts")).toBe(true);
   });
 
-  it("disables INSERT when excluding primary keys removes the only selected manual key", () => {
+  it("keeps INSERT enabled when generated-key exclusion preserves the only selected manual key", () => {
     const compositeKeyTable: DataGridTableMeta = {
       tableName: "daily_stats",
       primaryKeys: ["id", "stat_date"],
@@ -1116,10 +1116,27 @@ describe("useDataGridExport prepared row statements", () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["stat_date"], rows: [["2026-08-18"]] };
     const excludePrimaryKeys = {
       ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, skipGeneratedColumns: false, excludePrimaryKeysFromInsert: true },
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, skipGeneratedColumns: false, primaryKeyMode: "exclude-generated" },
     };
 
     const state = createExportState(compositeKeyTable, ["id", "stat_date", "name"], matrix, [1, "2026-08-18", "Ada"], undefined, undefined, [], excludePrimaryKeys);
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
+  });
+
+  it("disables INSERT when the all-primary-keys mode removes the only selected manual key", () => {
+    const table: DataGridTableMeta = {
+      tableName: "countries",
+      primaryKeys: ["code"],
+      columns: [{ name: "code", data_type: "varchar(2)", is_nullable: false, is_primary_key: true }],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["code"], rows: [["US"]] };
+    const options = {
+      ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-all" },
+    };
+
+    const state = createExportState(table, ["code"], matrix, ["US"], undefined, undefined, [], options);
 
     expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
   });
@@ -1136,7 +1153,7 @@ describe("useDataGridExport prepared row statements", () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["id"], rows: [["lowercase"]] };
     const excludePrimaryKeys = {
       ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-all" },
     };
 
     const state = createExportState(table, ["ID", "id"], matrix, ["key", "lowercase"], undefined, undefined, [], excludePrimaryKeys, false, undefined, false, undefined, undefined, "postgres");
@@ -1153,7 +1170,7 @@ describe("useDataGridExport prepared row statements", () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [["lowercase"]] };
     const excludePrimaryKeys = {
       ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-generated" },
     };
 
     const state = createExportState(table, ["id"], matrix, ["lowercase"], undefined, undefined, [], excludePrimaryKeys, false, undefined, false, undefined, undefined, "postgres");
@@ -1186,7 +1203,7 @@ describe("useDataGridExport prepared row statements", () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
     const excludePrimaryKeys = {
       ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-all" },
     };
 
     const state = createExportState(table, ["id"], matrix, [1], undefined, undefined, [], excludePrimaryKeys, false, undefined, false, undefined, undefined, "mysql");
@@ -1232,11 +1249,11 @@ describe("useDataGridExport prepared row statements", () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[7]] };
     const savedOptions = {
       ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-generated" },
     };
     const includePrimaryKeys = {
       ...savedOptions,
-      sql: { ...savedOptions.sql, excludePrimaryKeysFromInsert: false },
+      sql: { ...savedOptions.sql, primaryKeyMode: "include" },
     };
     vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
       text: "INSERT INTO `users` (`id`) VALUES (7);",
@@ -1250,8 +1267,8 @@ describe("useDataGridExport prepared row statements", () => {
     expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
     expect(state.canCopyWithExtractor("sql-inserts", includePrimaryKeys)).toBe(true);
     await expect(state.copyWithExtractor("sql-inserts", includePrimaryKeys)).resolves.toBe(true);
-    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ options: expect.objectContaining({ sql: expect.objectContaining({ excludePrimaryKeysFromInsert: false }) }) }));
-    expect(savedOptions.sql.excludePrimaryKeysFromInsert).toBe(true);
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ options: expect.objectContaining({ sql: expect.objectContaining({ primaryKeyMode: "include" }) }) }));
+    expect(savedOptions.sql.primaryKeyMode).toBe("exclude-generated");
   });
 
   it("sends only selected values for non-SQL extraction and marks column selections", async () => {

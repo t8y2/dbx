@@ -266,7 +266,7 @@ fn partially_deserialized_options_use_the_canonical_defaults() {
     assert!(options.sql.skip_computed_columns);
     assert!(!options.sql.skip_generated_columns);
     assert_eq!(options.sql.insert_mode, crate::data_grid_sql::DataGridCopyInsertMode::Merged);
-    assert!(!options.sql.exclude_primary_keys_from_insert);
+    assert_eq!(options.sql.primary_key_mode, crate::data_grid_sql::DataGridPrimaryKeyMode::Include);
     assert!(options.sql.include_database_name);
     assert!(options.sql.quote_identifiers);
     assert_eq!(options.sql.temporal_format, DataGridTemporalFormat::Native);
@@ -1458,7 +1458,7 @@ fn sql_insert_honors_primary_key_exclusion_and_row_by_row_mode() {
             },
         ]),
     });
-    request.options.sql.exclude_primary_keys_from_insert = true;
+    request.options.sql.primary_key_mode = crate::data_grid_sql::DataGridPrimaryKeyMode::ExcludeGenerated;
     request.options.sql.insert_mode = crate::data_grid_sql::DataGridCopyInsertMode::RowByRow;
 
     let result = extract_data_grid_selection(request).expect("row-by-row SQL INSERT extraction");
@@ -1500,7 +1500,7 @@ fn sql_insert_primary_key_exclusion_omits_postgres_serial_key() {
         ]),
     });
     request.rows = vec![vec![json!(1), json!("Ada")]];
-    request.options.sql.exclude_primary_keys_from_insert = true;
+    request.options.sql.primary_key_mode = crate::data_grid_sql::DataGridPrimaryKeyMode::ExcludeGenerated;
 
     let result = extract_data_grid_selection(request).expect("PostgreSQL SQL INSERT extraction");
 
@@ -1509,7 +1509,7 @@ fn sql_insert_primary_key_exclusion_omits_postgres_serial_key() {
 }
 
 #[test]
-fn sql_insert_primary_key_exclusion_removes_manual_composite_key_members() {
+fn sql_insert_generated_primary_key_exclusion_keeps_manual_composite_key_members() {
     let mut request = request(DataGridExtractorId::SqlInserts);
     request.table_meta = Some(DataGridTableMeta {
         catalog: None,
@@ -1547,7 +1547,54 @@ fn sql_insert_primary_key_exclusion_removes_manual_composite_key_members() {
     request.columns = vec![column("id", 0), column("stat_date", 1), column("name", 2)];
     request.selected_column_indexes = vec![0, 1, 2];
     request.rows = vec![vec![json!(1), json!("2026-08-18"), json!("Ada")]];
-    request.options.sql.exclude_primary_keys_from_insert = true;
+    request.options.sql.primary_key_mode = crate::data_grid_sql::DataGridPrimaryKeyMode::ExcludeGenerated;
+
+    let result = extract_data_grid_selection(request).expect("SQL INSERT extraction");
+
+    assert_eq!(result.text, "INSERT INTO \"daily_stats\" (\"stat_date\", \"name\") VALUES ('2026-08-18', 'Ada');");
+    assert_eq!(result.omitted_columns, vec!["id"]);
+}
+
+#[test]
+fn sql_insert_all_primary_key_mode_excludes_manual_composite_key_members() {
+    let mut request = request(DataGridExtractorId::SqlInserts);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "daily_stats".to_string(),
+        primary_keys: vec!["id".to_string(), "stat_date".to_string()],
+        columns: Some(vec![
+            DataGridColumnInfo {
+                name: "id".to_string(),
+                data_type: "bigint".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                column_default: None,
+                extra: Some("auto_increment".to_string()),
+            },
+            DataGridColumnInfo {
+                name: "stat_date".to_string(),
+                data_type: "date".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                column_default: None,
+                extra: None,
+            },
+            DataGridColumnInfo {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+        ]),
+    });
+    request.columns = vec![column("id", 0), column("stat_date", 1), column("name", 2)];
+    request.selected_column_indexes = vec![0, 1, 2];
+    request.rows = vec![vec![json!(1), json!("2026-08-18"), json!("Ada")]];
+    request.options.sql.primary_key_mode = crate::data_grid_sql::DataGridPrimaryKeyMode::ExcludeAll;
 
     let result = extract_data_grid_selection(request).expect("SQL INSERT extraction");
 
@@ -1587,7 +1634,7 @@ fn sql_insert_primary_key_exclusion_matches_unique_case_insensitive_mysql_primar
     request.columns = vec![column("id", 0), column("name", 1)];
     request.selected_column_indexes = vec![0, 1];
     request.rows = vec![vec![json!(1), json!("Ada")]];
-    request.options.sql.exclude_primary_keys_from_insert = true;
+    request.options.sql.primary_key_mode = crate::data_grid_sql::DataGridPrimaryKeyMode::ExcludeAll;
 
     let result = extract_data_grid_selection(request).expect("SQL INSERT extraction");
 
@@ -1663,7 +1710,7 @@ fn sql_insert_primary_key_exclusion_preserves_case_distinct_postgres_columns() {
     request.columns = vec![column("ID", 0), column("id", 1), column("name", 2)];
     request.selected_column_indexes = vec![0, 1, 2];
     request.rows = vec![vec![json!("key"), json!("lowercase"), json!("Ada")]];
-    request.options.sql.exclude_primary_keys_from_insert = true;
+    request.options.sql.primary_key_mode = crate::data_grid_sql::DataGridPrimaryKeyMode::ExcludeAll;
 
     let result = extract_data_grid_selection(request).expect("SQL INSERT extraction");
 
@@ -1692,7 +1739,7 @@ fn sql_insert_primary_key_exclusion_uses_exact_postgres_names_with_incomplete_me
     request.columns = vec![column("id", 0), column("name", 1)];
     request.selected_column_indexes = vec![0, 1];
     request.rows = vec![vec![json!("lowercase"), json!("Ada")]];
-    request.options.sql.exclude_primary_keys_from_insert = true;
+    request.options.sql.primary_key_mode = crate::data_grid_sql::DataGridPrimaryKeyMode::ExcludeGenerated;
 
     let result = extract_data_grid_selection(request).expect("SQL INSERT extraction");
 

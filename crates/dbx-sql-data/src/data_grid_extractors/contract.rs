@@ -1,4 +1,4 @@
-use crate::data_grid_sql::{DataGridCopyInsertMode, DataGridTableMeta};
+use crate::data_grid_sql::{DataGridCopyInsertMode, DataGridPrimaryKeyMode, DataGridTableMeta};
 use crate::models::connection::DatabaseType;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -93,7 +93,7 @@ pub struct DataGridSqlExtractorOptions {
     pub skip_computed_columns: bool,
     pub skip_generated_columns: bool,
     pub insert_mode: DataGridCopyInsertMode,
-    pub exclude_primary_keys_from_insert: bool,
+    pub primary_key_mode: DataGridPrimaryKeyMode,
     pub include_database_name: bool,
     pub quote_identifiers: bool,
     pub temporal_format: DataGridTemporalFormat,
@@ -105,7 +105,7 @@ impl Default for DataGridSqlExtractorOptions {
             skip_computed_columns: DEFAULT_SQL_SKIP_COMPUTED_COLUMNS,
             skip_generated_columns: DEFAULT_SQL_SKIP_GENERATED_COLUMNS,
             insert_mode: DataGridCopyInsertMode::Merged,
-            exclude_primary_keys_from_insert: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_database_name: true,
             quote_identifiers: true,
             temporal_format: DataGridTemporalFormat::Native,

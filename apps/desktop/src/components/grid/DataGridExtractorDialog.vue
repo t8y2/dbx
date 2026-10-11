@@ -210,9 +210,17 @@ function save() {
           <template v-if="isSql">
             <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.skipComputedColumns" @change="updateSql('skipComputedColumns', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorSkipComputed") }}</label>
             <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.skipGeneratedColumns" @change="updateSql('skipGeneratedColumns', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorSkipGenerated") }}</label>
-            <label v-if="draftExtractor === 'sql-inserts'" class="flex items-center gap-2 text-sm"
-              ><input type="checkbox" :checked="draftOptions.sql.excludePrimaryKeysFromInsert" @change="updateSql('excludePrimaryKeysFromInsert', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorExcludePrimaryKeys") }}</label
-            >
+            <div v-if="draftExtractor === 'sql-inserts'" class="space-y-1.5">
+              <Label>{{ t("grid.copyExtractorExcludePrimaryKeys") }}</Label>
+              <Select :model-value="draftOptions.sql.primaryKeyMode" @update:model-value="updateSql('primaryKeyMode', $event as DataGridExtractorOptions['sql']['primaryKeyMode'])">
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="include">{{ t("grid.copyExtractorSqlInsertsWithPrimaryKeys") }}</SelectItem>
+                  <SelectItem value="exclude-generated">{{ t("grid.copyExtractorSqlInsertsWithoutPrimaryKeys") }}</SelectItem>
+                  <SelectItem value="exclude-all">{{ t("grid.copyExtractorSqlInsertsWithoutAllPrimaryKeys") }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.includeDatabaseName" @change="updateSql('includeDatabaseName', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorIncludeDatabaseName") }}</label>
             <div v-if="draftExtractor === 'sql-inserts'" class="space-y-1.5">
               <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.quoteIdentifiers" @change="updateSql('quoteIdentifiers', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorQuoteIdentifiers") }}</label>

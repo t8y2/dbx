@@ -159,7 +159,7 @@ pub struct DataGridCopyInsertStatementOptions {
     #[serde(default)]
     pub rows: Vec<Vec<Value>>,
     #[serde(default)]
-    pub exclude_primary_keys: bool,
+    pub primary_key_mode: DataGridPrimaryKeyMode,
     #[serde(default)]
     pub include_computed_columns: bool,
     #[serde(default = "default_include_database_name")]
@@ -179,6 +179,16 @@ pub enum DataGridCopyInsertMode {
     #[default]
     Merged,
     RowByRow,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridPrimaryKeyMode {
+    #[default]
+    Include,
+    ExcludeGenerated,
+    ExcludeAll,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -570,13 +580,17 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
             )
         })
         .collect();
-    // The explicit "without primary keys" copy option excludes every key,
-    // including manually assigned and composite-key members.
     let insert_columns: Vec<(&str, usize, Option<DataGridColumnInfo>)> = insertable_columns
         .iter()
-        .filter(|(column, _, _)| {
-            !options.exclude_primary_keys
-                || !is_primary_key_column(options.database_type, primary_keys, column, column_info, &known_columns)
+        .filter(|(column, _, info)| {
+            let is_primary_key = is_primary_key_column(options.database_type, primary_keys, column, column_info, &known_columns);
+            match options.primary_key_mode {
+                DataGridPrimaryKeyMode::Include => true,
+                DataGridPrimaryKeyMode::ExcludeGenerated => {
+                    !is_primary_key || !info.as_ref().is_some_and(is_auto_generated_column)
+                }
+                DataGridPrimaryKeyMode::ExcludeAll => !is_primary_key,
+            }
         })
         .cloned()
         .collect();
@@ -4938,7 +4952,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("ada"), json!("Ada")], vec![json!(2), json!("linus"), json!("Linus")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeGenerated,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -4990,7 +5004,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("Ada")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeGenerated,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5037,7 +5051,7 @@ mod tests {
                 Some("NAME".to_string()),
             ]),
             rows: vec![vec![json!("A-1"), json!("A-1"), json!("Ada")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5094,7 +5108,7 @@ mod tests {
                 Some("display_name_upper".to_string()),
             ]),
             rows: vec![vec![json!(1), json!("Ada"), json!("ADA")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeGenerated,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5124,7 +5138,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_insert_primary_key_exclusion_removes_manual_composite_key_members() {
+    fn copy_insert_generated_primary_key_exclusion_keeps_manual_composite_key_members() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Mysql),
             identifier_quote: None,
@@ -5165,14 +5179,14 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("2026-08-18"), json!("sweater")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeGenerated,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
         assert_eq!(
             statement.as_deref(),
-            Some("INSERT INTO `move_statistic_product_daily` (`product_name`) VALUES ('sweater');")
+            Some("INSERT INTO `move_statistic_product_daily` (`stat_date`, `product_name`) VALUES ('2026-08-18', 'sweater');")
         );
     }
 
@@ -5210,7 +5224,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!("AD"), json!("Andorra")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5242,7 +5256,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1)]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5293,7 +5307,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!("key"), json!("lowercase"), json!("Ada")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5322,7 +5336,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!("lowercase")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5355,7 +5369,7 @@ mod tests {
             column_types: Some(vec![Some("text".to_string())]),
             source_columns: None,
             rows: vec![vec![json!({"value": "lowercase"})]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeGenerated,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5384,7 +5398,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("ada")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5402,7 +5416,7 @@ mod tests {
             column_types: Some(vec![Some("number".to_string()), Some("boolean".to_string()), Some("json".to_string())]),
             source_columns: None,
             rows: vec![vec![json!(7), json!(true), json!(r#"{"name":"Ada","roles":["admin"]}"#)]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5424,7 +5438,7 @@ mod tests {
             column_types: Some(vec![Some("json".to_string())]),
             source_columns: None,
             rows: vec![vec![json!([1, 2, 3])]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5443,7 +5457,7 @@ mod tests {
             column_types: Some(vec![Some("json".to_string())]),
             source_columns: None,
             rows: vec![vec![json!([])]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5462,7 +5476,7 @@ mod tests {
             column_types: Some(vec![Some("json".to_string())]),
             source_columns: None,
             rows: vec![vec![json!({"a": 1})]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5579,7 +5593,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!("ada"), json!("Ada")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeGenerated,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5608,7 +5622,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("ada"), json!("Ada")], vec![json!(2), json!("linus"), json!("Linus")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::RowByRow,
@@ -5638,7 +5652,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5672,7 +5686,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode,
@@ -5759,7 +5773,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: rows.clone(),
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5828,7 +5842,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("Hello"), json!("'hello':1A")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5866,7 +5880,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(7), json!("ok"), json!("0x00000000000007D1"), json!(42)]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5932,7 +5946,7 @@ mod tests {
             ]),
             source_columns: None,
             rows: vec![vec![json!(1), json!("2022-08-25T09:58:43Z"), json!("2022-08-25T09:58:43Z")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -8153,7 +8167,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("login")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -10372,7 +10386,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(2), json!("new")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -11091,7 +11105,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!("before"), json!("0x00ff")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,

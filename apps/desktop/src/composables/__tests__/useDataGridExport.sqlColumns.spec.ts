@@ -88,6 +88,34 @@ describe("SQL export column selection across entrypoints", () => {
     expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ selectedColumns: [choices[2]!], exportColumnTypes: ["int", "text", "bigint"], insertMode: "single", keysetOptimizationEnabled: true, sql: "SELECT id, name FROM users" }), expect.any(Function));
   });
 
+  it("excludes only the exact PostgreSQL primary-key spelling", async () => {
+    const names = ["ID", "id", "name"];
+    const choices = sqlExportColumnChoices(names);
+    const state = useDataGridExport(
+      createOptions({
+        allColumns: computed(() => names),
+        tableMeta: computed(() => ({
+          tableName: "users",
+          primaryKeys: ["id"],
+          columns: [
+            { name: "ID", data_type: "int", extra: "identity" },
+            { name: "id", data_type: "int", is_primary_key: true },
+            { name: "name", data_type: "text" },
+          ],
+        })),
+        extractorOptions: computed(() => ({
+          dsv: { columnSeparator: ",", rowSeparator: "\\n", quote: '"', quoteMode: "minimal", nullText: "", includeHeader: true, includeRowHeader: false },
+          sql: { skipComputedColumns: true, skipGeneratedColumns: true, insertMode: "merged", primaryKeyMode: "exclude-all", includeDatabaseName: false, quoteIdentifiers: true, temporalFormat: "native" },
+          json: { camelCaseFieldNames: false },
+        })),
+      }),
+    );
+
+    await state.exportSql();
+
+    expect(showSqlInsertModeDialog).toHaveBeenCalledWith({ allowSplit: false, columns: choices.filter((column) => column.name !== "id") });
+  });
+
   it("preserves full table paging keys and split options in the backend request", async () => {
     const selectedColumns = [sqlExportColumnChoices(["id", "name"])[1]!];
     vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "batch", selectedColumns, splitMaxMb: 128 });

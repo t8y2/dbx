@@ -10,6 +10,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::connection::{AppState, PoolKind};
+use crate::data_grid_sql::{extra_is_auto_generated, DataGridPrimaryKeyMode};
 use crate::csv_export::{
     csv_null_literal, format_query_result_csv_with_options, format_tsv, push_query_result_csv_row_with_options,
     push_tsv_row, CsvQuoteMode,
@@ -53,6 +54,41 @@ const AGENT_SESSION_MISSING_ERROR: &str =
 const STREAM_PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(1);
 const EXCEL_CELL_CHARACTER_LIMIT: usize = 32_767;
 const SQL_INSERT_BATCH_SIZE: usize = 100;
+
+fn sql_export_excluded_primary_keys(
+    database_type: Option<DatabaseType>,
+    mode: DataGridPrimaryKeyMode,
+    primary_keys: &[String],
+    columns: &[String],
+    column_extras: &[Option<String>],
+) -> Vec<String> {
+    match mode {
+        DataGridPrimaryKeyMode::Include => Vec::new(),
+        DataGridPrimaryKeyMode::ExcludeAll => primary_keys.to_vec(),
+        DataGridPrimaryKeyMode::ExcludeGenerated => primary_keys
+            .iter()
+            .filter(|key| {
+                sql_export_column_index(database_type, key, columns)
+                    .and_then(|index| column_extras.get(index))
+                    .and_then(|extra| extra.as_deref())
+                    .is_some_and(extra_is_auto_generated)
+            })
+            .cloned()
+            .collect(),
+    }
+}
+
+fn sql_export_column_index(database_type: Option<DatabaseType>, name: &str, columns: &[String]) -> Option<usize> {
+    if let Some(index) = columns.iter().position(|column| column == name) {
+        return Some(index);
+    }
+    if matches!(database_type, Some(DatabaseType::Postgres | DatabaseType::Redshift)) {
+        return None;
+    }
+    let mut matches = columns.iter().enumerate().filter(|(_, column)| column.eq_ignore_ascii_case(name));
+    let index = matches.next()?.0;
+    matches.next().is_none().then_some(index)
+}
 
 async fn disconnect_with_timeout<C, F, Fut>(
     connection: C,
@@ -148,9 +184,9 @@ pub struct QueryResultExportRequest {
     pub auto_filter: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier_quote: Option<String>,
-    /// 导出 SQL 时是否排除主键列（对应前端数据提取设置里的“排除主键”）。
+    /// SQL INSERT 导出使用的数据提取器主键模式。
     #[serde(default)]
-    pub exclude_primary_keys: bool,
+    pub primary_key_mode: DataGridPrimaryKeyMode,
     /// 结果集对应的原表主键列名。查询结果导出由前端从表元数据带过来；
     /// 没有表元数据（例如自由 SQL 查询）时为空，此时无法排除主键。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -485,7 +521,7 @@ impl SqlInsertWriter {
             table_name,
             identifier_quote: request.identifier_quote.clone(),
             projection: None,
-            exclude_columns: if request.exclude_primary_keys { request.primary_keys.clone() } else { Vec::new() },
+            exclude_columns: Vec::new(),
         })
     }
 
@@ -514,6 +550,13 @@ impl SqlInsertWriter {
         self.column_extras = projection.project_request(request.export_column_extras.as_deref().unwrap_or_default());
         self.spatial_columns = projection.project_spatial_columns(spatial_columns);
         self.columns = projection.project(&columns);
+        self.exclude_columns = sql_export_excluded_primary_keys(
+            request.database_type,
+            request.primary_key_mode,
+            &request.primary_keys,
+            &self.columns,
+            &self.column_extras,
+        );
         self.projection = request.selected_columns.as_ref().map(|_| projection);
         Ok(())
     }
@@ -2215,6 +2258,49 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn query_sql_export_primary_key_modes_distinguish_generated_and_manual_keys() {
+        let keys = vec!["id".to_string(), "stat_date".to_string()];
+        let columns = vec!["id".to_string(), "stat_date".to_string()];
+        let extras = vec![Some("identity".to_string()), None];
+
+        assert_eq!(
+            sql_export_excluded_primary_keys(
+                Some(DatabaseType::Postgres),
+                DataGridPrimaryKeyMode::ExcludeGenerated,
+                &keys,
+                &columns,
+                &extras,
+            ),
+            vec!["id"]
+        );
+        assert_eq!(
+            sql_export_excluded_primary_keys(
+                Some(DatabaseType::Postgres),
+                DataGridPrimaryKeyMode::ExcludeAll,
+                &keys,
+                &columns,
+                &extras,
+            ),
+            keys
+        );
+        assert!(
+            sql_export_excluded_primary_keys(Some(DatabaseType::Postgres), DataGridPrimaryKeyMode::Include, &keys, &columns, &extras).is_empty()
+        );
+    }
+
+    #[test]
+    fn query_generated_key_export_matches_case_distinct_column_names_exactly() {
+        assert!(sql_export_excluded_primary_keys(
+            Some(DatabaseType::Postgres),
+            DataGridPrimaryKeyMode::ExcludeGenerated,
+            &["id".to_string()],
+            &["ID".to_string(), "id".to_string()],
+            &[Some("identity".to_string()), None],
+        )
+        .is_empty());
+    }
+
+    #[test]
     fn export_column_remap_follows_column_names_across_pages() {
         // Elasticsearch-style page drift: the second page reports `beta` where the
         // header has `alpha`, so the `alpha` cell must be filled with NULL instead
@@ -2330,7 +2416,7 @@ mod tests {
             insert_mode: SqlInsertMode::Batch,
             csv_quote_mode: Default::default(),
             null_literal: String::new(),
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             primary_keys: Vec::new(),
         }
     }
@@ -2385,7 +2471,7 @@ mod tests {
     }
 
     #[test]
-    fn sql_insert_writer_omits_excluded_primary_key_columns() {
+    fn sql_insert_writer_excludes_all_primary_keys_in_all_keys_mode() {
         let dir = tempfile::tempdir().expect("temp dir");
         let file_path = dir.path().join("users.sql");
         let request = QueryResultExportRequest {
@@ -2424,7 +2510,7 @@ mod tests {
             insert_mode: Default::default(),
             csv_quote_mode: Default::default(),
             null_literal: String::new(),
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
             primary_keys: vec!["id".to_string()],
         };
 
@@ -2512,7 +2598,7 @@ mod tests {
             auto_filter: None,
             header_comment_rows: false,
             identifier_quote: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             primary_keys: Vec::new(),
         }
     }

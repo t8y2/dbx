@@ -6231,8 +6231,8 @@ export interface TableExportRequest {
   /** xlsx 专用：注释作为第二行表头（第 1 行列名、第 2 行注释、数据从第 3 行开始）。 */
   headerCommentRows?: boolean;
   primaryKeys?: string[];
-  /** 导出 SQL 时是否排除主键列（对应数据提取设置里的“排除主键”）。 */
-  excludePrimaryKeys?: boolean;
+  /** SQL INSERT 导出使用的数据提取器主键模式。 */
+  primaryKeyMode?: "include" | "exclude-generated" | "exclude-all";
   whereInput?: string;
   orderBy?: string;
   skipCount?: boolean;
@@ -6316,8 +6316,8 @@ export interface QueryResultExportRequest {
   headerCommentRows?: boolean;
   autoFilter?: boolean;
   identifierQuote?: string;
-  /** 导出 SQL 时是否排除主键列（对应数据提取设置里的“排除主键”）。 */
-  excludePrimaryKeys?: boolean;
+  /** SQL INSERT 导出使用的数据提取器主键模式。 */
+  primaryKeyMode?: "include" | "exclude-generated" | "exclude-all";
   /** 结果集对应的原表主键列名，由前端从表元数据带入。 */
   primaryKeys?: string[];
 }

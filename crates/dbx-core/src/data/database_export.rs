@@ -1445,8 +1445,7 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
     if options.columns.is_empty() || options.rows.is_empty() {
         return Ok(Vec::new());
     }
-    let excluded_names: HashSet<String> =
-        exclude_columns.iter().map(|column| column.trim().to_ascii_uppercase()).collect();
+    let excluded_names: HashSet<&str> = exclude_columns.iter().map(|column| column.trim()).collect();
     let table = export_qualified_table_name(
         options.database_type,
         options.schema.as_deref(),
@@ -1463,7 +1462,15 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
         .enumerate()
         .filter_map(|(index, column)| {
             let column_type = export_column_type(&options.column_types, index, options.database_type, &spatial_columns);
-            let excluded = excluded_names.contains(&column.trim().to_ascii_uppercase());
+            let column_name = column.trim();
+            let excluded = excluded_names.contains(column_name)
+                || (!matches!(options.database_type, Some(DatabaseType::Postgres | DatabaseType::Redshift))
+                    && exclude_columns.iter().filter(|excluded| {
+                        excluded.trim().eq_ignore_ascii_case(column_name)
+                    }).count() == 1
+                    && options.columns.iter().filter(|candidate| {
+                        candidate.trim().eq_ignore_ascii_case(column_name)
+                    }).count() == 1);
             (is_export_insert_column(
                 options.database_type,
                 column,
@@ -7206,6 +7213,34 @@ mod tests {
         assert_eq!(
             statements,
             vec!["INSERT INTO \"public\".\"users\" (\"name\", \"email\") VALUES ('Ada', 'ada@example.com');"]
+        );
+    }
+
+    #[test]
+    fn sql_insert_export_excludes_only_the_exact_case_sensitive_column() {
+        let statements = build_export_insert_statements_excluding(
+            BuildExportInsertStatementsOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                schema: Some("public".to_string()),
+                table_name: Some("users".to_string()),
+                qualified_table_name: None,
+                columns: vec!["ID".to_string(), "id".to_string(), "name".to_string()],
+                column_types: vec![Some("integer".to_string()), Some("integer".to_string()), Some("text".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(1), json!(2), json!("Ada")]],
+                batch_size: Some(10),
+                preserve_original_language: false,
+            },
+            &["id".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec!["INSERT INTO \"public\".\"users\" (\"ID\", \"name\") VALUES (1, 'Ada');"]
         );
     }
 

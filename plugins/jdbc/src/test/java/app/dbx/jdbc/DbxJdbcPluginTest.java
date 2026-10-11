@@ -2721,7 +2721,7 @@ final class DbxJdbcPluginTest {
         assertEquals("create_by", result.path(2).path("name").asText());
         assertEquals("CHARACTER VARYING(64 byte)", result.path(2).path("data_type").asText());
         assertEquals(64, result.path(2).path("character_maximum_length").asInt());
-        assertEquals(true, sql.get(1).contains("format_type(a.atttypid, a.atttypmod) AS data_type"));
+        assertEquals(true, sql.get(1).contains("CASE WHEN t.typname = 'json' THEN 'json' WHEN t.typname = '_json' THEN 'json[]' ELSE format_type(a.atttypid, a.atttypmod) END AS data_type"));
         assertEquals(true, sql.get(1).contains("FROM sys_catalog.sys_attribute"));
     }
 

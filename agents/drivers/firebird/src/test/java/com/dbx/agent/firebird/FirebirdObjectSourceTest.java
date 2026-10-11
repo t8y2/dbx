@@ -41,6 +41,34 @@ class FirebirdObjectSourceTest {
         assertTrue(source.getSource().contains("草稿"));
     }
 
+    @Test
+    void tableTriggerSourceBuildsStandardCreateOrAlterTriggerDdl() throws Exception {
+        List<String> calls = new ArrayList<>();
+        ObjectSource source = FirebirdObjectSource.read(
+            connection(calls, "AS\nBEGIN\n  NEW.ID = 1;\nEND", "ORDERS", 1, 0, 0),
+            "", "TR_ORDERS_BI", "TRIGGER", value -> value
+        );
+        assertEquals(
+            "CREATE OR ALTER TRIGGER \"TR_ORDERS_BI\" FOR \"ORDERS\" ACTIVE\nBEFORE INSERT\nAS\nBEGIN\n  NEW.ID = 1;\nEND",
+            source.getSource()
+        );
+        assertEquals("TR_ORDERS_BI", source.getName());
+        assertEquals("TRIGGER", source.getObject_type());
+    }
+
+    @Test
+    void databaseTriggerSourceFormatsEventAndTiming() throws Exception {
+        List<String> calls = new ArrayList<>();
+        ObjectSource source = FirebirdObjectSource.read(
+            connection(calls, "BEGIN\n  EXECUTE PROCEDURE LOG_CONN;\nEND", null, 8192, 1, 1),
+            "", "TR_CONN", "TRIGGER", value -> value
+        );
+        assertEquals(
+            "CREATE OR ALTER TRIGGER \"TR_CONN\" INACTIVE\nON CONNECT POSITION 1\nAS\nBEGIN\n  EXECUTE PROCEDURE LOG_CONN;\nEND",
+            source.getSource()
+        );
+    }
+
     private static Connection connection(List<String> calls, Object... values) {
         ResultSet result = (ResultSet) Proxy.newProxyInstance(ResultSet.class.getClassLoader(), new Class<?>[] {ResultSet.class},
             new java.lang.reflect.InvocationHandler() {
@@ -49,6 +77,7 @@ class FirebirdObjectSourceTest {
                     return switch (method.getName()) {
                         case "next" -> { boolean value = first; first = false; yield value; }
                         case "getString" -> { Object value = values[(Integer) args[0] - 1]; yield value == null ? null : value.toString(); }
+                        case "getInt" -> ((Number) values[(Integer) args[0] - 1]).intValue();
                         case "getLong" -> ((Number) values[(Integer) args[0] - 1]).longValue();
                         case "close" -> null;
                         default -> throw new UnsupportedOperationException(method.getName());

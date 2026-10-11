@@ -1,4 +1,5 @@
 pub mod batch_progress;
+pub use dbx_drivers::query_messages;
 pub mod document_ops;
 pub mod hbase_ops;
 pub mod mongo_ops;
@@ -6836,28 +6837,7 @@ async fn execute_manual_txn_postgres_statement(
     sql: &str,
     row_limit: usize,
 ) -> Result<db::QueryResult, String> {
-    if db::postgres::postgres_statement_returns_rows(sql) {
-        db::postgres::execute_select_query_unnamed(conn, sql, std::time::Instant::now(), row_limit).await
-    } else {
-        let affected = conn.execute_typed(sql, &[]).await.map_err(|e| format!("Query failed: {e}"))?;
-        Ok(db::QueryResult {
-            columns: vec![],
-            column_types: Vec::new(),
-            column_sortables: vec![],
-            spatial_columns: vec![],
-            spatial_values: vec![],
-            rows: vec![],
-            affected_rows: affected,
-            execution_time_ms: 0,
-            server_execute_time_us: None,
-            query_timings_ms: None,
-            truncated: false,
-            session_id: None,
-            has_more: false,
-            elasticsearch_raw_body: None,
-            messages: Vec::new(),
-        })
-    }
+    db::postgres::execute_query_on_client_unnamed(conn, sql, row_limit).await
 }
 
 async fn execute_manual_txn_mysql_statement(
@@ -7100,7 +7080,12 @@ mod tests {
                                     (b'n', Vec::new())
                                 }
                                 b'E' => {
-                                    commands.lock().unwrap().push(statement.clone());
+                                    // The driver resolves the connection identity once per
+                                    // physical connection at checkout; it is driver plumbing,
+                                    // not part of the session statement history under test.
+                                    if !statement.starts_with("SELECT pg_backend_pid") {
+                                        commands.lock().unwrap().push(statement.clone());
+                                    }
                                     if fail_once == Some(statement.as_str()) {
                                         fail_once = None;
                                         (b'E', b"SERROR\0CXX000\0Mtest statement failed\0\0".to_vec())

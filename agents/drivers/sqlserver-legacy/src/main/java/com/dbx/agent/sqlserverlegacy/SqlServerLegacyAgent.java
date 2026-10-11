@@ -468,13 +468,17 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     public List<ColumnInfo> getColumns(String schema, String table) {
         String resolvedSchema = metadataSchema(schema, table);
         List<ColumnInfo> columns = super.getColumns(resolvedSchema, table);
-        if (!sqlServer2000Mode || columns.isEmpty()) {
+        if (columns.isEmpty()) {
             return columns;
         }
         try {
+            // JDBC REMARKS from sp_columns is always NULL on SQL Server, so the
+            // MS_Description comments must be read from the catalog directly.
             return mergeSqlServer2000ColumnComments(
                 columns,
-                readSqlServer2000ColumnComments(resolvedSchema, table)
+                sqlServer2000Mode
+                    ? readSqlServer2000ColumnComments(resolvedSchema, table)
+                    : readColumnCommentsFromQuery(columnCommentsSql(), resolvedSchema, table)
             );
         } catch (SQLException | RuntimeException error) {
             // Comments are optional metadata. Keep the table usable when the
@@ -482,7 +486,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             // Legacy drivers can also throw runtime errors from their catalog
             // code, mirroring the RuntimeException guards in getTableDdl.
             System.err.println(
-                "[sqlserver-legacy] SQL Server 2000 column comments unavailable: "
+                "[sqlserver-legacy] SQL Server column comments unavailable: "
                     + error.getClass().getName()
                     + ": "
                     + error.getMessage()
@@ -545,6 +549,17 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             }
         }
         return columns;
+    }
+
+    static String columnCommentsSql() {
+        return "SELECT c.name AS column_name, CAST(ep.value AS nvarchar(max)) AS column_comment, "
+            + "ep.name AS property_name "
+            + "FROM sys.columns c "
+            + "JOIN sys.objects o ON o.object_id = c.object_id "
+            + "JOIN sys.schemas s ON s.schema_id = o.schema_id "
+            + "JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = c.object_id "
+            + "AND ep.minor_id = c.column_id AND ep.name = N'MS_Description' "
+            + "WHERE s.name = ? AND o.name = ? AND o.type IN ('U', 'V')";
     }
 
     static String sqlServer2000ColumnCommentsSql() {

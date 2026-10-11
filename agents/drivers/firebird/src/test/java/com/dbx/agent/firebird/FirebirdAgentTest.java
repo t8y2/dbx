@@ -1,6 +1,7 @@
 package com.dbx.agent.firebird;
 
 import com.dbx.agent.ObjectSource;
+import com.dbx.agent.TriggerInfo;
 import com.dbx.agent.test.TestSupport;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -337,6 +338,42 @@ class FirebirdAgentTest {
         );
 
         Assertions.assertEquals("Unsupported object type: UNKNOWN", error.getMessage());
+    }
+
+    @Test
+    void listTriggersNormalizesTableNameAndMapsTriggerTypes() {
+        List<String> sql = new ArrayList<>();
+        List<String> parameters = new ArrayList<>();
+        FirebirdAgent agent = agentWithRows(
+            sql,
+            parameters,
+            row(
+                "1", "TR_ORDERS_BI",
+                "2", 1
+            ),
+            row(
+                "1", "TR_ORDERS_AD",
+                "2", 6
+            )
+        );
+
+        List<TriggerInfo> triggers = agent.listTriggers(null, "\"orders\"");
+        Assertions.assertEquals(2, triggers.size());
+        Assertions.assertEquals("TR_ORDERS_BI", triggers.get(0).getName());
+        Assertions.assertEquals("INSERT", triggers.get(0).getEvent());
+        Assertions.assertEquals("BEFORE", triggers.get(0).getTiming());
+        Assertions.assertEquals("TR_ORDERS_AD", triggers.get(1).getName());
+        Assertions.assertEquals("DELETE", triggers.get(1).getEvent());
+        Assertions.assertEquals("AFTER", triggers.get(1).getTiming());
+        Assertions.assertEquals(List.of("1=orders", "2=orders"), parameters);
+        Assertions.assertTrue(sql.get(0).contains("TRIM(RDB$RELATION_NAME) = ? OR TRIM(RDB$RELATION_NAME) = UPPER(?)"));
+    }
+
+    @Test
+    void listTriggersReturnsEmptyForNullOrBlankTable() {
+        FirebirdAgent agent = new FirebirdAgent();
+        Assertions.assertTrue(agent.listTriggers(null, null).isEmpty());
+        Assertions.assertTrue(agent.listTriggers(null, "   ").isEmpty());
     }
 
     @SafeVarargs

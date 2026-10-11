@@ -911,4 +911,135 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(connectionStore.loadXuguTablespaces).not.toHaveBeenCalled();
     expect(toggled).toHaveBeenCalledWith(datafileGroup, true);
   });
+
+  it("collapses all child and descendant nodes when a parent node is collapsed", async () => {
+    const columnsGroup: TreeNode = {
+      id: "mysql:db:table:users:group-columns",
+      label: "Columns",
+      type: "group-columns",
+      connectionId: "mysql",
+      database: "db",
+      tableName: "users",
+      isExpanded: true,
+      children: [{ id: "mysql:db:table:users:col:id", label: "id", type: "column", connectionId: "mysql", database: "db", tableName: "users" }],
+    };
+    const tableNode: TreeNode = {
+      id: "mysql:db:table:users",
+      label: "users",
+      type: "table",
+      connectionId: "mysql",
+      database: "db",
+      isExpanded: true,
+      children: [columnsGroup],
+    };
+    const tablesGroup: TreeNode = {
+      id: "mysql:db:group-tables",
+      label: "Tables",
+      type: "group-tables",
+      connectionId: "mysql",
+      database: "db",
+      isExpanded: true,
+      children: [tableNode],
+    };
+    const databaseNode: TreeNode = {
+      id: "mysql:db",
+      label: "db",
+      type: "database",
+      connectionId: "mysql",
+      database: "db",
+      isExpanded: true,
+      children: [tablesGroup],
+    };
+
+    connectionStore.treeNodes = [databaseNode];
+    connectionStore.loadTables.mockImplementation(async () => {
+      databaseNode.isExpanded = true;
+    });
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const toggled = vi.fn((node: TreeNode, expanded: boolean) => {
+      syncSidebarTreeNodeExpansion(connectionStore.treeNodes, node, expanded);
+    });
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: databaseNode, depth: 0, onNodeToggled: toggled }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    // Collapsing databaseNode
+    host.value?.toggleNode(databaseNode);
+    await nextTick();
+
+    expect(databaseNode.isExpanded).toBe(false);
+    expect(tablesGroup.isExpanded).toBe(false);
+    expect(tableNode.isExpanded).toBe(false);
+    expect(columnsGroup.isExpanded).toBe(false);
+    expect(toggled).toHaveBeenCalledWith(databaseNode, false);
+
+    // Re-expanding databaseNode
+    host.value?.toggleNode(databaseNode);
+    await nextTick();
+
+    expect(databaseNode.isExpanded).toBe(true);
+    // Descendants must remain collapsed after parent is re-expanded
+    expect(tablesGroup.isExpanded).toBe(false);
+    expect(tableNode.isExpanded).toBe(false);
+    expect(columnsGroup.isExpanded).toBe(false);
+  });
+
+  it("collapses all child connections and their descendants when a connection-group collapses", async () => {
+    const databaseNode: TreeNode = {
+      id: "mysql:db",
+      label: "db",
+      type: "database",
+      connectionId: "mysql",
+      database: "db",
+      isExpanded: true,
+      children: [],
+    };
+    const connectionNode: TreeNode = {
+      id: "mysql",
+      label: "MySQL",
+      type: "connection",
+      connectionId: "mysql",
+      isExpanded: true,
+      children: [databaseNode],
+    };
+    const groupNode: TreeNode = {
+      id: "group-1",
+      label: "Dev Group",
+      type: "connection-group",
+      isExpanded: true,
+      children: [connectionNode],
+    };
+
+    connectionStore.treeNodes = [groupNode];
+    connectionStore.toggleConnectionGroupCollapsed = vi.fn();
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const toggled = vi.fn((node: TreeNode, expanded: boolean) => {
+      syncSidebarTreeNodeExpansion(connectionStore.treeNodes, node, expanded);
+    });
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: groupNode, depth: 0, onNodeToggled: toggled }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(groupNode);
+    await nextTick();
+
+    expect(groupNode.isExpanded).toBe(false);
+    expect(connectionNode.isExpanded).toBe(false);
+    expect(databaseNode.isExpanded).toBe(false);
+  });
 });

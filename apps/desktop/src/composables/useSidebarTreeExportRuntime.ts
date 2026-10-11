@@ -20,7 +20,7 @@ import { sidebarStructureExportTargets, sidebarTableDataExportTargets } from "@/
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import { dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
-import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import {
   isLoadingStructurePreview,
   showStructureDocCopyDialog,
@@ -489,7 +489,18 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         } else {
           const comments = result.columns.map((name) => exportColumnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
-          await api.exportQueryResultXlsx(outputPath, target.tableName, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows, undefined, autoFilter, settingsStore.editorSettings.globalDateTimeExportFormat || undefined);
+          await api.exportQueryResultXlsx(
+            outputPath,
+            target.tableName,
+            result.columns,
+            result.column_types ?? result.columns.map(() => ""),
+            headerOverrides,
+            result.rows,
+            undefined,
+            autoFilter,
+            settingsStore.editorSettings.globalDateTimeExportFormat || undefined,
+            xlsxHeaderUsesCommentRows(headerMode),
+          );
         }
         currentTask.status = "Done";
         currentTask.rowsExported = result.rows.length;
@@ -531,6 +542,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         nullLiteral: target.nullLiteral,
         columns: queryColumns,
         columnComments,
+        headerCommentRows: format === "xlsx" ? xlsxHeaderUsesCommentRows(headerMode) : undefined,
         autoFilter: format === "xlsx" ? autoFilter : undefined,
         primaryKeys,
         excludePrimaryKeys: settingsStore.editorSettings.dataGridExtractorOptions.sql.excludePrimaryKeysFromInsert === true,

@@ -11,8 +11,22 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --prefix plugins/sdk/dev-host
+      - run: npm run lint --prefix plugins/sdk/dev-host
+      - run: npm run fmt:check --prefix plugins/sdk/dev-host
   test:
+    needs: checks
     strategy:
       fail-fast: false
       matrix:
@@ -29,8 +43,6 @@ jobs:
           go-version: '1.22'
           cache: false
       - run: npm ci --prefix plugins/sdk/dev-host
-      - run: npm run lint --prefix plugins/sdk/dev-host
-      - run: npm run fmt:check --prefix plugins/sdk/dev-host
       - run: npm test --prefix plugins/sdk/dev-host
         timeout-minutes: 5
       - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3

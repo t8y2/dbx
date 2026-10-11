@@ -14,6 +14,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { buildSidebarMenuLayout } from "@/lib/sidebar/sidebarMenuLayout";
 
 const mysqlConnection = {
   id: "conn-mysql",
@@ -78,6 +79,54 @@ function menuLabels(items: ContextMenuItem[]): string[] {
 const tr = (key: string) => i18n.global.t(key);
 
 describe("SidebarTreeRuntimeHost saved SQL context menu (#9127)", () => {
+  it.each(["mysql", "oracle"])("shares the primary visible-filter preference for %s connections", async (dbType) => {
+    const connection = { ...mysqlConnection, db_type: dbType, driver_profile: dbType };
+    const host = await mountHost(connection);
+    const raw = host.buildContextMenu({ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id });
+    const filter = raw.find((entry) => entry.sidebarActionId === "contextMenu.configureVisibleObjects");
+    expect(filter?.label).toBe(tr(dbType === "oracle" ? "visibleSchemas.title" : "contextMenu.configureVisibleObjects"));
+    const grouped = buildSidebarMenuLayout(raw, "connection", "grouped", [], tr, { order: ["contextMenu.configureVisibleObjects"] });
+    expect(grouped[0]).toBe(filter);
+    const hidden = buildSidebarMenuLayout(raw, "connection", "grouped", [], tr, { hiddenPrimaryIds: ["contextMenu.configureVisibleObjects"] });
+    expect(hidden).not.toContain(filter);
+    expect(hidden.find((entry) => entry.sidebarActionId === "group.organize")?.children).toContainEqual(expect.objectContaining({ action: filter!.action }));
+  });
+
+  it.each(["mysql", "postgres", "oracle", "sqlserver"])("puts database search in data tools and pinning directly in %s database and table menus", async (dbType) => {
+    const host = await mountHost({ ...mysqlConnection, db_type: dbType, driver_profile: dbType });
+    for (const type of ["database", "table"] as const) {
+      const raw = host.buildContextMenu({ id: `app:${type}`, label: "app", type, connectionId: mysqlConnection.id, database: "app", schema: "public" });
+      const grouped = buildSidebarMenuLayout(raw, type, "grouped", [], tr);
+      const pin = raw.find((entry) => entry.sidebarActionId === "sidebar.togglePinnedObject");
+      expect(pin).toBeDefined();
+      expect(grouped).toContain(pin);
+      if (type === "database") {
+        const search = raw.find((entry) => entry.sidebarActionId === "databaseSearch.open");
+        expect(search).toBeDefined();
+        expect(grouped.find((entry) => entry.sidebarActionId === "group.data")?.children).toContainEqual(search);
+        expect(grouped.some((entry) => entry.sidebarActionId === "group.manage")).toBe(false);
+      }
+    }
+  });
+
+  it("groups real table actions without losing callbacks and binds a promoted query to its original target", async () => {
+    const host = await mountHost(mysqlConnection);
+    const connectionStore = useConnectionStore();
+    const queryStore = useQueryStore();
+    vi.spyOn(connectionStore, "ensureConnected").mockResolvedValue(undefined as any);
+    const createTabSpy = vi.spyOn(queryStore, "createTab").mockReturnValue("menu-query");
+    const node: TreeNode = { id: "orders", label: "orders", type: "table", connectionId: mysqlConnection.id, database: "app", schema: "public" };
+    const raw = host.buildContextMenu(node);
+    const grouped = buildSidebarMenuLayout(raw, "table", "grouped", ["contextMenu.exportData"], tr);
+    expect(grouped.find((item) => item.sidebarActionId === "contextMenu.exportData")?.children?.some((item) => item.label === "CSV")).toBe(true);
+    expect(grouped.find((item) => item.label === tr("sidebarMenu.groups.danger"))?.children?.some((item) => item.sidebarActionId === "contextMenu.dropTable")).toBe(true);
+    const callbacks = (items: ContextMenuItem[]): Array<ContextMenuItem["action"]> => items.flatMap((item) => (item.children?.length ? callbacks(item.children) : item.action ? [item.action] : []));
+    expect(callbacks(grouped)).toHaveLength(callbacks(raw).length);
+    expect(callbacks(grouped)).toEqual(expect.arrayContaining(callbacks(raw)));
+    node.database = "changed-after-open";
+    await grouped.find((item) => item.sidebarActionId === "contextMenu.newQuery")?.action?.();
+    expect(createTabSpy.mock.calls[0].slice(0, 7)).toEqual([mysqlConnection.id, "app", undefined, "query", "public", undefined, undefined]);
+  });
   afterEach(() => {
     for (const app of mountedApps.splice(0)) app.unmount();
     document.body.innerHTML = "";

@@ -90,7 +90,7 @@ async function loadDatabases() {
   loadingDatabases.value = true;
   error.value = "";
   try {
-    await connectionStore.ensureConnected(props.connection.id);
+    await connectionStore.ensureConnected(props.connection.id, { skipIfClosedByUser: true });
     const result = await api.listDatabases(props.connection.id);
     databases.value = result.map((database) => database.name).filter(Boolean);
     if (!selectedDatabase.value || !databases.value.includes(selectedDatabase.value)) {

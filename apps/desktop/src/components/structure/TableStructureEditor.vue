@@ -1368,7 +1368,7 @@ const usesNativeMysqlIndexNames = computed(() => {
   const profile = connection.value?.driver_profile?.trim().toLowerCase();
   return databaseType.value === "mysql" && connection.value?.db_type === "mysql" && (!profile || profile === "mysql");
 });
-const supportsCharacterLengthUnits = computed(() => databaseType.value === "dameng" || databaseType.value === "oracle");
+const supportsCharacterLengthUnits = computed(() => databaseType.value === "dameng" || databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle");
 const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
 const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion));
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value));
@@ -2085,7 +2085,7 @@ function observeStructureHorizontalScroller() {
   structureHorizontalScrollbarResizeObserver?.disconnect();
   structureHorizontalScrollbarResizeObserver = null;
   const tab = activeTab.value;
-  void nextTick(() => {
+  const refresh = () => {
     if (generation !== structureHorizontalScrollbarObserverGeneration || tab !== activeTab.value) return;
     const scroller = activeStructureHorizontalScroller();
     updateStructureHorizontalScrollbar(scroller);
@@ -2095,7 +2095,11 @@ function observeStructureHorizontalScroller() {
     });
     structureHorizontalScrollbarResizeObserver.observe(scroller);
     for (const child of Array.from(scroller.children)) structureHorizontalScrollbarResizeObserver.observe(child);
-  });
+  };
+  // TabsContent mounts the newly active pane on the tick after the tab change.
+  // Defer the measurement one additional tick so returning from a card tab
+  // (for example, Triggers) can find the freshly mounted columns scroller.
+  void nextTick(() => void nextTick(refresh));
 }
 
 function applyStructureHorizontalScrollbarDrag(clientX: number) {

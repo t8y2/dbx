@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { isCloseAllTabsShortcut } from "@/lib/editor/keyboardShortcuts";
 import {
   closeOtherTabsDefaultShortcut,
   countShortcutConflictPairs,
   DEFAULT_SHORTCUT_SETTINGS,
+  filterShortcutConflictsByVisibleIds,
   findCrossScopeShortcutConflicts,
   findShortcutConflict,
   foldAllDefaultShortcut,
@@ -19,6 +21,7 @@ import {
   shortcutToCodeMirrorKey,
   toggleAiPanelDefaultShortcut,
   type ShortcutActionId,
+  type ShortcutSettings,
 } from "@/lib/editor/shortcutRegistry";
 
 describe("shortcutRegistry editor actions", () => {
@@ -288,6 +291,25 @@ describe("shortcutRegistry editor actions", () => {
     expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.closeWindow, "MacIntel")).toBe("Shift+Cmd+W");
     expect(normalizeShortcutSettings({ closeWindow: "Mod+Alt+W" }).closeWindow).toBe("Mod+Alt+W");
     expect(normalizeShortcutSettings({ closeWindow: "" }).closeWindow).toBe("");
+  });
+
+  it("registers closeAllTabs as an unbound global shortcut that users can assign", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "closeAllTabs");
+    expect(definition).toMatchObject({
+      id: "closeAllTabs",
+      labelKey: "contextMenu.closeAllTabs",
+      scope: "global",
+      defaultShortcut: "",
+    });
+    // 无默认键位：保持未绑定状态，由用户在设置里自行分配
+    expect(DEFAULT_SHORTCUT_SETTINGS.closeAllTabs).toBe("");
+    expect(normalizeShortcutSettings({}).closeAllTabs).toBe("");
+    expect(normalizeShortcutSettings({ closeAllTabs: "Shift+Mod+Alt+W" }).closeAllTabs).toBe("Shift+Mod+Alt+W");
+    expect(normalizeShortcutSettings({ closeAllTabs: "" }).closeAllTabs).toBe("");
+    const event = { key: "w", shiftKey: true, metaKey: true, altKey: true };
+    // 显式分配后生效；默认未绑定时永不触发
+    expect(isCloseAllTabsShortcut(event, { closeAllTabs: "Shift+Mod+Alt+W" }, "MacIntel")).toBe(true);
+    expect(isCloseAllTabsShortcut(event, {}, "MacIntel")).toBe(false);
   });
 
   it("normalizes custom, cleared, and invalid modifier-only shortcuts", () => {
@@ -565,6 +587,32 @@ describe("shortcutRegistry editor actions", () => {
     });
   });
 
+  describe("filterShortcutConflictsByVisibleIds", () => {
+    it("keeps a conflict whose partner row is filtered out (detection stays global)", () => {
+      // find(editor) <-> focusSearch(global) 默认跨作用域同键；搜索只留下 find
+      // 一行时，这组重叠仍要计入徽章——对方行被过滤不代表冲突消失。
+      const conflicts = findCrossScopeShortcutConflicts(DEFAULT_SHORTCUT_SETTINGS);
+      const filtered = filterShortcutConflictsByVisibleIds(conflicts, new Set<ShortcutActionId>(["find"]));
+      expect(filtered.find).toContain("focusSearch");
+      expect(filtered.focusSearch).toContain("find");
+      expect(Object.keys(filtered)).not.toContain("explainSql");
+    });
+
+    it("handles the L1 same-scope shape and the empty visible set", () => {
+      const seeded = normalizeShortcutSettings({ explainSql: DEFAULT_SHORTCUT_SETTINGS.formatSql });
+      const l1: Partial<Record<ShortcutActionId, ShortcutActionId>> = {};
+      for (const definition of SHORTCUT_DEFINITIONS) {
+        const conflict = findShortcutConflict(definition.id, seeded[definition.id], seeded);
+        if (conflict) l1[definition.id] = conflict;
+      }
+      expect(Object.keys(l1).sort()).toEqual(["explainSql", "formatSql"]);
+      // 只留冲突一方时整组保留；可见集与冲突无关或为空时返回空映射。
+      expect(filterShortcutConflictsByVisibleIds(l1, new Set<ShortcutActionId>(["explainSql"]))).toEqual(l1);
+      expect(filterShortcutConflictsByVisibleIds(l1, new Set<ShortcutActionId>(["goToColumn"]))).toEqual({});
+      expect(filterShortcutConflictsByVisibleIds(l1, new Set())).toEqual({});
+    });
+  });
+
   describe("gotoLine", () => {
     it("resolves the platform default and maps it to the CodeMirror key", () => {
       // macOS 的 ⌃G 已分配给「选中下一个相同词」（JetBrains 风格），沿用
@@ -683,6 +731,31 @@ describe("shortcutRegistry editor actions", () => {
       expect(countShortcutConflictPairs({})).toBe(0);
       expect(countShortcutConflictPairs({ find: "" })).toBe(0);
       expect(countShortcutConflictPairs({ find: [] })).toBe(0);
+    });
+  });
+
+  describe("modifier double-tap shortcut conflicts", () => {
+    const settingsWith = (overrides: Partial<ShortcutSettings>): ShortcutSettings => ({ ...DEFAULT_SHORTCUT_SETTINGS, ...overrides });
+
+    it("treats Mod Mod and Meta Meta as the same double tap on macOS", () => {
+      const settings = settingsWith({ globalSearch: "Meta Meta" });
+      expect(findShortcutConflict("quickOpen", "Mod Mod", settings, "MacIntel")).toBe("globalSearch");
+    });
+
+    it("keeps Mod Mod and Meta Meta distinct on Windows", () => {
+      const settings = settingsWith({ globalSearch: "Meta Meta" });
+      expect(findShortcutConflict("quickOpen", "Mod Mod", settings, "Win32")).toBeNull();
+    });
+
+    it("matches Mod Mod with Ctrl Ctrl on Windows but not on macOS", () => {
+      const settings = settingsWith({ globalSearch: "Ctrl Ctrl" });
+      expect(findShortcutConflict("quickOpen", "Mod Mod", settings, "Win32")).toBe("globalSearch");
+      expect(findShortcutConflict("quickOpen", "Mod Mod", settings, "MacIntel")).toBeNull();
+    });
+
+    it("never conflicts a double tap with a chord shortcut", () => {
+      const settings = settingsWith({ globalSearch: "Mod+Alt+F" });
+      expect(findShortcutConflict("quickOpen", "Alt Alt", settings, "Win32")).toBeNull();
     });
   });
 });

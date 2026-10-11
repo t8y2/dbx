@@ -1,6 +1,6 @@
 import type { GridCellValue } from "@/lib/dataGrid/dataGridSql";
 import type { DatabaseType, ColumnInfo } from "@/types/database";
-import { binaryCellBytesToHexValue, binaryCellUtf8Text, isBlobCellColumnType } from "@/lib/dataGrid/binaryCellDownload";
+import { binaryCellBytesToHexValue, binaryCellUtf8Text, isBlobCellColumnType, isBlobTextPreviewDatabase } from "@/lib/dataGrid/binaryCellDownload";
 import { isNumericColumnType } from "@/lib/dataGrid/dataGridColumnType";
 import { isBooleanColumnType } from "@/lib/dataGrid/dataGridBooleanColumn";
 
@@ -26,7 +26,7 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
   const { value, oldValue } = options;
   if (value === "" && options.emptyStringAsNull) return null;
   if (value === "" && oldValue === null && !options.preserveEmptyString) return null;
-  const blobValue = coerceMysqlBlobTextValue(options);
+  const blobValue = coerceBlobTextValue(options);
   if (blobValue !== undefined) return blobValue;
   const postgresArrayValue = coercePostgresArrayValue(options);
   if (postgresArrayValue !== undefined) return postgresArrayValue;
@@ -82,7 +82,7 @@ function parseBooleanInput(value: string, allowNumericAliases: boolean): boolean
 export function dataGridCellEditorText(options: { value: GridCellValue | undefined; databaseType: DatabaseType | undefined; columnInfo: Pick<ColumnInfo, "data_type"> | undefined }): string {
   const value = options.value ?? null;
   if (value === null) return "";
-  if (options.databaseType === "mysql" && isBlobCellColumnType(options.columnInfo?.data_type)) {
+  if (isBlobTextPreviewDatabase(options.databaseType) && isBlobCellColumnType(options.columnInfo?.data_type)) {
     const text = binaryCellUtf8Text(value, options.columnInfo?.data_type, options.databaseType);
     if (text !== null) return text;
   }
@@ -92,8 +92,8 @@ export function dataGridCellEditorText(options: { value: GridCellValue | undefin
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
-function coerceMysqlBlobTextValue(options: CoerceDataGridCellValueOptions): GridCellValue | undefined {
-  if (options.databaseType !== "mysql" || !isBlobCellColumnType(options.columnInfo?.data_type)) return undefined;
+function coerceBlobTextValue(options: CoerceDataGridCellValueOptions): GridCellValue | undefined {
+  if (!isBlobTextPreviewDatabase(options.databaseType) || !isBlobCellColumnType(options.columnInfo?.data_type)) return undefined;
   const originalText = binaryCellUtf8Text(options.oldValue, options.columnInfo?.data_type, options.databaseType);
   if (originalText === null) return undefined;
   if (options.value === originalText) return options.oldValue;

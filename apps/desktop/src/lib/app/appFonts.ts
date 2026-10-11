@@ -1,5 +1,6 @@
 export const APP_FONT_SANS_CSS_VAR = "--font-sans";
 export const FONT_MONO_CSS_VAR = "--font-mono";
+export const EDITOR_FONT_FAMILY_CSS_VAR = "--dbx-editor-font-family";
 export const DATA_GRID_FONT_FAMILY_CSS_VAR = "--dbx-data-grid-font-family";
 
 export const DEFAULT_UI_FONT_FAMILY = `"Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif`;

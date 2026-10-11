@@ -1400,6 +1400,80 @@ describe("useDataGridEditor saveChanges reload", () => {
     message: "Cannot safely update or delete this row: more than one row matches.",
   };
 
+  it.each(["oracle", "oceanbase-oracle"] as const)("reports a concurrently deleted ROWID target without keeping an impossible retry pending (%s)", async (databaseType) => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["DELETE FROM orders_test WHERE ROWID='ROW-22'"], rollbackStatements: ["restore ROW-22"] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 0 });
+    const { editor, emit } = createSaveTestEditor({ databaseType, primaryKeys: ["__DBX_ROWID"] });
+    editor.deletedRows.value.add(1);
+
+    await editor.saveChanges();
+
+    expect(editor.saveError.value).not.toBe("");
+    expect(editor.deletedRows.value.size).toBe(0);
+    expect(editor.isSaving.value).toBe(false);
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+    expect(mocks.addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: false, rollback_sql: undefined, error: editor.saveError.value }));
+  });
+
+  it("keeps a successful ROWID deletion successful", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["DELETE FROM orders_test WHERE ROWID='ROW-21'"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 1 });
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"] });
+    editor.deletedRows.value.add(0);
+    await editor.saveChanges();
+    expect(editor.saveError.value).toBe("");
+    expect(mocks.addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: true, affected_rows: 1 }));
+  });
+
+  it("reports partial ROWID deletion after a transactional batch and does not replay completed deletes", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["DELETE FROM orders_test WHERE ROWID='ROW-21'", "DELETE FROM orders_test WHERE ROWID='ROW-22'"], rollbackStatements: [] });
+    mocks.executeInTransaction.mockResolvedValue({ affected_rows: 1 });
+    const { editor, emit } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"] });
+    editor.deletedRows.value.add(0);
+    editor.deletedRows.value.add(1);
+    await editor.saveChanges();
+    expect(mocks.executeInTransaction).toHaveBeenCalledTimes(1);
+    expect(editor.saveError.value).not.toBe("");
+    expect(editor.deletedRows.value.size).toBe(0);
+    expect(mocks.addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: false }));
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+    await editor.saveChanges();
+    expect(mocks.executeInTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a manual transaction's zero-row ROWID delete without claiming rollback", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["DELETE FROM orders_test WHERE ROWID='ROW-22'"], rollbackStatements: ["restore ROW-22"] });
+    mocks.executeInManualTransaction.mockResolvedValue([{ affected_rows: 0 }]);
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"], manualTransactionSessionId: "manual-1" });
+    editor.deletedRows.value.add(1);
+    await editor.saveChanges();
+    expect(editor.saveError.value).not.toBe("");
+    expect(editor.deletedRows.value.size).toBe(0);
+    expect(mocks.addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: false, rollback_sql: undefined }));
+  });
+
+  it("retains ROWID deletes when execution fails instead of treating the error as an already-missing target", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["delete ROW-22"], rollbackStatements: [] });
+    mocks.executeBatch.mockRejectedValue(new Error("delete connection failed"));
+    const { editor, emit } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"] });
+    editor.deletedRows.value.add(1);
+    await editor.saveChanges();
+    expect(editor.saveError.value).toContain("delete connection failed");
+    expect(editor.deletedRows.value).toEqual(new Set([1]));
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("does not mistake a protected LOB PL/SQL block's unknown update count for a missed ROWID delete", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["BEGIN\nDELETE FROM orders_test WHERE ROWID='ROW-22';\nIF SQL%ROWCOUNT <> 1 THEN RAISE_APPLICATION_ERROR(-20001, 'LOB target changed or missing; reload before saving'); END IF;\nEND;"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 0 });
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"] });
+    editor.deletedRows.value.add(1);
+    await editor.saveChanges();
+    expect(editor.saveError.value).toBe("");
+    expect(editor.deletedRows.value.size).toBe(0);
+    expect(mocks.addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+  });
+
   it("refuses a keyless save when the server counts more than one row matching the predicate the save sends", async () => {
     mocks.prepareDataGridSave.mockResolvedValue({
       statements: ["UPDATE orders_test SET status='shipped' WHERE status = 'pending'"],

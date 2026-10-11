@@ -213,6 +213,11 @@ const oracleCapabilities = capabilities({
   addPrimaryKey: true,
 });
 
+const oceanbaseOracleCapabilities = capabilities({
+  ...oracleCompatibleCapabilities,
+  addPrimaryKey: true,
+});
+
 // Dameng (DM8): ALTER TABLE ... DROP PRIMARY KEY / ADD PRIMARY KEY is official DDL.
 // Keep separate from Oracle-compatible engines so UI cannot enable PK edits without verified DDL.
 const damengCapabilities = capabilities({
@@ -368,7 +373,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   sqlserver: sqlserverCapabilities,
   oracle: oracleCapabilities,
   dameng: damengCapabilities,
-  "oceanbase-oracle": oracleCompatibleCapabilities,
+  "oceanbase-oracle": oceanbaseOracleCapabilities,
   iris: irisCapabilities,
   yashandb: oracleCompatibleCapabilities,
   xugu: oracleCompatibleCapabilities,

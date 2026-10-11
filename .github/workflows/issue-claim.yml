@@ -16,7 +16,11 @@ permissions:
 jobs:
   claim:
     runs-on: ubuntu-latest
-    if: ${{ !github.event.issue.pull_request }}
+    if: >-
+      ${{ !github.event.issue.pull_request && github.event.comment.user.type != 'Bot' &&
+          (contains(github.event.comment.body, '/claim') ||
+           contains(github.event.comment.body, '/unclaim') ||
+           contains(github.event.comment.body, '/close')) }}
     steps:
       - uses: actions/checkout@v5
 

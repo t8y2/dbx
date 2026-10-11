@@ -17,12 +17,14 @@ const win7InfrastructureFiles = new Set([
   "src-tauri/build.rs",
 ]);
 const win7InfrastructurePrefixes = [
+  ".cargo/",
+  "rust-toolchain",
+  ".github/fixtures/win7-",
   "src-tauri/windows/nsis/",
-  "vendor/wry/",
-  "vendor/webview2-com-sys/",
-  "vendor/ctor/",
-  "vendor/dirs-sys/",
-  "vendor/pageant/",
+  "src-tauri/src/commands/update",
+  "crates/dbx-core/src/host/update",
+  "crates/dbx-platform/",
+  "vendor/",
 ];
 
 function expandAffectedPackages(packages, members, affected) {
@@ -93,7 +95,8 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
   if (full) for (const pkg of packages) affected.add(pkg.name);
   expandAffectedPackages(packages, members, affected);
   const win7InfrastructureChanged = unknownDiff || files.some((file) => win7InfrastructureFiles.has(file)
-    || win7InfrastructurePrefixes.some((prefix) => file.startsWith(prefix)));
+    || win7InfrastructurePrefixes.some((prefix) => file.startsWith(prefix))
+    || /^src-tauri\/tauri.*\.json$/.test(file));
   const win7DependencyChanged = files.includes("Cargo.toml") || files.includes("Cargo.lock")
     || files.some((file) => /^(?:crates\/[^/]+|src-tauri)\/Cargo\.toml$/.test(file));
   const windowsWin7Reasons = {
@@ -101,6 +104,7 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
     dependency_input: win7DependencyChanged,
     desktop_dependency: win7Affected.has("dbx"),
     unknown_rust: unknownRust,
+    unknown_member: rust && unknownMember,
   };
   const windowsWin7Candidate = Object.values(windowsWin7Reasons).some(Boolean);
   const rustMatrix = !rust ? [] : full ? [{ group: "workspace" }] : Object.entries(rustGroups)
@@ -128,6 +132,7 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
   const java = allAgents || javaDriverChanges;
   const agents = agentsChanged || sharedAgents || nativeChanges.size > 0 || javaDriverChanges;
   return {
+    contributor_snapshot_only: files.length > 0 && files.every((file) => file === "docs/data/contributors.json"),
     rust, rust_full: full, rust_matrix: { include: rustMatrix }, rust_groups_known: !unknownMember,
     affected_packages: [...affected].sort(),
     agents, agent_java: java, agent_go: { include: goMatrix }, agent_rust: { include: nativeRustMatrix },
@@ -135,6 +140,8 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
     agent_rust_changed: nativeRustMatrix.length > 0, agent_integration_changed: liveMatrix.length > 0,
     duckdb_changed: nativeChanges.has("duckdb"),
     duckdb_windows: sharedRust || files.some((file) => file.startsWith("agents/drivers/duckdb/")),
+    windows_standard: windowsWin7Candidate,
+    windows_win7_bundle: win7InfrastructureChanged || win7DependencyChanged || unknownRust || (rust && unknownMember),
     windows_win7_candidate: windowsWin7Candidate,
     windows_win7_affected_packages: [...win7Affected].sort(),
     windows_win7_reasons: windowsWin7Reasons,
@@ -153,13 +160,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     const outputs = { ...plan, plan };
     appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(outputs).map(([name, value]) => `${name}=${JSON.stringify(value)}\n`).join(""));
   }
-  console.log(JSON.stringify({
-    ...plan,
-    win7_routing_comparison: {
-      current: process.env.WIN7_CURRENT === "true",
-      candidate: plan.windows_win7_candidate,
-      affected_packages: plan.windows_win7_affected_packages,
-      reasons: plan.windows_win7_reasons,
-    },
-  }, null, 2));
+  console.log(JSON.stringify(plan, null, 2));
 }

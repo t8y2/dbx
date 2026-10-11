@@ -43,6 +43,6 @@ clientEncoding=GB18030&serverEncoding=ISO-8859-1
 
 保存后重新连接。DBX 原生驱动使用这组参数转换查询结果、中文 SQL 和绑定参数；支持表格读取与编辑、文本数组、JSON、元数据和按行导出。不会修改数据库编码或已有数据。`clientEncoding` 也支持 `GBK` 和 `UTF-8`，`serverEncoding` 可写为 `LATIN1`；两个参数必须同时提供。
 
-这组参数只适用于数据库声明编码与实际文本字节不一致的连接。服务端必须报告 `server_encoding=LATIN1`，且 `standard_conforming_strings=on`。不能转换的文本会明确报错，避免替换字符或静默丢失。未填写参数的连接使用正常的 PostgreSQL 编码转换。
+这组参数只适用于数据库声明编码与实际文本字节不一致的连接。服务端必须报告 `server_encoding=LATIN1`，且 `standard_conforming_strings=on`。读取遇到无法转换的值时保留原文，并在查询消息中提示；其他完整的文本仍正常解码。按字节截断的脱敏值（例如半个汉字后接星号）不会再导致整条查询失败，也不会被替换字符或 NULL 覆盖。写入时不能用指定编码表示的内容仍明确报错。未填写参数的连接使用正常的 PostgreSQL 编码转换。
 
 COPY 文本导入支持 DBX 的默认文本格式；跨连接数据传输会使用按行 INSERT 路径。原始 COPY 输出和其他 COPY 格式请使用按行导入/导出。

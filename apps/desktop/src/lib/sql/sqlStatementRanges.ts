@@ -323,6 +323,31 @@ const ORACLE_PL_SQL_TERMINATORS = new Set(["IF", "LOOP", "CASE"]);
 const SAP_HANA_SCRIPT_BLOCK_TERMINATORS = new Set(["IF", "FOR", "WHILE"]);
 
 /**
+ * XML/HTML character references (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`,
+ * `&#39;`, `&#x27;`) end with `;`. MyBatis XML writes comparison operators
+ * this way (`&gt;= #{param}`), so that `;` must not be read as a statement
+ * terminator — otherwise one query is split into fragments, its run buttons
+ * multiply, and parameters in later fragments vanish (#11699). Only the five
+ * predefined XML names plus numeric references are recognized, so a plain
+ * bitwise `a&b;` still splits at its real terminator.
+ */
+const XML_ENTITY_REFERENCE_NAMES = new Set(["lt", "gt", "amp", "quot", "apos"]);
+
+function isXmlEntityReferenceSemicolon(sql: string, semicolonIndex: number): boolean {
+  let start = semicolonIndex;
+  while (start > 0 && isAsciiAlphanumeric(sql[start - 1] ?? "")) start -= 1;
+  if (start > 0 && sql[start - 1] === "#") start -= 1;
+  if (start === 0 || sql[start - 1] !== "&") return false;
+  const name = sql.slice(start, semicolonIndex);
+  if (name.startsWith("#")) return /^#(?:[xX][0-9A-Fa-f]+|[0-9]+)$/.test(name);
+  return XML_ENTITY_REFERENCE_NAMES.has(name);
+}
+
+function isAsciiAlphanumeric(ch: string): boolean {
+  return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9");
+}
+
+/**
  * Parse the SQL document into top-level statement ranges delimited by `;`.
  *
  * Delimiters inside string literals, double/backtick/bracket quoted
@@ -613,7 +638,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         statementHitStart = i;
         continue;
       }
-    } else if (ch === ";") {
+    } else if (ch === ";" && !isXmlEntityReferenceSemicolon(sql, i)) {
       const routineTokensBeforeSemicolon = isMysqlRoutineBlockDatabase(databaseType) && statementStart !== -1 ? mysqlRoutineTokensUpTo(i) : null;
       const isMysqlRoutineBlock = routineTokensBeforeSemicolon !== null && isMysqlRoutineDdlStartFromWords(mysqlRoutineDdlStartWords(routineTokensBeforeSemicolon)) && mysqlRoutineTokensContainBegin(routineTokensBeforeSemicolon);
       if (isMysqlRoutineBlock) {

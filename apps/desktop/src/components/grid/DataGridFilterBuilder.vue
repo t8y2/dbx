@@ -12,7 +12,7 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStor
 import { resolveDataGridFilterRuleDropPlacement } from "@/lib/dataGrid/dataGridFilterRuleDrag";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
-import type { DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
+import type { DataGridDistinctValueSource, DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
 import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 
 const { t } = useI18n();
@@ -58,6 +58,7 @@ const emit = defineEmits<{
   openValueSuggestions: [id: string, target: DataGridDistinctValueSuggestionTarget];
   closeValueSuggestions: [];
   updateValueSuggestionSearch: [value: string];
+  updateValueSuggestionSource: [source: DataGridDistinctValueSource];
   selectValueSuggestion: [option: DataGridLocalFilterOption];
   toggleValueSuggestion: [option: DataGridLocalFilterOption];
   toggleAllValueSuggestions: [];
@@ -655,8 +656,11 @@ function blurValueRule(id: string) {
                 :error="props.valueSuggestions.error"
                 :limited="props.valueSuggestions.limited"
                 :limit="props.valueSuggestions.limit"
+                :source="props.valueSuggestions.source"
+                :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
                 @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
                 @update:search="emit('updateValueSuggestionSearch', $event)"
+                @update:source="emit('updateValueSuggestionSource', $event)"
                 @select="emit('selectValueSuggestion', $event)"
               />
               <span class="shrink-0 text-[10px] text-muted-foreground">—</span>
@@ -678,8 +682,11 @@ function blurValueRule(id: string) {
                 :error="props.valueSuggestions.error"
                 :limited="props.valueSuggestions.limited"
                 :limit="props.valueSuggestions.limit"
+                :source="props.valueSuggestions.source"
+                :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
                 @update:open="updateValueSuggestionsOpen(rule, 'end', $event)"
                 @update:search="emit('updateValueSuggestionSearch', $event)"
+                @update:source="emit('updateValueSuggestionSource', $event)"
                 @select="emit('selectValueSuggestion', $event)"
               />
             </template>
@@ -703,10 +710,13 @@ function blurValueRule(id: string) {
                 :error="props.valueSuggestions.error"
                 :limited="props.valueSuggestions.limited"
                 :limit="props.valueSuggestions.limit"
+                :source="props.valueSuggestions.source"
+                :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
                 :multiple="true"
                 :selected-keys="props.valueSuggestions.selectedKeys"
                 @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
                 @update:search="emit('updateValueSuggestionSearch', $event)"
+                @update:source="emit('updateValueSuggestionSource', $event)"
                 @toggle="emit('toggleValueSuggestion', $event)"
                 @toggle-all="emit('toggleAllValueSuggestions')"
                 @apply="emit('applyValueSuggestions')"
@@ -732,8 +742,11 @@ function blurValueRule(id: string) {
                 :error="props.valueSuggestions.error"
                 :limited="props.valueSuggestions.limited"
                 :limit="props.valueSuggestions.limit"
+                :source="props.valueSuggestions.source"
+                :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
                 @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
                 @update:search="emit('updateValueSuggestionSearch', $event)"
+                @update:source="emit('updateValueSuggestionSource', $event)"
                 @select="emit('selectValueSuggestion', $event)"
               />
             </template>
@@ -762,8 +775,11 @@ function blurValueRule(id: string) {
               :error="props.valueSuggestions.error"
               :limited="props.valueSuggestions.limited"
               :limit="props.valueSuggestions.limit"
+              :source="props.valueSuggestions.source"
+              :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
               @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
               @update:search="emit('updateValueSuggestionSearch', $event)"
+              @update:source="emit('updateValueSuggestionSource', $event)"
               @select="emit('selectValueSuggestion', $event)"
             />
             <Input
@@ -787,8 +803,11 @@ function blurValueRule(id: string) {
               :error="props.valueSuggestions.error"
               :limited="props.valueSuggestions.limited"
               :limit="props.valueSuggestions.limit"
+              :source="props.valueSuggestions.source"
+              :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
               @update:open="updateValueSuggestionsOpen(rule, 'end', $event)"
               @update:search="emit('updateValueSuggestionSearch', $event)"
+              @update:source="emit('updateValueSuggestionSource', $event)"
               @select="emit('selectValueSuggestion', $event)"
             />
           </div>
@@ -813,10 +832,13 @@ function blurValueRule(id: string) {
               :error="props.valueSuggestions.error"
               :limited="props.valueSuggestions.limited"
               :limit="props.valueSuggestions.limit"
+              :source="props.valueSuggestions.source"
+              :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
               :multiple="true"
               :selected-keys="props.valueSuggestions.selectedKeys"
               @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
               @update:search="emit('updateValueSuggestionSearch', $event)"
+              @update:source="emit('updateValueSuggestionSource', $event)"
               @toggle="emit('toggleValueSuggestion', $event)"
               @toggle-all="emit('toggleAllValueSuggestions')"
               @apply="emit('applyValueSuggestions')"
@@ -845,8 +867,11 @@ function blurValueRule(id: string) {
               :error="props.valueSuggestions.error"
               :limited="props.valueSuggestions.limited"
               :limit="props.valueSuggestions.limit"
+              :source="props.valueSuggestions.source"
+              :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
               @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
               @update:search="emit('updateValueSuggestionSearch', $event)"
+              @update:source="emit('updateValueSuggestionSource', $event)"
               @select="emit('selectValueSuggestion', $event)"
             />
           </div>

@@ -62,6 +62,7 @@ export interface RedisJsonDetail {
   rawText: string;
   formattedText: string;
   value: unknown;
+  serializedLevel?: number;
 }
 
 export type RedisJsonDraftNormalizationResult =
@@ -351,12 +352,40 @@ export function parseRedisJsonDetail(value: unknown): RedisJsonDetail | null {
   try {
     // Pretty-print from source tokens so duplicate members and number spellings
     // stay intact when Redis string/hash values open in the JSON editor.
-    const formattedText = formatJsonSource(trimmed, 2);
-    const parsed = parseJsonPreservingLargeNumbers(trimmed);
+    let formattedText = formatJsonSource(trimmed, 2);
+    let parsed = parseJsonPreservingLargeNumbers(trimmed);
+    let serializedLevel = 0;
+
+    // Issue #11636: Support serialized JSON strings (e.g. "\"{\\\"abc\\\":\\\"\\\"}\"")
+    // produced by object mappers / serializers. Unwrap into a structured JSON container
+    // so it formats as an expandable object/array tree rather than an escaped scalar.
+    while (typeof parsed === "string") {
+      const innerTrimmed = parsed.trim();
+      if (!innerTrimmed.startsWith("{") && !innerTrimmed.startsWith("[") && !innerTrimmed.startsWith('"')) {
+        break;
+      }
+      try {
+        const nextFormatted = formatJsonSource(innerTrimmed, 2);
+        const nextParsed = parseJsonPreservingLargeNumbers(innerTrimmed);
+        if (typeof nextParsed === "string") {
+          const nextTrimmed = nextParsed.trim();
+          if (!nextTrimmed.startsWith("{") && !nextTrimmed.startsWith("[")) {
+            break;
+          }
+        }
+        formattedText = nextFormatted;
+        parsed = nextParsed;
+        serializedLevel += 1;
+      } catch {
+        break;
+      }
+    }
+
     return {
       rawText: value,
       formattedText,
       value: parsed,
+      ...(serializedLevel > 0 ? { serializedLevel } : {}),
     };
   } catch {
     return null;
@@ -366,11 +395,16 @@ export function parseRedisJsonDetail(value: unknown): RedisJsonDetail | null {
 /**
  * Validates a JSON editor draft and produces the compact text Redis should
  * store. Source-preserving minification keeps high-precision numbers and
- * duplicate object members intact.
+ * duplicate object members intact. When serializedLevel > 0 (issue #11636),
+ * wraps the compact text back into the expected serialized string representation.
  */
-export function normalizeRedisJsonDraft(text: string): RedisJsonDraftNormalizationResult {
+export function normalizeRedisJsonDraft(text: string, serializedLevel = 0): RedisJsonDraftNormalizationResult {
   try {
-    return { ok: true, compactText: formatJsonSource(text) };
+    let compactText = formatJsonSource(text);
+    for (let i = 0; i < serializedLevel; i += 1) {
+      compactText = JSON.stringify(compactText);
+    }
+    return { ok: true, compactText };
   } catch {
     return { ok: false, error: "invalid_json" };
   }

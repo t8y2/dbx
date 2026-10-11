@@ -1346,6 +1346,10 @@ function rememberRedisValueCodec(codec: RedisValueCodec) {
 
 function formatJsonText(raw: string, decodeUnicode: boolean): string | null {
   try {
+    const detail = parseRedisJsonDetail(raw);
+    if (detail) {
+      return decodeUnicode ? decodeJsonUnicodeEscapes(detail.formattedText) : detail.formattedText;
+    }
     // Keep Redis JSON baselines source-preserving (duplicate keys, number text),
     // then apply the display-only unicode decode when the user chose "decoded".
     const formatted = formatJsonSource(raw, 2);
@@ -1739,7 +1743,7 @@ async function saveString() {
   let value = editValue.value;
   // Compact whenever this draft is/was JSON-edited, even if the user switched tabs before Save.
   if (stringValueView.value === "json" || stringDraftFormat.value === "json") {
-    const normalized = normalizeRedisJsonDraft(jsonDraftForSave(stringJsonRawBaseline.value, value));
+    const normalized = normalizeRedisJsonDraft(jsonDraftForSave(stringJsonRawBaseline.value, value), stringValueDetail.value?.json?.serializedLevel);
     if (!normalized.ok) {
       toast(t("redis.jsonFormatError"), 3000);
       return;
@@ -2188,7 +2192,7 @@ async function saveMemberEdit() {
   let writeValue = memberEditValue.value;
   // Hash JSON drafts may still be open under UTF-8 after a format switch; keep compact writes.
   if (savingHashJson) {
-    const normalized = normalizeRedisJsonDraft(jsonDraftForSave(memberJsonRawBaseline.value, writeValue));
+    const normalized = normalizeRedisJsonDraft(jsonDraftForSave(memberJsonRawBaseline.value, writeValue), selectedMemberDetail.value?.json?.serializedLevel);
     if (!normalized.ok) {
       toast(t("redis.jsonFormatError"), 3000);
       return;

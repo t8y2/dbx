@@ -19,8 +19,10 @@ name: UI preview
 # PR's own frontend build is what's on screen (DBX_STATIC_DIR).
 
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, labeled]
+  # Temporarily disabled (2026-10-10) while jobs queue without a runner;
+  # manual dispatch below still works. Uncomment to re-enable.
+  # pull_request_target:
+  #   types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       pr:

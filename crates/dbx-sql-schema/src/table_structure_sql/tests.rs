@@ -3898,9 +3898,10 @@ fn sqlserver_legacy_column_comment_change_uses_legacy_extended_properties() {
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 1);
+    assert!(result.statements[0].starts_with("IF @@MICROSOFTVERSION / 16777216 >= 9 EXEC (N'"));
     assert!(result.statements[0].contains("::fn_listextendedproperty"));
     assert!(result.statements[0].contains("EXEC sp_addextendedproperty"));
-    assert!(!result.statements[0].contains("sys.extended_properties"));
+    assert!(result.statements[0].contains("EXEC sys.sp_addextendedproperty"));
 }
 
 #[test]
@@ -5021,98 +5022,104 @@ fn dameng_blocks_dropping_former_primary_key_column() {
 
 #[test]
 fn oracle_sets_not_null_before_adding_primary_key() {
-    let mut id = existing_pk_column("id", "NUMBER", false, true);
-    id.original.as_mut().unwrap().is_nullable = true;
+    for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+        let mut id = existing_pk_column("id", "NUMBER", false, true);
+        id.original.as_mut().unwrap().is_nullable = true;
 
-    let result =
-        build_table_structure_change_sql(structure_change_options(DatabaseType::Oracle, Some("HR"), "users", vec![id]));
+        let result =
+            build_table_structure_change_sql(structure_change_options(database_type, Some("HR"), "users", vec![id]));
 
-    assert_eq!(result.warnings, Vec::<String>::new());
-    assert_eq!(
-        result.statements,
-        vec![
-            "ALTER TABLE \"HR\".\"users\" MODIFY (\"id\" NUMBER NOT NULL);",
-            "ALTER TABLE \"HR\".\"users\" ADD PRIMARY KEY (\"id\");",
-        ]
-    );
-}
-
-#[test]
-fn oracle_adds_composite_primary_key_in_draft_order() {
-    let mut tenant_id = existing_pk_column("tenant_id", "NUMBER", false, true);
-    tenant_id.id = "tenant_id".to_string();
-    let mut code = existing_pk_column("code", "VARCHAR2(50)", false, true);
-    code.id = "code".to_string();
-
-    let result = build_table_structure_change_sql(structure_change_options(
-        DatabaseType::Oracle,
-        Some("HR"),
-        "users",
-        vec![code, tenant_id],
-    ));
-
-    assert_eq!(result.warnings, Vec::<String>::new());
-    assert_eq!(result.statements, vec!["ALTER TABLE \"HR\".\"users\" ADD PRIMARY KEY (\"code\", \"tenant_id\");"]);
-}
-
-#[test]
-fn oracle_adds_new_primary_key_column_before_adding_constraint() {
-    let mut code = column("code");
-    code.data_type = "VARCHAR2(50)".to_string();
-    code.is_nullable = false;
-    code.is_primary_key = true;
-
-    let result = build_table_structure_change_sql(structure_change_options(
-        DatabaseType::Oracle,
-        Some("HR"),
-        "users",
-        vec![code],
-    ));
-
-    assert_eq!(result.warnings, Vec::<String>::new());
-    assert_eq!(
-        result.statements,
-        vec![
-            "ALTER TABLE \"HR\".\"users\" ADD (\"code\" VARCHAR2(50));",
-            "ALTER TABLE \"HR\".\"users\" ADD PRIMARY KEY (\"code\");",
-        ]
-    );
-}
-
-#[test]
-fn oracle_rejects_existing_primary_key_changes_without_partial_sql() {
-    let uncheck =
-        vec![existing_pk_column("id", "NUMBER", true, false), existing_pk_column("name", "VARCHAR2(50)", false, false)];
-    let replacement = vec![
-        existing_pk_column("id", "NUMBER", true, false),
-        existing_pk_column("code", "VARCHAR2(50)", false, true),
-        existing_pk_column("name", "VARCHAR2(50)", false, false),
-    ];
-    let second_key = vec![
-        existing_pk_column("id", "NUMBER", true, true),
-        existing_pk_column("code", "VARCHAR2(50)", false, true),
-        existing_pk_column("name", "VARCHAR2(50)", false, false),
-    ];
-
-    for (case, columns) in [("uncheck", uncheck), ("replacement", replacement), ("second key", second_key)] {
-        let mut options = structure_change_options(DatabaseType::Oracle, Some("HR"), "users", columns);
-        options.indexes = vec![index("idx_users_name", &["name"])];
-
-        let result = build_table_structure_change_sql(options);
-
-        assert!(result.statements.is_empty(), "{case} must not emit partial SQL: {:?}", result.statements);
-        assert_eq!(result.warnings.len(), 1, "unexpected {case} warnings: {:?}", result.warnings);
-        assert!(
-            result.warnings[0].contains("Changing primary keys"),
-            "unexpected {case} warning: {:?}",
-            result.warnings
+        assert_eq!(result.warnings, Vec::<String>::new());
+        assert_eq!(
+            result.statements,
+            vec![
+                "ALTER TABLE \"HR\".\"users\" MODIFY (\"id\" NUMBER NOT NULL);",
+                "ALTER TABLE \"HR\".\"users\" ADD PRIMARY KEY (\"id\");",
+            ]
         );
     }
 }
 
 #[test]
+fn oracle_adds_composite_primary_key_in_draft_order() {
+    for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+        let mut tenant_id = existing_pk_column("tenant_id", "NUMBER", false, true);
+        tenant_id.id = "tenant_id".to_string();
+        let mut code = existing_pk_column("code", "VARCHAR2(50)", false, true);
+        code.id = "code".to_string();
+
+        let result = build_table_structure_change_sql(structure_change_options(
+            database_type,
+            Some("HR"),
+            "users",
+            vec![code, tenant_id],
+        ));
+
+        assert_eq!(result.warnings, Vec::<String>::new());
+        assert_eq!(result.statements, vec!["ALTER TABLE \"HR\".\"users\" ADD PRIMARY KEY (\"code\", \"tenant_id\");"]);
+    }
+}
+
+#[test]
+fn oracle_adds_new_primary_key_column_before_adding_constraint() {
+    for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+        let mut code = column("code");
+        code.data_type = "VARCHAR2(50)".to_string();
+        code.is_nullable = false;
+        code.is_primary_key = true;
+
+        let result =
+            build_table_structure_change_sql(structure_change_options(database_type, Some("HR"), "users", vec![code]));
+
+        assert_eq!(result.warnings, Vec::<String>::new());
+        assert_eq!(
+            result.statements,
+            vec![
+                "ALTER TABLE \"HR\".\"users\" ADD (\"code\" VARCHAR2(50));",
+                "ALTER TABLE \"HR\".\"users\" ADD PRIMARY KEY (\"code\");",
+            ]
+        );
+    }
+}
+
+#[test]
+fn oracle_rejects_existing_primary_key_changes_without_partial_sql() {
+    for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+        let uncheck = vec![
+            existing_pk_column("id", "NUMBER", true, false),
+            existing_pk_column("name", "VARCHAR2(50)", false, false),
+        ];
+        let replacement = vec![
+            existing_pk_column("id", "NUMBER", true, false),
+            existing_pk_column("code", "VARCHAR2(50)", false, true),
+            existing_pk_column("name", "VARCHAR2(50)", false, false),
+        ];
+        let second_key = vec![
+            existing_pk_column("id", "NUMBER", true, true),
+            existing_pk_column("code", "VARCHAR2(50)", false, true),
+            existing_pk_column("name", "VARCHAR2(50)", false, false),
+        ];
+
+        for (case, columns) in [("uncheck", uncheck), ("replacement", replacement), ("second key", second_key)] {
+            let mut options = structure_change_options(database_type, Some("HR"), "users", columns);
+            options.indexes = vec![index("idx_users_name", &["name"])];
+
+            let result = build_table_structure_change_sql(options);
+
+            assert!(result.statements.is_empty(), "{case} must not emit partial SQL: {:?}", result.statements);
+            assert_eq!(result.warnings.len(), 1, "unexpected {case} warnings: {:?}", result.warnings);
+            assert!(
+                result.warnings[0].contains("Changing primary keys"),
+                "unexpected {case} warning: {:?}",
+                result.warnings
+            );
+        }
+    }
+}
+
+#[test]
 fn oracle_compatible_engines_do_not_inherit_oracle_primary_key_add() {
-    for database_type in [DatabaseType::OceanbaseOracle, DatabaseType::Iris] {
+    for database_type in [DatabaseType::Yashandb, DatabaseType::Xugu, DatabaseType::Iris] {
         let columns = vec![
             existing_pk_column("id", "NUMBER", false, true),
             existing_pk_column("name", "VARCHAR2(50)", false, false),

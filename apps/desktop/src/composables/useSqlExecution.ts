@@ -465,7 +465,7 @@ export function useSqlExecution(deps: {
         deps.activeOutputView.value = "messages";
       }
     } else if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
-      if (executionTabStillActive) {
+      if (executionTabStillActive && deps.activeOutputView.value !== "messages") {
         deps.activeOutputView.value = statementCount === 1 ? defaultViewForResult(tab.result) : "summary";
       }
     }

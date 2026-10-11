@@ -664,6 +664,26 @@ SELECT @value AS Message;`;
     expect(activeOutputView.value).toBe("messages");
   });
 
+  it("keeps Messages selected after a batch with live output completes", async () => {
+    const sql = "SET client_min_messages = NOTICE; DO $$ BEGIN RAISE NOTICE 'hello'; END $$;";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("postgres"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart" | "messages">("result");
+    vi.spyOn(useQueryStore(), "executeCurrentSql").mockImplementation(async () => {
+      activeOutputView.value = "messages";
+      if (activeTab.value) activeTab.value.result = { columns: [], rows: [], affected_rows: 0, execution_time_ms: 1, messages: [{ severity: "NOTICE", message: "hello" }] };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+    await execution.tryExecute();
+    expect(activeOutputView.value).toBe("messages");
+  });
+
   it("keeps the summary view for a MySQL INSERT that carries an INFO message", async () => {
     const sql = "INSERT INTO users (name) VALUES ('a'), ('b')";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });

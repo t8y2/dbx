@@ -364,7 +364,7 @@ import { useDataGridAutoRefresh } from "@/composables/useDataGridAutoRefresh";
 import { useDataGridAsyncSurface } from "@/composables/useDataGridAsyncSurface";
 import { createDataGridFilterConditionCache, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import { DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT, useDataGridDistinctValueLoader } from "@/composables/useDataGridDistinctValueLoader";
-import { dataGridDistinctValueKey, dataGridNullSuggestionFilterMode, toggleAllDataGridDistinctValueOptions, type DataGridDistinctValueSuggestionState, type DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
+import { dataGridDistinctValueKey, dataGridNullSuggestionFilterMode, toggleAllDataGridDistinctValueOptions, type DataGridDistinctValueSource, type DataGridDistinctValueSuggestionState, type DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
 import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { createDataGridSearchScopeKey } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
@@ -399,7 +399,7 @@ import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
 import { buildColumnIndexMap, columnIndexColorClass, columnIndexNameKey, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { isSchemaAware, supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
-import { restoreDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
+import { buildDataGridLocalFilterOptions, restoreDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint } from "@/lib/database/jdbcDialect";
 import { mongoCollectionSupportsIndexes, supportsMongoIndexMutations } from "@/lib/mongo/mongoCapabilities";
 import { isProtectedMongoIndex, mongoDropAllIndexesPreview, mongoDropIndexFailureCount, mongoDropIndexPreview } from "@/lib/sidebar/mongoCollectionMutation";
@@ -1358,17 +1358,67 @@ const filterValueSuggestionLoader = useDataGridDistinctValueLoader({
   formatValue: (value, columnIndex) => formatCellCached(value, columnIndex),
   keyForValue: dataGridDistinctValueKey,
 });
-const filterValueSuggestionState = computed<DataGridDistinctValueSuggestionState>(() => ({
-  ruleId: filterValueSuggestionRuleId.value,
-  target: filterValueSuggestionTarget.value,
-  search: filterValueSuggestionSearch.value,
-  options: filterValueSuggestionLoader.options.value,
-  loading: filterValueSuggestionLoader.loading.value,
-  error: filterValueSuggestionLoader.error.value,
-  limited: filterValueSuggestionLoader.limited.value,
-  limit: DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT,
-  selectedKeys: new Set(filterValueSuggestionDraftValues.value.keys()),
-}));
+const FILTER_VALUE_SOURCE_STORAGE_KEY = "dbx-filter-distinct-value-source";
+
+function readFilterValueSuggestionSource(): DataGridDistinctValueSource {
+  return safeLocalStorageGet(FILTER_VALUE_SOURCE_STORAGE_KEY) === "page" ? "page" : "database";
+}
+
+const filterValueSuggestionSource = ref<DataGridDistinctValueSource>(readFilterValueSuggestionSource());
+const effectiveFilterValueSuggestionSource = computed<DataGridDistinctValueSource>(() => {
+  if (!canUseServerColumnFilter.value) return "page";
+  return filterValueSuggestionSource.value;
+});
+
+const pageFilterValueSuggestions = computed(() => {
+  if (effectiveFilterValueSuggestionSource.value !== "page" || !filterValueSuggestionRuleId.value) {
+    return { options: [] as DataGridLocalFilterOption[], limited: false };
+  }
+  const rule = filterValueSuggestionRule();
+  if (!rule || !rule.columnName) return { options: [] as DataGridLocalFilterOption[], limited: false };
+  const columnIndex = filterValueSuggestionColumnIndex(rule.columnName);
+  if (columnIndex < 0) return { options: [] as DataGridLocalFilterOption[], limited: false };
+  const columnInfo = filterBuilderColumns.value.find((c) => c.name === rule.columnName)?.columnInfo;
+
+  const rawOptions = buildDataGridLocalFilterOptions({
+    rows: props.result.rows,
+    newRows: getGridNewRows(),
+    columnIndex,
+    getRowData: (row, sourceIndex) => getGridRowData(row, sourceIndex),
+    formatValue: (value, colIdx) => formatCell(value, colIdx, undefined, false),
+  });
+
+  const query = filterValueSuggestionSearch.value.trim().toLowerCase();
+  const optionsWithKey = rawOptions.map((opt) => ({
+    ...opt,
+    key: dataGridDistinctValueKey(opt.value, columnInfo),
+  }));
+
+  const filtered = query ? optionsWithKey.filter((opt) => opt.label.toLowerCase().includes(query)) : optionsWithKey;
+
+  const limit = DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT;
+  return {
+    options: filtered.slice(0, limit),
+    limited: filtered.length > limit,
+  };
+});
+
+const filterValueSuggestionState = computed<DataGridDistinctValueSuggestionState>(() => {
+  const isPage = effectiveFilterValueSuggestionSource.value === "page";
+  return {
+    ruleId: filterValueSuggestionRuleId.value,
+    target: filterValueSuggestionTarget.value,
+    source: effectiveFilterValueSuggestionSource.value,
+    search: filterValueSuggestionSearch.value,
+    options: isPage ? pageFilterValueSuggestions.value.options : filterValueSuggestionLoader.options.value,
+    loading: isPage ? false : filterValueSuggestionLoader.loading.value,
+    error: isPage ? "" : filterValueSuggestionLoader.error.value,
+    limited: isPage ? pageFilterValueSuggestions.value.limited : filterValueSuggestionLoader.limited.value,
+    limit: DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT,
+    selectedKeys: new Set(filterValueSuggestionDraftValues.value.keys()),
+    canUseServerFilter: canUseServerColumnFilter.value,
+  };
+});
 // Structured filter rules are restored asynchronously. A tab-switch snapshot's
 // probe includes the applied condition, so restoring before this hydration
 // settles would reject an otherwise valid snapshot and never retry it.
@@ -1668,15 +1718,33 @@ async function openFilterValueSuggestions(ruleId: string, target: DataGridDistin
   filterValueSuggestionTarget.value = target;
   filterValueSuggestionSearch.value = "";
   filterValueSuggestionDraftValues.value = new Map(currentValues.filter((value) => value === null || typeof value !== "object").map((value): [string, CellValue] => [dataGridDistinctValueKey(value, columnInfo), value]));
-  filterValueSuggestionLoader.reset();
-  const request = filterValueSuggestionRequest();
-  if (request) await filterValueSuggestionLoader.load(request);
+  if (effectiveFilterValueSuggestionSource.value === "database") {
+    filterValueSuggestionLoader.reset();
+    const request = filterValueSuggestionRequest();
+    if (request) await filterValueSuggestionLoader.load(request);
+  } else {
+    filterValueSuggestionLoader.reset();
+  }
 }
 
 function updateFilterValueSuggestionSearch(value: string) {
   filterValueSuggestionSearch.value = value;
-  const request = filterValueSuggestionRequest(value);
-  if (request) filterValueSuggestionLoader.schedule(request);
+  if (effectiveFilterValueSuggestionSource.value === "database") {
+    const request = filterValueSuggestionRequest(value);
+    if (request) filterValueSuggestionLoader.schedule(request);
+  }
+}
+
+async function updateFilterValueSuggestionSource(source: DataGridDistinctValueSource) {
+  filterValueSuggestionSource.value = source;
+  safeLocalStorageSet(FILTER_VALUE_SOURCE_STORAGE_KEY, source);
+  if (source === "database") {
+    filterValueSuggestionLoader.reset();
+    const request = filterValueSuggestionRequest();
+    if (request) await filterValueSuggestionLoader.load(request);
+  } else {
+    filterValueSuggestionLoader.reset();
+  }
 }
 
 function selectFilterValueSuggestion(option: DataGridLocalFilterOption) {
@@ -1699,7 +1767,7 @@ function toggleFilterValueSuggestion(option: DataGridLocalFilterOption) {
 }
 
 function toggleAllFilterValueSuggestions() {
-  filterValueSuggestionDraftValues.value = toggleAllDataGridDistinctValueOptions(filterValueSuggestionDraftValues.value, filterValueSuggestionLoader.options.value);
+  filterValueSuggestionDraftValues.value = toggleAllDataGridDistinctValueOptions(filterValueSuggestionDraftValues.value, filterValueSuggestionState.value.options);
 }
 
 function applyFilterValueSuggestions() {
@@ -4370,6 +4438,7 @@ const editor = useDataGridEditor({
   manualTransactionSessionId: computed(() => props.manualTransactionSessionId),
   ensureManualTransactionSession: computed(() => props.ensureManualTransactionSession),
   onManualTransactionMutation: () => props.onManualTransactionMutation?.(),
+  onSaveConflict: (message) => toast(message, 5000),
   sql: computed(() => props.sql),
   searchText,
   whereFilterInput,
@@ -8725,6 +8794,15 @@ const {
   fullExportResult: props.fullExportResult,
   queryResultExportRequest: props.queryResultExportRequest,
   hasCompleteLocalResult,
+  partialLoadCopyInfo: computed(() =>
+    hasCompleteLocalResult.value
+      ? null
+      : {
+          loadedRows: props.result.rows.length,
+          totalRows: typeof displayedTotalRowCount.value === "number" ? displayedTotalRowCount.value : null,
+          hasMore: props.result.has_more === true || props.result.truncated === true,
+        },
+  ),
   completeLocalResult: computed(() => (hasCompleteLocalResult.value ? props.result : undefined)),
   allExportResults: computed(() => props.allExportResults),
   currentResultLabel: computed(() => props.result.sourceLabel),
@@ -13697,7 +13775,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   :filtered-columns="filteredFilterBuilderColumnOptions"
                   :mode-options="filterModeOptions"
                   :column-search="filterBuilderColumnSearch"
-                  :value-suggestions="canUseServerColumnFilter ? filterValueSuggestionState : undefined"
+                  :value-suggestions="canUseWhereSearch ? filterValueSuggestionState : undefined"
                   :apply-where="applyWhereFilter"
                   :apply-order-by="applyOrderBySearch"
                   :clear-order-by="clearOrderByInput"
@@ -13725,6 +13803,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   @open-value-suggestions="openFilterValueSuggestions"
                   @close-value-suggestions="closeFilterValueSuggestions"
                   @update-value-suggestion-search="updateFilterValueSuggestionSearch"
+                  @update-value-suggestion-source="updateFilterValueSuggestionSource"
                   @select-value-suggestion="selectFilterValueSuggestion"
                   @toggle-value-suggestion="toggleFilterValueSuggestion"
                   @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
@@ -13820,7 +13899,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @add-rule="addStructuredFilterRule"
           @apply="applyStructuredFilters"
           :apply-only-busy="applyingOnlyStructuredFilter || isApplyingWhere"
-          :value-suggestions="canUseServerColumnFilter ? filterValueSuggestionState : undefined"
+          :value-suggestions="canUseWhereSearch ? filterValueSuggestionState : undefined"
           @apply-only="applyOnlyStructuredFilter"
           @reset="resetStructuredFilters"
           @clear="clearAllFilters"
@@ -13831,6 +13910,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @open-value-suggestions="openFilterValueSuggestions"
           @close-value-suggestions="closeFilterValueSuggestions"
           @update-value-suggestion-search="updateFilterValueSuggestionSearch"
+          @update-value-suggestion-source="updateFilterValueSuggestionSource"
           @select-value-suggestion="selectFilterValueSuggestion"
           @toggle-value-suggestion="toggleFilterValueSuggestion"
           @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
@@ -13846,7 +13926,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           :mode-options="filterModeOptions"
           :column-search="filterBuilderColumnSearch"
           :disabled="!canUseWhereSearch"
-          :value-suggestions="canUseServerColumnFilter ? filterValueSuggestionState : undefined"
+          :value-suggestions="canUseWhereSearch ? filterValueSuggestionState : undefined"
           @update:height="updateTextFilterPanelHeight"
           @update:column-search="filterBuilderColumnSearch = $event"
           @ensure-rule="ensureStructuredFilterRule"
@@ -13863,6 +13943,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @open-value-suggestions="openFilterValueSuggestions"
           @close-value-suggestions="closeFilterValueSuggestions"
           @update-value-suggestion-search="updateFilterValueSuggestionSearch"
+          @update-value-suggestion-source="updateFilterValueSuggestionSource"
           @select-value-suggestion="selectFilterValueSuggestion"
           @toggle-value-suggestion="toggleFilterValueSuggestion"
           @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
@@ -15895,7 +15976,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   --data-grid-row-muted-bg: rgb(240, 240, 240);
   --data-grid-row-new-bg: rgb(243, 243, 243);
   --data-grid-row-deleted-bg: rgb(255, 244, 244);
-  --data-grid-cell-active-bg: rgb(244, 248, 255);
+  --data-grid-cell-active-bg: rgb(219, 234, 254);
   --data-grid-cell-crosshair-row-bg: rgb(174, 195, 224);
   --data-grid-cell-crosshair-col-bg: rgb(142, 170, 210);
   --data-grid-cell-dirty-bg: rgb(255, 248, 230);
@@ -15911,7 +15992,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   --data-grid-row-number-new-bg: rgb(219, 244, 233);
   --data-grid-row-number-edited-bg: rgb(253, 241, 219);
   --data-grid-row-number-deleted-bg: rgb(255, 244, 244);
-  --data-grid-row-number-active-bg: rgb(244, 248, 255);
+  --data-grid-row-number-active-bg: rgb(219, 234, 254);
   --data-grid-row-number-selected-bg: rgb(191, 219, 254);
   --data-grid-scrollbar-thumb: color-mix(in oklch, var(--foreground) 30%, transparent);
   --data-grid-scrollbar-thumb-hover: color-mix(in oklch, var(--foreground) 48%, transparent);
@@ -15929,7 +16010,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   --data-grid-row-muted-bg: rgb(40, 40, 43);
   --data-grid-row-new-bg: rgb(51, 51, 55);
   --data-grid-row-deleted-bg: rgb(55, 31, 32);
-  --data-grid-cell-active-bg: rgb(25, 34, 46);
+  --data-grid-cell-active-bg: rgb(27, 46, 70);
   --data-grid-cell-crosshair-row-bg: rgb(75, 84, 98);
   --data-grid-cell-crosshair-col-bg: rgb(98, 111, 130);
   --data-grid-cell-dirty-bg: rgb(94, 75, 26);
@@ -15945,7 +16026,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   --data-grid-row-number-new-bg: rgb(33, 45, 40);
   --data-grid-row-number-edited-bg: rgb(48, 41, 28);
   --data-grid-row-number-deleted-bg: rgb(55, 31, 32);
-  --data-grid-row-number-active-bg: rgb(25, 34, 46);
+  --data-grid-row-number-active-bg: rgb(27, 46, 70);
   --data-grid-row-number-selected-bg: rgb(30, 64, 96);
   --data-grid-scrollbar-thumb: rgb(82, 82, 91);
   --data-grid-scrollbar-thumb-hover: rgb(113, 113, 122);

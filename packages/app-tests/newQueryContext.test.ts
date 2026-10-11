@@ -142,3 +142,52 @@ test("new query target repairs stale SQLite file paths without changing attached
   assert.equal(stalePathTarget?.database, "main");
   assert.equal(attachedAliasTarget?.database, "analytics");
 });
+
+// Issue #11517: without a tab or sidebar context the fallback must not treat the
+// first *configured* connection as if it were connected, because that silently
+// binds the new editor to a database the user may never have opened.
+test("new query target falls back to the single online connection, not the first configured one", () => {
+  const target = resolveNewQueryTarget({
+    connections: [connection("conn-unused", "unused_db"), connection("conn-online", "online_db")],
+    connectedSqlConnectionIds: new Set(["conn-online"]),
+  });
+
+  assert.deepEqual(target, {
+    connectionId: "conn-online",
+    database: "online_db",
+    schema: undefined,
+    shouldRefreshDefaultDatabase: true,
+  });
+});
+
+test("new query target remains unselected when several configured connections are offline", () => {
+  const target = resolveNewQueryTarget({
+    connections: [connection("conn-first", "first_db"), connection("conn-second", "second_db")],
+    connectedSqlConnectionIds: new Set<string>(),
+  });
+
+  assert.equal(target, null);
+});
+
+test("new query target remains unselected when several SQL connections are online", () => {
+  const target = resolveNewQueryTarget({
+    connections: [connection("conn-first", "first_db"), connection("conn-second", "second_db"), connection("conn-third", "third_db")],
+    connectedSqlConnectionIds: new Set(["conn-second", "conn-third"]),
+  });
+
+  assert.equal(target, null);
+});
+
+test("new query target keeps the sole configured connection as the legacy fallback", () => {
+  const target = resolveNewQueryTarget({
+    connections: [connection("conn-only", "only_db")],
+    connectedSqlConnectionIds: new Set<string>(),
+  });
+
+  assert.deepEqual(target, {
+    connectionId: "conn-only",
+    database: "only_db",
+    schema: undefined,
+    shouldRefreshDefaultDatabase: true,
+  });
+});

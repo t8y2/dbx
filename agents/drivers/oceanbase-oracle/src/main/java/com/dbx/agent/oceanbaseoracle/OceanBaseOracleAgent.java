@@ -918,7 +918,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             String tableName = normalizeObjectName(table);
             String sql = """
                 SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_PRECISION, c.DATA_SCALE,
-                    c.DATA_LENGTH, c.CHAR_LENGTH, c.DATA_DEFAULT, cc.COMMENTS,
+                    c.DATA_LENGTH, c.CHAR_LENGTH, c.CHAR_USED, c.DATA_DEFAULT, cc.COMMENTS,
                     CASE WHEN pk.COLUMN_NAME IS NULL THEN 0 ELSE 1 END AS IS_PK
                 FROM ALL_TAB_COLUMNS c
                 LEFT JOIN ALL_COL_COMMENTS cc
@@ -952,7 +952,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                         Integer charLen = intOrNull(rs, "CHAR_LENGTH");
                         result.add(new ColumnInfo(
                             name,
-                            formatDataType(baseType, numPrec, numScale, dataLen, charLen),
+                            formatDataType(baseType, numPrec, numScale, dataLen, charLen, rs.getString("CHAR_USED")),
                             "Y".equalsIgnoreCase(rs.getString("NULLABLE")),
                             defaultValue,
                             rs.getInt("IS_PK") == 1,
@@ -1532,17 +1532,23 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         return false;
     }
 
-    private static String formatDataType(String base, Integer numPrec, Integer numScale, Integer dataLen, Integer charLen) {
+    private static String formatDataType(String base, Integer numPrec, Integer numScale, Integer dataLen, Integer charLen, String charUsed) {
         if (base == null || base.isBlank()) {
             return "";
         }
         return switch (base.toUpperCase(Locale.ROOT)) {
-            case "VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR" -> {
+            case "VARCHAR2", "CHAR" -> {
+                if ("B".equalsIgnoreCase(charUsed) && dataLen != null) yield base + "(" + dataLen + " BYTE)";
+                if ("C".equalsIgnoreCase(charUsed) && charLen != null) yield base + "(" + charLen + " CHAR)";
+                Integer len = charLen == null ? dataLen : charLen;
+                yield len == null ? base : base + "(" + len + ")";
+            }
+            case "NVARCHAR2", "NCHAR" -> {
                 Integer len = charLen == null ? dataLen : charLen;
                 yield len == null ? base : base + "(" + len + ")";
             }
             case "NUMBER" -> {
-                if (numPrec != null && numScale != null && numScale > 0) {
+                if (numPrec != null && numScale != null && numScale != 0) {
                     yield base + "(" + numPrec + "," + numScale + ")";
                 }
                 if (numPrec != null && numPrec > 0) {

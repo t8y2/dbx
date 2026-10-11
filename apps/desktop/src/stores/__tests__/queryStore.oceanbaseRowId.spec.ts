@@ -101,6 +101,25 @@ describe("OceanBase Oracle query ROWID preparation", () => {
     expect(sql).not.toContain("ROWID");
   });
 
+  it("preserves a business rowid alias and keeps its locator in a distinct hidden column", async () => {
+    const { analyzeEditableQueryEditability } = await import("@/lib/sql/sqlAnalysis");
+    mocks.analyze.mockImplementation(async (sql: string) => analyzeEditableQueryEditability(sql));
+    mocks.getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, is_primary_key: false },
+      { name: "BUSINESS_ROWID", data_type: "VARCHAR2(100)", is_nullable: true, is_primary_key: false },
+    ]);
+    mocks.executeMulti.mockResolvedValue([{ columns: ["ID", "rowid", "__DBX_PK_0", "__DBX_PK_1"], rows: [[6, "physical-6", "visible", "ROW-6"]], affected_rows: 0, execution_time_ms: 1 }]);
+    const originalSql = 'select ID, BUSINESS_ROWID AS "rowid", \'visible\' AS "__DBX_PK_0" from sipf.t_sipf_debug_log order by ID';
+    const { store, id, sql } = await executedQuery(originalSql);
+    expect(sql).toBe('select ID, BUSINESS_ROWID AS "rowid", \'visible\' AS "__DBX_PK_0", ROWIDTOCHAR(ROWID) AS "__DBX_PK_1" from sipf.t_sipf_debug_log order by ID');
+    expect(mocks.preparePlan.mock.calls[0]![0].sql).toBe(sql);
+    const tab = store.tabs.find((item) => item.id === id)!;
+    expect(tab.result?.hidden_column_indexes).toEqual([3]);
+    expect(tab.result?.rows).toEqual([[6, "physical-6", "visible", "ROW-6"]]);
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["ID", "BUSINESS_ROWID", undefined, "__DBX_ROWID"]));
+    expect(tab.tableMeta?.primaryKeys).toEqual(["__DBX_ROWID"]);
+  });
+
   it("hides the projected ROWID while retaining two row identities for editing", async () => {
     const { analyzeEditableQueryEditability } = await import("@/lib/sql/sqlAnalysis");
     mocks.analyze.mockImplementation(async (sql: string) => analyzeEditableQueryEditability(sql));

@@ -12,7 +12,7 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-async function mountNavigator(inputResults?: QueryResult[], canExportXlsx = true, displayMode: "tabs" | "list" = "tabs", activeIndex = 1) {
+async function mountNavigator(inputResults?: QueryResult[], canExportXlsx = true, displayMode: "tabs" | "list" = "tabs", activeIndex = 1, connectionColor?: string) {
   // Include a non-tabular result so ordinal and storage index are different.
   const results = inputResults ?? ([{ columns: [], rows: [] }, ...Array.from({ length: 100 }, (_, i) => ({ columns: ["value"], rows: [[i + 1]], sourceStatement: `SELECT ${i + 1} AS value` }))] as QueryResult[]);
   const select = vi.fn();
@@ -21,7 +21,7 @@ async function mountNavigator(inputResults?: QueryResult[], canExportXlsx = true
   const exportXlsx = vi.fn();
   const container = document.createElement("div");
   document.body.append(container);
-  app = createApp(ResultSetNavigator, { items: tabularResultItems(results), activeIndex, active: true, canExportXlsx, displayMode, onSelect: select, onCopySql: copySql, onCopyQuerySql: copyQuerySql, onExportXlsx: exportXlsx });
+  app = createApp(ResultSetNavigator, { items: tabularResultItems(results), activeIndex, active: true, canExportXlsx, displayMode, connectionColor, onSelect: select, onCopySql: copySql, onCopyQuerySql: copyQuerySql, onExportXlsx: exportXlsx });
   app.use(
     createI18n({
       legacy: false,
@@ -133,12 +133,20 @@ describe("large result-set navigation", () => {
     ["Copy as SQL", "copySql"],
     ["Copy queries", "copyQuerySql"],
     ["Export XLSX", "exportXlsx"],
-  ] as const)("%s only includes selected results matching the batch search", async (action, event) => {
-    const mounted = await mountNavigator([
-      { columns: [], rows: [] },
-      { columns: ["id"], rows: [[1]], sourceLabel: "apis", sourceStatement: "SELECT * FROM apis" },
-      { columns: ["id"], rows: [[2]], sourceLabel: "menus", sourceStatement: "SELECT * FROM menus WHERE enabled = true" },
-    ]);
+  ] as const)("%s preserves connection colors and only includes selected results matching the batch search", async (action, event) => {
+    const mounted = await mountNavigator(
+      [
+        { columns: [], rows: [] },
+        { columns: ["id"], rows: [[1]], sourceLabel: "apis", sourceStatement: "SELECT * FROM apis" },
+        { columns: ["id"], rows: [[2]], sourceLabel: "menus", sourceStatement: "SELECT * FROM menus WHERE enabled = true" },
+      ],
+      true,
+      "tabs",
+      1,
+      "#ef4444",
+    );
+    const markers = [...mounted.container.querySelectorAll<HTMLElement>("[data-result-connection-color]")];
+    expect(markers.map((marker) => marker.style.backgroundColor)).toEqual(["#ef4444", "#ef4444"]);
     const { popup, filter } = await openBatchMenu(mounted.container);
     await filter("APIS");
     expect(popup.querySelectorAll('input[type="checkbox"]')).toHaveLength(1);
@@ -152,6 +160,7 @@ describe("large result-set navigation", () => {
     expect(mounted[event]).toHaveBeenCalledOnce();
     expect(mounted[event].mock.calls[0]?.[0].map((item: { index: number }) => item.index)).toEqual([2]);
     expect(mounted.select).not.toHaveBeenCalled();
+    expect(markers.every((marker) => marker.isConnected && marker.style.backgroundColor === "#ef4444")).toBe(true);
   });
 
   it("disables XLSX export when the result view is inactive", async () => {
@@ -191,11 +200,12 @@ describe("large result-set navigation", () => {
   });
 
   it("renders a dropdown selector instead of horizontal tabs when displayMode is list", async () => {
-    const { container, select } = await mountNavigator(undefined, true, "list");
+    const { container, select } = await mountNavigator(undefined, true, "list", 1, "#ef4444");
     expect(container.querySelector(".result-set-scroll")).toBeNull();
     const trigger = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Result 1"))!;
     expect(trigger).toBeTruthy();
     expect(trigger.querySelector("svg")).toBeTruthy();
+    expect(trigger.querySelector<HTMLElement>("[data-result-connection-color]")?.style.backgroundColor).toBe("#ef4444");
     // No separate "All results (100)" button in list mode
     expect([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("All results"))).toBe(false);
 
@@ -213,10 +223,11 @@ describe("large result-set navigation", () => {
 
   it("renders a single result item without dropdown chevron in list mode when there is only one result", async () => {
     const single: QueryResult = { columns: ["id"], rows: [[1]], sourceStatement: "SELECT 1" };
-    const { container } = await mountNavigator([single], true, "list", 0);
+    const { container } = await mountNavigator([single], true, "list", 0, "#ef4444");
     expect(container.querySelector(".result-set-scroll")).toBeNull();
     const button = container.querySelector<HTMLButtonElement>("button")!;
     expect(button.textContent?.trim()).toBe("Result 1");
+    expect(button.querySelector<HTMLElement>("[data-result-connection-color]")?.style.backgroundColor).toBe("#ef4444");
     // No dropdown chevron
     expect(button.querySelector("svg")).toBeNull();
   });

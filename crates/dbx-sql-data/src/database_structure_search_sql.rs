@@ -73,13 +73,7 @@ pub fn build_database_structure_search_sql(
         }
         DatabaseType::ClickHouse => clickhouse_structure_search_sql(&options.database, &pattern_literal, limit),
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => {
-            oracle_family_structure_search_sql(
-                database_type,
-                options.schema.as_deref(),
-                &options.database,
-                &pattern_literal,
-                limit,
-            )
+            oracle_family_structure_search_sql(options.schema.as_deref(), &options.database, &pattern_literal, limit)
         }
         DatabaseType::SqlServer => sqlserver_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
         DatabaseType::Tdengine => tdengine_structure_search_sql(&options.database, &pattern_literal, limit),
@@ -109,13 +103,7 @@ pub fn build_database_structure_search_sql(
             postgres_family_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit)
         }
         DatabaseType::Jdbc if driver_profile_is_oracle(options.driver_profile.as_deref()) => {
-            oracle_family_structure_search_sql(
-                DatabaseType::Oracle,
-                options.schema.as_deref(),
-                &options.database,
-                &pattern_literal,
-                limit,
-            )
+            oracle_family_structure_search_sql(options.schema.as_deref(), &options.database, &pattern_literal, limit)
         }
         _ => return None,
     };
@@ -223,7 +211,6 @@ fn clickhouse_structure_search_sql(database: &str, pattern_literal: &str, limit:
 }
 
 fn oracle_family_structure_search_sql(
-    database_type: DatabaseType,
     schema: Option<&str>,
     database: &str,
     pattern_literal: &str,
@@ -231,7 +218,7 @@ fn oracle_family_structure_search_sql(
 ) -> String {
     let owner = schema.filter(|value| !value.trim().is_empty()).unwrap_or(database);
     let owner_literal = sql_string_literal(owner);
-    let name_expr = if database_type == DatabaseType::Dameng { "LOWER(c.COLUMN_NAME)" } else { "LOWER(c.COLUMN_NAME)" };
+    let name_expr = "LOWER(c.COLUMN_NAME)";
     let bounded = format!(
         "SELECT * FROM ( \
          SELECT c.OWNER AS object_schema, c.TABLE_NAME AS object_name, c.COLUMN_NAME AS column_name, m.COMMENTS AS column_comment \

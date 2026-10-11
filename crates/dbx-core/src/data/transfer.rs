@@ -5284,9 +5284,124 @@ fn rewrite_sqlserver_bracketed_schema_qualifier(ddl: &str, source_schema: &str, 
     if source_schema == target_schema || source_schema.is_empty() {
         return ddl.to_string();
     }
-    let source = format!("[{}].", source_schema.replace(']', "]]"));
-    let target = format!("[{}].", target_schema.replace(']', "]]"));
-    map_sql_code_spans(ddl, false, |code| code.replace(&source, &target))
+    let source_identifier = format!("[{}]", source_schema.replace(']', "]]"));
+    let target_identifier = format!("[{}]", target_schema.replace(']', "]]"));
+    let source_literal = format!("N'{}'", source_schema.replace('\'', "''"));
+    let target_literal = format!("N'{}'", target_schema.replace('\'', "''"));
+    let tokens = sqlserver_ddl_tokens(ddl);
+    let token_text = |token: &(usize, usize)| &ddl[token.0..token.1];
+    let mut output = String::with_capacity(ddl.len());
+    let mut previous = 0;
+
+    for statement in tokens.split(|token| token_text(token) == ";") {
+        let has_argument = |name: &str, value: &str| {
+            statement.windows(3).any(|argument| {
+                token_text(&argument[0]).eq_ignore_ascii_case(name)
+                    && token_text(&argument[1]) == "="
+                    && token_text(&argument[2]).eq_ignore_ascii_case(value)
+            })
+        };
+        let generated_comment = statement.len() >= 4
+            && matches!(token_text(&statement[0]).to_ascii_uppercase().as_str(), "EXEC" | "EXECUTE")
+            && token_text(&statement[1]).eq_ignore_ascii_case("sys")
+            && token_text(&statement[2]) == "."
+            && token_text(&statement[3]).eq_ignore_ascii_case("sp_addextendedproperty")
+            && has_argument("@name", "N'MS_Description'")
+            && has_argument("@level0type", "N'SCHEMA'")
+            && has_argument("@level1type", "N'TABLE'");
+
+        for (index, token) in statement.iter().enumerate() {
+            let replacement = if token_text(token) == source_identifier
+                && statement.get(index + 1).is_some_and(|next| token_text(next) == ".")
+            {
+                &target_identifier
+            } else if generated_comment
+                && token_text(token) == source_literal
+                && index >= 2
+                && token_text(&statement[index - 2]).eq_ignore_ascii_case("@level0name")
+                && token_text(&statement[index - 1]) == "="
+            {
+                &target_literal
+            } else {
+                continue;
+            };
+            output.push_str(&ddl[previous..token.0]);
+            output.push_str(replacement);
+            previous = token.1;
+        }
+    }
+    output.push_str(&ddl[previous..]);
+    output
+}
+
+fn sqlserver_ddl_tokens(ddl: &str) -> Vec<(usize, usize)> {
+    let bytes = ddl.as_bytes();
+    let mut tokens = Vec::new();
+    let mut position = 0;
+    while position < bytes.len() {
+        if bytes[position].is_ascii_whitespace() {
+            position += 1;
+            continue;
+        }
+        if bytes[position..].starts_with(b"--") {
+            while position < bytes.len() && !matches!(bytes[position], b'\n' | b'\r') {
+                position += 1;
+            }
+            continue;
+        }
+        if bytes[position..].starts_with(b"/*") {
+            let mut depth = 1;
+            position += 2;
+            while position < bytes.len() && depth > 0 {
+                if bytes[position..].starts_with(b"/*") {
+                    depth += 1;
+                    position += 2;
+                } else if bytes[position..].starts_with(b"*/") {
+                    depth -= 1;
+                    position += 2;
+                } else {
+                    position += 1;
+                }
+            }
+            continue;
+        }
+
+        let start = position;
+        if matches!(bytes[position], b'N' | b'n') && bytes.get(position + 1) == Some(&b'\'') {
+            position += 1;
+        }
+        if matches!(bytes[position], b'\'' | b'"' | b'[') {
+            let delimiter = if bytes[position] == b'[' { b']' } else { bytes[position] };
+            position += 1;
+            while position < bytes.len() {
+                if bytes[position] == delimiter {
+                    position += 1;
+                    if bytes.get(position) == Some(&delimiter) {
+                        position += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    position += 1;
+                }
+            }
+        } else if bytes[position].is_ascii_alphanumeric()
+            || matches!(bytes[position], b'_' | b'@' | b'#' | b'$')
+            || !bytes[position].is_ascii()
+        {
+            while position < bytes.len()
+                && (bytes[position].is_ascii_alphanumeric()
+                    || matches!(bytes[position], b'_' | b'@' | b'#' | b'$')
+                    || !bytes[position].is_ascii())
+            {
+                position += 1;
+            }
+        } else {
+            position += 1;
+        }
+        tokens.push((start, position));
+    }
+    tokens
 }
 
 /// Rewrites the table identifier of the leading CREATE TABLE statement of a reused
@@ -16998,6 +17113,79 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
         )
         .unwrap();
         assert_eq!(rewritten, "CREATE TABLE [plain].[t] ([id] int);");
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_retargets_generated_table_and_column_comments() {
+        let columns = vec![db::ColumnInfo {
+            name: "src".into(),
+            data_type: "nvarchar(50)".into(),
+            comment: Some("column src [src]. C:\\".into()),
+            ..Default::default()
+        }];
+        let ddl =
+            crate::schema::render_sqlserver_table_ddl("src", "src", &columns, &[], &[], Some("table's src [src]."));
+        let rewritten = rewrite_sqlserver_bracketed_schema_qualifier(&ddl, "src", "dst'雪]");
+
+        assert!(rewritten.contains("CREATE TABLE [dst'雪]]].[src]"), "{rewritten}");
+        assert_eq!(rewritten.matches("@level0name=N'dst''雪]'").count(), 2, "{rewritten}");
+        assert!(rewritten.contains("@value=N'table''s src [src].'"), "{rewritten}");
+        assert!(rewritten.contains("@value=N'column src [src]. C:\\'"), "{rewritten}");
+        assert_eq!(rewritten.matches("@level1name=N'src'").count(), 2, "{rewritten}");
+        assert!(rewritten.contains("@level2name=N'src'"), "{rewritten}");
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_keeps_windows_defaults_and_rewrites_later_qualifiers() {
+        let ddl = "CREATE TABLE [src].[child] (\n  [path] nvarchar(50) DEFAULT ('C:\\'),\n  [note] nvarchar(50) DEFAULT (N'it''s [src]. C:\\'),\n  [id] int,\n  FOREIGN KEY ([id]) REFERENCES [src].[parent]([id])\n);\nCREATE INDEX [ix] ON [src].[child] ([id]);";
+        let expected = ddl
+            .replace("CREATE TABLE [src].", "CREATE TABLE [dst].")
+            .replace("REFERENCES [src].", "REFERENCES [dst].")
+            .replace("ON [src].", "ON [dst].");
+        assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(ddl, "src", "dst"), expected);
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_handles_schema_token_characters_and_comment_owners() {
+        for source_schema in ["sales#old", "o'connor", "we]ird", "other[src", "we--ird", "we/*ird", "雪#'[]"] {
+            let source_identifier = format!("[{}]", source_schema.replace(']', "]]"));
+            let source_literal = format!("N'{}'", source_schema.replace('\'', "''"));
+            let ddl = format!("CREATE TABLE {source_identifier}.[t] ([id] int);\nEXEC sys.sp_addextendedproperty @name=N'MS_Description', @value={source_literal}, @level0type=N'SCHEMA', @level0name={source_literal}, @level1type=N'TABLE', @level1name=N't';");
+            let rewritten = rewrite_sqlserver_bracketed_schema_qualifier(&ddl, source_schema, "dst");
+            let expected = ddl
+                .replace(&format!("CREATE TABLE {source_identifier}."), "CREATE TABLE [dst].")
+                .replace(&format!("@level0name={source_literal}"), "@level0name=N'dst'");
+            assert_eq!(rewritten, expected, "source schema: {source_schema}");
+        }
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_preserves_nested_comments_and_whole_third_party_identifiers() {
+        let ddl = "/* outer /* inner */ [src].[comment] ' # */\n-- [src].[line]\rCREATE TABLE [src] /* [src]. */ . [child] (\n  [name#'/*[src]]] int,\n  [other] int,\n  [note] nvarchar(50) DEFAULT '/* [src]. */',\n  FOREIGN KEY ([other]) REFERENCES [other[src].[parent]([id]),\n  FOREIGN KEY ([name#'/*[src]]]) REFERENCES [other]]src].[parent]([id])\n);";
+        let expected = ddl.replace("CREATE TABLE [src]", "CREATE TABLE [dst]");
+        assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(ddl, "src", "dst"), expected);
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_rewrites_only_generated_extended_property_schema_arguments() {
+        let generated = "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'src', @level0type=N'SCHEMA', @level0name=N'src', @level1type=N'TABLE', @level1name=N'src';";
+        for unrelated in [
+            generated.replace("sys.sp_addextendedproperty", "dbo.sp_addextendedproperty"),
+            generated.replace("sp_addextendedproperty", "sp_updateextendedproperty"),
+            generated.replace("N'MS_Description'", "N'OtherProperty'"),
+            generated.replace("N'SCHEMA'", "N'USER'"),
+            generated.replace("N'TABLE'", "N'VIEW'"),
+            format!("/* {generated} */"),
+            format!("SELECT N'{}';", generated.replace('\'', "''")),
+        ] {
+            assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(&unrelated, "src", "dst"), unrelated);
+        }
+        assert_eq!(
+            rewrite_sqlserver_bracketed_schema_qualifier(generated, "src", "dst"),
+            generated.replace("@level0name=N'src'", "@level0name=N'dst'")
+        );
+        assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(generated, "src", "src"), generated);
+        assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(generated, "", "dst"), generated);
     }
 
     #[test]

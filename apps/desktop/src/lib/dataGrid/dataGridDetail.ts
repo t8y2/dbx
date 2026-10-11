@@ -1,7 +1,7 @@
 import { cellImagePreviewUrl } from "@/lib/dataGrid/cellImageUrl";
 import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
 import { clipboardCellValue, displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
-import { formatJsonText } from "@/lib/dataGrid/cellDetailPresentation";
+import { formatJsonText, looksLikeJsonContainerText } from "@/lib/dataGrid/cellDetailPresentation";
 import { cqlLiteralToJsonText } from "@/lib/dataGrid/cqlLiteralJson";
 import type { DatabaseType } from "@/types/database";
 
@@ -307,8 +307,7 @@ function detailFormattedJson(value: string, databaseType: DatabaseType | undefin
 }
 
 function looksLikeJsonContainer(text: string): boolean {
-  const trimmed = text.trim();
-  return trimmed.startsWith("{") || trimmed.startsWith("[");
+  return looksLikeJsonContainerText(text);
 }
 
 function previewText(text: string): string {

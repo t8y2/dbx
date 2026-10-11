@@ -171,6 +171,10 @@ describe("Cassandra collection cell detail presentation", () => {
     expect(detailFor("{'color': 'blue'}")!.formattedJson).toBe("");
     expect(detailFor("not a literal", "cassandra")!.formattedJson).toBe("");
   });
+
+  it("formats serialized JSON strings into formattedJson (issue #11636)", () => {
+    expect(detailFor('"{\\"abc\\":\\"\\"}"')!.formattedJson).toBe('{\n  "abc": ""\n}');
+  });
 });
 
 describe("Mongo collection cell detail presentation", () => {

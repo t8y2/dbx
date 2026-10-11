@@ -1629,12 +1629,24 @@ async function closeCurrentQueryResult() {
 }
 
 async function selectResultRun(runId: string) {
+  if (runId !== props.activeTab.activeResultRunId) dispatchBeforeResultTabSwitch();
   if (!(await queryStore.setActiveResultRun(props.activeTab.id, runId))) {
     toast(t("tabs.missingResultRun"), 4000);
     return false;
   }
   emit("update:activeOutputView", props.activeTab.id, "result");
   return true;
+}
+
+/**
+ * Result-set tabs share one query tab, but switching them still replaces the
+ * mounted DataGrid instance. Give the grid the same pre-switch boundary used
+ * by editor tabs so it snapshots its viewport and selection before the store
+ * changes the active result.
+ */
+function dispatchBeforeResultTabSwitch() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("dbx:before-tab-switch", { detail: { tabId: props.activeTab.id, fromTabId: props.activeTab.id } }));
 }
 
 /**
@@ -1676,6 +1688,7 @@ function toggleResultAutoSave() {
 }
 
 function selectResultItem(item: (typeof visibleResultItems.value)[number]) {
+  if (item.index !== (props.activeTab.activeResultIndex ?? 0)) dispatchBeforeResultTabSwitch();
   queryStore.setActiveResultIndex(props.activeTab.id, item.index);
   emit("update:activeOutputView", props.activeTab.id, "result");
   const range = resultSourceRange(props.activeTab.sql, item.result, item.index, activeEffectiveDatabaseType.value, activeSqlStatementParameterOptions.value) ?? null;

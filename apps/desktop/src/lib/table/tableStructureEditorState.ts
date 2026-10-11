@@ -1217,6 +1217,22 @@ export function filterStructureIndexColumnOptions(availableColumns: readonly str
   return query ? options.filter((column) => column.toLowerCase().includes(query)) : options;
 }
 
+/**
+ * Order index-column picker rows: picked columns first in their index order,
+ * then unpicked columns alphabetically (case-insensitive, numeric-aware) so a
+ * long field list is scannable (#11747).
+ */
+export function sortStructureIndexColumnOptions<T extends { name: string }>(options: readonly T[], selectedPositions: ReadonlyMap<string, number>): T[] {
+  return [...options].sort((left, right) => {
+    const leftPicked = selectedPositions.get(left.name);
+    const rightPicked = selectedPositions.get(right.name);
+    if (leftPicked !== undefined || rightPicked !== undefined) {
+      return (leftPicked ?? Number.MAX_SAFE_INTEGER) - (rightPicked ?? Number.MAX_SAFE_INTEGER);
+    }
+    return left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true });
+  });
+}
+
 export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[] {
   return indexes.map((index) => ({
     id: `existing:${index.name}`,

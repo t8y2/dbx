@@ -197,7 +197,7 @@ async function startSearch() {
   running.value = true;
   loadingTables.value = true;
   activeKeyword.value = keyword.value.trim();
-  activePerTableLimit.value = Math.min(100, Math.max(1, Math.trunc(Number(perTableLimit.value) || 20)));
+  activePerTableLimit.value = Math.min(500, Math.max(1, Math.trunc(Number(perTableLimit.value) || 20)));
   emitState();
 
   try {
@@ -279,8 +279,14 @@ async function runStructureSearch(currentRun: number) {
     const schemaNames = props.schema ? [props.schema] : isSchemaAware(databaseType) ? filterSearchSchemas(await api.listSchemas(props.connectionId, props.database)) : [undefined];
     const limit = Math.min(5000, Math.max(1, activePerTableLimit.value * 10));
     const merged: DatabaseSearchResultItem[] = [];
+    const tableTypeByName = new Map<string, string>();
     for (const schema of schemaNames) {
       if (currentRun !== runId || cancelled.value) return;
+      const resolvedSchema = schema ?? props.database;
+      const catalogTables = await api.listTables(props.connectionId, props.database, resolvedSchema);
+      for (const table of catalogTables) {
+        tableTypeByName.set(table.name, table.table_type);
+      }
       const hits = await runDatabaseStructureSearch({
         connectionId: props.connectionId,
         databaseType,
@@ -289,21 +295,22 @@ async function runStructureSearch(currentRun: number) {
         schema,
         term: activeKeyword.value,
         limit,
+        executionId,
+        shouldAbort: () => currentRun !== runId || cancelled.value,
         listTables: async (taskSchema) => {
-          const resolvedSchema = taskSchema || props.database;
-          const tables = await api.listTables(props.connectionId, props.database, resolvedSchema);
+          const listSchema = taskSchema || props.database;
+          const tables = await api.listTables(props.connectionId, props.database, listSchema);
           return tables.filter(isSearchableTable);
         },
         getColumns: (taskSchema, tableName) => api.getColumns(props.connectionId, props.database, taskSchema, tableName),
-        executeQuery: (sql, runId) => api.executeQuery(props.connectionId, props.database, sql, undefined, runId),
-        makeExecutionId,
+        executeQuery: (sql, runExecutionId) => api.executeQuery(props.connectionId, props.database, sql, undefined, runExecutionId),
       });
       for (const [index, hit] of hits.entries()) {
         merged.push({
           id: `${hit.schema ? `${hit.schema}.` : ""}${hit.tableName}:${hit.columnName}:${index}`,
           schema: hit.schema ?? schema,
           tableName: hit.tableName,
-          tableType: "TABLE",
+          tableType: hit.tableType ?? tableTypeByName.get(hit.tableName) ?? "UNKNOWN",
           matchedColumns: [hit.columnName],
           preview: structureHitPreview(hit),
           whereInput: "",

@@ -77,25 +77,8 @@ pub fn build_database_structure_search_sql(
         }
         DatabaseType::SqlServer => sqlserver_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
         DatabaseType::Tdengine => tdengine_structure_search_sql(&options.database, &pattern_literal, limit),
-        DatabaseType::Db2 => db2_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Hive | DatabaseType::Spark | DatabaseType::Impala | DatabaseType::Kyuubi => {
-            hive_family_structure_search_sql(&options.database, options.schema.as_deref(), &pattern_literal, limit)
-        }
         DatabaseType::Snowflake => snowflake_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
         DatabaseType::Gbase => gbase_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Firebird => firebird_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Informix => informix_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Cassandra => cassandra_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Iris => iris_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::SapHana => saphana_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Teradata => teradata_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Vertica => vertica_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Exasol => exasol_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Databend => databend_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Questdb => questdb_structure_search_sql(&pattern_literal, limit),
-        DatabaseType::PrestoSql | DatabaseType::Trino => {
-            presto_family_structure_search_sql(&options.database, options.schema.as_deref(), &pattern_literal, limit)
-        }
         DatabaseType::Jdbc if driver_profile_is_mysql(options.driver_profile.as_deref()) => {
             mysql_family_structure_search_sql(&options.database, options.schema.as_deref(), &pattern_literal, limit)
         }
@@ -271,46 +254,6 @@ fn tdengine_structure_search_sql(database: &str, pattern_literal: &str, limit: u
     )
 }
 
-fn db2_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
-    let schema_filter = if let Some(schema) = schema.filter(|value| !value.trim().is_empty()) {
-        format!(" AND c.TABSCHEMA = {}", sql_string_literal(schema))
-    } else {
-        String::new()
-    };
-    format!(
-        "SELECT c.TABSCHEMA AS object_schema, c.TABNAME AS object_name, c.COLNAME AS column_name, \
-         COALESCE(r.REMARKS, '') AS column_comment \
-         FROM SYSCAT.COLUMNS c \
-         LEFT JOIN SYSCAT.COLUMNS r ON r.TABSCHEMA = c.TABSCHEMA AND r.TABNAME = c.TABNAME AND r.COLNAME = c.COLNAME \
-         WHERE (LOWER(c.COLNAME) LIKE LOWER({pattern}) ESCAPE '~' OR LOWER(COALESCE(r.REMARKS, '')) LIKE LOWER({pattern}) ESCAPE '~') \
-         {schema_filter} \
-         FETCH FIRST {limit} ROWS ONLY",
-        pattern = pattern_literal,
-        schema_filter = schema_filter,
-        limit = limit,
-    )
-}
-
-fn hive_family_structure_search_sql(
-    database: &str,
-    schema: Option<&str>,
-    pattern_literal: &str,
-    limit: usize,
-) -> String {
-    let schema_name = schema.filter(|value| !value.trim().is_empty()).unwrap_or(database);
-    format!(
-        "SELECT table_schema AS object_schema, table_name AS object_name, column_name AS column_name, comment AS column_comment \
-         FROM information_schema.columns \
-         WHERE table_schema = {schema} \
-         AND (LOWER(column_name) LIKE LOWER({pattern}) ESCAPE '~' OR LOWER(COALESCE(comment, '')) LIKE LOWER({pattern}) ESCAPE '~') \
-         ORDER BY table_name, ordinal_position \
-         LIMIT {limit}",
-        schema = sql_string_literal(schema_name),
-        pattern = pattern_literal,
-        limit = limit,
-    )
-}
-
 fn snowflake_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
     let schema_filter = if let Some(schema) = schema.filter(|value| !value.trim().is_empty()) {
         format!(" AND table_schema = {}", sql_string_literal(schema))
@@ -333,135 +276,6 @@ fn snowflake_structure_search_sql(schema: Option<&str>, pattern_literal: &str, l
 fn gbase_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
     let database = schema.filter(|value| !value.trim().is_empty()).unwrap_or("gbase");
     mysql_family_structure_search_sql(database, schema, pattern_literal, limit)
-}
-
-fn firebird_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
-    let _ = schema;
-    format!(
-        "SELECT TRIM(r.RDB$OWNER_NAME) AS object_schema, TRIM(r.RDB$RELATION_NAME) AS object_name, \
-         TRIM(f.RDB$FIELD_NAME) AS column_name, CAST(NULL AS VARCHAR(4000)) AS column_comment \
-         FROM RDB$RELATION_FIELDS f \
-         JOIN RDB$RELATIONS r ON r.RDB$RELATION_NAME = f.RDB$RELATION_NAME \
-         WHERE COALESCE(r.RDB$SYSTEM_FLAG, 0) = 0 \
-         AND LOWER(TRIM(f.RDB$FIELD_NAME)) LIKE LOWER({pattern}) ESCAPE '~' \
-         ORDER BY object_schema, object_name \
-         ROWS {limit}",
-        pattern = pattern_literal,
-        limit = limit,
-    )
-}
-
-fn informix_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
-    let owner_filter = if let Some(schema) = schema.filter(|value| !value.trim().is_empty()) {
-        format!(" AND c.owner = {}", sql_string_literal(schema))
-    } else {
-        String::new()
-    };
-    format!(
-        "SELECT c.owner AS object_schema, c.tabname AS object_name, c.colname AS column_name, c.coltype AS column_comment \
-         FROM syscolumns c \
-         WHERE LOWER(c.colname) LIKE LOWER({pattern}) ESCAPE '~' \
-         {owner_filter} \
-         ORDER BY c.owner, c.tabname, c.colno \
-         FIRST {limit}",
-        pattern = pattern_literal,
-        owner_filter = owner_filter,
-        limit = limit,
-    )
-}
-
-fn cassandra_structure_search_sql(keyspace: Option<&str>, pattern_literal: &str, limit: usize) -> String {
-    let keyspace_filter = if let Some(keyspace) = keyspace.filter(|value| !value.trim().is_empty()) {
-        format!(" AND keyspace_name = {}", sql_string_literal(keyspace))
-    } else {
-        String::new()
-    };
-    format!(
-        "SELECT keyspace_name AS object_schema, table_name AS object_name, column_name AS column_name, \
-         CAST(NULL AS TEXT) AS column_comment \
-         FROM system_schema.columns \
-         WHERE LOWER(column_name) LIKE LOWER({pattern}) ESCAPE '~' \
-         {keyspace_filter} \
-         LIMIT {limit} ALLOW FILTERING",
-        pattern = pattern_literal,
-        keyspace_filter = keyspace_filter,
-        limit = limit,
-    )
-}
-
-fn iris_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
-    sqlserver_structure_search_sql(schema, pattern_literal, limit)
-}
-
-fn saphana_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
-    let schema_filter = if let Some(schema) = schema.filter(|value| !value.trim().is_empty()) {
-        format!(" AND SCHEMA_NAME = {}", sql_string_literal(schema))
-    } else {
-        String::new()
-    };
-    format!(
-        "SELECT SCHEMA_NAME AS object_schema, TABLE_NAME AS object_name, COLUMN_NAME AS column_name, COMMENTS AS column_comment \
-         FROM SYS.TABLE_COLUMNS \
-         WHERE (LOWER(COLUMN_NAME) LIKE LOWER({pattern}) ESCAPE '~' OR LOWER(COALESCE(COMMENTS, '')) LIKE LOWER({pattern}) ESCAPE '~') \
-         {schema_filter} \
-         ORDER BY SCHEMA_NAME, TABLE_NAME, POSITION \
-         LIMIT {limit}",
-        pattern = pattern_literal,
-        schema_filter = schema_filter,
-        limit = limit,
-    )
-}
-
-fn teradata_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
-    let database_filter = if let Some(schema) = schema.filter(|value| !value.trim().is_empty()) {
-        format!(" AND DatabaseName = {}", sql_string_literal(schema))
-    } else {
-        String::new()
-    };
-    format!(
-        "SELECT DatabaseName AS object_schema, TableName AS object_name, ColumnName AS column_name, ColumnTitle AS column_comment \
-         FROM DBC.ColumnsV \
-         WHERE (LOWER(ColumnName) LIKE LOWER({pattern}) ESCAPE '~' OR LOWER(COALESCE(ColumnTitle, '')) LIKE LOWER({pattern}) ESCAPE '~') \
-         {database_filter} \
-         QUALIFY ROW_NUMBER() OVER (ORDER BY DatabaseName, TableName, ColumnId) <= {limit}",
-        pattern = pattern_literal,
-        database_filter = database_filter,
-        limit = limit,
-    )
-}
-
-fn vertica_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
-    postgres_family_structure_search_sql(schema, pattern_literal, limit)
-}
-
-fn exasol_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
-    snowflake_structure_search_sql(schema, pattern_literal, limit)
-}
-
-fn databend_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
-    snowflake_structure_search_sql(schema, pattern_literal, limit)
-}
-
-fn questdb_structure_search_sql(pattern_literal: &str, limit: usize) -> String {
-    format!(
-        "SELECT table_schema AS object_schema, table_name AS object_name, column_name AS column_name, \
-         CAST(NULL AS VARCHAR) AS column_comment \
-         FROM information_schema.columns \
-         WHERE LOWER(column_name) LIKE LOWER({pattern}) ESCAPE '~' \
-         ORDER BY table_name, ordinal_position \
-         LIMIT {limit}",
-        pattern = pattern_literal,
-        limit = limit,
-    )
-}
-
-fn presto_family_structure_search_sql(
-    database: &str,
-    schema: Option<&str>,
-    pattern_literal: &str,
-    limit: usize,
-) -> String {
-    hive_family_structure_search_sql(database, schema, pattern_literal, limit)
 }
 
 fn clean_term(term: &str) -> String {
@@ -544,5 +358,47 @@ mod tests {
     fn supports_flag_matches_builder() {
         assert!(supports_database_structure_search(Some(DatabaseType::Mysql), None));
         assert!(!supports_database_structure_search(Some(DatabaseType::Redis), None));
+    }
+
+    #[test]
+    fn dropped_engines_return_none() {
+        for database_type in [
+            DatabaseType::Cassandra,
+            DatabaseType::Informix,
+            DatabaseType::Iris,
+            DatabaseType::Hive,
+            DatabaseType::Spark,
+            DatabaseType::Impala,
+            DatabaseType::Kyuubi,
+            DatabaseType::Exasol,
+            DatabaseType::Vertica,
+            DatabaseType::Db2,
+            DatabaseType::Firebird,
+            DatabaseType::SapHana,
+            DatabaseType::Teradata,
+            DatabaseType::Databend,
+            DatabaseType::Questdb,
+            DatabaseType::PrestoSql,
+            DatabaseType::Trino,
+        ] {
+            assert_eq!(
+                build_database_structure_search_sql(DatabaseStructureSearchSqlOptions {
+                    database_type: Some(database_type),
+                    driver_profile: None,
+                    database: "app".to_string(),
+                    schema: None,
+                    term: "col".to_string(),
+                    limit: Some(10),
+                }),
+                None,
+                "expected no SQL for {:?}",
+                database_type
+            );
+            assert!(
+                !supports_database_structure_search(Some(database_type), None),
+                "supports should be false for {:?}",
+                database_type
+            );
+        }
     }
 }

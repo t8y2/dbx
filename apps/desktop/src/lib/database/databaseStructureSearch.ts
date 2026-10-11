@@ -21,6 +21,7 @@ export interface DatabaseStructureSearchSql {
 export interface DatabaseStructureSearchHit {
   schema?: string;
   tableName: string;
+  tableType?: string;
   columnName: string;
   columnComment?: string;
   matchedIn: Array<"name" | "comment">;
@@ -34,10 +35,11 @@ export interface DatabaseStructureSearchOptions {
   schema?: string;
   term: string;
   limit?: number;
+  executionId: string;
+  shouldAbort?: () => boolean;
   listTables: (schema?: string) => Promise<Array<{ name: string; table_type: string }>>;
   getColumns: (schema: string, tableName: string) => Promise<ColumnInfo[]>;
   executeQuery: (sql: string, executionId: string) => Promise<{ columns: string[]; rows: unknown[][] }>;
-  makeExecutionId: () => string;
 }
 
 function cleanTerm(term: string): string {
@@ -70,6 +72,7 @@ export function mapStructureSearchRows(columns: string[], rows: unknown[][], ter
     const record = normalizeRow(columns, row);
     const schema = asString(record.object_schema) || undefined;
     const tableName = asString(record.object_name);
+    const tableType = asString(record.object_type) || undefined;
     const columnName = asString(record.column_name);
     const columnComment = asString(record.column_comment) || undefined;
     if (!tableName || !columnName) continue;
@@ -77,7 +80,7 @@ export function mapStructureSearchRows(columns: string[], rows: unknown[][], ter
     if (termMatches(columnName, query)) matchedIn.push("name");
     if (termMatches(columnComment, query)) matchedIn.push("comment");
     if (!matchedIn.length) continue;
-    hits.push({ schema, tableName, columnName, columnComment, matchedIn });
+    hits.push({ schema, tableName, tableType, columnName, columnComment, matchedIn });
   }
   return hits;
 }
@@ -101,6 +104,7 @@ export async function supportsDatabaseStructureSearchBackend(databaseType?: Data
 }
 
 export async function runSqlCatalogStructureSearch(options: DatabaseStructureSearchOptions): Promise<DatabaseStructureSearchHit[]> {
+  if (options.shouldAbort?.()) return [];
   const query = await buildDatabaseStructureSearchSql({
     databaseType: options.databaseType,
     driverProfile: options.driverProfile,
@@ -109,19 +113,20 @@ export async function runSqlCatalogStructureSearch(options: DatabaseStructureSea
     term: options.term,
     limit: options.limit,
   });
-  if (!query?.sql) return [];
-  const executionId = options.makeExecutionId();
-  const result = await options.executeQuery(query.sql, executionId);
+  if (!query?.sql || options.shouldAbort?.()) return [];
+  const result = await options.executeQuery(query.sql, options.executionId);
+  if (options.shouldAbort?.()) return [];
   return mapStructureSearchRows(result.columns, result.rows, options.term);
 }
 
 async function runDocumentStructureSearch(options: DatabaseStructureSearchOptions): Promise<DatabaseStructureSearchHit[]> {
   const query = cleanTerm(options.term);
-  if (!query) return [];
+  if (!query || options.shouldAbort?.()) return [];
   const limit = Math.min(5000, Math.max(1, options.limit ?? 200));
   const hits: DatabaseStructureSearchHit[] = [];
   const tables = await options.listTables(options.schema);
   for (const table of tables) {
+    if (options.shouldAbort?.()) return hits;
     if (hits.length >= limit) break;
     const schema = options.schema || options.database;
     let columns: ColumnInfo[] = [];
@@ -139,6 +144,7 @@ async function runDocumentStructureSearch(options: DatabaseStructureSearchOption
       hits.push({
         schema: options.schema,
         tableName: table.name,
+        tableType: table.table_type,
         columnName: column.name,
         columnComment: comment,
         matchedIn,

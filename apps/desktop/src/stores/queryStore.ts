@@ -206,6 +206,48 @@ function cloneTabDraft<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+export interface ClosedTabHistoryEntry {
+  tab: QueryTab;
+  groupId?: string;
+  indexInGroup?: number;
+}
+
+function snapshotClosedTab(tab: QueryTab): QueryTab {
+  return {
+    ...tab,
+    isExecuting: false,
+    isCancelling: false,
+    queryExecutionStartedAt: undefined,
+    executionId: undefined,
+    executingResultRunId: undefined,
+    isExplaining: false,
+    explainExecutionId: undefined,
+    txnSessionId: undefined,
+    result: undefined,
+    results: undefined,
+    resultSessionId: undefined,
+    resultClientSessionId: undefined,
+    sourceLoad: undefined,
+    activeResultIndex: undefined,
+    resultRuns: undefined,
+    activeResultRunId: undefined,
+    structureDraft: tab.structureDraft ? cloneTabDraft(tab.structureDraft) : undefined,
+    tableMeta: tab.tableMeta
+      ? {
+          ...tab.tableMeta,
+          columns: [...tab.tableMeta.columns],
+          primaryKeys: [...tab.tableMeta.primaryKeys],
+          ...(tab.tableMeta.virtualPrimaryKeys ? { virtualPrimaryKeys: [...tab.tableMeta.virtualPrimaryKeys] } : {}),
+        }
+      : undefined,
+    objectBrowser: tab.objectBrowser ? { ...tab.objectBrowser } : undefined,
+    objectSource: tab.objectSource ? { ...tab.objectSource } : undefined,
+    editorViewport: tab.editorViewport ? { ...tab.editorViewport } : undefined,
+    editorSelection: tab.editorSelection ? { ...tab.editorSelection } : undefined,
+    uiState: tab.uiState ? cloneTabDraft(tab.uiState) : undefined,
+  };
+}
+
 interface BuildQueryResultExportRequestOptions {
   exportId: string;
   filePath: string;
@@ -1122,6 +1164,24 @@ export const useQueryStore = defineStore("query", () => {
   // Most-recently-activated tab ids, oldest first. Read-only view for the
   // Ctrl+Tab switcher, which renders them in reverse.
   const recentTabIds = computed(() => activeTabHistory.value);
+  const MAX_CLOSED_TABS_HISTORY = 30;
+  const closedTabsHistory = ref<ClosedTabHistoryEntry[]>([]);
+  const canReopenClosedTab = computed(() => closedTabsHistory.value.length > 0);
+
+  function clearClosedTabsHistory() {
+    closedTabsHistory.value = [];
+  }
+
+  function recordClosedTabHistory(tab: QueryTab, groupId?: string, indexInGroup?: number) {
+    closedTabsHistory.value.push({
+      tab: snapshotClosedTab(tab),
+      groupId,
+      indexInGroup,
+    });
+    if (closedTabsHistory.value.length > MAX_CLOSED_TABS_HISTORY) {
+      closedTabsHistory.value.shift();
+    }
+  }
 
   function findGroup(groupId: string): EditorGroup | undefined {
     return groups.value.find((group) => group.id === groupId);
@@ -4446,7 +4506,7 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
-  function closeTab(id: string, { force = false }: { force?: boolean } = {}) {
+  function closeTab(id: string, { force = false, skipHistory = false }: { force?: boolean; skipHistory?: boolean } = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
     if (!force && shouldConfirmTabClose(tab)) {
@@ -4476,6 +4536,10 @@ export const useQueryStore = defineStore("query", () => {
     const ownerIndexInGroup = owner ? owner.tabIds.indexOf(id) : -1;
     const wasOwnerActive = owner?.activeTabId === id;
     const wasGlobalActive = activeTabId.value === id;
+
+    if (!skipHistory) {
+      recordClosedTabHistory(tabs.value[idx], owner?.id, ownerIndexInGroup >= 0 ? ownerIndexInGroup : undefined);
+    }
 
     tabs.value.splice(idx, 1);
     releasePluginConnectionsAfterClose([tab]);
@@ -4827,6 +4891,53 @@ export const useQueryStore = defineStore("query", () => {
     }
     activeTabId.value = newId;
     if (newTab.mode === "data") void refreshDataTab(newId);
+  }
+
+  function reopenClosedTab(): string | null {
+    assertUpdateAllowsInteraction();
+    const entry = closedTabsHistory.value.pop();
+    if (!entry) return null;
+
+    const restoredTab = snapshotClosedTab(entry.tab);
+    if (tabs.value.some((t) => t.id === restoredTab.id)) {
+      restoredTab.id = uuid();
+    }
+
+    initializeResultAutoSave(restoredTab);
+
+    let targetGroup = entry.groupId ? groups.value.find((g) => g.id === entry.groupId) : undefined;
+    if (!targetGroup) {
+      targetGroup = focusedGroup() ?? groups.value[0];
+    }
+    if (!targetGroup) {
+      targetGroup = { id: "main", tabIds: [], activeTabId: null };
+      groups.value.push(targetGroup);
+      focusedGroupId.value = "main";
+    }
+
+    const pinnedCount = targetGroup.tabIds.filter((id) => tabs.value.find((item) => item.id === id)?.pinned).length;
+    let insertIndex = entry.indexInGroup !== undefined ? Math.max(0, Math.min(entry.indexInGroup, targetGroup.tabIds.length)) : targetGroup.tabIds.length;
+
+    if (restoredTab.pinned) {
+      insertIndex = Math.min(insertIndex, pinnedCount);
+    } else {
+      insertIndex = Math.max(insertIndex, pinnedCount);
+    }
+
+    targetGroup.tabIds.splice(insertIndex, 0, restoredTab.id);
+    tabs.value.push(restoredTab);
+
+    if (restoredTab.externalSqlPath) {
+      refreshExternalSqlFileTitles();
+    }
+
+    activateTab(restoredTab.id);
+
+    if (restoredTab.mode === "data") {
+      void refreshDataTab(restoredTab.id);
+    }
+
+    return restoredTab.id;
   }
 
   function closeTabsWhere(predicate: (tab: QueryTab) => boolean) {
@@ -9972,6 +10083,10 @@ export const useQueryStore = defineStore("query", () => {
     closeFixedTabs,
     closeAllTabs,
     duplicateTab,
+    closedTabsHistory,
+    canReopenClosedTab,
+    reopenClosedTab,
+    clearClosedTabsHistory,
     closeConnectionTabs,
     closeDatabaseTabs,
     closeDroppedTableObjectTabs,

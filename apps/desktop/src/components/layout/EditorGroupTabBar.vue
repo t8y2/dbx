@@ -88,7 +88,8 @@ import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { parseTabDragPayload, serializeTabDragPayload } from "@/lib/tabs/tabDrag";
-import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems } from "@/lib/tabs/tabMenu";
+import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems, createReopenClosedTabMenuItem } from "@/lib/tabs/tabMenu";
+import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { tabConnectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabDisplayTitles, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import "./appTabBar.css";
@@ -1399,6 +1400,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
     createCloseTabMenuItem({
       label: t("contextMenu.closeTab"),
       onClose: () => closeTab(tab),
+    }),
+    createReopenClosedTabMenuItem({
+      label: t("contextMenu.reopenClosedTab"),
+      disabled: !queryStore.canReopenClosedTab,
+      shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.reopenClosedTab ?? "Shift+Mod+T"),
+      onReopen: () => queryStore.reopenClosedTab(),
     }),
   ];
   return items;

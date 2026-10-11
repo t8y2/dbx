@@ -276,6 +276,20 @@ describe("shortcutRegistry editor actions", () => {
     expect(normalizeShortcutSettings({ closeTab: "" }).closeTab).toBe("");
   });
 
+  it("registers reopenClosedTab as a global shortcut with Shift+Mod+T default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "reopenClosedTab");
+    expect(definition).toMatchObject({
+      id: "reopenClosedTab",
+      labelKey: "settings.shortcutReopenClosedTab",
+      scope: "global",
+      defaultShortcut: "Shift+Mod+T",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab).toBe("Shift+Mod+T");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab, "Win32")).toBe("Ctrl+Shift+T");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab, "MacIntel")).toBe("Shift+Cmd+T");
+    expect(findShortcutConflict("reopenClosedTab", DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("registers closeWindow as a global shortcut with Shift+Mod+W default", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "closeWindow");
     expect(definition).toMatchObject({

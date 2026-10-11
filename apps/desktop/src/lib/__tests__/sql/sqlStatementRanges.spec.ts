@@ -526,6 +526,16 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql)).length).toBe(2);
   });
 
+  it("keeps DuckDB Windows path literals separate from following statements", () => {
+    const sql = "SET VARIABLE path = 'C:\\path\\';\nSET VARIABLE next = 'value';\nSELECT 1;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "duckdb"))).toEqual(["SET VARIABLE path = 'C:\\path\\'", "SET VARIABLE next = 'value'", "SELECT 1"]);
+  });
+
+  it("keeps DuckDB escape string literals separate from following statements", () => {
+    const sql = "SELECT E'it\\'';\nSELECT 1;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "duckdb"))).toEqual(["SELECT E'it\\''", "SELECT 1"]);
+  });
+
   it("keeps backslash-escaped quotes as one string for MySQL (no regression)", () => {
     const sql = "SELECT 'a\\'b; still string';\nSELECT 2";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["SELECT 'a\\'b; still string'", "SELECT 2"]);

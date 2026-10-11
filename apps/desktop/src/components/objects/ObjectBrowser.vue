@@ -40,6 +40,7 @@ import {
   Loader2,
   Network,
   Pencil,
+  Plus,
   PencilLine,
   PencilRuler,
   Play,
@@ -77,7 +78,8 @@ import CustomTypeInfoPanel from "@/components/objects/CustomTypeInfoPanel.vue";
 import TablePartitionsPanel from "@/components/structure/TablePartitionsPanel.vue";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
-import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, PgTablePartitioning, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
+import { draftIsDirty } from "@/lib/database/customTypeDraft";
+import type { ColumnInfo, ConnectionConfig, CustomTypeEditorSession, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, PgTablePartitioning, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsAiAssistantContext, supportsDataDictionary, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
@@ -196,7 +198,15 @@ const props = defineProps<{
   initialEventOpenRequestId?: number;
   /** 显式"新建事件"请求号：每次菜单点击递增，用于打开/重新进入 CREATE 编辑器 */
   initialEventCreateRequestId?: number;
-  initialObjectFilter?: "tables" | "events";
+  initialObjectFilter?: "tables" | "events" | "types";
+  /** Custom type designer request from the sidebar / toolbar (monotonic id). */
+  initialCustomTypeRequest?: {
+    mode: "create" | "edit" | "delete";
+    schema?: string;
+    name?: string;
+    requestId: number;
+  };
+  customTypeSession?: CustomTypeEditorSession & { sourceRequestId: number };
   selectedObjectFilter?: ObjectFilter;
   initialSearchQuery?: string;
   viewport?: ObjectBrowserViewport;
@@ -209,6 +219,7 @@ const emit = defineEmits<{
   viewportChange: [viewport: ObjectBrowserViewport];
   searchChange: [query: string];
   filterChange: [filter: ObjectFilter];
+  customTypeSessionChange: [session: (CustomTypeEditorSession & { sourceRequestId: number }) | null];
   addToAi: [tables: Array<{ name: string; schema?: string }>];
 }>();
 
@@ -313,6 +324,12 @@ const sidePanelWidth = ref(settingsStore.editorSettings.tableInfoDrawerWidth || 
 let sidePanelResizeStartX = 0;
 let sidePanelResizeStartWidth = 0;
 const isResizingSidePanel = ref(false);
+/** Whether the type designer owns the side panel right now.
+ *
+ * Creation has no table row to select, so the panel cannot key off
+ * `sidePanelRow` alone — `openCustomTypeCreate` clears it on purpose. */
+const isTypeDesignerOpen = computed(() => sidePanelMode.value === "type-info" && !!customTypeDesignerRequest.value);
+
 const sidePanelGuard = createSidePanelRequestGuard();
 const sidePanelRef = ref<InstanceType<typeof CustomTypeInfoPanel> | null>(null);
 const tableMetadataCapabilities = computed<TableMetadataCapabilities>(() => getTableMetadataCapabilities(effectiveDatabaseType.value));
@@ -1188,6 +1205,7 @@ const filteredTableDdlContent = computed(() => {
 });
 
 async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
+  if (!leaveCustomTypeDesigner()) return;
   // Toggle off if clicking the same table
   if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "table-info" && !initialTab) {
     closeSidePanel();
@@ -1550,26 +1568,116 @@ function onSidePanelResizeEnd() {
   settingsStore.updateEditorSettings({ tableInfoDrawerWidth: sidePanelWidth.value });
 }
 
-function closeSidePanel() {
+function leaveCustomTypeDesigner(confirmed = false): boolean {
+  if (sidePanelMode.value !== "type-info") return true;
+  if (!confirmed && sidePanelRef.value?.confirmDiscard() === false) return false;
+  customTypeRestoreSession.value = undefined;
+  emit("customTypeSessionChange", null);
+  onCustomTypeDirtyChange(false);
+  customTypeDesignerRequest.value = null;
+  return true;
+}
+
+function closeSidePanel(confirmed = false) {
+  if (!leaveCustomTypeDesigner(confirmed)) return;
   sidePanelRow.value = null;
+  customTypeDesignerRequest.value = null;
   sidePanelMode.value = "source";
   sidePanelGuard.bump();
 }
 
-async function openTypeInfo(row: ObjectBrowserRow) {
-  if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "type-info") {
-    closeSidePanel();
-    return;
-  }
-  sidePanelRow.value = row;
+/** Request handed to the type designer so a repeated click re-runs it. */
+const customTypeDesignerRequest = ref<{
+  mode: "view" | "create" | "edit" | "delete";
+  schema: string;
+  name: string;
+  requestId: number;
+} | null>(null);
+let customTypeDesignerRequestSeq = 0;
+const customTypeRestoreSession = ref<CustomTypeEditorSession>();
+
+function requestCustomTypeDesigner(mode: "view" | "create" | "edit" | "delete", schema: string, name: string) {
+  customTypeDesignerRequestSeq += 1;
+  customTypeDesignerRequest.value = { mode, schema, name, requestId: customTypeDesignerRequestSeq };
   sidePanelMode.value = "type-info";
   sidePanelGuard.bump();
 }
 
+const canManageCustomTypes = computed(() => customTypeCapabilities(effectiveDatabaseType.value).management && !connectionIsEffectivelyReadOnly(props.connection));
+
+async function openTypeInfo(row: ObjectBrowserRow) {
+  if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "type-info" && !customTypeDesignerRequest.value) {
+    closeSidePanel();
+    return;
+  }
+  sidePanelRow.value = row;
+  requestCustomTypeDesigner("view", row.schema || selectedSchema.value || props.database, row.name);
+}
+
+/** Start the create flow for the schema currently shown in the browser. */
+function openCustomTypeCreate() {
+  if (!canManageCustomTypes.value) return;
+  sidePanelRow.value = null;
+  requestCustomTypeDesigner("create", selectedSchema.value || props.database, "");
+}
+
+function openCustomTypeEdit(row: ObjectBrowserRow) {
+  if (!canManageCustomTypes.value) return;
+  sidePanelRow.value = row;
+  requestCustomTypeDesigner("edit", row.schema || selectedSchema.value || props.database, row.name);
+}
+
+function openCustomTypeDelete(row: ObjectBrowserRow) {
+  if (!canManageCustomTypes.value) return;
+  sidePanelRow.value = row;
+  requestCustomTypeDesigner("delete", row.schema || selectedSchema.value || props.database, row.name);
+}
+
+function onCustomTypeSessionChange(session: CustomTypeEditorSession) {
+  // The mounted panel now owns the session. Consume the restore seed so a
+  // later panel cannot revive this older draft after it was saved or discarded.
+  customTypeRestoreSession.value = undefined;
+  emit("customTypeSessionChange", { ...session, sourceRequestId: props.initialCustomTypeRequest?.requestId ?? 0 });
+}
+
+function onCustomTypeSaved(payload: { identity: { schema: string; name: string }; created: boolean }) {
+  if (customTypeDesignerRequest.value) {
+    customTypeDesignerRequest.value = { ...customTypeDesignerRequest.value, ...payload.identity, mode: "view" };
+  }
+  if (payload.created) objectFilter.value = "types";
+  invalidateObjectBrowserRowsCache({ connectionId: props.connection.id, database: props.database, schema: payload.identity.schema });
+  void connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, payload.identity.schema, props.catalog);
+  void loadObjects({ allowCached: false }).then(() => {
+    const row = rows.value.find((entry) => entry.type === "TYPE" && entry.name === payload.identity.name && (entry.schema || payload.identity.schema) === payload.identity.schema);
+    if (row) sidePanelRow.value = row;
+  });
+}
+
+/** Mirror the designer's unsaved-work state onto the objects tab. */
+function onCustomTypeDirtyChange(dirty: boolean) {
+  queryStore.setCustomTypeDraftDirty(
+    {
+      connectionId: props.connection.id,
+      database: props.database,
+      schema: customTypeDesignerRequest.value?.schema || selectedSchema.value || props.database,
+      catalog: props.catalog,
+    },
+    dirty,
+  );
+}
+
+function onCustomTypeDeleted(payload: { identity: { schema: string; name: string } }) {
+  emit("customTypeSessionChange", null);
+  customTypeDesignerRequest.value = null;
+  sidePanelRow.value = null;
+  invalidateObjectBrowserRowsCache({ connectionId: props.connection.id, database: props.database, schema: payload.identity.schema });
+  void connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, payload.identity.schema, props.catalog);
+  void loadObjects({ allowCached: false });
+}
+
 function openTypeDdl(row: ObjectBrowserRow) {
   sidePanelRow.value = row;
-  sidePanelMode.value = "type-info";
-  sidePanelGuard.bump();
+  requestCustomTypeDesigner("view", row.schema || selectedSchema.value || props.database, row.name);
   // DDL tab is selected by the panel once details load; switching the tab is
   // deferred via a dedicated request so the panel can focus it.
   nextTick(() => {
@@ -1614,6 +1722,7 @@ async function openSource(row: ObjectBrowserRow) {
 }
 
 async function loadSourcePanel(row: ObjectBrowserRow, options?: { preserveEditing?: boolean }) {
+  if (!leaveCustomTypeDesigner()) return;
   // Starting a different object must invalidate slower source requests before
   // any state is reset, otherwise an old response can populate the new row.
   const epoch = sidePanelGuard.start();
@@ -1678,6 +1787,7 @@ async function refreshActiveSource() {
 }
 
 function openEventEditor(row: ObjectBrowserRow) {
+  if (!leaveCustomTypeDesigner()) return;
   sidePanelGuard.start();
   sidePanelRow.value = row;
   sourceRow.value = null;
@@ -3237,6 +3347,7 @@ function openInitialEventIfNeeded() {
   if (decision.type === "ignore") return;
   openedInitialEvent.value = decision.requestKey;
   if (decision.type === "create") {
+    if (!leaveCustomTypeDesigner()) return;
     // 新建事件：不依赖对象列表中的 EVENT row，直接进入 CREATE 编辑器。
     // MySqlEventEditor 收到空 name 时会以 CREATE 模式渲染。
     sidePanelGuard.start();
@@ -3568,6 +3679,33 @@ watch(
   { immediate: true },
 );
 
+// Run after the context initializer: it clears the previous panel before
+// this watcher restores or opens the requested type, including on first mount.
+/** React to a designer request raised by the sidebar on an already-open tab. */
+watch(
+  () => props.initialCustomTypeRequest?.requestId ?? 0,
+  (_id, previousId) => {
+    const request = props.initialCustomTypeRequest;
+    const session = props.customTypeSession;
+    if (previousId === undefined && session) {
+      const sameRequest = session.sourceRequestId === (request?.requestId ?? 0);
+      const dirty = session.mode !== "view" && draftIsDirty(session.originalDraft, session.draft);
+      if (sameRequest || (dirty && !window.confirm(t("customType.editor.discardConfirm")))) {
+        customTypeRestoreSession.value = session;
+        requestCustomTypeDesigner(session.mode, session.schema, session.name);
+        return;
+      }
+    }
+    customTypeRestoreSession.value = undefined;
+    if (!request || !request.requestId) return;
+    if (request.mode === "create") objectFilter.value = "types";
+    const row = request.name ? rows.value.find((entry) => entry.type === "TYPE" && entry.name === request.name) : undefined;
+    sidePanelRow.value = row ?? null;
+    requestCustomTypeDesigner(request.mode, request.schema || selectedSchema.value || props.database, request.name || "");
+  },
+  { immediate: true },
+);
+
 // ---- CustomContextMenu helpers ----
 
 function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
@@ -3800,6 +3938,10 @@ function getTypeMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       items.push({ label: t("contextMenu.viewDdl"), action: () => openTypeDdl(item), icon: FileCode });
     }
   }
+  if (canManageCustomTypes.value) {
+    items.push({ label: t("contextMenu.editType"), action: () => openCustomTypeEdit(item), icon: Pencil });
+    items.push({ label: t("contextMenu.dropType"), action: () => openCustomTypeDelete(item), icon: Trash2, variant: "destructive" as const });
+  }
   // Only separate when an action precedes copy-name.
   if (items.length > 0) {
     items.push({ label: "", separator: true });
@@ -3920,6 +4062,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <CheckSquare v-if="settingsStore.editorSettings.objectBrowserShowCheckbox" class="h-3.5 w-3.5" />
         <Square v-else class="h-3.5 w-3.5" />
       </Button>
+      <Button v-if="canManageCustomTypes && objectFilter === 'types'" variant="ghost" size="sm" class="h-7 px-2 text-xs" :title="t('contextMenu.createType')" @click="openCustomTypeCreate">
+        <Plus class="mr-1.5 h-3.5 w-3.5" />
+        {{ t("contextMenu.createType") }}
+      </Button>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="refreshTooltip" :disabled="loadingObjects" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects || refreshingObjects }" />
       </Button>
@@ -3999,14 +4145,14 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <RefreshCw class="h-3 w-3 shrink-0" />
       <span class="min-w-0 truncate">{{ scaffoldRefreshError }}</span>
     </div>
-    <div v-if="loadingObjects" class="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
+    <div v-if="loadingObjects && !isTypeDesignerOpen" class="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
       <Loader2 class="h-4 w-4 animate-spin" />
       {{ t("objects.loading") }}
     </div>
-    <div v-else-if="error" class="flex flex-1 items-center justify-center px-6 text-center text-sm text-destructive">
+    <div v-else-if="error && !isTypeDesignerOpen" class="flex flex-1 items-center justify-center px-6 text-center text-sm text-destructive">
       {{ error }}
     </div>
-    <div v-else-if="filteredRows.length === 0 && !isEventEditor" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+    <div v-else-if="filteredRows.length === 0 && !isEventEditor && !isTypeDesignerOpen" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
       {{ t("objects.empty") }}
     </div>
     <div v-else class="flex min-h-0 min-w-0 flex-1" :class="{ 'event-editor-layout': isEventEditor }">
@@ -4227,7 +4373,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </div>
       <!-- Right-side panel: table info or source -->
       <div
-        v-if="sidePanelRow || isEventEditor"
+        v-if="sidePanelRow || isEventEditor || isTypeDesignerOpen"
         :data-object-table-info-panel="sidePanelMode === 'table-info' ? '' : undefined"
         class="object-browser-side-panel relative flex min-h-0 min-w-0 shrink-0 flex-col border-l bg-background"
         :class="{ 'side-panel-resizing': isResizingSidePanel }"
@@ -4253,7 +4399,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               <PencilRuler class="w-3 h-3" />
               <span class="table-info-action-label">{{ t("contextMenu.editStructure") }}</span>
             </Button>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSidePanel">
+            <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSidePanel()">
               <X class="w-3 h-3" />
             </Button>
           </div>
@@ -4439,7 +4585,22 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         </template>
         <!-- Type info mode (read-only user-defined type details) -->
         <template v-else-if="sidePanelMode === 'type-info'">
-          <CustomTypeInfoPanel ref="sidePanelRef" :connection="props.connection" :database="props.database" :schema="sidePanelRow?.schema || selectedSchema || props.database" :name="sidePanelRow?.name || ''" :catalog="props.catalog" @close="closeSidePanel" />
+          <CustomTypeInfoPanel
+            ref="sidePanelRef"
+            :connection="props.connection"
+            :database="props.database"
+            :schema="customTypeDesignerRequest?.schema || sidePanelRow?.schema || selectedSchema || props.database"
+            :name="customTypeDesignerRequest ? customTypeDesignerRequest.name : sidePanelRow?.name || ''"
+            :catalog="props.catalog"
+            :initial-mode="customTypeDesignerRequest?.mode || 'view'"
+            :request-id="customTypeDesignerRequest?.requestId || 0"
+            :session="customTypeRestoreSession"
+            @session-change="onCustomTypeSessionChange"
+            @close="closeSidePanel(true)"
+            @saved="onCustomTypeSaved"
+            @deleted="onCustomTypeDeleted"
+            @dirty-change="onCustomTypeDirtyChange"
+          />
         </template>
         <template v-else-if="sidePanelMode === 'event-editor'">
           <MySqlEventEditor :key="eventEditorKey" :connection="props.connection" :database="props.database" :schema="sidePanelRow?.schema || selectedSchema || props.database" :name="sidePanelRow?.name" :read-only="props.initialEventReadOnly" @saved="onEventSaved" @close="closeSidePanel" />

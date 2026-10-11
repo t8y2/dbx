@@ -390,6 +390,78 @@ pub async fn get_custom_type_details(
 }
 
 #[tauri::command]
+pub async fn get_custom_type_management_capabilities(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: Option<String>,
+) -> Result<db::CustomTypeManagementCapabilities, String> {
+    dbx_core::schema::custom_types::get_custom_type_management_capabilities_core(
+        &state,
+        &connection_id,
+        database.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn preview_custom_type_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    request: db::CustomTypeChangeRequest,
+) -> Result<db::CustomTypeChangePreview, String> {
+    dbx_core::schema::custom_types::preview_custom_type_change_core(&state, &connection_id, &database, request).await
+}
+
+#[tauri::command]
+pub async fn apply_custom_type_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    apply: db::ApplyCustomTypeChangeRequest,
+) -> Result<db::CustomTypeChangeResult, String> {
+    dbx_core::schema::custom_types::apply_custom_type_change_core(&state, &connection_id, &database, apply).await
+}
+
+#[tauri::command]
+pub async fn preview_custom_type_drop(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    request: db::CustomTypeDropRequest,
+) -> Result<db::CustomTypeDropPreview, String> {
+    dbx_core::schema::custom_types::preview_custom_type_drop_core(&state, &connection_id, &database, request).await
+}
+
+#[tauri::command]
+pub async fn apply_custom_type_drop(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    apply: db::ApplyCustomTypeDropRequest,
+) -> Result<db::CustomTypeChangeResult, String> {
+    dbx_core::schema::custom_types::apply_custom_type_drop_core(&state, &connection_id, &database, apply).await
+}
+
+#[tauri::command]
+pub async fn list_custom_type_dependencies(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    name: String,
+) -> Result<Vec<db::CustomTypeDependency>, String> {
+    dbx_core::schema::custom_types::list_custom_type_dependencies_core(
+        &state,
+        &connection_id,
+        &database,
+        &schema,
+        &name,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn get_columns(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

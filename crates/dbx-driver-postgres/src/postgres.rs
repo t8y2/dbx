@@ -38,11 +38,11 @@ use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
     CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
-    CompletionAssistantResponse, ConstraintInfo, CustomTypeDdl, CustomTypeDetails, CustomTypeDomainConstraint,
-    CustomTypeKind, CustomTypeMember, CustomTypeProperties, DatabaseInfo, DatabaseStorageInfo, EventTriggerInfo,
-    ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics, OwnerInfo, PgPartitionBound,
-    PgPartitionKind, PgPartitionNode, PgTablePartitioning, QueryMessage, QueryResult, RuleInfo, SchemaInfo,
-    SequenceInfo, SpatialColumnBuilder, TableInfo, TriggerInfo,
+    CompletionAssistantResponse, ConstraintInfo, CustomTypeDdl, CustomTypeDependency, CustomTypeDetails,
+    CustomTypeDomainConstraint, CustomTypeKind, CustomTypeMember, CustomTypeProperties, DatabaseInfo,
+    DatabaseStorageInfo, EventTriggerInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo,
+    ObjectStatistics, OwnerInfo, PgPartitionBound, PgPartitionKind, PgPartitionNode, PgTablePartitioning, QueryMessage,
+    QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 
 pub const GAUSSDB_COMPATIBILITY_SQL: &str =
@@ -7255,6 +7255,7 @@ struct CustomTypeGeneralInfo {
     comment: Option<String>,
     relkind: Option<String>,
     collation: Option<String>,
+    owner: Option<String>,
 }
 
 fn custom_type_general_info_sql() -> &'static str {
@@ -7268,7 +7269,8 @@ fn custom_type_general_info_sql() -> &'static str {
        CASE WHEN t.typrelid != 0 THEN \
          (SELECT c.relkind::text FROM pg_catalog.pg_class c WHERE c.oid = t.typrelid) \
        END AS relkind, \
-       CASE WHEN cl.oid IS NULL THEN NULL ELSE quote_ident(ncl.nspname) || '.' || quote_ident(cl.collname) END \
+       CASE WHEN cl.oid IS NULL THEN NULL ELSE quote_ident(ncl.nspname) || '.' || quote_ident(cl.collname) END, \
+       pg_catalog.pg_get_userbyid(t.typowner) \
      FROM pg_catalog.pg_type t \
      JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
      LEFT JOIN pg_catalog.pg_description d \
@@ -7317,6 +7319,7 @@ async fn custom_type_general_info(
         comment: row.try_get::<_, Option<String>>(20).ok().flatten(),
         relkind: row.try_get::<_, Option<String>>(21).ok().flatten(),
         collation: row.try_get::<_, Option<String>>(22).ok().flatten(),
+        owner: row.try_get::<_, Option<String>>(23).ok().flatten(),
     })
 }
 
@@ -7516,7 +7519,7 @@ async fn custom_type_domain_attributes(
     }
     match postgres_query_cached(
         client,
-        "SELECT c.conname, pg_get_constraintdef(c.oid, true) AS definition \
+        "SELECT c.conname, pg_get_constraintdef(c.oid, true) AS definition, c.convalidated \
          FROM pg_catalog.pg_constraint c \
          WHERE c.contypid = $1 \
          ORDER BY c.conname",
@@ -7541,8 +7544,12 @@ async fn custom_type_domain_attributes(
                         continue;
                     }
                 };
+                // `convalidated` is decoded leniently: a kernel that does not
+                // expose it leaves `None`, which the editor reads as "unknown"
+                // rather than "not validated".
+                let validated = row.try_get::<_, bool>(2).ok();
                 if !definition.is_empty() {
-                    properties.domain_constraints.push(CustomTypeDomainConstraint { name, definition });
+                    properties.domain_constraints.push(CustomTypeDomainConstraint { name, definition, validated });
                 }
             }
         }
@@ -7723,13 +7730,27 @@ fn build_custom_type_ddl(
             if incomplete_warning {
                 complete = false;
             }
+            let mut deferred_constraints = Vec::new();
             for constraint in &properties.domain_constraints {
-                let body = constraint.definition.trim().trim_start_matches("CHECK").trim();
+                let definition = constraint.definition.trim();
                 let constraint_name =
                     if constraint.name.is_empty() { format!("{name}_check") } else { constraint.name.clone() };
-                parts.push(format!("CONSTRAINT {} CHECK {body}", pg_quote_ident(&constraint_name)));
+                let constraint_sql = format!("CONSTRAINT {} {definition}", pg_quote_ident(&constraint_name));
+                if constraint.validated == Some(false) {
+                    // pg_get_constraintdef places NOT VALID after CHECK (...),
+                    // a form supported only by ALTER DOMAIN, not CREATE DOMAIN.
+                    let suffix = if definition.ends_with("NOT VALID") { "" } else { " NOT VALID" };
+                    deferred_constraints.push(format!("ALTER DOMAIN {qualified} ADD {constraint_sql}{suffix};"));
+                } else {
+                    parts.push(constraint_sql);
+                }
             }
-            CustomTypeDdl { sql: format!("{};", parts.join("\n  ")), complete, warnings }
+            let mut sql = format!("{};", parts.join("\n  "));
+            for statement in deferred_constraints {
+                sql.push('\n');
+                sql.push_str(&statement);
+            }
+            CustomTypeDdl { sql, complete, warnings }
         }
         CustomTypeKind::Range => {
             let mut args = Vec::new();
@@ -7811,8 +7832,6 @@ fn custom_type_common_properties(info: &CustomTypeGeneralInfo) -> CustomTypeProp
 /// is an independent user-defined type (never a relation row type, an array
 /// companion, an undefined type or a system-schema type).
 pub async fn get_custom_type_details(pool: &Pool, schema: &str, name: &str) -> Result<CustomTypeDetails, String> {
-    let schema = schema.trim();
-    let name = name.trim();
     if schema.is_empty() || name.is_empty() {
         return Err("schema and type name are required".to_string());
     }
@@ -7863,14 +7882,188 @@ pub async fn get_custom_type_details(pool: &Pool, schema: &str, name: &str) -> R
 
     let ddl = build_custom_type_ddl(schema, name, kind, &info, &members, &properties, &warnings);
     Ok(CustomTypeDetails {
+        snapshot_revision: None,
         name: name.to_string(),
         schema: schema.to_string(),
         kind,
+        catalog_id: Some(info.oid.to_string()),
         comment: info.comment.clone(),
         members,
         properties,
         ddl: Some(ddl),
+        owner: info.owner.clone(),
     })
+}
+
+/// Whether a type name is already used in a schema.
+///
+/// `CREATE TYPE`/`CREATE DOMAIN` fail when *any* `pg_type` entry already owns
+/// the name — including the row type a table generates — so this probes
+/// `pg_type` rather than only user-created types. Checking up front turns a
+/// server error into a plan-blocking reason the editor can show before the user
+/// types anything else.
+pub async fn custom_type_name_exists(pool: &Pool, schema: &str, name: &str) -> Result<bool, String> {
+    if schema.is_empty() || name.is_empty() {
+        return Ok(false);
+    }
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(
+        &client,
+        "SELECT 1 FROM pg_catalog.pg_type t \
+         JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+         WHERE n.nspname = $1 AND t.typname = $2 \
+         LIMIT 1",
+        &[&schema, &name],
+    )
+    .await
+    .map_err(|error| format!("failed to check whether {schema}.{name} exists: {error}"))?;
+    Ok(!rows.is_empty())
+}
+
+/// Follow PostgreSQL's dependency graph, including internal companion objects.
+///
+/// Reverse edges find users of arrays/domains/composites as well as direct
+/// users. Forward internal edges promote implementation objects to their owner
+/// (notably a view's rewrite rule to the view). UNION makes cycles terminate;
+/// column dependencies retain their sub-object identity so dropping a column
+/// does not turn into dropping its entire table. Internal objects are hidden
+/// only after traversing through them to the user-visible dependents.
+/// Track paths consisting only of automatic/internal edges separately: objects
+/// on any such path are removed even under RESTRICT. A minimum dependency code
+/// cannot classify this, since an object may have several unrelated edges.
+fn custom_type_dependencies_sql() -> &'static str {
+    "WITH RECURSIVE dependents(classid, objid, objsubid, automatic) AS ( \
+       SELECT 'pg_catalog.pg_type'::regclass::oid, $1::oid, 0, true \
+       UNION \
+       SELECT edge.classid, edge.objid, edge.objsubid, parent.automatic AND edge.automatic \
+       FROM dependents parent \
+       JOIN LATERAL ( \
+         SELECT dep.classid, dep.objid, dep.objsubid, dep.deptype IN ('a', 'i') AS automatic \
+         FROM pg_catalog.pg_depend dep \
+         WHERE dep.refclassid = parent.classid AND dep.refobjid = parent.objid \
+           AND (parent.objsubid = 0 OR dep.refobjsubid = parent.objsubid) \
+         UNION \
+         SELECT dep.refclassid, dep.refobjid, dep.refobjsubid, true \
+         FROM pg_catalog.pg_depend dep \
+         WHERE dep.classid = parent.classid AND dep.objid = parent.objid \
+           AND dep.objsubid = parent.objsubid AND dep.deptype = 'i' \
+       ) edge ON true \
+     ), dependency_objects AS ( \
+       SELECT classid, objid, objsubid, bool_or(automatic) AS automatically_dropped \
+       FROM dependents GROUP BY classid, objid, objsubid \
+     ) \
+     SELECT \
+       CASE \
+         WHEN d.classid = 'pg_catalog.pg_class'::regclass AND d.objsubid > 0 THEN 'column' \
+         WHEN d.classid = 'pg_catalog.pg_class'::regclass THEN ( \
+           SELECT CASE c.relkind \
+             WHEN 'v' THEN 'view' \
+             WHEN 'm' THEN 'materialized_view' \
+             WHEN 'f' THEN 'foreign_table' \
+             WHEN 'S' THEN 'sequence' \
+             ELSE 'table' \
+           END FROM pg_catalog.pg_class c WHERE c.oid = d.objid) \
+         WHEN d.classid = 'pg_catalog.pg_proc'::regclass THEN 'routine' \
+         WHEN d.classid = 'pg_catalog.pg_type'::regclass THEN 'type' \
+         WHEN d.classid = 'pg_catalog.pg_constraint'::regclass THEN 'constraint' \
+         WHEN d.classid = 'pg_catalog.pg_attrdef'::regclass THEN 'default' \
+         WHEN d.classid = 'pg_catalog.pg_operator'::regclass THEN 'operator' \
+         WHEN d.classid = 'pg_catalog.pg_cast'::regclass THEN 'cast' \
+         WHEN d.classid = 'pg_catalog.pg_trigger'::regclass THEN 'trigger' \
+         WHEN d.classid = 'pg_catalog.pg_rewrite'::regclass THEN 'rule' \
+         ELSE 'object' \
+       END AS kind, \
+       (SELECT min(dep.deptype::text) FROM pg_catalog.pg_depend dep \
+        WHERE dep.classid = d.classid AND dep.objid = d.objid AND dep.objsubid = d.objsubid) AS dependency_type, \
+       CASE \
+         WHEN d.classid = 'pg_catalog.pg_class'::regclass THEN ( \
+           SELECT n.nspname FROM pg_catalog.pg_class c \
+           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = d.objid) \
+         WHEN d.classid = 'pg_catalog.pg_proc'::regclass THEN ( \
+           SELECT n.nspname FROM pg_catalog.pg_proc p \
+           JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = d.objid) \
+         WHEN d.classid = 'pg_catalog.pg_type'::regclass THEN ( \
+           SELECT n.nspname FROM pg_catalog.pg_type t \
+           JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE t.oid = d.objid) \
+       END AS object_schema, \
+       CASE \
+         WHEN d.classid = 'pg_catalog.pg_class'::regclass THEN ( \
+           SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = d.objid) \
+         WHEN d.classid = 'pg_catalog.pg_proc'::regclass THEN ( \
+           SELECT p.proname FROM pg_catalog.pg_proc p WHERE p.oid = d.objid) \
+         WHEN d.classid = 'pg_catalog.pg_type'::regclass THEN ( \
+           SELECT t.typname FROM pg_catalog.pg_type t WHERE t.oid = d.objid) \
+         WHEN d.classid = 'pg_catalog.pg_constraint'::regclass THEN ( \
+           SELECT con.conname FROM pg_catalog.pg_constraint con WHERE con.oid = d.objid) \
+       END AS object_name, \
+       CASE \
+         WHEN d.classid = 'pg_catalog.pg_class'::regclass AND d.objsubid > 0 THEN ( \
+           SELECT a.attname FROM pg_catalog.pg_attribute a \
+           WHERE a.attrelid = d.objid AND a.attnum = d.objsubid) \
+       END AS column_name, \
+       pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid) AS description, \
+       d.classid::text || ':' || d.objid::text || ':' || d.objsubid::text AS catalog_id, \
+       NOT d.automatically_dropped AS requires_cascade \
+     FROM dependency_objects d \
+     WHERE NOT (d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = $1 AND d.objsubid = 0) \
+       AND NOT EXISTS ( \
+         SELECT 1 FROM pg_catalog.pg_depend internal \
+         WHERE internal.classid = d.classid AND internal.objid = d.objid \
+           AND internal.objsubid = d.objsubid AND internal.deptype = 'i') \
+     ORDER BY 1, 3, 4, 5, 7"
+}
+
+/// User-visible objects affected by a cascading drop of a user-defined type.
+///
+/// Used by the drop confirmation so the user sees what a `RESTRICT` drop will
+/// refuse and what a `CASCADE` drop will take with it. The caller must treat a
+/// failure here as "unknown", never as "no dependents".
+pub async fn custom_type_dependencies(
+    pool: &Pool,
+    schema: &str,
+    name: &str,
+) -> Result<Vec<CustomTypeDependency>, String> {
+    if schema.is_empty() || name.is_empty() {
+        return Err("schema and type name are required".to_string());
+    }
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let info = custom_type_general_info(&client, schema, name).await?;
+    if info.oid == 0 {
+        return Err(format!("custom type {schema}.{name} does not exist"));
+    }
+    let rows = postgres_query_cached(&client, custom_type_dependencies_sql(), &[&info.oid])
+        .await
+        .map_err(|error| format!("failed to read type dependencies: {error}"))?;
+    let mut dependencies = Vec::with_capacity(rows.len());
+    for row in rows {
+        let kind = pg_row_try_string(&row, 0);
+        if kind.is_empty() {
+            continue;
+        }
+        let schema_value = row.try_get::<_, Option<String>>(2).ok().flatten().filter(|value| !value.is_empty());
+        let name_value = row.try_get::<_, Option<String>>(3).ok().flatten().filter(|value| !value.is_empty());
+        let column = row.try_get::<_, Option<String>>(4).ok().flatten().filter(|value| !value.is_empty());
+        let description =
+            row.try_get::<_, String>(5).map_err(|error| format!("failed to decode dependency: {error}"))?;
+        let catalog_id =
+            row.try_get::<_, String>(6).map_err(|error| format!("failed to decode dependency identity: {error}"))?;
+        // A column's parent is the relation that owns it; everything else has no
+        // meaningful parent in this flat listing.
+        let parent = if kind == "column" { name_value.clone() } else { None };
+        dependencies.push(CustomTypeDependency {
+            catalog_id: Some(catalog_id),
+            kind,
+            schema: schema_value,
+            name: column.clone().or(name_value).unwrap_or_else(|| description.clone()),
+            parent,
+            description,
+            dependency_type: row.try_get::<_, Option<String>>(1).ok().flatten(),
+            requires_cascade: Some(
+                row.try_get::<_, bool>(7).map_err(|error| format!("failed to decode dependency mode: {error}"))?,
+            ),
+        });
+    }
+    Ok(dependencies)
 }
 
 /// Row/size estimates for the object browser, per schema.
@@ -15285,6 +15478,7 @@ mod tests {
             comment: None,
             relkind: None,
             collation: None,
+            owner: Some("app_owner".to_string()),
         }
     }
 
@@ -15375,6 +15569,7 @@ mod tests {
             domain_constraints: vec![CustomTypeDomainConstraint {
                 name: "email_valid".to_string(),
                 definition: "CHECK ((VALUE <> ''::text))".to_string(),
+                validated: Some(true),
             }],
             ..Default::default()
         };

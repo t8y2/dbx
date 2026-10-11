@@ -32,6 +32,12 @@ define_registry![
     get_object_source,
     get_event_info,
     get_custom_type_details,
+    get_custom_type_management_capabilities,
+    preview_custom_type_change,
+    apply_custom_type_change,
+    preview_custom_type_drop,
+    apply_custom_type_drop,
+    list_custom_type_dependencies,
     list_schemas,
     list_schema_infos,
     list_data_types,
@@ -85,7 +91,7 @@ mod tests {
 
     #[test]
     fn handles_only_schema_commands() {
-        assert_eq!(COMMANDS.len(), 49);
+        assert_eq!(COMMANDS.len(), 55);
         assert!(handles("list_databases"));
         assert!(handles("list_event_triggers"));
         assert!(!handles("prepare_schema_diff"));

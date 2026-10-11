@@ -1092,6 +1092,8 @@ export interface CustomTypeMember {
 export interface CustomTypeDomainConstraint {
   name: string;
   definition: string;
+  /** `pg_constraint.convalidated`. Absent means the kernel could not report it. */
+  validated?: boolean | null;
 }
 
 export interface CustomTypeProperties {
@@ -1123,13 +1125,209 @@ export interface CustomTypeDdl {
 }
 
 export interface CustomTypeDetails {
+  snapshotRevision?: string | null;
   name: string;
   schema: string;
   kind: CustomTypeKind;
+  /** PostgreSQL type OID rendered as text; used by destructive-plan revisions. */
+  catalogId?: string | null;
   comment?: string | null;
   members: CustomTypeMember[];
   properties: CustomTypeProperties;
   ddl?: CustomTypeDdl | null;
+  /** Type owner (role name). Absent when the kernel or agent cannot report it. */
+  owner?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Custom type management (create / edit / drop)
+//
+// Mirrors `crates/dbx-types/src/types.rs`. The serialized operation ids are a
+// contract: the planner returns blocking issues keyed by capability reason
+// codes, so both sides must spell them identically.
+// ---------------------------------------------------------------------------
+
+/** Stable operation ids used by capability payloads and planner issue codes. */
+export type CustomTypeOperation =
+  | "create.enum"
+  | "create.composite"
+  | "create.domain"
+  | "create.range"
+  | "create.range.multirangeName"
+  | "alter.rename"
+  | "alter.setSchema"
+  | "alter.owner"
+  | "alter.comment"
+  | "alter.enum.addValue"
+  | "alter.enum.addValueInTransaction"
+  | "alter.enum.renameValue"
+  | "alter.composite.addAttribute"
+  | "alter.composite.renameAttribute"
+  | "alter.composite.alterAttributeType"
+  | "alter.composite.dropAttribute"
+  | "alter.domain.default"
+  | "alter.domain.notNull"
+  | "alter.domain.addConstraint"
+  | "alter.domain.renameConstraint"
+  | "alter.domain.dropConstraint"
+  | "alter.domain.validateConstraint"
+  | "drop.restrict"
+  | "drop.cascade"
+  | "transactionalDdl";
+
+export interface CustomTypeOperationCapability {
+  supported: boolean;
+  reasonCode?: string | null;
+  reason?: string | null;
+}
+
+export interface CustomTypeManagementCapabilities {
+  databaseType: string;
+  productVersion?: string | null;
+  compatibilityMode?: string | null;
+  operations: Partial<Record<CustomTypeOperation, CustomTypeOperationCapability>>;
+  capabilityRevision: string;
+}
+
+export interface CustomTypeIdentity {
+  schema: string;
+  name: string;
+  kind: CustomTypeKind;
+}
+
+export interface CustomTypeEnumValueDraft {
+  value: string;
+  /** Absent marks a value that does not exist yet. */
+  originalValue?: string | null;
+}
+
+export interface CustomTypeAttributeDraft {
+  name: string;
+  originalName?: string | null;
+  dataType: string;
+  comment?: string | null;
+}
+
+export interface CustomTypeDomainConstraintDraft {
+  name: string;
+  originalName?: string | null;
+  expression: string;
+  validated?: boolean | null;
+}
+
+export type CustomTypeDraftDefinition =
+  /**
+   * A kind with no structured editor (base types today). Carries its kind so the
+   * planner can tell an untouched base type from a kind change.
+   */
+  | { kind: "none"; typeKind: CustomTypeKind }
+  | { kind: "enum"; values: CustomTypeEnumValueDraft[] }
+  | { kind: "composite"; attributes: CustomTypeAttributeDraft[] }
+  | {
+      kind: "domain";
+      baseType: string;
+      collation?: string | null;
+      default?: string | null;
+      notNull: boolean;
+      constraints: CustomTypeDomainConstraintDraft[];
+    }
+  | {
+      kind: "range";
+      subtype: string;
+      subtypeOpclass?: string | null;
+      canonicalFunction?: string | null;
+      subtypeDiffFunction?: string | null;
+      multirangeName?: string | null;
+    };
+
+export interface CustomTypeDraft {
+  schema: string;
+  name: string;
+  owner?: string | null;
+  comment?: string | null;
+  definition: CustomTypeDraftDefinition;
+}
+
+export type CustomTypePlanIssueSeverity = "warning" | "destructive" | "blocking";
+
+export interface CustomTypePlanIssue {
+  code: string;
+  message: string;
+  path?: string | null;
+  severity: CustomTypePlanIssueSeverity;
+}
+
+export type CustomTypeTransactionPolicy = "required" | "preferred" | "autocommit";
+
+export interface CustomTypeChangeRequest {
+  /** Snapshot loaded when editing began; required for edits. */
+  expectedSnapshotRevision?: string | null;
+  target?: CustomTypeIdentity | null;
+  draft: CustomTypeDraft;
+}
+
+/** Survives editor component eviction; the details retain the editing baseline. */
+export interface CustomTypeEditorSession {
+  schema: string;
+  name: string;
+  mode: "view" | "create" | "edit";
+  details: CustomTypeDetails | null;
+  draft: CustomTypeDraft | null;
+  originalDraft: CustomTypeDraft | null;
+}
+
+export interface CustomTypeChangePreview {
+  statements: string[];
+  warnings: CustomTypePlanIssue[];
+  blockedChanges: CustomTypePlanIssue[];
+  destructive: boolean;
+  transactionPolicy: CustomTypeTransactionPolicy;
+  planRevision: string;
+  resultingIdentity: CustomTypeIdentity;
+}
+
+export interface ApplyCustomTypeChangeRequest {
+  change: CustomTypeChangeRequest;
+  expectedPlanRevision: string;
+}
+
+export interface CustomTypeChangeResult {
+  identity: CustomTypeIdentity;
+  statements: string[];
+  affectedRows: number;
+}
+
+export interface CustomTypeDependency {
+  /** Opaque catalog object address, used to distinguish dependent objects. */
+  catalogId?: string;
+  kind: string;
+  schema?: string | null;
+  name: string;
+  parent?: string | null;
+  description: string;
+  dependencyType?: string | null;
+  /** False for objects automatically removed with the target under RESTRICT. */
+  requiresCascade?: boolean | null;
+}
+
+export interface CustomTypeDropRequest {
+  target: CustomTypeIdentity;
+  cascade: boolean;
+}
+
+export interface CustomTypeDropPreview {
+  statement: string;
+  dependencies: CustomTypeDependency[];
+  /** `false` when the catalog could not be fully queried. */
+  dependenciesComplete: boolean;
+  warnings: CustomTypePlanIssue[];
+  blockedChanges: CustomTypePlanIssue[];
+  planRevision: string;
+}
+
+export interface ApplyCustomTypeDropRequest {
+  request: CustomTypeDropRequest;
+  expectedPlanRevision: string;
 }
 
 export interface ColumnInfo {
@@ -2191,7 +2389,23 @@ export interface QueryTab {
     eventOpenRequestId?: number;
     /** 显式的"新建事件"请求：单调递增，用于让已复用 tab 也能重复进入 CREATE 编辑器 */
     eventCreateRequestId?: number;
-    initialObjectFilter?: "tables" | "events";
+    /**
+     * Custom type designer request. The monotonic `requestId` is what lets a
+     * reused objects tab re-enter create/edit/delete mode on every click.
+     */
+    /**
+     * Whether the custom type designer holds unsaved work, so closing the whole
+     * objects tab goes through the same discard confirmation as the panel.
+     */
+    customTypeDraftDirty?: boolean;
+    customTypeSession?: CustomTypeEditorSession & { sourceRequestId: number };
+    customTypeRequest?: {
+      mode: "create" | "edit" | "delete";
+      schema?: string;
+      name?: string;
+      requestId: number;
+    };
+    initialObjectFilter?: "tables" | "events" | "types";
     filter?: ObjectBrowserFilter;
     searchQuery?: string;
     viewport?: ObjectBrowserViewport;

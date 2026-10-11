@@ -1048,6 +1048,10 @@ pub struct CustomTypeMember {
 pub struct CustomTypeDomainConstraint {
     pub name: String,
     pub definition: String,
+    /// `pg_constraint.convalidated`. `None` means the kernel could not report it
+    /// (older PostgreSQL-family kernels and non-native agents), never "false".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validated: Option<bool>,
 }
 
 /// Category-specific type attributes. Fields that do not apply to a category
@@ -1096,15 +1100,434 @@ pub struct CustomTypeDdl {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomTypeDetails {
+    /// Version of the editable catalog snapshot, attached by core when loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_revision: Option<String>,
     pub name: String,
     pub schema: String,
     pub kind: CustomTypeKind,
+    /// Stable catalog identity when the backend can expose one. PostgreSQL uses
+    /// the type OID rendered as text. Including it in a destructive-plan
+    /// revision distinguishes an object from a same-name, same-definition type
+    /// that was dropped and recreated after preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<String>,
     pub comment: Option<String>,
     #[serde(default)]
     pub members: Vec<CustomTypeMember>,
     pub properties: CustomTypeProperties,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddl: Option<CustomTypeDdl>,
+    /// Type owner (role name). `None` when the kernel or agent cannot report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Custom type management (create / edit / drop)
+//
+// These DTOs are the contract shared by the SQL planner (dbx-sql-schema), the
+// core orchestration layer, and the desktop/web transports. The planner is a
+// pure function over a snapshot plus a draft, so everything it needs to decide
+// a plan is expressible here without touching a database.
+// ---------------------------------------------------------------------------
+
+/// Stable operation identifiers for custom type management capabilities and
+/// for planner issues.
+///
+/// The serialized strings are part of the frontend contract. They are written
+/// out explicitly instead of relying on `rename_all` so that renaming a Rust
+/// variant can never silently change the capability the UI gates on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum CustomTypeOperation {
+    #[serde(rename = "create.enum")]
+    CreateEnum,
+    #[serde(rename = "create.composite")]
+    CreateComposite,
+    #[serde(rename = "create.domain")]
+    CreateDomain,
+    #[serde(rename = "create.range")]
+    CreateRange,
+    /// `multirange_type_name` in `CREATE TYPE ... AS RANGE` (PostgreSQL 14+).
+    #[serde(rename = "create.range.multirangeName")]
+    CreateRangeMultirangeName,
+    #[serde(rename = "alter.rename")]
+    AlterRename,
+    #[serde(rename = "alter.setSchema")]
+    AlterSetSchema,
+    #[serde(rename = "alter.owner")]
+    AlterOwner,
+    #[serde(rename = "alter.comment")]
+    AlterComment,
+    #[serde(rename = "alter.enum.addValue")]
+    AlterEnumAddValue,
+    /// Whether `ALTER TYPE ... ADD VALUE` may run inside an explicit transaction
+    /// block. PostgreSQL only allows it from 12 on, so a plan that both adds a
+    /// value and changes anything else cannot be made atomic on older kernels.
+    #[serde(rename = "alter.enum.addValueInTransaction")]
+    AlterEnumAddValueInTransaction,
+    #[serde(rename = "alter.enum.renameValue")]
+    AlterEnumRenameValue,
+    #[serde(rename = "alter.composite.addAttribute")]
+    AlterCompositeAddAttribute,
+    #[serde(rename = "alter.composite.renameAttribute")]
+    AlterCompositeRenameAttribute,
+    #[serde(rename = "alter.composite.alterAttributeType")]
+    AlterCompositeAlterAttributeType,
+    #[serde(rename = "alter.composite.dropAttribute")]
+    AlterCompositeDropAttribute,
+    #[serde(rename = "alter.domain.default")]
+    AlterDomainDefault,
+    #[serde(rename = "alter.domain.notNull")]
+    AlterDomainNotNull,
+    #[serde(rename = "alter.domain.addConstraint")]
+    AlterDomainAddConstraint,
+    #[serde(rename = "alter.domain.renameConstraint")]
+    AlterDomainRenameConstraint,
+    #[serde(rename = "alter.domain.dropConstraint")]
+    AlterDomainDropConstraint,
+    #[serde(rename = "alter.domain.validateConstraint")]
+    AlterDomainValidateConstraint,
+    #[serde(rename = "drop.restrict")]
+    DropRestrict,
+    #[serde(rename = "drop.cascade")]
+    DropCascade,
+    /// Whether multi-statement plans may run inside one transaction on this
+    /// backend. Distinct from the generic DDL-transaction capability because a
+    /// kernel can support transactional DDL while still refusing a specific
+    /// statement (pre-12 PostgreSQL `ALTER TYPE ... ADD VALUE`).
+    #[serde(rename = "transactionalDdl")]
+    TransactionalDdl,
+}
+
+impl CustomTypeOperation {
+    /// Every operation in a stable order, so capability payloads and tests can
+    /// assert completeness without duplicating the variant list.
+    pub const ALL: [CustomTypeOperation; 25] = [
+        Self::CreateEnum,
+        Self::CreateComposite,
+        Self::CreateDomain,
+        Self::CreateRange,
+        Self::CreateRangeMultirangeName,
+        Self::AlterRename,
+        Self::AlterSetSchema,
+        Self::AlterOwner,
+        Self::AlterComment,
+        Self::AlterEnumAddValue,
+        Self::AlterEnumAddValueInTransaction,
+        Self::AlterEnumRenameValue,
+        Self::AlterCompositeAddAttribute,
+        Self::AlterCompositeRenameAttribute,
+        Self::AlterCompositeAlterAttributeType,
+        Self::AlterCompositeDropAttribute,
+        Self::AlterDomainDefault,
+        Self::AlterDomainNotNull,
+        Self::AlterDomainAddConstraint,
+        Self::AlterDomainRenameConstraint,
+        Self::AlterDomainDropConstraint,
+        Self::AlterDomainValidateConstraint,
+        Self::DropRestrict,
+        Self::DropCascade,
+        Self::TransactionalDdl,
+    ];
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeOperationCapability {
+    pub supported: bool,
+    /// Stable code the UI can map to a translated explanation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    /// Human-readable, untranslated detail for diagnostics and tooltips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl CustomTypeOperationCapability {
+    pub fn supported() -> Self {
+        Self { supported: true, reason_code: None, reason: None }
+    }
+
+    pub fn unsupported(reason_code: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self { supported: false, reason_code: Some(reason_code.into()), reason: Some(reason.into()) }
+    }
+}
+
+/// Whether a connection may create/edit/drop user-defined types, and exactly
+/// which operations are verified on it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeManagementCapabilities {
+    pub database_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_mode: Option<String>,
+    pub operations: std::collections::BTreeMap<CustomTypeOperation, CustomTypeOperationCapability>,
+    /// Changes whenever the resolved capability set changes, so an in-flight
+    /// plan built against an older capability set can be rejected on apply.
+    pub capability_revision: String,
+}
+
+impl CustomTypeManagementCapabilities {
+    pub fn supports(&self, operation: CustomTypeOperation) -> bool {
+        self.operations.get(&operation).is_some_and(|capability| capability.supported)
+    }
+
+    pub fn can_create_any(&self) -> bool {
+        self.supports(CustomTypeOperation::CreateEnum)
+            || self.supports(CustomTypeOperation::CreateComposite)
+            || self.supports(CustomTypeOperation::CreateDomain)
+            || self.supports(CustomTypeOperation::CreateRange)
+    }
+}
+
+/// Identity of a user-defined type. Used for preview/apply/drop requests and
+/// returned as the resulting identity after a rename or schema move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeIdentity {
+    pub schema: String,
+    pub name: String,
+    pub kind: CustomTypeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeEnumValueDraft {
+    pub value: String,
+    /// `None` marks a value that does not exist yet. Existing values must keep
+    /// their original text so the planner can tell a rename from an add/drop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_value: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeAttributeDraft {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<String>,
+    pub data_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeDomainConstraintDraft {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<String>,
+    /// The CHECK expression, either bare or already prefixed with `CHECK`.
+    pub expression: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validated: Option<bool>,
+}
+
+/// The desired end state of one type's structured definition.
+///
+/// `rename_all` applies to the *variant* names, and `rename_all_fields` to the
+/// fields inside them. Both are needed: without the second one the fields stayed
+/// `base_type` / `not_null` / `type_kind` while every frontend payload is
+/// camelCase, so domain, range and base drafts failed to deserialize with
+/// `missing field base_type`. Enum and composite were unaffected only because
+/// their fields (`values`, `attributes`) are single words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum CustomTypeDraftDefinition {
+    Enum {
+        values: Vec<CustomTypeEnumValueDraft>,
+    },
+    Composite {
+        attributes: Vec<CustomTypeAttributeDraft>,
+    },
+    /// A kind with no structured editor (base types today). The draft still has
+    /// to state which kind it describes, otherwise the planner cannot tell an
+    /// untouched base type from a kind change, and the editor would have to fake
+    /// a definition it does not manage.
+    None {
+        type_kind: CustomTypeKind,
+    },
+    Domain {
+        base_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collation: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<String>,
+        #[serde(default)]
+        not_null: bool,
+        #[serde(default)]
+        constraints: Vec<CustomTypeDomainConstraintDraft>,
+    },
+    Range {
+        subtype: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtype_opclass: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        canonical_function: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtype_diff_function: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        multirange_name: Option<String>,
+    },
+}
+
+impl CustomTypeDraftDefinition {
+    pub fn kind(&self) -> CustomTypeKind {
+        match self {
+            Self::Enum { .. } => CustomTypeKind::Enum,
+            Self::Composite { .. } => CustomTypeKind::Composite,
+            Self::Domain { .. } => CustomTypeKind::Domain,
+            Self::Range { .. } => CustomTypeKind::Range,
+            Self::None { type_kind } => *type_kind,
+        }
+    }
+}
+
+/// A desired end state for one user-defined type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeDraft {
+    pub schema: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    pub definition: CustomTypeDraftDefinition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomTypePlanIssueSeverity {
+    /// Informational: the plan runs, but the user should know.
+    Warning,
+    /// The plan runs, but it drops or rewrites something. Requires confirmation.
+    Destructive,
+    /// The plan must not run.
+    Blocking,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypePlanIssue {
+    /// Stable code, e.g. `enum.remove_value_unsupported`.
+    pub code: String,
+    pub message: String,
+    /// Draft path the issue belongs to, e.g. `definition.values[2].value`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub severity: CustomTypePlanIssueSeverity,
+}
+
+/// How a plan's statements must be executed to stay all-or-nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomTypeTransactionPolicy {
+    /// The batch must run in one transaction; refuse otherwise.
+    Required,
+    /// Prefer one transaction when the backend can roll DDL back.
+    Preferred,
+    /// The backend cannot roll this batch back, so it runs statement by
+    /// statement. Only ever returned for single-statement plans.
+    Autocommit,
+}
+
+/// A create (target = None) or edit (target = Some) request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeChangeRequest {
+    /// Required for edits: the version loaded when editing began, not the most
+    /// recent preview. Prevents automatic re-preview from accepting a stale draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_snapshot_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<CustomTypeIdentity>,
+    pub draft: CustomTypeDraft,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeChangePreview {
+    pub statements: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<CustomTypePlanIssue>,
+    #[serde(default)]
+    pub blocked_changes: Vec<CustomTypePlanIssue>,
+    pub destructive: bool,
+    pub transaction_policy: CustomTypeTransactionPolicy,
+    pub plan_revision: String,
+    pub resulting_identity: CustomTypeIdentity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyCustomTypeChangeRequest {
+    pub change: CustomTypeChangeRequest,
+    pub expected_plan_revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeChangeResult {
+    pub identity: CustomTypeIdentity,
+    pub statements: Vec<String>,
+    pub affected_rows: u64,
+}
+
+/// One object that depends on a type, as reported by the catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeDependency {
+    /// Opaque catalog object address, including the sub-object (column) ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<String>,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_type: Option<String>,
+    /// False when this object is removed automatically with the target even
+    /// under RESTRICT. None means the dependency has not been classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_cascade: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeDropRequest {
+    pub target: CustomTypeIdentity,
+    #[serde(default)]
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeDropPreview {
+    pub statement: String,
+    #[serde(default)]
+    pub dependencies: Vec<CustomTypeDependency>,
+    /// `false` when the catalog could not be fully queried. The UI must not
+    /// claim "no dependents" in that case.
+    pub dependencies_complete: bool,
+    #[serde(default)]
+    pub warnings: Vec<CustomTypePlanIssue>,
+    #[serde(default)]
+    pub blocked_changes: Vec<CustomTypePlanIssue>,
+    pub plan_revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyCustomTypeDropRequest {
+    pub request: CustomTypeDropRequest,
+    pub expected_plan_revision: String,
 }
 
 #[cfg(test)]

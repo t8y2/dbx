@@ -196,9 +196,29 @@ export type CustomTypeCapabilities = {
   details: boolean;
   members: boolean;
   ddl: boolean;
+  /**
+   * Whether the create/edit/delete surface is offered for this engine.
+   *
+   * This is the *entry visibility* switch, deliberately static: the sidebar and
+   * object browser must decide whether to render a "new type" entry without an
+   * async capability round trip. The per-operation truth still comes from
+   * `getCustomTypeManagementCapabilities`, which the designer fetches and which
+   * can refuse an individual operation (server version, compatibility mode).
+   */
+  management: boolean;
 };
 
 const VERIFIED_CUSTOM_TYPE_DATABASES = new Set<DatabaseType>(["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"]);
+
+/**
+ * Engines whose type *management* (DDL) path is implemented and verified.
+ *
+ * Kept separate from the read-only set: Kingbase, Vastbase, openGauss and
+ * GaussDB list and describe types today, but their ALTER/DROP behaviour is
+ * verified per compatibility mode before it is offered (see
+ * docs/pips/plans/2026-10-08-pg-custom-type-management.md §16).
+ */
+const VERIFIED_CUSTOM_TYPE_MANAGEMENT_DATABASES = new Set<DatabaseType>(["postgres"]);
 
 /**
  * Whether a connection may open read-only custom type details (phase 2).
@@ -207,7 +227,12 @@ const VERIFIED_CUSTOM_TYPE_DATABASES = new Set<DatabaseType>(["postgres", "openg
  */
 export function customTypeCapabilities(dbType?: DatabaseType): CustomTypeCapabilities {
   const supported = !!dbType && VERIFIED_CUSTOM_TYPE_DATABASES.has(dbType);
-  return { details: supported, members: supported, ddl: supported };
+  return {
+    details: supported,
+    members: supported,
+    ddl: supported,
+    management: !!dbType && VERIFIED_CUSTOM_TYPE_MANAGEMENT_DATABASES.has(dbType),
+  };
 }
 
 export function supportsPackageMemberExpansion(dbType?: DatabaseType, compatibilityMode?: string): boolean {

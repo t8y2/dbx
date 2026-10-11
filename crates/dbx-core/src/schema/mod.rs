@@ -1,3 +1,4 @@
+pub mod custom_types;
 pub mod table_structure_sql;
 
 pub use dbx_drivers::metadata::sqlite_ddl;
@@ -10849,10 +10850,12 @@ pub async fn get_custom_type_details_core(
     schema: &str,
     name: &str,
 ) -> Result<db::CustomTypeDetails, String> {
-    retry_metadata_connection(state, connection_id, Some(database), || {
+    let mut details = retry_metadata_connection(state, connection_id, Some(database), || {
         get_custom_type_details_once(state, connection_id, database, schema, name)
     })
-    .await
+    .await?;
+    details.snapshot_revision = Some(custom_types::snapshot_revision(&details));
+    Ok(details)
 }
 
 async fn get_custom_type_details_once(

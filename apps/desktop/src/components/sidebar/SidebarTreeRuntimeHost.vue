@@ -5058,6 +5058,33 @@ const canOpenFieldLineage = computed(() => {
   return activeNode.value.type === "column" && !!activeNode.value.database && !!activeNode.value.tableName && supportsFieldLineage(currentDatabaseType());
 });
 
+/**
+ * Whether this connection offers the custom type designer.
+ *
+ * The static per-engine switch decides entry visibility (no async probe in a
+ * menu builder); per-operation truth still comes from the backend capability
+ * call the designer makes.
+ */
+const canManageCustomType = computed(() => {
+  const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+  if (!config || connectionIsEffectivelyReadOnly(config)) return false;
+  const effective = effectiveDatabaseTypeForConnection(config) ?? config.db_type;
+  return customTypeCapabilities(effective).management;
+});
+
+function openCustomTypeDesigner(mode: "create" | "edit" | "delete") {
+  const node = activeNode.value;
+  if (!node.connectionId || !node.database) return;
+  queryStore.openCustomTypeDesigner({
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.schema || node.database,
+    catalog: node.catalog,
+    mode,
+    name: mode === "create" ? undefined : node.objectName || node.label,
+  });
+}
+
 const hasTypeMenu = computed(() => {
   const t = activeNode.value.type;
   return t === "connection" || t === "database" || t === "schema" || t === "table" || t === "view" || t === "column" || t === "procedure" || t === "function" || t === "trigger" || t === "package" || t === "package-body" || t === "type" || t === "type-body" || isGroupLabel(activeNode.value);
@@ -6890,9 +6917,21 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (customTypeCapabilities(currentDatabaseType()).details) {
       items.push({ label: t("contextMenu.copyDdl"), action: copyCustomTypeDdl, icon: Copy });
-      items.push({ label: "", separator: true });
     }
+    if (canManageCustomType.value) {
+      items.push({ label: t("contextMenu.editType"), action: () => openCustomTypeDesigner("edit"), icon: Pencil });
+    }
+    items.push({ label: "", separator: true });
     items.push(copyNameMenuItem());
+    if (canManageCustomType.value) {
+      items.push({ label: "", separator: true });
+      items.push({
+        label: t("contextMenu.dropType"),
+        action: () => openCustomTypeDesigner("delete"),
+        icon: Trash2,
+        variant: "destructive" as const,
+      });
+    }
     return true;
   }
   return false;
@@ -6926,7 +6965,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     const hasMongoCreateIndexAction = node.type === "group-indexes" && canCreateMongoIndex.value;
     const hasMongoDropAllIndexesAction = node.type === "group-indexes" && canDropAllMongoIndexes.value;
     const canCreateGroupView = node.type === "group-views" && !!node.connectionId && !!node.database && !["neo4j", "nebula"].includes(currentDatabaseType() || "");
-    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateGroupView || !!mysqlObjectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
+    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateGroupView || (node.type === "group-types" && canManageCustomType.value) || !!mysqlObjectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
@@ -6939,6 +6978,9 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     }
     if (canCreateGroupView) {
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
+    }
+    if (node.type === "group-types" && canManageCustomType.value) {
+      items.push({ label: t("contextMenu.createType"), action: () => openCustomTypeDesigner("create"), icon: Plus });
     }
     if (node.type === "group-events" && node.connectionId && node.database) {
       items.push({ label: t("contextMenu.createEvent"), action: openMysqlEventCreateEditor, icon: Plus });

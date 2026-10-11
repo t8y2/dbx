@@ -147,10 +147,17 @@ describe("databaseObjectCapabilities", () => {
 
   it("enables custom type details only for verified PG-family databases", () => {
     for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
-      expect(customTypeCapabilities(dbType), dbType).toEqual({ details: true, members: true, ddl: true });
+      expect(customTypeCapabilities(dbType), dbType).toEqual({
+        details: true,
+        members: true,
+        ddl: true,
+        // Management (DDL) is verified per engine and per compatibility mode, so
+        // only PostgreSQL advertises it today.
+        management: dbType === "postgres",
+      });
     }
     for (const dbType of ["xugu", "highgo", "uxdb", "redshift", "mysql", undefined] as const) {
-      expect(customTypeCapabilities(dbType), String(dbType)).toEqual({ details: false, members: false, ddl: false });
+      expect(customTypeCapabilities(dbType), String(dbType)).toEqual({ details: false, members: false, ddl: false, management: false });
     }
   });
 

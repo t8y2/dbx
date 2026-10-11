@@ -58,6 +58,45 @@ pub struct DatabaseStorageRequest {
     pub databases: Vec<String>,
 }
 
+#[derive(Deserialize)]
+pub struct CustomTypeCapabilitiesQuery {
+    pub connection_id: String,
+    #[serde(default)]
+    pub database: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CustomTypeChangeBody {
+    pub connection_id: String,
+    #[serde(default)]
+    pub database: Option<String>,
+    pub request: dbx_core::db::CustomTypeChangeRequest,
+}
+
+#[derive(Deserialize)]
+pub struct ApplyCustomTypeChangeBody {
+    pub connection_id: String,
+    #[serde(default)]
+    pub database: Option<String>,
+    pub apply: dbx_core::db::ApplyCustomTypeChangeRequest,
+}
+
+#[derive(Deserialize)]
+pub struct CustomTypeDropBody {
+    pub connection_id: String,
+    #[serde(default)]
+    pub database: Option<String>,
+    pub request: dbx_core::db::CustomTypeDropRequest,
+}
+
+#[derive(Deserialize)]
+pub struct ApplyCustomTypeDropBody {
+    pub connection_id: String,
+    #[serde(default)]
+    pub database: Option<String>,
+    pub apply: dbx_core::db::ApplyCustomTypeDropRequest,
+}
+
 pub async fn list_databases(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
@@ -425,6 +464,103 @@ pub async fn get_custom_type_details(
     let result = dbx_core::schema::get_custom_type_details_core(&state.app, &q.connection_id, database, schema, name)
         .await
         .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn get_custom_type_management_capabilities(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<CustomTypeCapabilitiesQuery>,
+) -> Result<Json<dbx_core::db::CustomTypeManagementCapabilities>, AppError> {
+    let result = dbx_core::schema::custom_types::get_custom_type_management_capabilities_core(
+        &state.app,
+        &q.connection_id,
+        q.database.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn preview_custom_type_change(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<CustomTypeChangeBody>,
+) -> Result<Json<dbx_core::db::CustomTypeChangePreview>, AppError> {
+    let database = body.database.as_deref().unwrap_or("");
+    let result = dbx_core::schema::custom_types::preview_custom_type_change_core(
+        &state.app,
+        &body.connection_id,
+        database,
+        body.request,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn apply_custom_type_change(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<ApplyCustomTypeChangeBody>,
+) -> Result<Json<dbx_core::db::CustomTypeChangeResult>, AppError> {
+    let database = body.database.as_deref().unwrap_or("");
+    let result = dbx_core::schema::custom_types::apply_custom_type_change_core(
+        &state.app,
+        &body.connection_id,
+        database,
+        body.apply,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn preview_custom_type_drop(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<CustomTypeDropBody>,
+) -> Result<Json<dbx_core::db::CustomTypeDropPreview>, AppError> {
+    let database = body.database.as_deref().unwrap_or("");
+    let result = dbx_core::schema::custom_types::preview_custom_type_drop_core(
+        &state.app,
+        &body.connection_id,
+        database,
+        body.request,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn apply_custom_type_drop(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<ApplyCustomTypeDropBody>,
+) -> Result<Json<dbx_core::db::CustomTypeChangeResult>, AppError> {
+    let database = body.database.as_deref().unwrap_or("");
+    let result = dbx_core::schema::custom_types::apply_custom_type_drop_core(
+        &state.app,
+        &body.connection_id,
+        database,
+        body.apply,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn list_custom_type_dependencies(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Vec<dbx_core::db::CustomTypeDependency>>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let name = q.table.as_deref().unwrap_or("");
+    let result = dbx_core::schema::custom_types::list_custom_type_dependencies_core(
+        &state.app,
+        &q.connection_id,
+        database,
+        schema,
+        name,
+    )
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 

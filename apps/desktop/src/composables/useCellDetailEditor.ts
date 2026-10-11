@@ -8,6 +8,7 @@ import { bracketMatching, foldGutter, foldKeymap } from "@codemirror/language";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, cellDetailActiveLineColor, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
+import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, isJsonColumnType } from "@/lib/dataGrid/cellDetailPresentation";
@@ -17,6 +18,7 @@ import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorTheme } from "@/stores/settingsStore";
 import type { AppThemeAppearance, AppThemePalette } from "@/lib/app/appTheme";
 import { selectAllCellDetailText } from "@/lib/dataGrid/cellDetailSelection";
+import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 
 export interface UseCellDetailEditorOptions {
   onChange?: (value: string) => void;
@@ -79,6 +81,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
   const fontThemeComp = new Compartment();
   const lineWrappingComp = new Compartment();
   const readOnlyComp = new Compartment();
+  const shortcutComp = new Compartment();
 
   let destroyed = false;
   let currentIsJson = false;
@@ -105,6 +108,10 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
 
   function isReadOnly(): boolean {
     return typeof options.readOnly === "function" ? options.readOnly() : Boolean(options.readOnly);
+  }
+
+  function isLineWrapping(): boolean {
+    return typeof options.lineWrapping === "function" ? options.lineWrapping() : settingsStore.editorSettings.wordWrap;
   }
 
   function readOnlyExtensions(readOnly: boolean) {
@@ -173,11 +180,20 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
   });
 
   watch(
-    () => options.lineWrapping?.() ?? false,
+    () => isLineWrapping(),
     (lineWrapping) => {
       const editor = view.value;
       if (!editor || destroyed) return;
       editor.dispatch({ effects: lineWrappingComp.reconfigure(lineWrapping ? EditorView.lineWrapping : []) });
+    },
+  );
+
+  watch(
+    () => settingsStore.editorSettings.shortcuts.selectLineEnds,
+    (shortcut) => {
+      const editor = view.value;
+      if (!editor || destroyed) return;
+      editor.dispatch({ effects: shortcutComp.reconfigure(keymap.of([{ key: shortcutToCodeMirrorKey(shortcut), preventDefault: true, run: selectLineEnds }])) });
     },
   );
 
@@ -250,10 +266,11 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
               ]),
         ]),
         languageComp.of(currentIsJson ? json() : []),
-        lineWrappingComp.of(options.lineWrapping?.() ? EditorView.lineWrapping : []),
+        lineWrappingComp.of(isLineWrapping() ? EditorView.lineWrapping : []),
         readOnlyComp.of(readOnlyExtensions(isReadOnly())),
         themeComp.of(theme),
         fontThemeComp.of(fontTheme),
+        shortcutComp.of(keymap.of([{ key: shortcutToCodeMirrorKey(shortcuts.selectLineEnds), preventDefault: true, run: selectLineEnds }])),
         keymap.of([
           {
             key: "Mod-a",
@@ -274,7 +291,11 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
           }
         }),
         EditorView.domEventHandlers({
-          keydown(event) {
+          keydown(event, eventView) {
+            if (matchesShortcut(event, settingsStore.editorSettings.shortcuts.selectLineEnds)) {
+              event.preventDefault();
+              return selectLineEnds(eventView);
+            }
             if (!options.onSaveShortcut?.(event)) return false;
             event.preventDefault();
             event.stopPropagation();

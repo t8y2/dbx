@@ -110,6 +110,9 @@ import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWor
 import DataGridPagination from "@/components/grid/DataGridPagination.vue";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
+import DataGridSortBuilder from "@/components/grid/DataGridSortBuilder.vue";
+import DataGridSortWorkbench from "@/components/grid/DataGridSortWorkbench.vue";
+import DataGridTextSortWorkbench from "@/components/grid/DataGridTextSortWorkbench.vue";
 
 const cellDetailPanelSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailPanel.vue", "utf8");
 const cellDetailDialogSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailDialog.vue", "utf8");
@@ -408,6 +411,127 @@ describe("DataGridPagination", () => {
     expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow").props.disabled).toBe(true);
     await mounted.setProps({ loading: false, canLoadAllRows: false });
     expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow").props.disabled).toBe(true);
+  });
+
+  it("gates the bottom export menu based on canExport", async () => {
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: null,
+      selectionSummarySumText: "",
+      selectionSummaryAverageText: "",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [{ value: "csv", label: "CSV" }],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+      canExport: true,
+    });
+
+    const findExportMenu = () => findAll(mounted.root, (node) => node.props["data-stub"] === "LightDropdown" && node.props["aria-label"] === "grid.export");
+    expect(findExportMenu()).toHaveLength(1);
+
+    await mounted.setProps({ canExport: false });
+    expect(findExportMenu()).toHaveLength(0);
+
+    await mounted.setProps({ canExport: true });
+    expect(findExportMenu()).toHaveLength(1);
+  });
+
+  it("renders export menu by default when canExport is not specified", () => {
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: null,
+      selectionSummarySumText: "",
+      selectionSummaryAverageText: "",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [{ value: "csv", label: "CSV" }],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+    });
+
+    const exportMenus = findAll(mounted.root, (node) => node.props["data-stub"] === "LightDropdown" && node.props["aria-label"] === "grid.export");
+    expect(exportMenus).toHaveLength(1);
+  });
+
+  it("copies each aggregate value on click, and only the values", () => {
+    const copySelectionSummary = vi.fn();
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: { cellCount: 4, rowCount: 2 },
+      selectionSummarySumText: "10",
+      selectionSummaryAverageText: "2.5",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+      onCopySelectionSummary: copySelectionSummary,
+    });
+
+    const sum = findOne(mounted.root, (node) => node.props["data-selection-summary-sum"] === "");
+    const average = findOne(mounted.root, (node) => node.props["data-selection-summary-average"] === "");
+    // Native buttons provide tab focus plus Enter/Space activation without recreating
+    // the complete button interaction model on a clickable text span.
+    expect(sum.type).toBe("button");
+    expect(average.type).toBe("button");
+    expect(sum.props.title).toBe("grid.copyValue");
+    expect(hostText(sum)).toContain("grid.copyValue");
+
+    dispatch(sum, "click");
+    expect(copySelectionSummary).toHaveBeenCalledWith("10");
+
+    dispatch(average, "click");
+    expect(copySelectionSummary).toHaveBeenLastCalledWith("2.5");
+    expect(copySelectionSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the aggregate values non-copyable while the selection drag is pending", () => {
+    const copySelectionSummary = vi.fn();
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: { cellCount: 4, rowCount: 2 },
+      selectionSummarySumText: "…",
+      selectionSummaryAverageText: "…",
+      selectionSummaryPending: true,
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+      onCopySelectionSummary: copySelectionSummary,
+    });
+
+    const sum = findOne(mounted.root, (node) => node.props["data-selection-summary-sum"] === "");
+    // Pending aggregate placeholders retain their layout but expose no copy action.
+    expect(sum.props.title).toBeUndefined();
+    expect(sum.props.disabled).toBe(true);
+
+    dispatch(sum, "click");
+    expect(copySelectionSummary).not.toHaveBeenCalled();
+  });
+});
+
+describe("DataGrid selection summary copy wiring", () => {
+  it("routes the pagination aggregate copy through the grid clipboard helper", () => {
+    expect(dataGridSource).toMatch(/@copy-selection-summary="copyText"/);
+    expect(dataGridSource).toMatch(/:selection-summary-pending="isSelectingCells"/);
   });
 });
 
@@ -1022,6 +1146,220 @@ describe("DataGridFilterBuilder", () => {
   });
 });
 
+describe("DataGridSortBuilder", () => {
+  const rules = [
+    { id: "r1", columnName: "id", direction: "asc" as const },
+    { id: "r2", columnName: "created_at", direction: "desc" as const, disabled: true },
+  ];
+
+  it("edits, reorders, disables, removes, adds, resets, and applies sort rules", () => {
+    const add = vi.fn();
+    const remove = vi.fn();
+    const move = vi.fn();
+    const updateRule = vi.fn();
+    const applyOnly = vi.fn();
+    const reset = vi.fn();
+    const clear = vi.fn();
+    const apply = vi.fn();
+    const mounted = mountComponent(DataGridSortBuilder, {
+      rules,
+      columns: ["id", "created_at", "name"],
+      onAdd: add,
+      onRemove: remove,
+      onMove: move,
+      onUpdateRule: updateRule,
+      onApplyOnly: applyOnly,
+      onReset: reset,
+      onClear: clear,
+      onApply: apply,
+    });
+
+    const selects = findAll(mounted.root, (node) => node.props["data-stub"] === "Select");
+    const updateColumn = selects[0]!.props["onUpdate:modelValue"];
+    for (const callback of Array.isArray(updateColumn) ? updateColumn : [updateColumn]) callback("name");
+    expect(updateRule).toHaveBeenCalledWith("r1", { columnName: "name" });
+
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.sortBuilderReorderRule"),
+      "keydown",
+      { key: "ArrowDown" },
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.sortBuilderApplyOnly"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.sortBuilderDisableRule"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "common.remove"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderAddRule"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderReset"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.clearSort"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderApply"),
+      "click",
+    );
+
+    expect(move).toHaveBeenCalledWith("r1", 1);
+    expect(applyOnly).toHaveBeenCalledWith("r1");
+    expect(updateRule).toHaveBeenCalledWith("r1", { disabled: true });
+    expect(remove).toHaveBeenCalledWith("r1");
+    expect(add).toHaveBeenCalledOnce();
+    expect(reset).toHaveBeenCalledOnce();
+    expect(clear).toHaveBeenCalledOnce();
+    expect(apply).toHaveBeenCalledOnce();
+  });
+
+  it("filters fields from the searchable selector", async () => {
+    const mounted = mountComponent(DataGridSortBuilder, {
+      rules: [{ id: "r1", columnName: "", direction: "asc" }],
+      columns: ["id", "created_at", "display_name"],
+    });
+
+    const searchInput = findOne(mounted.root, (node) => node.type === "input" && node.props.placeholder === "grid.filterBuilderSearchColumns");
+    dispatch(searchInput, "input", { target: { value: "created" } });
+    await nextTick();
+
+    const options = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem").map(hostText);
+    expect(options).toContain("created_at");
+    expect(options).not.toContain("display_name");
+  });
+
+  it("matches fields by column comment from the searchable selector", async () => {
+    const mounted = mountComponent(DataGridSortBuilder, {
+      rules: [{ id: "r1", columnName: "", direction: "asc" }],
+      columns: ["customer_name", "created_at"],
+      commentByColumn: new Map([["customer_name", "客户名称 / Customer Name"]]),
+    });
+
+    const searchInput = findOne(mounted.root, (node) => node.type === "input" && node.props.placeholder === "grid.filterBuilderSearchColumns");
+    dispatch(searchInput, "input", { target: { value: "客户" } });
+    await nextTick();
+
+    const options = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem").map(hostText);
+    expect(options).toContain("customer_name");
+    expect(options).not.toContain("created_at");
+  });
+
+  it("keeps an already selected field available for another sort rule", () => {
+    const mounted = mountComponent(DataGridSortBuilder, {
+      rules: [
+        { id: "r1", columnName: "name", direction: "asc" },
+        { id: "r2", columnName: "", direction: "desc" },
+      ],
+      columns: ["name"],
+    });
+
+    const nameOptions = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem" && hostText(node) === "name");
+    expect(nameOptions).toHaveLength(2);
+    expect(nameOptions.every((option) => option.props.disabled !== true)).toBe(true);
+
+    const addButton = findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderAddRule");
+    expect(addButton.props.disabled).not.toBe(true);
+  });
+});
+
+describe("DataGrid sort workbenches", () => {
+  const rules = [
+    { id: "r1", columnName: "tenant_id", direction: "asc" as const },
+    { id: "r2", columnName: "created_at", direction: "desc" as const },
+  ];
+
+  it("renders the conditions layout with SQL preview and explicit actions", () => {
+    const addRule = vi.fn();
+    const apply = vi.fn();
+    const reset = vi.fn();
+    const clear = vi.fn();
+    const copySql = vi.fn();
+    const mounted = mountComponent(DataGridSortWorkbench, {
+      sqlPreview: "ORDER BY tenant_id ASC, created_at DESC",
+      rules,
+      columns: ["id", "tenant_id", "created_at"],
+      onAddRule: addRule,
+      onApply: apply,
+      onReset: reset,
+      onClear: clear,
+      onCopySql: copySql,
+    });
+
+    expect(findOne(mounted.root, (node) => node.props["data-grid-sort-workbench"] === "")).toBeTruthy();
+    expect(hostText(mounted.root)).toContain("ORDER BY tenant_id ASC, created_at DESC");
+    dispatch(
+      findOne(mounted.root, (node) => node.props["aria-label"] === "grid.copySortSql"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderAddRule"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderReset"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.clearSort"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.sortBuilderApply"),
+      "click",
+    );
+
+    expect(copySql).toHaveBeenCalledOnce();
+    expect(addRule).toHaveBeenCalledOnce();
+    expect(reset).toHaveBeenCalledOnce();
+    expect(clear).toHaveBeenCalledOnce();
+    expect(apply).toHaveBeenCalledOnce();
+  });
+
+  it("renders the compact resizable text layout", async () => {
+    const addRule = vi.fn();
+    const updateRule = vi.fn();
+    const updateHeight = vi.fn();
+    const mounted = mountComponent(DataGridTextSortWorkbench, {
+      height: 168,
+      sqlPreview: "ORDER BY tenant_id ASC, created_at DESC",
+      rules,
+      columns: ["id", "tenant_id", "created_at"],
+      onAddRule: addRule,
+      onUpdateRule: updateRule,
+      "onUpdate:height": updateHeight,
+    });
+
+    const panel = findOne(mounted.root, (node) => node.props["data-grid-text-sort-workbench"] === "");
+    const rulesArea = findOne(mounted.root, (node) => node.props["data-sort-rules-scroll"] === "") as any;
+    const resizeHandle = findOne(mounted.root, (node) => node.props.role === "separator");
+    expect(panel.props.style).toEqual({ height: "168px", maxHeight: "55vh" });
+    expect(findAll(mounted.root, (node) => node.props.role === "checkbox")).toHaveLength(2);
+
+    dispatch(
+      findOne(mounted.root, (node) => node.props.role === "checkbox"),
+      "click",
+    );
+    expect(updateRule).toHaveBeenCalledWith("r1", { disabled: true });
+    const addShortcut = dispatch(rulesArea, "keydown", { key: "Enter", shiftKey: true });
+    expect(addShortcut.defaultPrevented).toBe(true);
+    expect(addRule).toHaveBeenCalledOnce();
+
+    dispatch(resizeHandle, "keydown", { key: "ArrowDown" });
+    await nextTick();
+    expect(updateHeight).toHaveBeenCalledWith(176);
+  });
+});
+
 describe("DataGridQueryControls", () => {
   it("opens column search when the filter button creates the first rule", async () => {
     let mounted: ReturnType<typeof mountComponent>;
@@ -1264,6 +1602,7 @@ describe("DataGridQueryControls", () => {
       filterEditorView: "quick",
       filterButtonActive: false,
       filterButtonCount: 0,
+      sortButtonCount: 2,
       hasLocalColumnFilters: false,
       localFilterCount: 0,
       localFilterSummaries: [],
@@ -1280,14 +1619,16 @@ describe("DataGridQueryControls", () => {
 
     expect(hostText(mounted.root)).not.toContain("grid.filterQuickView");
     expect(hostText(mounted.root)).not.toContain("grid.filterConditionView");
-    const quickFilterButtons = findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"));
+    const quickFilterButtons = findAll(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.filter");
     expect(quickFilterButtons).toHaveLength(1);
     expect(quickFilterButtons[0].props["aria-label"]).toBe("grid.filter");
+    const sortButton = findOne(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.sortBuilderTitle");
+    expect(hostText(sortButton)).toContain("2");
 
     await mounted.setProps({ filterEditorView: "conditions", filterBuilderOpen: false });
     await nextTick();
     expect(findOne(mounted.root, (node) => node.type === "textarea" && node.props.placeholder === "WHERE")).toBeTruthy();
-    const filterButtons = findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"));
+    const filterButtons = findAll(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.filter");
     expect(filterButtons).toHaveLength(1);
     expect(filterButtons[0].props["aria-label"]).toBe("grid.filter");
     expect(filterButtons[0].props["aria-expanded"]).toBe(false);
@@ -1350,6 +1691,51 @@ describe("DataGridDistinctValuePopover", () => {
     await mounted.setProps({ selectedKeys: new Set(options.map((option) => option.key)) });
     expect(findSelectAll().props["aria-checked"]).toBe(true);
   });
+
+  it("renders the current page value switch and emits update:source", async () => {
+    const updateSource = vi.fn();
+    const mounted = mountComponent(DataGridDistinctValuePopover, {
+      open: true,
+      search: "",
+      options: [{ key: "str:open", label: "open", count: 12, value: "open" }],
+      loading: false,
+      error: "",
+      limited: false,
+      limit: 1000,
+      source: "database",
+      "onUpdate:source": updateSource,
+    });
+
+    expect(hostText(mounted.root)).toContain("grid.filterFromCurrentPage");
+    const switchEl = findOne(mounted.root, (node) => node.props["data-distinct-value-page-switch"] === "");
+    expect(switchEl.props["model-value"] ?? switchEl.props.modelValue).toBe(false);
+
+    (switchEl.props["onUpdate:model-value"] ?? switchEl.props["onUpdate:modelValue"])(true);
+    expect(updateSource).toHaveBeenCalledWith("page");
+
+    await mounted.setProps({ source: "page" });
+    const switchElPage = findOne(mounted.root, (node) => node.props["data-distinct-value-page-switch"] === "");
+    expect(switchElPage.props["model-value"] ?? switchElPage.props.modelValue).toBe(true);
+
+    (switchElPage.props["onUpdate:model-value"] ?? switchElPage.props["onUpdate:modelValue"])(false);
+    expect(updateSource).toHaveBeenCalledWith("database");
+  });
+
+  it("disables source switch when server filter is not supported", () => {
+    const mounted = mountComponent(DataGridDistinctValuePopover, {
+      open: true,
+      search: "",
+      options: [{ key: "str:open", label: "open", count: 12, value: "open" }],
+      loading: false,
+      error: "",
+      limited: false,
+      limit: 1000,
+      canUseServerFilter: false,
+    });
+    const switchEl = findOne(mounted.root, (node) => node.props["data-distinct-value-page-switch"] === "");
+    expect(switchEl.props.disabled).toBe(true);
+    expect(switchEl.props["model-value"] ?? switchEl.props.modelValue).toBe(true);
+  });
 });
 
 describe("DataGridFilterWorkbench", () => {
@@ -1410,6 +1796,24 @@ describe("DataGridFilterWorkbench", () => {
     });
 
     expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
+  });
+
+  it("forwards distinct value source updates in the conditions workbench", () => {
+    const updateSource = vi.fn();
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "",
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      columns: ["status"],
+      filteredColumns: ["status"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      valueSuggestions: { ruleId: "r1", target: "value", source: "database", search: "", options: [], loading: false, error: "", limited: false, limit: 1000, selectedKeys: new Set<string>() },
+      onUpdateValueSuggestionSource: updateSource,
+    });
+
+    const switchEl = findOne(mounted.root, (node) => node.props["data-distinct-value-page-switch"] === "");
+    (switchEl.props["onUpdate:model-value"] ?? switchEl.props["onUpdate:modelValue"])(true);
+    expect(updateSource).toHaveBeenCalledWith("page");
   });
 
   it("scrolls to the newest rule when a condition is added", async () => {
@@ -1685,6 +2089,57 @@ describe("cell detail surfaces", () => {
       "click",
     );
     expect(copyText).toHaveBeenCalledWith("#2005805");
+  });
+
+  it("presents printable Oracle BLOB bytes as text and copies the presented value", async () => {
+    const copyText = vi.fn();
+    const blobDetail = detail({
+      type: "BLOB",
+      value: "0x48656c6c6f",
+      rawValue: "0x48656c6c6f",
+      rawValuePreview: "0x48656c6c6f",
+      displayValue: "Hello",
+      displayValuePreview: "Hello",
+      formattedJson: "",
+    });
+    const dialog = mountComponent(DataGridCellDetailDialog, {
+      open: true,
+      detail: blobDetail,
+      typeColorClass: () => "",
+      openImagePreview: vi.fn(),
+      copyText,
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      databaseType: "oracle",
+    });
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: blobDetail,
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "oracle",
+    });
+
+    expect(hostText(dialog.root)).toContain("Hello");
+    expect(hostText(panel.root)).toContain("Hello");
+    dispatch(
+      findOne(dialog.root, (node) => node.props.title === "grid.copyValue"),
+      "click",
+    );
+    expect(copyText).toHaveBeenCalledWith("Hello");
   });
 
   it("keeps non-MySQL BLOB detail previews in hex", () => {

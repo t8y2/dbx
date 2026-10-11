@@ -32,18 +32,18 @@ export function useMigrationStore(backend: MigrationApi = api) {
     state.errorCode = null;
     state.errorMessage = null;
   }
-  async function refreshStatus() {
+  async function refreshStatus(retry = false) {
     // Only this endpoint returns classified, redacted migration errors. Transport
     // exceptions may contain configuration values and must never enter UI state.
-    state.status = await backend.migrationStatus();
+    state.status = await backend.migrationStatus(retry);
     state.errorCode = state.status.errorCode ?? null;
     state.errorMessage = state.status.errorMessage ?? null;
   }
-  async function initialize() {
+  async function checkStatus(retry: boolean) {
     state.loading = true;
     clearError();
     try {
-      await refreshStatus();
+      await refreshStatus(retry);
       state.step = completed.value ? 3 : 1;
       // A completed migration only needs the success page in the session that
       // performed it. On later launches, retained backups are recovery assets,
@@ -57,6 +57,8 @@ export function useMigrationStore(backend: MigrationApi = api) {
       state.loading = false;
     }
   }
+  const initialize = () => checkStatus(false);
+  const retryStatus = () => checkStatus(true);
   async function run(retry: boolean) {
     if (state.busy) return;
     state.busy = true;
@@ -114,5 +116,5 @@ export function useMigrationStore(backend: MigrationApi = api) {
   function enter() {
     if (completed.value && !state.busy) state.entered = true;
   }
-  return { state, blocking, completed, initialize, start: () => run(false), retry: () => run(true), cleanup, diagnostic, enter };
+  return { state, blocking, completed, initialize, retryStatus, start: () => run(false), retry: () => run(true), cleanup, diagnostic, enter };
 }

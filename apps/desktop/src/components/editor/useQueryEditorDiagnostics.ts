@@ -14,6 +14,7 @@ import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis } from "@/lib/sql/semantic/references";
 import { sqlServerUseDatabaseBeforeCursor } from "@/lib/sql/sqlCompletionLookupTarget";
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange, sqlErrorSqlMatchesEditor } from "@/lib/sql/sqlDiagnostics";
+import { scalarPositionToUtf16Offset, sqlErrorEditorOffset } from "@/lib/sql/errorPosition";
 import { analyzeMysqlRoutineSyntax, supportsMysqlRoutineSyntaxDiagnostics } from "@/lib/sql/mysqlRoutineSyntaxDiagnostics";
 import { buildOracleSyntaxDiagnostics } from "@/lib/sql/oracleSyntaxDiagnostics";
 import { buildSqlServerRoutineSyntaxDiagnostics } from "@/lib/sql/sqlServerRoutineSyntaxDiagnostics";
@@ -90,6 +91,16 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
 
   function sqlErrorDecorationRange(currentState: import("@codemirror/state").EditorState) {
     if (!props.executionError) return [];
+    if (props.executionErrorResult?.sourceStatement) {
+      const sql = currentState.doc.toString();
+      const mapped = sqlErrorEditorOffset({ editorSql: sql, result: props.executionErrorResult, resultIndex: props.executionErrorResult.statement_index, databaseType: props.databaseType, parameterOptions: sqlStatementParameterOptions() });
+      if (!mapped || mapped.offset >= sql.length) return [];
+      const source = props.executionErrorResult.sourceStatement;
+      const sourceRange = source ? resolveSqlErrorDecorationRange(source, props.executionError) : null;
+      const sourceOffset = source ? scalarPositionToUtf16Offset(source, mapped.line, mapped.column) : undefined;
+      const width = sourceRange && sourceRange.from === sourceOffset ? sourceRange.to - sourceRange.from : (sql.codePointAt(mapped.offset) ?? 0) > 0xffff ? 2 : 1;
+      return [{ from: mapped.offset, to: Math.min(sql.length, mapped.offset + width), message: props.executionError }];
+    }
     if (!props.executionErrorSql || !sqlErrorSqlMatchesEditor(currentState.doc.toString(), props.executionErrorSql)) return [];
     const range = resolveSqlErrorDecorationRange(currentState.doc.toString(), props.executionError);
     if (!range) return [];
@@ -339,7 +350,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       setSemanticDiagnostics([]);
       return;
     }
-    if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "victoriametrics" || props.databaseType === "salesforce") {
+    if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "couchdb" || props.databaseType === "victoriametrics" || props.databaseType === "salesforce") {
       setSemanticDiagnostics([]);
       return;
     }
@@ -506,7 +517,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
   onBeforeUnmount(clearScheduledSemanticDiagnostics);
 
   // ==================== Unknown table/column highlighting ====================
-  const NON_SQL_UNKNOWN_OBJECT_DATABASE_TYPES: ReadonlySet<DatabaseType> = new Set(["qdrant", "milvus", "weaviate", "chromadb", "solr"]);
+  const NON_SQL_UNKNOWN_OBJECT_DATABASE_TYPES: ReadonlySet<DatabaseType> = new Set(["qdrant", "milvus", "weaviate", "chromadb", "solr", "couchdb"]);
   const MAX_SQL_UNKNOWN_OBJECT_SQL_LENGTH = 200_000;
   const MAX_SQL_UNKNOWN_OBJECT_STATEMENTS = 80;
   const SQL_UNKNOWN_OBJECT_COLUMN_TABLE_LIMIT = 24;

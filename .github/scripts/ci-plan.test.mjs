@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { goAgents, integrationCases, rustGroups } from "./ci-config.mjs";
-import { changedPaths, planCi } from "./ci-plan.mjs";
+import { cargoMetadata, changedPaths, planCi } from "./ci-plan.mjs";
 import { rustCommand } from "./ci-rust.mjs";
 import { gateFailures } from "./ci-gate.mjs";
 import { assertCoverage, parseCoverage } from "./ci-rust-coverage.mjs";
@@ -29,7 +29,8 @@ const graph = {
     "dbx-driver-mysql", "dbx-driver-postgres", "dbx-driver-redis", "dbx-driver-sqlserver", "dbx-driver-support",
     "dbx-platform", "dbx-sql-core", "dbx-sql-data", "dbx-sql-dialect", "dbx-types", "dbx-sqlite-worker"],
   "dbx-core": ["dbx-drivers", "dbx-sql", "dbx-types", "dbx-platform", "dbx-ai-provider", "dbx-plugin-runtime", "dbx-formats"],
-  "dbx-mcp": ["dbx-core"], "dbx-cli": ["dbx-core", "dbx-mcp"], "dbx-web": ["dbx-core", "dbx-mcp"], "dbx": ["dbx-core", "dbx-mcp"],
+  "dbx-mcp": ["dbx-core"], "dbx-cli": ["dbx-core", "dbx-mcp"], "dbx-web": ["dbx-core", "dbx-mcp"], "dbx": ["dbx-core", "dbx-mcp", "dbx-tauri-consul", "dbx-tauri-schema"],
+  "dbx-tauri-consul": ["dbx-core"], "dbx-tauri-schema": ["dbx-core"],
 };
 const metadata = {
   workspace_members: Object.keys(graph),
@@ -40,11 +41,33 @@ const metadata = {
 };
 const plan = (files, options = {}) => planCi({ files, metadata, root, ...options });
 const groups = (result) => result.rust_matrix.include.map((entry) => entry.group);
-// Keep the gate fixtures in sync with ci-gate.mjs routedJobs. Both Windows jobs
-// share the windows_win7_bundle routing output.
+
+test("the planner uses the runner stable Cargo only for metadata", () => {
+  let invocation;
+  const result = cargoMetadata("/workspace", (command, args, options) => {
+    invocation = { command, args, options };
+    return '{"packages":[],"workspace_members":[]}';
+  });
+  assert.deepEqual(result, { packages: [], workspace_members: [] });
+  assert.equal(invocation.command, "cargo");
+  assert.deepEqual(invocation.args, ["+stable", "metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"]);
+  assert.equal(invocation.options.cwd, "/workspace");
+});
 const routedJobs = { frontend: "frontend", packages: "packages", "github-scripts": "github_scripts",
-  "windows-standard-check": "windows_win7_bundle", "windows-win7-bundle": "windows_win7_bundle",
+  "windows-standard-check": "windows_standard", "windows-win7-bundle": "windows_win7_bundle",
   "duckdb-windows-driver": "duckdb_windows", jdbc: "jdbc", "offline-jdbc-release": "offline_jdbc", "nix-packaging": "nix" };
+
+test("only an exact contributor snapshot diff skips desktop frontend validation", () => {
+  for (const eventName of ["pull_request", "push"]) {
+    assert.equal(plan(["docs/data/contributors.json"], { eventName }).contributor_snapshot_only, true);
+    for (const files of [null, [], ["docs/lib/contributorActivity.test.ts"],
+      ["docs/data/contributors.json", "apps/desktop/src/main.ts"],
+      ["docs/data/contributors.json", "docs/lib/contributorActivity.ts"],
+      ["docs/data/contributors.json", "Cargo.lock"]]) {
+      assert.equal(plan(files, { eventName }).contributor_snapshot_only, false);
+    }
+  }
+});
 
 test("foundation changes select transitive consumers and standalone DuckDB", () => {
   const result = plan(["crates/dbx-types/src/lib.rs"]);
@@ -67,6 +90,123 @@ test("core and consumer changes do not pull unrelated foundation test groups", (
   assert.deepEqual(groups(plan(["crates/dbx-driver-postgres/src/postgres.rs"])), ["drivers", "application"]);
 });
 
+test("Win7 candidate follows the desktop package dependency graph", () => {
+  assert.equal(plan(["crates/dbx-core/src/query/mod.rs"]).windows_win7_candidate, true);
+  assert.equal(plan(["crates/dbx-drivers/src/lib.rs"]).windows_win7_candidate, true);
+  assert.equal(plan(["crates/dbx-cli/src/main.rs"]).windows_win7_candidate, false);
+});
+
+test("ordinary desktop Rust changes keep Windows compilation without full Win7 packaging", () => {
+  for (const file of ["crates/dbx-core/src/query/mod.rs", "crates/dbx-core/tests/runtime_diagnostic_history.rs",
+    "crates/dbx-drivers/src/lib.rs", "crates/dbx-driver-postgres/src/postgres.rs", "crates/dbx-driver-mysql/tests/query.rs",
+    "src-tauri/src/commands/query.rs", "crates/dbx-tauri-consul/src/lib.rs", "crates/dbx-tauri-schema/src/lib.rs"]) {
+    const result = plan([file]);
+    assert.equal(result.windows_standard, true, file);
+    assert.equal(result.windows_win7_bundle, false, file);
+  }
+  for (const file of ["crates/dbx-cli/src/main.rs", "crates/dbx-web/src/routes/transfer.rs", "docs/README.md"]) {
+    const result = plan([file]);
+    assert.equal(result.windows_standard, false, file);
+    assert.equal(result.windows_win7_bundle, false, file);
+  }
+});
+
+test("old Win7 Rust paths remain candidates through the dependency graph", () => {
+  for (const file of [
+    "src-tauri/src/commands/update.rs",
+    "crates/dbx-core/src/host/update.rs",
+    "crates/dbx-driver-postgres/src/postgres.rs",
+    "crates/dbx-platform/src/lib.rs",
+  ]) {
+    assert.equal(plan([file]).windows_win7_candidate, true, file);
+  }
+});
+
+test("Win7 infrastructure changes remain candidates outside the Cargo graph", () => {
+  for (const file of [
+    ".github/scripts/assert-win7-pe-compat.ps1",
+    ".github/scripts/assert-webview2-win7-loader.ps1",
+    ".github/scripts/assert-win7-installer-content.ps1",
+    ".github/scripts/assert-webview2-win7-runtime.ps1",
+    ".github/scripts/prepare-webview2-win7-loader.ps1",
+    ".github/scripts/prepare-webview2-win7-runtime.ps1",
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    "src-tauri/tauri.webview2-win7-fixed.conf.json",
+    "src-tauri/build.rs",
+    "src-tauri/windows/nsis/installer.nsi",
+    "vendor/wry/src/lib.rs",
+    "vendor/webview2-com-sys/src/lib.rs",
+    "vendor/ctor/src/lib.rs",
+    "vendor/dirs-sys/src/lib.rs",
+    "vendor/pageant/src/lib.rs",
+    ".cargo/config.toml",
+    "rust-toolchain.toml",
+    ".github/fixtures/win7-imports/dll.json",
+    "src-tauri/tauri.conf.json",
+    "src-tauri/tauri.windows.conf.json",
+    "src-tauri/src/commands/update.rs",
+    "crates/dbx-core/src/host/update.rs",
+    "crates/dbx-platform/src/lib.rs",
+  ]) {
+    const result = plan([file]);
+    assert.equal(result.windows_win7_candidate, true, file);
+    assert.equal(result.windows_standard, true, file);
+    assert.equal(result.windows_win7_bundle, true, file);
+  }
+});
+
+test("Win7 dependency inputs fail open", () => {
+  for (const file of ["Cargo.toml", "Cargo.lock", "src-tauri/Cargo.toml", "crates/dbx-cli/Cargo.toml"]) {
+    assert.equal(plan([file]).windows_win7_candidate, true, file);
+    assert.equal(plan([file]).windows_standard, true, file);
+    assert.equal(plan([file]).windows_win7_bundle, true, file);
+  }
+});
+
+test("unknown Rust changes and unknown diffs remain Win7 candidates", () => {
+  for (const files of [["crates/new-engine/src/lib.rs"], null]) {
+    const result = plan(files);
+    assert.equal(result.windows_win7_candidate, true);
+    assert.equal(result.windows_standard, true);
+    assert.equal(result.windows_win7_bundle, true);
+  }
+  const fixture = structuredClone(metadata);
+  fixture.workspace_members.push("new-engine");
+  fixture.packages.push({ id: "new-engine", name: "new-engine", manifest_path: `${root}/crates/new-engine/Cargo.toml`, dependencies: [] });
+  const result = plan(["crates/dbx-web/src/lib.rs"], { metadata: fixture });
+  assert.equal(result.windows_standard, true);
+  assert.equal(result.windows_win7_bundle, true);
+  assert.equal(result.windows_win7_reasons.unknown_member, true);
+  assert.equal(plan(["docs/README.md"], { metadata: fixture }).windows_win7_bundle, false);
+});
+
+test("unrelated CI inputs do not become Win7 candidates through full Rust coverage", () => {
+  const result = plan([".github/scripts/ci-gate.mjs"]);
+  assert.equal(result.rust_full, true);
+  assert.equal(result.windows_win7_candidate, false);
+});
+
+test("Win7 affected packages stay independent from full Rust coverage", () => {
+  const result = plan([".github/scripts/ci-gate.mjs"]);
+  assert.ok(result.affected_packages.includes("dbx"));
+  assert.deepEqual(result.windows_win7_affected_packages, []);
+});
+
+test("Win7 candidate reports each routing reason", () => {
+  assert.equal(plan([".github/scripts/assert-win7-pe-compat.ps1"]).windows_win7_reasons.infrastructure, true);
+  assert.equal(plan(["Cargo.lock"]).windows_win7_reasons.dependency_input, true);
+  assert.equal(plan(["crates/dbx-core/src/lib.rs"]).windows_win7_reasons.desktop_dependency, true);
+  assert.equal(plan(["crates/new-engine/src/lib.rs"]).windows_win7_reasons.unknown_rust, true);
+  assert.deepEqual(plan(["crates/dbx-cli/src/main.rs"]).windows_win7_reasons, {
+    infrastructure: false,
+    dependency_input: false,
+    desktop_dependency: false,
+    unknown_rust: false,
+    unknown_member: false,
+  });
+});
+
 test("code generation and test-only dependencies participate in impact analysis", () => {
   assert.deepEqual(groups(plan(["plugins/connection-types/postgres.yaml"])), ["foundation", "drivers", "application"]);
   assert.deepEqual(groups(plan(["plugins/dialects/postgres.yaml"])), ["foundation", "drivers", "application"]);
@@ -81,7 +221,7 @@ for (const file of ["Cargo.toml", "Cargo.lock", ".cargo/config.toml", "rust-tool
     const result = plan([file]);
     assert.deepEqual(groups(result), ["workspace"]);
     assert.equal(result.rust_full, true);
-    assert.equal(result.agent_go.include.length, 10);
+    assert.equal(result.agent_go.include.length, goAgents.length);
     assert.equal(result.agent_rust.include.length, 2);
     assert.equal(result.agent_integration.include.length, 16);
     assert.equal(result.agent_java, true);
@@ -138,12 +278,12 @@ test("shared Agent inputs and unknown native modules never silently lose coverag
   for (const file of ["agents/common/src/main/java/Protocol.java", "agents/scripts/validate_agents.py", "agents/build.gradle",
     "agents/drivers/new-driver/main.go", "crates/dbx-driver-agent/assets/agent-protocol-v2.json", ".github/workflows/agents-release.yml"]) {
     const result = plan([file]);
-    assert.equal(result.agent_go.include.length, 10, file);
+    assert.equal(result.agent_go.include.length, goAgents.length, file);
     assert.equal(result.agent_integration.include.length, 16, file);
     assert.equal(result.agent_java, true, file);
   }
   const fallback = plan(["future-agent-filter-input"], { agentsChanged: true });
-  assert.equal(fallback.agent_go.include.length, 10);
+  assert.equal(fallback.agent_go.include.length, goAgents.length);
   assert.equal(fallback.agent_integration.include.length, 16);
   assert.equal(fallback.agent_java, true);
 });
@@ -162,6 +302,22 @@ test("test groups partition every current workspace package exactly once", () =>
   const selected = Object.values(rustGroups).flat();
   assert.equal(new Set(selected).size, selected.length);
   assert.deepEqual(selected.toSorted(), Object.keys(graph).toSorted());
+});
+
+test("Rust groups cover the actual workspace metadata, including extracted Tauri crates", () => {
+  const repository = path.resolve(import.meta.dirname, "../..");
+  const actual = cargoMetadata(repository);
+  const members = actual.packages.filter((pkg) => actual.workspace_members.includes(pkg.id)).map((pkg) => pkg.name);
+  assert.deepEqual(Object.values(rustGroups).flat().toSorted(), members.toSorted());
+  const result = planCi({ files: ["crates/dbx-core/tests/runtime_diagnostic_history.rs", "crates/dbx-web/src/routes/transfer.rs"],
+    metadata: actual, root: repository });
+  assert.equal(result.rust_groups_known, true);
+  assert.equal(result.rust_full, false);
+  assert.deepEqual(groups(result), ["application"]);
+  assert.deepEqual(result.agent_rust.include, [{ driver: "duckdb" }]);
+  assert.equal(result.agent_java, false);
+  assert.equal(result.agent_go.include.length, 0);
+  assert.equal(result.agent_integration.include.length, 0);
 });
 
 test("workspace Cargo flags preserve full versus fast coverage and strict clippy", () => {
@@ -189,8 +345,11 @@ test("nextest, doctests and coverage select identical packages and features in e
       const nextest = rustCommand("test", group, mode);
       const doctest = rustCommand("doctest", group, mode);
       assert.deepEqual(nextest.slice(0, 3), ["nextest", "run", "--no-fail-fast"]);
-      assert.deepEqual(doctest, ["test", "--doc", ...nextest.slice(3)]);
-      assert.deepEqual(rustCommand("tree", group, mode), ["tree", ...nextest.slice(3)]);
+      const selection = nextest.slice(3).filter((argument) => argument !== "--timings");
+      assert.deepEqual(doctest, ["test", "--doc", ...selection]);
+      assert.deepEqual(rustCommand("tree", group, mode), ["tree", ...selection]);
+      assert.ok(nextest.includes("--timings"));
+      assert.ok(rustCommand("clippy", "workspace", mode).includes("--timings"));
       assert.ok(nextest.includes("--no-default-features"));
       assert.ok(nextest.includes("--locked"));
     }
@@ -291,6 +450,7 @@ test("the final gate requires both Windows jobs when the bundle routing is selec
     needs.changes.outputs[output] = "false";
   }
   needs.changes.outputs.windows_win7_bundle = "true";
+  needs.changes.outputs.windows_standard = "true";
   needs["windows-standard-check"].result = "success";
   needs["windows-win7-bundle"].result = "success";
   assert.deepEqual(gateFailures(needs, "all"), []);
@@ -299,6 +459,26 @@ test("the final gate requires both Windows jobs when the bundle routing is selec
   assert.ok(gateFailures(needs, "all").length);
   needs["windows-standard-check"].result = "success";
   needs["windows-win7-bundle"].result = "skipped";
+  assert.ok(gateFailures(needs, "all").length);
+});
+
+test("the final gate independently requires standard Windows compilation without Win7 packaging", () => {
+  const needs = results(["crates/dbx-core/src/query/mod.rs"]);
+  const selected = plan(["crates/dbx-core/src/query/mod.rs"]);
+  needs.rust = needs.agents = { result: "success" };
+  for (const [job, output] of Object.entries(routedJobs)) {
+    needs.changes.outputs[output] = String(selected[output] ?? false);
+    needs[job] = { result: selected[output] ? "success" : "skipped" };
+  }
+  assert.equal(needs.changes.outputs.windows_standard, "true");
+  assert.equal(needs.changes.outputs.windows_win7_bundle, "false");
+  assert.deepEqual(gateFailures(needs, "all"), []);
+  for (const result of ["failure", "skipped", "cancelled"]) {
+    needs["windows-standard-check"].result = result;
+    assert.ok(gateFailures(needs, "all").some((failure) => failure.includes("windows-standard-check")));
+  }
+  needs["windows-standard-check"].result = "success";
+  delete needs.changes.outputs.windows_standard;
   assert.ok(gateFailures(needs, "all").length);
 });
 

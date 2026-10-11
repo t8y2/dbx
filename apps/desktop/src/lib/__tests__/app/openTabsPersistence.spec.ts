@@ -27,6 +27,13 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.uiState).toEqual({ activeOutputView: "chart", redisResultViewMode: "console", resultPaneOpen: false });
   });
 
+  it("preserves the structured sort field across a data tab round-trip", () => {
+    const [restored] = roundTrip([queryTab({ mode: "data", orderByInput: '"status" ASC', structuredOrderByInput: '"created_at" DESC' })]);
+
+    expect(restored.orderByInput).toBe('"status" ASC');
+    expect(restored.structuredOrderByInput).toBe('"created_at" DESC');
+  });
+
   it("preserves namespaced special-page state across a round-trip", () => {
     const uiState = {
       page: {
@@ -286,6 +293,53 @@ describe("openTabsPersistence originalSql round-trip", () => {
       providerId: "dbx.example.storage.files",
       rootUri: "s3://bucket/",
       currentUri: "s3://bucket/reports/",
+    });
+  });
+
+  it("preserves database-search tab state across a round-trip", () => {
+    const [restored] = roundTrip([
+      queryTab({
+        id: "search-tab",
+        title: "Search Database",
+        connectionId: "conn-1",
+        database: "shop",
+        schema: "public",
+        mode: "database-search",
+        databaseSearchState: {
+          keyword: "order_123",
+          perTableLimit: 25,
+          progressDone: 4,
+          progressTotal: 8,
+          results: [
+            {
+              id: "orders:0",
+              tableName: "orders",
+              schema: "public",
+              matchedColumns: ["order_no"],
+              preview: "order_no: order_123",
+              whereInput: "\"order_no\" = 'order_123'",
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(restored.mode).toBe("database-search");
+    expect(restored.databaseSearchState).toEqual({
+      keyword: "order_123",
+      perTableLimit: 25,
+      progressDone: 4,
+      progressTotal: 8,
+      results: [
+        {
+          id: "orders:0",
+          tableName: "orders",
+          schema: "public",
+          matchedColumns: ["order_no"],
+          preview: "order_no: order_123",
+          whereInput: "\"order_no\" = 'order_123'",
+        },
+      ],
     });
   });
 });

@@ -9,6 +9,18 @@ use serde::Deserialize;
 
 use crate::state::WebState;
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn origin_host_extracts_the_authority() {
+        assert_eq!(super::origin_host("http://127.0.0.1:4224"), Some("127.0.0.1:4224"));
+        assert_eq!(super::origin_host("https://dbx.example.com"), Some("dbx.example.com"));
+        assert_eq!(super::origin_host("https://proxy.example/base"), Some("proxy.example"));
+        assert_eq!(super::origin_host("not-a-origin"), None);
+        assert_eq!(super::origin_host("https://"), None);
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PubSubWsParams {
@@ -19,12 +31,25 @@ pub struct PubSubWsParams {
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
     Query(params): Query<PubSubWsParams>,
     State(state): State<Arc<WebState>>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (axum::http::StatusCode, &'static str)> {
+    // 浏览器发起的跨站 WebSocket 握手会自动附带会话 cookie（drive-by 攻击面）：
+    // 升级前校验 Origin 与 Host 同源。浏览器 UI 始终携带同源 Origin；桌面壳
+    // 不经过此端点（它连接本地 sidecar 而非 dbx-web）。
+    let origin = headers.get(axum::http::header::ORIGIN).and_then(|value| value.to_str().ok());
+    let host = headers.get(axum::http::header::HOST).and_then(|value| value.to_str().ok());
+    let same_origin = match (origin, host) {
+        (Some(origin), Some(host)) => origin_host(origin) == Some(host),
+        _ => false,
+    };
+    if !same_origin {
+        return Err((axum::http::StatusCode::FORBIDDEN, "cross-origin WebSocket upgrade rejected"));
+    }
     let connection_id = params.connection_id;
     let owner = dbx_core::session_credentials::current_credential_owner();
-    ws.on_upgrade(move |socket| async move {
+    Ok(ws.on_upgrade(move |socket| async move {
         if params.monitor {
             dbx_core::session_credentials::with_credential_owner(
                 owner,
@@ -34,7 +59,18 @@ pub async fn ws_handler(
         } else {
             handle_pubsub_socket(socket, state, connection_id).await;
         }
-    })
+    }))
+}
+
+/// `Origin: scheme://host[:port]` 的 authority 部分；与 Host 头做同源比较。
+fn origin_host(origin: &str) -> Option<&str> {
+    let rest = origin.split("://").nth(1)?;
+    let authority = rest.split(['/', '?']).next()?;
+    if authority.is_empty() {
+        None
+    } else {
+        Some(authority)
+    }
 }
 
 async fn handle_monitor_socket(mut socket: WebSocket, state: Arc<WebState>, connection_id: String) {

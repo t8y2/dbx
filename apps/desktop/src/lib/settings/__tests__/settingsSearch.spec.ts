@@ -40,6 +40,11 @@ const translate = (key: string) => translations[key] ?? key;
 const allCategories = new Set(Object.keys(categoryLabels) as SettingsCategory[]);
 
 describe("settings search", () => {
+  it("finds connection tab colors by their Chinese label", () => {
+    const entries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: false, visibleCategories: allCategories }, (key) => (key === "settings.colorizeConnectionTabs" ? "按连接颜色区分标签页" : key), categoryLabels);
+    expect(searchSettings(entries, "连接颜色", "zh-CN")).toEqual(expect.arrayContaining([expect.objectContaining({ id: "appearance-connection-tab-colors", category: "appearance", targetId: "appearance" })]));
+  });
+
   const definitions: readonly SettingsSearchDefinition[] = [
     { id: "font", category: "editor", titleKey: "font", descriptionKey: "fontDescription" },
     { id: "export", category: "data", titleKey: "export" },
@@ -105,6 +110,16 @@ describe("settings search", () => {
       titleKey: "settings.multiStatementDefaultView",
       descriptionKey: "settings.multiStatementDefaultViewDescription",
       targetId: "multi-statement-default-view",
+    });
+  });
+
+  it("indexes the default explain view and its settings control", () => {
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
+      id: "default-explain-view",
+      category: "data",
+      titleKey: "settings.defaultExplainView",
+      descriptionKey: "settings.defaultExplainViewDescription",
+      targetId: "default-explain-view",
     });
   });
 
@@ -179,7 +194,7 @@ describe("settings search", () => {
   it("exposes WebDAV sync in Web settings without exposing snippet sync", () => {
     const webEntries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: true, visibleCategories: new Set<SettingsCategory>(["sync"]) }, translate, categoryLabels);
 
-    expect(webEntries.map((entry) => entry.id)).toEqual(["sync-webdav", "sync-webdav-endpoint", "sync-webdav-username", "sync-webdav-password", "sync-webdav-remote-path", "sync-webdav-auto-upload", "sync-secrets", "sync-secrets-passphrase"]);
+    expect(webEntries.map((entry) => entry.id)).toEqual(["sync-webdav", "sync-webdav-endpoint", "sync-webdav-username", "sync-webdav-password", "sync-webdav-remote-path", "sync-webdav-user-agent", "sync-webdav-auto-upload", "sync-secrets", "sync-secrets-passphrase"]);
   });
 
   it("matches Chinese text as a Unicode substring", () => {
@@ -292,8 +307,10 @@ describe("settings search", () => {
       { titleKey: "transfer.dataTransfer", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.driverManager", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.theme", category: "appearance", targetId: "appearance" },
+      { titleKey: "settings.webLogoPosition", category: "appearance", targetId: "appearance-web-logo-position" },
       { titleKey: "settings.sidebarObjectInfoMode", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.insertSpaceAfterCompletion", category: "editor", targetId: "editor" },
+      { titleKey: "settings.functionCompletionIncludeParams", category: "editor", targetId: "editor" },
       { titleKey: "settings.completionTriggerMode", category: "editor", targetId: "editor" },
       { titleKey: "settings.tableCompletionSchemaQualification", category: "editor", targetId: "editor" },
       { titleKey: "settings.autoAliasTables", category: "editor", targetId: "editor" },
@@ -310,7 +327,10 @@ describe("settings search", () => {
       { titleKey: "settings.sqlFormatterIndent", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterTabWidth", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterIndentStyle", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterLayoutStyle", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterLogicalOperatorNewline", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterCommaPosition", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterFromClauseLayout", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterExpressionWidth", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterLinesBetweenQueries", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterPreserveEmptyLines", category: "formatter", targetId: "formatter" },

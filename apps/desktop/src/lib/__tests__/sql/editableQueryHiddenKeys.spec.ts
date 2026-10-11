@@ -249,7 +249,7 @@ describe("editable query hidden primary keys", () => {
     expect(sourceColumnsForResult(aliased.analysis, ["ID", "NUM", "ROWNUM"], undefined, "oracle")).toEqual(["id", "amount", undefined]);
   });
 
-  it("maps a qualified Oracle ROWID projection to the synthetic row key", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("maps a qualified %s ROWID projection to the synthetic row key", (databaseType) => {
     const analysis: EditableQueryInfo = {
       schema: "APP",
       tableName: "USERS",
@@ -261,9 +261,9 @@ describe("editable query hidden primary keys", () => {
       ],
     };
 
-    expect(allPrimaryKeysPresent(["__DBX_ROWID"], ["ROWID", "NAME", "LABEL"], analysis, "t:0", "oracle")).toBe(true);
-    expect(sourceColumnsForResult(analysis, ["ROWID", "NAME", "LABEL"], "t:0", "oracle", ["__DBX_ROWID"])).toEqual(["__DBX_ROWID", "NAME", undefined]);
-    expect(allPrimaryKeysPresent(["__DBX_ROWID"], ["ROWID", "NAME", "LABEL"], analysis, "o:1", "oracle")).toBe(false);
+    expect(allPrimaryKeysPresent(["__DBX_ROWID"], ["ROWID", "NAME", "LABEL"], analysis, "t:0", databaseType)).toBe(true);
+    expect(sourceColumnsForResult(analysis, ["ROWID", "NAME", "LABEL"], "t:0", databaseType, ["__DBX_ROWID"])).toEqual(["__DBX_ROWID", "NAME", undefined]);
+    expect(allPrimaryKeysPresent(["__DBX_ROWID"], ["ROWID", "NAME", "LABEL"], analysis, "o:1", databaseType)).toBe(false);
   });
 
   it("does not assign an unqualified multi-source ROWID to a target table", () => {

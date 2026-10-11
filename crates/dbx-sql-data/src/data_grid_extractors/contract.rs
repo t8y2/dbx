@@ -95,6 +95,8 @@ pub struct DataGridSqlExtractorOptions {
     pub insert_mode: DataGridCopyInsertMode,
     pub exclude_primary_keys_from_insert: bool,
     pub include_database_name: bool,
+    pub quote_identifiers: bool,
+    pub temporal_format: DataGridTemporalFormat,
 }
 
 impl Default for DataGridSqlExtractorOptions {
@@ -105,8 +107,19 @@ impl Default for DataGridSqlExtractorOptions {
             insert_mode: DataGridCopyInsertMode::Merged,
             exclude_primary_keys_from_insert: false,
             include_database_name: true,
+            quote_identifiers: true,
+            temporal_format: DataGridTemporalFormat::Native,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridTemporalFormat {
+    #[default]
+    Native,
+    String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,11 +128,14 @@ impl Default for DataGridSqlExtractorOptions {
 pub struct DataGridJsonExtractorOptions {
     pub pretty: bool,
     pub camel_case_field_names: bool,
+    /// Emit a bare array of cell values instead of objects. Only honored for
+    /// single-column selections; multi-column selections fall back to objects.
+    pub values_only: bool,
 }
 
 impl Default for DataGridJsonExtractorOptions {
     fn default() -> Self {
-        Self { pretty: DEFAULT_JSON_PRETTY, camel_case_field_names: false }
+        Self { pretty: DEFAULT_JSON_PRETTY, camel_case_field_names: false, values_only: false }
     }
 }
 

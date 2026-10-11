@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { buildXuguKillTransactionSql, mapXuguTransactionRows, XUGU_OWN_SESSION_SQL, XUGU_TRANSACTION_LIST_SQL, xuguTransactionKey } from "./xuguProcessList";
 import { buildCancelQuerySql as buildMysqlCancelQuerySql, buildTerminateSessionSql as buildMysqlTerminateSessionSql, mapProcessRows as mapMysqlProcessRows, PROCESS_LIST_SQL as MYSQL_PROCESS_LIST_SQL, supportsProcessList as supportsMysqlProcessList } from "./mysqlProcessList";
 import {
   buildKingbaseCancelQuerySql,
@@ -32,12 +33,12 @@ import {
 } from "./postgresProcessList";
 
 /**
- * Engine-agnostic process-list model. Each supported engine contributes a driver
- * describing how to list sessions, identify the caller's own session, render the
- * columns, and kill a session. The panel component stays entirely generic.
+ * Engine-agnostic operations model. Each supported engine contributes a driver
+ * describing how to list sessions or transactions, identify the caller's own
+ * session, render columns, and perform its explicitly named action.
  */
 
-/** A displayable session row. `id` is the value passed to the driver's kill SQL. */
+/** A displayable row. `id` is the session/process id; transaction drivers use a separate composite target. */
 export type ProcessRow = { id: number } & Record<string, string | number | null>;
 
 export interface ProcessColumn {
@@ -54,9 +55,15 @@ export interface ProcessColumn {
 }
 
 export interface ProcessListDriver {
+  /** Xugu displays active transactions rather than a full session list. */
+  mode?: "transaction";
+  /** Execution database for a system-wide administrative view. */
+  database?: string;
+  /** Stable row key when a server-local session id is not globally unique. */
+  rowKey?(row: ProcessRow): string;
   /** Whether the panel offers multi-selection and batch query cancellation. */
   supportsBatchCancel?: boolean;
-  /** SQL that lists current sessions, one row each. */
+  /** SQL that lists sessions or, for transaction mode, active transactions. */
   listSql: string;
   /** Compatibility query used when the primary list SQL references newer columns. */
   fallbackListSql?: string;
@@ -77,7 +84,9 @@ export interface ProcessListDriver {
   /** Map a raw list result into typed rows. */
   mapRows(result: QueryResult | null | undefined): ProcessRow[];
   /** Build the validated statement that cancels the selected session's running query. */
-  buildCancelQuerySql(id: number): string;
+  buildCancelQuerySql?(id: number): string;
+  /** Xugu-only action: end the selected transaction without disconnecting its session. */
+  buildKillTransactionSql?(row: ProcessRow): string;
   /** Build the compatibility statement used when the primary cancellation function is unavailable. */
   buildFallbackCancelQuerySql?(id: number): string;
   /** Restrict cancellation fallback attempts to known compatibility failures. */
@@ -188,16 +197,40 @@ const KINGBASE_DRIVER: ProcessListDriver = {
   fallbackTerminateSessionResultError: kingbasePgTerminateSessionResultError,
 };
 
+const XUGU_COLUMNS: ProcessColumn[] = [
+  { key: "nodeId", labelKey: "processList.transactionNode", mono: true, numeric: true },
+  { key: "transactionId", labelKey: "processList.transactionId", mono: true },
+  { key: "id", labelKey: "processList.transactionSession", mono: true, numeric: true },
+  { key: "user", labelKey: "processList.colUser" },
+  { key: "db", labelKey: "processList.colDb" },
+  { key: "host", labelKey: "processList.colClient" },
+  { key: "startTime", labelKey: "processList.transactionStart" },
+];
+
+const XUGU_DRIVER: ProcessListDriver = {
+  mode: "transaction",
+  database: "SYSTEM",
+  listSql: XUGU_TRANSACTION_LIST_SQL,
+  ownSessionSql: XUGU_OWN_SESSION_SQL,
+  columns: XUGU_COLUMNS,
+  defaultSortKey: "startTime",
+  maxRows: 5000,
+  mapRows: (result) => mapXuguTransactionRows(result) as unknown as ProcessRow[],
+  rowKey: (row) => xuguTransactionKey(row as unknown as ReturnType<typeof mapXuguTransactionRows>[number]),
+  buildKillTransactionSql: (row) => buildXuguKillTransactionSql(row as unknown as ReturnType<typeof mapXuguTransactionRows>[number]),
+};
+
 /** Resolve the process-list driver for a connection, or null if unsupported. */
 export function resolveProcessListDriver(dbType: DatabaseType | undefined): ProcessListDriver | null {
   if (supportsMysqlProcessList(dbType)) return MYSQL_DRIVER;
   if (dbType === "postgres") return POSTGRES_DRIVER;
   if (dbType === "opengauss") return OPENGAUSS_DRIVER;
   if (dbType === "kingbase") return KINGBASE_DRIVER;
+  if (dbType === "xugu") return XUGU_DRIVER;
   return null;
 }
 
-/** Whether any process-list viewer (MySQL or Postgres family) covers this engine. */
+/** Whether the shared operations panel covers this engine. */
 export function supportsProcessList(dbType: DatabaseType | undefined): boolean {
   return resolveProcessListDriver(dbType) !== null;
 }
@@ -221,6 +254,9 @@ export function resolveProcessListDriverForConnection(connection: ConnectionConf
   }
   const dbType = effectiveDatabaseTypeForConnection(connection);
   if (dbType === "gaussdb" && connection.driver_profile?.toLowerCase() === "opengauss") return OPENGAUSS_DRIVER;
+  // Xugu's SYS_* transaction views and DBMS_DBA.KILL_TRANS are queried through
+  // SYSTEM. A DBA grant in a business database does not make that login SYSDBA.
+  if (dbType === "xugu" && connection.username?.trim().toUpperCase() !== "SYSDBA") return null;
   return resolveProcessListDriver(dbType);
 }
 

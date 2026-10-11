@@ -88,6 +88,25 @@ pub async fn mongo_list_collections_core(
     crate::document_ops::list_collections_core(state, connection_id, database).await
 }
 
+pub async fn ensure_collection_exists_for_query(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+) -> Result<(), String> {
+    match mongo_list_collections_core(state, connection_id, database).await {
+        Ok(collections) => {
+            if !collections.iter().any(|c| c.name == collection) {
+                return Err(format!("Collection '{}' does not exist in database '{}'", collection, database));
+            }
+        }
+        Err(e) => {
+            log::warn!("Could not list collections to verify existence of '{}': {}", collection, e);
+        }
+    }
+    Ok(())
+}
+
 pub async fn mongo_create_database_core(state: &AppState, connection_id: &str, database: &str) -> Result<(), String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
@@ -306,7 +325,7 @@ pub async fn mongo_find_documents_core(
     sort: Option<&str>,
     collation: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
-    crate::document_ops::find_documents_core(
+    let result = crate::document_ops::find_documents_core(
         state,
         connection_id,
         database,
@@ -320,7 +339,13 @@ pub async fn mongo_find_documents_core(
         None,
         false,
     )
-    .await
+    .await?;
+
+    if result.documents.is_empty() {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
+    }
+
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -338,7 +363,7 @@ async fn mongo_find_documents_without_total_core(
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let result = match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::find_documents_without_total(
                 client, database, collection, skip, limit, filter, projection, sort, collation,
@@ -364,7 +389,12 @@ async fn mongo_find_documents_without_total_core(
             client.mongo_find_documents(params).await
         }
         _ => Err("Not a MongoDB connection".to_string()),
+    }?;
+
+    if result.documents.is_empty() {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
     }
+    Ok(result)
 }
 
 pub async fn mongo_find_one_core(
@@ -378,7 +408,7 @@ pub async fn mongo_find_one_core(
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let result = match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::find_one(client, database, collection, filter, projection, options).await
         }
@@ -395,7 +425,12 @@ pub async fn mongo_find_one_core(
                 .await
         }
         _ => Err("Not a MongoDB connection".to_string()),
+    }?;
+
+    if result.documents.is_empty() {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
     }
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -452,7 +487,7 @@ pub async fn mongo_count_documents_core(
     let accurate = mode != Some("legacy");
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let total = match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::count_documents(client, database, collection, filter, accurate).await
         }
@@ -482,7 +517,12 @@ pub async fn mongo_count_documents_core(
             }
         }
         _ => Err("Not a MongoDB connection".to_string()),
+    }?;
+
+    if total == 0 {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
     }
+    Ok(total)
 }
 
 /// Read MongoDB documents as relaxed Extended JSON for MongoDB transfer paths.
@@ -500,7 +540,7 @@ pub async fn mongo_find_documents_extended_json_core(
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let result = match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::find_documents_extended_json(
                 client, database, collection, skip, limit, filter, projection, sort, None,
@@ -529,7 +569,12 @@ pub async fn mongo_find_documents_extended_json_core(
             }
         }
         _ => Err("Not a MongoDB connection".to_string()),
+    }?;
+
+    if result.documents.is_empty() {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
     }
+    Ok(result)
 }
 
 pub(crate) fn is_unknown_agent_method_error(error: &str, method: &str) -> bool {
@@ -555,7 +600,7 @@ pub async fn mongo_aggregate_documents_core(
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let result = match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::aggregate_documents(client, database, collection, pipeline_json, max_rows, options_json).await
         }
@@ -578,7 +623,12 @@ pub async fn mongo_aggregate_documents_core(
             }
         }
         _ => Err("Not a MongoDB connection".to_string()),
+    }?;
+
+    if result.documents.is_empty() {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
     }
+    Ok(result)
 }
 
 pub async fn mongo_distinct_core(
@@ -591,7 +641,7 @@ pub async fn mongo_distinct_core(
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let result = match &pool {
         PoolKind::MongoDb(client) => mongo_driver::distinct(client, database, collection, field, filter).await,
         PoolKind::Agent(client) => {
             let command = mongo_driver::distinct_command(collection, field, filter)?;
@@ -599,7 +649,12 @@ pub async fn mongo_distinct_core(
             mongo_driver::distinct_response_result(response)
         }
         _ => Err("Not a MongoDB connection".to_string()),
+    }?;
+
+    if result.documents.is_empty() {
+        ensure_collection_exists_for_query(state, connection_id, database, collection).await?;
     }
+    Ok(result)
 }
 
 /// Read every index of a collection with its full MongoDB option set.
@@ -809,6 +864,25 @@ pub async fn mongo_insert_documents_core(
         PoolKind::Agent(client) => {
             let documents: serde_json::Value =
                 serde_json::from_str(docs_json).map_err(|error| format!("Invalid JSON: {error}"))?;
+            // A single-document insert()/insertOne() rides the per-document RPC
+            // the legacy agent already serves for grid row inserts (#11656);
+            // only bulk arrays need the MongoInsertDocuments capability.
+            if let Some(document) = documents.as_object() {
+                let doc_json = serde_json::to_string(document).map_err(|error| format!("Invalid JSON: {error}"))?;
+                let mut client = client.lock().await;
+                let result: serde_json::Value = client
+                    .mongo_insert_document(serde_json::json!({
+                        "database": database,
+                        "collection": collection,
+                        "doc_json": doc_json,
+                    }))
+                    .await?;
+                // The single-document RPC fails the whole call on rejection and
+                // reports the resolved _id on success (see the agent's
+                // insertDocument handler).
+                result.get("inserted_id").ok_or_else(|| "MongoDB Legacy Agent returned no inserted id".to_string())?;
+                return Ok(1);
+            }
             let documents = documents.as_array().ok_or_else(|| {
                 "MongoDB legacy agent does not support bulk insertMany/insertOne writes; insertMany requires an array"
                     .to_string()
@@ -2038,24 +2112,67 @@ for line in sys.stdin:
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn mongo_insert_one_keeps_the_existing_legacy_agent_behavior() {
+    async fn mongo_insert_one_routes_single_document_to_the_per_document_rpc() {
+        // #11656: a shell insert()/insertOne() with one document used to be
+        // rejected by the legacy-agent bulk path; it rides the per-document
+        // RPC that grid row inserts already use, without the bulk capability.
         let document = r#"{"name":"Ada"}"#;
+        let (state, _directory) = legacy_mongo_state(
+            "insert_document",
+            serde_json::json!({
+                "database": "app",
+                "collection": "users",
+                "doc_json": document,
+            }),
+            serde_json::json!({ "inserted_id": "507f1f77bcf86cd799439011" }),
+        )
+        .await;
+
+        let affected = mongo_insert_documents_core(&state, "legacy", "app", "users", document).await.unwrap();
+
+        assert_eq!(affected, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_insert_many_keeps_requiring_the_bulk_capability() {
+        let documents = r#"[{"name":"Ada"},{"name":"Grace"}]"#;
         let (state, _directory) = legacy_mongo_state_with_capabilities(
             "insert_documents",
             serde_json::json!({
                 "database": "app",
                 "collection": "users",
-                "docs_json": document,
+                "docs_json": documents,
+            }),
+            serde_json::json!({ "affected_rows": 2 }),
+            &[AgentCapability::MongoInsertDocuments.as_str()],
+        )
+        .await;
+
+        let affected = mongo_insert_documents_core(&state, "legacy", "app", "users", documents).await.unwrap();
+
+        assert_eq!(affected, 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_insert_many_still_rejects_non_object_documents() {
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "insert_documents",
+            serde_json::json!({
+                "database": "app",
+                "collection": "users",
+                "docs_json": r#"[{"name":"Ada"}]"#,
             }),
             serde_json::json!({ "affected_rows": 1 }),
             &[AgentCapability::MongoInsertDocuments.as_str()],
         )
         .await;
 
-        let error = mongo_insert_documents_core(&state, "legacy", "app", "users", document).await.unwrap_err();
+        let error =
+            mongo_insert_documents_core(&state, "legacy", "app", "users", r#"["not an object"]"#).await.unwrap_err();
 
-        assert!(error.contains("insertMany/insertOne"), "{error}");
-        assert!(!error.contains("unexpected MongoDB RPC"), "{error}");
+        assert!(error.contains("insertMany document"), "{error}");
     }
 
     #[cfg(unix)]

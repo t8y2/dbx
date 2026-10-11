@@ -2134,7 +2134,7 @@ pub fn classify_command(command: &str) -> RedisCommandSafety {
         | "ZREM" | "ZPOPMAX" | "ZPOPMIN" | "ZMPOP" | "BZMPOP" | "BZPOPMAX" | "BZPOPMIN" | "ZREMRANGEBYLEX"
         | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "XDEL" | "XTRIM" | "MOVE" | "SORT" | "SDIFFSTORE"
         | "SINTERSTORE" | "SUNIONSTORE" | "ZDIFFSTORE" | "ZINTERSTORE" | "ZRANGESTORE" | "ZUNIONSTORE" | "PFMERGE"
-        | "GEOSEARCHSTORE" | "FLUSHDB" => RedisCommandSafety::Confirm,
+        | "GEOSEARCHSTORE" => RedisCommandSafety::Confirm,
         "APPEND" | "BITFIELD" | "BITOP" | "COPY" | "DECR" | "DECRBY" | "GEOADD" | "GEORADIUS" | "GEORADIUSBYMEMBER"
         | "GETEX" | "GETSET" | "INCR" | "INCRBY" | "INCRBYFLOAT" | "SET" | "SETEX" | "PSETEX" | "SETNX"
         | "SETRANGE" | "MSET" | "MSETNX" | "PERSIST" | "HSET" | "HMSET" | "HINCRBY" | "HINCRBYFLOAT" | "HSETNX"
@@ -2796,6 +2796,24 @@ where
     })
 }
 
+/// Read the complete raw payload for a Redis string-like key.
+///
+/// The normal value path deliberately caps previews at 64 KiB. Downloads must
+/// bypass that cap while preserving the exact bytes, including non-UTF-8 data.
+pub async fn get_raw_value<C>(con: &mut C, key: &[u8]) -> Result<RedisBlob, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let redis_type: String = redis::cmd("TYPE").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
+    let raw: RedisRawValue = match redis_type.as_str() {
+        "string" | "bitmap" => redis::cmd("GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?,
+        "none" => return Err("Redis key does not exist".to_string()),
+        _ => return Err("Only Redis string values can be downloaded".to_string()),
+    };
+    let bytes = redis_value_to_bytes(raw).ok_or_else(|| "Redis value is not byte-addressable".to_string())?;
+    Ok(redis_blob_from_bytes(&bytes))
+}
+
 /// Read only a key's TTL without loading its value or collection members.
 ///
 /// Redis returns `-2` for a missing key and `-1` for a key without an expiry;
@@ -3415,7 +3433,10 @@ where
         local source_ttl = -2
         local ttl_reply = redis.pcall('HTTL', key, 'FIELDS', 1, old_field)
         if type(ttl_reply) == 'table' and ttl_reply.err ~= nil then
-            if not optional_expiry_error(ttl_reply) then
+            local detail = string.lower(ttl_reply.err)
+            if not optional_expiry_error(ttl_reply)
+                and detail ~= 'invalid argument: hash field expiration is not supported by legacy hash encoding'
+                and detail ~= 'err invalid argument: hash field expiration is not supported by legacy hash encoding' then
                 return -3
             end
         elseif type(ttl_reply) == 'table' and ttl_reply[1] ~= nil then
@@ -4059,18 +4080,15 @@ async fn hscan_page_raw<C>(
     key: &[u8],
     cursor: u64,
     count: usize,
-    match_pattern: Option<&str>,
+    lowered_query: Option<&str>,
 ) -> Result<(u64, Vec<RedisHashItem>), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
     let mut cmd = redis::cmd("HSCAN");
     cmd.arg(key).arg(cursor).arg("COUNT").arg(count);
-    if let Some(pattern) = match_pattern {
-        cmd.arg("MATCH").arg(pattern);
-    }
     let raw: RedisRawValue = cmd.query_async(con).await.map_err(|e| e.to_string())?;
-    parse_scan_hash_entries(raw)
+    parse_scan_hash_entries(raw, lowered_query)
 }
 
 async fn hscan_filtered_page_raw<C>(
@@ -4088,13 +4106,39 @@ where
     let target = count.max(1);
     let lowered = query.to_lowercase();
 
+    // A full field name should not have to wait for its hash-table scan bucket.
+    // Still scan one batch to obtain a real continuation for the fuzzy search.
+    if cursor == 0 {
+        let exact: Option<Vec<u8>> = match redis::cmd("HGET").arg(key).arg(query.as_bytes()).query_async(con).await {
+            Ok(value) => value,
+            Err(error) if is_redis_command_denied_error(&error.to_string()) => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        if let Some(value) = exact {
+            items.push(RedisHashItem {
+                field: redis_blob_from_bytes(query.as_bytes()),
+                value: redis_blob_from_bytes(&value),
+                field_ttl: None,
+            });
+        }
+    }
+    let exact_match = !items.is_empty();
+    let mut positions: HashMap<String, usize> =
+        items.iter().enumerate().map(|(index, item)| (item.field.raw_base64.clone(), index)).collect();
     for _ in 0..COLLECTION_FILTER_SCAN_MAX_ITERATIONS {
-        let (next, page) = hscan_page_raw(con, key, cur, target, None).await?;
-        items.extend(page.into_iter().filter(|item| hash_entry_matches_query(item, &lowered)));
+        let (next, page) = hscan_page_raw(con, key, cur, target, Some(&lowered)).await?;
+        for item in page {
+            if let Some(&index) = positions.get(&item.field.raw_base64) {
+                items[index] = item;
+            } else {
+                positions.insert(item.field.raw_base64.clone(), items.len());
+                items.push(item);
+            }
+        }
         cur = next;
         // HSCAN MATCH only checks field names, so value search has to filter returned pairs client-side.
         // Keep a hard scan bound so sparse value matches cannot turn one UI search into a full hash walk.
-        if cur == 0 || items.len() >= target {
+        if exact_match || cur == 0 || items.len() >= target {
             break;
         }
     }
@@ -4420,12 +4464,37 @@ where
         return Ok(());
     }
 
+    let fields = items
+        .iter()
+        .map(|item| {
+            base64::engine::general_purpose::STANDARD
+                .decode(&item.field.raw_base64)
+                .map_err(|error| format!("Invalid Redis hash field encoding: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Redis < 7.4 echoes command arguments verbatim in unknown-command errors.
+    // Binary arguments can make that RESP error invalid UTF-8 (or inject CRLF),
+    // so redis-rs fails to parse it before the optional-error fallback can run.
+    // Discover support using ASCII-only arguments before sending unsafe bytes.
+    let unsafe_error_arg =
+        |bytes: &[u8]| std::str::from_utf8(bytes).is_err() || bytes.windows(2).any(|pair| pair == b"\r\n");
+    if unsafe_error_arg(key) || fields.iter().any(|field| unsafe_error_arg(field)) {
+        let info: RedisRawValue = match redis::cmd("COMMAND").arg("INFO").arg("HTTL").query_async(con).await {
+            Ok(info) => info,
+            Err(error) if is_optional_hash_field_expiry_error(&error) => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        };
+        if matches!(info, RedisRawValue::Nil)
+            || matches!(&info, RedisRawValue::Array(commands) if commands.is_empty() || matches!(commands.first(), Some(RedisRawValue::Nil)))
+        {
+            return Ok(());
+        }
+    }
+
     let mut command = redis::cmd("HTTL");
-    command.arg(key).arg("FIELDS").arg(items.len());
-    for item in items.iter() {
-        let field = base64::engine::general_purpose::STANDARD
-            .decode(&item.field.raw_base64)
-            .map_err(|error| format!("Invalid Redis hash field encoding: {error}"))?;
+    command.arg(key).arg("FIELDS").arg(fields.len());
+    for field in fields {
         command.arg(field);
     }
 
@@ -4481,14 +4550,19 @@ fn is_optional_hash_field_expiry_error(error: &redis::RedisError) -> bool {
         || detail.contains("syntax error")
         || detail.contains("noperm")
         || detail.contains("no permission")
+        || detail == "invalid argument: hash field expiration is not supported by legacy hash encoding"
 }
 
 fn blob_matches_query(blob: &RedisBlob, lowered_query: &str) -> bool {
     redis_blob_display_text(blob).to_lowercase().contains(lowered_query)
 }
 
-fn hash_entry_matches_query(item: &RedisHashItem, lowered_query: &str) -> bool {
-    blob_matches_query(&item.field, lowered_query) || blob_matches_query(&item.value, lowered_query)
+fn bytes_match_query(bytes: &[u8], lowered_query: &str) -> bool {
+    // Match the same text as redis_blob_display_text, including binary escapes.
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_lowercase().contains(lowered_query),
+        Err(_) => redis_bytes_to_display(bytes).to_lowercase().contains(lowered_query),
+    }
 }
 
 async fn sscan_page_raw<C>(
@@ -4549,33 +4623,38 @@ where
     Ok(items)
 }
 
-fn parse_scan_hash_entries(raw: RedisRawValue) -> Result<(u64, Vec<RedisHashItem>), String> {
-    let RedisRawValue::Array(parts) = raw else {
+fn parse_scan_hash_entries(
+    raw: RedisRawValue,
+    lowered_query: Option<&str>,
+) -> Result<(u64, Vec<RedisHashItem>), String> {
+    let RedisRawValue::Array(mut parts) = raw else {
         return Err("Invalid SCAN response".to_string());
     };
     if parts.len() != 2 {
         return Err("Invalid SCAN response".to_string());
     }
 
-    let cursor = redis_value_to_string(parts[0].clone())
+    let entries = parts.pop().unwrap();
+    let cursor = redis_value_to_string(parts.pop().unwrap())
         .ok_or("Invalid cursor")?
         .parse::<u64>()
         .map_err(|_| "Invalid cursor".to_string())?;
 
-    let RedisRawValue::Array(entries) = &parts[1] else {
+    let RedisRawValue::Array(entries) = entries else {
         return Err("Invalid SCAN entries".to_string());
     };
 
     let mut items = Vec::new();
-    let mut iter = entries.iter();
+    let mut iter = entries.into_iter();
     while let Some(field) = iter.next() {
         let Some(value) = iter.next() else { break };
-        let field = redis_value_to_bytes(field.clone())
-            .map(|bytes| redis_blob_from_bytes(&bytes))
-            .ok_or_else(|| "Invalid hash field payload".to_string())?;
-        let value = redis_value_to_bytes(value.clone())
-            .map(|bytes| redis_blob_from_bytes(&bytes))
-            .ok_or_else(|| "Invalid hash value payload".to_string())?;
+        let field = redis_value_to_bytes(field).ok_or_else(|| "Invalid hash field payload".to_string())?;
+        let value = redis_value_to_bytes(value).ok_or_else(|| "Invalid hash value payload".to_string())?;
+        if lowered_query.is_some_and(|query| !bytes_match_query(&field, query) && !bytes_match_query(&value, query)) {
+            continue;
+        }
+        let field = redis_blob_from_bytes(&field);
+        let value = redis_blob_from_bytes(&value);
         items.push(RedisHashItem { field, value, field_ttl: None });
     }
 
@@ -6532,9 +6611,335 @@ mod tests {
         assert!(sessions.entries.keys().all(|cursor| *cursor > 0 && *cursor <= super::MAX_SAFE_INTEGER_CURSOR));
     }
 
+    // Keep the pre-optimization path as an independent semantic/benchmark oracle.
+    fn hash_scan_before_filter(raw: RedisRawValue, query: Option<&str>) -> Result<(u64, Vec<RedisHashItem>), String> {
+        let RedisRawValue::Array(parts) = raw else { return Err("Invalid SCAN response".to_string()) };
+        if parts.len() != 2 {
+            return Err("Invalid SCAN response".to_string());
+        }
+        let cursor = super::redis_value_to_string(parts[0].clone())
+            .ok_or("Invalid cursor")?
+            .parse::<u64>()
+            .map_err(|_| "Invalid cursor".to_string())?;
+        let RedisRawValue::Array(entries) = &parts[1] else { return Err("Invalid SCAN entries".to_string()) };
+        let mut items = Vec::new();
+        let mut iter = entries.iter();
+        while let Some(field) = iter.next() {
+            let Some(value) = iter.next() else { break };
+            let field = redis_value_to_bytes(field.clone())
+                .map(|bytes| redis_blob_from_bytes(&bytes))
+                .ok_or_else(|| "Invalid hash field payload".to_string())?;
+            let value = redis_value_to_bytes(value.clone())
+                .map(|bytes| redis_blob_from_bytes(&bytes))
+                .ok_or_else(|| "Invalid hash value payload".to_string())?;
+            items.push(RedisHashItem { field, value, field_ttl: None });
+        }
+        if let Some(query) = query {
+            items.retain(|item| {
+                super::blob_matches_query(&item.field, query) || super::blob_matches_query(&item.value, query)
+            });
+        }
+        Ok((cursor, items))
+    }
+
+    #[test]
+    fn hash_raw_filter_preserves_unicode_binary_and_value_matching() {
+        let mut pairs = vec![
+            (b"Exact".to_vec(), b"".to_vec()),
+            (b"other".to_vec(), b"contains eXaCt".to_vec()),
+            ("用户:İΣ".as_bytes().to_vec(), "Straße Σσς".as_bytes().to_vec()),
+            (b"slash\\field".to_vec(), b"utf8\\value".to_vec()),
+            (b"binary\\\xff".to_vec(), b"\0\x80".to_vec()),
+        ];
+        pairs.extend((0..=255).map(|byte| (vec![b'f', byte], vec![byte, b'V'])));
+        let entries = pairs
+            .into_iter()
+            .flat_map(|(field, value)| [RedisRawValue::BulkString(field), RedisRawValue::BulkString(value)])
+            .collect();
+        let raw = RedisRawValue::Array(vec![bulk("512"), RedisRawValue::Array(entries)]);
+        for query in [
+            None,
+            Some(""),
+            Some("exact"),
+            Some("用户"),
+            Some("i\u{307}"),
+            Some("σ"),
+            Some("ς"),
+            Some("straße"),
+            Some("\\"),
+            Some("\\\\"),
+            Some("\\xff"),
+            Some("\\x00"),
+            Some("v"),
+            Some("absent"),
+        ] {
+            assert_eq!(
+                super::parse_scan_hash_entries(raw.clone(), query),
+                hash_scan_before_filter(raw.clone(), query),
+                "query {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hash_raw_filter_preserves_payload_validation() {
+        for raw in [
+            RedisRawValue::Nil,
+            RedisRawValue::Array(vec![]),
+            RedisRawValue::Array(vec![bulk("bad-cursor"), RedisRawValue::Array(vec![])]),
+            RedisRawValue::Array(vec![bulk("0"), RedisRawValue::Nil]),
+            RedisRawValue::Array(vec![bulk("0"), RedisRawValue::Array(vec![RedisRawValue::Nil, bulk("value")])]),
+            RedisRawValue::Array(vec![bulk("0"), RedisRawValue::Array(vec![bulk("unmatched"), RedisRawValue::Nil])]),
+            RedisRawValue::Array(vec![
+                RedisRawValue::Int(17),
+                RedisRawValue::Array(vec![RedisRawValue::Int(42), RedisRawValue::Boolean(true), bulk("unpaired")]),
+            ]),
+        ] {
+            for query in [None, Some("absent"), Some("42")] {
+                assert_eq!(
+                    super::parse_scan_hash_entries(raw.clone(), query),
+                    hash_scan_before_filter(raw.clone(), query)
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual CPU benchmark; run with --ignored --nocapture using an optimized test profile"]
+    fn hash_raw_filter_benchmark() {
+        use std::{hint::black_box, time::Instant};
+        let payload = "payload:".to_string() + &"x".repeat(1016);
+        let raw = hscan_response_owned(
+            "0",
+            (0..25_000)
+                .map(|index| {
+                    (if index < 4 { format!("needle:{index}") } else { format!("field:{index}") }, payload.clone())
+                })
+                .collect(),
+        );
+        for query in ["absent", "needle", "payload"] {
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for _ in 0..7 {
+                let input = raw.clone();
+                let start = Instant::now();
+                let expected = black_box(hash_scan_before_filter(black_box(input), Some(query)).unwrap());
+                before.push(start.elapsed().as_secs_f64() * 1000.0);
+                let input = raw.clone();
+                let start = Instant::now();
+                let actual = black_box(super::parse_scan_hash_entries(black_box(input), Some(query)).unwrap());
+                after.push(start.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(actual, expected);
+            }
+            before.sort_by(f64::total_cmp);
+            after.sort_by(f64::total_cmp);
+            eprintln!("Hash CPU query={query} fields=25000 value_bytes=1024 median_before_ms={:.3} median_after_ms={:.3} speedup={:.2}", before[3], after[3], before[3] / after[3]);
+        }
+    }
+
+    #[tokio::test]
+    async fn hash_search_prioritizes_exact_fields_and_keeps_fuzzy_continuation() {
+        let mut con = FakeRedisConnection::new(vec![
+            bulk("old"),
+            hscan_response("512", vec![("Exact", "new"), ("exact", "case variant"), ("other", "contains Exact")]),
+            httl_response(3, -1),
+            hscan_response("0", vec![("prefix:Exact", "tail")]),
+            httl_response(1, -1),
+        ]);
+        let page = super::load_more_collection(&mut con, b"hash", "hash", 0, 200, Some("Exact"), None).await.unwrap();
+        let RedisCollectionPage::Hash { items, scan_cursor } = page else { panic!("expected hash") };
+        assert_eq!(scan_cursor, Some(512));
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].field, text_blob("Exact"));
+        assert_eq!(items[0].value, text_blob("new"));
+        assert_eq!(con.command_count("HGET"), 1);
+        assert_eq!(con.command_count("HSCAN"), 1);
+        assert!(con.commands[0].contains("\r\nExact\r\n"));
+        let page = super::load_more_collection(&mut con, b"hash", "hash", 512, 200, Some("Exact"), None).await.unwrap();
+        let RedisCollectionPage::Hash { items, scan_cursor } = page else { panic!("expected hash") };
+        assert_eq!(scan_cursor, None);
+        assert_eq!(items[0].field, text_blob("prefix:Exact"));
+        assert_eq!(con.command_count("HGET"), 1);
+    }
+
+    #[tokio::test]
+    async fn hash_search_distinguishes_empty_exact_values_from_missing_fields() {
+        let mut con = FakeRedisConnection::new(vec![bulk(""), hscan_response("100", vec![])]);
+        let (cursor, items) = super::hscan_filtered_page_raw(&mut con, b"hash", 0, 200, "field").await.unwrap();
+        assert_eq!(cursor, 100);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].value, text_blob(""));
+        assert_eq!(con.command_count("HSCAN"), 1);
+    }
+
+    #[tokio::test]
+    async fn hash_search_exact_seed_keeps_overflow_pages_and_refreshes_ttls() {
+        let mut con = FakeRedisConnection::new(vec![
+            bulk("old"),
+            hscan_response("0", vec![("wanted", "new"), ("wanted:2", "two"), ("wanted:3", "three")]),
+            httl_response(1, 100),
+            httl_response(1, 90),
+            httl_response(1, 80),
+        ]);
+        let first = super::load_more_collection(&mut con, b"exact-overflow-hash", "hash", 0, 1, Some("wanted"), None)
+            .await
+            .unwrap();
+        let RedisCollectionPage::Hash { items, scan_cursor } = first else { panic!("expected Hash") };
+        let cursor = scan_cursor.unwrap();
+        assert!(cursor >= super::COLLECTION_OVERFLOW_CURSOR_START);
+        assert_eq!(items[0].value, text_blob("new"));
+        assert_eq!(items[0].field_ttl, Some(100));
+        let second =
+            super::load_more_collection(&mut con, b"exact-overflow-hash", "hash", cursor, 1, Some("wanted"), None)
+                .await
+                .unwrap();
+        let RedisCollectionPage::Hash { items, scan_cursor } = second else { panic!("expected Hash") };
+        assert_eq!(scan_cursor, Some(cursor));
+        assert_eq!(items[0].field, text_blob("wanted:2"));
+        assert_eq!(items[0].field_ttl, Some(90));
+        let third =
+            super::load_more_collection(&mut con, b"exact-overflow-hash", "hash", cursor, 1, Some("wanted"), None)
+                .await
+                .unwrap();
+        let RedisCollectionPage::Hash { items, scan_cursor } = third else { panic!("expected Hash") };
+        assert_eq!(scan_cursor, None);
+        assert_eq!(items[0].field, text_blob("wanted:3"));
+        assert_eq!(items[0].field_ttl, Some(80));
+        assert_eq!(con.command_count("HGET"), 1);
+        assert_eq!(con.command_count("HSCAN"), 1);
+    }
+
+    #[tokio::test]
+    async fn hash_search_optional_lookup_errors_fall_back_without_hiding_real_failures() {
+        for error in [
+            noperm("hget"),
+            redis::RedisError::from((redis::ErrorKind::ResponseError, "ERR", "unknown command 'HGET'".to_string())),
+        ] {
+            let mut con =
+                FakeRedisConnection::with_results(vec![Err(error), Ok(hscan_response("0", vec![("field", "wanted")]))]);
+            let (_, items) = super::hscan_filtered_page_raw(&mut con, b"hash", 0, 200, "wanted").await.unwrap();
+            assert_eq!(items.len(), 1);
+        }
+        for error in [
+            redis::RedisError::from((redis::ErrorKind::IoError, "disconnected")),
+            redis::RedisError::from((redis::ErrorKind::AuthenticationFailed, "WRONGPASS")),
+            redis::RedisError::from((redis::ErrorKind::TypeError, "WRONGTYPE")),
+        ] {
+            let mut con = FakeRedisConnection::with_results(vec![Err(error)]);
+            assert!(super::hscan_filtered_page_raw(&mut con, b"hash", 0, 200, "wanted").await.is_err());
+            assert_eq!(con.command_count("HSCAN"), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn hash_search_exact_lookup_keeps_binary_keys_and_unicode_queries() {
+        let mut con = FakeRedisConnection::new(vec![bulk("value"), hscan_response("0", vec![])]);
+        let (cursor, items) = super::hscan_filtered_page_raw(&mut con, b"hash\xff", 0, 200, "用户").await.unwrap();
+        assert_eq!(cursor, 0);
+        assert_eq!(items[0].field, text_blob("用户"));
+    }
+
+    // Exercise the production page/TTL/overflow path against a disposable server.
+    async fn verify_large_hash_search_live<C>(con: &mut C) -> Result<(), String>
+    where
+        C: ConnectionLike + Send + Sync + Unpin,
+    {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let key = format!("dbx-11491-{}-{nonce}", std::process::id());
+        let query = "EC00100051EB02DD";
+        let expected = [query.to_string(), query.to_lowercase(), format!("prefix:{query}"), "value-only".to_string()];
+        let result = async {
+            for start in (0..25_000).step_by(500) {
+                let mut command = redis::cmd("HSET");
+                command.arg(&key);
+                for index in start..start + 500 {
+                    command.arg(format!("filler:{index:05}")).arg("unrelated payload");
+                }
+                command.query_async::<u64>(con).await.map_err(|error| error.to_string())?;
+                // Ensure even interrupted manual runs leave no persistent test data.
+                redis::cmd("EXPIRE")
+                    .arg(&key)
+                    .arg(600)
+                    .query_async::<bool>(con)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            let mut command = redis::cmd("HSET");
+            command.arg(&key);
+            for field in &expected {
+                command.arg(field).arg(if field == "value-only" { "contains Ec00100051eb02dd" } else { "" });
+            }
+            command.query_async::<u64>(con).await.map_err(|error| error.to_string())?;
+            for search in [query, "ec00100051eb02dd", "00100051", "absent-11491"] {
+                let mut cursor = 0;
+                let mut found = HashMap::new();
+                let mut requests = 0;
+                loop {
+                    let page =
+                        super::load_more_collection(con, key.as_bytes(), "hash", cursor, 200, Some(search), None)
+                            .await?;
+                    let RedisCollectionPage::Hash { items, scan_cursor } = page else {
+                        return Err("expected Hash page".to_string());
+                    };
+                    requests += 1;
+                    if search == query && requests == 1 {
+                        if items.first().map(|item| &item.field) != Some(&text_blob(query)) || scan_cursor.is_none() {
+                            return Err("exact field was not prioritized with a continuation".to_string());
+                        }
+                        if items[0].value != text_blob("") {
+                            return Err("empty value was lost".to_string());
+                        }
+                    }
+                    for item in items {
+                        found.insert(item.field.raw_base64.clone(), item);
+                    }
+                    let Some(next) = scan_cursor else { break };
+                    cursor = next;
+                    if requests > 200 {
+                        return Err("scan did not finish".to_string());
+                    }
+                }
+                let wanted: std::collections::HashSet<_> = if search == "absent-11491" {
+                    Default::default()
+                } else {
+                    expected.iter().map(|field| text_blob(field).raw_base64).collect()
+                };
+                if found.keys().cloned().collect::<std::collections::HashSet<_>>() != wanted {
+                    return Err(format!("incomplete search for {search}: {} matches", found.len()));
+                }
+                eprintln!("large Hash search {search}: {requests} pages, {} unique matches", found.len());
+            }
+            Ok(())
+        }
+        .await;
+        let cleanup = redis::cmd("DEL").arg(&key).query_async::<u64>(con).await.map_err(|error| error.to_string());
+        result.and(cleanup.map(|_| ()))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable Redis via DBX_TEST_REDIS_URL"]
+    async fn hash_search_large_hash_live() {
+        let url = std::env::var("DBX_TEST_REDIS_URL").expect("DBX_TEST_REDIS_URL");
+        let mut con = super::connect(&url, std::time::Duration::from_secs(5)).await.unwrap();
+        verify_large_hash_search_live(&mut con).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable Cluster via DBX_TEST_REDIS_CLUSTER_PORT"]
+    async fn hash_search_large_hash_cluster_live() {
+        let mut config = redis_test_connection_config();
+        config.host = "127.0.0.1".to_string();
+        config.port =
+            std::env::var("DBX_TEST_REDIS_CLUSTER_PORT").expect("DBX_TEST_REDIS_CLUSTER_PORT").parse().unwrap();
+        let pool = super::connect_cluster(&config).await.unwrap();
+        let mut con = super::cluster_key_connection(&pool, b"dbx-11491").await.unwrap();
+        verify_large_hash_search_live(&mut con).await.unwrap();
+    }
+
     #[tokio::test]
     async fn filtered_hash_load_more_matches_fields_and_keeps_scan_cursor() {
         let mut con = FakeRedisConnection::new(vec![
+            RedisRawValue::Nil,
             hscan_response("512", vec![("user:1", "Ada")]),
             hscan_response("0", vec![("user:2", "Bob")]),
         ]);
@@ -6548,13 +6953,15 @@ mod tests {
         assert_eq!(scan_cursor, Some(512));
         assert_eq!(items, vec![RedisHashItem { field: text_blob("user:1"), value: text_blob("Ada"), field_ttl: None }]);
         assert_eq!(con.command_count("HSCAN"), 1);
-        assert!(!con.commands[0].contains("\r\nMATCH\r\n"));
+        assert!(!con.commands.iter().any(|command| command.contains("\r\nMATCH\r\n")));
     }
 
     #[tokio::test]
     async fn filtered_hash_load_more_matches_values() {
-        let mut con =
-            FakeRedisConnection::new(vec![hscan_response("0", vec![("status", "Ada Lovelace"), ("name", "Bob")])]);
+        let mut con = FakeRedisConnection::new(vec![
+            RedisRawValue::Nil,
+            hscan_response("0", vec![("status", "Ada Lovelace"), ("name", "Bob")]),
+        ]);
 
         let result =
             super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, Some("lovelace"), None).await.unwrap();
@@ -6568,7 +6975,7 @@ mod tests {
             vec![RedisHashItem { field: text_blob("status"), value: text_blob("Ada Lovelace"), field_ttl: None }]
         );
         assert_eq!(con.command_count("HSCAN"), 1);
-        assert!(!con.commands[0].contains("\r\nMATCH\r\n"));
+        assert!(!con.commands.iter().any(|command| command.contains("\r\nMATCH\r\n")));
     }
 
     #[tokio::test]
@@ -6585,7 +6992,7 @@ mod tests {
         assert_eq!(items, vec![RedisSetItem { member: text_blob("Ada Lovelace") }]);
         assert_eq!(con.command_count("SSCAN"), 1);
         // Substring search cannot be expressed as an SSCAN glob, so no MATCH is sent.
-        assert!(!con.commands[0].contains("\r\nMATCH\r\n"));
+        assert!(!con.commands.iter().any(|command| command.contains("\r\nMATCH\r\n")));
     }
 
     #[tokio::test]
@@ -6774,6 +7181,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn binary_hash_ttl_discovery_avoids_unsafe_unknown_command_errors() {
+        for (key, field) in
+            [(b"hash".as_slice(), b"\x03kryo\xf3".as_slice()), (b"hash\xff", b"field"), (b"hash", b"field\r\n")]
+        {
+            let mut items = vec![RedisHashItem {
+                field: redis_blob_from_bytes(field),
+                value: redis_blob_from_bytes(b"\x01value\xff"),
+                field_ttl: None,
+            }];
+            let original = items.clone();
+            let mut con = FakeRedisConnection::new(vec![RedisRawValue::Array(vec![RedisRawValue::Nil])]);
+            super::attach_hash_field_ttls(&mut con, key, &mut items).await.unwrap();
+            assert_eq!(items, original);
+            assert_eq!(con.command_count("COMMAND"), 1);
+            assert_eq!(con.commands.len(), 1);
+            assert!(!con.commands[0].contains("\r\nFIELDS\r\n"));
+            assert!(con.responses.is_empty());
+
+            let mut con = FakeRedisConnection::new(vec![
+                RedisRawValue::Array(vec![RedisRawValue::Array(vec![bulk("httl")])]),
+                httl_response(1, 42),
+            ]);
+            super::attach_hash_field_ttls(&mut con, key, &mut items).await.unwrap();
+            assert_eq!(items[0].field_ttl, Some(42));
+            assert_eq!(con.commands.len(), 2);
+            assert!(con.commands[1].contains("\r\nFIELDS\r\n"));
+            assert!(con.responses.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn binary_hash_command_discovery_only_suppresses_optional_errors() {
+        let mut items = vec![RedisHashItem {
+            field: redis_blob_from_bytes(b"\x03kryo\xf3"),
+            value: text_blob("value"),
+            field_ttl: None,
+        }];
+        let mut con = FakeRedisConnection::with_results(vec![Err(noperm("command"))]);
+        super::attach_hash_field_ttls(&mut con, b"hash", &mut items).await.unwrap();
+        assert_eq!(con.commands.len(), 1);
+        assert_eq!(items[0].field_ttl, None);
+
+        let mut con = FakeRedisConnection::with_results(vec![Err(redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "server error",
+            "unrelated discovery failure".to_string(),
+        )))]);
+        assert!(super::attach_hash_field_ttls(&mut con, b"hash", &mut items)
+            .await
+            .unwrap_err()
+            .contains("unrelated discovery failure"));
+    }
+
+    #[tokio::test]
     async fn hash_load_more_attaches_field_ttl_when_supported() {
         let mut con = FakeRedisConnection::new(vec![
             hscan_response("0", vec![("session", "Ada")]),
@@ -6838,6 +7299,338 @@ mod tests {
         assert_eq!(con.command_count("HTTL"), 1);
         assert_eq!(con.command_count("HSET"), 1);
         assert_eq!(con.command_count("HEXPIRE"), 1);
+    }
+
+    fn legacy_hash_expiry_error() -> redis::RedisError {
+        redis::parse_redis_value(
+            b"-ERR Invalid argument: hash field expiration is not supported by legacy hash encoding\r\n",
+        )
+        .unwrap()
+        .extract_error()
+        .unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn legacy_hash_value_keeps_bounded_pages_and_key_ttl() {
+        let pairs = (0..201).map(|index| (format!("f{index}"), format!("v{index}"))).collect();
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(bulk("hash")),
+            Ok(RedisRawValue::Int(73)),
+            Ok(RedisRawValue::Int(201)),
+            Ok(hscan_response_owned("0", pairs)),
+            Err(legacy_hash_expiry_error()),
+            Err(legacy_hash_expiry_error()),
+        ]);
+
+        let value = super::get_value(&mut con, b"legacy-paged-hash").await.unwrap();
+        assert_eq!(value.ttl, 73);
+        let RedisValueData::Hash { items, total, scan_cursor } = value.data else {
+            panic!("expected hash");
+        };
+        assert_eq!(total, 201);
+        assert_eq!(items.len(), 200);
+        assert!(items.iter().all(|item| item.field_ttl.is_none()));
+        assert_eq!(items[199].field, text_blob("f199"));
+        let page =
+            super::load_more_collection(&mut con, b"legacy-paged-hash", "hash", scan_cursor.unwrap(), 200, None, None)
+                .await
+                .unwrap();
+        let RedisCollectionPage::Hash { items, scan_cursor } = page else {
+            panic!("expected hash page");
+        };
+        assert_eq!(items, vec![RedisHashItem { field: text_blob("f200"), value: text_blob("v200"), field_ttl: None }]);
+        assert_eq!(scan_cursor, None);
+        assert_eq!(con.command_count("HSCAN"), 1);
+        assert_eq!(con.command_count("HTTL"), 2);
+        assert!(con.commands[4].contains("\r\n200\r\n"));
+        assert!(!con.commands[4].contains("\r\nf200\r\n"));
+        assert!(con.responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_hash_load_more_does_not_disable_ttl_for_other_hashes() {
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(hscan_response("17", vec![("field", "value")])),
+            Err(legacy_hash_expiry_error()),
+            Ok(hscan_response("0", vec![("field", "value")])),
+            Ok(httl_response(1, 42)),
+        ]);
+        for (key, cursor, expected_ttl) in [(b"legacy".as_slice(), Some(17), None), (b"modern", None, Some(42))] {
+            let page = super::load_more_collection(&mut con, key, "hash", 0, 1, None, None).await.unwrap();
+            let RedisCollectionPage::Hash { items, scan_cursor } = page else {
+                panic!("expected hash page");
+            };
+            assert_eq!(scan_cursor, cursor);
+            assert_eq!(
+                items,
+                vec![RedisHashItem { field: text_blob("field"), value: text_blob("value"), field_ttl: expected_ttl }]
+            );
+        }
+        assert_eq!(con.command_count("HTTL"), 2);
+        assert!(con.responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_hash_set_does_not_disable_ttl_for_other_hashes() {
+        let mut con = FakeRedisConnection::with_results(vec![
+            Err(legacy_hash_expiry_error()),
+            Ok(RedisRawValue::Okay),
+            Ok(httl_response(1, 42)),
+            Ok(RedisRawValue::Okay),
+            Ok(httl_response(1, 1)),
+        ]);
+        super::hash_set(&mut con, b"legacy", "field", "value", None).await.unwrap();
+        super::hash_set(&mut con, b"modern", "field", "value", None).await.unwrap();
+        assert_eq!(con.command_count("HTTL"), 2);
+        assert_eq!(con.command_count("HSET"), 2);
+        assert_eq!(con.command_count("HEXPIRE"), 1);
+        assert_eq!(con.command_count("EXPIRE"), 0);
+        assert!(con.commands[4].contains("\r\nmodern\r\n$2\r\n42\r\n"));
+        assert!(con.responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hash_ttl_discovery_keeps_unrelated_errors_fatal() {
+        for detail in [
+            "operation not supported",
+            "Invalid argument: hash field expiration is not supported by another encoding",
+            "WRONGTYPE Operation against a key holding the wrong kind of value",
+            "Invalid argument: hash field expiration is not supported by legacy hash encoding: extra failure",
+        ] {
+            let error =
+                || redis::RedisError::from((redis::ErrorKind::ResponseError, "server error", detail.to_string()));
+            let mut con = FakeRedisConnection::with_results(vec![Err(error())]);
+            assert!(super::hash_set(&mut con, b"hash", "field", "value", None).await.unwrap_err().contains(detail));
+            assert_eq!(con.command_count("HSET"), 0);
+            let mut con =
+                FakeRedisConnection::with_results(vec![Ok(hscan_response("0", vec![("f", "v")])), Err(error())]);
+            assert!(super::load_more_collection(&mut con, b"hash", "hash", 0, 1, None, None)
+                .await
+                .unwrap_err()
+                .contains(detail));
+        }
+        let disconnected =
+            || redis::RedisError::from(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset"));
+        let mut con = FakeRedisConnection::with_results(vec![Err(disconnected())]);
+        assert!(super::hash_set(&mut con, b"hash", "field", "value", None).await.is_err());
+        assert_eq!(con.command_count("HSET"), 0);
+        let mut con =
+            FakeRedisConnection::with_results(vec![Ok(hscan_response("0", vec![("f", "v")])), Err(disconnected())]);
+        assert!(super::load_more_collection(&mut con, b"hash", "hash", 0, 1, None, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_hash_explicit_expiry_errors_remain_visible() {
+        let mut con = FakeRedisConnection::with_results(vec![
+            Err(legacy_hash_expiry_error()),
+            Err(legacy_hash_expiry_error()),
+            Err(legacy_hash_expiry_error()),
+        ]);
+        assert!(super::set_hash_field_ttl(&mut con, b"hash", "field", 60).await.is_err());
+        assert!(super::set_hash_field_ttl(&mut con, b"hash", "field", -1).await.is_err());
+        assert!(super::set_hash_field_expire_at(&mut con, b"hash", "field", 1_735_689_600).await.is_err());
+        assert_eq!(con.command_count("HEXPIRE"), 1);
+        assert_eq!(con.command_count("HPERSIST"), 1);
+        assert_eq!(con.command_count("HEXPIREAT"), 1);
+    }
+
+    #[tokio::test]
+    async fn hash_set_keeps_explicit_key_ttl_and_missing_field_behavior() {
+        for ttl in [Some(60), Some(0), Some(-1)] {
+            let mut con = FakeRedisConnection::new(vec![RedisRawValue::Okay, RedisRawValue::Okay]);
+            super::hash_set(&mut con, b"hash", "field", "value", ttl).await.unwrap();
+            assert_eq!(con.command_count("HTTL"), 0);
+            assert_eq!(con.command_count("HSET"), 1);
+            assert_eq!(con.command_count("EXPIRE"), usize::from(ttl == Some(60)));
+        }
+        for response in [httl_response(1, -2), httl_response(1, -1), httl_response(0, -2)] {
+            let mut con = FakeRedisConnection::new(vec![response, RedisRawValue::Okay]);
+            super::hash_set(&mut con, b"hash", "field", "value", None).await.unwrap();
+            assert_eq!(con.command_count("HSET"), 1);
+            assert_eq!(con.command_count("HEXPIRE"), 0);
+        }
+        let mut con = FakeRedisConnection::new(vec![hscan_response("0", vec![])]);
+        let page = super::load_more_collection(&mut con, b"hash", "hash", 0, 1, None, None).await.unwrap();
+        assert!(matches!(page, RedisCollectionPage::Hash { items, scan_cursor: None } if items.is_empty()));
+        assert_eq!(con.command_count("HTTL"), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_hash_update_handles_encoding_only_in_discovery() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(2)]);
+        super::hash_field_update(&mut con, b"hash", "old", "new", "value").await.unwrap();
+        assert_eq!(con.commands.len(), 1);
+        assert_eq!(con.command_count("EVAL"), 1);
+        let script = &con.commands[0];
+        let discovery =
+            script.split("local ttl_reply =").nth(1).unwrap().split("local function restore_source").next().unwrap();
+        assert!(discovery.contains("hash field expiration is not supported by legacy hash encoding"));
+        let writes = script.split("local function restore_source").nth(1).unwrap();
+        assert!(!writes.contains("legacy hash encoding"));
+    }
+
+    #[tokio::test]
+    async fn legacy_hash_pages_keep_byte_and_sparse_scan_limits() {
+        let value = "v".repeat(super::COLLECTION_PAGE_MAX_BYTES / 2);
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(hscan_response("0", vec![("first", &value), ("second", &value)])),
+            Err(legacy_hash_expiry_error()),
+            Err(legacy_hash_expiry_error()),
+        ]);
+        let mut cursor = 0;
+        for field in ["first", "second"] {
+            let page = super::load_more_collection(&mut con, b"legacy-byte-limit", "hash", cursor, 200, None, None)
+                .await
+                .unwrap();
+            let RedisCollectionPage::Hash { items, scan_cursor } = page else {
+                panic!("expected hash page");
+            };
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].field, text_blob(field));
+            assert_eq!(items[0].value, text_blob(&value));
+            assert!(items[0].field_ttl.is_none());
+            assert!(super::hash_item_page_bytes(&items[0]) <= super::COLLECTION_PAGE_MAX_BYTES);
+            cursor = scan_cursor.unwrap_or(0);
+        }
+        assert_eq!(cursor, 0);
+        assert_eq!(con.command_count("HSCAN"), 1);
+        assert_eq!(con.command_count("HTTL"), 2);
+
+        let mut responses = (1..=super::COLLECTION_FILTER_SCAN_MAX_ITERATIONS)
+            .map(|cursor| Ok(hscan_response(&cursor.to_string(), vec![("field", "unmatched")])))
+            .collect::<Vec<_>>();
+        *responses.last_mut().unwrap() = Ok(hscan_response("10", vec![("field", "wanted")]));
+        responses.push(Err(legacy_hash_expiry_error()));
+        responses.insert(0, Ok(RedisRawValue::Nil));
+        let mut con = FakeRedisConnection::with_results(responses);
+        let page =
+            super::load_more_collection(&mut con, b"legacy-sparse", "hash", 0, 20, Some("wanted"), None).await.unwrap();
+        let RedisCollectionPage::Hash { items, scan_cursor } = page else {
+            panic!("expected hash page");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].value, text_blob("wanted"));
+        assert!(items[0].field_ttl.is_none());
+        assert_eq!(scan_cursor, Some(10));
+        assert_eq!(con.command_count("HSCAN"), 10);
+        assert_eq!(con.command_count("HTTL"), 1);
+    }
+
+    #[tokio::test]
+    async fn hash_ttl_discovery_preserves_rust_permission_fallback() {
+        let mut con = FakeRedisConnection::with_results(vec![
+            Err(noperm("httl")),
+            Ok(RedisRawValue::Okay),
+            Ok(hscan_response("0", vec![("f", "v")])),
+            Err(noperm("httl")),
+        ]);
+        super::hash_set(&mut con, b"hash", "field", "value", None).await.unwrap();
+        let page = super::load_more_collection(&mut con, b"hash", "hash", 0, 1, None, None).await.unwrap();
+        assert!(matches!(page, RedisCollectionPage::Hash { items, .. } if items[0].field_ttl.is_none()));
+        assert_eq!(con.command_count("HTTL"), 2);
+        assert_eq!(con.command_count("HSET"), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_hash_fallback_keeps_write_and_scan_errors_visible() {
+        let mut con = FakeRedisConnection::with_results(vec![Err(legacy_hash_expiry_error()), Err(noperm("hset"))]);
+        assert!(super::hash_set(&mut con, b"hash", "field", "value", None).await.is_err());
+        assert_eq!(con.command_count("HSET"), 1);
+        assert_eq!(con.commands.len(), 2);
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(httl_response(1, 42)),
+            Ok(RedisRawValue::Okay),
+            Err(legacy_hash_expiry_error()),
+        ]);
+        assert!(super::hash_set(&mut con, b"hash", "field", "value", None).await.is_err());
+        assert_eq!(con.command_count("HEXPIRE"), 1);
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(bulk("hash")),
+            Ok(RedisRawValue::Int(-1)),
+            Ok(RedisRawValue::Int(1)),
+            Err(noperm("hscan")),
+        ]);
+        assert!(super::get_value(&mut con, b"hash").await.is_err());
+        assert_eq!(con.command_count("HTTL"), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable Redis via DBX_TEST_REDIS_URL; injects Kvrocks HTTL replies into production Lua"]
+    async fn hash_field_update_lua_legacy_encoding_regression() {
+        let mut trace = FakeRedisConnection::new(vec![RedisRawValue::Int(2)]);
+        super::hash_field_update(&mut trace, b"hash", "old", "new", "after").await.unwrap();
+        let RedisRawValue::Array(args) = redis::parse_redis_value(trace.commands[0].as_bytes()).unwrap() else {
+            panic!("expected EVAL arguments");
+        };
+        let script = String::from_utf8(redis_value_to_bytes(args[1].clone()).unwrap()).unwrap();
+        let probe = "redis.pcall('HTTL', key, 'FIELDS', 1, old_field)";
+        assert_eq!(script.matches(probe).count(), 1);
+        let url = std::env::var("DBX_TEST_REDIS_URL").expect("DBX_TEST_REDIS_URL");
+        let mut con = super::connect(&url, std::time::Duration::from_secs(5)).await.unwrap();
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let key = format!("dbx-10948-{}-{nonce}", std::process::id());
+        for (reply, success) in [
+            ("Invalid argument: hash field expiration is not supported by legacy hash encoding", true),
+            ("ERR Invalid argument: hash field expiration is not supported by legacy hash encoding", true),
+            ("NOPERM no permission to run HTTL", false),
+            ("WRONGTYPE Operation against a key holding the wrong kind of value", false),
+            ("ERR operation not supported", false),
+            (
+                "ERR Invalid argument: hash field expiration is not supported by legacy hash encoding: extra failure",
+                false,
+            ),
+        ] {
+            let injected = script.replace(probe, &format!("{{err = '{reply}'}}"));
+            for destination in ["old", "new"] {
+                redis::cmd("DEL").arg(&key).query_async::<()>(&mut con).await.unwrap();
+                redis::cmd("HSET")
+                    .arg(&key)
+                    .arg("old")
+                    .arg("before")
+                    .arg("keeper")
+                    .arg("keep")
+                    .query_async::<()>(&mut con)
+                    .await
+                    .unwrap();
+                redis::cmd("EXPIRE").arg(&key).arg(60).query_async::<()>(&mut con).await.unwrap();
+                let result: i64 = redis::cmd("EVAL")
+                    .arg(&injected)
+                    .arg(1)
+                    .arg(&key)
+                    .arg("old")
+                    .arg(destination)
+                    .arg("after")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result,
+                    if success {
+                        if destination == "old" {
+                            1
+                        } else {
+                            2
+                        }
+                    } else {
+                        -3
+                    },
+                    "{reply}"
+                );
+                let fields: HashMap<String, String> =
+                    redis::cmd("HGETALL").arg(&key).query_async(&mut con).await.unwrap();
+                let expected = if success { (destination, "after") } else { ("old", "before") };
+                assert_eq!(
+                    fields,
+                    HashMap::from([
+                        (expected.0.to_string(), expected.1.to_string()),
+                        ("keeper".to_string(), "keep".to_string()),
+                    ])
+                );
+                let ttl: i64 = redis::cmd("TTL").arg(&key).query_async(&mut con).await.unwrap();
+                assert!((1..=60).contains(&ttl));
+            }
+        }
+        redis::cmd("DEL").arg(&key).query_async::<()>(&mut con).await.unwrap();
     }
 
     #[tokio::test]
@@ -7070,7 +7863,9 @@ mod tests {
     async fn filtered_hash_load_more_caps_sparse_scan_iterations() {
         let responses = (1..=super::COLLECTION_FILTER_SCAN_MAX_ITERATIONS + 1)
             .map(|cursor| hscan_response(&cursor.to_string(), vec![]))
-            .collect();
+            .collect::<Vec<_>>();
+        let mut responses = responses;
+        responses.insert(0, RedisRawValue::Nil);
         let mut con = FakeRedisConnection::new(responses);
 
         let result =
@@ -7333,7 +8128,7 @@ mod tests {
         assert_eq!(classify_command("GETEX"), RedisCommandSafety::Write);
         assert_eq!(classify_command("XREADGROUP"), RedisCommandSafety::Write);
         assert_eq!(classify_command("del"), RedisCommandSafety::Confirm);
-        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("JSON.DEL"), RedisCommandSafety::Confirm);
         assert_eq!(classify_command("JSON.FORGET"), RedisCommandSafety::Confirm);
         assert_eq!(classify_command("JSON.CLEAR"), RedisCommandSafety::Confirm);
@@ -7536,6 +8331,8 @@ mod tests {
 
     fn redis_test_connection_config() -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "redis".to_string(),
             name: "Redis".to_string(),
@@ -7556,6 +8353,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -7582,6 +8380,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),

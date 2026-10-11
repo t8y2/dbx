@@ -66,7 +66,7 @@ Field names come from the plugin manifest, not the runtime. Imported records get
 
 ## Supported boundary
 
-- Host API 1.0 subset: `ready`, `context`, `locale`, `theme`, `request`, `invoke`, `notify`, `onInit`, `onContext`, `onEvent`, `onBinary`, `sendBinary`, resource reads and `openWorkbench`.
+- Host API 1.0 subset: `ready`, `contributionId` (readable after `ready`), `context`, `locale`, `theme`, `request`, `invoke`, `notify`, `onInit`, `onContext`, `onEvent`, `onBinary`, `sendBinary`, resource reads and `openWorkbench`.
 - Backend transports: default `stdio-jsonl` and explicit `stdio-framed`, protocol version 1. Initialization verifies plugin identity and version. Binary channels require framed transport.
 - Permissions: event, binary and workbench navigation permissions are enforced. Unimplemented methods, such as `host.openFilesystem`, return errors. Native connection actions, query-result contributions and the DBX component kit are not emulated.
 - JSON bridge parameters: 2 MiB. UI binary messages: 8 MiB. Sidecar JSON: 8 MiB. Sidecar binary: 64 MiB. Explicit bridge timeouts are clamped to 1–120000 ms, matching the host baseline.

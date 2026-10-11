@@ -38,7 +38,7 @@ import {
   splitMongoCommandRanges,
 } from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
 import type { MongoWriteCommand } from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
-import { buildMongoUpdateDocument as buildMongoDocumentUpdate, formatMongoShellLiteral as formatMongoDocumentShellLiteral } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
+import { buildMongoUpdateDocument as buildMongoDocumentUpdate, formatMongoShellLiteral as formatMongoDocumentShellLiteral, mongoDocumentGridDisplayText, mongoDocumentGridEditorText, mongoDocumentGridValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
 import { normalizeJsonArgument } from "../mongo-shell/src/json.ts";
 
 test("parseMongoFindCommand parses db collection find with an empty JSON filter", () => {
@@ -914,6 +914,31 @@ test("parseMongoWriteCommand unwraps EJSON.deserialize values", () => {
   });
 });
 
+test("parseMongoWriteCommand accepts the copied insert form that wraps BSON values in EJSON.deserialize", () => {
+  // "Copy -> SQL Inserts" formats values extended JSON cannot spell directly
+  // through `EJSON.deserialize({...})`. The statement is re-parsed by the Rust
+  // parser before execution, so both parsers must accept this exact shape
+  // (#11666).
+  assert.deepEqual(
+    parseMongoWriteCommand(`db.getCollection("test").insert({
+  "type": EJSON.deserialize({
+    "$numberInt": "999999"
+  }),
+  "refid": "27507"
+})`),
+    {
+      kind: "insert",
+      collection: "test",
+      docsJson: `{
+  "type": {
+    "$numberInt": "999999"
+  },
+  "refid": "27507"
+}`,
+    },
+  );
+});
+
 test("parseMongoWriteCommand accepts legacy insert commands", () => {
   assert.deepEqual(
     parseMongoWriteCommand(`db.getCollection("accounting_reconciliations").insert({
@@ -1751,7 +1776,7 @@ test("mongoDocumentsToQueryResult turns mongo documents into grid rows", () => {
 
   assert.deepEqual(result.columns, ["_id", "name", "profile", "active"]);
   assert.deepEqual(result.rows, [
-    ["1", "Ada", '{"role":"admin"}', null],
+    ["1", "Ada", mongoDocumentGridValue({ role: "admin" }), null],
     ["2", "Lin", null, true],
   ]);
   assert.deepEqual(result.mongo_documents, [
@@ -1761,6 +1786,19 @@ test("mongoDocumentsToQueryResult turns mongo documents into grid rows", () => {
   assert.equal(result.affected_rows, 12);
   assert.equal(result.execution_time_ms, 5);
   assert.equal(result.truncated, true);
+});
+
+test("mongoDocumentsToQueryResult displays array structures with shell-style BSON literals", () => {
+  const document = {
+    _id: "1",
+    history: [{ at: 'ISODate("2026-06-10T13:59:31.287Z")', by: { $oid: "507f1f77bcf86cd799439011" } }],
+  };
+  const result = mongoDocumentsToQueryResult([document], 5, 1);
+  const historyCell = result.rows[0]?.[1];
+
+  assert.equal(typeof historyCell, "string");
+  assert.equal(mongoDocumentGridDisplayText(historyCell), '[{"at": ISODate("2026-06-10T13:59:31.287Z"), "by": ObjectId("507f1f77bcf86cd799439011")}]');
+  assert.equal(mongoDocumentGridEditorText(historyCell), JSON.stringify(document.history));
 });
 
 test("mongoDocumentsToQueryResult keeps aligned extended documents for copying", () => {

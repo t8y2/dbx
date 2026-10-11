@@ -3,7 +3,7 @@
 import { createApp, h, nextTick, ref, shallowRef, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
-import { language } from "@codemirror/language";
+import { foldedRanges, language } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH, QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT } from "@/lib/editor/queryEditorLargeDocument";
@@ -13,6 +13,7 @@ const analysisProbe = vi.hoisted(() => ({
   documentLengths: [] as number[],
   documentLineCounts: [] as number[],
   backgroundDocuments: [] as string[],
+  backgroundGate: null as Promise<void> | null,
   failAtLength: Number.POSITIVE_INFINITY,
   failAtLineCount: Number.POSITIVE_INFINITY,
 }));
@@ -33,7 +34,11 @@ vi.mock("@/lib/sql/executableStatementRangeCache", async (importOriginal) => {
 
 vi.mock("@/lib/sql/sqlStatementAnalysisWorker", async () => {
   const actual = await vi.importActual<typeof import("@/lib/sql/executableStatementRangeCache")>("@/lib/sql/executableStatementRangeCache");
-  const { Text } = await import("@codemirror/state");
+  const { EditorState, Text } = await import("@codemirror/state");
+  const langSql = await import("@codemirror/lang-sql");
+  const { ensureSyntaxTree } = await import("@codemirror/language");
+  const { createDbxCodeMirrorSqlDialect } = await import("@/lib/editor/codemirrorSqlDialect");
+  const { computeBlockFoldRanges } = await import("@/lib/editor/codemirrorSqlBlockFolding");
   return {
     createSqlStatementAnalysisWorker: () => {
       let generation = 0;
@@ -41,10 +46,15 @@ vi.mock("@/lib/sql/sqlStatementAnalysisWorker", async () => {
         async analyze(request: import("@/lib/sql/sqlStatementAnalysis").SqlStatementAnalysisRequest) {
           const current = ++generation;
           analysisProbe.backgroundDocuments.push(request.sql);
+          if (analysisProbe.backgroundGate) await analysisProbe.backgroundGate;
           await Promise.resolve();
           if (current !== generation) return null;
           const { doc: _doc, ...result } = actual.executableStatementRangeCacheForDoc(null, Text.of(request.sql.split("\n")), request.databaseType, request.parameterOptions);
-          return result;
+          if (!request.includeFolds) return result;
+          const state = EditorState.create({ doc: request.sql, extensions: [langSql.sql({ dialect: createDbxCodeMirrorSqlDialect(langSql, request.syntaxDialect ?? "mysql", request.databaseType, request.driverProfile) })] });
+          let tree = ensureSyntaxTree(state, state.doc.length, 1000);
+          while (!tree) tree = ensureSyntaxTree(state, state.doc.length, 1000);
+          return { ...result, folds: computeBlockFoldRanges(state, request.databaseType, tree) };
         },
         cancel() {
           generation++;
@@ -83,6 +93,7 @@ beforeEach(() => {
   analysisProbe.documentLengths = [];
   analysisProbe.documentLineCounts = [];
   analysisProbe.backgroundDocuments = [];
+  analysisProbe.backgroundGate = null;
   analysisProbe.failAtLength = Number.POSITIVE_INFINITY;
   analysisProbe.failAtLineCount = Number.POSITIVE_INFINITY;
 });
@@ -126,6 +137,12 @@ async function mountEditor(modelValue: string, overrides: Partial<QueryEditorPro
   return { editor: editor.value!, host, onUpdateModelValue, view };
 }
 
+function foldedRangeCount(view: EditorView): number {
+  let count = 0;
+  foldedRanges(view.state).between(0, view.state.doc.length, () => count++);
+  return count;
+}
+
 describe("QueryEditor large document mode", () => {
   it("keeps the full editor feature path for ordinary documents", async () => {
     const source = oraclePackage(8);
@@ -149,6 +166,22 @@ describe("QueryEditor large document mode", () => {
     expect(analysisProbe.documentLineCounts).not.toContain(lineCount);
     expect(view.state.facet(language)).not.toBeNull();
     expect(analysisProbe.backgroundDocuments).toContain(source);
+  });
+
+  it("waits for background fold analysis before folding a large document", async () => {
+    const source = `BEGIN\n${"SELECT 1;\n".repeat(QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT)}END;`;
+    let releaseBackgroundAnalysis!: () => void;
+    analysisProbe.backgroundGate = new Promise<void>((resolve) => {
+      releaseBackgroundAnalysis = resolve;
+    });
+    const { editor, view } = await mountEditor(source);
+
+    expect(editor.foldAll()).toBe(true);
+    expect(foldedRangeCount(view)).toBe(0);
+    releaseBackgroundAnalysis();
+    await vi.waitFor(() => expect(foldedRangeCount(view)).toBe(1), { timeout: 5000 });
+    expect(editor.unfoldAll()).toBe(true);
+    expect(foldedRangeCount(view)).toBe(0);
   });
 
   it("enters bounded mode when typing crosses the line budget", async () => {

@@ -45,6 +45,24 @@ describe("tableImport", () => {
     expect(legacyEmptyField.emptyStringAsNull).toBe(true);
   });
 
+  it("passes the decimal separator only for delimited sources", () => {
+    const settings = {
+      delimiter: ";",
+      decimalSeparator: ",",
+      textEncoding: "auto" as const,
+      titleRow: 1,
+      dataStartRow: 2,
+      lastDataRow: 0,
+      trimValues: false,
+      emptyStringAsNull: false,
+      jsonShape: "auto" as const,
+    };
+    expect(buildTableImportParseOptions({ ...settings, format: "delimited" }).decimalSeparator).toBe(",");
+    expect(buildTableImportParseOptions({ ...settings, format: "csv" }).decimalSeparator).toBe(",");
+    expect(buildTableImportParseOptions({ ...settings, format: "tsv" }).decimalSeparator).toBe(",");
+    expect(buildTableImportParseOptions({ ...settings, format: "json" }).decimalSeparator).toBeNull();
+  });
+
   it("formats import elapsed time for progress and terminal summaries", () => {
     expect(formatTableImportElapsed(0)).toBe("0 ms");
     expect(formatTableImportElapsed(999)).toBe("999 ms");
@@ -75,6 +93,31 @@ describe("tableImport", () => {
       "user name": "user_name",
       ignored: "",
     });
+  });
+
+  it("maps headerless columns by position even when generated names match a different target", () => {
+    expect(autoMapImportColumns(["column_1", "column_2"], ["column_2", "column_1"], "position")).toEqual({ column_1: "column_2", column_2: "column_1" });
+  });
+
+  it("falls back to position mapping in auto mode when no column names match", () => {
+    expect(autoMapImportColumns(["col_a", "col_b", "col_c"], ["id", "name"])).toEqual({
+      col_a: "id",
+      col_b: "name",
+      col_c: "",
+    });
+  });
+
+  it("keeps name-only matches when explicitly using name mode", () => {
+    expect(autoMapImportColumns(["col_a", "col_b"], ["id", "name"], "name")).toEqual({
+      col_a: "",
+      col_b: "",
+    });
+  });
+
+  it("skips excess source columns and leaves excess target columns unmapped", () => {
+    expect(autoMapImportColumns(["column_1", "column_2", "column_3"], ["id", "name"], "position")).toEqual({ column_1: "id", column_2: "name", column_3: "" });
+    expect(autoMapImportColumns(["column_1"], ["id", "name"], "position")).toEqual({ column_1: "id" });
+    expect(autoMapImportColumns(["column_1"], [], "position")).toEqual({ column_1: "" });
   });
 
   it("rejects empty mappings and duplicate target columns", () => {

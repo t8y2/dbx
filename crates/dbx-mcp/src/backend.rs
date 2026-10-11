@@ -35,6 +35,7 @@ pub struct ConnectionSummary {
     pub port: u16,
     pub database: String,
     pub group_path: Vec<String>,
+    pub note: String,
 }
 
 impl From<&ConnectionConfig> for ConnectionSummary {
@@ -51,6 +52,7 @@ impl From<&ConnectionConfig> for ConnectionSummary {
             port: config.port,
             database: config.database.clone().unwrap_or_default(),
             group_path: Vec::new(),
+            note: config.note.clone(),
         }
     }
 }
@@ -212,6 +214,68 @@ pub struct DocsSnapshotOptions {
     pub tables: Vec<String>,
     #[serde(default)]
     pub project_name: Option<String>,
+}
+
+/// Stand-in backend for a store that could not be opened, most often because the
+/// data encryption key is not reachable from this process.
+///
+/// Exiting at startup closes stdout before the transport is running, so an MCP
+/// client sees only EOF and the remedy stays on stderr where the host does not
+/// show it. Keeping the server answerable turns that into an ordinary protocol
+/// error: every request fails closed, carrying the reason the operator needs.
+pub struct UnavailableBackend {
+    reason: String,
+}
+
+impl UnavailableBackend {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self { reason: reason.into() }
+    }
+}
+
+#[async_trait]
+impl DbxBackend for UnavailableBackend {
+    async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+        Err(self.reason.clone())
+    }
+
+    async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
+        Err(self.reason.clone())
+    }
+
+    async fn execute_agent_tool(
+        &self,
+        _connection: &ConnectionConfig,
+        _database: &str,
+        tool_name: &str,
+        _arguments: Value,
+        _permissions: AgentSqlPermissions,
+    ) -> ToolResult {
+        ToolResult {
+            tool_call_id: String::new(),
+            tool_name: tool_name.to_string(),
+            content: self.reason.clone(),
+            is_error: true,
+            explain_data: None,
+        }
+    }
+
+    async fn add_connection_for_mcp(&self, _config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        Err(self.reason.clone())
+    }
+
+    async fn duplicate_connection_for_mcp(
+        &self,
+        _source_id: &str,
+        _copy_id: &str,
+        _copy_name: &str,
+    ) -> Result<ConnectionConfig, String> {
+        Err(self.reason.clone())
+    }
+
+    async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
+        Err(self.reason.clone())
+    }
 }
 
 #[async_trait]
@@ -414,6 +478,20 @@ pub trait DbxBackend: Send + Sync {
     async fn bridge_request(&self, path: &str, body: Value) -> Result<(), String> {
         let _ = (path, body);
         Err("DBX is not running. Please start DBX first.".to_string())
+    }
+    async fn approve_high_risk_sql(&self, connection_id: &str, database: &str, sql: &str) -> Result<String, String> {
+        let _ = (connection_id, database, sql);
+        Err("SQL_BLOCKED: Desktop approval is unavailable for this MCP backend.".to_string())
+    }
+    async fn consume_high_risk_sql_approval(
+        &self,
+        token: &str,
+        connection_id: &str,
+        database: &str,
+        sql: &str,
+    ) -> Result<(), String> {
+        let _ = (token, connection_id, database, sql);
+        Err("SQL_BLOCKED: Desktop approval is unavailable for this MCP backend.".to_string())
     }
     async fn collect_docs_snapshot(
         &self,
@@ -682,6 +760,16 @@ fn plugin_lacks_mcp_surface(err: &str) -> bool {
 const PLUGIN_TOOLS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 impl LocalBackend {
+    async fn notify_connections_changed(&self) {
+        // Persistence has already succeeded. A closed or unresponsive desktop
+        // must not turn the mutation into an error (or block headless MCP).
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.bridge_request("/reload-connections", json!({})),
+        )
+        .await;
+    }
+
     fn spawn_connection_lifecycle_watcher(
         &self,
         lifecycle: ConnectionLifecycleSnapshot,
@@ -1006,6 +1094,55 @@ fn local_agent_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
 
 #[async_trait]
 impl DbxBackend for LocalBackend {
+    async fn approve_high_risk_sql(&self, connection_id: &str, database: &str, sql: &str) -> Result<String, String> {
+        let port = tokio::fs::read_to_string(self.data_dir.join("mcp-bridge-port"))
+            .await
+            .map_err(|_| "SQL_BLOCKED: DBX desktop is not running.".to_string())?;
+        let response = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(100))
+            .build()
+            .map_err(|error| error.to_string())?
+            .post(format!("http://127.0.0.1:{}/approve-high-risk-sql", port.trim()))
+            .json(&json!({ "connection_id": connection_id, "database": database, "sql": sql }))
+            .send()
+            .await
+            .map_err(|error| format!("SQL_BLOCKED: Desktop approval unavailable: {error}"))?;
+        if !response.status().is_success() {
+            return Err(response.text().await.unwrap_or_else(|_| "SQL_BLOCKED: Approval failed".to_string()));
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| error.to_string())?
+            .get("token")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| "SQL_BLOCKED: Invalid desktop approval response".to_string())
+    }
+    async fn consume_high_risk_sql_approval(
+        &self,
+        token: &str,
+        connection_id: &str,
+        database: &str,
+        sql: &str,
+    ) -> Result<(), String> {
+        let port = tokio::fs::read_to_string(self.data_dir.join("mcp-bridge-port"))
+            .await
+            .map_err(|_| "SQL_BLOCKED: DBX desktop is not running.".to_string())?;
+        let response = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|error| error.to_string())?
+            .post(format!("http://127.0.0.1:{}/consume-high-risk-sql-approval", port.trim()))
+            .json(&json!({ "token": token, "connection_id": connection_id, "database": database, "sql": sql }))
+            .send()
+            .await
+            .map_err(|error| format!("SQL_BLOCKED: Desktop approval unavailable: {error}"))?;
+        if !response.status().is_success() {
+            return Err(response.text().await.unwrap_or_else(|_| "SQL_BLOCKED: Approval expired".to_string()));
+        }
+        Ok(())
+    }
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
         self.state.storage.load_mcp_global_policy().await.map(effective_mcp_policy)
     }
@@ -1242,6 +1379,7 @@ impl DbxBackend for LocalBackend {
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         let config = self.state.storage.add_connection_for_mcp(config).await?;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        self.notify_connections_changed().await;
         Ok(config)
     }
 
@@ -1253,6 +1391,7 @@ impl DbxBackend for LocalBackend {
     ) -> Result<ConnectionConfig, String> {
         let config = self.state.storage.duplicate_connection_for_mcp(source_id, copy_id, copy_name).await?;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        self.notify_connections_changed().await;
         Ok(config)
     }
 
@@ -1262,6 +1401,7 @@ impl DbxBackend for LocalBackend {
             self.state.configs.write().await.remove(connection_id);
             self.transaction_owners.invalidate_connection(connection_id);
             self.state.remove_connection_pools_detached(connection_id).await;
+            self.notify_connections_changed().await;
         }
         Ok(removed)
     }
@@ -2797,6 +2937,64 @@ pub fn new_connection_config(
 }
 
 #[cfg(test)]
+mod unavailable_backend_tests {
+    use super::*;
+
+    const REASON: &str = "SECRET_KEY_UNAVAILABLE: this process cannot read the DBX data encryption key";
+
+    fn sample_connection() -> ConnectionConfig {
+        new_connection_config(
+            "source".into(),
+            "Source".into(),
+            DatabaseType::Postgres,
+            "127.0.0.1".into(),
+            5432,
+            "postgres".into(),
+            "test-password".into(),
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+    }
+
+    // The server used to exit before the transport started, so the client saw
+    // EOF and this text never left stderr. Serving it means every entry point
+    // has to carry it rather than failing blank.
+    #[tokio::test]
+    async fn every_required_entry_point_reports_the_reason() {
+        let backend = UnavailableBackend::new(REASON);
+
+        assert_eq!(backend.load_mcp_global_policy().await.unwrap_err(), REASON);
+        assert_eq!(backend.load_connections().await.unwrap_err(), REASON);
+        assert_eq!(backend.remove_connection_for_mcp("any").await.unwrap_err(), REASON);
+        assert_eq!(backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap_err(), REASON);
+        assert_eq!(backend.add_connection_for_mcp(sample_connection()).await.unwrap_err(), REASON);
+    }
+
+    // A tool call answers in band: is_error set, reason in the content, and the
+    // tool name preserved so the client can tell which call failed.
+    #[tokio::test]
+    async fn an_agent_tool_call_fails_closed_with_the_reason() {
+        let backend = UnavailableBackend::new(REASON);
+
+        let result = backend
+            .execute_agent_tool(
+                &sample_connection(),
+                "db",
+                "execute_query",
+                Value::Null,
+                AgentSqlPermissions { allow_writes: false, allow_dangerous: false, confirmed_write_sql: None },
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content, REASON);
+        assert_eq!(result.tool_name, "execute_query");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::{
@@ -2809,11 +3007,138 @@ mod tests {
         time::Duration,
     };
 
+    async fn connection_mutation_backend(data_dir: &Path) -> LocalBackend {
+        let storage = Storage::open(&data_dir.join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(dbx_core::persistence::secret_codec::SecretKeyPolicy::ManagedDataDir);
+        storage.save_mcp_global_policy(&McpGlobalPolicy { read_only: false, ..Default::default() }).await.unwrap();
+        LocalBackend::from_app_state(Arc::new(AppState::new(storage)), data_dir.to_path_buf())
+    }
+
+    fn mutation_test_connection() -> ConnectionConfig {
+        new_connection_config(
+            "source".into(),
+            "Source".into(),
+            DatabaseType::Postgres,
+            "127.0.0.1".into(),
+            5432,
+            "postgres".into(),
+            "test-password".into(),
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn connection_summary_preserves_notes() {
+        let mut config = mutation_test_connection();
+        for note in ["", "Application database | staging\nRead-only queries"] {
+            config.note = note.to_string();
+            assert_eq!(ConnectionSummary::from(&config).note, note);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_connection_mutations_notify_desktop_only_after_success() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backend = connection_mutation_backend(data_dir.path()).await;
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let storage = backend.state.storage.clone();
+        let app = axum::Router::new().route(
+            "/reload-connections",
+            axum::routing::post(move || {
+                let sent = sent.clone();
+                let storage = storage.clone();
+                async move {
+                    // The desktop must observe the committed state, not the old list.
+                    let ids: Vec<_> = storage.load_connections().await.unwrap().into_iter().map(|c| c.id).collect();
+                    sent.send(ids).unwrap();
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        tokio::fs::write(data_dir.path().join("mcp-bridge-port"), listener.local_addr().unwrap().port().to_string())
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        backend.add_connection_for_mcp(mutation_test_connection()).await.unwrap();
+        assert_eq!(received.try_recv().unwrap(), vec!["source"]);
+        backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap();
+        let mut ids = received.try_recv().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["copy", "source"]);
+        assert!(backend.remove_connection_for_mcp("copy").await.unwrap());
+        assert_eq!(received.try_recv().unwrap(), vec!["source"]);
+
+        assert!(!backend.remove_connection_for_mcp("missing").await.unwrap());
+        assert!(backend.duplicate_connection_for_mcp("missing", "other", "Other").await.is_err());
+        backend
+            .state
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy { read_only: true, ..Default::default() })
+            .await
+            .unwrap();
+        assert!(backend.add_connection_for_mcp(mutation_test_connection()).await.is_err());
+        assert!(backend.remove_connection_for_mcp("source").await.is_err());
+        assert!(received.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn local_connection_mutations_succeed_without_desktop() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backend = connection_mutation_backend(data_dir.path()).await;
+        backend.add_connection_for_mcp(mutation_test_connection()).await.unwrap();
+        backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap();
+        assert!(backend.remove_connection_for_mcp("source").await.unwrap());
+        let connections = backend.load_connections().await.unwrap();
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].id, "copy");
+        assert_eq!(connections[0].password, "test-password");
+    }
+
+    #[tokio::test]
+    async fn local_connection_mutations_succeed_when_desktop_fails_or_stalls() {
+        for stall in [false, true] {
+            let data_dir = tempfile::tempdir().unwrap();
+            let backend = connection_mutation_backend(data_dir.path()).await;
+            let app = axum::Router::new().route(
+                "/reload-connections",
+                axum::routing::post(move || async move {
+                    if stall {
+                        std::future::pending::<()>().await;
+                    }
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            tokio::fs::write(
+                data_dir.path().join("mcp-bridge-port"),
+                listener.local_addr().unwrap().port().to_string(),
+            )
+            .await
+            .unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            tokio::time::timeout(Duration::from_secs(5), backend.add_connection_for_mcp(mutation_test_connection()))
+                .await
+                .expect("desktop notification must be bounded")
+                .unwrap();
+            assert_eq!(backend.load_connections().await.unwrap().len(), 1);
+            server.abort();
+        }
+    }
+
     fn policy_state(configured: bool, read_only: bool) -> McpGlobalPolicyState {
         McpGlobalPolicyState {
             configured,
             read_only,
             allow_dangerous_sql: false,
+            prompt_high_risk_sql: false,
             allowed_connection_ids: None,
             allowed_group_ids: Vec::new(),
             allowed_tool_names: None,

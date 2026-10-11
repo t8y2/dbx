@@ -19,6 +19,8 @@ interface ResolveNewQueryTargetInput {
   activeConnectionId?: string | null;
   connections: Pick<ConnectionConfig, "id" | "host" | "database" | "default_schema" | "db_type">[];
   preferredSource?: NewQueryContextSource;
+  /** Ids of currently online SQL connections, used only when there is exactly one. */
+  connectedSqlConnectionIds?: ReadonlySet<string>;
 }
 
 export function findTreeNodeById(nodes: TreeNode[], id: string | null | undefined): TreeNode | null {
@@ -40,7 +42,11 @@ export function resolveNewQueryTarget(input: ResolveNewQueryTargetInput): NewQue
   if (secondaryTarget) return secondaryTarget;
 
   const activeConnection = input.activeConnectionId ? input.connections.find((connection) => connection.id === input.activeConnectionId) : undefined;
-  const fallbackConnection = activeConnection || input.connections[0];
+  // Preserve an explicit active connection, then use the only online SQL
+  // connection. A sole configured connection remains a safe legacy fallback;
+  // when several choices remain, return null so the caller can leave selection
+  // to the user instead of silently taking connections[0].
+  const fallbackConnection = activeConnection ?? singleOnlineSqlConnection(input.connections, input.connectedSqlConnectionIds) ?? (input.connections.length === 1 ? input.connections[0] : undefined);
   return fallbackConnection
     ? {
         connectionId: fallbackConnection.id,
@@ -49,6 +55,16 @@ export function resolveNewQueryTarget(input: ResolveNewQueryTargetInput): NewQue
         shouldRefreshDefaultDatabase: true,
       }
     : null;
+}
+
+/**
+ * The one online SQL connection, when there is exactly one. An ambiguous or
+ * empty online set must not be resolved by connection-list order.
+ */
+function singleOnlineSqlConnection(connections: ResolveNewQueryTargetInput["connections"], connectedSqlConnectionIds?: ReadonlySet<string>): ResolveNewQueryTargetInput["connections"][number] | undefined {
+  if (!connectedSqlConnectionIds || connectedSqlConnectionIds.size !== 1) return undefined;
+  const [onlyOnlineId] = connectedSqlConnectionIds;
+  return connections.find((connection) => connection.id === onlyOnlineId);
 }
 
 function targetFromContext(
@@ -98,7 +114,7 @@ export interface ResolveNewQueryInitialSqlInput extends ResolveNewQueryTableInpu
 
 // Database types whose "table" view does not use standard SQL `SELECT * FROM <table>`
 // (e.g. Neo4j uses Cypher). The new-query prefill is skipped for these.
-const NEW_QUERY_PREFILL_DISABLED_TYPES: ReadonlySet<DatabaseType | undefined> = new Set<DatabaseType | undefined>(["neo4j"]);
+const NEW_QUERY_PREFILL_DISABLED_TYPES: ReadonlySet<DatabaseType | undefined> = new Set<DatabaseType | undefined>(["neo4j", "nebula"]);
 
 export function isNewQueryPrefillSupported(databaseType: DatabaseType | undefined): boolean {
   return !NEW_QUERY_PREFILL_DISABLED_TYPES.has(databaseType);

@@ -1396,7 +1396,7 @@ pub async fn connect_with_ca_cert_pool_limit_idle_and_setup_database(
         idle_timeout_secs,
         setup_database,
         extra_setup_queries,
-        MySqlSetupMode::Standard,
+        MySqlSetupMode::default_for_url(url),
     )
     .await
 }
@@ -1648,6 +1648,10 @@ const MYSQL_DEFAULT_CHARSET: &str = "utf8mb4";
 const MYSQL_LEGACY_CHARSET: &str = "utf8";
 
 impl MySqlSetupMode {
+    pub fn default_for_url(url: &str) -> Self {
+        mysql_url_setup_mode(url).unwrap_or(Self::Standard)
+    }
+
     fn group_concat_max_len_query(self, url: &str) -> Option<String> {
         match self {
             // An explicit Connector/J style `sessionVariables=group_concat_max_len=...`
@@ -1982,6 +1986,13 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     // `Unknown system variable 'group_concat_'` with `max_len` cut off
     // (issue #10197). The truncated prefix is specific enough on its own.
     let proxy_truncated_variable_rejected = lower.contains("unknown system variable 'group_concat_'");
+    // ProxySQL rejects queries with error 9006 when an unparseable expression SET
+    // (such as `cast(greatest(...))`) causes ProxySQL to lock the connection to
+    // hostgroup 0 under `mysql-set_query_lock_on_hostgroup=1`, conflicting with
+    // read/write split rules routing queries to another hostgroup (issue #11307).
+    let proxysql_hostgroup_locked = lower.contains("error 9006")
+        || (lower.contains("proxysql") && lower.contains("locked to hostgroup"))
+        || (lower.contains("connection is locked to hostgroup") && lower.contains("trying to reach hostgroup"));
     if (floor_statement_rejected && (setup_query_rejected || setup_value_rejected || setup_argument_rejected))
         || txsql_truncated_name_rejected
         || gaea_setup_expression_rejected
@@ -1989,6 +2000,7 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
         || sphinxql_setup_query_rejected
         || gateway_session_variable_rejected
         || proxy_truncated_variable_rejected
+        || proxysql_hostgroup_locked
     {
         return Some(MySqlSetupMode::Compatible);
     }
@@ -2187,7 +2199,7 @@ fn mysql_ssl_opts(
 }
 
 fn mysql_setup_queries(url: &str, extra_setup_queries: &[String]) -> Vec<String> {
-    mysql_setup_queries_with_mode(url, extra_setup_queries, MySqlSetupMode::Standard)
+    mysql_setup_queries_with_mode(url, extra_setup_queries, MySqlSetupMode::default_for_url(url))
 }
 
 fn mysql_setup_queries_for_database(
@@ -2195,7 +2207,12 @@ fn mysql_setup_queries_for_database(
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
 ) -> Vec<String> {
-    mysql_setup_queries_for_database_with_mode(url, setup_database, extra_setup_queries, MySqlSetupMode::Standard)
+    mysql_setup_queries_for_database_with_mode(
+        url,
+        setup_database,
+        extra_setup_queries,
+        MySqlSetupMode::default_for_url(url),
+    )
 }
 
 fn mysql_setup_queries_with_mode(url: &str, extra_setup_queries: &[String], setup_mode: MySqlSetupMode) -> Vec<String> {
@@ -2452,6 +2469,30 @@ fn mysql_local_infile_paths(url: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+fn mysql_url_setup_mode(url: &str) -> Option<MySqlSetupMode> {
+    let (_, query) = url.split_once('?')?;
+    let query = query.split('#').next().unwrap_or(query);
+    for segment in query.split('&') {
+        let (key, value) = match segment.split_once('=') {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => (segment.trim(), "true"),
+        };
+        if key.eq_ignore_ascii_case("proxysql") && mysql_url_param_value_is_true(value) {
+            return Some(MySqlSetupMode::LiteralFloor);
+        }
+        if key.eq_ignore_ascii_case("setupmode") || key.eq_ignore_ascii_case("setup_mode") {
+            if value.eq_ignore_ascii_case("literalfloor") || value.eq_ignore_ascii_case("literal_floor") {
+                return Some(MySqlSetupMode::LiteralFloor);
+            } else if value.eq_ignore_ascii_case("compatible") {
+                return Some(MySqlSetupMode::Compatible);
+            } else if value.eq_ignore_ascii_case("standard") {
+                return Some(MySqlSetupMode::Standard);
+            }
+        }
+    }
+    None
+}
+
 fn split_mysql_session_variables(value: &str) -> Vec<String> {
     let chars: Vec<char> = value.chars().collect();
     let mut assignments = Vec::new();
@@ -2619,6 +2660,7 @@ async fn verify_pool_connection(pool: &MySqlPool, timeout: Duration) -> Result<(
     super::with_connection_timeout("MySQL", timeout, async {
         let mut conn = pool.get_conn().await.map_err(|e| format!("MySQL connection failed: {e}"))?;
         conn.ping().await.map_err(|e| format!("MySQL ping failed: {e}"))?;
+        conn.query_drop("SELECT 1").await.map_err(|e| format!("MySQL connection verification query failed: {e}"))?;
         Ok(())
     })
     .await
@@ -2873,6 +2915,9 @@ fn is_dbx_handled_mysql_url_param(key: &str) -> bool {
             | "forceconnectiontimezonetosession"
             | "sessionvariables"
             | "localinfilepath"
+            | "proxysql"
+            | "setupmode"
+            | "setup_mode"
     )
 }
 
@@ -3833,6 +3878,56 @@ fn table_infos_from_show_rows(rows: &[mysql_async::Row]) -> Vec<TableInfo> {
     tables
 }
 
+fn logical_table_comments_sql(database: &str, table_names: &[String]) -> Option<String> {
+    let names =
+        table_names.iter().map(|name| name.trim()).filter(|name| !name.is_empty()).map(quote_value).collect::<Vec<_>>();
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "SELECT TABLE_NAME, TABLE_COMMENT FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME IN ({}) AND TABLE_TYPE <> 'VIEW'",
+        quote_value(database),
+        names.join(", "),
+    ))
+}
+
+async fn list_logical_table_comments(
+    pool: &MySqlPool,
+    database: &str,
+    table_names: &[String],
+) -> Result<HashMap<String, String>, String> {
+    let Some(sql) = logical_table_comments_sql(database, table_names) else {
+        return Ok(HashMap::new());
+    };
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let result = conn.query_iter(&sql).await.map_err(|error| error.to_string())?;
+    let rows = result.collect_and_drop::<mysql_async::Row>().await.map_err(|error| error.to_string())?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let comment = get_opt_str(row, "TABLE_COMMENT")
+                .map(|value| fix_potential_double_encoding(&value))
+                .filter(|value| !value.is_empty())?;
+            Some((name, comment))
+        })
+        .collect())
+}
+
+fn apply_logical_table_comments(objects: &mut [ObjectInfo], comments: &HashMap<String, String>) {
+    for object in objects {
+        if object.object_type.eq_ignore_ascii_case("TABLE") {
+            if let Some(comment) = comments.get(&object.name) {
+                object.comment = Some(comment.clone());
+            }
+        }
+    }
+}
+
 pub async fn list_logical_tables_show(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
     // Proxy logical names are authoritative here. Do not add SHOW TABLE STATUS: this hot
     // path must replace the information_schema lookup with one metadata request.
@@ -3851,12 +3946,26 @@ async fn list_logical_table_objects_show_filtered(
     offset: Option<usize>,
 ) -> Result<Vec<ObjectInfo>, String> {
     let tables = list_logical_tables_show(pool, database).await?;
-    Ok(filter_table_objects_fallback(
+    let mut objects = filter_table_objects_fallback(
         table_infos_to_objects(tables, &HashMap::new(), database),
         object_types,
         limit,
         offset,
-    ))
+    );
+    let table_names = objects
+        .iter()
+        .filter(|object| object.object_type.eq_ignore_ascii_case("TABLE"))
+        .map(|object| object.name.clone())
+        .collect::<Vec<_>>();
+    // Keep SHOW FULL TABLES authoritative so proxy physical partitions cannot leak back in;
+    // only enrich the logical table names that survived filtering and pagination.
+    match list_logical_table_comments(pool, database, &table_names).await {
+        Ok(comments) => apply_logical_table_comments(&mut objects, &comments),
+        Err(error) => {
+            log::warn!("Skipping logical table comments for database `{database}` in object browser: {error}");
+        }
+    }
+    Ok(objects)
 }
 
 async fn list_table_names_show_filtered(
@@ -7068,6 +7177,64 @@ pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) ->
         .collect())
 }
 
+/// Reads all foreign keys for a database with two catalog queries. The
+/// per-table variant above is intentionally kept for table metadata panels;
+/// destructive database-wide operations use this bounded variant instead.
+pub async fn list_foreign_keys_for_database(
+    pool: &MySqlPool,
+    database: &str,
+) -> Result<HashMap<String, Vec<ForeignKeyInfo>>, String> {
+    let column_sql = format!(
+        "SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, \
+         REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
+         FROM information_schema.KEY_COLUMN_USAGE \
+         WHERE TABLE_SCHEMA = {} AND REFERENCED_TABLE_NAME IS NOT NULL \
+         ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION",
+        quote_value(database),
+    );
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let column_result = conn.query_iter(&column_sql).await.map_err(|e| e.to_string())?;
+    let column_rows: Vec<mysql_async::Row> = column_result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    if column_rows.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rule_sql = format!(
+        "SELECT TABLE_NAME, CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE \
+         FROM information_schema.REFERENTIAL_CONSTRAINTS \
+         WHERE CONSTRAINT_SCHEMA = {}",
+        quote_value(database),
+    );
+    let rule_result = conn.query_iter(&rule_sql).await.map_err(|e| e.to_string())?;
+    let rule_rows: Vec<mysql_async::Row> = rule_result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let rules = rule_rows
+        .iter()
+        .map(|row| {
+            (
+                (get_str_by_name(row, "TABLE_NAME"), get_str_by_name(row, "CONSTRAINT_NAME")),
+                (get_str_by_name(row, "UPDATE_RULE"), get_str_by_name(row, "DELETE_RULE")),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut result: HashMap<String, Vec<ForeignKeyInfo>> = HashMap::new();
+    for row in &column_rows {
+        let table = get_str_by_name(row, "TABLE_NAME");
+        let name = get_str_by_name(row, "CONSTRAINT_NAME");
+        let (on_update, on_delete) = rules.get(&(table.clone(), name.clone())).cloned().unwrap_or_default();
+        result.entry(table).or_default().push(ForeignKeyInfo {
+            name,
+            column: get_str_by_name(row, "COLUMN_NAME"),
+            ref_schema: Some(get_str_by_name(row, "REFERENCED_TABLE_SCHEMA")),
+            ref_table: get_str_by_name(row, "REFERENCED_TABLE_NAME"),
+            ref_column: get_str_by_name(row, "REFERENCED_COLUMN_NAME"),
+            on_update: Some(on_update).filter(|value| !value.is_empty()),
+            on_delete: Some(on_delete).filter(|value| !value.is_empty()),
+        });
+    }
+    Ok(result)
+}
+
 pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
     let sql = format!(
         "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT \
@@ -7980,6 +8147,42 @@ mod tests {
     fn logical_show_full_tables_is_one_exact_statement() {
         assert_eq!(logical_show_full_tables_sql("app"), "SHOW FULL TABLES FROM `app`");
         assert_eq!(logical_show_full_tables_sql(""), "SHOW FULL TABLES");
+    }
+
+    #[test]
+    fn logical_table_comments_sql_is_bounded_to_known_logical_tables() {
+        let table_names = vec!["orders".to_string(), "order's".to_string(), " ".to_string()];
+
+        assert_eq!(
+            logical_table_comments_sql("sales'archive", &table_names).as_deref(),
+            Some(
+                "SELECT TABLE_NAME, TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = \
+                 'sales\\'archive' AND TABLE_NAME IN ('orders', 'order\\'s') AND TABLE_TYPE <> 'VIEW'"
+            )
+        );
+        assert_eq!(logical_table_comments_sql("app", &[]), None);
+    }
+
+    #[test]
+    fn logical_table_comments_only_enrich_matching_tables() {
+        let mut objects = vec![
+            mysql_test_object("orders", "TABLE"),
+            mysql_test_object("active_users", "VIEW"),
+            mysql_test_object("missing", "TABLE"),
+        ];
+        objects[2].comment = Some("existing".to_string());
+        let comments = HashMap::from([
+            ("orders".to_string(), "Order records".to_string()),
+            ("active_users".to_string(), "Must not be applied to views".to_string()),
+            ("physical_partition".to_string(), "Must not create an object".to_string()),
+        ]);
+
+        apply_logical_table_comments(&mut objects, &comments);
+
+        assert_eq!(objects.len(), 3);
+        assert_eq!(objects[0].comment.as_deref(), Some("Order records"));
+        assert_eq!(objects[1].comment, None);
+        assert_eq!(objects[2].comment.as_deref(), Some("existing"));
     }
 
     #[test]
@@ -9658,6 +9861,10 @@ mod tests {
             // is the floor expression failing to parse rather than the variable being
             // missing, so the literal rung still applies (issue #10197).
             "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_'`",
+            // ProxySQL error 9006 when expression SET locks connection to hostgroup 0 (issue #11307).
+            "MySQL connection verification query failed: Server error: `ERROR 9006 (Y0000): ProxySQL Error: connection is locked to hostgroup 0 but trying to reach hostgroup 1`",
+            "Server error: `ERROR 9006 (Y0000): ProxySQL Error: connection is locked to hostgroup 0 but trying to reach hostgroup 1`",
+            "Server error: `ProxySQL Error: connection is locked to hostgroup 0 but trying to reach hostgroup 1`",
         ] {
             let fallback = mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error)
                 .or_else(|| mysql_setup_probe_fallback_mode(MySqlSetupMode::Standard, url, error))
@@ -9668,6 +9875,65 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn mysql_proxysql_hostgroup_locked_error_retries_with_literal_floor() {
+        let error = "MySQL connection verification query failed: Server error: `ERROR 9006 (Y0000): ProxySQL Error: connection is locked to hostgroup 0 but trying to reach hostgroup 1`";
+        let fallback = mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error)
+            .expect("ProxySQL error 9006 must trigger setup fallback");
+        assert_eq!(fallback, MySqlSetupMode::Compatible);
+        assert_eq!(
+            mysql_setup_fallback_ladder(fallback, error),
+            vec![MySqlSetupMode::Compatible, MySqlSetupMode::LiteralFloor]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_mode_url_detection() {
+        assert_eq!(
+            MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app?proxysql=true"),
+            MySqlSetupMode::LiteralFloor
+        );
+        assert_eq!(
+            MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app?proxysql=1"),
+            MySqlSetupMode::LiteralFloor
+        );
+        assert_eq!(
+            MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app?setupMode=literalFloor"),
+            MySqlSetupMode::LiteralFloor
+        );
+        assert_eq!(
+            MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app?setup_mode=literal_floor"),
+            MySqlSetupMode::LiteralFloor
+        );
+        assert_eq!(
+            MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app?setupMode=compatible"),
+            MySqlSetupMode::Compatible
+        );
+        assert_eq!(
+            MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app?setupMode=standard"),
+            MySqlSetupMode::Standard
+        );
+        assert_eq!(MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app"), MySqlSetupMode::Standard);
+    }
+
+    #[test]
+    fn mysql_setup_queries_prefers_literal_floor_for_proxysql_url() {
+        let queries = mysql_setup_queries("mysql://host:3306/db?proxysql=true", &[]);
+        assert_eq!(queries, vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+
+        let queries_flag = mysql_setup_queries("mysql://host:3306/db?setupMode=literalFloor", &[]);
+        assert_eq!(queries_flag, vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+    }
+
+    #[test]
+    fn mysql_url_strips_proxysql_and_setupmode_parameters() {
+        let url = "mysql://root:pw@host:3306/app?proxysql=true&setupMode=literalFloor&require_ssl=true";
+        let async_url = mysql_async_url(url);
+        assert!(!async_url.contains("proxysql"), "{async_url}");
+        assert!(!async_url.contains("setupMode"), "{async_url}");
+        assert_eq!(async_url.as_ref(), "mysql://root:pw@host:3306/app?require_ssl=true");
     }
 
     #[test]

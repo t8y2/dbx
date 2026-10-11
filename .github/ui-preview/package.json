@@ -1,0 +1,11 @@
+{
+  "name": "dbx-ui-preview",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "seed": "node seed.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.49.1"
+  }
+}

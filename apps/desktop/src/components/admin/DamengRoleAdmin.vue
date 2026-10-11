@@ -107,7 +107,7 @@ const availablePrivilegesForGrant = computed(() => {
 const canCreateRole = computed(() => createRoleName.value.trim() !== "");
 
 async function ensureConnection() {
-  await connectionStore.ensureConnected(props.connection.id);
+  await connectionStore.ensureConnected(props.connection.id, { skipIfClosedByUser: true });
 }
 
 function isDdlAnyPrivDenied(message: string): boolean {

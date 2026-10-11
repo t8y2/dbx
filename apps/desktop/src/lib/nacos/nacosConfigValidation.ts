@@ -26,10 +26,10 @@ export function nacosConfigDiagnosticSeverity(diagnostic: NacosConfigDiagnostic)
 }
 
 /**
- * Whether a configuration must not be published. Only errors block: a parser
- * warning is a note about content the user is still entitled to publish (#9405).
+ * Whether diagnostics contain errors, for presentation only. Syntax diagnostics
+ * are advisory and do not determine whether a configuration can be published.
  */
-export function nacosConfigValidationBlocksPublish(diagnostics: readonly NacosConfigDiagnostic[]): boolean {
+export function nacosConfigValidationHasErrors(diagnostics: readonly NacosConfigDiagnostic[]): boolean {
   return diagnostics.some((diagnostic) => nacosConfigDiagnosticSeverity(diagnostic) === "error");
 }
 

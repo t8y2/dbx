@@ -92,6 +92,18 @@ fn large_value_preview_kind(
                 None
             }
         }
+        Some(DatabaseType::Db2) => {
+            if matches!(base.as_str(), "blob" | "binary" | "varbinary" | "longvarbinary") {
+                Some(LargeValuePreviewKind::Binary)
+            } else if matches!(base.as_str(), "clob" | "dbclob")
+                || (matches!(base.as_str(), "char" | "character" | "varchar" | "graphic" | "vargraphic")
+                    && declared_data_type_length(data_type).is_some_and(|length| length > preview_size))
+            {
+                Some(LargeValuePreviewKind::Text)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -149,10 +161,23 @@ fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Opt
                 (format!("left({quoted}::text, {prefix_size}) AS {quoted}"), "V")
             }
             Some(DatabaseType::Postgres) => (format!("left({quoted}, {prefix_size}) AS {quoted}"), "T"),
+            // DB2 的 SUBSTR 第三参数越界会报 SQL0138N，而 BLOB/CLOB 长度不定，故用
+            // CASE WHEN LENGTH(..) 把预览长度夹在实际长度内，对短值不报错；SUBSTR 对 BLOB
+            // 返回 BLOB、对 CLOB/字符列返回 VARCHAR，agent 侧 BLOB 再转 0x 前缀的 hex 字符串。
+            Some(DatabaseType::Db2) if kind == LargeValuePreviewKind::Binary => (
+                format!("SUBSTR({quoted}, 1, CASE WHEN LENGTH({quoted}) >= {prefix_size} THEN {prefix_size} ELSE LENGTH({quoted}) END) AS {quoted}"),
+                "B",
+            ),
+            Some(DatabaseType::Db2) => (
+                format!("SUBSTR({quoted}, 1, CASE WHEN LENGTH({quoted}) >= {prefix_size} THEN {prefix_size} ELSE LENGTH({quoted}) END) AS {quoted}"),
+                "T",
+            ),
             _ => return None,
         };
         let marker = if database_type == Some(DatabaseType::Mysql) {
             format!("CONCAT('{marker_kind}:{preview_size}:', LENGTH({quoted})) AS {marker_alias}")
+        } else if database_type == Some(DatabaseType::Postgres) && kind == LargeValuePreviewKind::Binary {
+            format!("'{marker_kind}:{preview_size}:' || octet_length({quoted})::text AS {marker_alias}")
         } else {
             format!("'{marker_kind}:{preview_size}' AS {marker_alias}")
         };
@@ -199,6 +224,9 @@ pub fn build_table_data_select_sql_with_database(
     let limit = options.limit.unwrap_or(100);
     if database_type == Some(DatabaseType::Neo4j) {
         return build_neo4j_table_select_sql(&options, limit);
+    }
+    if database_type == Some(DatabaseType::Nebula) {
+        return build_nebula_table_select_sql(&options, limit);
     }
     if database_type == Some(DatabaseType::Salesforce) {
         return build_salesforce_table_select_sql(&options, limit);
@@ -336,7 +364,7 @@ pub fn build_table_data_select_sql_with_database(
             if options.use_driver_row_offset {
                 format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order}")
             } else {
-                build_iris_table_select_sql(&select_columns, &table_alias, &where_clause, &order, limit, offset)
+                build_iris_table_select_sql(&select_columns, &table_alias, &where_clause, &order, limit, offset as u64)
             }
         }
         TablePaginationStrategy::InformixFirst => {
@@ -676,24 +704,23 @@ fn quoted_table_columns_or_star(database_type: Option<DatabaseType>, columns: &[
 
 /// Builds one page of a Caché/IRIS table read.
 ///
-/// InterSystems SQL has `TOP` but no `OFFSET` clause — both Caché 2016 and IRIS
-/// reject `SELECT TOP n ... OFFSET m` — so later pages bound a derived table
-/// with `TOP(offset + limit)` and drop the leading rows with `%VID`, the row
+/// Caché and older IRIS SQL have `TOP` but no `OFFSET` clause, so later pages
+/// bound a derived table with `TOP(offset + limit)` and drop the leading rows with `%VID`, the row
 /// number InterSystems assigns to the rows a query produces. Running the same
 /// `TOP limit` statement for every page was the reason the grid kept showing
 /// the first page (#8929).
-fn build_iris_table_select_sql(
+pub fn build_iris_table_select_sql(
     select_columns: &str,
     table_alias: &str,
     where_clause: &str,
     order: &str,
     limit: usize,
-    offset: usize,
+    offset: u64,
 ) -> String {
     if offset == 0 {
         return format!("SELECT TOP {limit} {select_columns} FROM {table_alias}{where_clause}{order}");
     }
-    let window = offset.saturating_add(limit);
+    let window = offset.saturating_add(limit as u64);
     format!(
         "SELECT * FROM (SELECT TOP {window} {select_columns} FROM {table_alias}{where_clause}{order}) WHERE %VID > {offset}"
     )
@@ -782,7 +809,13 @@ pub(super) fn build_select_columns(
     // natively and users can narrow the projection by editing the SQL.
     if !matches!(
         database_type,
-        Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
+        Some(
+            DatabaseType::Hive
+                | DatabaseType::Kyuubi
+                | DatabaseType::Impala
+                | DatabaseType::Argo
+                | DatabaseType::Transwarp
+        )
     ) {
         return "*".to_string();
     }
@@ -873,6 +906,38 @@ pub(super) fn build_db2_table_select_page_sql(
     )
 }
 
+/// Neo4j 5.0 replaced `id()` with `elementId()`, and servers before that only know `id()`, so the
+/// generated Cypher has to pick the spelling the connected server accepts. An unknown version keeps
+/// `elementId()`, which is what every caller without connection metadata got before.
+pub fn neo4j_element_id_function(server_version: Option<&str>) -> &'static str {
+    match neo4j_major_version(server_version) {
+        Some(major) if major < NEO4J_ELEMENT_ID_MIN_MAJOR_VERSION => NEO4J_LEGACY_ELEMENT_ID_FUNCTION,
+        _ => "elementId",
+    }
+}
+
+/// The identity function Neo4j used before 5.0. Unlike `elementId()`, which returns a string, it
+/// returns the node's internal `Integer` id, so callers comparing a value read from a grid have to
+/// compare numbers.
+pub const NEO4J_LEGACY_ELEMENT_ID_FUNCTION: &str = "id";
+
+/// Extracts the leading `major` from version strings such as `4.4.44`, `Neo4j/5.26.0` or
+/// `Neo4j/2025.01.0`. The product name itself contains a digit ("Neo4j"), so only a token that
+/// *starts* with digits counts as the version. Anything without one is treated as unknown.
+fn neo4j_major_version(server_version: Option<&str>) -> Option<u32> {
+    let version = server_version?.trim();
+    version.split(|character: char| !character.is_ascii_alphanumeric()).find_map(|token| {
+        let digits: String = token.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() {
+            None
+        } else {
+            digits.parse().ok()
+        }
+    })
+}
+
+const NEO4J_ELEMENT_ID_MIN_MAJOR_VERSION: u32 = 5;
+
 pub(super) fn build_neo4j_table_select_sql(options: &TableDataSelectSqlOptions, limit: usize) -> String {
     let label = quote_table_identifier(Some(DatabaseType::Neo4j), &options.table_name);
     let predicate = normalize_where_input(options.where_input.as_deref());
@@ -891,13 +956,55 @@ pub(super) fn build_neo4j_table_select_sql(options: &TableDataSelectSqlOptions, 
             .join(", ")
     };
     let returns = format!(
-        "elementId(n) AS {}, {returned_columns}",
+        "{}(n) AS {}, {returned_columns}",
+        neo4j_element_id_function(options.server_version.as_deref()),
         quote_table_identifier(Some(DatabaseType::Neo4j), DBX_NEO4J_ELEMENT_ID_COLUMN)
     );
     let order_by = options.order_by.as_deref().filter(|order| !order.trim().is_empty());
     let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
     let skip = options.offset.filter(|offset| *offset > 0).map(|offset| format!(" SKIP {offset}")).unwrap_or_default();
     format!("MATCH (n:{label}){where_clause} RETURN {returns}{order}{skip} LIMIT {limit};")
+}
+
+fn build_nebula_table_select_sql(options: &TableDataSelectSqlOptions, limit: usize) -> String {
+    let quote = |name: &str| quote_table_identifier(Some(DatabaseType::Nebula), name);
+    let kind = quote(&options.table_name);
+    let is_edge = options.table_type.as_deref().is_some_and(|kind| kind.eq_ignore_ascii_case("VIEW"));
+    let (pattern, identity, projection) = if is_edge {
+        let projection = if options.columns.is_empty() {
+            "e AS `edge`".to_string()
+        } else {
+            options
+                .columns
+                .iter()
+                .map(|column| format!("e.{} AS {}", quote(column), quote(column)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        (format!("MATCH ()-[e:{kind}]->()"), "src(e) AS `_src`, dst(e) AS `_dst`, rank(e) AS `_rank`", projection)
+    } else {
+        let projection = if options.columns.is_empty() {
+            "v AS `vertex`".to_string()
+        } else {
+            options
+                .columns
+                .iter()
+                .map(|column| format!("v.{kind}.{} AS {}", quote(column), quote(column)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        (format!("MATCH (v:{kind})"), "id(v) AS `_vid`", projection)
+    };
+    let predicate = normalize_where_input(options.where_input.as_deref());
+    let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE {predicate}") };
+    let order = options
+        .order_by
+        .as_deref()
+        .filter(|order| !order.trim().is_empty())
+        .map(|order| format!(" ORDER BY {order}"))
+        .unwrap_or_default();
+    let skip = options.offset.filter(|offset| *offset > 0).map(|offset| format!(" SKIP {offset}")).unwrap_or_default();
+    format!("{pattern}{where_clause} RETURN {identity}, {projection}{order}{skip} LIMIT {limit};")
 }
 
 /// Salesforce's `FIELDS(ALL)` selector is only legal with a LIMIT of 200 or less.
@@ -979,6 +1086,7 @@ mod tests {
             database_type: Some(database_type),
             driver_profile: None,
             identifier_quote: None,
+            server_version: None,
             schema: None,
             table_name: table.to_string(),
             catalog: catalog.map(|c| c.to_string()),

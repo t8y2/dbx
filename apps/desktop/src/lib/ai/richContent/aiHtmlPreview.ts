@@ -1,3 +1,7 @@
+import { buildSafeHtmlPreview, SAFE_HTML_PREVIEW_CSP } from "@/lib/common/safeHtmlPreview";
+
+export { buildSafeHtmlPreview };
+
 /**
  * Safe HTML preview shell (V1).
  *
@@ -30,38 +34,11 @@
 /** Max raw ```html fence body length (characters) that may enter the iframe `srcdoc`. */
 export const AI_HTML_MAX_CONTENT_CHARS = 512 * 1024;
 
-export const AI_HTML_PREVIEW_CSP = "default-src 'none'; base-uri 'none'; form-action 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:";
+export const AI_HTML_PREVIEW_CSP = SAFE_HTML_PREVIEW_CSP;
 
 /** True when the raw fence body may be previewed / saved. Oversize stays a plain code segment. */
 export function isAiHtmlPreviewEligible(content: string): boolean {
   return content.length > 0 && content.length <= AI_HTML_MAX_CONTENT_CHARS;
-}
-
-/**
- * Matches any `<meta>` carrying `http-equiv=refresh`: case-insensitive on the
- * tag name and the `http-equiv` key/value, tolerant of unquoted, single- or
- * double-quoted values in any attribute order with extra attributes present.
- */
-const AI_HTML_META_REFRESH_PATTERN = /<meta\b[^>]*?\bhttp-equiv\s*=\s*(?:"\s*refresh\s*"|'\s*refresh\s*'|refresh\b)[^>]*>/gi;
-
-/** Inert replacement for a defused refresh meta: a comment navigates nowhere. */
-const AI_HTML_META_REFRESH_REPLACEMENT = "<!-- meta refresh removed -->";
-
-/** Strip every `http-equiv=refresh` meta; everything else passes through byte-identical. */
-function defuseMetaRefresh(content: string): string {
-  return content.replace(AI_HTML_META_REFRESH_PATTERN, AI_HTML_META_REFRESH_REPLACEMENT);
-}
-
-/**
- * Wrap raw AI HTML in the safe standalone document. The same bytes back BOTH
- * the iframe preview and the "Save Safe HTML" payload, so what is previewed is
- * exactly what gets saved. If the AI content is itself a complete document,
- * the browser's error recovery nests it inside the body while the outer CSP
- * meta still applies document-wide. The only rewrite is the refresh meta
- * defused above — navigation sits outside the CSP fetch model.
- */
-export function buildSafeHtmlPreview(content: string): string {
-  return ["<!doctype html>", "<html>", "<head>", '<meta charset="utf-8">', `<meta http-equiv="Content-Security-Policy" content="${AI_HTML_PREVIEW_CSP}">`, "</head>", "<body>", defuseMetaRefresh(content), "</body>", "</html>"].join("\n");
 }
 
 /**

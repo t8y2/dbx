@@ -36,18 +36,27 @@ pub struct TableCsvExportOptions {
     pub null_literal: String,
 }
 
-async fn connection_database_type(state: &AppState, connection_id: &str) -> Result<DatabaseType, String> {
+/// Export pages go through the same dialect code as the grid, so the statement has to match the
+/// connected server too: Neo4j below 5 only accepts `id()` where 5+ uses `elementId()`. That needs
+/// the recorded version next to the connection type.
+async fn connection_server_version_and_type(
+    state: &AppState,
+    connection_id: &str,
+) -> Result<(Option<String>, DatabaseType), String> {
     state
         .configs
         .read()
         .await
         .get(connection_id)
-        .map(|config| config.db_type)
+        .map(|config| {
+            let server_version = config.database_info.as_ref().and_then(|info| info.product_version.clone());
+            (server_version, config.db_type)
+        })
         .ok_or_else(|| format!("Connection config not found: {connection_id}"))
 }
 
 pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExportOptions) -> Result<u64, String> {
-    let database_type = connection_database_type(state, &options.connection_id).await?;
+    let (server_version, database_type) = connection_server_version_and_type(state, &options.connection_id).await?;
     // This loop pages with `LIMIT <page_size> OFFSET <n>` and stops at the first
     // short page. Neither half holds for SOQL: a `/query` response carries at most
     // 2000 rows and hands the rest back as a QueryLocator (`has_more` +
@@ -67,6 +76,7 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
     let outcome = write_table_csv_pages(
         &mut writer,
         database_type,
+        server_version.as_deref(),
         &options,
         client_session_id.as_deref(),
         |sql, query_options| async move {
@@ -93,6 +103,7 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
 async fn write_table_csv_pages<Execute, QueryFuture>(
     writer: &mut impl Write,
     database_type: DatabaseType,
+    server_version: Option<&str>,
     options: &TableCsvExportOptions,
     client_session_id: Option<&str>,
     mut execute_page: Execute,
@@ -113,6 +124,7 @@ where
     loop {
         let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(database_type),
+            server_version: server_version.map(str::to_owned),
             schema: options.schema.clone(),
             table_name: options.table_name.clone(),
             table_type: None,
@@ -225,6 +237,7 @@ mod tests {
         let count = write_table_csv_pages(
             &mut output,
             DatabaseType::Cassandra,
+            None,
             &export_options(usize::MAX),
             Some("export-test"),
             |sql, options| {
@@ -266,6 +279,7 @@ mod tests {
             let count = write_table_csv_pages(
                 &mut Vec::new(),
                 DatabaseType::Cassandra,
+                None,
                 &export_options(2),
                 Some("export-test"),
                 |_, _| {
@@ -289,6 +303,7 @@ mod tests {
             let error = write_table_csv_pages(
                 &mut Vec::new(),
                 DatabaseType::Cassandra,
+                None,
                 &export_options(2),
                 Some("export-test"),
                 |_, _| {
@@ -309,6 +324,7 @@ mod tests {
         let error = write_table_csv_pages(
             &mut Vec::new(),
             DatabaseType::Cassandra,
+            None,
             &export_options(2),
             Some("export-test"),
             |_, options| {
@@ -331,21 +347,51 @@ mod tests {
     async fn non_cassandra_csv_export_preserves_limit_offset_paging() {
         let mut pages = vec![page(&[1, 2], None, false), page(&[3], None, false)].into_iter();
         let mut sqls = Vec::new();
-        let count =
-            write_table_csv_pages(&mut Vec::new(), DatabaseType::Sqlite, &export_options(2), None, |sql, options| {
+        let count = write_table_csv_pages(
+            &mut Vec::new(),
+            DatabaseType::Sqlite,
+            None,
+            &export_options(2),
+            None,
+            |sql, options| {
                 sqls.push(sql);
                 assert_eq!(options.max_rows, Some(2));
                 assert!(options.page_size.is_none());
                 assert!(options.result_session_id.is_none());
                 assert!(options.client_session_id.is_none());
                 std::future::ready(Ok(pages.next().unwrap()))
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(count, 3);
         assert_eq!(sqls.len(), 2);
         assert!(sqls[0].contains("LIMIT 2"));
         assert!(sqls[1].contains("OFFSET 2"));
+    }
+
+    #[tokio::test]
+    async fn csv_export_uses_the_identifier_function_the_neo4j_server_understands() {
+        for (server_version, identifier) in [("Neo4j/4.4.44", "id(n)"), ("Neo4j/5.26.0", "elementId(n)")] {
+            let mut pages = vec![page(&[1], None, false)].into_iter();
+            let mut sqls = Vec::new();
+            let options = export_options(2);
+            write_table_csv_pages(
+                &mut Vec::new(),
+                DatabaseType::Neo4j,
+                Some(server_version),
+                &options,
+                None,
+                |sql, _| {
+                    sqls.push(sql);
+                    std::future::ready(Ok(pages.next().expect("unexpected extra export page")))
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(sqls.len(), 1);
+            assert!(sqls[0].contains(identifier), "{server_version} export SQL was {}", sqls[0]);
+        }
     }
 
     fn salesforce_config(id: &str) -> ConnectionConfig {
@@ -384,7 +430,7 @@ mod tests {
         options.null_literal = dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL.to_string();
         let mut pages = vec![result_with_a_null_and_an_empty_string()].into_iter();
         let mut output = Vec::new();
-        write_table_csv_pages(&mut output, DatabaseType::Postgres, &options, None, |_, _| {
+        write_table_csv_pages(&mut output, DatabaseType::Postgres, None, &options, None, |_, _| {
             std::future::ready(Ok(pages.next().expect("single page")))
         })
         .await
@@ -395,7 +441,7 @@ mod tests {
         options.null_literal = String::new();
         let mut pages = vec![result_with_a_null_and_an_empty_string()].into_iter();
         let mut output = Vec::new();
-        write_table_csv_pages(&mut output, DatabaseType::Postgres, &options, None, |_, _| {
+        write_table_csv_pages(&mut output, DatabaseType::Postgres, None, &options, None, |_, _| {
             std::future::ready(Ok(pages.next().expect("single page")))
         })
         .await
@@ -433,12 +479,13 @@ mod tests {
         options.null_literal = dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL.to_string();
 
         let mut exported_bytes = "\u{FEFF}".as_bytes().to_vec();
-        let exported = write_table_csv_pages(&mut exported_bytes, DatabaseType::Sqlite, &options, None, |sql, _| {
-            let sqlite = sqlite.clone();
-            async move { crate::db::sqlite::execute_query(&sqlite, &sql).await.map_err(|error| error.to_string()) }
-        })
-        .await
-        .unwrap();
+        let exported =
+            write_table_csv_pages(&mut exported_bytes, DatabaseType::Sqlite, None, &options, None, |sql, _| {
+                let sqlite = sqlite.clone();
+                async move { crate::db::sqlite::execute_query(&sqlite, &sql).await.map_err(|error| error.to_string()) }
+            })
+            .await
+            .unwrap();
         assert_eq!(exported, 2);
         // 导出的 NULL 与空串必须已经可区分：空串 `""`、NULL 裸写 `\N`
         assert_eq!(

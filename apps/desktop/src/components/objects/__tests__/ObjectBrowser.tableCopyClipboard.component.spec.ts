@@ -93,6 +93,7 @@ const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
+  connection.db_type = "mysql";
   mocks.store.treeClipboard = null;
   mocks.listObjects.mockResolvedValue([
     { name: "orders", object_type: "TABLE" },
@@ -153,5 +154,19 @@ describe("ObjectBrowser table copy", () => {
 
     await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("grid.copyFailed", 5000));
     expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.pasteTableClipboardUpdated", 2000);
+  });
+
+  it("does not expose relational table copy or batch actions for NebulaGraph", async () => {
+    connection.db_type = "nebula";
+    const host = await mountBrowser();
+    rowFor(host, "orders").dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+    await nextTick();
+
+    expect(host.textContent).not.toContain("objects.exportSelected");
+    expect(host.textContent).not.toContain("objects.dropSelected");
+    expect(host.querySelector('[title="objects.toggleCheckbox"]')).toBeNull();
+    host.querySelector<HTMLElement>("[data-object-browser-root]")!.dispatchEvent(new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true }));
+    expect(mocks.copyToClipboard).not.toHaveBeenCalled();
+    expect(mocks.store.treeClipboard).toBeNull();
   });
 });

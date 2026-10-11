@@ -37,4 +37,19 @@ describe("savedSqlImportTarget", () => {
       catalog: undefined,
     });
   });
+
+  it("applies fallback database when source has no database", () => {
+    expect(savedSqlImportTarget({ connectionId: "", database: "" }, { connectionId: "conn-1" }, "fallback_db")).toEqual({
+      connectionId: "conn-1",
+      database: "fallback_db",
+      catalog: undefined,
+      schema: undefined,
+    });
+    expect(savedSqlImportTarget({ connectionId: "", database: "" }, undefined, "fallback_db")).toEqual({
+      connectionId: "",
+      database: "fallback_db",
+      catalog: undefined,
+      schema: undefined,
+    });
+  });
 });

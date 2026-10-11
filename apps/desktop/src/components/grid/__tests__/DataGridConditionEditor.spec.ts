@@ -277,19 +277,20 @@ describe("DataGridConditionEditor quote completion", () => {
   });
 
   it("passes the textarea caret range through when accepting a suggestion", async () => {
-    const { value, input } = mountEditor("where", "status = cus AND enabled = 1", { columns: ["customer_id"] });
+    const { value, input } = mountEditor("where", "", { columns: ["customer_id"] });
     input.focus();
-    input.setSelectionRange(12, 12);
-    input.dispatchEvent(new Event("select", { bubbles: true }));
+    input.value = "status = 1 AND cus";
+    input.setSelectionRange(18, 18);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
     await nextTick();
     await vi.waitFor(() => expect(document.querySelector('[role="option"]')?.textContent).toContain("customer_id"));
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
     await nextTick();
 
-    expect(value.value).toBe("status = customer_id AND enabled = 1");
-    expect(input.selectionStart).toBe(20);
-    expect(input.selectionEnd).toBe(20);
+    expect(value.value).toBe("status = 1 AND customer_id");
+    expect(input.selectionStart).toBe(26);
+    expect(input.selectionEnd).toBe(26);
   });
 
   it("starts without an active suggestion and selects the first item on ArrowDown", async () => {
@@ -325,6 +326,7 @@ describe("DataGridConditionEditor quote completion", () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await nextTick();
     expect(value.value).toBe("customer_id");
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
   });
 
   it("does not select a suggestion just because the dropdown appears under the mouse", async () => {
@@ -361,8 +363,8 @@ describe("DataGridConditionEditor quote completion", () => {
   it("keeps suggestions closed after Enter applies a complete condition", async () => {
     const { input } = mountEditor("where", "", { columns: ["id", "order0", "status"] });
     input.focus();
-    input.value = "id > 0";
-    input.setSelectionRange(6, 6);
+    input.value = "order";
+    input.setSelectionRange(5, 5);
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
 

@@ -31,6 +31,10 @@ pub struct NacosImportContext {
 pub struct WebState {
     pub app: Arc<AppState>,
     pub data_dir: PathBuf,
+    /// Extra absolute roots allowed for connection-level `docsNotesPath`
+    /// beyond `data_dir/docs-notes` (`DBX_DOCS_NOTES_ROOTS`), resolved once at
+    /// startup; injectable so notes containment is testable (see `docs`).
+    pub notes_roots: Vec<PathBuf>,
     pub public_base_path: String,
     pub password_disabled: bool,
     /// `DBX_DEMO_MODE`：公网演示部署的封锁开关（见 `demo` 模块）。
@@ -41,6 +45,9 @@ pub struct WebState {
     pub transfer_progress_channels: RwLock<HashMap<String, Arc<TransferProgressChannel>>>,
     pub table_import_channels: RwLock<HashMap<String, watch::Sender<String>>>,
     pub sql_file_executions: RwLock<HashMap<String, CancellationToken>>,
+    /// Failure logs of the executions this process ran, scoped to the session
+    /// that started them (dbx#11619).
+    pub sql_file_failure_logs: dbx_core::sql_file_import::SqlFileFailureLogRegistry,
     pub managed_sql_previews: crate::routes::sql_file::ManagedSqlPreviews,
     pub nacos_imports: RwLock<HashMap<String, NacosImportContext>>,
     pub login_rate_limit: Mutex<LoginRateLimit>,
@@ -62,6 +69,7 @@ impl WebState {
         Self {
             app,
             data_dir,
+            notes_roots: Vec::new(),
             public_base_path: "/".to_string(),
             password_disabled: false,
             demo_mode: false,
@@ -70,6 +78,7 @@ impl WebState {
             sse_channels: RwLock::new(HashMap::new()),
             transfer_progress_channels: RwLock::new(HashMap::new()),
             table_import_channels: RwLock::new(HashMap::new()),
+            sql_file_failure_logs: Default::default(),
             sql_file_executions: RwLock::new(HashMap::new()),
             managed_sql_previews: Default::default(),
             nacos_imports: RwLock::new(HashMap::new()),

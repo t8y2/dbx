@@ -146,6 +146,19 @@ pub struct BuildDatabaseSearchSqlRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildDatabaseStructureSearchSqlRequest {
+    pub options: dbx_core::database_structure_search_sql::DatabaseStructureSearchSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportsDatabaseStructureSearchRequest {
+    pub database_type: Option<dbx_core::models::connection::DatabaseType>,
+    pub driver_profile: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildSearchResultWhereRequest {
     pub options: dbx_core::database_search_sql::SearchResultWhereOptions,
 }
@@ -829,6 +842,8 @@ pub struct GetExplainInfoRequest {
     pub schema: Option<String>,
     pub sql: String,
     pub mode: Option<String>,
+    pub execution_id: Option<String>,
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -849,14 +864,15 @@ pub async fn get_explain_info(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GetExplainInfoRequest>,
 ) -> Result<Json<String>, AppError> {
-    let plan = dbx_core::agent_explain::get_agent_explain_info_core(
+    let plan = dbx_core::agent_explain::get_agent_explain_info_core_with_execution_id(
         &state.app,
         &req.connection_id,
         req.database.as_deref(),
         req.schema.as_deref(),
         &req.sql,
         req.mode.as_deref(),
-        None,
+        req.timeout_secs,
+        req.execution_id.as_deref(),
     )
     .await
     .map_err(AppError::from)?;
@@ -957,6 +973,19 @@ pub async fn build_database_search_sql(
     Json(req): Json<BuildDatabaseSearchSqlRequest>,
 ) -> Json<Option<dbx_core::database_search_sql::DatabaseSearchSql>> {
     Json(dbx_core::database_search_sql::build_database_search_sql(req.options))
+}
+
+pub async fn build_database_structure_search_sql(
+    Json(req): Json<BuildDatabaseStructureSearchSqlRequest>,
+) -> Json<Option<dbx_core::database_structure_search_sql::DatabaseStructureSearchSql>> {
+    Json(dbx_core::database_structure_search_sql::build_database_structure_search_sql(req.options))
+}
+
+pub async fn supports_database_structure_search(Json(req): Json<SupportsDatabaseStructureSearchRequest>) -> Json<bool> {
+    Json(dbx_core::database_structure_search_sql::supports_database_structure_search(
+        req.database_type,
+        req.driver_profile.as_deref(),
+    ))
 }
 
 pub async fn build_search_result_where(Json(req): Json<BuildSearchResultWhereRequest>) -> Json<String> {
@@ -1189,17 +1218,22 @@ pub async fn extract_data_grid_selection(
     Json<dbx_core::data_grid_extractors::DataGridExtractResult>,
     (axum::http::StatusCode, Json<dbx_core::data_grid_extractors::DataGridExtractError>),
 > {
-    tokio::task::spawn_blocking(move || dbx_core::data_grid_extractors::extract_data_grid_selection(req.request))
-        .await
-        .map_err(|error| {
-            let error = dbx_core::data_grid_extractors::DataGridExtractError::new(
-                dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
-                format!("Data grid extractor worker failed: {error}"),
-            );
-            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(error))
-        })?
-        .map(Json)
-        .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, Json(error)))
+    tokio::task::spawn_blocking(move || {
+        // Cells pasted from the grid land in a spreadsheet, so formula-triggering text
+        // is neutralized before the extractor renders it (see dbx_core::data::grid_clipboard_guard).
+        let request = dbx_core::data::grid_clipboard_guard::neutralize_spreadsheet_formulas(req.request);
+        dbx_core::data_grid_extractors::extract_data_grid_selection(request)
+    })
+    .await
+    .map_err(|error| {
+        let error = dbx_core::data_grid_extractors::DataGridExtractError::new(
+            dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
+            format!("Data grid extractor worker failed: {error}"),
+        );
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(error))
+    })?
+    .map(Json)
+    .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, Json(error)))
 }
 
 pub async fn build_data_grid_copy_update_statements(

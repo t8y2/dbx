@@ -244,6 +244,7 @@ mod tests {
         DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Iotdb),
             identifier_quote: None,
+            server_version: None,
             table_meta: DataGridTableMeta {
                 catalog: None,
                 database: None,

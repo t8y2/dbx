@@ -14,6 +14,13 @@ test("set NULL applies a real null value only to editable selections", () => {
   assert.doesNotMatch(handler, /fillSelectionWithValue\(["'](?:NULL)?["']\)/);
 });
 
+test("hide identical columns compares full-width rows, not visibility-projected ones", () => {
+  const fn = dataGridSource.match(/function getComparisonRows\(\)[^{]*\{[^]*?\n\}/)?.[0] ?? "";
+  assert.ok(fn, "getComparisonRows not found");
+  assert.match(fn, /\bdisplayItems\.value/);
+  assert.doesNotMatch(fn, /visibleDisplayItems/);
+});
+
 test("editable cell selections expose generation after bulk edit", () => {
   const icon = {};
   const action = () => {};

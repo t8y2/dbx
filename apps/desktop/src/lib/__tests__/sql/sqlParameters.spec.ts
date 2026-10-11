@@ -34,6 +34,25 @@ describe("extractSqlParameters", () => {
       { key: "params", name: "params", syntax: "named", token: ":params" },
       { key: "context", name: "context", syntax: "sqlserver", token: "@context" },
     ]);
+    expect(extractSqlParameters("select :customer_id", { databaseType: "mysql" })).toEqual(["customer_id"]);
+  });
+
+  it("preserves Neo4j pattern labels and relationship types", () => {
+    const cypher = 'MATCH (p:Person)-[:WORK_IN]->(c:Company{name:"星云科技"})\nRETURN p.name, p.job, c.name';
+    const options = { databaseType: "neo4j" as const };
+    expect(extractSqlParameterDescriptors(cypher, options)).toEqual([]);
+    expect(substituteSqlParameters(cypher, {}, options)).toBe(cypher);
+    expect(extractSqlParameterDescriptors(cypher, { ...options, enabledSyntaxes: ["named"] as const })).toEqual([]);
+    expect(extractSqlParameters("MATCH (p:Person {name:${name}}) RETURN p", options)).toEqual(["name"]);
+  });
+
+  it("keeps NebulaGraph tags and edge types intact in nGQL", () => {
+    const ngql = 'MATCH (p:Person)-[:WORK_IN]->(c:Company{name:"星云科技"}) RETURN p.Person.name LIMIT 10';
+    const options = { databaseType: "nebula" as const };
+    expect(extractSqlParameterDescriptors(ngql, options)).toEqual([]);
+    expect(substituteSqlParameters(ngql, {}, options)).toBe(ngql);
+    expect(extractSqlParameters("MATCH (p:Person {name:${name}}) RETURN p LIMIT 10", options)).toEqual(["name"]);
+    expect(extractSqlParameters("select :customer_id", { databaseType: "mysql" })).toEqual(["customer_id"]);
   });
 
   it("extracts unique template parameters in order", () => {
@@ -68,6 +87,79 @@ describe("extractSqlParameters", () => {
   it("ignores placeholders inside Postgres dollar-quoted strings", () => {
     const sql = "select $$ ${body_param} $$, $tag$ ${tag_param} $tag$, ${real_param}";
     expect(extractSqlParameters(sql)).toEqual(["real_param"]);
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("preserves alternative-quoted strings and following parameters for %s", (databaseType) => {
+    for (const literal of [
+      "q'[O'Reilly :hidden]'",
+      "nq'{O'Reilly :hidden}'",
+      "Q'<O'Reilly :hidden>'",
+      "NQ'(O'Reilly :hidden)'",
+      "q'!O'Reilly :hidden!'",
+      "q'[O'Reilly [nested] :hidden]'",
+      "q'[O'Reilly /* :inside */ @LINK ${shell} #{mybatis} ? :hidden]'",
+      "q''O'Reilly :hidden''",
+      "nq'😀O'Reilly :hidden😀'",
+    ]) {
+      const sql = `UPDATE t SET name = ${literal} WHERE id = :id`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" }, hidden: { kind: "string", value: "WRONG" } }, { databaseType })).toBe(`UPDATE t SET name = ${literal} WHERE id = 7`);
+    }
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("ignores parameters inside unterminated alternative-quoted strings for %s", (databaseType) => {
+    for (const literal of ["q'[O'Reilly :hidden", "nq'{O'Reilly :hidden]"]) {
+      const sql = `SELECT :id, ${literal}`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType })).toBe(`SELECT 7, ${literal}`);
+    }
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("preserves separated database links after alternative-quoted strings for %s", (databaseType) => {
+    for (const literal of ["q'[O'Reilly :hidden]'", "nq'{O'Reilly :hidden}'", "q''O'Reilly :hidden''", "nq'😀O'Reilly :hidden😀'"]) {
+      const sql = `SELECT ${literal} FROM employees /* separator */ @LINK WHERE id = :id`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" }, LINK: { kind: "string", value: "WRONG" } }, { databaseType })).toBe(`SELECT ${literal} FROM employees /* separator */ @LINK WHERE id = 7`);
+    }
+  });
+
+  it.each(["postgres", "mysql", "sqlserver", "dameng"] as const)("does not apply alternative-quote rules to %s", (databaseType) => {
+    const sql = "SELECT q'[O' AS label, :id";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT q'[O' AS label, 7");
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("requires a complete alternative-quote prefix for %s", (databaseType) => {
+    for (const prefix of ["myq", "mynq", "my$q"]) {
+      const sql = `SELECT ${prefix}'[O' AS label, :id`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    }
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps alternative-quoted content during MyBatis substitution for %s", (databaseType) => {
+    const sql = "SELECT q'[O'Reilly &lt; :hidden]' FROM t WHERE id &gt; #{id}";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT q'[O'Reilly &lt; :hidden]' FROM t WHERE id > 7");
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("ignores MyBatis closing tags inside alternative-quoted strings for %s", (databaseType) => {
+    const sql = "SELECT * FROM t <where> name = q'[O'Reilly </where> :hidden]' AND id = #{id} </where>";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT * FROM t WHERE name = q'[O'Reilly </where> :hidden]' AND id = 7");
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("preserves trigger pseudo-records after alternative-quoted strings for %s", (databaseType) => {
+    const sql = "CREATE TRIGGER trg BEFORE UPDATE ON t FOR EACH ROW BEGIN :new.name := nq'[O'Reilly :hidden]'; :new.id := :id; END;";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType })).toBe("CREATE TRIGGER trg BEFORE UPDATE ON t FOR EACH ROW BEGIN :new.name := nq'[O'Reilly :hidden]'; :new.id := 7; END;");
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps parameters after ordinary strings ending in a literal backslash for %s", (databaseType) => {
+    const sql = "UPDATE t SET name = 'a\\' WHERE id = :id";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType })).toBe("UPDATE t SET name = 'a\\' WHERE id = 7");
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+    expect(substituteSqlParameters("SELECT 'a\\' FROM t WHERE id &gt; #{id}", { id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT 'a\\' FROM t WHERE id > 7");
   });
 
   it("extracts supported placeholder syntaxes in order", () => {
@@ -218,12 +310,324 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters("select @amount/2, @total / 4")).toEqual(["amount", "total"]);
   });
 
-  it("ignores Oracle database links while preserving standalone at-sign placeholders", () => {
+  it("does not treat the Dameng DBLink in issue #11247 as a parameter", () => {
+    const sql = "select * from test.table_name@dm1";
+    expect(extractSqlParameterDescriptors(sql, { databaseType: "dameng" })).toEqual([]);
+    expect(substituteSqlParameters(sql, { dm1: { kind: "string", value: "WRONG" } }, { databaseType: "dameng" })).toBe(sql);
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("ignores %s database links while preserving standalone at-sign placeholders", (databaseType) => {
     const sql = 'SELECT * FROM HR.EMPLOYEES@REMOTE_DB, "AUDIT_LOG"@ARCHIVE_DB WHERE tenant_id = @tenant_id';
-    expect(extractSqlParameters("SELECT 1 FROM DUAL@WDHIS160;", { databaseType: "oracle" })).toEqual([]);
-    expect(extractSqlParameters(sql, { databaseType: "oracle" })).toEqual(["tenant_id"]);
-    expect(substituteSqlParameters(sql, { tenant_id: { kind: "number", value: "7" } }, { databaseType: "oracle" })).toBe('SELECT * FROM HR.EMPLOYEES@REMOTE_DB, "AUDIT_LOG"@ARCHIVE_DB WHERE tenant_id = 7');
+    expect(extractSqlParameters("SELECT 1 FROM DUAL@WDHIS160;", { databaseType })).toEqual([]);
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["tenant_id"]);
+    expect(substituteSqlParameters(sql, { tenant_id: { kind: "number", value: "7" } }, { databaseType })).toBe('SELECT * FROM HR.EMPLOYEES@REMOTE_DB, "AUDIT_LOG"@ARCHIVE_DB WHERE tenant_id = 7');
     expect(extractSqlParameters("SELECT * FROM EMPLOYEES@REMOTE_DB", { databaseType: "postgres" })).toEqual(["REMOTE_DB"]);
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("preserves %s links, quoted names, strings and comments during substitution", (databaseType) => {
+    const sql = `SELECT '@literal' FROM "Hr"."Audit Log"@ARCHIVE_DB /* @comment */ WHERE "Id" = :id AND tenant_id = @tenant_id -- @tail`;
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id", "tenant_id"]);
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          id: { kind: "number", value: "3" },
+          tenant_id: { kind: "number", value: "7" },
+          ARCHIVE_DB: { kind: "number", value: "99" },
+          literal: { kind: "number", value: "99" },
+          comment: { kind: "number", value: "99" },
+          tail: { kind: "number", value: "99" },
+        },
+        { databaseType },
+      ),
+    ).toBe(`SELECT '@literal' FROM "Hr"."Audit Log"@ARCHIVE_DB /* @comment */ WHERE "Id" = 3 AND tenant_id = 7 -- @tail`);
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("extracts only real %s parameters around separated database links", (databaseType) => {
+    const sql = `SELECT @projection FROM SYS.ALL_TABLES @LINK
+      JOIN "Hr"."Audit Log"/* comment */@ARCHIVE_DB ON 1 = 1
+      JOIN employees -- comment with /* and @ignored
+        @REMOTE_DB ON 1 = 1
+      WHERE owner = :owner AND tenant_id = @tenant_id`;
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["projection", "owner", "tenant_id"]);
+  });
+
+  describe.each(["oracle", "oceanbase-oracle", "dameng"] as const)("%s strict database link contexts", (databaseType) => {
+    it.each([
+      ["SELECT XMLSERIALIZE(CONTENT @value AS CLOB) FROM DUAL", "XMLTYPE('<a/>')"],
+      ["SELECT XMLSERIALIZE(CONTENT@value AS CLOB) FROM DUAL", "XMLTYPE('<a/>')"],
+      ["SELECT XMLSERIALIZE(DOCUMENT @value AS CLOB) FROM DUAL", "XMLTYPE('<a/>')"],
+      ["CREATE OR REPLACE PACKAGE BODY @value AS PROCEDURE p IS BEGIN NULL; END; END;", "test_package"],
+      ["DROP DATABASE LINK @value", "remote_db"],
+      ["CREATE DATABASE LINK @value CONNECT TO remote_user IDENTIFIED BY password USING 'remote'", "remote_db"],
+      ['SELECT "xml_column" @value FROM DUAL', "AS xml_alias"],
+    ])("keeps raw template parameters outside object references in %s", (sql, value) => {
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["value"]);
+      expect(substituteSqlParameters(sql, { value: { kind: "raw", value } }, { databaseType })).toBe(sql.replace("@value", value));
+    });
+
+    it.each([
+      ["SELECT XMLSERIALIZE(CONTENT @fn('<a/>') AS CLOB) FROM DUAL", "SELECT XMLSERIALIZE(CONTENT XMLTYPE('<a/>') AS CLOB) FROM DUAL"],
+      ["SELECT XMLSERIALIZE(DOCUMENT @fn('<a/>') AS CLOB) FROM DUAL", "SELECT XMLSERIALIZE(DOCUMENT XMLTYPE('<a/>') AS CLOB) FROM DUAL"],
+      ["SELECT XMLQUERY('/a' PASSING @fn('<a/>') RETURNING CONTENT) FROM DUAL", "SELECT XMLQUERY('/a' PASSING XMLTYPE('<a/>') RETURNING CONTENT) FROM DUAL"],
+      ["SELECT XMLQUERY(fn_nested('/a') PASSING @fn('<a/>') RETURNING CONTENT) FROM DUAL", "SELECT XMLQUERY(fn_nested('/a') PASSING XMLTYPE('<a/>') RETURNING CONTENT) FROM DUAL"],
+      ["SELECT COALESCE(XMLSERIALIZE(CONTENT @fn('<a/>') AS CLOB), 'empty') FROM DUAL", "SELECT COALESCE(XMLSERIALIZE(CONTENT XMLTYPE('<a/>') AS CLOB), 'empty') FROM DUAL"],
+    ])("keeps function-name templates after SQL/XML keywords in %s", (sql, expected) => {
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["fn"]);
+      expect(substituteSqlParameters(sql, { fn: { kind: "raw", value: "XMLTYPE" } }, { databaseType })).toBe(expected);
+    });
+
+    it.each([
+      "SELECT XMLQUERY('/a' PASSING BY VALUE @fn('<a/>') RETURNING CONTENT) FROM DUAL",
+      "SELECT XMLTABLE('/a' PASSING @fn('<a/>') COLUMNS name VARCHAR2(50) PATH '.') FROM DUAL",
+      "SELECT XMLTABLE('/a' PASSING BY /* separator */ VALUE @fn('<a/>') COLUMNS name VARCHAR2(50) PATH '.') FROM DUAL",
+      "SELECT XMLQUERY('/a' PASSING BY VALUE @fn('<a/>'), @fn('<b/>') AS b RETURNING CONTENT) FROM DUAL",
+      "SELECT COALESCE(XMLQUERY(fn_nested('/a') PASSING BY VALUE @fn('<a/>') RETURNING CONTENT), NULL) FROM DUAL",
+      "SELECT XMLQUERY('/a' PASSING BY VALUE XMLQUERY('/b' PASSING BY VALUE @fn('<a/>') RETURNING CONTENT) RETURNING CONTENT) FROM DUAL",
+    ])("keeps complete SQL/XML PASSING function templates in %s", (sql) => {
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["fn"]);
+      expect(substituteSqlParameters(sql, { fn: { kind: "raw", value: "XMLTYPE" } }, { databaseType })).toBe(sql.replaceAll("@fn", "XMLTYPE"));
+    });
+
+    it.each([
+      "SELECT XMLQUERY('/a' PASSING BY VALUE value@LINK(1) RETURNING CONTENT) FROM DUAL",
+      "SELECT XMLTABLE('/a' PASSING passing@LINK(1) COLUMNS name VARCHAR2(50) PATH '.') FROM DUAL",
+      "SELECT XMLTABLE('/a' PASSING BY VALUE HR.value@LINK(1), \"VALUE\"@LINK(1) AS b COLUMNS name VARCHAR2(50) PATH '.') FROM DUAL",
+      "SELECT XMLQUERY('/a' PASSING BY VALUE (value@LINK(1)) RETURNING CONTENT) FROM DUAL",
+      "SELECT XMLQUERY('/a' PASSING COALESCE(passing@LINK(1), NULL) RETURNING CONTENT) FROM DUAL",
+    ])("preserves remote routines inside complete SQL/XML PASSING clauses in %s", (sql) => {
+      expect(extractSqlParameters(sql, { databaseType })).toEqual([]);
+      expect(substituteSqlParameters(sql, { LINK: { kind: "raw", value: "WRONG" } }, { databaseType })).toBe(sql);
+    });
+
+    it.each([
+      "SELECT content@LINK('<a/>'), document@LINK('<a/>'), passing@LINK('<a/>') FROM DUAL",
+      'SELECT HR.content@LINK(1), "CONTENT"@LINK(1) FROM DUAL',
+      'SELECT XMLSERIALIZE(CONTENT HR.content@LINK(1) AS CLOB), XMLSERIALIZE(DOCUMENT "DOCUMENT"@LINK(1) AS CLOB) FROM DUAL',
+      "SELECT XMLQUERY('/a' PASSING HR.passing@LINK(1) RETURNING CONTENT) FROM DUAL",
+      "SELECT XMLSERIALIZE(CONTENT (content@LINK(1)) AS CLOB) FROM DUAL",
+      "SELECT XMLSERIALIZE(CONTENT content@LINK(1) AS CLOB), XMLSERIALIZE(DOCUMENT document@LINK(1) AS CLOB) FROM DUAL",
+      "SELECT XMLQUERY('/a' PASSING passing@LINK(1) RETURNING CONTENT) FROM DUAL",
+      "SELECT XMLQUERY(passing@LINK(1)) FROM DUAL",
+      "SELECT XMLQUERY(fn_nested('/a') PASSING passing@LINK(1) RETURNING CONTENT) FROM DUAL",
+    ])("preserves real remote routines named after SQL/XML keywords in %s", (sql) => {
+      expect(extractSqlParameters(sql, { databaseType })).toEqual([]);
+      expect(substituteSqlParameters(sql, { LINK: { kind: "raw", value: "WRONG" } }, { databaseType })).toBe(sql);
+    });
+
+    it("preserves remote routine links in expressions and PL/SQL calls", () => {
+      const sql = "SELECT HR.get_value@LINK(:id) FROM DUAL; BEGIN HR.run_job /* link */ @LINK(:id); END;";
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" }, LINK: { kind: "raw", value: "WRONG" } }, { databaseType })).toBe("SELECT HR.get_value@LINK(7) FROM DUAL; BEGIN HR.run_job /* link */ @LINK(7); END;");
+    });
+
+    it.each(["employees", "HR.EMPLOYEES", '"Hr"."Employees"', "DUAL"])("preserves compact and separated links on %s", (objectName) => {
+      for (const separator of ["", " /* object link */ "]) {
+        const sql = `SELECT @value FROM ${objectName}${separator}@LINK WHERE id = :id`;
+        expect(extractSqlParameters(sql, { databaseType })).toEqual(["value", "id"]);
+        expect(substituteSqlParameters(sql, { value: { kind: "number", value: "1" }, id: { kind: "number", value: "7" }, LINK: { kind: "raw", value: "WRONG" } }, { databaseType })).toBe(`SELECT 1 FROM ${objectName}${separator}@LINK WHERE id = 7`);
+      }
+    });
+
+    it.each(["DELETE FROM @table WHERE id = :id", "INSERT INTO @table VALUES (:id)"])("keeps parameters after reserved keywords in %s", (sql) => {
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["table", "id"]);
+      expect(substituteSqlParameters(sql, { table: { kind: "raw", value: "employees" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe(sql.replace("@table", "employees").replace(":id", "7"));
+    });
+
+    it("preserves remote routine links in comma-separated select lists", () => {
+      const sql = "SELECT ename, HR.get_sal@LINK(empno) FROM emp WHERE id = :id";
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { LINK: { kind: "raw", value: "WRONG" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT ename, HR.get_sal@LINK(empno) FROM emp WHERE id = 7");
+    });
+  });
+
+  describe.each(["oracle", "oceanbase-oracle"] as const)("%s database link separators", (databaseType) => {
+    it.each(["", " ", "\t\r\n", "/* comment with -- and @ignored */", " /* first */ \n /* second */ ", "-- comment with /* and @ignored\n"])("preserves database links separated by %j during replacement", (separator) => {
+      const sql = `SELECT '@literal', @projection FROM "Hr"."Audit Log"${separator}@LINK WHERE id = :id -- @tail`;
+      expect(
+        substituteSqlParameters(
+          sql,
+          {
+            LINK: { kind: "string", value: "WRONG" },
+            projection: { kind: "number", value: "3" },
+            id: { kind: "number", value: "7" },
+          },
+          { databaseType },
+        ),
+      ).toBe(`SELECT '@literal', 3 FROM "Hr"."Audit Log"${separator}@LINK WHERE id = 7 -- @tail`);
+    });
+
+    it("keeps parameters following SQL and PL/SQL keywords", () => {
+      const sql = `SELECT CASE WHEN/* table_name */@condition THEN @yes ELSE @no END FROM DUAL;
+        BEGIN IF @condition THEN NULL; END IF; RETURN @result; END;`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["condition", "yes", "no", "result"]);
+      expect(
+        substituteSqlParameters(
+          sql,
+          {
+            condition: { kind: "raw", value: "1 = 1" },
+            yes: { kind: "number", value: "1" },
+            no: { kind: "number", value: "0" },
+            result: { kind: "number", value: "7" },
+          },
+          { databaseType },
+        ),
+      ).toBe(`SELECT CASE WHEN/* table_name */1 = 1 THEN 1 ELSE 0 END FROM DUAL;
+        BEGIN IF 1 = 1 THEN NULL; END IF; RETURN 7; END;`);
+    });
+
+    it("preserves quoted keywords and Unicode object names before links", () => {
+      const sql = `SELECT @value FROM "SELECT" /* separator */ @LINK, 订单 @中文链接 WHERE id = :id`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["value", "id"]);
+      expect(substituteSqlParameters(sql, { value: { kind: "number", value: "1" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe(`SELECT 1 FROM "SELECT" /* separator */ @LINK, 订单 @中文链接 WHERE id = 7`);
+    });
+
+    it("keeps standalone parameters in joins, pagination and dynamic SQL", () => {
+      const sql = `SELECT @value FROM @source JOIN @target USING (@column)
+        OFFSET @offset ROWS FETCH NEXT @count ROWS ONLY;
+        BEGIN EXECUTE IMMEDIATE @sql USING @input; END;`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["value", "source", "target", "column", "offset", "count", "sql", "input"]);
+    });
+
+    it.each(["HR.NEXT", "HR.OFFSET", "HR.FIRST", "FIRST", "-- comment\nFIRST", "employees, FIRST", "(SELECT id FROM employees) e, FIRST"])("preserves database links on the non-reserved object %s", (objectName) => {
+      const sql = `SELECT * FROM ${objectName} /* separator */ @LINK WHERE id = :id`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { LINK: { kind: "string", value: "WRONG" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe(`SELECT * FROM ${objectName} /* separator */ @LINK WHERE id = 7`);
+    });
+
+    it("keeps lock wait, null ordering and cursor parameters", () => {
+      const sql = `SELECT * FROM HR.EMPLOYEES ORDER BY id NULLS @position FOR UPDATE WAIT @seconds;
+        BEGIN OPEN @cursor FOR SELECT * FROM HR.EMPLOYEES; END;`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["position", "seconds", "cursor"]);
+      expect(substituteSqlParameters(sql, { position: { kind: "raw", value: "FIRST" }, seconds: { kind: "number", value: "5" }, cursor: { kind: "raw", value: "c" } }, { databaseType })).toBe(`SELECT * FROM HR.EMPLOYEES ORDER BY id NULLS FIRST FOR UPDATE WAIT 5;
+        BEGIN OPEN c FOR SELECT * FROM HR.EMPLOYEES; END;`);
+    });
+
+    it.each([
+      ["SELECT * FROM HR.EMPLOYEES AS OF SCN @value", "7", "SELECT * FROM HR.EMPLOYEES AS OF SCN 7"],
+      ["SELECT * FROM HR.EMPLOYEES AS OF TIMESTAMP @value", "SYSTIMESTAMP", "SELECT * FROM HR.EMPLOYEES AS OF TIMESTAMP SYSTIMESTAMP"],
+      ["BEGIN CLOSE @value; END;", "c", "BEGIN CLOSE c; END;"],
+      ["SELECT * FROM employees WHERE name LIKE 'x' ESCAPE @value", "'!'", "SELECT * FROM employees WHERE name LIKE 'x' ESCAPE '!'"],
+      ["SELECT CURRENT_TIMESTAMP AT TIME ZONE @value FROM DUAL", "'UTC'", "SELECT CURRENT_TIMESTAMP AT TIME ZONE 'UTC' FROM DUAL"],
+      ["SELECT INTERVAL @value DAY FROM DUAL", "'1'", "SELECT INTERVAL '1' DAY FROM DUAL"],
+      ["SELECT JSON_OBJECT(KEY @value VALUE 'x') FROM DUAL", "'k'", "SELECT JSON_OBJECT(KEY 'k' VALUE 'x') FROM DUAL"],
+      ["SELECT JSON_OBJECT(KEY 'k' VALUE @value) FROM DUAL", "'x'", "SELECT JSON_OBJECT(KEY 'k' VALUE 'x') FROM DUAL"],
+      ["SELECT XMLQUERY('/a' PASSING @value RETURNING CONTENT) FROM DUAL", "XMLTYPE('<a/>')", "SELECT XMLQUERY('/a' PASSING XMLTYPE('<a/>') RETURNING CONTENT) FROM DUAL"],
+      ["SELECT SUM(salary) OVER (ORDER BY salary RANGE @value PRECEDING) FROM employees", "100", "SELECT SUM(salary) OVER (ORDER BY salary RANGE 100 PRECEDING) FROM employees"],
+      ["SELECT id FROM employees CONNECT BY NOCYCLE @value", "PRIOR id = manager_id", "SELECT id FROM employees CONNECT BY NOCYCLE PRIOR id = manager_id"],
+      ["SELECT LISTAGG(name, ',' ON OVERFLOW TRUNCATE @value) WITHIN GROUP (ORDER BY name) FROM employees", "'...'", "SELECT LISTAGG(name, ',' ON OVERFLOW TRUNCATE '...') WITHIN GROUP (ORDER BY name) FROM employees"],
+      ["SELECT name COLLATE @value FROM employees", "BINARY_CI", "SELECT name COLLATE BINARY_CI FROM employees"],
+      ["SET TRANSACTION NAME @value", "'test'", "SET TRANSACTION NAME 'test'"],
+      ["DECLARE v NUMBER; BEGIN EXECUTE IMMEDIATE 'BEGIN :x := 1; END;' USING OUT @value; END;", "v", "DECLARE v NUMBER; BEGIN EXECUTE IMMEDIATE 'BEGIN :x := 1; END;' USING OUT v; END;"],
+      ["BEGIN FOR i IN REVERSE @value .. 10 LOOP NULL; END LOOP; END;", "1", "BEGIN FOR i IN REVERSE 1 .. 10 LOOP NULL; END LOOP; END;"],
+      ["SAVEPOINT @value", "sp1", "SAVEPOINT sp1"],
+      ["DECLARE e EXCEPTION; BEGIN RAISE @value; END;", "e", "DECLARE e EXCEPTION; BEGIN RAISE e; END;"],
+      ["BEGIN GOTO @value; <<finish>> NULL; END;", "finish", "BEGIN GOTO finish; <<finish>> NULL; END;"],
+      ["BEGIN <<outer_loop>> LOOP EXIT @value; END LOOP; END;", "outer_loop", "BEGIN <<outer_loop>> LOOP EXIT outer_loop; END LOOP; END;"],
+      ["BEGIN <<outer_loop>> FOR i IN 1..2 LOOP CONTINUE @value WHEN i = 1; END LOOP; END;", "outer_loop", "BEGIN <<outer_loop>> FOR i IN 1..2 LOOP CONTINUE outer_loop WHEN i = 1; END LOOP; END;"],
+      ["SELECT 1, INTERVAL @value DAY FROM DUAL", "'1'", "SELECT 1, INTERVAL '1' DAY FROM DUAL"],
+      ["SELECT 1, CASE @value WHEN 1 THEN 2 ELSE 3 END FROM DUAL", "1", "SELECT 1, CASE 1 WHEN 1 THEN 2 ELSE 3 END FROM DUAL"],
+      ["SELECT 1, TIMESTAMP @value FROM DUAL", "'2026-10-09 00:00:00'", "SELECT 1, TIMESTAMP '2026-10-09 00:00:00' FROM DUAL"],
+      ["SELECT JSON_OBJECT('first' VALUE 1, KEY @value VALUE 2) FROM DUAL", "'k'", "SELECT JSON_OBJECT('first' VALUE 1, KEY 'k' VALUE 2) FROM DUAL"],
+      ["DECLARE v NUMBER; BEGIN EXECUTE IMMEDIATE 'BEGIN :x := 1; :y := 2; END;' USING OUT v, OUT @value; END;", "v", "DECLARE v NUMBER; BEGIN EXECUTE IMMEDIATE 'BEGIN :x := 1; :y := 2; END;' USING OUT v, OUT v; END;"],
+    ])("keeps expression parameters in %s", (sql, value, expected) => {
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["value"]);
+      expect(substituteSqlParameters(sql, { value: { kind: "raw", value } }, { databaseType })).toBe(expected);
+    });
+  });
+
+  it.each([" ", ""])("keeps Dameng THEN%s template calls as real parameters", (separator) => {
+    const sql = `SELECT CASE WHEN 1=1 THEN${separator}@value(1) ELSE 0 END FROM DUAL`;
+    expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["value"]);
+    expect(substituteSqlParameters(sql, { value: { kind: "raw", value: "ABS" } }, { databaseType: "dameng" })).toBe(`SELECT CASE WHEN 1=1 THEN${separator}ABS(1) ELSE 0 END FROM DUAL`);
+  });
+
+  it("preserves a large expression of SQL/XML-keyword-named remote calls", () => {
+    const expression = Array.from({ length: 8000 }, (_, tokenIndex) => `${["content", "document", "passing"][tokenIndex % 3]}@LINK(1)`).join(" + ");
+    const sql = `SELECT ${expression} FROM DUAL WHERE id = :id`;
+    expect(extractSqlParameters(sql, { databaseType: "oracle" })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { LINK: { kind: "raw", value: "WRONG" }, id: { kind: "number", value: "7" } }, { databaseType: "oracle" })).toBe(sql.replace(":id", "7"));
+  });
+
+  describe.each(["oracle", "oceanbase-oracle"] as const)("%s PL/SQL function templates", (databaseType) => {
+    it.each(["BEGIN @fn('ok'); END;", "BEGIN LOOP @fn('ok'); EXIT; END LOOP; END;", "BEGIN IF @fn(1)>0 THEN NULL; ELSIF @fn(2)>0 THEN NULL; END IF; END;", "BEGIN WHILE @fn(1)>0 LOOP NULL; END LOOP; END;", "BEGIN RETURN @fn(1); END;"])(
+      "keeps function templates after control keywords in %s",
+      (sql) => {
+        expect(extractSqlParameters(sql, { databaseType })).toEqual(["fn"]);
+        expect(substituteSqlParameters(sql, { fn: { kind: "raw", value: "test_fn" } }, { databaseType })).toBe(sql.replaceAll("@fn", "test_fn"));
+      },
+    );
+
+    it.each(["begin", "loop", "elsif", "if", "while", "return"])("preserves qualified and quoted remote routines named %s", (name) => {
+      const sql = `BEGIN HR.${name}@LINK(1); "${name}"@LINK(1); END; SELECT * FROM ${name}@LINK`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual([]);
+      expect(substituteSqlParameters(sql, { LINK: { kind: "raw", value: "WRONG" } }, { databaseType })).toBe(sql);
+    });
+  });
+
+  it("preserves Dameng quoted THEN objects and qualified THEN routines", () => {
+    const sql = 'SELECT HR.then@LINK(:id) FROM "THEN"@LINK WHERE id = :id';
+    expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { LINK: { kind: "raw", value: "WRONG" }, id: { kind: "number", value: "7" } }, { databaseType: "dameng" })).toBe('SELECT HR.then@LINK(7) FROM "THEN"@LINK WHERE id = 7');
+  });
+
+  it.each(["", " "])("preserves Dameng unquoted THEN tables separated by %j", (separator) => {
+    const sql = `SELECT * FROM then${separator}@LINK WHERE id = :id`;
+    expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { LINK: { kind: "raw", value: "WRONG" }, id: { kind: "number", value: "7" } }, { databaseType: "dameng" })).toBe(`SELECT * FROM then${separator}@LINK WHERE id = 7`);
+  });
+
+  describe("Dameng database link separators", () => {
+    it.each(["", " ", "\t", "\n", "/* @ignored */", " /* first */ \n /* second */ ", "-- @ignored\n"])("preserves links separated by %j alongside same-name parameters", (separator) => {
+      for (const objectName of ["test.table_name", '"Hr"."Audit Log"', "订单", '"SELECT"']) {
+        const sql = `SELECT @id FROM ${objectName}${separator}@id WHERE id = :id AND tenant_id = @tenant_id`;
+        expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["id", "tenant_id"]);
+        expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" }, tenant_id: { kind: "number", value: "3" } }, { databaseType: "dameng" })).toBe(`SELECT 7 FROM ${objectName}${separator}@id WHERE id = 7 AND tenant_id = 3`);
+      }
+    });
+
+    it.each([
+      ["SELECT * FROM test.remote_view /* link */ @dm1", [], "SELECT * FROM test.remote_view /* link */ @dm1"],
+      ["SELECT test.remote_fn /* link */ @dm1(:id) FROM DUAL", ["id"], "SELECT test.remote_fn /* link */ @dm1(7) FROM DUAL"],
+      ["CALL test.remote_proc /* link */ @dm1(@id)", ["id"], "CALL test.remote_proc /* link */ @dm1(7)"],
+      ["SELECT * FROM ACCESS /* link */ @dm1 WHERE id = :id", ["id"], "SELECT * FROM ACCESS /* link */ @dm1 WHERE id = 7"],
+    ] as const)("preserves links on remote objects in %s", (sql, names, expected) => {
+      expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(names);
+      expect(substituteSqlParameters(sql, { dm1: { kind: "number", value: "99" }, id: { kind: "number", value: "7" } }, { databaseType: "dameng" })).toBe(expected);
+    });
+
+    it.each([
+      ["SELECT TOP @count * FROM test.table_name @dm1", ["count"], "SELECT TOP 7 * FROM test.table_name @dm1"],
+      ["SELECT * FROM test.table_name @dm1 LIMIT @offset, @count", ["offset", "count"], "SELECT * FROM test.table_name @dm1 LIMIT 7, 7"],
+      ["SELECT CASE WHEN/* comment */@condition THEN @yes ELSE @no END FROM DUAL", ["condition", "yes", "no"], "SELECT CASE WHEN/* comment */7 THEN 7 ELSE 7 END FROM DUAL"],
+      ["BEGIN IF @condition THEN NULL; END IF; RETURN @result; END;", ["condition", "result"], "BEGIN IF 7 THEN NULL; END IF; RETURN 7; END;"],
+    ] as const)("keeps real parameters after Dameng keywords in %s", (sql, names, expected) => {
+      expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(names);
+      const values = Object.fromEntries(names.map((name) => [name, { kind: "number" as const, value: "7" }]));
+      expect(substituteSqlParameters(sql, values, { databaseType: "dameng" })).toBe(expected);
+    });
+
+    it("respects disabled parameter syntaxes without changing links", () => {
+      const sql = "SELECT @id FROM test.table_name /* link */ @id WHERE id = :id";
+      expect(extractSqlParameters(sql, { databaseType: "dameng", enabledSyntaxes: ["named"] })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType: "dameng", enabledSyntaxes: ["named"] })).toBe("SELECT @id FROM test.table_name /* link */ @id WHERE id = 7");
+      expect(extractSqlParameters(sql, { databaseType: "dameng", enabledSyntaxes: [] })).toEqual([]);
+      expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { databaseType: "dameng", enabledSyntaxes: [] })).toBe(sql);
+    });
+
+    it.each([
+      ["SELECT DATE @value FROM DUAL", "'2026-10-10'", "SELECT DATE '2026-10-10' FROM DUAL"],
+      ["SELECT TIMESTAMP @value FROM DUAL", "'2026-10-10 12:00:00'", "SELECT TIMESTAMP '2026-10-10 12:00:00' FROM DUAL"],
+    ])("keeps Dameng datetime literal parameters in %s", (sql, value, expected) => {
+      expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["value"]);
+      expect(substituteSqlParameters(sql, { value: { kind: "raw", value } }, { databaseType: "dameng" })).toBe(expected);
+    });
+  });
+
+  it.each(["postgres", "sqlserver", "mysql"] as const)("keeps separated at-sign parameters unchanged for %s", (databaseType) => {
+    const sql = "SELECT * FROM employees /* comment */ @LINK WHERE id = :id";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["LINK", "id"]);
+    expect(substituteSqlParameters(sql, { LINK: { kind: "number", value: "9" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT * FROM employees /* comment */ 9 WHERE id = 7");
   });
 
   it("describes each placeholder syntax for the parameter dialog", () => {
@@ -640,8 +1044,8 @@ describe("extractSqlParameters", () => {
   });
 });
 
-describe("Oracle and Dameng trigger pseudo-records", () => {
-  it("ignores Oracle default pseudo-record fields while keeping ordinary parameters", () => {
+describe("Oracle, OceanBase Oracle and Dameng trigger pseudo-records", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("ignores %s default pseudo-record fields while keeping ordinary parameters", (databaseType) => {
     const sql = `
       CREATE OR REPLACE TRIGGER audit_orders
       BEFORE UPDATE ON orders
@@ -652,7 +1056,7 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
       END;
     `;
 
-    expect(extractSqlParameters(sql, { databaseType: "oracle" })).toEqual(["tenant_id"]);
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["tenant_id"]);
   });
 
   it("ignores Dameng default pseudo-record fields case-insensitively", () => {
@@ -667,7 +1071,7 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
     expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["actor_id"]);
   });
 
-  it("parses REFERENCING aliases without disabling default pseudo-records", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("parses %s REFERENCING aliases without disabling default pseudo-records", (databaseType) => {
     const sql = `
       create or replace trigger audit_orders
       before update on orders
@@ -678,10 +1082,10 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
       end;
     `;
 
-    expect(extractSqlParameters(sql, { databaseType: "oracle" })).toEqual(["reason"]);
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["reason"]);
   });
 
-  it("replaces ordinary trigger parameters but preserves pseudo-record fields", () => {
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("replaces ordinary %s trigger parameters but preserves pseudo-record fields", (databaseType) => {
     const sql = `create trigger audit_orders before update on orders
       referencing new as inserted old as deleted
       for each row begin
@@ -696,7 +1100,7 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
           user_id: { kind: "number", value: "42" },
           note: { kind: "string", value: "manual" },
         },
-        { databaseType: "dameng" },
+        { databaseType },
       ),
     ).toBe(`create trigger audit_orders before update on orders
       referencing new as inserted old as deleted
@@ -713,11 +1117,12 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
       select :new, :outside_value from dual;`;
 
     expect(extractSqlParameters(oracleScript, { databaseType: "oracle" })).toEqual(["value", "new", "outside_value"]);
+    expect(extractSqlParameters(oracleScript, { databaseType: "oceanbase-oracle" })).toEqual(["value", "new", "outside_value"]);
     expect(extractSqlParameters("create trigger t before update on x begin :NEW.id := :value; end;", { databaseType: "postgres" })).toEqual(["NEW", "value"]);
     expect(extractSqlParameters("create trigger t before update on x begin NEW.id := :value; end;", { databaseType: "postgres" })).toEqual(["value"]);
   });
 
-  it("keeps assignment, casts, comments, strings, and non-field pseudo-record tokens unchanged", () => {
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("keeps %s assignment, casts, comments, strings, and non-field pseudo-record tokens unchanged", (databaseType) => {
     const sql = `create trigger audit_orders before update on orders
       for each row begin
         :new := :actual_value;
@@ -727,7 +1132,7 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
         note := ':EVENTINFO.string_field';
       end;`;
 
-    expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["new", "actual_value", "target_value"]);
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["new", "actual_value", "target_value"]);
   });
 });
 

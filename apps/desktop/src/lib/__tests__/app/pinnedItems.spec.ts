@@ -229,6 +229,19 @@ describe("sidebar pinned tree nodes", () => {
     expect(defaultNode.pinned).toBe(true);
   });
 
+  it("restores the natural order of the default database when fixed priority is disabled", () => {
+    const nodeA: TreeNode = { id: "db-a", label: "A", type: "database", connectionId: "conn", database: "a" };
+    const defaultNode: TreeNode = { id: "db-default", label: "B", type: "database", connectionId: "conn", database: "default" };
+    const nodeC: TreeNode = { id: "db-c", label: "C", type: "database", connectionId: "conn", database: "c" };
+    const nodes = [nodeA, defaultNode, nodeC];
+
+    syncPinnedTreeNodeStateInPlace(nodes, new Set(), [], (node) => node.id === defaultNode.id);
+    expect(nodes.map((node) => node.id)).toEqual(["db-default", "db-a", "db-c"]);
+
+    syncPinnedTreeNodeStateInPlace(nodes, new Set(), [], () => false);
+    expect(nodes.map((node) => node.id)).toEqual(["db-a", "db-default", "db-c"]);
+  });
+
   it("reorders pinned keys before and after a sibling without dropping unrelated keys", () => {
     const initial = ["scope:a", "other:x", "scope:b", "other:y", "scope:c"];
 

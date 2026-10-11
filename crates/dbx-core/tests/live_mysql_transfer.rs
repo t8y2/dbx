@@ -74,6 +74,7 @@ fn transfer_request(
     mode: TransferMode,
 ) -> TransferRequest {
     TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id,
         source_connection_id: connection_id.to_string(),
         source_database: source_database.to_string(),
@@ -88,7 +89,7 @@ fn transfer_request(
         drop_target_before_create: false,
         drop_target_confirmed: false,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -180,6 +181,7 @@ async fn run_live_mysql_cross_version_transfer_completes_on_small_stack() {
     let source_pool_key = state.get_or_create_pool(&source_connection_id, Some(&source_database)).await.unwrap();
     let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_database)).await.unwrap();
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("small-stack-transfer-{suffix}"),
         source_connection_id,
         source_database: source_database.clone(),
@@ -194,7 +196,7 @@ async fn run_live_mysql_cross_version_transfer_completes_on_small_stack() {
         drop_target_before_create: false,
         drop_target_confirmed: false,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -335,6 +337,7 @@ async fn live_mysql_transfer_keeps_columns_whose_comment_mentions_foreign_key() 
     let source_pool_key = state.get_or_create_pool(&source_connection_id, Some(&source_database)).await.unwrap();
     let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_database)).await.unwrap();
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-mysql-fk-comment-transfer-{suffix}"),
         source_connection_id,
         source_database: source_database.clone(),
@@ -349,7 +352,7 @@ async fn live_mysql_transfer_keeps_columns_whose_comment_mentions_foreign_key() 
         drop_target_before_create: false,
         drop_target_confirmed: false,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -494,6 +497,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
     let modern_target_pool_key =
         state.get_or_create_pool(&source_connection_id, Some(&modern_target_database)).await.unwrap();
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-mysql-collation-transfer-{suffix}"),
         source_connection_id,
         source_database: source_database.clone(),
@@ -508,7 +512,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
         drop_target_before_create: false,
         drop_target_confirmed: false,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -558,6 +562,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
         );
 
         let modern_request = TransferRequest {
+            table_filters: std::collections::HashMap::new(),
             transfer_id: format!("live-mysql-modern-collation-transfer-{suffix}"),
             source_connection_id: request.source_connection_id.clone(),
             source_database: source_database.clone(),
@@ -572,7 +577,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
             drop_target_before_create: false,
             drop_target_confirmed: false,
             content: TransferContent::default(),
-            objects: Vec::new(),
+            objects: Some(Vec::new()),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
             quote_target_column_names: true,
@@ -865,6 +870,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
     // and the reporter picked overwrite mode. The target table already exists
     // with a column that's missing from the source ("orders" lacks extra_col).
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-mysql-transfer-struct-overwrite-{suffix}"),
         source_connection_id: connection_id.clone(),
         source_database: source_database.clone(),
@@ -879,7 +885,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
         drop_target_before_create: false,
         drop_target_confirmed: false,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Overwrite,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -921,6 +927,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
         );
 
         let required_request = TransferRequest {
+            table_filters: std::collections::HashMap::new(),
             transfer_id: format!("live-mysql-transfer-required-target-overwrite-{suffix}"),
             source_connection_id: connection_id.clone(),
             source_database: source_database.clone(),
@@ -935,7 +942,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
             drop_target_before_create: false,
             drop_target_confirmed: false,
             content: TransferContent::default(),
-            objects: Vec::new(),
+            objects: Some(Vec::new()),
             mode: TransferMode::Overwrite,
             target_table_name_case: TransferTableNameCase::Preserve,
             quote_target_column_names: true,
@@ -1018,6 +1025,7 @@ async fn live_mysql_transfer_structure_only_rejects_incompatible_target_columns(
     let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_database)).await.unwrap();
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-mysql-transfer-structonly-{suffix}"),
         source_connection_id: connection_id.clone(),
         source_database: source_database.clone(),
@@ -1032,7 +1040,7 @@ async fn live_mysql_transfer_structure_only_rejects_incompatible_target_columns(
         drop_target_before_create: false,
         drop_target_confirmed: false,
         content: TransferContent::StructureOnly,
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -1117,6 +1125,7 @@ async fn live_mysql_transfer_drop_target_parent_child_foreign_key() {
     let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_database)).await.unwrap();
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-mysql-parent-child-{suffix}"),
         source_connection_id: connection_id.clone(),
         source_database: source_database.clone(),
@@ -1131,7 +1140,7 @@ async fn live_mysql_transfer_drop_target_parent_child_foreign_key() {
         drop_target_before_create: true,
         drop_target_confirmed: true,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -1310,6 +1319,7 @@ async fn live_mysql_transfer_drop_target_rebuilds_incompatible_structure() {
     let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_database)).await.unwrap();
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("drop-rebuild-{suffix}"),
         source_connection_id: connection_id.clone(),
         source_database: source_database.clone(),
@@ -1324,7 +1334,7 @@ async fn live_mysql_transfer_drop_target_rebuilds_incompatible_structure() {
         drop_target_before_create: true,
         drop_target_confirmed: true,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -1498,6 +1508,7 @@ async fn live_mysql_transfer_drop_target_rejects_external_incoming_fk() {
     let pool_key = state.get_or_create_pool(&connection_id, Some(&database)).await.unwrap();
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("ext-fk-{suffix}"),
         source_connection_id: connection_id.clone(),
         source_database: database.clone(),
@@ -1512,7 +1523,7 @@ async fn live_mysql_transfer_drop_target_rejects_external_incoming_fk() {
         drop_target_before_create: true,
         drop_target_confirmed: true,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -1589,6 +1600,7 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
     let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_database)).await.unwrap();
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("circular-{suffix}"),
         source_connection_id: connection_id.clone(),
         source_database: source_database.clone(),
@@ -1603,7 +1615,7 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
         drop_target_before_create: true,
         drop_target_confirmed: true,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -1818,6 +1830,7 @@ async fn live_mysql_transfer_drop_target_retains_backup_on_failure() {
     let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_database)).await.unwrap();
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("retain-{suffix}"),
         source_connection_id: connection_id.clone(),
         source_database: source_database.clone(),
@@ -1832,7 +1845,7 @@ async fn live_mysql_transfer_drop_target_retains_backup_on_failure() {
         drop_target_before_create: true,
         drop_target_confirmed: true,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -1996,6 +2009,7 @@ async fn live_mysql_keyset_pagination_copies_every_row() {
     let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_database)).await.unwrap();
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-mysql-keyset-{suffix}"),
         source_connection_id,
         source_database: source_database.clone(),
@@ -2010,7 +2024,7 @@ async fn live_mysql_keyset_pagination_copies_every_row() {
         drop_target_before_create: false,
         drop_target_confirmed: false,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -2120,6 +2134,7 @@ async fn live_mysql_progress_read_survives_total_duration_beyond_timeout() {
     let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_database)).await.unwrap();
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-mysql-progress-{suffix}"),
         source_connection_id,
         source_database: source_database.clone(),
@@ -2134,7 +2149,7 @@ async fn live_mysql_progress_read_survives_total_duration_beyond_timeout() {
         drop_target_before_create: false,
         drop_target_confirmed: false,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -2220,6 +2235,7 @@ async fn live_mysql_transfer_drop_target_inspects_dependent_views_without_the_us
     let pool_key = state.get_or_create_pool(&connection_id, Some(&target_database)).await.unwrap();
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("legacy-dependency-{suffix}"),
         source_connection_id: connection_id.clone(),
         source_database: source_database.clone(),
@@ -2234,7 +2250,7 @@ async fn live_mysql_transfer_drop_target_inspects_dependent_views_without_the_us
         drop_target_before_create: true,
         drop_target_confirmed: true,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
@@ -2270,6 +2286,94 @@ async fn live_mysql_transfer_drop_target_inspects_dependent_views_without_the_us
         true,
     )
     .await;
+    setup_pool.disconnect().await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    cleanup.unwrap();
+}
+
+/// A single timed-out statement must not take the rest of the transfer down with it.
+///
+/// `execute_on_pool_once` drops the pool of a timed-out driver so a late server response
+/// cannot be reused; because a bulk transfer shares one pool key across every table, the
+/// pool has to be replaced before the next statement runs. Without that replacement the
+/// next table reported the misleading `Connection not found` instead of executing.
+#[tokio::test]
+#[ignore = "requires a disposable MySQL 5.7+ endpoint via DBX_LIVE_MYSQL_TRANSFER_* variables"]
+async fn live_mysql_transfer_recovers_the_pool_after_a_query_timeout() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-transfer-timeout-{suffix}");
+    let database = format!("dbx_transfer_timeout_{}", &suffix[..12]);
+    let mut config = live_mysql_config(&connection_id);
+    // A one-second budget lets `SELECT SLEEP(3)` time out while leaving normal
+    // statements (and the replacement pool) usable.
+    config.query_timeout_secs = 1;
+
+    let setup_pool = mysql::connect(&mysql_url(&config), Duration::from_secs(10)).await.unwrap();
+    mysql::execute_query(&setup_pool, &format!("CREATE DATABASE `{database}`"), true).await.unwrap();
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-mysql-transfer-timeout-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new(storage));
+    state.configs.write().await.insert(connection_id.clone(), config);
+    let pool_key = state.get_or_create_pool(&connection_id, Some(&database)).await.unwrap();
+
+    let timed_out = execute_on_pool(&state, &pool_key, "SELECT SLEEP(3)")
+        .await
+        .expect_err("the statement must hit the configured one-second budget");
+    assert!(timed_out.to_lowercase().contains("timed out"), "expected a timeout error, got: {timed_out}");
+
+    let follow_up = execute_on_pool(&state, &pool_key, "SELECT 1").await;
+    assert!(
+        follow_up.is_ok(),
+        "a later transfer statement must run on a replacement pool, not report a missing connection: {:?}",
+        follow_up.err()
+    );
+
+    let cleanup = mysql::execute_query(&setup_pool, &format!("DROP DATABASE `{database}`"), true).await;
+    setup_pool.disconnect().await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    cleanup.unwrap();
+}
+
+/// A pool removed while it is idle between two statements must be rebuilt instead of
+/// failing the rest of the transfer with `Connection not found`.
+///
+/// The connection keepalive tears a pool down whenever its ping fails or times out, and a
+/// bulk transfer shares one pool key across every table. The next statement therefore has
+/// to reconnect on its own rather than report a missing pool -- the statement has not run
+/// yet, so nothing is replayed.
+#[tokio::test]
+#[ignore = "requires a disposable MySQL 5.7+ endpoint via DBX_LIVE_MYSQL_TRANSFER_* variables"]
+async fn live_mysql_transfer_recreates_a_pool_removed_between_statements() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-transfer-removed-pool-{suffix}");
+    let database = format!("dbx_transfer_recreate_{}", &suffix[..12]);
+    let config = live_mysql_config(&connection_id);
+
+    let setup_pool = mysql::connect(&mysql_url(&config), Duration::from_secs(10)).await.unwrap();
+    mysql::execute_query(&setup_pool, &format!("CREATE DATABASE `{database}`"), true).await.unwrap();
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-mysql-transfer-recreate-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new(storage));
+    state.configs.write().await.insert(connection_id.clone(), config);
+    let pool_key = state.get_or_create_pool(&connection_id, Some(&database)).await.unwrap();
+    execute_on_pool(&state, &pool_key, "SELECT 1").await.unwrap();
+
+    // Same effect as a keepalive invalidation (or any other path that drops a transfer
+    // pool) while the transfer waits between two tables.
+    assert!(state.remove_pool_by_key(&pool_key).await, "the pool under test must exist first");
+
+    let follow_up = execute_on_pool(&state, &pool_key, "SELECT 1").await;
+    assert!(
+        follow_up.is_ok(),
+        "a statement after the pool disappeared must reconnect, not report a missing connection: {:?}",
+        follow_up.err()
+    );
+
+    let cleanup = mysql::execute_query(&setup_pool, &format!("DROP DATABASE `{database}`"), true).await;
     setup_pool.disconnect().await.unwrap();
     let _ = std::fs::remove_dir_all(dir);
     cleanup.unwrap();

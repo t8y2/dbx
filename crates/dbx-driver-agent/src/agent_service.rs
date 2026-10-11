@@ -461,13 +461,21 @@ pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> 
     let local_state = am.load_state();
     let use_managed_jre = local_state.java_runtime.mode == JavaRuntimeMode::Managed;
     agent_catalog::driver_store_entries()
-        .map(|(key, label)| {
+        .filter_map(|(key, label)| {
             let jar_valid = am.is_driver_jar_valid(key);
             let native_installed = am.driver_native_installed(key);
             let launch_config_installed = am.driver_launch_config_path(key).exists();
             let installed = jar_valid || native_installed || launch_config_installed;
             let local = local_state.installed_drivers.get(key);
             let remote = registry.and_then(|r| agent_registry_driver(r, key));
+            // A driver the registry publishes nothing for on this platform (the
+            // Windows-only Oracle OCI agent on macOS, for example) cannot be
+            // installed here, and offering it would only produce a download or
+            // JRE fetch that must fail. Already-installed entries stay listed so
+            // they can still be upgraded or uninstalled.
+            if !installed && remote.is_some_and(|driver| !driver_installable_on_current_platform(key, driver)) {
+                return None;
+            }
             let remote_requires_java_runtime = remote.is_some_and(remote_driver_requires_java_runtime);
             let requires_java_runtime = if installed {
                 jar_valid && !native_installed && !launch_config_installed
@@ -485,7 +493,7 @@ pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> 
                 && use_managed_jre
                 && (!am.is_jre_installed(&jre_key)
                     || remote_jre_version.is_some_and(|version| local_jre_version != Some(version)));
-            AgentDriverInfo {
+            Some(AgentDriverInfo {
                 db_type: key.to_string(),
                 label: label.to_string(),
                 version: remote.map(|r| r.version.clone()).unwrap_or_default(),
@@ -499,13 +507,26 @@ pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> 
                 requires_java_runtime,
                 jre: jre_key.clone(),
                 jre_installed: !requires_java_runtime || am.is_jre_installed(&jre_key),
-            }
+            })
         })
         .collect()
 }
 
 fn usable_driver_jar(driver: &crate::agent_manager::DriverInfo) -> Option<&crate::agent_manager::ArtifactInfo> {
     driver.jar.as_ref().filter(|artifact| artifact.size > 0)
+}
+
+/// Whether the registry publishes an artifact this platform can actually run:
+/// a native agent binary built for it, or the Java JAR fallback.
+///
+/// The SQLite SSH worker is the one driver whose binaries execute on the remote
+/// SSH host instead of the desktop, so a `native` set without an entry for this
+/// platform is still installable here (#8987).
+fn driver_installable_on_current_platform(db_type: &str, driver: &crate::agent_manager::DriverInfo) -> bool {
+    if AgentManager::is_sqlite_worker_driver(db_type) {
+        return true;
+    }
+    driver.native.contains_key(AgentManager::current_platform()) || usable_driver_jar(driver).is_some()
 }
 
 fn driver_download_artifact(driver: &crate::agent_manager::DriverInfo) -> Option<&crate::agent_manager::ArtifactInfo> {
@@ -1644,18 +1665,14 @@ async fn install_sqlite_worker_from_registry(
             current,
             total_drivers,
         ));
-        download_with_progress(
+        obtain_driver_artifact(
             am,
             progress,
-            "driver",
             source,
-            &artifact.url,
-            &r2_path_with_cache_buster(&github_url_to_r2_path(&artifact.url, "driver"), &driver.version),
+            artifact,
+            db_type,
+            &driver.version,
             &download_path,
-            artifact.size,
-            artifact.sha256.as_deref(),
-            Some(CacheIdentity::Driver { db_type, version: &driver.version }),
-            Some(db_type),
             current,
             total_drivers,
             cancellations,
@@ -1738,7 +1755,11 @@ async fn install_agent_driver_from_registry(
     let jre_key = &driver.jre;
     let native_artifact = driver.native.get(AgentManager::current_platform());
     let jar_artifact = usable_driver_jar(driver);
-    let requires_java_runtime = native_artifact.is_none();
+    // Java is only required when the JAR fallback is what actually gets
+    // installed. A driver that publishes no artifact for this platform at all
+    // (the Windows-only Oracle OCI agent on macOS, for example) must fail
+    // immediately instead of downloading and unpacking a JRE it cannot use.
+    let requires_java_runtime = native_artifact.is_none() && jar_artifact.is_some();
     let needs_jre = requires_java_runtime && jre_needs_install(am, registry, jre_key);
 
     if needs_jre {
@@ -1773,18 +1794,14 @@ async fn install_agent_driver_from_registry(
         current,
         total_drivers,
     ));
-    download_with_progress(
+    obtain_driver_artifact(
         am,
         progress,
-        "driver",
         source,
-        &artifact.url,
-        &r2_path_with_cache_buster(&github_url_to_r2_path(&artifact.url, "driver"), &driver.version),
+        artifact,
+        db_type,
+        &driver.version,
         &download_path,
-        artifact.size,
-        artifact.sha256.as_deref(),
-        Some(CacheIdentity::Driver { db_type, version: &driver.version }),
-        Some(db_type),
         current,
         total_drivers,
         cancellations,
@@ -1796,6 +1813,9 @@ async fn install_agent_driver_from_registry(
         std::fs::remove_file(&download_path).ok();
         return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
     }
+    // Retain the artifact bytes for future incremental updates before the
+    // install consumes (and deletes) the staged download.
+    retain_driver_delta_base(am, db_type, &driver.version, &download_path);
     stop_driver_processes_before_replacement(am, db_type).await?;
     install_downloaded_driver_artifact(
         &download_path,
@@ -2021,6 +2041,131 @@ fn agent_registry_driver<'a>(
     db_type: &str,
 ) -> Option<&'a crate::agent_manager::DriverInfo> {
     registry.drivers.get(db_type)
+}
+
+/// Downloads `artifact` for installation, preferring the registry's
+/// incremental delta when a matching base artifact was retained by a previous
+/// install of `db_type`. The staged full artifact lands at `dest` either way;
+/// every delta failure falls back to a full download.
+#[allow(clippy::too_many_arguments)]
+async fn obtain_driver_artifact(
+    am: &AgentManager,
+    progress: &impl Fn(AgentProgressEvent),
+    source: DownloadSource,
+    artifact: &crate::agent_manager::ArtifactInfo,
+    db_type: &str,
+    driver_version: &str,
+    dest: &Path,
+    current: Option<u32>,
+    total_drivers: Option<u32>,
+    cancellations: &[&AgentInstallCancellation],
+) -> Result<(), String> {
+    if let Some(delta) = artifact.delta.as_ref() {
+        let base = crate::driver_delta::find_delta_base(&am.download_cache_dir(), db_type, &delta.base_version);
+        if let Some(base) = base {
+            match try_delta_artifact(
+                am,
+                progress,
+                source,
+                artifact,
+                delta,
+                &base,
+                db_type,
+                driver_version,
+                dest,
+                current,
+                total_drivers,
+                cancellations,
+            )
+            .await
+            {
+                Ok(()) => {
+                    log::info!(
+                        "[driver-delta:{db_type}] applied incremental update {} -> {} (delta {} bytes of a {} byte artifact)",
+                        delta.base_version,
+                        driver_version,
+                        delta.size,
+                        artifact.size
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    log::warn!(
+                        "[driver-delta:{db_type}] incremental update failed, falling back to full download: {err}"
+                    );
+                    let _ = std::fs::remove_file(dest);
+                }
+            }
+        }
+    }
+    download_with_progress(
+        am,
+        progress,
+        "driver",
+        source,
+        &artifact.url,
+        &r2_path_with_cache_buster(&github_url_to_r2_path(&artifact.url, "driver"), driver_version),
+        dest,
+        artifact.size,
+        artifact.sha256.as_deref(),
+        Some(CacheIdentity::Driver { db_type, version: driver_version }),
+        Some(db_type),
+        current,
+        total_drivers,
+        cancellations,
+    )
+    .await
+}
+
+/// Downloads the delta frame and reconstructs the full artifact onto `dest`.
+/// The reconstructed bytes are verified against the full artifact's size and
+/// SHA-256; a mismatching (e.g. corrupt) base is caught here and reported as a
+/// plain error so the caller can fall back to a full download.
+#[allow(clippy::too_many_arguments)]
+async fn try_delta_artifact(
+    am: &AgentManager,
+    progress: &impl Fn(AgentProgressEvent),
+    source: DownloadSource,
+    artifact: &crate::agent_manager::ArtifactInfo,
+    delta: &crate::agent_manager::DeltaInfo,
+    base: &Path,
+    db_type: &str,
+    driver_version: &str,
+    dest: &Path,
+    current: Option<u32>,
+    total_drivers: Option<u32>,
+    cancellations: &[&AgentInstallCancellation],
+) -> Result<(), String> {
+    let file_name = dest
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Driver artifact has no file name".to_string())?;
+    let delta_path = dest
+        .parent()
+        .ok_or_else(|| "Driver artifact has no parent directory".to_string())?
+        .join(format!(".{file_name}.delta"));
+    let cache_buster_version = format!("{driver_version}-from-{}", delta.base_version);
+    download_with_progress(
+        am,
+        progress,
+        "driver",
+        source,
+        &delta.url,
+        &r2_path_with_cache_buster(&github_url_to_r2_path(&delta.url, "driver"), &cache_buster_version),
+        &delta_path,
+        delta.size,
+        Some(delta.sha256.as_str()),
+        Some(CacheIdentity::Driver { db_type, version: &cache_buster_version }),
+        Some(db_type),
+        current,
+        total_drivers,
+        cancellations,
+    )
+    .await?;
+    let outcome = crate::driver_delta::apply_zstd_delta(base, &delta_path, dest)
+        .and_then(|()| validate_artifact_integrity(dest, artifact.size, artifact.sha256.as_deref()));
+    let _ = std::fs::remove_file(&delta_path);
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2500,8 +2645,25 @@ fn prune_jre_download_cache(am: &AgentManager, jre_key: &str) -> Result<(), Stri
 }
 
 fn cleanup_driver_download_cache_after_success(am: &AgentManager, db_type: &str) {
-    if let Err(err) = prune_driver_download_cache(am, db_type) {
+    // Keep the retained delta base (future incremental updates read it back);
+    // drop the transient download entries for this driver.
+    let prefix = format!("driver-{}-", cache_file_token(db_type));
+    let base_prefix = format!("driver-{}-base-", cache_file_token(db_type));
+    if let Err(err) = remove_download_cache_entries(
+        am,
+        |name| name.starts_with(&prefix) && !name.starts_with(&base_prefix),
+        "cached driver download",
+    ) {
         log::warn!("Failed to clean cached download for {db_type}: {err}");
+    }
+}
+
+/// Retains the just-installed artifact as the delta base for the next
+/// incremental update of `db_type`. Best-effort: a missing base only costs a
+/// full download later.
+fn retain_driver_delta_base(am: &AgentManager, db_type: &str, version: &str, downloaded: &Path) {
+    if let Err(err) = crate::driver_delta::retain_delta_base(&am.download_cache_dir(), db_type, version, downloaded) {
+        log::warn!("Failed to retain delta base for {db_type} {version}: {err}");
     }
 }
 
@@ -4518,10 +4680,17 @@ mod agent_registry_install_tests {
                     sha256: None,
                     size: 0,
                     format: None,
+                    delta: None,
                 }),
                 native: [(
                     AgentManager::current_platform().to_string(),
-                    ArtifactInfo { url: native_url.to_string(), sha256: None, size: native_size, format: None },
+                    ArtifactInfo {
+                        url: native_url.to_string(),
+                        sha256: None,
+                        size: native_size,
+                        format: None,
+                        delta: None,
+                    },
                 )]
                 .into_iter()
                 .collect(),
@@ -4539,7 +4708,7 @@ mod agent_registry_install_tests {
                 label: db_type.to_string(),
                 min_app_version: "0.1.0".to_string(),
                 jre: DEFAULT_JRE_KEY.to_string(),
-                jar: Some(ArtifactInfo { url: url.to_string(), sha256: None, size, format: None }),
+                jar: Some(ArtifactInfo { url: url.to_string(), sha256: None, size, format: None, delta: None }),
                 native: std::collections::HashMap::new(),
             },
         );
@@ -4784,7 +4953,7 @@ mod agent_registry_install_tests {
                     version: version.to_string(),
                     platforms: [(
                         AgentManager::current_platform().to_string(),
-                        ArtifactInfo { url: url.to_string(), sha256: None, size, format: None },
+                        ArtifactInfo { url: url.to_string(), sha256: None, size, format: None, delta: None },
                     )]
                     .into_iter()
                     .collect(),
@@ -4899,6 +5068,46 @@ mod agent_registry_install_tests {
         let state = manager.load_state();
         assert_eq!(state.installed_drivers["mongodb"].version, driver_version);
         assert_eq!(state.jre_versions[DEFAULT_JRE_KEY], jre_version);
+    }
+
+    /// The managed JRE is only needed for the JAR fallback. A driver the registry
+    /// publishes for another platform only — the Windows-only Oracle OCI agent on
+    /// macOS — must fail on the missing artifact instead of fetching and
+    /// unpacking a JRE it can never use.
+    #[tokio::test]
+    async fn ensure_agent_runtime_fails_without_fetching_a_jre_when_no_local_artifact_exists() {
+        let _test_guard = ENSURE_AGENT_TEST_LOCK.lock().await;
+        let manager = test_manager("ensure-no-local-artifact");
+        let db_type = "oracle-oci";
+        let foreign_platform =
+            if AgentManager::current_platform() == "windows-x64" { "linux-x64" } else { "windows-x64" };
+        let mut registry = registry_with_jar(
+            db_type,
+            "0.1.0",
+            "https://example.invalid/dbx-agent-oracle-oci-legacy-placeholder.jar",
+            0,
+        );
+        registry.jres = registry_with_jre(DEFAULT_JRE_KEY, "21.0.12", "https://example.invalid/dbx-jre.tar.gz", 8).jres;
+        registry.drivers.get_mut(db_type).unwrap().native.insert(
+            foreign_platform.to_string(),
+            ArtifactInfo {
+                url: format!("https://example.invalid/dbx-agent-oracle-oci-{foreign_platform}"),
+                sha256: None,
+                size: 8,
+                format: None,
+                delta: None,
+            },
+        );
+        cache_test_registry(registry).await;
+
+        let error = ensure_agent_driver_ready_from(&manager, db_type, DownloadSource::Cnb).await.unwrap_err();
+
+        assert!(error.contains("No driver artifact available"), "{error}");
+        assert!(
+            !manager.is_jre_installed(DEFAULT_JRE_KEY),
+            "the JRE must not be downloaded for an uninstallable driver"
+        );
+        assert!(!manager.is_driver_installed(db_type));
     }
 
     #[tokio::test]
@@ -5082,6 +5291,77 @@ mod agent_registry_install_tests {
     }
 
     #[tokio::test]
+    async fn successful_delta_download_is_removed_by_driver_cache_cleanup() {
+        let manager = test_manager("delta-cache-cleanup");
+        let db_type = "demo";
+        let base_version = "0.1.0";
+        let driver_version = "0.2.0";
+        let delta_url = "https://example.invalid/demo.delta";
+        let rebuilt = b"reconstructed driver package";
+        let delta_bytes = zstd::stream::encode_all(rebuilt.as_slice(), 3).unwrap();
+        let delta_sha256 = format!("{:x}", Sha256::digest(&delta_bytes));
+        let artifact_sha256 = format!("{:x}", Sha256::digest(rebuilt));
+
+        let base_path = manager.download_cache_dir().join(crate::driver_delta::delta_base_file_name(
+            db_type,
+            base_version,
+            "base.tar.zst",
+        ));
+        std::fs::create_dir_all(base_path.parent().unwrap()).unwrap();
+        std::fs::write(&base_path, b"unused base for a standalone zstd frame").unwrap();
+
+        let dest = manager.driver_dir(db_type).join(".agent.tar.zst");
+        let delta_path = dest.parent().unwrap().join("..agent.tar.zst.delta");
+        let cache_version = format!("{driver_version}-from-{base_version}");
+        let cache_path = cached_download_path(
+            &manager,
+            delta_url,
+            delta_bytes.len() as u64,
+            Some(&delta_sha256),
+            Some(CacheIdentity::Driver { db_type, version: &cache_version }),
+            &delta_path,
+        );
+        std::fs::write(&cache_path, &delta_bytes).unwrap();
+
+        let artifact = ArtifactInfo {
+            url: "https://example.invalid/demo.tar.zst".to_string(),
+            sha256: Some(artifact_sha256),
+            size: rebuilt.len() as u64,
+            format: Some(ArtifactFormat::TarZstd),
+            delta: None,
+        };
+        let delta = crate::agent_manager::DeltaInfo {
+            base_version: base_version.to_string(),
+            url: delta_url.to_string(),
+            sha256: delta_sha256,
+            size: delta_bytes.len() as u64,
+        };
+
+        try_delta_artifact(
+            &manager,
+            &|_| {},
+            DownloadSource::Cnb,
+            &artifact,
+            &delta,
+            &base_path,
+            db_type,
+            driver_version,
+            &dest,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), rebuilt);
+        assert!(cache_path.exists());
+        cleanup_driver_download_cache_after_success(&manager, db_type);
+        assert!(!cache_path.exists());
+        assert!(base_path.exists());
+    }
+
+    #[tokio::test]
     async fn registry_install_replaces_hive_legacy_jar_with_native_driver() {
         let manager = test_manager("hive-native-replaces-legacy-jar");
         let db_type = "hive";
@@ -5133,11 +5413,23 @@ mod agent_registry_install_tests {
         let mut native = std::collections::HashMap::new();
         native.insert(
             "linux-x64".to_string(),
-            ArtifactInfo { url: x64_url.to_string(), sha256: None, size: x64_bytes.len() as u64, format: None },
+            ArtifactInfo {
+                url: x64_url.to_string(),
+                sha256: None,
+                size: x64_bytes.len() as u64,
+                format: None,
+                delta: None,
+            },
         );
         native.insert(
             "linux-aarch64".to_string(),
-            ArtifactInfo { url: arm_url.to_string(), sha256: None, size: arm_bytes.len() as u64, format: None },
+            ArtifactInfo {
+                url: arm_url.to_string(),
+                sha256: None,
+                size: arm_bytes.len() as u64,
+                format: None,
+                delta: None,
+            },
         );
         let mut drivers = std::collections::HashMap::new();
         drivers.insert(
@@ -5152,6 +5444,7 @@ mod agent_registry_install_tests {
                     sha256: None,
                     size: 0,
                     format: None,
+                    delta: None,
                 }),
                 native,
             },
@@ -6323,6 +6616,7 @@ mod agent_registry_install_tests {
                             sha256: Some(sha256_bytes(&jre_bytes)),
                             size: jre_bytes.len() as u64,
                             format: None,
+                            delta: None,
                         },
                     )]
                     .into_iter()
@@ -6342,6 +6636,7 @@ mod agent_registry_install_tests {
                         sha256: Some(sha256_bytes(&jar_bytes)),
                         size: jar_bytes.len() as u64,
                         format: None,
+                        delta: None,
                     }),
                     native: std::collections::HashMap::new(),
                     jre: jre_key.to_string(),
@@ -6402,6 +6697,7 @@ mod agent_registry_install_tests {
                             sha256: Some(sha256_bytes(&unrelated_jre_bytes)),
                             size: unrelated_jre_bytes.len() as u64,
                             format: None,
+                            delta: None,
                         },
                     )]
                     .into_iter()
@@ -6421,6 +6717,7 @@ mod agent_registry_install_tests {
                         sha256: Some(sha256_bytes(&jar_bytes)),
                         size: jar_bytes.len() as u64,
                         format: None,
+                        delta: None,
                     }),
                     native: std::collections::HashMap::new(),
                     jre: "temurin-21".to_string(),
@@ -6463,6 +6760,7 @@ mod agent_registry_install_tests {
                             sha256: Some(sha256),
                             size,
                             format: None,
+                            delta: None,
                         },
                     )]
                     .into_iter()
@@ -6507,6 +6805,7 @@ mod agent_registry_install_tests {
                             sha256: Some(sha256_bytes(&jre_bytes)),
                             size: jre_bytes.len() as u64,
                             format: None,
+                            delta: None,
                         },
                     )]
                     .into_iter()
@@ -6526,6 +6825,7 @@ mod agent_registry_install_tests {
                         sha256: Some(sha256_bytes(&jar_bytes)),
                         size: jar_bytes.len() as u64,
                         format: None,
+                        delta: None,
                     }),
                     native: std::collections::HashMap::new(),
                     jre: jre_key.to_string(),
@@ -6602,6 +6902,7 @@ mod agent_registry_install_tests {
                         sha256: None,
                         size: 0,
                         format: None,
+                        delta: None,
                     },
                 )
             })
@@ -6700,6 +7001,106 @@ mod agent_registry_install_tests {
         assert!(!result.failures.is_empty(), "a mismatched binary must be reported as a failure");
         assert!(!manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-x64").exists());
         assert!(!manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY));
+    }
+
+    /// The website drivers page assembles custom offline bundles in the
+    /// browser: raw artifacts under `drivers/`, the JRE tarball under `jre/`,
+    /// and a synthesized registry whose artifact URLs are `offline://` file
+    /// names. This test feeds exactly that JSON shape (including the extra
+    /// `external_driver_required` field the package registries carry) through
+    /// the real inspect + import pipeline.
+    #[tokio::test]
+    async fn offline_zip_imports_a_web_assembled_custom_bundle() {
+        let platform = AgentManager::current_platform();
+        let jar_name = "dbx-agent-h2-1.0.0.jar";
+        let worker_x64 = "dbx-agent-sqlite-worker-0.1.6-linux-x64";
+        let worker_arm = "dbx-agent-sqlite-worker-0.1.6-linux-aarch64";
+        let jre_name = format!("dbx-jre-21-{platform}.tar.zst");
+        let jar_bytes = test_agent_jar();
+        let jre_bytes = b"fake-jre-archive".to_vec();
+        let worker_x64_bytes = linux_native_binary(62);
+        let worker_arm_bytes = linux_native_binary(183);
+
+        let registry_json = serde_json::json!({
+            "jres": {
+                "21": {
+                    "version": "21",
+                    "platforms": {
+                        platform: {
+                            "url": format!("offline://{jre_name}"),
+                            "sha256": sha256_bytes(&jre_bytes),
+                            "size": jre_bytes.len(),
+                            "format": "tar_zstd"
+                        }
+                    }
+                }
+            },
+            "drivers": {
+                "h2": {
+                    "version": "1.0.0",
+                    "label": "H2",
+                    "min_app_version": "0.6.33",
+                    "jre": "21",
+                    "external_driver_required": false,
+                    "jar": {
+                        "url": format!("offline://{jar_name}"),
+                        "sha256": sha256_bytes(&jar_bytes),
+                        "size": jar_bytes.len()
+                    }
+                },
+                "sqlite-worker": {
+                    "version": "0.1.6",
+                    "label": "SQLite SSH Worker",
+                    "min_app_version": "0.6.30",
+                    "jre": "21",
+                    "external_driver_required": false,
+                    "native": {
+                        "linux-x64": {
+                            "url": format!("offline://{worker_x64}"),
+                            "sha256": sha256_bytes(&worker_x64_bytes),
+                            "size": worker_x64_bytes.len()
+                        },
+                        "linux-aarch64": {
+                            "url": format!("offline://{worker_arm}"),
+                            "sha256": sha256_bytes(&worker_arm_bytes),
+                            "size": worker_arm_bytes.len()
+                        }
+                    }
+                }
+            }
+        });
+        let registry: AgentRegistry =
+            serde_json::from_value(registry_json).expect("web-synthesized registry JSON must deserialize");
+
+        let (_dir, package) = write_offline_zip(
+            &registry,
+            &[
+                (format!("drivers/{jar_name}"), jar_bytes),
+                (format!("drivers/{worker_x64}"), worker_x64_bytes),
+                (format!("drivers/{worker_arm}"), worker_arm_bytes),
+                (format!("jre/{jre_name}"), jre_bytes),
+            ],
+        );
+
+        let plan = inspect_offline_zip(&package).expect("web-synthesized bundle must pass inspection");
+        assert_eq!(plan.driver_keys, vec!["h2".to_string(), SQLITE_WORKER_DRIVER_KEY.to_string()]);
+        assert!(plan.includes_jre);
+
+        let manager = test_manager("offline-web-custom-bundle");
+        let result = import_offline_zip(&manager, &package, |_| {}).await.unwrap();
+        // The fake JRE archive cannot extract (no java executable inside), but
+        // that must only surface as an isolated JRE failure — never block the
+        // drivers, exactly like a corrupt real-world package.
+        assert!(result.failures.iter().all(|failure| failure.is_jre), "unexpected failures: {:?}", result.failures);
+        // The worker contributes one entry per remote platform, so it appears twice.
+        assert_eq!(
+            result.drivers_installed,
+            vec!["h2".to_string(), SQLITE_WORKER_DRIVER_KEY.to_string(), SQLITE_WORKER_DRIVER_KEY.to_string()]
+        );
+        assert!(manager.driver_jar_path("h2").is_file());
+        assert!(manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-x64").is_file());
+        assert!(manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-aarch64").is_file());
+        assert_eq!(manager.load_state().installed_drivers.get("h2").map(|d| d.version.as_str()), Some("1.0.0"));
     }
 }
 

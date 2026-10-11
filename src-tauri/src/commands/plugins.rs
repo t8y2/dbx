@@ -123,7 +123,7 @@ pub async fn install_marketplace_plugin(
         PluginMarketplace::new(state.plugins.root_dir().to_path_buf(), state.plugins.app_version().to_string())?
             .with_lifecycle(state.plugins.lifecycle());
     let result = marketplace.install(request).await?;
-    stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    stop_replaced_plugin_runtime(&state, &result.plugin).await?;
     emit_plugin_runtime_replaced(&app, &result.plugin);
     Ok(result.response())
 }
@@ -200,7 +200,7 @@ pub async fn install_plugin_package(
     })
     .await
     .map_err(|error| error.to_string())??;
-    stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    stop_replaced_plugin_runtime(&state, &result.plugin).await?;
     emit_plugin_runtime_replaced(&app, &result.plugin);
     Ok(result.response())
 }
@@ -228,7 +228,7 @@ pub async fn install_plugin_package_from_url(
             );
         })
         .await?;
-    stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    stop_replaced_plugin_runtime(&state, &result.plugin).await?;
     emit_plugin_runtime_replaced(&app, &result.plugin);
     Ok(result.response())
 }
@@ -247,7 +247,7 @@ pub async fn rollback_plugin(
     })
     .await
     .map_err(|error| error.to_string())??;
-    stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    stop_replaced_plugin_runtime(&state, &result.plugin).await?;
     emit_plugin_runtime_replaced(&app, &result.plugin);
     Ok(result.response())
 }
@@ -255,6 +255,7 @@ pub async fn rollback_plugin(
 #[tauri::command]
 pub async fn uninstall_plugin(
     state: State<'_, Arc<AppState>>,
+    file_state: State<'_, crate::commands::plugin_file::PluginFileState>,
     plugin_id: String,
 ) -> Result<Vec<InstalledPluginInfo>, String> {
     let dependent_connections = state
@@ -282,6 +283,11 @@ pub async fn uninstall_plugin(
     // Stops the runtime and uninstalls the store under one lifecycle update lease, so a plugin
     // call cannot re-activate the sidecar (and re-lock its container) in between.
     state.plugin_host.uninstall_plugin(&plugin_id).await?;
+    // Past every validation and the runtime teardown: retire the plugin's
+    // remaining file handles and drop entries — nothing else will close them.
+    // (Before this point an Err return must leave a still-installed plugin's
+    // workbenches fully functional.)
+    crate::commands::plugin_file::close_all_plugin_files(&file_state, &plugin_id);
     // A reinstall must ask for AI tool access and data grants again.
     if let Err(error) = state.storage.forget_plugin_permissions(&plugin_id).await {
         log::warn!("Failed to clear permissions of uninstalled plugin {plugin_id}: {error}");
@@ -304,8 +310,15 @@ pub async fn list_active_plugins(state: State<'_, Arc<AppState>>) -> Result<Vec<
 }
 
 #[tauri::command]
-pub async fn stop_plugin(state: State<'_, Arc<AppState>>, plugin_id: String) -> Result<(), String> {
-    state.plugin_host.stop(&plugin_id).await;
+pub async fn stop_plugin(
+    state: State<'_, Arc<AppState>>,
+    file_state: State<'_, crate::commands::plugin_file::PluginFileState>,
+    plugin_id: String,
+) -> Result<(), String> {
+    // The plugin's workbenches are going away with its runtime; without this
+    // sweep, handles it never closed would pin the shared registry quota.
+    crate::commands::plugin_file::close_all_plugin_files(&file_state, &plugin_id);
+    state.plugin_host.stop(&plugin_id).await?;
     Ok(())
 }
 
@@ -520,10 +533,10 @@ fn emit_plugin_runtime_replaced(app: &AppHandle, plugin: &InstalledPlugin) {
     );
 }
 
-async fn stop_replaced_plugin_runtime(state: &Arc<AppState>, plugin: &InstalledPlugin) {
+async fn stop_replaced_plugin_runtime(state: &Arc<AppState>, plugin: &InstalledPlugin) -> Result<(), String> {
     state.remove_plugin_connection_pools(&plugin.manifest.id).await;
     stop_external_driver_pools(state, plugin).await;
-    state.plugin_host.stop(&plugin.manifest.id).await;
+    state.plugin_host.stop(&plugin.manifest.id).await
 }
 
 async fn stop_external_driver_pools(state: &Arc<AppState>, plugin: &InstalledPlugin) {

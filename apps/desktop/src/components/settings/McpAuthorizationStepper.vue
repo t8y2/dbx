@@ -15,8 +15,9 @@ const steps = computed<Array<{ id: StepId; title: string; description: string }>
 
 const currentStep = ref<StepId>("overrides");
 const currentIndex = computed(() => steps.value.findIndex((step) => step.id === currentStep.value));
-// Every step is directly reachable from the nav above and all policy edits save as they are made,
-// so the last step has nothing to advance to and nothing to confirm.
+// Every step is directly reachable from the nav above and all policy edits stage into the
+// dialog draft, so the last step has nothing to advance to and nothing to confirm here —
+// persistence is the settings footer Apply button's job, not this stepper's.
 const isLastStep = computed(() => currentIndex.value === steps.value.length - 1);
 
 function scrollableAncestor(target: EventTarget | null): HTMLElement | null {

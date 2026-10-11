@@ -1,6 +1,7 @@
 import type { ColumnInfo, DatabaseType, IndexInfo, QueryTab } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { editableRowIdentifierColumns, physicalTablePrimaryKeys } from "@/lib/table/tableEditing";
+import { loadVirtualRowIdentifier } from "@/lib/table/virtualRowIdentifier";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadCacheStatus, type MetadataLoadTraceLogger } from "./metadataLoadCoordinator";
 import { metadataScopeKey, metadataScopeParts, type MetadataScopeInput } from "./metadataLoadScope";
 import { metadataCacheInvalidationMatcher, MetadataResultCache, type MetadataCacheInvalidation } from "./metadataResultCache";
@@ -17,6 +18,7 @@ export interface TableMetadata {
   columns: ColumnInfo[];
   indexes: IndexInfo[];
   primaryKeys: string[];
+  virtualPrimaryKeys?: string[];
   rowIdentityResolved?: boolean;
   cachedAt: number;
 }
@@ -58,6 +60,7 @@ export interface TableColumnsMetadata {
 }
 
 export interface TableColumnsLoadResult {
+  schema?: string;
   columns: ColumnInfo[];
   tableType?: string;
   cacheStatus: MetadataLoadCacheStatus;
@@ -167,10 +170,17 @@ export function tableMetadataScope(request: Pick<TableMetadataRequest, "connecti
   };
 }
 
+function withVirtualRowIdentifier(metadata: TableMetadata, request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "catalog">): TableMetadata {
+  if (metadata.primaryKeys.length > 0) return metadata;
+  const virtualPrimaryKeys = loadVirtualRowIdentifier(request, metadata.columns);
+  if (virtualPrimaryKeys.length === 0) return metadata;
+  return { ...metadata, primaryKeys: virtualPrimaryKeys, virtualPrimaryKeys, rowIdentityResolved: true };
+}
+
 export function getCachedTableMetadata(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog">): TableMetadataLoadResult | undefined {
   const hit = tableMetadataCache.get(tableMetadataScope(request));
   if (!hit) return undefined;
-  return { metadata: hit.value, cacheStatus: hit.stale ? "stale" : "hit", ageMs: hit.ageMs };
+  return { metadata: withVirtualRowIdentifier(hit.value, request), cacheStatus: hit.stale ? "stale" : "hit", ageMs: hit.ageMs };
 }
 
 export function updateCachedTableMetadataType(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog">, tableType: string): boolean {
@@ -239,8 +249,9 @@ export async function loadTableColumns(request: TableMetadataRequest): Promise<T
       async () => {
         // Display-only loader: columns only, never index discovery.
         const columns = await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog);
+        const resolvedSchema = (request.databaseType === "vastbase" || request.databaseType === "kingbase") && !request.schema ? columns.find((column) => column.resolved_schema)?.resolved_schema : request.schema;
         return {
-          schema: request.schema || undefined,
+          schema: resolvedSchema || undefined,
           tableName: request.tableName,
           tableType: request.tableType,
           catalog: request.catalog,
@@ -263,7 +274,7 @@ export async function loadTableColumns(request: TableMetadataRequest): Promise<T
     resultCount: metadata.columns.length,
     force: request.force === true,
   });
-  return { columns: metadata.columns, tableType: metadata.tableType, cacheStatus: request.force ? "refresh" : "miss", ageMs: 0, cachedAt: metadata.cachedAt };
+  return { schema: metadata.schema, columns: metadata.columns, tableType: metadata.tableType, cacheStatus: request.force ? "refresh" : "miss", ageMs: 0, cachedAt: metadata.cachedAt };
 }
 
 export function tableMetadataToDataTabMeta(metadata: TableMetadata, overrides?: { schema?: string }): NonNullable<QueryTab["tableMeta"]> {
@@ -275,6 +286,7 @@ export function tableMetadataToDataTabMeta(metadata: TableMetadata, overrides?: 
     database: metadata.database,
     columns: metadata.columns,
     primaryKeys: metadata.primaryKeys,
+    ...(metadata.virtualPrimaryKeys?.length ? { virtualPrimaryKeys: metadata.virtualPrimaryKeys } : {}),
     physicalPrimaryKeys: physicalTablePrimaryKeys(metadata.columns, metadata.indexes),
   };
 }
@@ -310,7 +322,7 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
         resultCount: cached.value.columns.length,
         stale: cached.stale,
       });
-      return { metadata: cached.value, cacheStatus: cached.stale ? "stale" : "hit", ageMs: cached.ageMs };
+      return { metadata: withVirtualRowIdentifier(cached.value, request), cacheStatus: cached.stale ? "stale" : "hit", ageMs: cached.ageMs };
     }
   }
 
@@ -372,7 +384,7 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
     resultCount: metadata.columns.length,
     force: request.force === true,
   });
-  return { metadata, cacheStatus: request.force ? "refresh" : "miss", ageMs: 0 };
+  return { metadata: withVirtualRowIdentifier(metadata, request), cacheStatus: request.force ? "refresh" : "miss", ageMs: 0 };
 }
 
 export function invalidateTableMetadataCache(match: MetadataCacheInvalidation): number {

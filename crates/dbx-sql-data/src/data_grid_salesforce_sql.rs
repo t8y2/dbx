@@ -196,6 +196,7 @@ mod tests {
         DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Salesforce),
             identifier_quote: None,
+            server_version: None,
             table_meta: DataGridTableMeta {
                 database: None,
                 catalog: None,
@@ -234,6 +235,7 @@ mod tests {
         DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Salesforce),
             identifier_quote: None,
+            server_version: None,
             table_meta: DataGridTableMeta {
                 database: None,
                 catalog: None,

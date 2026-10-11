@@ -89,6 +89,7 @@ function objectBrowserRowObjectInfo(row: ObjectBrowserRow, schema?: string): Obj
     name: row.name,
     object_type: row.type,
     schema,
+    valid: row.valid,
     signature: row.signature || undefined,
     parent_schema: row.partitionParentSchema,
     parent_name: row.partitionParentName,

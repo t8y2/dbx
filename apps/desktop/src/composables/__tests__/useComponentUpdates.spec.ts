@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useComponentUpdates } from "@/composables/useComponentUpdates";
+import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
 import { runPendingComponentUpdatePlan, type PendingComponentUpdates } from "@/lib/updates/componentUpdateOrchestration";
 import { showToolbarUpdateAction } from "@/lib/updates/updateBadges";
 
@@ -108,6 +109,32 @@ describe("useComponentUpdates", () => {
 
     expect(mocks.listInstalledAgents).toHaveBeenCalledTimes(2);
     expect(updates.driverUpdateCount.value).toBe(0);
+  });
+
+  it("discards a background refresh that started before an update instead of reusing its stale promise", async () => {
+    const backgroundCatalog = deferred<unknown[]>();
+    mocks.fetchPluginMarketplaceCatalogs.mockReturnValueOnce(backgroundCatalog.promise);
+    let mcpInstallFinished = false;
+    mocks.checkMcpServerStatus.mockImplementation(() => (mcpInstallFinished ? Promise.resolve({ ...mcpStatus, latest_version: mcpStatus.current_version, update_available: false }) : Promise.resolve(mcpStatus)));
+    mocks.installMcpServer.mockImplementation(() => {
+      mcpInstallFinished = true;
+      return Promise.resolve("updated");
+    });
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    // 10 秒后台检查先发出，拿到的是升级前快照（这里让插件目录请求悬停住）。
+    // 修复前：更新流程会复用这个在途 promise，拿不到安装后的权威状态。
+    const backgroundRefresh = updates.refresh();
+    await Promise.resolve();
+
+    // 安装流程开始并完成：安装后的刷新确认无更新。
+    await updates.installCategory("mcp");
+    expect(updates.mcpUpdateAvailable.value).toBe(false);
+
+    // 升级前的旧快照晚返回，必须被丢弃，不能重新点亮更新入口。
+    backgroundCatalog.resolve([]);
+    expect(await backgroundRefresh).toBe(false);
+    expect(updates.mcpUpdateAvailable.value).toBe(false);
   });
 
   it("starts a fresh MCP check for an explicit user action instead of reusing a background result", async () => {
@@ -267,6 +294,60 @@ describe("useComponentUpdates", () => {
 
     expect(updates.updating.value).toBe(false);
     expect(showToolbarUpdateAction({ ...toolbarOptions, componentUpdatesRunning: updates.updating.value })).toBe(true);
+  });
+
+  it("keeps the toolbar update action hidden when a stale background MCP poll lands after the restart install", async () => {
+    // 本用例只关心 MCP，排除驱动/插件分类的干扰。
+    mocks.listInstalledAgents.mockResolvedValue([]);
+    mocks.jdbcPluginStatus.mockResolvedValue({ installed: true, update_available: false });
+    mocks.buildMarketplacePluginListings.mockReturnValue([]);
+    const backgroundSnapshot = deferred<typeof mcpStatus>();
+    let mcpInstallFinished = false;
+    mocks.checkMcpServerStatus.mockImplementation(() => {
+      if (!mcpInstallFinished) return Promise.resolve(mcpStatus);
+      return Promise.resolve({ ...mcpStatus, latest_version: mcpStatus.current_version, update_available: false });
+    });
+    const updates = useComponentUpdates({ isDesktop: true });
+    const badge = useMcpUpdateBadge({
+      isDesktop: true,
+      updateNotificationsEnabled: () => true,
+      shouldDeferRefresh: () => updates.updating.value,
+    });
+
+    // 重启窗口开始前，后台轮询已发出，快照仍是升级前的 update_available=true。
+    mocks.checkMcpServerStatus.mockReturnValueOnce(backgroundSnapshot.promise);
+    const backgroundPoll = badge.refreshMcpUpdateStatus();
+    mocks.installMcpServer.mockImplementation(() => {
+      mcpInstallFinished = true;
+      return Promise.resolve("updated");
+    });
+
+    const pending: PendingComponentUpdates = {
+      fromVersion: "0.6.18",
+      targetVersion: "0.6.19",
+      plan: { kind: "manual", categories: ["mcp"] },
+    };
+    await runPendingComponentUpdatePlan(pending, updates);
+
+    // 安装完成：权威来源确认无更新，并丢弃在途旧快照。
+    badge.applyMcpStatus(updates.mcpUpdateAvailable.value);
+    badge.invalidateMcpUpdateStatus();
+    backgroundSnapshot.resolve(mcpStatus);
+    await backgroundPoll;
+
+    expect(updates.updating.value).toBe(false);
+    expect(updates.mcpUpdateAvailable.value).toBe(false);
+    expect(badge.mcpUpdateAvailable.value).toBe(false);
+    expect(
+      showToolbarUpdateAction({
+        appUpdateAvailable: false,
+        driverUpdateCount: updates.driverUpdateCount.value,
+        jdbcUpdateAvailable: updates.jdbcUpdateAvailable.value,
+        mcpUpdateAvailable: badge.mcpUpdateAvailable.value || updates.mcpUpdateAvailable.value,
+        pluginUpdateCount: updates.pluginUpdateCount.value,
+        componentUpdatesRunning: updates.updating.value,
+      }),
+    ).toBe(false);
   });
 
   it("skips blocked agent updates while allowing other component updates", async () => {

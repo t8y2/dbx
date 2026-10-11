@@ -1,8 +1,11 @@
 name: Pull Request Labels
 
 on:
-  pull_request_target:
-    types: [opened, edited, synchronize, reopened, ready_for_review]
+  # Temporarily disabled (2026-10-10): informational labels only, no
+  # mechanical consumers, fires on every PR event. Uncomment to re-enable.
+  # pull_request_target:
+  #   types: [opened, edited, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
 
 concurrency:
   group: pull-request-labels-${{ github.event.pull_request.number }}

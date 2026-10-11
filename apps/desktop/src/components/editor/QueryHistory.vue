@@ -926,6 +926,8 @@ onBeforeUnmount(() => {
 
 .history-filter-scroll--scrollable {
   overflow-x: auto;
+  /* Keep the search row in place when scrollbar space changes. */
+  min-height: calc(2rem + 12px);
   padding-bottom: 2px;
   scrollbar-color: color-mix(in oklab, var(--muted-foreground) 45%, transparent) transparent;
   scrollbar-width: thin;

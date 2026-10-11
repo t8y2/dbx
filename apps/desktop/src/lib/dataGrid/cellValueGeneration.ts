@@ -1,6 +1,6 @@
 import { uuid } from "@/lib/common/utils";
 
-export type CellValueGenerationKind = "empty" | "null" | "datetime" | "date" | "uuid" | "uuid-v7" | "increment" | "snowflake";
+export type CellValueGenerationKind = "empty" | "null" | "datetime" | "datetime-ms" | "date" | "uuid" | "uuid-v7" | "increment" | "snowflake";
 
 export interface SnowflakeIdGenerator {
   next(nowMs?: number): string;
@@ -57,6 +57,7 @@ export function generateCellValues(
     if (kind === "null") return null;
     if (kind === "empty") return "";
     if (kind === "datetime") return localDateTimeText(now);
+    if (kind === "datetime-ms") return localDateTimeMillisecondText(now);
     if (kind === "date") return localDateText(now);
     if (kind === "uuid") return uuidFactory();
     if (kind === "uuid-v7") {
@@ -76,6 +77,14 @@ function padDatePart(value: number): string {
 
 function localDateTimeText(date: Date): string {
   return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())} ${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}:${padDatePart(date.getSeconds())}`;
+}
+
+/**
+ * 带毫秒的本地日期时间文本（issue #11602），例如 2026-07-16 09:08:07.123。
+ * 毫秒固定补足 3 位，避免 7 毫秒被写成 .7 而与存量数据的 3 位格式不一致。
+ */
+function localDateTimeMillisecondText(date: Date): string {
+  return `${localDateTimeText(date)}.${String(date.getMilliseconds()).padStart(3, "0")}`;
 }
 
 function localDateText(date: Date): string {

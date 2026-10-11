@@ -4,6 +4,42 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { goAgents, integrationCases, rustAgents, rustGroups } from "./ci-config.mjs";
 
+const win7InfrastructureFiles = new Set([
+  ".github/scripts/assert-win7-pe-compat.ps1",
+  ".github/scripts/assert-webview2-win7-loader.ps1",
+  ".github/scripts/assert-win7-installer-content.ps1",
+  ".github/scripts/assert-webview2-win7-runtime.ps1",
+  ".github/scripts/prepare-webview2-win7-loader.ps1",
+  ".github/scripts/prepare-webview2-win7-runtime.ps1",
+  ".github/workflows/ci.yml",
+  ".github/workflows/release.yml",
+  "src-tauri/tauri.webview2-win7-fixed.conf.json",
+  "src-tauri/build.rs",
+]);
+const win7InfrastructurePrefixes = [
+  ".cargo/",
+  "rust-toolchain",
+  ".github/fixtures/win7-",
+  "src-tauri/windows/nsis/",
+  "src-tauri/src/commands/update",
+  "crates/dbx-core/src/host/update",
+  "crates/dbx-platform/",
+  "vendor/",
+];
+
+function expandAffectedPackages(packages, members, affected) {
+  let expanded;
+  do {
+    expanded = false;
+    for (const pkg of packages) {
+      if (!affected.has(pkg.name) && pkg.dependencies.some((dependency) => members.has(dependency.name) && affected.has(dependency.name))) {
+        affected.add(pkg.name);
+        expanded = true;
+      }
+    }
+  } while (expanded);
+}
+
 export function changedPaths(base, root) {
   if (!base || /^0+$/.test(base)) return null;
   execFileSync("git", ["rev-parse", "--verify", `${base}^{commit}`], { cwd: root, stdio: "pipe" });
@@ -24,6 +60,12 @@ export function knownJavaDrivers(root, nativeDrivers) {
   } catch {
     return [];
   }
+}
+
+export function cargoMetadata(root, execute = execFileSync) {
+  return JSON.parse(execute("cargo", ["+stable", "metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"], {
+    cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+  }));
 }
 
 export function planCi({ files, metadata, root, eventName = "pull_request", rustChanged = false, agentsChanged = false, javaDrivers }) {
@@ -48,17 +90,23 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
   const unknownMember = packages.some((pkg) => !knownGroups.has(pkg.name));
   const rust = rustChanged || sharedRust || unknownRust || affected.size > 0 || files.includes("scripts/core-architecture.test.mjs");
   const full = rust && (eventName !== "pull_request" || sharedRust || unknownRust || unknownMember || affected.size === 0);
+  const win7Affected = new Set(affected);
+  expandAffectedPackages(packages, members, win7Affected);
   if (full) for (const pkg of packages) affected.add(pkg.name);
-  let expanded;
-  do {
-    expanded = false;
-    for (const pkg of packages) {
-      if (!affected.has(pkg.name) && pkg.dependencies.some((dependency) => members.has(dependency.name) && affected.has(dependency.name))) {
-        affected.add(pkg.name);
-        expanded = true;
-      }
-    }
-  } while (expanded);
+  expandAffectedPackages(packages, members, affected);
+  const win7InfrastructureChanged = unknownDiff || files.some((file) => win7InfrastructureFiles.has(file)
+    || win7InfrastructurePrefixes.some((prefix) => file.startsWith(prefix))
+    || /^src-tauri\/tauri.*\.json$/.test(file));
+  const win7DependencyChanged = files.includes("Cargo.toml") || files.includes("Cargo.lock")
+    || files.some((file) => /^(?:crates\/[^/]+|src-tauri)\/Cargo\.toml$/.test(file));
+  const windowsWin7Reasons = {
+    infrastructure: win7InfrastructureChanged,
+    dependency_input: win7DependencyChanged,
+    desktop_dependency: win7Affected.has("dbx"),
+    unknown_rust: unknownRust,
+    unknown_member: rust && unknownMember,
+  };
+  const windowsWin7Candidate = Object.values(windowsWin7Reasons).some(Boolean);
   const rustMatrix = !rust ? [] : full ? [{ group: "workspace" }] : Object.entries(rustGroups)
     .filter(([, names]) => names.some((name) => affected.has(name)))
     .map(([group]) => ({ group }));
@@ -84,6 +132,7 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
   const java = allAgents || javaDriverChanges;
   const agents = agentsChanged || sharedAgents || nativeChanges.size > 0 || javaDriverChanges;
   return {
+    contributor_snapshot_only: files.length > 0 && files.every((file) => file === "docs/data/contributors.json"),
     rust, rust_full: full, rust_matrix: { include: rustMatrix }, rust_groups_known: !unknownMember,
     affected_packages: [...affected].sort(),
     agents, agent_java: java, agent_go: { include: goMatrix }, agent_rust: { include: nativeRustMatrix },
@@ -91,15 +140,18 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
     agent_rust_changed: nativeRustMatrix.length > 0, agent_integration_changed: liveMatrix.length > 0,
     duckdb_changed: nativeChanges.has("duckdb"),
     duckdb_windows: sharedRust || files.some((file) => file.startsWith("agents/drivers/duckdb/")),
+    windows_standard: windowsWin7Candidate,
+    windows_win7_bundle: win7InfrastructureChanged || win7DependencyChanged || unknownRust || (rust && unknownMember),
+    windows_win7_candidate: windowsWin7Candidate,
+    windows_win7_affected_packages: [...win7Affected].sort(),
+    windows_win7_reasons: windowsWin7Reasons,
     fast: rust || agents || ciChanged,
   };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const root = process.cwd();
-  const metadata = JSON.parse(execFileSync("cargo", ["metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"], {
-    cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
-  }));
+  const metadata = cargoMetadata(root);
   const plan = planCi({
     files: changedPaths(process.env.BASE_SHA, root), metadata, root, eventName: process.env.GITHUB_EVENT_NAME,
     rustChanged: process.env.RUST_CHANGED === "true", agentsChanged: process.env.AGENTS_CHANGED === "true",

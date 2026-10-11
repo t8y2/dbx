@@ -512,3 +512,11 @@ fn xugu_declares_table_import_support() {
 
     assert!(xugu.capabilities.table_import);
 }
+
+#[test]
+fn db2_declares_table_import_support() {
+    let manifest = driver_manifest();
+    let db2 = manifest.drivers.iter().find(|driver| driver.db_type == DatabaseType::Db2).expect("DB2 manifest entry");
+
+    assert!(db2.capabilities.table_import);
+}

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPinia } from "pinia";
 import { DEFAULT_EDITOR_SETTINGS } from "@/stores/settingsStore";
@@ -18,7 +18,16 @@ const hoisted = vi.hoisted(() => ({ shortcuts: {} as Record<string, string> }));
 vi.mock("vue-i18n", async () => {
   const { ref } = await import("vue");
   const locale = ref("en");
-  const t = (key: string) => key;
+  // Interpolate params into the returned string so count assertions can read
+  // them (real vue-i18n would fold them into the message text).
+  const t = (key: string, params?: Record<string, unknown>) => {
+    if (!params) return key;
+    const suffix = Object.keys(params)
+      .sort()
+      .map((name) => `${name}=${String(params[name])}`)
+      .join(" ");
+    return suffix ? `${key} ${suffix}` : key;
+  };
   return {
     createI18n: () => ({ global: { t, locale }, install: () => undefined }),
     useI18n: () => ({ t, locale }),
@@ -154,6 +163,13 @@ const inputFor = (host: HTMLElement, id: string) => shortcutsPane(host).querySel
 
 const rowFor = (host: HTMLElement, id: string) => inputFor(host, id).closest<HTMLElement>(".settings-shortcut-row")!;
 
+const headerFor = (host: HTMLElement, scope: string) =>
+  groupSections(host)
+    .find((section) => section.querySelector("h3")?.textContent?.trim() === `settings.shortcutScope${scope[0].toUpperCase()}${scope.slice(1)}`)!
+    .querySelector<HTMLElement>("header")!;
+
+const contentFor = (host: HTMLElement, scope: string) => shortcutsPane(host).querySelector<HTMLElement>(`#shortcut-scope-content-${scope}`)!;
+
 function button(host: HTMLElement, text: string) {
   return [...host.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent?.trim() === text) ?? null;
 }
@@ -200,6 +216,59 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     for (const row of rendered) {
       expect(row.textContent).not.toContain("settings.shortcutScope");
     }
+  });
+
+  it("collapses and expands a group from its accessible header", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+    const header = headerFor(host, "editor");
+
+    expect(header.getAttribute("role")).toBe("button");
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(header.getAttribute("aria-controls")).toBe("shortcut-scope-content-editor");
+    expect(rowFor(host, "formatSql")).toBeTruthy();
+
+    header.click();
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    expect(contentFor(host, "editor").getAttribute("aria-hidden")).toBe("true");
+    expect(contentFor(host, "editor").hasAttribute("inert")).toBe(true);
+
+    header.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(contentFor(host, "editor").getAttribute("aria-hidden")).toBe("false");
+    expect(contentFor(host, "editor").hasAttribute("inert")).toBe(false);
+    expect(rowFor(host, "formatSql")).toBeTruthy();
+
+    header.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("auto-expands a collapsed group while searching and restores it afterward", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+    const header = headerFor(host, "editor");
+    header.click();
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+
+    const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
+    search.value = "shortcutFormatSql";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(rows(host).length).toBe(1);
+    expect(rowFor(host, "formatSql")).toBeTruthy();
+
+    search.value = "";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    expect(contentFor(host, "editor").getAttribute("aria-hidden")).toBe("true");
+    expect(contentFor(host, "editor").hasAttribute("inert")).toBe(true);
   });
 
   it("treats a same-scope duplicate as blocking: red pills, footer reason and a disabled Apply", async () => {
@@ -290,5 +359,73 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     const positions = rendered.map((scope) => dispatchOrder.indexOf(scope));
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
     expect(positions.every((index) => index >= 0)).toBe(true);
+  });
+
+  it("scopes the amber cross-scope badge to the search results and restores the global count on clear", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+
+    const crossBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-warning/30"]');
+    const conflictBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-destructive/25"]');
+
+    // 未搜索：全局口径（默认键位 6 组跨域同键），且默认无同作用域阻断冲突。
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=6");
+    expect(conflictBadge()).toBeNull();
+
+    const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
+
+    // 搜索只留下 editTableStructure 一行：对方 viewTableDdl 被过滤掉，但冲突
+    // 判定仍基于全局绑定，这组重叠必须继续计入（恰好 1 组）。
+    search.value = "shortcutEditTableStructure";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(rows(host).length).toBe(1);
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=1");
+
+    // 无搜索结果：徽章随空结果隐藏。
+    search.value = "noSuchShortcutZZZ";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(crossBadge()).toBeNull();
+
+    // 清空搜索：恢复全局口径。
+    search.value = "";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=6");
+  });
+
+  it("scopes the red same-scope badge to the search results while the footer gate stays global", async () => {
+    const base = defaults();
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+
+    const conflictBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-destructive/25"]');
+    const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
+
+    // explainSql 与 formatSql 同属 editor 作用域：走真实捕获输入重绑成同键，
+    // 制造一组阻断冲突（草稿被改动后页脚门禁才会出现，与产品语义一致）。
+    rowFor(host, "explainSql").querySelector<HTMLButtonElement>("button")!.click();
+    await flushAsyncUpdates();
+    inputFor(host, "explainSql").dispatchEvent(shortcutKeyEvent(base.formatSql));
+    await flushAsyncUpdates();
+
+    // 全局：冲突映射双向各记一行，2 项冲突（1 组重复）。
+    expect(conflictBadge()!.textContent!.trim()).toBe("settings.shortcutConflictBadge count=2");
+    expect(hasFooterBlockerReason(host)).toBe(true);
+
+    // 搜索只留 formatSql：对方 explainSql 不可见，但冲突真实存在，仍计入。
+    search.value = "shortcutFormatSql";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(conflictBadge()!.textContent!.trim()).toBe("settings.shortcutConflictBadge count=2");
+    expect(hasFooterBlockerReason(host)).toBe(true);
+
+    // 当前结果无冲突：徽章隐藏，但页脚全局门禁不随搜索消失。
+    search.value = "shortcutUndo";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(conflictBadge()).toBeNull();
+    expect(hasFooterBlockerReason(host)).toBe(true);
   });
 });

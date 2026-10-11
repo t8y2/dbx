@@ -41,8 +41,8 @@ async function copy() {
 </script>
 
 <template>
-  <!-- card: 卡片类报错信息面板（单层框架：标题行 + 正文，正文不再嵌套内框） -->
-  <div v-if="variant === 'card'" class="mx-3 my-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 shrink-0 select-text flex flex-col gap-1.5">
+  <!-- card: 通栏报错面板（标题行 + 正文，正文不再嵌套内框；上下与表格区和状态栏直接相接，不加外边距/圆角） -->
+  <div v-if="variant === 'card'" class="border-t border-destructive/30 bg-destructive/10 px-3 py-2 shrink-0 select-text flex flex-col gap-1.5">
     <div class="flex items-center justify-between gap-2">
       <div data-native-clipboard class="flex items-center gap-1.5 font-medium text-xs text-destructive">
         <TriangleAlert class="h-3.5 w-3.5 text-destructive shrink-0" aria-hidden="true" />
@@ -58,7 +58,7 @@ async function copy() {
         </Button>
       </div>
     </div>
-    <div data-native-clipboard class="max-h-40 overflow-y-auto text-xs font-mono leading-relaxed text-destructive break-words whitespace-pre-wrap select-text cursor-text" @mousedown.stop @click.stop>
+    <div data-native-clipboard class="max-h-40 overflow-y-auto text-xs font-mono leading-relaxed text-destructive/80 break-words whitespace-pre-wrap select-text cursor-text" @mousedown.stop @click.stop>
       {{ message }}
     </div>
   </div>

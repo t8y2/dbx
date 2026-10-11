@@ -239,6 +239,20 @@ describe("tableMetaWithoutOptionalDatabaseQualifier — copy extractors (#9326)"
     expect(tableMetaWithoutOptionalDatabaseQualifier({ schema: "public", tableName: "users" }, "postgres", false)).toEqual({ schema: undefined, tableName: "users" });
   });
 
+  it("covers the copy-SQL dialects reported in #11195", () => {
+    // Dameng exposes schemas as databases; a copied INSERT/UPDATE must still be
+    // able to opt into the schema prefix, so the qualifier only drops when the
+    // extractor option is off.
+    const damengMeta = { schema: "SYSDBA", tableName: "PEOPLE" };
+    expect(tableMetaWithoutOptionalDatabaseQualifier(damengMeta, "dameng", false)).toEqual({ schema: undefined, tableName: "PEOPLE" });
+    expect(tableMetaWithoutOptionalDatabaseQualifier(damengMeta, "dameng", true)).toBe(damengMeta);
+    // MySQL family and ClickHouse address tables as database.table.
+    const clickhouseMeta = { database: "analytics", tableName: "events" };
+    expect(tableMetaWithoutOptionalDatabaseQualifier(clickhouseMeta, "clickhouse", false)).toEqual({ database: undefined, tableName: "events" });
+    expect(tableMetaWithoutOptionalDatabaseQualifier(clickhouseMeta, "clickhouse", true)).toBe(clickhouseMeta);
+    expect(tableMetaWithoutOptionalDatabaseQualifier({ database: "appdb", tableName: "people" }, "goldendb", false)).toEqual({ database: undefined, tableName: "people" });
+  });
+
   it("returns undefined tableMeta unchanged", () => {
     expect(tableMetaWithoutOptionalDatabaseQualifier(undefined, "mysql", false)).toBeUndefined();
   });
@@ -272,6 +286,10 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableIdentifierIfNeeded("oracle", "DBX_TEST")).toBe("DBX_TEST");
     expect(quoteTableIdentifierIfNeeded("oracle", "Order")).toBe('"Order"');
     expect(quoteTableIdentifierIfNeeded("oracle", "ORDER")).toBe('"ORDER"');
+    expect(quoteTableIdentifierIfNeeded("oceanbase-oracle", "DBX_TEST")).toBe("DBX_TEST");
+    expect(quoteTableIdentifierIfNeeded("oceanbase-oracle", "Order")).toBe('"Order"');
+    expect(quoteTableIdentifierIfNeeded("oceanbase-oracle", "order_id")).toBe('"order_id"');
+    expect(quoteTableIdentifierIfNeeded("oceanbase-oracle", "ORDER")).toBe('"ORDER"');
     expect(quoteTableIdentifierIfNeeded("dameng", "DBX_TEST")).toBe("DBX_TEST");
     expect(quoteTableIdentifierIfNeeded("dameng", "order detail")).toBe('"order detail"');
     expect(quoteTableIdentifierIfNeeded("postgres", "dbx_test")).toBe("dbx_test");
@@ -322,6 +340,8 @@ describe("quoteTableIdentifier", () => {
     expect(requiresEagerTableMetadataForDataOpen("salesforce")).toBe(true);
     expect(requiresEagerTableMetadataForDataOpen("mysql")).toBe(true);
     expect(requiresEagerTableMetadataForDataOpen("postgres")).toBe(true);
+    expect(requiresEagerTableMetadataForDataOpen("nebula")).toBe(true);
+    expect(requiresEagerTableMetadataForDataOpen("neo4j")).toBe(true);
     // Drivers whose preview works from `SELECT *` keep loading metadata lazily.
     expect(requiresEagerTableMetadataForDataOpen("sqlite")).toBe(false);
     expect(requiresEagerTableMetadataForDataOpen(undefined)).toBe(false);

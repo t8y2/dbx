@@ -9,7 +9,7 @@ export function gateFailures(needs, mode) {
   const flags = ["rust", "agents", "fast", "agent_java", "agent_go_changed", "agent_rust_changed", "agent_integration_changed"];
   if (!flags.every((flag) => typeof plan[flag] === "boolean")) return ["incomplete CI plan"];
   const routedJobs = { frontend: "frontend", packages: "packages", "github-scripts": "github_scripts",
-    "windows-standard-check": "windows_win7_bundle", "windows-win7-bundle": "windows_win7_bundle",
+    "windows-standard-check": "windows_standard", "windows-win7-bundle": "windows_win7_bundle",
     "duckdb-windows-driver": "duckdb_windows", jdbc: "jdbc", "offline-jdbc-release": "offline_jdbc", "nix-packaging": "nix" };
   if (mode === "all" && !Object.values(routedJobs).every((output) => ["true", "false"].includes(needs.changes.outputs[output]))) {
     return ["missing or invalid job selection outputs"];

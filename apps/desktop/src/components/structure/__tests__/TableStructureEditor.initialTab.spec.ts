@@ -347,7 +347,7 @@ beforeEach(() => {
   mocks.executeQuery.mockResolvedValue({ columns: [], rows: [] });
   mocks.executeBatch.mockResolvedValue({ rowsAffected: 0 });
   mocks.listDataTypes.mockResolvedValue([]);
-  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
   mocks.getTableOwner.mockResolvedValue("");
   mocks.buildTableOwnerChangeSql.mockResolvedValue({ statements: [], warnings: [] });
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
@@ -400,5 +400,42 @@ describe("TableStructureEditor initial tab", () => {
     const root = await mountStructureEditor({ initialTab: "foreignKeys", initialTabRequestId: 1 });
 
     expect(root.textContent).toContain("structureEditor.addForeignKey");
+  });
+
+  it.each(["triggers", "ddl", "foreignKeys"])("restores the fields horizontal scrollbar after visiting %s", async (tab) => {
+    const scrollWidthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollWidth");
+    const clientWidthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+    try {
+      Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+        configurable: true,
+        get() {
+          if (this.classList?.contains("structure-column-virtual-scroller")) return 1200;
+          return scrollWidthDescriptor?.get?.call(this) ?? 0;
+        },
+      });
+      Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+        configurable: true,
+        get() {
+          if (this.classList?.contains("structure-column-virtual-scroller")) return 400;
+          return clientWidthDescriptor?.get?.call(this) ?? 0;
+        },
+      });
+
+      const root = await mountStructureEditor();
+      await vi.waitFor(() => expect(root.querySelector(".structure-horizontal-scrollbar")).not.toBeNull());
+
+      root.querySelector<HTMLButtonElement>(`[data-tab-trigger="${tab}"]`)!.click();
+      await settle();
+      expect(root.querySelector(".structure-horizontal-scrollbar")).toBeNull();
+
+      root.querySelector<HTMLButtonElement>('[data-tab-trigger="columns"]')?.click();
+      await settle();
+      expect(root.querySelector(".structure-horizontal-scrollbar")).not.toBeNull();
+    } finally {
+      if (scrollWidthDescriptor) Object.defineProperty(HTMLElement.prototype, "scrollWidth", scrollWidthDescriptor);
+      else delete (HTMLElement.prototype as { scrollWidth?: number }).scrollWidth;
+      if (clientWidthDescriptor) Object.defineProperty(HTMLElement.prototype, "clientWidth", clientWidthDescriptor);
+      else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+    }
   });
 });

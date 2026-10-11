@@ -1,4 +1,5 @@
 import type { DatabaseType } from "@/types/database";
+import { collectSqlDatabaseLinkStarts } from "@/lib/sql/sqlDatabaseLinks";
 
 export type SqlParameterValueKind = "string" | "number" | "boolean" | "null" | "raw";
 
@@ -324,7 +325,7 @@ function decodeMyBatisXmlComparisonEntities(sql: string, databaseType?: Database
     const next = sql[i + 1];
 
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, databaseType);
       continue;
     }
     if (ch === "[") {
@@ -378,9 +379,10 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   const occurrences: ParameterOccurrence[] = [];
   const databaseType = options?.databaseType;
   const nativeSqlServerParameters = collectNativeSqlServerParameters(sql, databaseType);
-  const supportsNamedParameters = databaseType !== "saphana";
+  const supportsNamedParameters = databaseType !== "saphana" && databaseType !== "neo4j" && databaseType !== "nebula";
   const enabledSyntaxes = options?.enabledSyntaxes ? new Set(options.enabledSyntaxes) : null;
   const isSyntaxEnabled = (syntax: SqlParameterSyntax) => !enabledSyntaxes || enabledSyntaxes.has(syntax);
+  const databaseLinkStarts = isSyntaxEnabled("sqlserver") ? collectSqlDatabaseLinkStarts(sql, databaseType) : new Set<number>();
   const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql, databaseType) : new Set<number>();
   const duckDbStructFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") && databaseType === "duckdb" ? collectDuckDbStructFieldSeparators(sql) : new Set<number>();
   const triggerPseudoRecordFieldStarts = supportsNamedParameters && isSyntaxEnabled("named") ? collectTriggerPseudoRecordFieldStarts(sql, databaseType) : new Set<number>();
@@ -419,7 +421,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         i = foreach.end;
         continue;
       }
-      const where = readMyBatisWhereAt(sql, i);
+      const where = readMyBatisWhereAt(sql, i, databaseType);
       if (where) {
         occurrences.push({
           key: "",
@@ -443,7 +445,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         i = quoted.end;
         continue;
       }
-      const quotedEnd = skipQuoted(sql, i, ch);
+      const quotedEnd = skipQuoted(sql, i, ch, databaseType);
       // Double quotes can delimit identifiers, so only ordinary single-quoted
       // values opt into embedded interpolation.
       if (ch === "'" && !hasSqlStringLiteralPrefix(sql, i)) {
@@ -541,7 +543,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     if (ch === "@" && isSyntaxEnabled("sqlserver")) {
       const name = readParameterName(sql, i + 1);
-      if (name && next !== "@" && sql[i - 1] !== "@" && !isOracleDatabaseLinkMarker(sql, i, options?.databaseType) && !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
+      if (name && next !== "@" && sql[i - 1] !== "@" && !databaseLinkStarts.has(i) && !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
         occurrences.push({
           key: name,
           name,
@@ -606,12 +608,12 @@ function readMyBatisForeachAt(sql: string, start: number, databaseType?: Databas
   };
 }
 
-function readMyBatisWhereAt(sql: string, start: number): { body: string; end: number } | null {
+function readMyBatisWhereAt(sql: string, start: number, databaseType?: DatabaseType): { body: string; end: number } | null {
   if (!/^<where(?:\s|>)/i.test(sql.slice(start))) return null;
   const openingEnd = findXmlTagEnd(sql, start);
   if (openingEnd === -1) return null;
 
-  const close = findMatchingXmlTagClose(sql, openingEnd + 1, "where");
+  const close = findMatchingXmlTagClose(sql, openingEnd + 1, "where", databaseType);
   if (!close) return null;
   return { body: sql.slice(openingEnd + 1, close.start), end: close.end };
 }
@@ -667,7 +669,7 @@ function findMatchingXmlTagClose(sql: string, start: number, tagName: string, da
     const next = sql[i + 1];
 
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, databaseType);
       continue;
     }
     if (ch === "[") {
@@ -722,12 +724,6 @@ function isDuckDbCompactPrefixAliasSeparator(sql: string, index: number, databas
   if (databaseType !== "duckdb") return false;
   const previous = sql[index - 1] ?? "";
   return PARAMETER_NAME_CHAR_RE.test(previous) || previous === '"';
-}
-
-function isOracleDatabaseLinkMarker(sql: string, index: number, databaseType: DatabaseType | undefined): boolean {
-  if (databaseType !== "oracle" || index === 0) return false;
-  const previous = sql[index - 1];
-  return PARAMETER_NAME_CHAR_RE.test(previous) || previous === "$" || previous === "#" || previous === '"';
 }
 
 function isPostgresQuestionMarkOperator(sql: string, index: number, databaseType: DatabaseType | undefined): boolean {
@@ -872,7 +868,7 @@ function readDuckDbStructFieldSeparator(sql: string, start: number): number | nu
   return sql[separator] === ":" ? separator : null;
 }
 
-// Oracle and Dameng expose trigger rows through colon-prefixed pseudo-records,
+// Oracle, OceanBase Oracle and Dameng expose trigger rows through colon-prefixed pseudo-records,
 // unlike PostgreSQL's unprefixed NEW/OLD records. Keep ordinary :name binds enabled.
 function collectTriggerPseudoRecordFieldStarts(sql: string, databaseType?: DatabaseType): Set<number> {
   const starts = new Set<number>();
@@ -895,7 +891,7 @@ function collectTriggerPseudoRecordFieldStarts(sql: string, databaseType?: Datab
     const ch = sql[i];
     const next = sql[i + 1];
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, databaseType);
       continue;
     }
     if (ch === "[") {
@@ -955,7 +951,7 @@ function collectTriggerPseudoRecordFieldStarts(sql: string, databaseType?: Datab
 }
 
 function triggerPseudoRecordDefaults(databaseType?: DatabaseType): readonly TriggerPseudoRecordName[] | null {
-  if (databaseType === "oracle") return ["new", "old", "parent"];
+  if (databaseType === "oracle" || databaseType === "oceanbase-oracle") return ["new", "old", "parent"];
   if (databaseType === "dameng") return ["new", "old", "eventinfo"];
   return null;
 }
@@ -1702,10 +1698,29 @@ function hasSqlStringLiteralPrefix(sql: string, quoteStart: number): boolean {
   return PARAMETER_NAME_CHAR_RE.test(sql[quoteStart - 1]);
 }
 
-function skipQuoted(sql: string, start: number, quote: string): number {
+function skipOracleAlternativeQuoted(sql: string, quoteStart: number): number | null {
+  if (sql[quoteStart - 1]?.toLowerCase() !== "q") return null;
+  const prefixStart = sql[quoteStart - 2]?.toLowerCase() === "n" ? quoteStart - 2 : quoteStart - 1;
+  const previous = sql[prefixStart - 1] ?? "";
+  if (PARAMETER_NAME_CHAR_RE.test(previous) || previous === "$" || previous === "#") return null;
+
+  const openerCodePoint = sql.codePointAt(quoteStart + 1);
+  if (openerCodePoint === undefined) return null;
+  const opener = String.fromCodePoint(openerCodePoint);
+  if (/\s/.test(opener)) return null;
+  const closer = ({ "[": "]", "{": "}", "(": ")", "<": ">" } as Record<string, string>)[opener] ?? opener;
+  const end = sql.indexOf(closer + "'", quoteStart + 1 + opener.length);
+  return end === -1 ? sql.length : end + closer.length + 1;
+}
+
+function skipQuoted(sql: string, start: number, quote: string, databaseType?: DatabaseType): number {
+  if (quote === "'" && (databaseType === "oracle" || databaseType === "oceanbase-oracle")) {
+    const end = skipOracleAlternativeQuoted(sql, start);
+    if (end !== null) return end;
+  }
   let i = start + 1;
   while (i < sql.length) {
-    if (sql[i] === "\\" && quote === "'" && i + 1 < sql.length) {
+    if (sql[i] === "\\" && quote === "'" && databaseType !== "oracle" && databaseType !== "oceanbase-oracle" && i + 1 < sql.length) {
       i += 2;
       continue;
     }

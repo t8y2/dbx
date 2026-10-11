@@ -102,7 +102,7 @@ export function useTauriEvents(deps: {
         track(
           listen("mcp-reload-connections", async () => {
             try {
-              await connectionStore.initFromDisk();
+              await connectionStore.reloadFromDisk();
             } catch (e) {
               console.error("[DBX] mcp-reload-connections error:", e);
             }

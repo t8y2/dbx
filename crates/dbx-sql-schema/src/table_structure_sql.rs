@@ -9,6 +9,7 @@ mod indexes;
 mod mysql_engine;
 mod owner;
 mod partitions;
+mod transwarp;
 mod triggers;
 mod types;
 mod util;

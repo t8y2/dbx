@@ -45,8 +45,12 @@ fn home_directory() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
 }
 
+fn standalone_bin_directory(home: &Path) -> PathBuf {
+    home.join(".dbx").join("bin")
+}
+
 fn discover_standalone() -> Option<NativeInstallation> {
-    discover(&home_directory()?.join(".dbx/bin"))
+    discover(&standalone_bin_directory(&home_directory()?))
 }
 
 fn parse_version(value: &str) -> Option<String> {
@@ -191,7 +195,7 @@ impl NativeInstallation {
 
     fn uninstall_standalone(&self) -> Result<String, String> {
         let expected = home_directory()
-            .map(|home| home.join(".dbx/bin").join(if cfg!(windows) { "dbx-mcp.exe" } else { "dbx-mcp" }))
+            .map(|home| standalone_bin_directory(&home).join(if cfg!(windows) { "dbx-mcp.exe" } else { "dbx-mcp" }))
             .ok_or_else(|| "Unable to resolve the user home directory.".to_string())?;
         if self.binary != expected {
             return Err(format!("Refusing to remove unexpected native MCP path: {}", self.binary.display()));
@@ -309,6 +313,21 @@ fn require_success(output: Output, action: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_bin_directory_uses_separate_path_components() {
+        let home = Path::new("/home/example");
+        assert_eq!(standalone_bin_directory(home), home.join(".dbx").join("bin"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn standalone_bin_directory_uses_windows_separators() {
+        assert_eq!(
+            standalone_bin_directory(Path::new(r"C:\Users\86139")).to_string_lossy(),
+            r"C:\Users\86139\.dbx\bin"
+        );
+    }
 
     #[test]
     fn parses_version_output_and_rejects_marker_commands() {

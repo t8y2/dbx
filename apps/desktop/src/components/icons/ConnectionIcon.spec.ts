@@ -66,6 +66,11 @@ describe("ConnectionIcon", () => {
     expect(listPlugins).not.toHaveBeenCalled();
   });
 
+  it("shows the Inceptor logo for a saved Transwarp connection", async () => {
+    const container = await mountIcon({ ...connection, db_type: "transwarp", driver_profile: "transwarp-inceptor" });
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("/icons/database/transwarp-inceptor.png");
+  });
+
   it("renders a safe fallback for missing connection metadata", async () => {
     const container = await mountIcon();
     expect(container.querySelector("img")?.getAttribute("src")).toBe("/icons/database/postgres.svg");

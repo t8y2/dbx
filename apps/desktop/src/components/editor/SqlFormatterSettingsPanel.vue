@@ -20,9 +20,11 @@ import {
   serializeSqlFormatterConfig,
   syncSqlFormatterConfigDraft,
   type SqlFormatterCase,
+  type SqlFormatterCommaPosition,
   type SqlFormatterExpressionWidth,
   type SqlFormatterFromClauseLayout,
   type SqlFormatterIndentStyle,
+  type SqlFormatterLayoutStyle,
   type SqlFormatterLinesBetweenQueries,
   type SqlFormatterLogicalOperatorNewline,
   type SqlFormatterOptionSettings,
@@ -83,6 +85,11 @@ const logicalOperatorOptions: { value: SqlFormatterLogicalOperatorNewline; label
   { value: "none", labelKey: "settings.sqlFormatterLogicalSameLine" },
 ];
 
+const commaPositionOptions: { value: SqlFormatterCommaPosition; labelKey: string }[] = [
+  { value: "after", labelKey: "settings.sqlFormatterCommaPositionAfter" },
+  { value: "before", labelKey: "settings.sqlFormatterCommaPositionBefore" },
+];
+
 const fromClauseLayoutOptions: { value: SqlFormatterFromClauseLayout; labelKey: string }[] = [
   { value: "newLine", labelKey: "settings.sqlFormatterFromNewLine" },
   { value: "sameLine", labelKey: "settings.sqlFormatterFromSameLine" },
@@ -94,10 +101,16 @@ const indentStyleOptions: { value: SqlFormatterIndentStyle; labelKey: string }[]
   { value: "tabularRight", labelKey: "settings.sqlFormatterIndentStyleTabularRight" },
 ];
 
+const layoutStyleOptions: { value: SqlFormatterLayoutStyle; labelKey: string }[] = [
+  { value: "dbx", labelKey: "settings.sqlFormatterLayoutStyleDbx" },
+  { value: "classic", labelKey: "settings.sqlFormatterLayoutStyleClassic" },
+];
+
 const tabWidthOptions: SqlFormatterTabWidth[] = [2, 4];
 const expressionWidthOptions: SqlFormatterExpressionWidth[] = [50, 80, 120];
 const linesBetweenQueriesOptions: SqlFormatterLinesBetweenQueries[] = [0, 1, 2];
 const sqlFormatterOptionLabelKeys: Record<keyof SqlFormatterOptionSettings, string> = {
+  layoutStyle: "settings.sqlFormatterLayoutStyle",
   keywordCase: "settings.sqlFormatterKeywordCase",
   dataTypeCase: "settings.sqlFormatterDataTypeCase",
   functionCase: "settings.sqlFormatterFunctionCase",
@@ -106,6 +119,7 @@ const sqlFormatterOptionLabelKeys: Record<keyof SqlFormatterOptionSettings, stri
   useTabs: "settings.sqlFormatterIndent",
   tabWidth: "settings.sqlFormatterTabWidth",
   logicalOperatorNewline: "settings.sqlFormatterLogicalOperatorNewline",
+  commaPosition: "settings.sqlFormatterCommaPosition",
   fromClauseLayout: "settings.sqlFormatterFromClauseLayout",
   expressionWidth: "settings.sqlFormatterExpressionWidth",
   linesBetweenQueries: "settings.sqlFormatterLinesBetweenQueries",
@@ -194,12 +208,20 @@ function onIndentStyle(value: any) {
   if (value === "standard" || value === "tabularLeft" || value === "tabularRight") updateOption("indentStyle", value);
 }
 
+function onLayoutStyle(value: any) {
+  if (value === "dbx" || value === "classic") updateOption("layoutStyle", value);
+}
+
 function onLogicalOperatorNewline(value: any) {
   if (value === "before" || value === "after" || value === "none") updateOption("logicalOperatorNewline", value);
 }
 
 function onFromClauseLayout(value: any) {
   if (value === "newLine" || value === "sameLine") updateOption("fromClauseLayout", value);
+}
+
+function onCommaPosition(value: any) {
+  if (value === "after" || value === "before") updateOption("commaPosition", value);
 }
 
 function onTabWidth(value: any) {
@@ -567,7 +589,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_10rem_12rem]">
+        <div class="grid gap-4 md:grid-cols-4">
           <div class="space-y-2">
             <Label>{{ t("settings.sqlFormatterIndent") }}</Label>
             <div class="grid grid-cols-2 gap-2">
@@ -607,6 +629,20 @@ onBeforeUnmount(() => {
               </SelectContent>
             </Select>
           </div>
+
+          <div class="space-y-2">
+            <Label>{{ t("settings.sqlFormatterLayoutStyle") }}</Label>
+            <Select :model-value="settings.layoutStyle" @update:model-value="onLayoutStyle">
+              <SelectTrigger class="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="option in layoutStyleOptions" :key="option.value" :value="option.value">
+                  {{ t(option.labelKey) }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
 
         <div class="grid gap-4 md:grid-cols-3">
@@ -638,6 +674,22 @@ onBeforeUnmount(() => {
             </Select>
           </div>
 
+          <div class="space-y-2">
+            <Label>{{ t("settings.sqlFormatterCommaPosition") }}</Label>
+            <Select :model-value="settings.commaPosition" @update:model-value="onCommaPosition">
+              <SelectTrigger class="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="option in commaPositionOptions" :key="option.value" :value="option.value">
+                  {{ t(option.labelKey) }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        <div class="grid gap-4 md:grid-cols-2">
           <div class="space-y-2">
             <Label>{{ t("settings.sqlFormatterExpressionWidth") }}</Label>
             <Select :model-value="String(settings.expressionWidth)" @update:model-value="onExpressionWidth">

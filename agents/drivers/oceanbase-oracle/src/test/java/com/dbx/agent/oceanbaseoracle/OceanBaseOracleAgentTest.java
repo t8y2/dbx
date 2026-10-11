@@ -147,7 +147,8 @@ class OceanBaseOracleAgentTest {
         List<String> auditSql = new ArrayList<>();
         Connection auditConnection = auditTimingConnection(1, 2, false, auditSql, new ArrayList<>(), auditLimits);
         int[] row = {-1};
-        int[] queryLimit = {0}; // JDBC's default, independent of the client-side cap.
+        int[] queryLimit = {0};
+        int[] queryFetchSize = {0};
         boolean[] queryStarted = {false};
         boolean[] resultClosed = {false};
         boolean[] statementClosed = {false};
@@ -167,6 +168,7 @@ class OceanBaseOracleAgentTest {
         });
         Statement statement = proxy(Statement.class, (method, args) -> {
             if ("setMaxRows".equals(method.getName())) queryLimit[0] = (Integer) args[0];
+            if ("setFetchSize".equals(method.getName())) queryFetchSize[0] = (Integer) args[0];
             if ("execute".equals(method.getName())) {
                 queryStarted[0] = !String.valueOf(args[0]).startsWith("ALTER SESSION");
                 statementClosed[0] = false;
@@ -198,7 +200,8 @@ class OceanBaseOracleAgentTest {
         Assertions.assertFalse(result.getHas_more());
         Assertions.assertEquals(truncated, result.getTruncated());
         Assertions.assertEquals(truncated ? List.of(List.of(1)) : List.of(List.of(1), List.of(2)), rows);
-        Assertions.assertEquals(0, queryLimit[0], "the paging cap must not change the JDBC statement limit");
+        Assertions.assertEquals(maxRows + 1, queryLimit[0]);
+        Assertions.assertTrue(queryFetchSize[0] > 0);
         Assertions.assertTrue(auditSql.isEmpty(), "completed queries must not read trace or audit records");
         Assertions.assertTrue(auditLimits.isEmpty());
         Assertions.assertNull(result.getServer_execute_time_us());
@@ -427,9 +430,9 @@ class OceanBaseOracleAgentTest {
         List<String> sql = new ArrayList<>();
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
         TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
-            new String[]{"OBJECT_NAME", "OBJECT_TYPE"},
+            new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS"},
             new Object[][]{
-                {"FORMAT_USER", "FUNCTION"}
+                {"FORMAT_USER", "FUNCTION", null}
             }
         )));
 
@@ -783,6 +786,28 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void getColumnsPreservesCharacterUnitsAndNegativeScale() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, columnResultSet(new Object[][]{
+            {"VB", "VARCHAR2", "Y", null, null, 8, 8, null, null, 0, "B"},
+            {"VC", "VARCHAR2", "Y", null, null, 32, 8, null, null, 0, "C"},
+            {"NC", "NVARCHAR2", "Y", null, null, 32, 8, null, null, 0, "C"},
+            {"CB", "CHAR", "Y", null, null, 12, 4, null, null, 0, "B"},
+            {"CC", "CHAR", "Y", null, null, 32, 8, null, null, 0, "C"},
+            {"NR", "NUMBER", "Y", 10, -2, 22, 0, null, null, 0, null},
+            {"NZ", "NUMBER", "Y", 10, 0, 22, 0, null, null, 0, null},
+            {"NP", "NUMBER", "Y", 10, 2, 22, 0, null, null, 0, null},
+            {"NU", "NUMBER", "Y", null, null, 22, 0, null, null, 0, null},
+            {"VU", "VARCHAR2", "Y", null, null, 32, 8, null, null, 0, null}
+        })));
+        List<ColumnInfo> columns = agent.getColumns("APP", "USERS");
+        Assertions.assertEquals(List.of("VARCHAR2(8 BYTE)", "VARCHAR2(8 CHAR)", "NVARCHAR2(8)", "CHAR(12 BYTE)", "CHAR(8 CHAR)", "NUMBER(10,-2)", "NUMBER(10)", "NUMBER(10,2)", "NUMBER", "VARCHAR2(8)"),
+            columns.stream().map(ColumnInfo::getData_type).toList());
+        Assertions.assertTrue(sql.get(0).contains("c.CHAR_USED"));
+    }
+
+    @Test
     void getColumnsResolvesTheCurrentSchemaWhenSchemaIsEmpty() {
         List<String> sql = new ArrayList<>();
         List<String> params = new ArrayList<>();
@@ -1051,9 +1076,10 @@ class OceanBaseOracleAgentTest {
                 "CHAR_LENGTH",
                 "DATA_DEFAULT",
                 "COMMENTS",
-                "IS_PK"
+                "IS_PK",
+                "CHAR_USED"
             },
-            rows
+            java.util.Arrays.stream(rows).map(row -> java.util.Arrays.copyOf(row, 11)).toArray(Object[][]::new)
         );
     }
 

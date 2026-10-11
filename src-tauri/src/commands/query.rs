@@ -9,6 +9,17 @@ use dbx_core::models::connection::DatabaseType;
 use dbx_core::query_cancel::RunningTaskMetadata;
 use dbx_core::sql::split_sql_statements;
 
+fn query_messages_callback(
+    app: &AppHandle,
+    execution_id: Option<&str>,
+) -> Option<dbx_core::query::query_messages::QueryMessagesCallback> {
+    let execution_id = execution_id?.to_string();
+    let app = app.clone();
+    Some(Arc::new(move |messages| {
+        let _ = app.emit("query-messages", serde_json::json!({ "executionId": execution_id, "messages": messages }));
+    }))
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ExecuteMultiProgress {
@@ -30,9 +41,23 @@ pub enum ManualTransactionCommandError {
     Legacy(String),
 }
 
+fn manual_transaction_command_error(error: String) -> ManualTransactionCommandError {
+    if let Some(error) = dbx_core::query::sqlserver_manual_transaction::backend_error(&error) {
+        return ManualTransactionCommandError::Structured(Box::new(error));
+    }
+    if dbx_core::query::is_manual_transaction_session_expired_error(&error) {
+        ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired(
+            dbx_core::query::MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS,
+        )))
+    } else {
+        ManualTransactionCommandError::Legacy(error)
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_query(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
@@ -58,26 +83,30 @@ pub async fn execute_query(
     });
     let cancel_token = registered_query.as_ref().map(|query| query.token());
 
-    let result = dbx_core::query::execute_sql_statement_with_options_typed(
-        &state,
-        &connection_id,
-        &database,
-        &sql,
-        schema.as_deref(),
-        cancel_token,
-        dbx_core::query::QueryExecutionOptions {
-            max_rows,
-            fetch_size,
-            page_size,
-            row_offset,
-            catalog,
-            result_session_id,
-            client_session_id,
-            timeout_secs,
-            execution_id,
-            execution_mode: execution_mode.unwrap_or_default(),
-            ..Default::default()
-        },
+    let messages = query_messages_callback(&app, execution_id.as_deref());
+    let result = dbx_core::query::query_messages::with_query_messages(
+        messages,
+        dbx_core::query::execute_sql_statement_with_options_typed(
+            &state,
+            &connection_id,
+            &database,
+            &sql,
+            schema.as_deref(),
+            cancel_token,
+            dbx_core::query::QueryExecutionOptions {
+                max_rows,
+                fetch_size,
+                page_size,
+                row_offset,
+                catalog,
+                result_session_id,
+                client_session_id,
+                timeout_secs,
+                execution_id,
+                execution_mode: execution_mode.unwrap_or_default(),
+                ..Default::default()
+            },
+        ),
     )
     .await;
 
@@ -233,36 +262,40 @@ pub async fn execute_multi(
         schema
     );
 
-    let result = dbx_core::query::batch_progress::with_coalesced_execute_multi_progress(progress, |progress| {
-        dbx_core::query::execute_multi_core_with_options_for_client_and_progress_typed(
-            &state,
-            &connection_id,
-            &database,
-            &sql,
-            schema.as_deref(),
-            cancel_token,
-            dbx_core::query::QueryExecutionOptions {
-                max_rows,
-                fetch_size,
-                page_size,
-                row_offset,
-                max_result_bytes,
-                result_key_columns: result_key_columns.unwrap_or_default(),
-                table_data_preview: table_data_preview.unwrap_or(false),
-                catalog,
-                result_session_id,
-                client_session_id,
-                timeout_secs,
-                await_cancel_completion: false,
-                execution_id,
-                use_transaction,
-                continue_on_error: continue_on_error.unwrap_or(false),
-                execution_mode: execution_mode.unwrap_or_default(),
-                preserve_explicit_transaction: preserve_explicit_transaction.unwrap_or(false),
-            },
-            progress,
-        )
-    })
+    let messages = query_messages_callback(&app, execution_id.as_deref());
+    let result = dbx_core::query::query_messages::with_query_messages(
+        messages,
+        dbx_core::query::batch_progress::with_coalesced_execute_multi_progress(progress, |progress| {
+            dbx_core::query::execute_multi_core_with_options_for_client_and_progress_typed(
+                &state,
+                &connection_id,
+                &database,
+                &sql,
+                schema.as_deref(),
+                cancel_token,
+                dbx_core::query::QueryExecutionOptions {
+                    max_rows,
+                    fetch_size,
+                    page_size,
+                    row_offset,
+                    max_result_bytes,
+                    result_key_columns: result_key_columns.unwrap_or_default(),
+                    table_data_preview: table_data_preview.unwrap_or(false),
+                    catalog,
+                    result_session_id,
+                    client_session_id,
+                    timeout_secs,
+                    await_cancel_completion: false,
+                    execution_id,
+                    use_transaction,
+                    continue_on_error: continue_on_error.unwrap_or(false),
+                    execution_mode: execution_mode.unwrap_or_default(),
+                    preserve_explicit_transaction: preserve_explicit_transaction.unwrap_or(false),
+                },
+                progress,
+            )
+        }),
+    )
     .await;
     match &result {
         Ok(results) => log::info!(
@@ -462,13 +495,16 @@ pub async fn begin_manual_transaction(
     database: String,
     schema: Option<String>,
     catalog: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, ManualTransactionCommandError> {
     dbx_core::query::begin_manual_transaction(&state, &connection_id, &database, schema.as_deref(), catalog.as_deref())
         .await
+        .map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_in_manual_transaction(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
     sql: String,
@@ -479,47 +515,49 @@ pub async fn execute_in_manual_transaction(
     page_size: Option<usize>,
     result_session_id: Option<String>,
     classification_sql: Option<String>,
+    execution_id: Option<String>,
+    timeout_secs: Option<u64>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, ManualTransactionCommandError> {
-    dbx_core::query::execute_in_manual_transaction_with_options(
-        &state,
-        &txn_session_id,
-        &sql,
-        &database,
-        schema.as_deref(),
-        dbx_core::query::ManualTransactionExecutionOptions {
-            max_rows,
-            table_data_preview: table_data_preview.unwrap_or(false),
-            page_size,
-            result_session_id,
-            classification_sql,
-        },
+    let messages = query_messages_callback(&app, execution_id.as_deref());
+    dbx_core::query::query_messages::with_query_messages(
+        messages,
+        dbx_core::query::execute_in_manual_transaction_with_options(
+            &state,
+            &txn_session_id,
+            &sql,
+            &database,
+            schema.as_deref(),
+            dbx_core::query::ManualTransactionExecutionOptions {
+                max_rows,
+                table_data_preview: table_data_preview.unwrap_or(false),
+                page_size,
+                result_session_id,
+                classification_sql,
+                execution_id,
+                timeout_secs,
+            },
+        ),
     )
     .await
-    .map_err(|error| {
-        if dbx_core::query::is_manual_transaction_session_expired_error(&error) {
-            ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired(
-                dbx_core::query::MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS,
-            )))
-        } else {
-            ManualTransactionCommandError::Legacy(error)
-        }
-    })
+    .map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
 pub async fn commit_manual_transaction(
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
-) -> Result<db::QueryResult, String> {
-    dbx_core::query::commit_manual_transaction(&state, &txn_session_id).await
+) -> Result<db::QueryResult, ManualTransactionCommandError> {
+    dbx_core::query::commit_manual_transaction(&state, &txn_session_id).await.map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
 pub async fn rollback_manual_transaction(
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
-) -> Result<db::QueryResult, String> {
-    dbx_core::query::rollback_manual_transaction(&state, &txn_session_id).await
+) -> Result<db::QueryResult, ManualTransactionCommandError> {
+    dbx_core::query::rollback_manual_transaction(&state, &txn_session_id)
+        .await
+        .map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
@@ -585,6 +623,24 @@ pub fn build_database_search_sql(
     options: dbx_core::database_search_sql::DatabaseSearchSqlOptions,
 ) -> Result<Option<dbx_core::database_search_sql::DatabaseSearchSql>, String> {
     Ok(dbx_core::database_search_sql::build_database_search_sql(options))
+}
+
+#[tauri::command]
+pub fn build_database_structure_search_sql(
+    options: dbx_core::database_structure_search_sql::DatabaseStructureSearchSqlOptions,
+) -> Result<Option<dbx_core::database_structure_search_sql::DatabaseStructureSearchSql>, String> {
+    Ok(dbx_core::database_structure_search_sql::build_database_structure_search_sql(options))
+}
+
+#[tauri::command]
+pub fn supports_database_structure_search(
+    database_type: Option<dbx_core::models::connection::DatabaseType>,
+    driver_profile: Option<String>,
+) -> Result<bool, String> {
+    Ok(dbx_core::database_structure_search_sql::supports_database_structure_search(
+        database_type,
+        driver_profile.as_deref(),
+    ))
 }
 
 #[tauri::command]
@@ -833,14 +889,19 @@ pub async fn extract_data_grid_selection(
     request: dbx_core::data_grid_extractors::DataGridExtractRequest,
 ) -> Result<dbx_core::data_grid_extractors::DataGridExtractResult, dbx_core::data_grid_extractors::DataGridExtractError>
 {
-    tauri::async_runtime::spawn_blocking(move || dbx_core::data_grid_extractors::extract_data_grid_selection(request))
-        .await
-        .map_err(|error| {
-            dbx_core::data_grid_extractors::DataGridExtractError::new(
-                dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
-                format!("Data grid extractor worker failed: {error}"),
-            )
-        })?
+    tauri::async_runtime::spawn_blocking(move || {
+        // Cells pasted from the grid land in a spreadsheet, so formula-triggering text
+        // is neutralized before the extractor renders it (see dbx_core::data::grid_clipboard_guard).
+        let request = dbx_core::data::grid_clipboard_guard::neutralize_spreadsheet_formulas(request);
+        dbx_core::data_grid_extractors::extract_data_grid_selection(request)
+    })
+    .await
+    .map_err(|error| {
+        dbx_core::data_grid_extractors::DataGridExtractError::new(
+            dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
+            format!("Data grid extractor worker failed: {error}"),
+        )
+    })?
 }
 
 #[tauri::command]
@@ -968,15 +1029,18 @@ pub async fn get_explain_info(
     schema: Option<String>,
     sql: String,
     mode: Option<String>,
+    execution_id: Option<String>,
+    timeout_secs: Option<u64>,
 ) -> Result<String, String> {
-    dbx_core::agent_explain::get_agent_explain_info_core(
+    dbx_core::agent_explain::get_agent_explain_info_core_with_execution_id(
         &state,
         &connection_id,
         database.as_deref(),
         schema.as_deref(),
         &sql,
         mode.as_deref(),
-        None,
+        timeout_secs,
+        execution_id.as_deref(),
     )
     .await
 }

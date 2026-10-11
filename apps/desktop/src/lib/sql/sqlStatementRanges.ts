@@ -3,7 +3,7 @@ import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDe
 import { splitMongoCommandRanges } from "@/lib/mongo/mongoShellCommand";
 import { isRedisCommentLine } from "@/lib/redis/redisCommandTokenizer";
 import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
-import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
+import { isCouchDbDatabaseType, isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 
 /**
  * A contiguous range of SQL text expressed as document offsets plus the
@@ -18,7 +18,7 @@ export interface SqlTextRange {
 const ELASTICSEARCH_REST_REQUEST = /^(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+\S+/i;
 
 function isHttpJsonRestDatabaseType(databaseType?: DatabaseType): boolean {
-  return isElasticsearchCompatibleDatabaseType(databaseType) || isMeilisearchDatabaseType(databaseType) || isSolrDatabaseType(databaseType);
+  return isElasticsearchCompatibleDatabaseType(databaseType) || isMeilisearchDatabaseType(databaseType) || isSolrDatabaseType(databaseType) || isCouchDbDatabaseType(databaseType);
 }
 
 export function elasticsearchRestRequestRanges(sql: string, databaseType?: DatabaseType): SqlTextRange[] {
@@ -27,7 +27,7 @@ export function elasticsearchRestRequestRanges(sql: string, databaseType?: Datab
   return requests.length > 0 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
 }
 
-const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "neo4j", "victoriametrics", "salesforce"]);
+const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "couchdb", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "neo4j", "nebula", "victoriametrics", "salesforce"]);
 
 export function supportsExecutionTargetPicker(databaseType?: DatabaseType): boolean {
   return !!databaseType && (databaseType === "redis" || isHttpJsonRestDatabaseType(databaseType) || !NON_SQL_EXECUTION_TARGET_TYPES.has(databaseType));
@@ -214,7 +214,8 @@ function splitElasticsearchRestRequestRanges(sql: string): RawStatement[] | unde
 type QuoteState = "none" | "single" | "double" | "backtick" | "bracket" | "dollar";
 
 function usesBracketIdentifierQuotes(databaseType?: DatabaseType): boolean {
-  return databaseType !== "doris" && databaseType !== "starrocks";
+  // IRIS uses `[` as its Contains operator, with no matching `]`.
+  return databaseType !== "doris" && databaseType !== "starrocks" && databaseType !== "iris";
 }
 
 const COMMON_SOFT_STATEMENT_START_KEYWORDS = [
@@ -271,6 +272,7 @@ const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly st
   elasticsearch: [],
   easysearch: [],
   solr: [],
+  couchdb: [],
   qdrant: [],
   milvus: [],
   weaviate: [],
@@ -293,7 +295,7 @@ const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
 // in sync. ArgoDB (Transwarp Hive/Inceptor fork) ships a PL/SQL-compatible procedure
 // language (`CREATE [OR REPLACE] PROCEDURE ... IS BEGIN ... END;`), so its statement
 // ranges must stay whole instead of splitting at every body semicolon.
-const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu", "argo"]);
+const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu", "argo", "transwarp"]);
 const MYSQL_ROUTINE_BLOCK_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
 // PostgreSQL/openGauss are also the connection types users pick for GaussDB/openGauss instances
 // running in Oracle (A) compatibility mode, where a routine body is written in Oracle style
@@ -305,9 +307,17 @@ const POSTGRES_FAMILY_DATABASES: ReadonlySet<DatabaseType> = new Set(["postgres"
 // escape unconditionally makes ESCAPE '\' swallow its closing quote and the following statement
 // boundary, so the next statement loses its run button (#8189). Gate it by dialect, matching the
 // tokenizer/completion side.
-export const BACKSLASH_ESCAPE_STRING_DIALECTS: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "hive", "argo", "impala", "spark", "databend"]);
+export const BACKSLASH_ESCAPE_STRING_DIALECTS: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "hive", "argo", "transwarp", "impala", "spark", "databend"]);
 function allowsBackslashStringEscape(databaseType?: DatabaseType): boolean {
   return !!databaseType && BACKSLASH_ESCAPE_STRING_DIALECTS.has(databaseType);
+}
+const POSTGRES_ESCAPE_STRING_DIALECTS: ReadonlySet<DatabaseType> = new Set(["postgres", "opengauss", "gaussdb", "vastbase", "kingbase", "highgo", "uxdb", "kwdb", "duckdb"]);
+function startsPostgresEscapeString(sql: string, quoteIndex: number, databaseType?: DatabaseType): boolean {
+  if (!databaseType || !POSTGRES_ESCAPE_STRING_DIALECTS.has(databaseType)) return false;
+  const prefixIndex = quoteIndex - 1;
+  if (sql[prefixIndex] !== "E" && sql[prefixIndex] !== "e") return false;
+  const beforePrefix = sql[prefixIndex - 1];
+  return beforePrefix === undefined || !/[A-Za-z0-9_$]/.test(beforePrefix);
 }
 const MYSQL_CREATE_TABLE_OPTION_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb", "gbase"]);
 const MYSQL_ROUTINE_OBJECT_TYPES = new Set(["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]);
@@ -319,6 +329,31 @@ const ORACLE_PL_SQL_BLOCK_STARTERS = new Set(["DECLARE", "BEGIN"]);
 const ORACLE_PL_SQL_CREATE_OBJECT_TYPES = new Set(["FUNCTION", "PROCEDURE", "TRIGGER", "PACKAGE"]);
 const ORACLE_PL_SQL_TERMINATORS = new Set(["IF", "LOOP", "CASE"]);
 const SAP_HANA_SCRIPT_BLOCK_TERMINATORS = new Set(["IF", "FOR", "WHILE"]);
+
+/**
+ * XML/HTML character references (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`,
+ * `&#39;`, `&#x27;`) end with `;`. MyBatis XML writes comparison operators
+ * this way (`&gt;= #{param}`), so that `;` must not be read as a statement
+ * terminator — otherwise one query is split into fragments, its run buttons
+ * multiply, and parameters in later fragments vanish (#11699). Only the five
+ * predefined XML names plus numeric references are recognized, so a plain
+ * bitwise `a&b;` still splits at its real terminator.
+ */
+const XML_ENTITY_REFERENCE_NAMES = new Set(["lt", "gt", "amp", "quot", "apos"]);
+
+function isXmlEntityReferenceSemicolon(sql: string, semicolonIndex: number): boolean {
+  let start = semicolonIndex;
+  while (start > 0 && isAsciiAlphanumeric(sql[start - 1] ?? "")) start -= 1;
+  if (start > 0 && sql[start - 1] === "#") start -= 1;
+  if (start === 0 || sql[start - 1] !== "&") return false;
+  const name = sql.slice(start, semicolonIndex);
+  if (name.startsWith("#")) return /^#(?:[xX][0-9A-Fa-f]+|[0-9]+)$/.test(name);
+  return XML_ENTITY_REFERENCE_NAMES.has(name);
+}
+
+function isAsciiAlphanumeric(ch: string): boolean {
+  return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9");
+}
 
 /**
  * Parse the SQL document into top-level statement ranges delimited by `;`.
@@ -349,6 +384,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let pendingMysqlDirectiveLineEnd = -1;
   let customDelimiter: string | null = null;
   let state: QuoteState = "none";
+  let singleQuoteBackslashEscapes = false;
   let dollarTag = "";
   let postgresDollarQuotedRoutine = false;
   let oraclePlSqlStatementEnd: number | null | undefined;
@@ -451,7 +487,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       // Only MySQL-family dialects treat backslash as an escape inside '...' (see
       // BACKSLASH_ESCAPE_STRING_DIALECTS); in standard SQL '\' is a literal char and must not
       // consume the next char, otherwise the closing quote is swallowed (#8189).
-      if (ch === "\\" && next && backslashEscapes) {
+      if (ch === "\\" && next && singleQuoteBackslashEscapes) {
         i += 2;
         continue;
       }
@@ -462,6 +498,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
           continue;
         }
         state = "none";
+        singleQuoteBackslashEscapes = false;
       }
       i += 1;
       continue;
@@ -568,6 +605,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     if (ch === "'") {
       markContent(i);
       state = "single";
+      singleQuoteBackslashEscapes = backslashEscapes || startsPostgresEscapeString(sql, i, databaseType);
       i += 1;
       continue;
     }
@@ -611,7 +649,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         statementHitStart = i;
         continue;
       }
-    } else if (ch === ";") {
+    } else if (ch === ";" && !isXmlEntityReferenceSemicolon(sql, i)) {
       const routineTokensBeforeSemicolon = isMysqlRoutineBlockDatabase(databaseType) && statementStart !== -1 ? mysqlRoutineTokensUpTo(i) : null;
       const isMysqlRoutineBlock = routineTokensBeforeSemicolon !== null && isMysqlRoutineDdlStartFromWords(mysqlRoutineDdlStartWords(routineTokensBeforeSemicolon)) && mysqlRoutineTokensContainBegin(routineTokensBeforeSemicolon);
       if (isMysqlRoutineBlock) {
@@ -1062,6 +1100,7 @@ function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, d
   const unclosedExplainOptionsStart = explainOptionsStart !== null && skipBalancedParens(sql, explainOptionsStart, databaseType, parameterOptions) === null ? explainOptionsStart : null;
   const backslashEscapes = allowsBackslashStringEscape(databaseType);
   let state: QuoteState | "lineComment" | "blockComment" = "none";
+  let singleQuoteBackslashEscapes = false;
   let dollarTag = "";
   let parenDepth = 0;
   let lineStart = statement.from;
@@ -1120,7 +1159,7 @@ function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, d
     }
 
     if (state === "single") {
-      if (ch === "\\" && next && backslashEscapes) {
+      if (ch === "\\" && next && singleQuoteBackslashEscapes) {
         i += 2;
         continue;
       }
@@ -1130,6 +1169,7 @@ function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, d
           continue;
         }
         state = "none";
+        singleQuoteBackslashEscapes = false;
       }
       i += 1;
       continue;
@@ -1183,6 +1223,7 @@ function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, d
     }
     if (ch === "'") {
       state = "single";
+      singleQuoteBackslashEscapes = backslashEscapes || startsPostgresEscapeString(sql, i, databaseType);
       i += 1;
       continue;
     }
@@ -1312,6 +1353,7 @@ function topLevelWordsInRange(sql: string, from: number, to: number, databaseTyp
   const ends: number[] = [];
   const backslashEscapes = allowsBackslashStringEscape(databaseType);
   let state: QuoteState | "lineComment" | "blockComment" = "none";
+  let singleQuoteBackslashEscapes = false;
   let dollarTag = "";
   let parenDepth = 0;
   let i = from;
@@ -1351,7 +1393,7 @@ function topLevelWordsInRange(sql: string, from: number, to: number, databaseTyp
     }
 
     if (state === "single") {
-      if (ch === "\\" && next && backslashEscapes) {
+      if (ch === "\\" && next && singleQuoteBackslashEscapes) {
         i += 2;
         continue;
       }
@@ -1361,6 +1403,7 @@ function topLevelWordsInRange(sql: string, from: number, to: number, databaseTyp
           continue;
         }
         state = "none";
+        singleQuoteBackslashEscapes = false;
       }
       i += 1;
       continue;
@@ -1413,6 +1456,7 @@ function topLevelWordsInRange(sql: string, from: number, to: number, databaseTyp
     }
     if (ch === "'") {
       state = "single";
+      singleQuoteBackslashEscapes = backslashEscapes || startsPostgresEscapeString(sql, i, databaseType);
       i += 1;
       continue;
     }
@@ -1557,6 +1601,7 @@ function explainLikeTargetKeywordAt(sql: string, pos: number, databaseType?: Dat
 
 function skipBalancedParens(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number | null {
   let state: "none" | "single" | "double" | "lineComment" | "blockComment" = "none";
+  let singleQuoteBackslashEscapes = false;
   let depth = 0;
   let i = pos;
 
@@ -1579,11 +1624,18 @@ function skipBalancedParens(sql: string, pos: number, databaseType?: DatabaseTyp
       continue;
     }
     if (state === "single") {
+      if (ch === "\\" && next && singleQuoteBackslashEscapes) {
+        i += 2;
+        continue;
+      }
       if (ch === "'" && next === "'") {
         i += 2;
         continue;
       }
-      if (ch === "'") state = "none";
+      if (ch === "'") {
+        state = "none";
+        singleQuoteBackslashEscapes = false;
+      }
       i += 1;
       continue;
     }
@@ -1614,6 +1666,7 @@ function skipBalancedParens(sql: string, pos: number, databaseType?: DatabaseTyp
     }
     if (ch === "'") {
       state = "single";
+      singleQuoteBackslashEscapes = startsPostgresEscapeString(sql, i, databaseType);
       i += 1;
       continue;
     }
@@ -1659,6 +1712,7 @@ function trimRangeEnd(sql: string, from: number, to: number): number {
 
 function trimRangeEndBeforeNextBoundary(sql: string, from: number, nextBoundaryFrom: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number {
   const backslashEscapes = allowsBackslashStringEscape(databaseType);
+  let singleQuoteBackslashEscapes = false;
   let state: QuoteState | "lineComment" | "blockComment" = "none";
   let dollarTag = "";
   let lastContentEnd = from;
@@ -1702,7 +1756,7 @@ function trimRangeEndBeforeNextBoundary(sql: string, from: number, nextBoundaryF
 
     if (state === "single") {
       lastContentEnd = i + 1;
-      if (ch === "\\" && next && backslashEscapes) {
+      if (ch === "\\" && next && singleQuoteBackslashEscapes) {
         i += 2;
         lastContentEnd = i;
         continue;
@@ -1714,6 +1768,7 @@ function trimRangeEndBeforeNextBoundary(sql: string, from: number, nextBoundaryF
           continue;
         }
         state = "none";
+        singleQuoteBackslashEscapes = false;
       }
       i += 1;
       continue;
@@ -1771,6 +1826,7 @@ function trimRangeEndBeforeNextBoundary(sql: string, from: number, nextBoundaryF
     }
     if (ch === "'") {
       state = "single";
+      singleQuoteBackslashEscapes = backslashEscapes || startsPostgresEscapeString(sql, i, databaseType);
       lastContentEnd = i + 1;
       i += 1;
       continue;
@@ -2470,11 +2526,13 @@ function isSqlServerGoLine(sql: string, pos: number): boolean {
 
 function startsDelimiterCommand(sql: string, pos: number): boolean {
   const prefix = sql.slice(pos, pos + 9);
-  return prefix.toLowerCase() === "delimiter" && (sql[pos + 9] === " " || sql[pos + 9] === "\t");
+  return prefix.toLowerCase() === "delimiter" && (sql[pos + 9] === " " || sql[pos + 9] === "\t" || sql[pos + 9] === ";");
 }
 
 function parseDelimiterCommand(line: string): string | null {
-  const match = /^delimiter[ \t]+(.+)$/i.exec(line.trim());
+  const trimmed = line.trim();
+  if (/^delimiter;$/i.test(trimmed)) return ";";
+  const match = /^delimiter[ \t]+(.+)$/i.exec(trimmed);
   const delimiter = match?.[1]?.trim();
   return delimiter ? delimiter : null;
 }

@@ -3,7 +3,9 @@ use std::fs::File;
 use std::io::Read;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -14,9 +16,20 @@ use crate::db::agent_driver::{
 use crate::models::connection::DatabaseType;
 
 pub const DEFAULT_JRE_KEY: &str = "21";
+/// Every Java artifact DBX runs itself (driver agents and the JDBC plugin) is
+/// compiled for Java 21, so an older runtime cannot load any of them.
+pub const MINIMUM_JAVA_MAJOR_VERSION: u32 = 21;
+/// Shown when the selected Java runtime is older than the agent bytecode.
+/// Kept verbatim in sync with the desktop error catalog
+/// (apps/desktop/src/i18n/backend-errors.ts -> connection.agentJavaTooOld).
+pub const AGENT_JAVA_TOO_OLD_MESSAGE: &str =
+    "Agent requires Java 21, but DBX started it with an older Java runtime. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager.";
 pub const SQLITE_WORKER_DRIVER_KEY: &str = "sqlite-worker";
 pub const SQLITE_WORKER_NATIVE_PLATFORMS: &[&str] = &["linux-x64", "linux-aarch64"];
 pub const DOWNLOAD_CACHE_DIR_NAME: &str = "download-cache";
+/// `java -version` is only needed for runtimes without a `release` file; the
+/// probe must never block a connect or a settings save on a broken executable.
+pub const JAVA_VERSION_PROBE_TIMEOUT_SECS: u64 = 5;
 pub const DOWNLOAD_CACHE_MAX_AGE_DAYS: u64 = 7;
 
 pub type OperationLockTable = StdMutex<std::collections::HashMap<String, Arc<Mutex<()>>>>;
@@ -172,6 +185,42 @@ mod tests {
     }
 
     #[test]
+    fn registry_artifact_parses_optional_delta_and_stays_backward_compatible() {
+        let with_delta: ArtifactInfo = serde_json::from_str(
+            r#"{
+                "url": "https://example.com/dbx-agent-demo-0.2.0.tar.zst",
+                "sha256": "52da05589c140cdf5ceba54999422dfc50a1fd23ee19c9f26ee92869ad099d09",
+                "size": 71239014,
+                "delta": {
+                    "base_version": "0.1.73",
+                    "url": "https://example.com/dbx-agent-demo-0.1.73-to-0.2.0.tar.zst.delta",
+                    "sha256": "aa05555555c140cdf5feba54999422dfc50a1fd23ee19c9f26ee92869ad099d09",
+                    "size": 4432615
+                }
+            }"#,
+        )
+        .unwrap();
+        let delta = with_delta.delta.as_ref().expect("delta parsed");
+        assert_eq!(delta.base_version, "0.1.73");
+        assert_eq!(delta.size, 4_432_615);
+        assert!(delta.url.ends_with(".delta"));
+        // Round-trips through serialization for the offline export path.
+        let serialized = serde_json::to_value(&with_delta).unwrap();
+        assert!(serialized.get("delta").is_some());
+
+        // Registries published before delta support have no `delta` key.
+        let without_delta: ArtifactInfo = serde_json::from_str(
+            r#"{
+                "url": "https://example.com/dbx-agent-demo-0.1.73.tar.zst",
+                "sha256": "52da05589c140cdf5ceba54999422dfc50a1fd23ee19c9f26ee92869ad099d09",
+                "size": 71239014
+            }"#,
+        )
+        .unwrap();
+        assert!(without_delta.delta.is_none());
+    }
+
+    #[test]
     fn cleanup_pending_jre_removes_stash_dirs_and_persists() {
         let manager = test_manager("pending-cleanup");
         std::fs::create_dir_all(manager.base_dir()).unwrap();
@@ -251,6 +300,126 @@ mod tests {
 
         let state = AgentState::default();
 
+        assert_eq!(manager.resolve_java_runtime(&state, DEFAULT_JRE_KEY).unwrap(), java);
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dbx-agent-manager-{name}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn parses_java_major_versions() {
+        assert_eq!(parse_java_major_version("1.8.0_504"), Some(8));
+        assert_eq!(parse_java_major_version("1.7.0_80"), Some(7));
+        assert_eq!(parse_java_major_version("21.0.10"), Some(21));
+        assert_eq!(parse_java_major_version("17.0.18+9"), Some(17));
+        assert_eq!(parse_java_major_version("\"11.0.2\""), Some(11));
+        assert_eq!(parse_java_major_version("9"), Some(9));
+        assert_eq!(parse_java_major_version("not-a-version"), None);
+        assert_eq!(parse_java_major_version(""), None);
+    }
+
+    #[test]
+    fn parses_java_version_output() {
+        assert_eq!(
+            parse_java_version_output(
+                "openjdk version \"1.8.0_504\"\nOpenJDK Runtime Environment (build 1.8.0_504-b01)"
+            )
+            .as_deref(),
+            Some("1.8.0_504")
+        );
+        assert_eq!(parse_java_version_output("java version \"21.0.10\" 2026-01-20 LTS").as_deref(), Some("21.0.10"));
+        assert_eq!(parse_java_version_output("command not found"), None);
+    }
+
+    #[test]
+    fn reads_java_version_from_release_file_in_both_layouts() {
+        let home = temp_dir("release-flat");
+        let flat_java = home.join("bin").join(java_executable_name());
+        touch(&flat_java);
+        fs::write(home.join("release"), "IMPLEMENTOR=\"Eclipse Adoptium\"\nJAVA_VERSION=\"1.8.0_504\"\n").unwrap();
+
+        assert_eq!(AgentManager::java_major_version(&flat_java), Some(8));
+
+        let bundle = temp_dir("release-bundle");
+        let bundle_java = bundle.join("Contents").join("Home").join("bin").join(java_executable_name());
+        touch(&bundle_java);
+        fs::write(bundle.join("Contents").join("Home").join("release"), "JAVA_VERSION=\"21.0.10\"\n").unwrap();
+
+        assert_eq!(AgentManager::java_major_version(&bundle_java), Some(21));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probes_java_version_when_release_file_is_missing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = temp_dir("probe-version");
+        let java = home.join("bin").join("java");
+        fs::create_dir_all(java.parent().unwrap()).unwrap();
+        fs::write(&java, "#!/bin/sh\necho 'openjdk version \"1.8.0_504\"' >&2\n").unwrap();
+        fs::set_permissions(&java, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(AgentManager::java_major_version(&java), Some(8));
+    }
+
+    #[test]
+    fn rejects_java_runtime_older_than_the_agent_bytecode() {
+        let manager = test_manager("old-custom-java");
+        let java = manager.base_dir().join("jre8").join("bin").join(java_executable_name());
+        touch(&java);
+        // The reported case: a Java 8 runtime (a system Java or an imported JRE)
+        // rejects the agent's --add-opens flags before any class is loaded.
+        fs::write(java.parent().unwrap().parent().unwrap().join("release"), "JAVA_VERSION=\"1.8.0_504\"\n").unwrap();
+        let state = AgentState {
+            java_runtime: JavaRuntimeConfig {
+                mode: JavaRuntimeMode::Custom,
+                custom_java_path: Some(java.to_string_lossy().to_string()),
+            },
+            ..AgentState::default()
+        };
+
+        let err = manager.resolve_java_runtime(&state, DEFAULT_JRE_KEY).unwrap_err();
+
+        assert!(err.starts_with(AGENT_JAVA_TOO_OLD_MESSAGE), "unexpected error: {err}");
+        assert!(err.contains("Detected Java 8"));
+    }
+
+    #[test]
+    fn accepts_java_runtime_matching_the_agent_bytecode() {
+        let manager = test_manager("new-custom-java");
+        let java = manager.base_dir().join("jre21").join("bin").join(java_executable_name());
+        touch(&java);
+        fs::write(java.parent().unwrap().parent().unwrap().join("release"), "JAVA_VERSION=\"21.0.10\"\n").unwrap();
+        let state = AgentState {
+            java_runtime: JavaRuntimeConfig {
+                mode: JavaRuntimeMode::Custom,
+                custom_java_path: Some(java.to_string_lossy().to_string()),
+            },
+            ..AgentState::default()
+        };
+
+        assert_eq!(manager.resolve_java_runtime(&state, DEFAULT_JRE_KEY).unwrap(), java);
+    }
+
+    #[test]
+    fn keeps_runtimes_with_unknown_version_usable() {
+        // Wrapper scripts and stripped runtimes cannot be probed; they must still
+        // resolve so that the spawn-time diagnostics stay in charge.
+        let manager = test_manager("unknown-custom-java");
+        let java = manager.base_dir().join("wrapper").join("bin").join(java_executable_name());
+        touch(&java);
+        let state = AgentState {
+            java_runtime: JavaRuntimeConfig {
+                mode: JavaRuntimeMode::Custom,
+                custom_java_path: Some(java.to_string_lossy().to_string()),
+            },
+            ..AgentState::default()
+        };
+
+        assert_eq!(AgentManager::java_major_version(&java), None);
         assert_eq!(manager.resolve_java_runtime(&state, DEFAULT_JRE_KEY).unwrap(), java);
     }
 
@@ -474,10 +643,11 @@ mod tests {
             .expect("manifest launch should resolve");
 
         assert_eq!(launch.program, driver_dir.join("bin").join("dameng-agent"));
-        assert_eq!(
-            launch.args,
-            vec!["--config".to_string(), driver_dir.join("config.json").to_string_lossy().to_string()]
-        );
+        // 比较 Path：模板里写的是正斜杠，而 Path::join 在 Windows 上产出反斜杠，
+        // 直接比字符串会在 Windows 上误报。
+        assert_eq!(launch.args.len(), 2);
+        assert_eq!(launch.args[0], "--config");
+        assert_eq!(std::path::PathBuf::from(&launch.args[1]), driver_dir.join("config.json"));
         assert_eq!(launch.working_dir.as_deref(), Some(driver_dir.as_path()));
     }
 
@@ -570,6 +740,25 @@ pub struct ArtifactInfo {
     pub size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<ArtifactFormat>,
+    /// Optional incremental update payload: a zstd patch-from frame that
+    /// reconstructs this artifact from the artifact of `base_version`. Clients
+    /// without a matching retained base (or on any reconstruct failure) fall
+    /// back to downloading `url` in full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta: Option<DeltaInfo>,
+}
+
+/// Describes the incremental update payload of an [ArtifactInfo].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeltaInfo {
+    /// Version whose downloaded artifact the delta applies onto.
+    pub base_version: String,
+    /// URL of the delta frame (a `.delta` file on the same release as the full artifact).
+    pub url: String,
+    /// SHA-256 of the delta file itself.
+    pub sha256: String,
+    /// Size of the delta file in bytes.
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -990,13 +1179,31 @@ impl AgentManager {
         jre_key: &str,
         extra_java_args: &[String],
     ) -> Result<AgentLaunchSpec, String> {
+        self.resolve_agent_launch_spec_with_launch_env(state, driver_key, jre_key, extra_java_args, &[])
+    }
+
+    /// Same as [`Self::resolve_agent_launch_spec_with_extra_args`] but also
+    /// attaches `env` to the resolved spec.
+    ///
+    /// The entries become part of the launch fingerprint, so two connections
+    /// requesting different environments never share an agent process.
+    pub fn resolve_agent_launch_spec_with_launch_env(
+        &self,
+        state: &AgentState,
+        driver_key: &str,
+        jre_key: &str,
+        extra_java_args: &[String],
+        env: &[(String, String)],
+    ) -> Result<AgentLaunchSpec, String> {
         if driver_key == "dameng" {
             validate_dameng_java_system_properties(extra_java_args)?;
         }
         let driver_dir = self.driver_dir(driver_key);
         let config_path = self.driver_launch_config_path(driver_key);
         if config_path.exists() {
-            return self.resolve_configured_agent_launch_spec(driver_key, &driver_dir, &config_path);
+            return Ok(self
+                .resolve_configured_agent_launch_spec(driver_key, &driver_dir, &config_path)?
+                .with_env(env.iter().cloned()));
         }
 
         let native_path = self.driver_native_path(driver_key);
@@ -1012,7 +1219,7 @@ impl AgentManager {
             } else {
                 (native_path, driver_dir)
             };
-            return Ok(AgentLaunchSpec::new(native_path).with_working_dir(driver_dir));
+            return Ok(AgentLaunchSpec::new(native_path).with_working_dir(driver_dir).with_env(env.iter().cloned()));
         }
 
         let jar_path = self.driver_jar_path(driver_key);
@@ -1023,7 +1230,8 @@ impl AgentManager {
                     "{driver_key} driver jar is invalid or corrupt. Please reinstall it from the Driver Manager."
                 ));
             }
-            return Ok(AgentLaunchSpec::java_jar_with_extra_args(java, jar_path, extra_java_args));
+            return Ok(AgentLaunchSpec::java_jar_with_extra_args(java, jar_path, extra_java_args)
+                .with_env(env.iter().cloned()));
         }
 
         Err(format!("{driver_key} driver is not installed. Please install it from the Driver Manager."))
@@ -1135,21 +1343,39 @@ impl AgentManager {
         }
     }
 
+    /// Major version of the Java runtime at `java_path`, or `None` when it
+    /// cannot be determined (wrapper scripts, stripped runtimes, unknown
+    /// layouts). An undetectable runtime is never rejected: the spawn-time
+    /// diagnostics in `agent_driver` still explain a failed start.
+    pub fn java_major_version(java_path: &Path) -> Option<u32> {
+        let key = java_path.canonicalize().unwrap_or_else(|_| java_path.to_path_buf());
+        if let Ok(cache) = java_version_cache().lock() {
+            if let Some(cached) = cache.get(&key) {
+                return *cached;
+            }
+        }
+        let detected = detect_java_major_version(&key);
+        if let Ok(mut cache) = java_version_cache().lock() {
+            cache.insert(key, detected);
+        }
+        detected
+    }
+
     pub fn resolve_java_runtime(&self, state: &AgentState, jre_key: &str) -> Result<PathBuf, String> {
-        match state.java_runtime.mode {
+        let java = match state.java_runtime.mode {
             JavaRuntimeMode::Managed => {
                 if !self.is_jre_installed(jre_key) {
                     return Err(format!(
                         "JRE {jre_key} runtime is not installed. Please install it from the Driver Manager."
                     ));
                 }
-                Ok(self.jre_java_path(jre_key))
+                self.jre_java_path(jre_key)
             }
             JavaRuntimeMode::System => {
                 let java_home = std::env::var_os(JAVA_HOME_ENV);
                 let path_var = std::env::var_os(PATH_ENV);
                 resolve_system_java_path(java_home.as_deref(), path_var.as_deref())
-                    .ok_or_else(|| system_java_missing_error(java_home.as_deref(), path_var.as_deref()))
+                    .ok_or_else(|| system_java_missing_error(java_home.as_deref(), path_var.as_deref()))?
             }
             JavaRuntimeMode::Custom => {
                 let path = state
@@ -1159,9 +1385,11 @@ impl AgentManager {
                     .map(str::trim)
                     .filter(|path| !path.is_empty())
                     .ok_or_else(|| "Custom Java runtime path is empty. Please choose a Java executable.".to_string())?;
-                resolve_custom_java_path(path)
+                resolve_custom_java_path(path)?
             }
-        }
+        };
+        ensure_supported_java_runtime(&java)?;
+        Ok(java)
     }
 
     pub async fn stop_daemons(&self) {
@@ -1211,11 +1439,44 @@ impl AgentManager {
         crate::agent_runtime::spawn_connection_client(self, db_type, driver_profile, extra_java_args).await
     }
 
+    /// Spawns a dedicated agent process carrying `env` (Oracle OCI connections).
+    pub async fn spawn_with_env(
+        &self,
+        db_type: &DatabaseType,
+        driver_profile: Option<&str>,
+        env: &[(String, String)],
+    ) -> Result<AgentDriverClient, String> {
+        crate::agent_runtime::spawn_connection_client_with_env(self, db_type, driver_profile, &[], env).await
+    }
+
+    /// One-shot daemon call variant that hands `env` to the agent process.
+    pub async fn call_daemon_method_with_timeout_and_env<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        db_type: &DatabaseType,
+        driver_profile: Option<&str>,
+        method: AgentMethod,
+        params: serde_json::Value,
+        timeout_duration: Option<Duration>,
+        env: &[(String, String)],
+    ) -> Result<T, String> {
+        crate::agent_runtime::call_daemon_method_with_timeout_and_env(
+            self,
+            db_type,
+            driver_profile,
+            method,
+            params,
+            timeout_duration,
+            env,
+        )
+        .await
+    }
+
     pub async fn spawn_shared_connection_client(
         &self,
         db_type: &DatabaseType,
         driver_profile: Option<&str>,
         extra_java_args: &[String],
+        agent_env: &[(String, String)],
         agent_session_id: String,
         connect_params: serde_json::Value,
         connect_timeout: std::time::Duration,
@@ -1225,6 +1486,7 @@ impl AgentManager {
             db_type,
             driver_profile,
             extra_java_args,
+            agent_env,
             agent_session_id,
             connect_params,
             connect_timeout,
@@ -1368,6 +1630,113 @@ fn resolve_custom_java_path(path: &str) -> Result<PathBuf, String> {
     let raw = PathBuf::from(path);
     resolve_java_under_root(&raw)
         .ok_or_else(|| format!("Custom Java runtime does not exist or is not a Java executable: {}", raw.display()))
+}
+
+/// Rejects a runtime that cannot load DBX's Java artifacts before any agent
+/// process is spawned, so the user gets actionable guidance instead of a raw
+/// JVM startup failure (a Java 8 runtime dies on the `--add-opens` flags with
+/// "Unrecognized option: --add-opens=...").
+fn ensure_supported_java_runtime(java_path: &Path) -> Result<(), String> {
+    let Some(major) = AgentManager::java_major_version(java_path) else {
+        return Ok(());
+    };
+    if major >= MINIMUM_JAVA_MAJOR_VERSION {
+        return Ok(());
+    }
+    Err(format!("{AGENT_JAVA_TOO_OLD_MESSAGE} Detected Java {major} at {}.", java_path.display()))
+}
+
+fn java_version_cache() -> &'static StdMutex<std::collections::HashMap<PathBuf, Option<u32>>> {
+    static CACHE: std::sync::OnceLock<StdMutex<std::collections::HashMap<PathBuf, Option<u32>>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn detect_java_major_version(java_path: &Path) -> Option<u32> {
+    if let Some(major) = read_java_release_version(java_path).and_then(|version| parse_java_major_version(&version)) {
+        return Some(major);
+    }
+    let output = probe_java_version_output(java_path)?;
+    let version = parse_java_version_output(&output)?;
+    parse_java_major_version(&version)
+}
+
+/// Reads `JAVA_VERSION` from the `release` file of the Java home that contains
+/// `java_path`, which avoids starting a JVM just to learn the version. Walks a
+/// few levels up to cover both the `<home>/bin/java` and the macOS bundle
+/// `<home>/Contents/Home/bin/java` layouts.
+fn read_java_release_version(java_path: &Path) -> Option<String> {
+    let bin_dir = java_path.parent()?;
+    for ancestor in bin_dir.ancestors().take(4) {
+        let Ok(contents) = std::fs::read_to_string(ancestor.join("release")) else {
+            continue;
+        };
+        if let Some(version) = parse_release_java_version(&contents) {
+            return Some(version);
+        }
+    }
+    None
+}
+
+fn parse_release_java_version(contents: &str) -> Option<String> {
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix("JAVA_VERSION="))
+        .map(|value| value.trim().trim_matches('"').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Extracts the version from `java -version` output, e.g.
+/// `openjdk version "1.8.0_504"` or `java version "21.0.10" 2024-01-16 LTS`.
+fn parse_java_version_output(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (_, rest) = line.split_once("version ")?;
+        let quoted = rest.trim_start().strip_prefix('"')?;
+        quoted.split('"').next().filter(|value| !value.is_empty()).map(str::to_string)
+    })
+}
+
+/// `1.8.0_504` -> 8, `21.0.10` -> 21, `9` -> 9.
+fn parse_java_major_version(version: &str) -> Option<u32> {
+    let cleaned = version.trim().trim_matches('"');
+    let mut parts = cleaned.split(['.', '_', '-', '+']);
+    let first = parts.next()?.parse::<u32>().ok()?;
+    if first == 1 {
+        parts.next()?.parse::<u32>().ok()
+    } else {
+        Some(first)
+    }
+}
+
+/// Runs `java -version` (which writes to stderr) for runtimes that ship no
+/// `release` file. Bounded by a timeout so a broken executable can never hang a
+/// connect or a settings save.
+fn probe_java_version_output(java_path: &Path) -> Option<String> {
+    let mut child = crate::process::new_std_command(java_path)
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(JAVA_VERSION_PROBE_TIMEOUT_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
+    if text.trim().is_empty() {
+        text = String::from_utf8_lossy(&output.stdout).into_owned();
+    }
+    Some(text)
 }
 
 const JAVA_HOME_ENV: &str = "JAVA_HOME";

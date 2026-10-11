@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
+import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, parseDataGridClipboardInBatches, planDataGridPaste, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
+import { DataGridClipboardCapacityError } from "@/lib/dataGrid/dataGridRowPreparation";
 
 afterEach(() => clearDataGridClipboardCopy());
 
@@ -103,6 +104,32 @@ describe("planDataGridPaste", () => {
 });
 
 describe("parseDataGridClipboard", () => {
+  it("bounds logical rows and cells before allocating an oversized clipboard", () => {
+    expect(() => parseDataGridClipboard("a\nb\nc", { maxRows: 2 })).toThrow(DataGridClipboardCapacityError);
+    expect(() => parseDataGridClipboard("a\tb\tc", { maxCells: 2 })).toThrow(DataGridClipboardCapacityError);
+  });
+
+  it("counts internal multiline values as one logical row", () => {
+    const text = "line\n".repeat(1000);
+    rememberDataGridClipboardCopy(text, [[text]]);
+    expect(parseDataGridClipboard(text, { maxRows: 1, maxCells: 1 })).toEqual([[text]]);
+  });
+
+  it.each(["a\r\nb\r\n", "a\rb\r", "a\nb\n"])("preserves line endings through batched parsing: %j", async (text) => {
+    expect(await parseDataGridClipboardInBatches(text)).toEqual([["a"], ["b"]]);
+  });
+
+  it("cancels during parsing before returning a clipboard matrix", async () => {
+    const controller = new AbortController();
+    const result = await parseDataGridClipboardInBatches("a\n".repeat(50_000), {
+      signal: controller.signal,
+      onProgress: ({ completed }) => {
+        if (completed > 0) controller.abort();
+      },
+    });
+    expect(result).toBeNull();
+  });
+
   it("restores null values copied from the DBX grid", () => {
     rememberDataGridClipboardCopy("NULL\tNULL", [[null, "NULL"]]);
 

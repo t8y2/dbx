@@ -10,6 +10,10 @@ default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher", "system
 duckdb-sidecar = ["dbx-sql/duckdb-sidecar", "dbx-drivers/duckdb-sidecar"]
 dynamodb = ["dbx-drivers/dynamodb"]
 mq-admin = ["dep:rumqttc", "dbx-types/mq-admin", "dbx-drivers/mq-admin"]
+# SQL Server native TDS ATTENTION on interrupt (SQL Server 2000 batch abort).
+# Requires the vendored tiberius patched in by the root workspace; standalone
+# agent driver workspaces build dbx-core without it. Desktop enables this.
+sqlserver-native-attention = ["dbx-drivers/sqlserver-native-attention"]
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl", "dbx-drivers/sqlite-sqlcipher"]
 sqlite-multiple-ciphers = ["dbx-drivers/sqlite-multiple-ciphers"]
 # Keeps bundled SQLite for consumers that enable no other sqlite source

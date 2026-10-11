@@ -870,6 +870,220 @@ impl TypeMappingMatrix {
                     requires_cast: false,
                 });
             }
+            (DialectKind::SqlServer, DialectKind::Postgres) => {
+                rules.push(TypeConversionRule {
+                    source_type: "UNIQUEIDENTIFIER".into(),
+                    target_type: "UUID".into(),
+                    precision_loss: false,
+                    requires_cast: true,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "BIT".into(),
+                    target_type: "BOOLEAN".into(),
+                    precision_loss: false,
+                    requires_cast: true,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "TINYINT".into(),
+                    target_type: "SMALLINT".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "SMALLINT".into(),
+                    target_type: "SMALLINT".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "INT".into(),
+                    target_type: "INTEGER".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "BIGINT".into(),
+                    target_type: "BIGINT".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "REAL".into(),
+                    target_type: "REAL".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "FLOAT".into(),
+                    target_type: "DOUBLE PRECISION".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "MONEY".into(),
+                    target_type: "NUMERIC(19,4)".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "SMALLMONEY".into(),
+                    target_type: "NUMERIC(10,4)".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "NVARCHAR(MAX)".into(),
+                    target_type: "TEXT".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "VARCHAR(MAX)".into(),
+                    target_type: "TEXT".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "NTEXT".into(),
+                    target_type: "TEXT".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "TEXT".into(),
+                    target_type: "TEXT".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "VARBINARY(MAX)".into(),
+                    target_type: "BYTEA".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "IMAGE".into(),
+                    target_type: "BYTEA".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "ROWVERSION".into(),
+                    target_type: "BYTEA".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "DATETIME".into(),
+                    target_type: "TIMESTAMP".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "DATETIME2".into(),
+                    target_type: "TIMESTAMP".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "SMALLDATETIME".into(),
+                    target_type: "TIMESTAMP".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "DATETIMEOFFSET".into(),
+                    target_type: "TIMESTAMPTZ".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "XML".into(),
+                    target_type: "XML".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+            }
+            (DialectKind::Postgres, DialectKind::SqlServer) => {
+                rules.push(TypeConversionRule {
+                    source_type: "UUID".into(),
+                    target_type: "UNIQUEIDENTIFIER".into(),
+                    precision_loss: false,
+                    requires_cast: true,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "BOOLEAN".into(),
+                    target_type: "BIT".into(),
+                    precision_loss: false,
+                    requires_cast: true,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "SMALLINT".into(),
+                    target_type: "SMALLINT".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "INTEGER".into(),
+                    target_type: "INT".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "BIGINT".into(),
+                    target_type: "BIGINT".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "REAL".into(),
+                    target_type: "REAL".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "DOUBLE PRECISION".into(),
+                    target_type: "FLOAT".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "TEXT".into(),
+                    target_type: "NVARCHAR(MAX)".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "BYTEA".into(),
+                    target_type: "VARBINARY(MAX)".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "TIMESTAMP".into(),
+                    target_type: "DATETIME2".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "TIMESTAMPTZ".into(),
+                    target_type: "DATETIMEOFFSET".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "JSONB".into(),
+                    target_type: "NVARCHAR(MAX)".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+                rules.push(TypeConversionRule {
+                    source_type: "JSON".into(),
+                    target_type: "NVARCHAR(MAX)".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+            }
             _ => {}
         }
         rules
@@ -1145,5 +1359,13 @@ mod tests {
         assert_eq!(desc.flags, 0);
         assert!(!desc.supports_schemas);
         assert!(!desc.supports_partitioning);
+    }
+
+    #[test]
+    fn sqlserver_to_postgres_mapping() {
+        let matrix = TypeMappingMatrix::for_dialects(DialectKind::SqlServer, DialectKind::Postgres);
+        let (converted, requires_cast) = matrix.convert_type("uniqueidentifier");
+        assert_eq!(converted, "UUID");
+        assert!(requires_cast);
     }
 }

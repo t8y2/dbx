@@ -2347,6 +2347,30 @@ func TestOracleCompletionRoutinesQueryUsesPublicPackageMetadata(t *testing.T) {
 	}
 }
 
+func TestOracleCompletionRoutinesQueryIncludesSequences(t *testing.T) {
+	query := oracleCompletionRoutinesQuery(completionAssistantRequest{
+		Schema:       "HR",
+		ObjectKinds:  []string{"routine", "sequence"},
+		Mask:         "SEQ",
+		GlobalSearch: false,
+	}, "HR", 100)
+	sqlText := strings.ToUpper(query.SQL)
+	if !strings.Contains(sqlText, "'SEQUENCE'") {
+		t.Fatalf("routines query should include SEQUENCE when requested: %s", query.SQL)
+	}
+
+	seqOnlyQuery := oracleCompletionRoutinesQuery(completionAssistantRequest{
+		Schema:       "HR",
+		ObjectKinds:  []string{"sequence"},
+		Mask:         "SEQ",
+		GlobalSearch: false,
+	}, "HR", 100)
+	seqSQL := strings.ToUpper(seqOnlyQuery.SQL)
+	if !strings.Contains(seqSQL, "IN ('SEQUENCE')") {
+		t.Fatalf("sequence-only query should only include SEQUENCE: %s", seqOnlyQuery.SQL)
+	}
+}
+
 func TestOracleCompletionPackageCandidatesPreserveOverloadsAndReturnTypes(t *testing.T) {
 	rows := []oraclePackageRoutineRow{
 		{
@@ -3254,6 +3278,7 @@ type oracleViewSourceQueryStep struct {
 	panicText        string
 	nextPanicText    string
 	columnsPanicText string
+	columnsPanicCall int
 }
 
 type oracleViewSourceDriver struct {
@@ -3319,6 +3344,7 @@ func (c *oracleViewSourceConn) QueryContext(
 		values:           step.rows,
 		nextPanicText:    step.nextPanicText,
 		columnsPanicText: step.columnsPanicText,
+		columnsPanicCall: step.columnsPanicCall,
 	}, nil
 }
 
@@ -3354,10 +3380,13 @@ type oracleViewSourceRows struct {
 	next             int
 	nextPanicText    string
 	columnsPanicText string
+	columnsPanicCall int
+	columnsCalls     int
 }
 
 func (r *oracleViewSourceRows) Columns() []string {
-	if r.columnsPanicText != "" {
+	r.columnsCalls++
+	if r.columnsPanicText != "" && (r.columnsPanicCall == 0 || r.columnsPanicCall == r.columnsCalls) {
 		panic(r.columnsPanicText)
 	}
 	return r.columns
@@ -3561,12 +3590,7 @@ func TestOracleCursorSurvivesDeadlineWindow(t *testing.T) {
 }
 
 func TestOracleQueryRowsRecoversDriverPanic(t *testing.T) {
-	driverName := "oracle-test-panic-" + strings.ReplaceAll(t.Name(), "/", "-")
-	sql.Register(driverName, &oraclePanicDriver{})
-	db, err := sql.Open(driverName, "dsn")
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := sql.OpenDB(oracleQueryConnector{oracleGuardTestConnector{&oraclePanicDriver{}}})
 	t.Cleanup(func() { _ = db.Close() })
 
 	s := newServer()
@@ -3578,6 +3602,9 @@ func TestOracleQueryRowsRecoversDriverPanic(t *testing.T) {
 	var panicErr oracleDriverPanicError
 	if !errors.As(err, &panicErr) {
 		t.Fatalf("expected oracle driver panic error, got %v", err)
+	}
+	if stats := db.Stats(); stats.InUse != 0 {
+		t.Errorf("driver panic leaked a pool connection: in_use=%d open=%d", stats.InUse, stats.OpenConnections)
 	}
 	s.activeCancelMu.Lock()
 	defer s.activeCancelMu.Unlock()
@@ -3780,6 +3807,9 @@ func TestRuntimeHandleLineRecoversRequestPanic(t *testing.T) {
 	if string(resp.ID) != "5" {
 		t.Fatalf("panic response must keep the request id, got %s", resp.ID)
 	}
+	if stats := db.Stats(); stats.InUse != 0 || len(session.activeRows) != 0 {
+		t.Errorf("metadata panic leaked rows/connection: in_use=%d active_rows=%d", stats.InUse, len(session.activeRows))
+	}
 
 	// The RPC stream must survive the panic and keep serving requests.
 	followUp, shutdown := runtime.handleLine(`{"jsonrpc":"2.0","id":6,"method":"handshake","params":{}}`)
@@ -3895,6 +3925,29 @@ func TestManualTransactionSkipsPerStatementSetSchema(t *testing.T) {
 	}
 }
 
+func TestManualTransactionCurrentSchemaUsesPinnedSession(t *testing.T) {
+	db, _ := openOracleManualTxTestDB(t)
+	// A second pooled session that never ran ALTER SESSION SET CURRENT_SCHEMA
+	// still reports the login user's schema.
+	db.SetMaxOpenConns(2)
+	s := newServer()
+	s.db = db
+
+	if err := s.beginManualTransaction("APP_TEST"); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	schema, err := s.normalizeSchema("")
+	if err != nil {
+		t.Fatalf("normalizeSchema: %v", err)
+	}
+	if schema != "APP_TEST" {
+		t.Fatalf("normalizeSchema(\"\") during manual tx = %q, want APP_TEST", schema)
+	}
+	if err := s.rollbackManualTransaction(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+}
+
 func TestManualTransactionDisconnectRollsBack(t *testing.T) {
 	db, driver := openOracleManualTxTestDB(t)
 	s := newServer()
@@ -3981,13 +4034,8 @@ type oracleManualTxDriver struct {
 
 func openOracleManualTxTestDB(t *testing.T) (*sql.DB, *oracleManualTxDriver) {
 	t.Helper()
-	driverName := "oracle-test-manual-tx-" + strings.ReplaceAll(t.Name(), "/", "-") + "-" + time.Now().Format("150405.000000000")
 	drv := &oracleManualTxDriver{}
-	sql.Register(driverName, drv)
-	db, err := sql.Open(driverName, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := sql.OpenDB(oracleQueryConnector{oracleGuardTestConnector{drv}})
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() {
 		_ = db.Close()
@@ -4002,6 +4050,7 @@ func (d *oracleManualTxDriver) Open(string) (driver.Conn, error) {
 type oracleManualTxConn struct {
 	driver *oracleManualTxDriver
 	closed bool
+	schema string
 }
 
 func (c *oracleManualTxConn) Prepare(string) (driver.Stmt, error) {
@@ -4035,6 +4084,9 @@ func (c *oracleManualTxConn) ExecContext(_ context.Context, query string, _ []dr
 	c.driver.mu.Lock()
 	defer c.driver.mu.Unlock()
 	c.driver.execs = append(c.driver.execs, query)
+	if schema, ok := strings.CutPrefix(query, "ALTER SESSION SET CURRENT_SCHEMA = "); ok {
+		c.schema = strings.Trim(schema, `"`)
+	}
 	return driver.RowsAffected(1), nil
 }
 
@@ -4042,6 +4094,16 @@ func (c *oracleManualTxConn) QueryContext(_ context.Context, query string, _ []d
 	c.driver.mu.Lock()
 	defer c.driver.mu.Unlock()
 	c.driver.queries = append(c.driver.queries, query)
+	if strings.Contains(query, "'CURRENT_SCHEMA'") {
+		schema := c.schema
+		if schema == "" {
+			schema = "LOGIN_USER"
+		}
+		return &oracleManualTxRows{
+			columns: []string{"SCHEMA"},
+			values:  [][]driver.Value{{schema}},
+		}, nil
+	}
 	return &oracleManualTxRows{
 		columns: []string{"A"},
 		values:  [][]driver.Value{{int64(1)}},
@@ -4343,5 +4405,117 @@ func TestRewriteOracleOpaqueObjectExplicitColumnKeepsLinkedAlias(t *testing.T) {
 	want := `SELECT t.ID, CASE WHEN t."G" IS NULL THEN NULL ELSE '<GEOM_T>' END AS "G" FROM T_UDT@DBX_LOOP t`
 	if sqlText != want {
 		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+// OCI 模式的连接串解析：oci8 前缀、TNS 别名与 thin 形式共用同一套规则。
+func TestParseOracleJDBCURLAcceptsOci8FormsAndTnsAliases(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		want jdbcURLInfo
+	}{
+		{
+			name: "service",
+			url:  "jdbc:oracle:oci8:@//db.example.com:1521/ORCLPDB1",
+			want: jdbcURLInfo{Kind: "service", Host: "db.example.com", Port: 1521, Database: "ORCLPDB1"},
+		},
+		{
+			name: "sid",
+			url:  "jdbc:oracle:oci8:@db.example.com:1521:ORCL",
+			want: jdbcURLInfo{Kind: "sid", Host: "db.example.com", Port: 1521, Database: "ORCL"},
+		},
+		{
+			name: "descriptor",
+			url:  "jdbc:oracle:oci8:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=h)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=x)))",
+			want: jdbcURLInfo{Kind: "descriptor", Descriptor: "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=h)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=x)))"},
+		},
+		{
+			name: "tns alias",
+			url:  "jdbc:oracle:oci8:@ORCLPDB1",
+			want: jdbcURLInfo{Kind: "tns", Database: "ORCLPDB1"},
+		},
+		{
+			name: "tns alias with admin query",
+			url:  "jdbc:oracle:oci8:@ORCLPDB1?TNS_ADMIN=C:/wallets",
+			want: jdbcURLInfo{Kind: "tns", Database: "ORCLPDB1"},
+		},
+		{
+			name: "thin form still parses",
+			url:  "jdbc:oracle:thin:@//db.example.com:1521/ORCLPDB1",
+			want: jdbcURLInfo{Kind: "service", Host: "db.example.com", Port: 1521, Database: "ORCLPDB1"},
+		},
+	}
+	for _, tc := range cases {
+		if got := parseOracleJDBCURL(tc.url); got != tc.want {
+			t.Errorf("%s: parseOracleJDBCURL(%q) = %+v, want %+v", tc.name, tc.url, got, tc.want)
+		}
+	}
+}
+
+func TestParseOracleJDBCURLRejectsUnknownSchemes(t *testing.T) {
+	for _, url := range []string{
+		"jdbc:postgresql://db/app",
+		"jdbc:mysql://db:3306/app",
+		"",
+	} {
+		if got := parseOracleJDBCURL(url); got != (jdbcURLInfo{}) {
+			t.Errorf("parseOracleJDBCURL(%q) = %+v, want the zero value", url, got)
+		}
+	}
+}
+
+func TestOracleTnsAliasName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"ORCLPDB1", "ORCLPDB1"},
+		{"ORCLPDB1?TNS_ADMIN=C:/wallets", "ORCLPDB1"},
+		{"ORCLPDB1 ", "ORCLPDB1"},
+		{"(DESCRIPTION=(ADDRESS=...))", ""},
+		{"//host:1521/svc", ""},
+		{"host:1521:orcl", ""},
+		{"host/svc", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := oracleTnsAliasName(tc.in); got != tc.want {
+			t.Errorf("oracleTnsAliasName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestOraclePlanTableNamePrefersSessionUserTable(t *testing.T) {
+	cases := []struct {
+		name                      string
+		sessionOwner, sessionName string
+		publicOwner, publicName   string
+		want                      string
+	}{
+		{
+			name:         "session user table shadows the public synonym",
+			sessionOwner: "U_BROKEN", sessionName: "PLAN_TABLE",
+			publicOwner: "SYS", publicName: "PLAN_TABLE$",
+			want: `"U_BROKEN"."PLAN_TABLE"`,
+		},
+		{
+			name:        "public synonym target when the schema has no own table",
+			publicOwner: "SYS", publicName: "PLAN_TABLE$",
+			want: `"SYS"."PLAN_TABLE$"`,
+		},
+		{
+			name: "bare name when nothing resolves",
+			want: "PLAN_TABLE",
+		},
+		{
+			name:         "quoted mixed case object is escaped",
+			sessionOwner: "user_1", sessionName: `plan"table`,
+			want: `"user_1"."plan""table"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := oraclePlanTableName(tc.sessionOwner, tc.sessionName, tc.publicOwner, tc.publicName); got != tc.want {
+				t.Fatalf("oraclePlanTableName() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

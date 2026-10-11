@@ -215,6 +215,7 @@ describe("namespace options", () => {
   it("identifies connection-root namespace options as schemas", () => {
     expect(namespaceOptionsAreSchemas({ db_type: "dameng" })).toBe(true);
     expect(namespaceOptionsAreSchemas({ db_type: "oracle" })).toBe(true);
+    expect(namespaceOptionsAreSchemas({ db_type: "oceanbase-oracle" })).toBe(true);
     expect(
       namespaceOptionsAreSchemas({
         db_type: "jdbc",

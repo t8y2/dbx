@@ -5,6 +5,7 @@ pub mod data_compare;
 pub mod database_export;
 pub mod docs;
 pub mod export_runtime;
+pub mod grid_clipboard_guard;
 pub mod mongodb_dump;
 pub mod mongodb_import_export;
 pub mod query_result_export;

@@ -76,7 +76,7 @@ const STANDARD_URL_SCHEMES: Partial<Record<DatabaseType, string>> = {
 };
 
 /** Schemes that are plain HTTP(S) endpoints. */
-const HTTP_URL_DB_TYPES = new Set<DatabaseType>(["elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "rqlite", "consul", "victoriametrics", "influxdb", "influxdb3", "dynamodb", "salesforce"]);
+const HTTP_URL_DB_TYPES = new Set<DatabaseType>(["elasticsearch", "easysearch", "meilisearch", "solr", "couchdb", "qdrant", "milvus", "weaviate", "chromadb", "rqlite", "consul", "victoriametrics", "influxdb", "influxdb3", "dynamodb", "salesforce"]);
 
 /**
  * Generic `prefix://host:port/db` JDBC dialects. Dialects with a different URL
@@ -100,6 +100,7 @@ const JDBC_URL_PREFIXES: Partial<Record<DatabaseType, string>> = {
   hive: "jdbc:hive2",
   kyuubi: "jdbc:hive2",
   argo: "jdbc:hive2",
+  transwarp: "jdbc:inceptor2",
   impala: "jdbc:impala",
   trino: "jdbc:trino",
   prestosql: "jdbc:presto",
@@ -292,15 +293,42 @@ function jdbcCredentialParams(config: ConnectionUrlCopyConfig, withCredentials: 
 }
 
 /**
+ * Oracle Easy Connect Plus properties are not URI query parameters. The
+ * Oracle driver keeps percent escapes literal, so `^` must stay `^` rather
+ * than becoming `%5E`. Values containing property delimiters cannot be
+ * represented safely in the generated URL and are rejected by the caller.
+ */
+function oracleJdbcCredentialValue(value: string): string {
+  return value;
+}
+
+function oracleJdbcCredentialCanBeEmbedded(value: string): boolean {
+  return !/[&=@\s\\"]/.test(value);
+}
+
+/**
  * Dialects whose JDBC URL is not `prefix://host:port/db?query`.
  * Returns `undefined` when the type is not a special dialect, `null` when the
  * dialect is special but cannot be built from this config.
  */
+/**
+ * Oracle Easy Connect Plus property values are not URI-decoded by the driver,
+ * so percent-encoding credentials produces a URL that silently changes the
+ * password. Only values that can be embedded verbatim without breaking the
+ * `?key=value&key=value` grammar are safe to offer as a with-credentials URL.
+ */
+const ORACLE_SAFE_PROPERTY_VALUE = /^[A-Za-z0-9^%#_\-+!*'()]+$/;
+
+function isOracleSafePropertyValue(value: string): boolean {
+  return ORACLE_SAFE_PROPERTY_VALUE.test(value);
+}
+
 function buildSpecialJdbcUrl(config: ConnectionUrlCopyConfig, database: string, withCredentials: boolean): string | null | undefined {
   const host = config.host?.trim() ?? "";
   const rawParams = (config.url_params ?? "").trim();
   const propertyStyle = config.db_type === "sqlserver" || config.db_type === "teradata" ? config.db_type : null;
-  const credentials = jdbcCredentialParams(config, withCredentials, propertyStyle ? (value) => quoteJdbcProperty(value, propertyStyle) : encodeURIComponent);
+  if (config.db_type === "oracle" && withCredentials && [effectiveUsername(config), config.password ?? ""].some((value) => value && !oracleJdbcCredentialCanBeEmbedded(value))) return null;
+  const credentials = jdbcCredentialParams(config, withCredentials, propertyStyle ? (value) => quoteJdbcProperty(value, propertyStyle) : config.db_type === "oracle" ? oracleJdbcCredentialValue : encodeURIComponent);
 
   switch (config.db_type) {
     case "sqlserver": {
@@ -322,7 +350,18 @@ function buildSpecialJdbcUrl(config: ConnectionUrlCopyConfig, database: string, 
         return explicit ? explicit : null;
       }
       const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
-      const query = joinNonEmpty("&", [...credentials, rawParams.replace(/^[?&]+/, "")]);
+      // Oracle Easy Connect Plus does not URI-decode credentials. Offer the
+      // with-credentials item only when the stored values can be embedded
+      // verbatim; otherwise the copied URL would silently change the password.
+      let oracleCredentials: string[] = [];
+      if (withCredentials) {
+        const user = effectiveUsername(config);
+        const password = config.password ?? "";
+        if (user && !isOracleSafePropertyValue(user)) return null;
+        if (password && !isOracleSafePropertyValue(password)) return null;
+        oracleCredentials = jdbcCredentialParams(config, true, (value) => value);
+      }
+      const query = joinNonEmpty("&", [...oracleCredentials, rawParams.replace(/^[?&]+/, "")]);
       if (connectionType === "sid") {
         return `jdbc:oracle:thin:@${formatHostForUrl(host)}${portPart}:${database}${query ? `?${query}` : ""}`;
       }
@@ -352,6 +391,12 @@ function buildSpecialJdbcUrl(config: ConnectionUrlCopyConfig, database: string, 
       if (!host) return null;
       const query = joinNonEmpty("&", [database && `db=${database}`, ...credentials, rawParams.replace(/^[?&]+/, "")]);
       return `jdbc:snowflake://${formatHostForUrl(host)}/${query ? `?${query}` : ""}`;
+    }
+    case "transwarp": {
+      const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
+      const props = rawParams.replace(/^[?&;]+/, "").replace(/&/g, ";");
+      const ssl = config.ssl && !queryHasParam(props, ["ssl"]) ? ";ssl=true" : "";
+      return `jdbc:inceptor2://${formatHostForUrl(host)}${portPart}/${database || "default"}${props ? `;${props}` : ""}${ssl}`;
     }
     case "informix":
     case "gbase": {

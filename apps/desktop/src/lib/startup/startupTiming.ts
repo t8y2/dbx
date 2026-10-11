@@ -1,4 +1,4 @@
-export type StartupPhase = "bootstrap" | "gate-mounted" | "locale-ready" | "auth-ready" | "migration-ready" | "app-mounted" | "settings-ready" | "connections-ready" | "tabs-restored";
+export type StartupPhase = "bootstrap" | "compat-blocked" | "gate-mounted" | "locale-ready" | "auth-ready" | "migration-ready" | "app-mounted" | "settings-ready" | "connections-ready" | "tabs-restored";
 
 export function markStartupPhase(phase: StartupPhase): void {
   const name = `dbx:startup:${phase}`;

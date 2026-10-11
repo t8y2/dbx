@@ -1,5 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 import { supportsDriverManagement } from "@/lib/database/databaseCapabilities";
+import { databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 
 export interface AgentDriverInstallState {
   db_type: string;
@@ -35,8 +36,18 @@ export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverPr
   if (dbType === "sqlite") return context?.ssh ? "sqlite-worker" : undefined;
   // argo owns its dedicated argo-go agent — only kyuubi/impala still share hive-go.
   if (dbType === "kyuubi" || dbType === "impala") return "hive";
-  if (dbType === "oracle") return "oracle";
+  // Oracle 的 OCI（thick）模式由独立的 oracle-oci agent 承担；其它 Oracle 连接继续用 thin agent。
+  // agentKey 以连接类型声明（connection-types/oracle.yaml）为准，避免两处各写一份映射。
+  if (dbType === "oracle") {
+    const entry = databaseManifestEntry(dbType);
+    return entry?.driverProfiles?.find((profile) => profile.profile === driverProfile)?.agentKey ?? entry?.agentKey;
+  }
   if (dbType === "h2") return "h2";
+  if (dbType === "transwarp") return "transwarp";
+  if (dbType === "nebula") {
+    const entry = databaseManifestEntry(dbType);
+    return entry?.driverProfiles?.find((profile) => profile.profile === driverProfile)?.agentKey ?? entry?.agentKey;
+  }
   if (dbType === "mongodb") return "mongodb";
   if (dbType === "dameng") return "dameng";
   if (dbType === "gbase") return driverProfile === "gbase8s" ? "gbase8s" : "gbase8a";

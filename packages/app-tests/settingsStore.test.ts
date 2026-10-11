@@ -505,6 +505,7 @@ test("defaults shortcut settings", () => {
   assert.equal(settings.shortcuts.copySidebarSelection, "Mod+C");
   assert.equal(settings.shortcuts.pasteSidebarSelection, "Mod+V");
   assert.equal(settings.shortcuts.editSidebarConnection, "Mod+E");
+  assert.equal(settings.shortcuts.disconnectSidebarConnection, "Shift+Mod+E");
 });
 
 test("keeps saved shortcut overrides", () => {
@@ -518,6 +519,7 @@ test("keeps saved shortcut overrides", () => {
       openSettings: "Shift+Mod+P",
       zoomInUi: "Alt+Mod+=",
       editSidebarConnection: "Alt+E",
+      disconnectSidebarConnection: "Alt+D",
     } as any,
   });
 
@@ -530,6 +532,7 @@ test("keeps saved shortcut overrides", () => {
   assert.equal(settings.shortcuts.openSettings, "Shift+Mod+P");
   assert.equal(settings.shortcuts.zoomInUi, "Alt+Mod+=");
   assert.equal(settings.shortcuts.editSidebarConnection, "Alt+E");
+  assert.equal(settings.shortcuts.disconnectSidebarConnection, "Alt+D");
   assert.equal(settings.shortcuts.saveSql, "Mod+S");
 });
 

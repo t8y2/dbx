@@ -26,11 +26,13 @@ test("getAllColumns is exported from both backends with table_name", () => {
 });
 
 test("get_all_columns is registered in Tauri and mounted on the web API", () => {
-  const schemaCommands = source("src-tauri/src/commands/schema.rs");
+  const schemaCommands = source("crates/dbx-tauri-schema/src/commands.rs");
+  const schemaRegistry = source("crates/dbx-tauri-schema/src/lib.rs");
   const lib = source("src-tauri/src/lib.rs");
   const webMain = source("crates/dbx-web/src/main.rs");
 
   assert.match(schemaCommands, /pub async fn get_all_columns/);
-  assert.match(lib, /commands::schema::get_all_columns/);
+  assert.match(schemaRegistry, /get_all_columns/);
+  assert.match(lib, /dbx_tauri_schema::route/);
   assert.match(webMain, /\/schema\/all-columns/);
 });

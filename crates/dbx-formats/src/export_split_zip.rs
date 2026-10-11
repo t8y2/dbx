@@ -122,6 +122,21 @@ impl SplitZipExportWriter {
         Ok(())
     }
 
+    /// Writes one complete SQL export unit into a single part. A unit may be
+    /// a DDL statement, routine body, INSERT, comment, or client-side batch
+    /// delimiter such as SQL Server `GO`; it must never be assembled from
+    /// multiple calls. A unit that fits starts a new part before it would
+    /// exceed the configured size; an oversized individual unit remains whole
+    /// as the only unavoidable exception.
+    pub fn write_sql_unit(&mut self, unit: &[u8]) -> std::io::Result<()> {
+        if self.current_part_bytes > 0 && self.current_part_bytes + unit.len() as u64 > self.part_max_bytes {
+            self.start_next_part().map_err(std::io::Error::other)?;
+        }
+        self.zip.write_all(unit)?;
+        self.current_part_bytes += unit.len() as u64;
+        Ok(())
+    }
+
     /// Writes the trailing `manifest.json` entry (listing every part in
     /// order) and finalizes the zip archive. Consumes the writer because the
     /// underlying `zip::ZipWriter::finish` does.
@@ -148,12 +163,14 @@ impl SplitZipExportWriter {
 
 impl Write for SplitZipExportWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        if self.current_part_bytes >= self.part_max_bytes {
-            self.start_next_part().map_err(std::io::Error::other)?;
-        }
-        let written = self.zip.write(buffer)?;
-        self.current_part_bytes += written as u64;
-        Ok(written)
+        self.write_sql_unit(buffer)?;
+        Ok(buffer.len())
+    }
+
+    fn write_fmt(&mut self, fmt: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+        let mut unit = String::new();
+        std::fmt::write(&mut unit, fmt).map_err(|_| std::io::Error::other("Failed to format SQL export unit"))?;
+        self.write_sql_unit(unit.as_bytes())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -240,13 +257,9 @@ mod tests {
 
         {
             let mut writer = SplitZipExportWriter::create(&zip_path, MIN_SPLIT_PART_MAX_MB, "mydb", "sql").unwrap();
-            // Each write() call is one full statement; the threshold check
-            // happens before the call, so a small per-write payload combined
-            // with a below-1MB threshold still needs enough total bytes to
-            // exceed 1MB and trigger a second part. Use the internal minimum
-            // by writing repeatedly.
             for index in 0..6000 {
-                writeln!(writer, "{long_statement} -- row {index}").unwrap();
+                let line = format!("{long_statement} -- row {index}\n");
+                writer.write_all(line.as_bytes()).unwrap();
             }
             writer.finish("mydb.sql").unwrap();
         }
@@ -268,6 +281,109 @@ mod tests {
         let manifest: serde_json::Value = serde_json::from_slice(&manifest_entry.1).unwrap();
         assert_eq!(manifest["totalParts"].as_u64().unwrap() as usize, sql_entries.len());
         assert_eq!(manifest["parts"].as_array().unwrap().len(), sql_entries.len());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotates_before_a_complete_statement_that_would_exceed_the_part_limit() {
+        let dir = std::env::temp_dir().join(format!("dbx-split-zip-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("export.zip");
+        let statement = format!("INSERT INTO t VALUES ('{}');", "x".repeat(700 * 1024));
+
+        {
+            let mut writer = SplitZipExportWriter::create(&zip_path, MIN_SPLIT_PART_MAX_MB, "mydb", "sql").unwrap();
+            writer.write_all(statement.as_bytes()).unwrap();
+            writer.write_all(b"\n").unwrap();
+            writer.write_all(statement.as_bytes()).unwrap();
+            writer.finish("mydb.sql").unwrap();
+        }
+
+        let entries = read_zip_entries(&zip_path);
+        let sql_entries: Vec<_> = entries.iter().filter(|(name, _)| name.ends_with(".sql")).collect();
+        assert_eq!(sql_entries.len(), 2);
+        assert!(sql_entries.iter().all(|(_, contents)| contents.len() <= 1024 * 1024));
+        assert_eq!(String::from_utf8(sql_entries[0].1.clone()).unwrap(), format!("{statement}\n"));
+        assert_eq!(String::from_utf8(sql_entries[1].1.clone()).unwrap(), statement);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn writeln_with_multiple_format_arguments_stays_one_sql_unit() {
+        // std::fmt's default Write::write_fmt dispatches one write() call per
+        // format-string fragment, which would let a rotation slip in between
+        // "CREATE TABLE " and the column list even though the whole macro
+        // invocation is meant to emit a single DDL unit. Every real export
+        // call site formats a whole statement/DDL/routine body with `writeln!`
+        // (e.g. `writeln!(file, "{source}\n")`, `writeln!(file, "-- Date:
+        // {timestamp}")`), so the writer overrides `write_fmt` to buffer the
+        // formatted text and hand it to `write_sql_unit` in one call.
+        let dir = std::env::temp_dir().join(format!("dbx-split-zip-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("export.zip");
+        let table_name = "orders";
+        let insert = "INSERT INTO orders VALUES (1);";
+        // part_max_bytes for MIN_SPLIT_PART_MAX_MB is 1 MiB. Size the column
+        // list so the CREATE TABLE unit alone fits (leaving less headroom
+        // than the INSERT needs), forcing the rotation to land *between* the
+        // two units instead of never triggering or landing mid-DDL.
+        let overhead = "CREATE TABLE ".len() + table_name.len() + " (".len() + ");".len() + "\n".len();
+        let columns = "x".repeat(1024 * 1024 - overhead - 10);
+        let create_table = format!("CREATE TABLE {table_name} ({columns});");
+
+        {
+            let mut writer = SplitZipExportWriter::create(&zip_path, MIN_SPLIT_PART_MAX_MB, "mydb", "sql").unwrap();
+            writeln!(writer, "CREATE TABLE {table_name} ({columns});").unwrap();
+            writeln!(writer, "{insert}").unwrap();
+            writer.finish("mydb.sql").unwrap();
+        }
+
+        let entries = read_zip_entries(&zip_path);
+        let mut sql_entries: Vec<_> = entries.iter().filter(|(name, _)| name.ends_with(".sql")).collect();
+        sql_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(sql_entries.len(), 2, "the oversized CREATE TABLE must rotate before the INSERT, not mid-DDL");
+        let first = String::from_utf8(sql_entries[0].1.clone()).unwrap();
+        let second = String::from_utf8(sql_entries[1].1.clone()).unwrap();
+        assert_eq!(first, format!("{create_table}\n"), "the whole CREATE TABLE must land in one part intact");
+        assert_eq!(second, format!("{insert}\n"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keeps_an_oversized_individual_statement_whole_as_the_only_limit_exception() {
+        let dir = std::env::temp_dir().join(format!("dbx-split-zip-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("export.zip");
+
+        let mut seed = 0x1234_5678_u32;
+        let huge_payload = (0..3 * 1024 * 1024)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                char::from(b'a' + (seed >> 24) as u8 % 26)
+            })
+            .collect::<String>();
+        let statement = format!("INSERT INTO t VALUES ('{huge_payload}');\n");
+
+        {
+            let mut writer = SplitZipExportWriter::create(&zip_path, MIN_SPLIT_PART_MAX_MB, "mydb", "sql").unwrap();
+            writer.write_all(statement.as_bytes()).unwrap();
+            writer.finish("mydb.sql").unwrap();
+        }
+
+        let entries = read_zip_entries(&zip_path);
+        let mut sql_entries: Vec<_> = entries.iter().filter(|(name, _)| name.ends_with(".sql")).collect();
+        sql_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(sql_entries.len(), 1, "a single write must stay in one SQL part");
+        assert_eq!(String::from_utf8(sql_entries[0].1.clone()).unwrap(), statement);
+
+        let manifest_entry = entries.iter().find(|(name, _)| name == "manifest.json").unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest_entry.1).unwrap();
+        assert_eq!(manifest["totalParts"].as_u64().unwrap() as usize, sql_entries.len());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

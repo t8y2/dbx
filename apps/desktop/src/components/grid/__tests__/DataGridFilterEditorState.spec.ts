@@ -79,6 +79,16 @@ function filterToggle(host: HTMLElement): HTMLButtonElement {
   return toggle;
 }
 
+function sortPanelSelector(view: DataGridFilterEditorView): string {
+  return view === "conditions" ? "[data-grid-sort-workbench]" : "[data-grid-text-sort-workbench]";
+}
+
+function sortToggle(host: HTMLElement): HTMLButtonElement {
+  const toggle = host.querySelector<HTMLButtonElement>('button[aria-label="Sort"][aria-expanded]');
+  if (!toggle) throw new Error("Sort editor toggle not found");
+  return toggle;
+}
+
 function applyButton(host: HTMLElement, view: DataGridFilterEditorView): HTMLButtonElement {
   const panel = host.querySelector(panelSelector(view));
   const button = [...(panel?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((candidate) => candidate.textContent?.trim() === "Apply Filter");
@@ -181,6 +191,25 @@ describe.each(["conditions", "text"] as const)("DataGrid %s filter editor state"
 
     filterToggle(host).click();
     await settle();
+    expect(host.querySelector(panelSelector(view))).not.toBeNull();
+  });
+
+  it("opens the matching sort workbench and keeps it mutually exclusive with the filter workbench", async () => {
+    const { host } = mountGrid(view, true);
+    await settle();
+
+    expect(host.querySelector(panelSelector(view))).not.toBeNull();
+    expect(host.querySelector(sortPanelSelector(view))).toBeNull();
+
+    sortToggle(host).click();
+    await settle();
+    expect(host.querySelector(panelSelector(view))).toBeNull();
+    expect(host.querySelector(sortPanelSelector(view))).not.toBeNull();
+    expect(sortToggle(host).getAttribute("aria-expanded")).toBe("true");
+
+    filterToggle(host).click();
+    await settle();
+    expect(host.querySelector(sortPanelSelector(view))).toBeNull();
     expect(host.querySelector(panelSelector(view))).not.toBeNull();
   });
 });

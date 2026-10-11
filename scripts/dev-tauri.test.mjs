@@ -110,6 +110,19 @@ test(
       assert.notEqual(first.hash, second.hash);
       assert.equal(first.requirement, second.requirement);
       assert.match(execute(binary, [identity.keychain]), /build=2 status=0/);
+      compile(3);
+      signDevelopmentBinary(binary, directory);
+      const third = signature();
+      assert.notEqual(second.hash, third.hash);
+      assert.equal(second.requirement, third.requirement);
+      assert.match(execute(binary, [identity.keychain]), /build=3 status=0/);
+      execute("/usr/bin/security", ["lock-keychain", identity.keychain]);
+      const locked = spawnSync(binary, [identity.keychain], { encoding: "utf8", timeout: 5000 });
+      assert.equal(locked.error, undefined, "a locked keychain must fail without waiting for a dialog");
+      assert.equal(locked.status, 3);
+      assert.match(locked.stdout, /status=-\d+/);
+      execute("/usr/bin/security", ["unlock-keychain", "-p", identity.password, identity.keychain]);
+      assert.match(execute(binary, [identity.keychain]), /build=3 status=0/);
       assert.equal(ensureSigningIdentity(directory).fingerprint, identity.fingerprint);
     } finally {
       if (identity) removeSigningKeychain(identity.keychain);

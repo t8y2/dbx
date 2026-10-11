@@ -17,6 +17,7 @@ import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoCommandException;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.ServerAddress;
+import com.mongodb.connection.ClusterConnectionMode;
 import com.mongodb.bulk.BulkWriteError;
 import com.mongodb.bulk.BulkWriteResult;
 import com.mongodb.bulk.WriteConcernError;
@@ -1518,6 +1519,118 @@ class MongoAgentTest {
         connection.addProperty("database", "gray_lite_twin_fat");
 
         assertEquals("admin", MongoAgent.authenticationDatabase(connection));
+    }
+
+    // ─── Direct connection: configureBuilder directConnection parsing ───
+
+    @Test
+    void configureBuilderWithDirectConnectionTrueSetsSingleModeAndKeepsReplicaSetName() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?replicaSet=cardetail&directConnection=true&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.SINGLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void configureBuilderWithCaseInsensitiveDirectConnectionSetsSingleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?replicaSet=cardetail&DirectConnection=TRUE&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.SINGLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void configureBuilderWithReplicaSetWithoutDirectConnectionDefaultsToMultipleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?replicaSet=cardetail&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.MULTIPLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void configureBuilderWithDirectConnectionFalseAndReplicaSetLeavesMultipleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?directConnection=false&replicaSet=cardetail&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.MULTIPLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void configureBuilderSingleHostNoOptionsRemainsUnchanged() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty("connection_string", "mongodb://127.0.0.1:27017");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.SINGLE, settings.getClusterSettings().getMode());
+    }
+
+    @Test
+    void configureBuilderTwoHostsWithDirectConnectionTrueRemainsMultipleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://127.0.0.1:27017,127.0.0.1:27018/?replicaSet=cardetail&directConnection=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.MULTIPLE, settings.getClusterSettings().getMode());
+    }
+
+    @Test
+    void configureBuilderWithPercentEncodedDirectConnectionSetsSingleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?replicaSet=cardetail&%64irect%43onnection=%74rue&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.SINGLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void hasDirectConnectionTrueHandlesVariousQueryFormats() {
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=true"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?DirectConnection=TRUE"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directconnection=true&other=1"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?other=1&directConnection=true"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=false&directConnection=true"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=true#fragment"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?%64irect%43onnection=%74rue"));
+
+        assertFalse(MongoAgent.hasDirectConnectionTrue(null));
+        assertFalse(MongoAgent.hasDirectConnectionTrue(""));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017?"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?replicaSet=rs"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=false"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=1"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection="));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=true&directConnection=false"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/#fragment?directConnection=true"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://directConnection=true@127.0.0.1:27017/db"));
     }
 
     // ─── TLS: configureBuilder JSON parsing ───

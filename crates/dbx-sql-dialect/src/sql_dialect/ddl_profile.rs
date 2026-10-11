@@ -363,6 +363,11 @@ const SQLITE_TYPE_MAP: &[TypeMapEntry] = &[
     TypeMapEntry { source_base: "JSON", target_template: "TEXT" },
 ];
 
+const POSTGRES_TYPE_MAP: &[TypeMapEntry] = &[
+    TypeMapEntry { source_base: "UNIQUEIDENTIFIER", target_template: "UUID" },
+    TypeMapEntry { source_base: "GUID", target_template: "UUID" },
+];
+
 // ---------------------------------------------------------------------------
 // Profile families (shared shapes; registration is the only DatabaseType match)
 // ---------------------------------------------------------------------------
@@ -469,7 +474,7 @@ fn postgres_family(db: DatabaseType) -> DdlDialectProfile {
         owner_alter_template: Some(OWNER_ALTER),
         drop_table_template: DROP_TABLE,
         lock_timeout_sql: Some("SET lock_timeout = '3s';"),
-        type_map: &[],
+        type_map: POSTGRES_TYPE_MAP,
     }
 }
 
@@ -894,8 +899,8 @@ pub fn profile_for(db_type: DatabaseType) -> DdlDialectProfile {
             profile
         }
 
-        DuckDb | Questdb | Snowflake | Trino | PrestoSql | Hive | Kyuubi | Impala | Argo | Spark | Bigquery
-        | Spanner | Kylin | Ignite | Ignite3 | Oscar | Tdengine | Iotdb | Databricks | Jdbc => {
+        DuckDb | Questdb | Snowflake | Trino | PrestoSql | Hive | Kyuubi | Impala | Argo | Transwarp | Spark
+        | Bigquery | Spanner | Kylin | Ignite | Ignite3 | Oscar | Tdengine | Iotdb | Databricks | Jdbc => {
             conservative_ansi(db_type)
         }
 
@@ -904,9 +909,9 @@ pub fn profile_for(db_type: DatabaseType) -> DdlDialectProfile {
         Plugin => conservative_ansi(db_type),
 
         // Non-tabular / not applicable for relational CREATE TABLE
-        Redis | MongoDb | DynamoDb | Elasticsearch | Easysearch | Solr | Meilisearch | Qdrant | Milvus | Weaviate
-        | ChromaDb | Neo4j | Cassandra | Etcd | ZooKeeper | Nacos | Consul | InfluxDb3 | VictoriaMetrics
-        | MessageQueue | Mqtt | Hbase | Salesforce => conservative_ansi(db_type),
+        Redis | MongoDb | DynamoDb | Elasticsearch | Easysearch | Solr | CouchDb | Meilisearch | Qdrant | Milvus
+        | Weaviate | ChromaDb | Neo4j | Nebula | Cassandra | Etcd | ZooKeeper | Nacos | Consul | InfluxDb3
+        | VictoriaMetrics | MessageQueue | Mqtt | Hbase | Salesforce => conservative_ansi(db_type),
     }
 }
 

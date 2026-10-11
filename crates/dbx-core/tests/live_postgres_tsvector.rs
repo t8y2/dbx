@@ -98,6 +98,7 @@ async fn postgres_tsvector_generated_columns_are_readable_and_omitted_from_inser
         spatial_values: Vec::new(),
         rows: result.rows.clone(),
         batch_size: Some(10),
+        preserve_original_language: false,
     })
     .expect("export insert")
     .join("\n");

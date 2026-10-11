@@ -31,6 +31,8 @@ describe("migration failure actions", () => {
       button("migration.retryStatus").click();
       await nextTick();
       expect(backend.migrationStatus).toHaveBeenCalledTimes(2);
+      expect(backend.migrationStatus).toHaveBeenNthCalledWith(1, false);
+      expect(backend.migrationStatus).toHaveBeenNthCalledWith(2, true);
       expect(backend.migrationRetry).not.toHaveBeenCalled();
     } finally {
       app.unmount();

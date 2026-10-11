@@ -185,7 +185,7 @@ pub async fn list_indexes(pool: &MySqlPool, table: &str) -> Result<Vec<IndexInfo
 }
 
 fn list_indexes_sql(table: &str) -> String {
-    format!("SHOW TABLE INDEXES FROM {}", quote_identifier(table))
+    format!("SHOW TABLE {} INDEXES", quote_identifier(table))
 }
 
 fn index_info_from_row(row: &mysql_async::Row) -> IndexInfo {
@@ -248,8 +248,8 @@ mod tests {
 
     #[test]
     fn indexes_sql_uses_show_table_indexes() {
-        assert_eq!(list_indexes_sql("materials"), "SHOW TABLE INDEXES FROM `materials`");
-        assert_eq!(list_indexes_sql("odd`name"), "SHOW TABLE INDEXES FROM `odd``name`");
+        assert_eq!(list_indexes_sql("materials"), "SHOW TABLE `materials` INDEXES");
+        assert_eq!(list_indexes_sql("odd`name"), "SHOW TABLE `odd``name` INDEXES");
     }
 
     #[test]

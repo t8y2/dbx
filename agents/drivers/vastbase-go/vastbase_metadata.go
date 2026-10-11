@@ -1868,6 +1868,14 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if len(columns) == 0 {
+		if visibleColumns, fallbackErr := s.getColumns("", table); fallbackErr == nil && len(visibleColumns) > 0 {
+			columns = visibleColumns
+			if columns[0].ResolvedSchema != nil && *columns[0].ResolvedSchema != "" {
+				effective = *columns[0].ResolvedSchema
+			}
+		}
+	}
 	tableComment, _ := s.getTableComment(effective, table)
 	ddl := renderTableDDL(effective, table, columns, tableComment)
 	ddl, err = s.appendTableIndexDDL(effective, table, ddl)

@@ -25,6 +25,9 @@ export interface DataGridColumnInfo {
 
 export interface DataGridSaveStatementOptions {
   databaseType?: DatabaseType;
+  /** Server version reported by the connection (see `BuildTableSelectSqlOptions.serverVersion`).
+   * The saved statements must address rows the same way the grid read them. */
+  serverVersion?: string;
   identifierQuote?: string;
   tableMeta: DataGridTableMeta;
   columns: string[];
@@ -131,6 +134,7 @@ export interface DataGridConditionalUpdateSqlOptions {
 }
 
 export interface HiveTablePropertiesSqlOptions {
+  databaseType?: DatabaseType;
   schema?: string;
   tableName: string;
   propertyName: string;

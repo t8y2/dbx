@@ -205,6 +205,7 @@ function preparationFor(table: string) {
     targetRowCount: 0,
     sourceTruncated: false,
     targetTruncated: false,
+    rowBudget: 100_000,
   };
 }
 

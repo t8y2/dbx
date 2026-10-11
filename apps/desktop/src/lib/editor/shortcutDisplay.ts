@@ -97,3 +97,9 @@ export function formatShortcutDisplay(shortcut: string, platform = globalThis.na
     .map((parts) => parts.map((part) => shortcutKeyLabel(part, platform)).join(keySeparator))
     .join(", ");
 }
+
+export function formatShortcutTooltip(label: string, shortcut?: string, platform = globalThis.navigator?.platform || ""): string {
+  if (!shortcut?.trim()) return label;
+  const display = formatShortcutDisplay(shortcut, platform);
+  return display && display !== "—" ? `${label} (${display})` : label;
+}

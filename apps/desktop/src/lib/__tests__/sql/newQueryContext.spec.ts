@@ -106,6 +106,83 @@ describe("resolveNewQueryTarget", () => {
       })?.schema,
     ).toBe("reporting");
   });
+
+  it("prefers the active tab over a selected sidebar node when no explicit source is given", () => {
+    // Every ad-hoc entry (app toolbar, shortcut, welcome screen, editor-group
+    // "+") resolves through this default order, so a sidebar node that merely
+    // happens to be selected must not outrank the editor the user is looking at
+    // (issue #11517).
+    expect(
+      resolveNewQueryTarget({
+        activeTab: { connectionId: "conn-tab", database: "bilibili" },
+        selectedTreeNode: { connectionId: "conn-tree", database: "reporting" },
+        connections: [
+          { id: "conn-tree", host: "localhost", database: "reporting", db_type: "mysql" },
+          { id: "conn-tab", host: "localhost", database: "bilibili", db_type: "mysql" },
+        ],
+      }),
+    ).toMatchObject({ connectionId: "conn-tab", database: "bilibili" });
+  });
+
+  it("falls back to the single online connection instead of the first configured one", () => {
+    expect(
+      resolveNewQueryTarget({
+        connections: [
+          { id: "conn-unused", host: "localhost", database: "unused_db", db_type: "mysql" },
+          { id: "conn-online", host: "localhost", database: "online_db", db_type: "mysql" },
+        ],
+        connectedSqlConnectionIds: new Set(["conn-online"]),
+      }),
+    ).toMatchObject({ connectionId: "conn-online", database: "online_db", shouldRefreshDefaultDatabase: true });
+  });
+
+  it("leaves the connection unselected when several configured connections are offline", () => {
+    expect(
+      resolveNewQueryTarget({
+        connections: [
+          { id: "conn-first", host: "localhost", database: "first_db", db_type: "mysql" },
+          { id: "conn-second", host: "localhost", database: "second_db", db_type: "mysql" },
+        ],
+        connectedSqlConnectionIds: new Set<string>(),
+      }),
+    ).toBeNull();
+  });
+
+  it("leaves the connection unselected when multiple SQL connections are online", () => {
+    // An ambiguous online state must not pick a connection on its own (#11517).
+    expect(
+      resolveNewQueryTarget({
+        connections: [
+          { id: "conn-first", host: "localhost", database: "first_db", db_type: "mysql" },
+          { id: "conn-second", host: "localhost", database: "second_db", db_type: "mysql" },
+          { id: "conn-third", host: "localhost", database: "third_db", db_type: "mysql" },
+        ],
+        connectedSqlConnectionIds: new Set(["conn-second", "conn-third"]),
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps the sole configured connection as the legacy fallback", () => {
+    expect(
+      resolveNewQueryTarget({
+        connections: [{ id: "conn-only", host: "localhost", database: "only_db", db_type: "mysql" }],
+        connectedSqlConnectionIds: new Set<string>(),
+      }),
+    ).toMatchObject({ connectionId: "conn-only", database: "only_db" });
+  });
+
+  it("keeps the last active connection ahead of the single online connection", () => {
+    expect(
+      resolveNewQueryTarget({
+        activeConnectionId: "conn-active",
+        connections: [
+          { id: "conn-active", host: "localhost", database: "active_db", db_type: "mysql" },
+          { id: "conn-online", host: "localhost", database: "online_db", db_type: "mysql" },
+        ],
+        connectedSqlConnectionIds: new Set(["conn-online"]),
+      }),
+    ).toMatchObject({ connectionId: "conn-active" });
+  });
 });
 
 describe("resolveNewQueryTable", () => {

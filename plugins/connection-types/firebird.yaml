@@ -20,7 +20,7 @@ capabilities:
   queryExecution: true
   metadataBrowse: true
   objectBrowser: true
-  objectSource: false
+  objectSource: true
   schemaSearch: true
   diagram: true
   tableDataEdit: true

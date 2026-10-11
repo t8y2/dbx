@@ -38,10 +38,39 @@ const TRACKED_END_CONTINUATIONS = new Set(["CASE", "TRY", "CATCH"]);
 // the stack; nothing on it belongs to them.
 const UNTRACKED_END_CONTINUATIONS = new Set(["IF", "WHILE", "LOOP"]);
 
-// A comment is legal SQL wherever whitespace is, so "END /* note */ CASE" must still read as a
-// continuation; this matches a run of pure whitespace and/or `--`/`/* */` comments so real code
-// between the two words (e.g. a `;` starting an unrelated statement) still fails the check.
-const GAP_IS_WHITESPACE_OR_COMMENT = /^(?:\s|--[^\n]*|\/\*[\s\S]*?\*\/)*$/;
+// Comments are legal wherever whitespace is, so "END /* note */ CASE" is still a
+// continuation. Scan once: a repeated regex can split a long `-----` comment in
+// exponentially many ways when a label or other code follows it.
+function gapIsWhitespaceOrComment(gap: string): boolean {
+  let index = 0;
+  while (index < gap.length) {
+    if (/\s/.test(gap[index])) {
+      index++;
+    } else if (gap.startsWith("--", index)) {
+      const newline = gap.indexOf("\n", index + 2);
+      if (newline < 0) return true;
+      index = newline + 1;
+    } else if (gap.startsWith("/*", index)) {
+      let depth = 1;
+      index += 2;
+      while (depth > 0 && index < gap.length) {
+        if (gap.startsWith("/*", index)) {
+          depth++;
+          index += 2;
+        } else if (gap.startsWith("*/", index)) {
+          depth--;
+          index += 2;
+        } else {
+          index++;
+        }
+      }
+      if (depth > 0) return false;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
 
 // T-SQL transaction openers do not have a matching `END`, so they must not consume the closer
 // of an enclosing procedural `BEGIN...END` block. Match complete keyword tokens only: `TRAN` is
@@ -50,14 +79,14 @@ const SQLSERVER_TRANSACTION_BEGIN_WORDS = new Set(["TRAN", "TRANSACTION"]);
 
 function isSqlServerTransactionBegin(state: EditorState, tokens: SyntaxNode[], index: number): boolean {
   const next = tokens[index + 1];
-  if (!next || !GAP_IS_WHITESPACE_OR_COMMENT.test(state.sliceDoc(tokens[index].to, next.from))) return false;
+  if (!next || !gapIsWhitespaceOrComment(state.sliceDoc(tokens[index].to, next.from))) return false;
 
   const nextText = state.sliceDoc(next.from, next.to).toUpperCase();
   if (SQLSERVER_TRANSACTION_BEGIN_WORDS.has(nextText)) return true;
   if (nextText !== "DISTRIBUTED") return false;
 
   const transaction = tokens[index + 2];
-  return Boolean(transaction && GAP_IS_WHITESPACE_OR_COMMENT.test(state.sliceDoc(next.to, transaction.from)) && state.sliceDoc(transaction.from, transaction.to).toUpperCase() === "TRANSACTION");
+  return Boolean(transaction && gapIsWhitespaceOrComment(state.sliceDoc(next.to, transaction.from)) && state.sliceDoc(transaction.from, transaction.to).toUpperCase() === "TRANSACTION");
 }
 
 // Keyed by the `Tree` instance (not `Text`): the syntax tree is also invalidated when the SQL
@@ -189,7 +218,7 @@ export function computeBlockFoldRanges(state: EditorState, databaseType?: Databa
     const text = state.sliceDoc(token.from, token.to).toUpperCase();
     if (text === "END") {
       const next = tokens[i + 1];
-      const continuation = next && GAP_IS_WHITESPACE_OR_COMMENT.test(state.sliceDoc(token.to, next.from)) ? state.sliceDoc(next.from, next.to).toUpperCase() : null;
+      const continuation = next && gapIsWhitespaceOrComment(state.sliceDoc(token.to, next.from)) ? state.sliceDoc(next.from, next.to).toUpperCase() : null;
       if (continuation && UNTRACKED_END_CONTINUATIONS.has(continuation)) {
         i++; // "END IF"/"END WHILE"/... -- closes something we don't track; skip past it untouched
         continue;

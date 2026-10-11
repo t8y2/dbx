@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 
 import { createApp, defineComponent, h, nextTick, reactive } from "vue";
+import { undo } from "@codemirror/commands";
+import { EditorView } from "@codemirror/view";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import { compressSqlText, formatSqlForEditing } from "@/lib/sql/sqlFormatter";
 import { DEFAULT_SQL_FORMATTER_SETTINGS } from "@/lib/sql/sqlFormatterConfig";
+import type { DatabaseType } from "@/types/database";
 
 // The request ids are per-kind global counters in App.vue, so ids keep
 // increasing for the lifetime of the process. The module-scope replay cursor in
@@ -33,7 +36,7 @@ type EditorState = {
 
 const WAIT = { timeout: 5000, interval: 20 };
 
-function mountEditor(initial: { modelValue: string; tabId: string; formatRequestId?: number; compressRequestId?: number }) {
+function mountEditor(initial: { modelValue: string; tabId: string; databaseType?: DatabaseType; formatRequestId?: number; compressRequestId?: number }) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const state = reactive<EditorState>({
@@ -43,12 +46,13 @@ function mountEditor(initial: { modelValue: string; tabId: string; formatRequest
     compressRequestId: initial.compressRequestId,
   });
   const emits: string[] = [];
+  const formatErrors: string[] = [];
   const root = defineComponent({
     setup: () => () =>
       h(QueryEditor, {
         modelValue: state.modelValue,
         tabId: state.tabId,
-        databaseType: "mysql",
+        databaseType: initial.databaseType ?? "mysql",
         dialect: "mysql",
         formatDialect: "mysql",
         autoFocus: false,
@@ -59,6 +63,9 @@ function mountEditor(initial: { modelValue: string; tabId: string; formatRequest
           // Mirror the app: App.vue writes the emitted text back into the tab
           // store, so the modelValue prop follows the editor document.
           state.modelValue = value;
+        },
+        onFormatError: (message: string) => {
+          formatErrors.push(message);
         },
       }),
   });
@@ -72,7 +79,7 @@ function mountEditor(initial: { modelValue: string; tabId: string; formatRequest
     app.unmount();
     host.remove();
   });
-  return { state, emits, host, unmount: () => app.unmount() };
+  return { state, emits, formatErrors, host, unmount: () => app.unmount() };
 }
 
 async function waitForEditor(host: HTMLElement) {
@@ -157,5 +164,136 @@ describe("QueryEditor format/compress request replay", () => {
     await settle();
 
     expect(second.emits).toEqual([]);
+  });
+
+  it("keeps the whole-document format caret on its original SQL token", async () => {
+    const { state, emits, host } = mountEditor({ modelValue: COMPRESSED_SQL, tabId: "tab-a" });
+    await waitForEditor(host);
+    const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
+    const caret = COMPRESSED_SQL.lastIndexOf("tenant_id") + 4;
+    editorView.dispatch({ selection: { anchor: caret } });
+
+    state.formatRequestId = 4;
+    await vi.waitFor(() => expect(emits.at(-1)).toBe(FORMATTED_SQL), WAIT);
+
+    expect(editorView.state.selection.main.head).toBe(FORMATTED_SQL.lastIndexOf("tenant_id") + 4);
+    expect(editorView.state.selection.main.head).toBeLessThan(editorView.state.doc.length);
+    expect(undo(editorView)).toBe(true);
+    expect(editorView.state.doc.toString()).toBe(COMPRESSED_SQL);
+    expect(editorView.state.selection.main.head).toBe(caret);
+    expect(undo(editorView)).toBe(false);
+  });
+
+  it("reports the parse failure instead of silently formatting nothing", async () => {
+    const source = "SELECT 1 .";
+    const { state, emits, formatErrors, host } = mountEditor({ modelValue: source, tabId: "tab-a" });
+    await waitForEditor(host);
+    const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
+    const caret = source.indexOf("1");
+    editorView.dispatch({ selection: { anchor: caret } });
+
+    state.formatRequestId = 5;
+    // The formatter cannot parse the statement, so the command must say so
+    // rather than return the source and leave the editor looking untouched.
+    await vi.waitFor(() => expect(formatErrors).toHaveLength(1), WAIT);
+
+    expect(formatErrors[0]).toContain("Parse error");
+    expect(emits).toEqual([]);
+    expect(editorView.state.doc.toString()).toBe(source);
+    expect(editorView.state.selection.main.head).toBe(caret);
+  });
+
+  it.each([
+    ["forward", 0, COMPRESSED_SQL.length, 0, FORMATTED_SQL.length, 6],
+    ["reverse", COMPRESSED_SQL.length, 0, FORMATTED_SQL.length, 0, 7],
+  ] as const)("keeps a %s formatted SQL selection complete and in its original direction", async (_direction, anchor, head, expectedAnchor, expectedHead, requestId) => {
+    const { state, emits, host } = mountEditor({ modelValue: COMPRESSED_SQL, tabId: "tab-a" });
+    await waitForEditor(host);
+    const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
+    editorView.dispatch({ selection: { anchor, head } });
+
+    state.formatRequestId = requestId;
+    await vi.waitFor(() => expect(emits.at(-1)).toBe(FORMATTED_SQL), WAIT);
+
+    expect(editorView.state.selection.main.anchor).toBe(expectedAnchor);
+    expect(editorView.state.selection.main.head).toBe(expectedHead);
+  });
+
+  it.each([
+    {
+      name: "Mongo shell",
+      databaseType: "mongodb",
+      source: 'db.items.find({name:"Ada",age:42});',
+      formatted: 'db.items.find({\n  name: "Ada",\n  age: 42\n});',
+      requestId: 8,
+    },
+    {
+      name: "Elasticsearch request",
+      databaseType: "elasticsearch",
+      source: 'GET /items/_search {"query":{"match_all":{}}}',
+      formatted: 'GET /items/_search\n{\n  "query": {\n    "match_all": {}\n  }\n}',
+      requestId: 9,
+    },
+    {
+      name: "JSON",
+      databaseType: "mysql",
+      source: '{"name":"Ada","items":[1,2]}',
+      formatted: '{\n  "name": "Ada",\n  "items": [\n    1,\n    2\n  ]\n}',
+      requestId: 10,
+    },
+    {
+      name: "XML",
+      databaseType: "mysql",
+      source: '<root><item id="1"/><item id="2"/></root>',
+      formatted: '<root>\n  <item id="1"/>\n  <item id="2"/>\n</root>',
+      requestId: 11,
+    },
+  ] as const)("keeps the existing whole-document caret behavior for $name formatting", async ({ databaseType, source, formatted, requestId }) => {
+    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "tab-a", databaseType });
+    await waitForEditor(host);
+    const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
+    editorView.dispatch({ selection: { anchor: Math.floor(source.length / 2) } });
+
+    state.formatRequestId = requestId;
+    await vi.waitFor(() => expect(emits.at(-1)).toBe(formatted), WAIT);
+
+    expect(editorView.state.selection.main.anchor).toBe(formatted.length);
+    expect(editorView.state.selection.main.head).toBe(formatted.length);
+  });
+
+  it("keeps the existing forward full-range selection for non-SQL formatting", async () => {
+    const source = '{"name":"Ada","items":[1,2]}';
+    const formatted = '{\n  "name": "Ada",\n  "items": [\n    1,\n    2\n  ]\n}';
+    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "tab-a" });
+    await waitForEditor(host);
+    const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
+    editorView.dispatch({ selection: { anchor: source.length, head: 0 } });
+
+    state.formatRequestId = 12;
+    await vi.waitFor(() => expect(emits.at(-1)).toBe(formatted), WAIT);
+
+    expect(editorView.state.selection.main.anchor).toBe(0);
+    expect(editorView.state.selection.main.head).toBe(formatted.length);
+  });
+
+  it.each([
+    ["whole document", false, 13],
+    ["full selection", true, 14],
+  ] as const)("formats MySQL view CASE/REPLACE calls through the %s toolbar request", async (_name, selectAll, requestId) => {
+    const source = "ALTER ALGORITHM=UNDEFINED DEFINER=`root`@`127.0.0.1` SQL SECURITY DEFINER VIEW `v_format_repro` AS SELECT CASE WHEN 1 THEN REPLACE('a','a','b') END AS `结果`;";
+    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "mysql-view" });
+    await waitForEditor(host);
+    const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
+    editorView.dispatch({ selection: { anchor: 0, head: selectAll ? source.length : 0 } });
+
+    state.formatRequestId = requestId;
+    await vi.waitFor(() => expect(emits.at(-1)).toContain("\n"), WAIT);
+
+    expect(editorView.state.doc.toString()).toContain("REPLACE('a', 'a', 'b')");
+    expect(editorView.state.doc.toString()).toContain("AS `结果`");
+    if (selectAll) {
+      expect(editorView.state.selection.main.from).toBe(0);
+      expect(editorView.state.selection.main.to).toBe(editorView.state.doc.length);
+    }
   });
 });

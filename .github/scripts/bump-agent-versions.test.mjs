@@ -48,6 +48,38 @@ test("bumps the SQLite SSH worker from its crate path", () => {
   assert.deepEqual(result.nativeModules, ["sqlite-worker"]);
 });
 
+test("bumps both Oracle variants when their shared module changes", () => {
+  // `oracle` and `oracle-oci` are built from the same `oracle-go` module (with
+  // and without the `oci` build tag), so a change there must rebuild and
+  // re-release both artifacts — otherwise the `oci` variant silently keeps a
+  // stale version and `reuse-previous-assets` re-publishes the old binary.
+  const result = evaluateAgentVersionBump({
+    versions: { oracle: "0.1.66", "oracle-oci": "0.1.0" },
+    changedFiles: ["agents/drivers/oracle-go/oci.go"],
+    moduleExists: (path) => path === "agents/drivers/oracle-go",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.oracle, "0.1.67");
+  assert.equal(result.versions["oracle-oci"], "0.1.1");
+  assert.deepEqual(result.changedModules.sort(), ["oracle", "oracle-oci"]);
+  assert.deepEqual(result.nativeModules.sort(), ["oracle", "oracle-oci"]);
+});
+
+test("keeps a manually versioned Oracle OCI release without touching the thin variant", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { oracle: "0.1.66", "oracle-oci": "0.1.0" },
+    prevVersions: { oracle: "0.1.66" },
+    changedFiles: ["agents/versions.json"],
+    moduleExists: (path) => path === "agents/drivers/oracle-go",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions["oracle-oci"], "0.1.0");
+  assert.equal(result.versions.oracle, "0.1.66");
+  assert.deepEqual(result.changedModules, ["oracle-oci"]);
+});
+
 test("classifies TDengine Rust changes as native-only", () => {
   const result = evaluateAgentVersionBump({
     versions: { tdengine: "0.1.39" },

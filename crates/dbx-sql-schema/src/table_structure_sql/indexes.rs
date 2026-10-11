@@ -266,6 +266,22 @@ pub(super) fn mysql_index_parts(index_type: &str) -> (String, String) {
     }
 }
 
+/// Inline MySQL index definition for indexes required at CREATE TABLE time.
+pub(super) fn mysql_inline_index_definition(index: &EditableStructureIndex) -> Option<String> {
+    let name = clean(&index.name);
+    let columns: Vec<_> =
+        index.columns.iter().map(|column| clean(column)).filter(|column| !column.is_empty()).collect();
+    if name.is_empty() || columns.is_empty() {
+        return None;
+    }
+    let unique = if index.is_unique { "UNIQUE " } else { "" };
+    let (prefix, using) = mysql_index_parts(&normalized_index_type(index));
+    let cols = columns.iter().map(|column| mysql_index_column_sql(column)).collect::<Vec<_>>().join(", ");
+    let comment = clean(&index.comment);
+    let comment = if comment.is_empty() { String::new() } else { format!(" COMMENT {}", quote_string(&comment)) };
+    Some(format!("{unique}{prefix}INDEX {}{using} ({cols}){comment}", quote_ident(StructureDialect::Mysql, &name)))
+}
+
 fn gaussdbm_index_parts(index_type: &str) -> (String, String) {
     match index_type.to_ascii_uppercase().as_str() {
         "BTREE" | "UBTREE" => (String::new(), " USING UBTREE".to_string()),

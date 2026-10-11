@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { applyLegacyWebViewClass, isLegacyWebView, LEGACY_WEBVIEW_CLASS, missingLegacyWebViewCapabilities, supportsRegExpLookbehind } from "@/lib/ui/legacyWebView";
+import { applyLegacyWebViewClass, isBlockingCompatFailure, isLegacyWebView, LEGACY_WEBVIEW_CLASS, missingLegacyWebViewCapabilities, supportsRegExpLookbehind, webViewCompatReport } from "@/lib/ui/legacyWebView";
 
 const supportedFeatures = new Set(["oklch", "color-mix-oklab", "color-mix-oklch", "has-selector", "dynamic-viewport", "min-function", "media-query-range"]);
 
@@ -82,6 +82,52 @@ describe("legacy WebView detection", () => {
     mockCssSupports(supportedFeatures);
     expect(applyLegacyWebViewClass(root)).toBe(false);
     expect(root.classList.contains(LEGACY_WEBVIEW_CLASS)).toBe(false);
+  });
+});
+
+describe("inline engine probe report", () => {
+  const setReport = (report: unknown) => {
+    (window as unknown as Record<string, unknown>).__DBX_WEBVIEW_COMPAT__ = report;
+  };
+
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__DBX_WEBVIEW_COMPAT__;
+  });
+
+  it("prefers the verdict the probe recorded before the bundle loaded", () => {
+    setReport({ tier: "fatal", missing: ["layer"], engine: "Safari 15.2", platform: "macos", desktop: true, bypassed: false });
+
+    expect(webViewCompatReport()?.engine).toBe("Safari 15.2");
+    expect(isLegacyWebView()).toBe(true);
+    expect(missingLegacyWebViewCapabilities()).toEqual(["layer"]);
+  });
+
+  it("treats a clean report as a supported engine", () => {
+    setReport({ tier: "ok", missing: [], engine: "Safari 17.6", platform: "macos", desktop: true, bypassed: false });
+
+    expect(isLegacyWebView()).toBe(false);
+    expect(missingLegacyWebViewCapabilities()).toEqual([]);
+  });
+
+  it("ignores a malformed report and falls back to probing", () => {
+    mockCssSupports(supportedFeatures);
+    setReport({ tier: "ok" });
+
+    expect(webViewCompatReport()).toBeUndefined();
+    expect(missingLegacyWebViewCapabilities()).toEqual([]);
+  });
+
+  it("blocks startup only on a fatal engine the user did not choose to continue past", () => {
+    expect(isBlockingCompatFailure()).toBe(false);
+
+    setReport({ tier: "degraded", missing: ["media-query-range"], engine: "", platform: "web", desktop: false, bypassed: false });
+    expect(isBlockingCompatFailure()).toBe(false);
+
+    setReport({ tier: "fatal", missing: ["layer"], engine: "", platform: "macos", desktop: true, bypassed: false });
+    expect(isBlockingCompatFailure()).toBe(true);
+
+    setReport({ tier: "fatal", missing: ["layer"], engine: "", platform: "macos", desktop: true, bypassed: true });
+    expect(isBlockingCompatFailure()).toBe(false);
   });
 });
 

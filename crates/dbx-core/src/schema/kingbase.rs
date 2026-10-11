@@ -27,11 +27,31 @@ impl ExtensionCatalog {
     }
 }
 
+pub(super) fn object_statistics_query_plan(schema: &str) -> Vec<super::ObjectStatisticsAttempt> {
+    vec![
+        ("catalog", object_statistics_sql(schema), true),
+        // Some V8 servers lack sys_total_relation_size(oid). Page statistics
+        // are an estimate, may be stale, and exclude indexes and TOAST storage.
+        (
+            "estimated-pages",
+            object_statistics_size_sql(
+                schema,
+                "CAST(c.relpages AS BIGINT) * CAST(current_setting('block_size') AS BIGINT)",
+            ),
+            true,
+        ),
+    ]
+}
+
 pub(super) fn object_statistics_sql(schema: &str) -> String {
+    object_statistics_size_sql(schema, "sys_total_relation_size(c.oid)")
+}
+
+fn object_statistics_size_sql(schema: &str, size_expression: &str) -> String {
     format!(
         "SELECT c.relname, n.nspname, \
                 CAST(CASE WHEN c.reltuples < 0 THEN 0 ELSE c.reltuples END AS BIGINT) AS estimated_rows, \
-                CAST(sys_total_relation_size(c.oid) AS BIGINT) AS total_bytes \
+                CAST({size_expression} AS BIGINT) AS total_bytes \
          FROM sys_catalog.sys_class c \
          JOIN sys_catalog.sys_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = {} AND c.relkind IN ('r','m','f','p') \

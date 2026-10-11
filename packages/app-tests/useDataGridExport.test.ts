@@ -111,6 +111,9 @@ function buildExportHarness(
     databaseType?: DatabaseType;
     context?: "results" | "table-data";
     extractorOptions?: DataGridExtractorOptions;
+    sql?: string;
+    exportSql?: string;
+    pageSql?: string;
   } = {},
 ) {
   const exportColumns = options.columns ?? ["id", "name"];
@@ -161,8 +164,9 @@ function buildExportHarness(
   const composable = useDataGridExport({
     columns: computed(() => exportColumns),
     displayItems: computed(() => rowItems),
-    sql: computed(() => "SELECT * FROM users"),
-    exportSql: computed(() => "SELECT * FROM users ORDER BY id DESC"),
+    sql: computed(() => options.sql ?? "SELECT * FROM users"),
+    exportSql: computed(() => options.exportSql ?? "SELECT * FROM users ORDER BY id DESC"),
+    pageSql: computed(() => options.pageSql),
     tableMeta: computed(() => options.tableMeta),
     databaseType: computed(() => options.databaseType ?? "postgres"),
     connectionId: computed(() => "conn-1"),
@@ -913,7 +917,7 @@ test("selected query result CSV export keeps the existing in-memory path", async
   assert.equal(apiMock.exportQueryResultCsv.mock.calls[0][3], "necessary");
 });
 
-test("selected query result CSV export formats only typed temporal columns", async () => {
+test("selected query result CSV export formats typed temporal columns without a formula wrapper", async () => {
   useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/M/D HH:mm:ss" });
   const rawDateTime = "2024-02-25 13:02:15";
   const { composable } = buildExportHarness({
@@ -924,8 +928,8 @@ test("selected query result CSV export formats only typed temporal columns", asy
 
   await composable.exportCsv([1]);
 
-  // Temporal columns are wrapped as `="..."` so spreadsheet apps keep them as text; plain columns are untouched.
-  assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [['="2024/2/25 13:02:15"', rawDateTime]]);
+  // Temporal columns use the configured export format; plain columns are untouched.
+  assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [["2024/2/25 13:02:15", rawDateTime]]);
 });
 
 test("selected query result XLSX export uses the current source label as the sheet name", async () => {
@@ -1034,6 +1038,45 @@ test("selected XLSX with SQL uses the effective result SQL in a second worksheet
   assert.deepEqual(worksheets[0].rows, [[1, "Ada"]]);
   assert.equal(worksheets[1].sheetName, "SQL");
   assert.deepEqual(worksheets[1].rows, [["SELECT * FROM users ORDER BY id DESC"]]);
+  assert.equal(worksheets[1].autoFilter, false);
+});
+
+test("exportCurrentPageXlsxWithSql prioritizes pageSql over base query and disables autoFilter on SQL worksheet", async () => {
+  apiMock.exportQueryResultsXlsx.mockClear();
+  const { composable } = buildExportHarness({
+    currentResultLabel: "public.users",
+    sql: "SELECT * FROM users",
+    exportSql: "SELECT * FROM users ORDER BY id DESC",
+    pageSql: "SELECT * FROM users ORDER BY id DESC LIMIT 50 OFFSET 0",
+  });
+
+  await composable.exportCurrentPageXlsxWithSql();
+
+  assert.equal(apiMock.exportQueryResultsXlsx.mock.calls.length, 1);
+  const worksheets = apiMock.exportQueryResultsXlsx.mock.calls[0][1];
+  assert.equal(worksheets.length, 2);
+  assert.equal(worksheets[0].sheetName, "public.users");
+  assert.equal(worksheets[1].sheetName, "SQL");
+  assert.deepEqual(worksheets[1].rows, [["SELECT * FROM users ORDER BY id DESC LIMIT 50 OFFSET 0"]]);
+  assert.equal(worksheets[1].autoFilter, false);
+});
+
+test("exportCurrentPageXlsxWithSql falls back to exportSql when pageSql is unset", async () => {
+  apiMock.exportQueryResultsXlsx.mockClear();
+  const { composable } = buildExportHarness({
+    currentResultLabel: "public.users",
+    sql: "SELECT * FROM users",
+    exportSql: "SELECT * FROM users ORDER BY id DESC",
+  });
+
+  await composable.exportCurrentPageXlsxWithSql();
+
+  assert.equal(apiMock.exportQueryResultsXlsx.mock.calls.length, 1);
+  const worksheets = apiMock.exportQueryResultsXlsx.mock.calls[0][1];
+  assert.equal(worksheets.length, 2);
+  assert.equal(worksheets[1].sheetName, "SQL");
+  assert.deepEqual(worksheets[1].rows, [["SELECT * FROM users ORDER BY id DESC"]]);
+  assert.equal(worksheets[1].autoFilter, false);
 });
 
 test("all-results XLSX with SQL maps each result set to its source statement", async () => {

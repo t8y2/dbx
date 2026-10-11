@@ -233,6 +233,7 @@ impl BackupService {
             }
             // Metadata discovery may be slow; finish it before starting the snapshot idle timeout.
             let mut targets = Vec::new();
+            let mut found_selected_tables = std::collections::HashSet::new();
             for schema_name in &schemas {
                 check_cancel(stop)?;
                 let mut selected_tables = Vec::new();
@@ -250,7 +251,21 @@ impl BackupService {
                         None,
                     )
                     .await?;
+                    let exact_names = job
+                        .config
+                        .selected_tables
+                        .iter()
+                        .filter(|target| target.database == *database && target.schema == *schema_name)
+                        .map(|target| target.table.as_str())
+                        .collect::<std::collections::HashSet<_>>();
                     for table in &tables {
+                        if job.config.table_filter_mode == "selected" {
+                            if exact_names.contains(table.name.as_str()) {
+                                selected_tables.push(table.name.clone());
+                                found_selected_tables.insert((schema_name.as_str(), table.name.clone()));
+                            }
+                            continue;
+                        }
                         let matched = job
                             .config
                             .table_patterns
@@ -264,7 +279,7 @@ impl BackupService {
                             }
                         }
                     }
-                    let included = if job.config.table_filter_mode == "include" {
+                    let included = if matches!(job.config.table_filter_mode.as_str(), "include" | "selected") {
                         selected_tables.len()
                     } else {
                         tables.len() - excluded_tables.len()
@@ -275,6 +290,21 @@ impl BackupService {
                     }
                 }
                 targets.push((schema_name.clone(), selected_tables, excluded_tables));
+            }
+            if job.config.table_filter_mode == "selected" {
+                let missing = job
+                    .config
+                    .selected_tables
+                    .iter()
+                    .filter(|target| {
+                        target.database == *database
+                            && !found_selected_tables.contains(&(target.schema.as_str(), target.table.clone()))
+                    })
+                    .map(|target| format!("{}.{}.{}", target.database, target.schema, target.table))
+                    .collect::<Vec<_>>();
+                if !missing.is_empty() {
+                    return Err(format!("Selected backup tables are unavailable: {}", missing.join(", ")));
+                }
             }
             if targets.is_empty() {
                 continue;
@@ -331,6 +361,7 @@ impl BackupService {
                         include_create_database: false,
                         drop_table_if_exists: job.config.drop_table_if_exists,
                         omit_auto_increment: false,
+                        preserve_original_language: false,
                         fail_on_error: true,
                         prevent_overwrite: true,
                         output_compression: if job.config.output_compression == "gzip" {
@@ -339,6 +370,7 @@ impl BackupService {
                             DatabaseExportOutputCompression::None
                         },
                         insert_dialect: Default::default(),
+                        insert_mode: Default::default(),
                         snapshot_session_id: Some(snapshot.session_id.clone()),
                         batch_size: 1000,
                         split_max_mb: None,

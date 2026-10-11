@@ -5,6 +5,7 @@ use serde_json::json;
 use serde_json::Value;
 
 use crate::agent_events::{ToolCall, ToolDefinition, ToolResult};
+use crate::ai::skill_tools;
 use crate::connection::AppState;
 use crate::db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety};
 use crate::db::vector_driver;
@@ -792,6 +793,13 @@ pub async fn execute_tool_scoped(
     } else {
         None
     };
+    // `use_skill` reports which skill it actually resolved. That identity leaves
+    // through the tool result's `explain_data`, which is frontend-only (the model
+    // sees `content` alone — see the follow-up message built in `agent_loop`), so
+    // the UI can record a load from the backend's own answer instead of
+    // re-deriving it from the call arguments, which describe an intent and not an
+    // outcome. Every other tool leaves this `None`.
+    let mut skill_explain: Option<serde_json::Value> = None;
     let result = match tool_call.name.as_str() {
         "list_databases" => execute_list_databases(tool_call, state, connection_id).await,
         "list_tables" => execute_list_tables(tool_call, state, connection_id, database, default_schema, db_type).await,
@@ -833,6 +841,17 @@ pub async fn execute_tool_scoped(
             execute_redis_command(tool_call, state, connection_id, database, database_scope).await
         }
         "get_current_time" => execute_get_current_time(tool_call),
+        // Skill tools are filesystem-only: `tool_uses_database` must keep
+        // returning false for them, or they would serialize on a connection lock
+        // they have no reason to hold (see the test below).
+        skill_tools::USE_SKILL_TOOL => match skill_tools::execute_use_skill(tool_call, state).await {
+            Ok(outcome) => {
+                skill_explain = outcome.loaded_skill_id.map(|id| serde_json::json!({ "skillId": id }));
+                Ok(outcome.text)
+            }
+            Err(err) => Err(err),
+        },
+        skill_tools::READ_SKILL_FILE_TOOL => skill_tools::execute_read_skill_file(tool_call, state).await,
         _ => Err(format!("Unknown tool: {}", tool_call.name)),
     };
 
@@ -842,7 +861,7 @@ pub async fn execute_tool_scoped(
             tool_name: tool_call.name.clone(),
             content,
             is_error: false,
-            explain_data: None,
+            explain_data: skill_explain,
         },
         Err(err) => ToolResult {
             tool_call_id: tool_call.id.clone(),
@@ -1491,7 +1510,8 @@ async fn execute_get_sample_data(
 
     // Reuse the table-data builder so identifier quoting and row limiting follow
     // the active database instead of assuming PostgreSQL syntax.
-    let sql = build_sample_data_sql(db_type, schema.as_deref(), table, limit);
+    let server_version = connection_server_version(state, connection_id).await;
+    let sql = build_sample_data_sql(db_type, server_version.as_deref(), schema.as_deref(), table, limit);
 
     // Delegate to execute_execute_query with a synthetic tool call
     let synthetic_call = ToolCall {
@@ -1512,9 +1532,28 @@ async fn execute_get_sample_data(
     .await
 }
 
-fn build_sample_data_sql(db_type: &DatabaseType, schema: Option<&str>, table: &str, limit: usize) -> String {
+/// The sample-data statement is produced by the shared dialect code, so it has to match the
+/// connected server too: Neo4j below 5 only accepts `id()` where 5+ uses `elementId()`.
+async fn connection_server_version(state: &Arc<AppState>, connection_id: &str) -> Option<String> {
+    state
+        .configs
+        .read()
+        .await
+        .get(connection_id)
+        .and_then(|config| config.database_info.as_ref())
+        .and_then(|info| info.product_version.clone())
+}
+
+fn build_sample_data_sql(
+    db_type: &DatabaseType,
+    server_version: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+    limit: usize,
+) -> String {
     build_table_data_select_sql(TableDataSelectSqlOptions {
         database_type: Some(*db_type),
+        server_version: server_version.map(str::to_owned),
         schema: schema.map(str::to_owned),
         table_name: table.to_string(),
         limit: Some(limit),
@@ -1559,7 +1598,13 @@ async fn execute_explain_query(
         }
     }
 
-    if *db_type == DatabaseType::Oracle {
+    let connection_config = state.configs.read().await.get(connection_id).cloned();
+    let explain_timeout_secs = agent_query_timeout_secs(
+        tool_call.arguments.get("timeout_secs").and_then(Value::as_u64),
+        connection_config.as_ref(),
+    );
+
+    if matches!(*db_type, DatabaseType::Oracle | DatabaseType::Db2) {
         return match crate::agent_explain::get_agent_explain_info_core(
             state,
             connection_id,
@@ -1567,7 +1612,7 @@ async fn execute_explain_query(
             default_schema,
             sql,
             Some("explain"),
-            None,
+            Some(explain_timeout_secs),
         )
         .await
         {
@@ -1593,18 +1638,9 @@ async fn execute_explain_query(
         }
     };
 
-    // Execute the EXPLAIN query. Timeout resolves like the execute path
-    // (per-call `timeout_secs` > connection effective timeout) so the global
-    // MCP timeout override covers EXPLAIN too.
-    let connection_config = state.configs.read().await.get(connection_id).cloned();
-    let options = QueryExecutionOptions {
-        max_rows: Some(100),
-        timeout_secs: Some(agent_query_timeout_secs(
-            tool_call.arguments.get("timeout_secs").and_then(Value::as_u64),
-            connection_config.as_ref(),
-        )),
-        ..Default::default()
-    };
+    // Both native and generated plans use the per-call timeout policy.
+    let options =
+        QueryExecutionOptions { max_rows: Some(100), timeout_secs: Some(explain_timeout_secs), ..Default::default() };
     let result = match crate::query::execute_sql_statement_with_options(
         state,
         connection_id,
@@ -1957,6 +1993,8 @@ for line in sys.stdin:
     #[cfg(unix)]
     fn agent_test_connection(id: &str, name: &str, db_type: DatabaseType, database: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: name.to_string(),
@@ -1977,6 +2015,7 @@ for line in sys.stdin:
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -2003,6 +2042,7 @@ for line in sys.stdin:
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -2640,20 +2680,32 @@ for line in sys.stdin:
     #[test]
     fn sample_data_sql_uses_database_identifier_and_limit_syntax() {
         assert_eq!(
-            build_sample_data_sql(&DatabaseType::Mysql, Some("app"), "sys_tenant", 20),
+            build_sample_data_sql(&DatabaseType::Mysql, None, Some("app"), "sys_tenant", 20),
             "SELECT * FROM `app`.`sys_tenant` LIMIT 20;"
         );
         assert_eq!(
-            build_sample_data_sql(&DatabaseType::Postgres, Some("public"), "sys_tenant", 20),
+            build_sample_data_sql(&DatabaseType::Postgres, None, Some("public"), "sys_tenant", 20),
             "SELECT * FROM \"public\".\"sys_tenant\" LIMIT 20;"
         );
         assert_eq!(
-            build_sample_data_sql(&DatabaseType::SqlServer, Some("dbo"), "sys_tenant", 20),
+            build_sample_data_sql(&DatabaseType::SqlServer, None, Some("dbo"), "sys_tenant", 20),
             "SELECT TOP (20) * FROM [dbo].[sys_tenant]"
         );
         assert_eq!(
-            build_sample_data_sql(&DatabaseType::Oracle, Some("APP"), "SYS_TENANT", 20),
+            build_sample_data_sql(&DatabaseType::Oracle, None, Some("APP"), "SYS_TENANT", 20),
             "SELECT * FROM (SELECT * FROM \"APP\".\"SYS_TENANT\") WHERE ROWNUM <= 20"
+        );
+    }
+
+    #[test]
+    fn sample_data_sql_follows_the_connected_neo4j_identifier_function() {
+        assert_eq!(
+            build_sample_data_sql(&DatabaseType::Neo4j, Some("Neo4j/4.4.44"), None, "Person", 20),
+            "MATCH (n:`Person`) RETURN id(n) AS `__DBX_ELEMENT_ID`, n LIMIT 20;"
+        );
+        assert_eq!(
+            build_sample_data_sql(&DatabaseType::Neo4j, Some("Neo4j/5.26.0"), None, "Person", 20),
+            "MATCH (n:`Person`) RETURN elementId(n) AS `__DBX_ELEMENT_ID`, n LIMIT 20;"
         );
     }
 
@@ -3044,6 +3096,17 @@ for line in sys.stdin:
         let tool = get_current_time_tool();
         assert!(tool.read_only, "get_current_time must be read_only");
         assert!(tool.parallel_ok, "get_current_time must be parallel_ok");
+    }
+
+    /// `tool_uses_database` is a closed whitelist, so this pins the whole
+    /// classification: the skill tools read the filesystem, and taking a
+    /// per-connection lock for them would serialize unrelated runs for nothing.
+    #[test]
+    fn skill_tools_do_not_take_the_connection_lock() {
+        for name in [skill_tools::USE_SKILL_TOOL, skill_tools::READ_SKILL_FILE_TOOL] {
+            assert!(!tool_uses_database(name), "{name} must not be classified as a database tool");
+        }
+        assert!(tool_uses_database("execute_query"), "the whitelist must still contain real database tools");
     }
 
     #[test]

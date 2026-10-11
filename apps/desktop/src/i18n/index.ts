@@ -1,21 +1,22 @@
 import { createI18n } from "vue-i18n";
 import en from "./locales/en";
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
-import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { safeLocalStorageGet } from "@/lib/backend/safeStorage";
+import { persistAppLocale } from "@/lib/app/appAppearance";
 
-export type Locale = "az" | "en" | "es" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "tr" | "zh-CN" | "zh-TW";
+export type Locale = "az" | "en" | "es" | "id" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "tr" | "zh-CN" | "zh-TW";
 type LocaleMessages = Record<string, unknown>;
 type I18nGlobal = {
   locale: { value: Locale };
   setLocaleMessage: (locale: Locale, messages: LocaleMessages) => void;
 };
 
-const supportedLocales: Locale[] = ["az", "en", "es", "it", "ja", "ko", "pt-BR", "ru", "tr", "zh-CN", "zh-TW"];
+const supportedLocales: Locale[] = ["az", "en", "es", "id", "it", "ja", "ko", "pt-BR", "ru", "tr", "zh-CN", "zh-TW"];
 const defaultLocale: Locale = "en";
 const loadedLocales = new Set<Locale>([defaultLocale]);
 const localeLoaders: Record<Exclude<Locale, "en">, () => Promise<{ default: LocaleMessages }>> = {
   az: () => import("./locales/az"),
   es: () => import("./locales/es"),
+  id: () => import("./locales/id"),
   it: () => import("./locales/it"),
   ja: () => import("./locales/ja"),
   ko: () => import("./locales/ko"),
@@ -45,6 +46,7 @@ export function localeFromLanguageTag(value: string | null | undefined): Locale 
   if (normalized === "az" || normalized.startsWith("az-")) return "az";
   if (normalized === "en" || normalized.startsWith("en-")) return "en";
   if (normalized === "es" || normalized.startsWith("es-")) return "es";
+  if (normalized === "id" || normalized.startsWith("id-")) return "id";
   if (normalized === "it" || normalized.startsWith("it-")) return "it";
   if (normalized === "ja" || normalized.startsWith("ja-")) return "ja";
   if (normalized === "ko" || normalized.startsWith("ko-")) return "ko";
@@ -98,19 +100,9 @@ export async function loadLocaleMessages(locale: Locale) {
   loadedLocales.add(locale);
 }
 
-async function syncLocaleToBackend(locale: Locale) {
-  if (!isTauriRuntime()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("set_app_locale", { locale });
-  } catch (error) {
-    console.warn("[DBX][i18n] failed to sync locale to backend", error);
-  }
-}
-
 export async function loadSavedLocale() {
   await loadLocaleMessages(initialLocale);
-  void syncLocaleToBackend(initialLocale);
+  persistAppLocale(initialLocale);
 }
 
 async function applyTransientLocale(locale: Locale) {
@@ -138,8 +130,7 @@ export async function setLocale(locale: Locale) {
   ++localeRequestId;
   // An explicit selection is durable immediately; only the visible locale
   // waits for its lazy message bundle. Preview paths never reach this branch.
-  safeLocalStorageSet("dbx-locale", locale);
-  void syncLocaleToBackend(locale);
+  persistAppLocale(locale);
   await loadLocaleMessages(locale);
   // A later explicit selection wins; hover/restore requests must not undo it.
   if (persistedLocale !== locale) return;

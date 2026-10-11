@@ -13,12 +13,14 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
+import { promptExportSavePath } from "@/lib/export/exportPath";
+import { notifyExportComplete } from "@/lib/export/exportReveal";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { sidebarStructureExportTargets, sidebarTableDataExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
-import { forceCsvTextForTemporalColumns } from "@/lib/dataGrid/columnFormatter";
+import { dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
-import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import {
   isLoadingStructurePreview,
   showStructureDocCopyDialog,
@@ -111,11 +113,11 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
 
   async function saveFileContent(content: string, defaultFileName: string, filterName: string, filterExt: string) {
     if (isTauriRuntime()) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
       const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-      const path = await save({
-        defaultPath: defaultFileName,
+      const path = await promptExportSavePath({
+        defaultFileName,
         filters: [{ name: filterName, extensions: [filterExt] }],
+        preferredPath: settingsStore.editorSettings.preferredExportPath,
       });
       if (path) await writeTextFile(path, content);
       return;
@@ -337,10 +339,10 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       return outputDirectory ? joinExportFilePath(outputDirectory, fileName) : fileName;
     }
     if (isTauriRuntime()) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const path = await save({
-        defaultPath: fileName,
+      const path = await promptExportSavePath({
+        defaultFileName: fileName,
         filters: [{ name: exportFilterName(format), extensions: [format === "bson.gz" ? "gz" : format] }],
+        preferredPath: settingsStore.editorSettings.preferredExportPath,
       });
       return path ? String(path) : null;
     }
@@ -384,7 +386,14 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       const outputPath = await resolveTableExportOutputPath(target, "json", outputDirectory);
       if (!outputPath) return false;
       await api.exportQueryResultJson(outputPath, result.columns, result.rows);
-      if (!suppressDoneToast) toast(t("grid.exported"));
+      if (!suppressDoneToast) {
+        notifyExportComplete({
+          filePath: outputPath,
+          message: t("grid.exported"),
+          openFolderLabel: t("exportProgress.openFolder"),
+          toast,
+        });
+      }
       return true;
     } catch (error: any) {
       toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
@@ -476,16 +485,34 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           executePage: (sql) => api.executeQuery(connectionId, database, sql),
         });
         if (format === "csv") {
-          await api.exportQueryResultCsv(outputPath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? []), target.csvQuoteMode, target.nullLiteral);
+          await api.exportQueryResultCsv(outputPath, result.columns, result.rows, target.csvQuoteMode, target.nullLiteral);
         } else {
           const comments = result.columns.map((name) => exportColumnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
-          await api.exportQueryResultXlsx(outputPath, target.tableName, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows, undefined, autoFilter, settingsStore.editorSettings.globalDateTimeExportFormat || undefined);
+          await api.exportQueryResultXlsx(
+            outputPath,
+            target.tableName,
+            result.columns,
+            result.column_types ?? result.columns.map(() => ""),
+            headerOverrides,
+            result.rows,
+            undefined,
+            autoFilter,
+            settingsStore.editorSettings.globalDateTimeExportFormat || undefined,
+            xlsxHeaderUsesCommentRows(headerMode),
+          );
         }
         currentTask.status = "Done";
         currentTask.rowsExported = result.rows.length;
         currentTask.totalRows = result.rows.length;
-        if (!suppressDoneToast) toast(t("grid.exported"));
+        if (!suppressDoneToast) {
+          notifyExportComplete({
+            filePath: outputPath,
+            message: t("grid.exported"),
+            openFolderLabel: t("exportProgress.openFolder"),
+            toast,
+          });
+        }
         return true;
       }
       const columnComments =
@@ -505,11 +532,17 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         tableName: target.tableName,
         filePath: outputPath,
         format,
-        ...(format === "sql" ? { insertDialect } : {}),
+        ...(format === "sql"
+          ? {
+              insertDialect,
+              omitDatabaseQualifier: dropsSchemaQualifier(target.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, target.catalog),
+            }
+          : {}),
         csvQuoteMode: target.csvQuoteMode,
         nullLiteral: target.nullLiteral,
         columns: queryColumns,
         columnComments,
+        headerCommentRows: format === "xlsx" ? xlsxHeaderUsesCommentRows(headerMode) : undefined,
         autoFilter: format === "xlsx" ? autoFilter : undefined,
         primaryKeys,
         excludePrimaryKeys: settingsStore.editorSettings.dataGridExtractorOptions.sql.excludePrimaryKeysFromInsert === true,
@@ -521,7 +554,14 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       await api.startTableExport(request, (progress) => {
         updateTableExportTask(currentTask.exportId, progress);
         if (progress.status === "Done") {
-          if (!suppressDoneToast) toast(t("grid.exported"));
+          if (!suppressDoneToast) {
+            notifyExportComplete({
+              filePath: request.filePath,
+              message: t("grid.exported"),
+              openFolderLabel: t("exportProgress.openFolder"),
+              toast,
+            });
+          }
         } else if (progress.status === "Error") toast(t("grid.exportFailed", { message: translateBackendError(t, progress.errorMessage || "") }), 5000);
       });
       return true;
@@ -577,7 +617,12 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           } else if (progress.status === "cancelled") currentTask.status = "Cancelled";
         },
       );
-      toast(t("grid.exported"));
+      notifyExportComplete({
+        filePath: outputPath,
+        message: t("grid.exported"),
+        openFolderLabel: t("exportProgress.openFolder"),
+        toast,
+      });
     } catch (error: unknown) {
       if (task) {
         task.status = "Error";

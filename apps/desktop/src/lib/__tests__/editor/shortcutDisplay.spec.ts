@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatShortcutDisplay, shortcutDisplayKeys } from "@/lib/editor/shortcutDisplay";
+import { formatShortcutDisplay, formatShortcutTooltip, shortcutDisplayKeys } from "@/lib/editor/shortcutDisplay";
 
 describe("shortcut display", () => {
   it("shows the default mouse modifier as Option on macOS and Alt elsewhere", () => {
@@ -52,5 +52,14 @@ describe("shortcut display", () => {
 
   it("displays multi-stroke shortcuts", () => {
     expect(formatShortcutDisplay("Ctrl+K Ctrl+C", "Win32")).toBe("Ctrl + K, Ctrl + C");
+  });
+
+  it("formats button tooltips with shortcut hints", () => {
+    expect(formatShortcutTooltip("Execute", "Mod+Enter", "Win32")).toBe("Execute (Ctrl + ↵)");
+    expect(formatShortcutTooltip("Execute", "Mod+Enter", "MacIntel")).toBe("Execute (⌘ ↵)");
+    expect(formatShortcutTooltip("Format SQL", "Shift+Mod+F", "Win32")).toBe("Format SQL (Ctrl + Shift + F)");
+    expect(formatShortcutTooltip("New Query", "")).toBe("New Query");
+    expect(formatShortcutTooltip("New Query", undefined)).toBe("New Query");
+    expect(formatShortcutTooltip("New Query", "   ")).toBe("New Query");
   });
 });

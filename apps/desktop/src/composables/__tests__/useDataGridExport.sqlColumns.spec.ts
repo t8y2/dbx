@@ -40,6 +40,8 @@ function createOptions(overrides: Partial<UseDataGridExportOptions> = {}): UseDa
       ],
     })),
     databaseType: computed(() => "postgres"),
+    includeDatabaseName: computed(() => false),
+    hasUniqueQueryInsertTarget: computed(() => true),
     connectionId: computed(() => "conn"),
     database: computed(() => "dbx"),
     context: computed(() => "results"),
@@ -104,6 +106,34 @@ describe("SQL export column selection across entrypoints", () => {
     expect(saveTextFile).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { includeDatabaseName: true, expectedSchema: "APP_OWNER" },
+    { includeDatabaseName: false, expectedSchema: undefined },
+  ])("uses the Oracle owner only when generated SQL includes database names ($includeDatabaseName)", async ({ includeDatabaseName, expectedSchema }) => {
+    await useDataGridExport(
+      createOptions({
+        databaseType: computed(() => "oracle"),
+        includeDatabaseName: computed(() => includeDatabaseName),
+        tableMeta: computed(() => ({ tableName: "USERS", schema: "APP_OWNER", primaryKeys: [], columns: [] })),
+      }),
+    ).exportSql([7]);
+
+    expect(formatSqlInsert).toHaveBeenCalledWith(expect.objectContaining({ schema: expectedSchema, tableName: "USERS" }));
+  });
+
+  it("does not infer an INSERT target from first-source metadata for a multi-source result", async () => {
+    await useDataGridExport(
+      createOptions({
+        databaseType: computed(() => "oracle"),
+        includeDatabaseName: computed(() => true),
+        hasUniqueQueryInsertTarget: computed(() => false),
+        tableMeta: computed(() => ({ tableName: "USERS", schema: "APP_OWNER", primaryKeys: [], columns: [] })),
+      }),
+    ).exportSql([7]);
+
+    expect(formatSqlInsert).toHaveBeenCalledWith(expect.objectContaining({ schema: undefined, tableName: "query_result" }));
+  });
+
   it("keeps second duplicate, spatial metadata and raw types aligned after internal-key removal", async () => {
     const names = ["__DBX_ROWID", "id", "id", "shape"];
     const choices = sqlExportColumnChoices(names);
@@ -154,6 +184,40 @@ describe("SQL export column selection across entrypoints", () => {
     expect(showSqlInsertModeDialog).toHaveBeenCalledWith({ allowSplit: true, columns: sqlExportColumnChoices(names).filter((column) => column.name !== "generated") });
   });
 
+  it("prefers SQL Server table metadata types so non-insertable columns get filtered", async () => {
+    vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "batch" });
+    const names = ["id", "row_version", "total"];
+    const items = [{ id: 7, sourceIndex: 0, data: [7, "0x00000000000007D1", 42], isNew: false, isDeleted: false, isDirtyCol: [false, false, false], status: "" }];
+    await useDataGridExport(
+      createOptions({
+        displayItems: computed(() => items),
+        getRowItem: (id) => items.find((item) => item.id === id),
+        context: computed(() => "table-data"),
+        databaseType: computed(() => "sqlserver"),
+        columns: computed(() => names),
+        sourceColumns: computed(() => names),
+        columnTypes: computed(() => ["int4", "varbinary", "int4"]),
+        tableMeta: computed(() => ({
+          tableName: "sync_state",
+          primaryKeys: ["id"],
+          columns: [
+            { name: "id", data_type: "int" },
+            { name: "row_version", data_type: "timestamp" },
+            { name: "total", data_type: "int", extra: "computed" },
+          ],
+        })),
+      }),
+    ).exportCurrentPageSql();
+    expect(formatSqlInsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        columns: ["id", "row_version", "total"],
+        columnTypes: ["int", "timestamp", "int"],
+        columnExtras: [null, null, "computed"],
+        rows: [[7, "0x00000000000007D1", 42]],
+      }),
+    );
+  });
+
   it("omits PostgreSQL tsvector fields using query metadata", async () => {
     vi.mocked(showSqlInsertModeDialog).mockResolvedValue(null);
     await useDataGridExport(createOptions({ allColumns: computed(() => ["id", "search"]), allColumnTypes: computed(() => ["int", "pg_catalog.tsvector"]) })).exportSql();
@@ -170,6 +234,21 @@ describe("SQL export column selection across entrypoints", () => {
     expect(formatSqlInsert).not.toHaveBeenCalled();
     expect(saveTextFile).not.toHaveBeenCalled();
     expect(mocks.toast).toHaveBeenCalledWith("grid.exportFailed", 5000);
+  });
+
+  it("resolves subset type fallbacks by name instead of subset position", async () => {
+    const choices = sqlExportColumnChoices(["name"]);
+    vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "single", selectedColumns: [choices[0]!] });
+    const state = useDataGridExport(
+      createOptions({
+        columns: computed(() => ["name"]),
+        allColumns: computed(() => ["id", "name"]),
+        allColumnTypes: computed(() => ["tsvector", "text"]),
+        tableMeta: computed(() => ({ tableName: "users", primaryKeys: [], columns: [] })),
+      }),
+    );
+    await state.exportSql({ columnIndexes: [0] });
+    expect(showSqlInsertModeDialog).toHaveBeenCalledWith({ allowSplit: false, columns: choices });
   });
 
   it("keeps legacy omitted selection behavior", async () => {

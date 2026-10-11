@@ -415,7 +415,16 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
     }
   }
 
-  filteredNodes.sort((a, b) => b.score - a.score);
+  // 置顶优先（issue #11386）：store 已把置顶节点排在兄弟列表最前，但这里按匹配得分
+  // 重排会把置顶节点压到匹配度更高的兄弟之后。改为置顶节点恒在前，且置顶节点之间
+  // 保持 store 里用户自定义的置顶顺序（相等即稳定，不参与得分重排）；未置顶节点仍
+  // 按得分从高到低排序。
+  filteredNodes.sort((a, b) => {
+    const pinnedDiff = Number(b.node.pinned === true) - Number(a.node.pinned === true);
+    if (pinnedDiff !== 0) return pinnedDiff;
+    if (a.node.pinned === true) return 0;
+    return b.score - a.score;
+  });
   return filteredNodes.map((match) => match.node);
 }
 

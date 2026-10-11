@@ -16,6 +16,7 @@
  *   QUERY_OPERATORS      → filter documents (`find`, `$match`, …)
  *   UPDATE_OPERATORS     → update documents (`updateOne`, `findOneAndUpdate`, …)
  *   PUSH_MODIFIERS       → the object value of `$push` / `$addToSet`
+ *   PROJECTION_OPERATORS → projection documents (`find`, `findOne`, `findOneAndUpdate`, …)
  *   PIPELINE_STAGES      → elements of an aggregation pipeline array
  *   ACCUMULATORS         → the output fields of `$group`
  *   EXPRESSION_OPERATORS → aggregation expression position (`$project`, `$expr`, …)
@@ -55,6 +56,7 @@ export const FIELD_QUERY_OPERATORS: MongoOperatorSpec[] = specs([
   ["$exists", "Matches documents that have the field", "$exists: true"],
   ["$type", "Matches documents by BSON type", '$type: "${string}"'],
   ["$regex", "Matches a regular expression", '$regex: "${pattern}"'],
+  ["$options", "Regular expression options", '$options: "${i}"'],
   ["$mod", "Matches values by modulo division", "$mod: [${divisor}, ${remainder}]"],
   ["$all", "Matches arrays containing all the values", "$all: [${}]"],
   ["$elemMatch", "Matches arrays with an element matching all criteria", "$elemMatch: { ${} }"],
@@ -77,11 +79,21 @@ export const TOP_LEVEL_QUERY_OPERATORS: MongoOperatorSpec[] = specs([
   ["$and", "Joins clauses with a logical AND", "$and: [${}]"],
   ["$or", "Joins clauses with a logical OR", "$or: [${}]"],
   ["$nor", "Joins clauses with a logical NOR", "$nor: [${}]"],
+  ["$comment", "Attaches a comment to the query, visible in logs and profiler", '$comment: "${comment}"'],
   ["$expr", "Uses aggregation expressions in a query", "$expr: { ${} }"],
   ["$text", "Performs a text search", '$text: { $search: "${text}" }'],
   ["$where", "Matches with a JavaScript predicate", '$where: "${expression}"'],
   ["$jsonSchema", "Matches documents against a JSON schema", "$jsonSchema: { ${} }"],
 ]);
+
+/** Logical operators accepted inside `$elemMatch` and at the root of a filter. */
+export const LOGICAL_QUERY_OPERATORS: MongoOperatorSpec[] = TOP_LEVEL_QUERY_OPERATORS.filter((op) => ["$and", "$or", "$nor"].includes(op.label));
+
+/**
+ * Operators accepted directly inside the body of `$elemMatch`.
+ * Matches both scalar elements (via field query operators) and document elements (via field names + logical operators).
+ */
+export const ELEM_MATCH_QUERY_OPERATORS: MongoOperatorSpec[] = [...FIELD_QUERY_OPERATORS, ...LOGICAL_QUERY_OPERATORS];
 
 /** Every query operator, for callers that do not care about position. */
 export const QUERY_OPERATORS: MongoOperatorSpec[] = [...FIELD_QUERY_OPERATORS, ...TOP_LEVEL_QUERY_OPERATORS];
@@ -112,6 +124,13 @@ export const PUSH_MODIFIERS: MongoOperatorSpec[] = specs([
   ["$position", "Insert position for $each", "$position: 0"],
 ]);
 
+/** Projection operators, valid inside a projected field's object value in find-style projections. */
+export const PROJECTION_OPERATORS: MongoOperatorSpec[] = specs([
+  ["$slice", "Limits the number of elements projected from an array", "$slice: ${}"],
+  ["$elemMatch", "Projects the first array element matching a condition", "$elemMatch: { ${} }"],
+  ["$meta", "Projects metadata associated with the document", '$meta: "textScore"'],
+]);
+
 export const PIPELINE_STAGES: MongoOperatorSpec[] = specs([
   ["$match", "Filters documents", "$match: { ${} }"],
   ["$project", "Reshapes documents", "$project: { ${} }"],
@@ -136,7 +155,7 @@ export const PIPELINE_STAGES: MongoOperatorSpec[] = specs([
   ["$graphLookup", "Performs a recursive search on a collection", '$graphLookup: { from: "${collection}", startWith: "$${field}", connectFromField: "${field}", connectToField: "_id", as: "${as}" }'],
   ["$geoNear", "Orders documents by proximity to a point", '$geoNear: { near: { type: "Point", coordinates: [0, 0] }, distanceField: "${distance}" }'],
   ["$setWindowFields", "Adds fields computed over a window of documents", '$setWindowFields: { partitionBy: "$${field}", sortBy: { ${field}: 1 }, output: {} }'],
-  ["$densify", "Fills gaps in a sequence of field values", '$densify: { field: "${field}", range: { step: 1, unit: "${unit}" } }'],
+  ["$densify", "Fills gaps in a sequence of field values", '$densify: { field: "${field}", range: { step: 1, bounds: "${full}" } }'],
   ["$fill", "Fills null or missing field values", "$fill: { output: { ${field}: { value: ${} } } }"],
   ["$documents", "Returns literal documents", "$documents: [${}]"],
   ["$redact", "Restricts document content based on a condition", "$redact: { ${} }"],
@@ -172,6 +191,37 @@ export const ACCUMULATORS: MongoOperatorSpec[] = specs([
   ["$percentile", "Approximates the requested percentiles", '$percentile: { input: "$${field}", p: [0.95], method: "approximate" }'],
 ]);
 
+export const WINDOW_OPERATORS: MongoOperatorSpec[] = specs([
+  ["$rank", "Returns the document's rank relative to other documents", "$rank: {}"],
+  ["$denseRank", "Returns the document's dense rank relative to other documents", "$denseRank: {}"],
+  ["$documentNumber", "Returns the document's position within the window", "$documentNumber: {}"],
+  ["$shift", "Returns a value from a document at a given offset", '$shift: { output: "$${field}", by: 1, default: null }'],
+  ["$expMovingAvg", "Exponential moving average", '$expMovingAvg: { input: "$${field}", N: 3 }'],
+  ["$derivative", "Average rate of change over an interval", '$derivative: { input: "$${field}", unit: "${unit}" }'],
+  ["$integral", "Approximation of the area under the curve", '$integral: { input: "$${field}", unit: "${unit}" }'],
+  ["$covariancePop", "Population covariance between two numeric expressions", '$covariancePop: ["$${field1}", "$${field2}"]'],
+  ["$covarianceSamp", "Sample covariance between two numeric expressions", '$covarianceSamp: ["$${field1}", "$${field2}"]'],
+  ["$locf", "Last observation carried forward", '$locf: "$${field}"'],
+  ["$linearFill", "Fills null and missing values by linear interpolation", '$linearFill: "$${field}"'],
+]);
+
+const WINDOW_SPEC: Spec = ["window", "Window boundary specification", 'window: { documents: ["unbounded", "current"] }'];
+
+function dedupeSpecsByLabel(...lists: readonly MongoOperatorSpec[][]): MongoOperatorSpec[] {
+  const seen = new Set<string>();
+  const deduped: MongoOperatorSpec[] = [];
+  for (const list of lists) {
+    for (const spec of list) {
+      if (seen.has(spec.label)) continue;
+      seen.add(spec.label);
+      deduped.push(spec);
+    }
+  }
+  return deduped;
+}
+
+export const WINDOW_FUNCTION_OPERATORS: MongoOperatorSpec[] = [...dedupeSpecsByLabel(WINDOW_OPERATORS, ACCUMULATORS), ...specs([WINDOW_SPEC])];
+
 export const EXPRESSION_OPERATORS: MongoOperatorSpec[] = specs([
   // Conditional
   ["$cond", "Returns one of two values from a condition", "$cond: { if: ${}, then: ${}, else: ${} }"],
@@ -194,6 +244,12 @@ export const EXPRESSION_OPERATORS: MongoOperatorSpec[] = specs([
   ["$multiply", "Multiplies numbers", "$multiply: [${}, ${}]"],
   ["$divide", "Divides two numbers", "$divide: [${}, ${}]"],
   ["$mod", "Returns the remainder of a division", "$mod: [${}, ${}]"],
+  ["$sum", "Sums values", "$sum: [${}, ${}]"],
+  ["$avg", "Averages values", "$avg: [${}, ${}]"],
+  ["$min", "Returns the lowest value", "$min: [${}, ${}]"],
+  ["$max", "Returns the highest value", "$max: [${}, ${}]"],
+  ["$stdDevPop", "Population standard deviation", "$stdDevPop: [${}, ${}]"],
+  ["$stdDevSamp", "Sample standard deviation", "$stdDevSamp: [${}, ${}]"],
   ["$abs", "Absolute value", "$abs: ${}"],
   ["$ceil", "Rounds up to the next integer", "$ceil: ${}"],
   ["$floor", "Rounds down to the previous integer", "$floor: ${}"],
@@ -274,6 +330,11 @@ export const EXPRESSION_OPERATORS: MongoOperatorSpec[] = specs([
   ["$isoWeek", "ISO week number of a date", '$isoWeek: "$${field}"'],
   ["$isoWeekYear", "ISO week-numbering year of a date", '$isoWeekYear: "$${field}"'],
   ["$isoDayOfWeek", "ISO day of the week of a date", '$isoDayOfWeek: "$${field}"'],
+  // Bitwise
+  ["$bitAnd", "Returns the bitwise AND of an array of numbers", "$bitAnd: [${}]"],
+  ["$bitOr", "Returns the bitwise OR of an array of numbers", "$bitOr: [${}]"],
+  ["$bitXor", "Returns the bitwise XOR of an array of numbers", "$bitXor: [${}]"],
+  ["$bitNot", "Returns the bitwise NOT of a number", "$bitNot: ${}"],
   // Types and misc
   ["$type", "Returns the BSON type of a value", "$type: ${}"],
   ["$convert", "Converts a value to a given type", '$convert: { input: ${}, to: "${string}" }'],
@@ -325,6 +386,400 @@ export const KEY_MAP_VALUES: Record<string, MongoOperatorSpec[]> = {
  * Both lists are exactly what the shell parser accepts: it rejects an unknown operation key and
  * an unknown field inside one, so anything extra here would complete into a command that fails.
  */
+const GEO_NEAR_KEYS: Spec[] = [
+  ["$geometry", "GeoJSON point to measure distance from", '$geometry: { type: "Point", coordinates: [${}, ${}] }'],
+  ["$maxDistance", "Farthest match, in meters", "$maxDistance: ${}"],
+  ["$minDistance", "Nearest match, in meters", "$minDistance: ${}"],
+];
+
+const JSON_SCHEMA_KEYWORDS: Spec[] = [
+  ["bsonType", "BSON type the value must have", 'bsonType: "${string}"'],
+  ["type", "JSON Schema type the value must have", 'type: "${string}"'],
+  ["enum", "Values the field may take", "enum: [${}]"],
+  ["required", "Fields that must be present", 'required: ["${field}"]'],
+  ["properties", "Schema for each named field", "properties: { ${field}: {} }"],
+  ["additionalProperties", "Allow, forbid or constrain fields not listed in properties", "additionalProperties: false"],
+  ["patternProperties", "Schema for fields whose name matches a pattern", 'patternProperties: { "${pattern}": {} }'],
+  ["minProperties", "Minimum number of fields", "minProperties: ${}"],
+  ["maxProperties", "Maximum number of fields", "maxProperties: ${}"],
+  ["items", "Schema for array elements", "items: {}"],
+  ["additionalItems", "Allow or constrain elements beyond the listed item schemas", "additionalItems: false"],
+  ["minItems", "Minimum array length", "minItems: ${}"],
+  ["maxItems", "Maximum array length", "maxItems: ${}"],
+  ["uniqueItems", "Reject duplicate array elements", "uniqueItems: true"],
+  ["minimum", "Smallest allowed number", "minimum: ${}"],
+  ["maximum", "Largest allowed number", "maximum: ${}"],
+  ["exclusiveMinimum", "Treat minimum as exclusive", "exclusiveMinimum: true"],
+  ["exclusiveMaximum", "Treat maximum as exclusive", "exclusiveMaximum: true"],
+  ["multipleOf", "Number must be a multiple of this", "multipleOf: ${}"],
+  ["minLength", "Minimum string length", "minLength: ${}"],
+  ["maxLength", "Maximum string length", "maxLength: ${}"],
+  ["pattern", "Regular expression the string must match", 'pattern: "${}"'],
+  ["allOf", "Must match every listed schema", "allOf: [{}]"],
+  ["anyOf", "Must match at least one listed schema", "anyOf: [{}]"],
+  ["oneOf", "Must match exactly one listed schema", "oneOf: [{}]"],
+  ["not", "Must not match this schema", "not: {}"],
+  ["dependencies", "Fields or schemas required when a field is present", 'dependencies: { ${field}: ["${other}"] }'],
+  ["title", "Schema title", 'title: "${}"'],
+  ["description", "Schema description", 'description: "${}"'],
+];
+
+/**
+ * Keys of an operator's own sub-document, where the field operators `{ field: { $… } }`
+ * takes would be wrong: `$text: { $search }`, `$near: { $geometry }`. `$jsonSchema`
+ * and every schema nested in it take the JSON Schema keywords; `collation` covers
+ * the cursor method and the option key alike; `$currentDate` is the per-field
+ * object of the update operator.
+ */
+export const OPERATOR_SUB_KEYS: Record<string, MongoOperatorSpec[]> = {
+  roles: specs([
+    ["role", "Name of the role", 'role: "${read}"'],
+    ["db", "Database on which the role is granted", 'db: "${admin}"'],
+  ]),
+  $text: specs([
+    ["$search", "Words or phrases to search for", '$search: "${text}"'],
+    ["$language", "Language for stemming and stop words", '$language: "${en}"'],
+    ["$caseSensitive", "Match case exactly", "$caseSensitive: true"],
+    ["$diacriticSensitive", "Match diacritics exactly", "$diacriticSensitive: true"],
+  ]),
+  $geoWithin: specs([
+    ["$geometry", "GeoJSON polygon or multipolygon to fall within", '$geometry: { type: "Polygon", coordinates: [${}] }'],
+    ["$box", "Rectangle from its bottom-left and top-right corners", "$box: [[${}, ${}], [${}, ${}]]"],
+    ["$polygon", "Polygon from a list of points", "$polygon: [[${}, ${}]]"],
+    ["$center", "Circle from a center point and a radius", "$center: [[${}, ${}], ${}]"],
+    ["$centerSphere", "Spherical circle from a center point and a radius in radians", "$centerSphere: [[${}, ${}], ${}]"],
+  ]),
+  $geoIntersects: specs([["$geometry", "GeoJSON geometry to intersect", '$geometry: { type: "${Polygon}", coordinates: [${}] }']]),
+  $near: specs(GEO_NEAR_KEYS),
+  $nearSphere: specs(GEO_NEAR_KEYS),
+  $geometry: specs([
+    ["type", "GeoJSON geometry type", 'type: "${Point}"'],
+    ["coordinates", "Coordinates, longitude first", "coordinates: [${}, ${}]"],
+  ]),
+  $jsonSchema: specs(JSON_SCHEMA_KEYWORDS),
+  $currentDate: specs([["$type", "Store a Date or a Timestamp", '$type: "${date}"']]),
+  timeseries: specs([
+    ["timeField", "Field holding each measurement's time", 'timeField: "${timestamp}"'],
+    ["metaField", "Field holding the series metadata", 'metaField: "${meta}"'],
+    ["granularity", "Expected spacing between measurements", 'granularity: "${seconds}"'],
+    ["bucketMaxSpanSeconds", "Maximum time span of one bucket", "bucketMaxSpanSeconds: ${}"],
+    ["bucketRoundingSeconds", "Rounding of bucket boundaries", "bucketRoundingSeconds: ${}"],
+  ]),
+  clusteredIndex: specs([
+    ["key", "Clustered key, which must be _id", "key: { _id: 1 }"],
+    ["unique", "Required, and must be true", "unique: true"],
+    ["name", "Index name", 'name: "${name}"'],
+  ]),
+  collation: specs([
+    ["locale", 'ICU locale, such as "en" or "zh"', 'locale: "${en}"'],
+    ["strength", "Comparison level, 1 (base letters) to 5 (identical)", "strength: 2"],
+    ["caseLevel", "Compare case as its own level", "caseLevel: false"],
+    ["caseFirst", "Order uppercase before or after lowercase", 'caseFirst: "${off}"'],
+    ["numericOrdering", "Compare digit sequences as numbers", "numericOrdering: true"],
+    ["alternate", "Whether spaces and punctuation are base characters", 'alternate: "${non-ignorable}"'],
+    ["maxVariable", 'Which characters "shifted" ignores', 'maxVariable: "${punct}"'],
+    ["backwards", "Compare secondary differences from the end", "backwards: false"],
+    ["normalization", "Normalize text to Unicode NFD first", "normalization: false"],
+  ]),
+  range: specs([
+    ["step", "Step size to densify by", "step: 1"],
+    ["unit", "Time unit for date densification", 'unit: "${unit}"'],
+    ["bounds", "Boundary condition for the range", 'bounds: "${full}"'],
+  ]),
+  fillOutput: specs([
+    ["value", "Value or expression to fill with", "value: ${}"],
+    ["method", "Fill method", 'method: "${linear}"'],
+  ]),
+  $dateToString: specs([
+    ["date", "Date to format", 'date: "$${field}"'],
+    ["format", "Format specification string", 'format: "${%Y-%m-%d}"'],
+    ["timezone", "Timezone for formatting", 'timezone: "${UTC}"'],
+    ["onNull", "Value to return if date is null or missing", "onNull: ${}"],
+  ]),
+  $dateFromParts: specs([
+    ["year", "Calendar year", "year: ${}"],
+    ["month", "Month of year (1-12)", "month: ${}"],
+    ["day", "Day of month (1-31)", "day: ${}"],
+    ["hour", "Hour of day (0-23)", "hour: ${}"],
+    ["minute", "Minute of hour (0-59)", "minute: ${}"],
+    ["second", "Second of minute (0-59)", "second: ${}"],
+    ["millisecond", "Millisecond of second (0-999)", "millisecond: ${}"],
+    ["timezone", "Timezone for formatting", 'timezone: "${UTC}"'],
+    ["isoWeekYear", "ISO week-numbering year", "isoWeekYear: ${}"],
+    ["isoWeek", "ISO week number (1-53)", "isoWeek: ${}"],
+    ["isoDayOfWeek", "Day of week (1-7, Monday is 1)", "isoDayOfWeek: ${}"],
+  ]),
+  $dateToParts: specs([
+    ["date", "Date to convert to parts", 'date: "$${field}"'],
+    ["timezone", "Timezone for calculation", 'timezone: "${UTC}"'],
+    ["iso8601", "Whether to return ISO week date parts", "iso8601: true"],
+  ]),
+  $trim: specs([
+    ["input", "String to trim", 'input: "$${field}"'],
+    ["chars", "Characters to trim", 'chars: "${ }"'],
+  ]),
+  $ltrim: specs([
+    ["input", "String to trim", 'input: "$${field}"'],
+    ["chars", "Characters to trim", 'chars: "${ }"'],
+  ]),
+  $rtrim: specs([
+    ["input", "String to trim", 'input: "$${field}"'],
+    ["chars", "Characters to trim", 'chars: "${ }"'],
+  ]),
+  $replaceOne: specs([
+    ["input", "String to search in", 'input: "$${field}"'],
+    ["find", "String or regex to search for", 'find: "${find}"'],
+    ["replacement", "String to replace with", 'replacement: "${replacement}"'],
+  ]),
+  $replaceAll: specs([
+    ["input", "String to search in", 'input: "$${field}"'],
+    ["find", "String or regex to search for", 'find: "${find}"'],
+    ["replacement", "String to replace with", 'replacement: "${replacement}"'],
+  ]),
+  $regexMatch: specs([
+    ["input", "String to evaluate", 'input: "$${field}"'],
+    ["regex", "Regular expression to match", 'regex: "${pattern}"'],
+    ["options", "Regular expression options", 'options: "${i}"'],
+  ]),
+  $regexFind: specs([
+    ["input", "String to evaluate", 'input: "$${field}"'],
+    ["regex", "Regular expression to match", 'regex: "${pattern}"'],
+    ["options", "Regular expression options", 'options: "${i}"'],
+  ]),
+  $regexFindAll: specs([
+    ["input", "String to evaluate", 'input: "$${field}"'],
+    ["regex", "Regular expression to match", 'regex: "${pattern}"'],
+    ["options", "Regular expression options", 'options: "${i}"'],
+  ]),
+  $filter: specs([
+    ["input", "Array expression to filter", 'input: "$${field}"'],
+    ["as", "Variable name for each element", 'as: "${item}"'],
+    ["cond", "Boolean expression for each element", "cond: ${}"],
+    ["limit", "Maximum number of elements to return", "limit: ${}"],
+  ]),
+  $map: specs([
+    ["input", "Array expression to transform", 'input: "$${field}"'],
+    ["as", "Variable name for each element", 'as: "${item}"'],
+    ["in", "Expression applied to each element", "in: ${}"],
+  ]),
+  $reduce: specs([
+    ["input", "Array expression to reduce", 'input: "$${field}"'],
+    ["initialValue", "Initial value of the accumulator", "initialValue: ${}"],
+    ["in", "Expression applied to each element", "in: ${}"],
+  ]),
+  $cond: specs([
+    ["if", "Condition to evaluate", "if: ${}"],
+    ["then", "Result if condition is true", "then: ${}"],
+    ["else", "Result if condition is false", "else: ${}"],
+  ]),
+  $switch: specs([
+    ["branches", "Array of case-then branch documents", "branches: [{ case: ${}, then: ${} }]"],
+    ["default", "Default expression if no branch matches", "default: ${}"],
+  ]),
+  switchBranch: specs([
+    ["case", "Condition expression to evaluate", "case: ${}"],
+    ["then", "Result expression when case is true", "then: ${}"],
+  ]),
+};
+
+const BSON_TYPE_ALIASES: Spec[] = [
+  ["string", "UTF-8 string", '"string"'],
+  ["objectId", "ObjectId", '"objectId"'],
+  ["date", "Date", '"date"'],
+  ["bool", "Boolean", '"bool"'],
+  ["int", "32-bit integer", '"int"'],
+  ["long", "64-bit integer", '"long"'],
+  ["double", "64-bit floating point", '"double"'],
+  ["decimal", "128-bit decimal", '"decimal"'],
+  ["number", "Any numeric type", '"number"'],
+  ["object", "Embedded document", '"object"'],
+  ["array", "Array", '"array"'],
+  ["null", "Null", '"null"'],
+  ["binData", "Binary data", '"binData"'],
+  ["regex", "Regular expression", '"regex"'],
+  ["timestamp", "Timestamp", '"timestamp"'],
+  ["javascript", "JavaScript code", '"javascript"'],
+  ["minKey", "MinKey", '"minKey"'],
+  ["maxKey", "MaxKey", '"maxKey"'],
+];
+
+/**
+ * The fixed set a value position accepts, by the name the classifier gives that
+ * position. String values carry their quotes in `apply`, so an unquoted cursor
+ * gets a well-formed literal; numbers do not.
+ */
+export const ENUM_VALUES: Record<string, MongoOperatorSpec[]> = {
+  builtInRole: specs([
+    ["read", "Provides reading data on all non-system collections", '"read"'],
+    ["readWrite", "Provides all the privileges of the read role plus ability to modify data", '"readWrite"'],
+    ["dbAdmin", "Provides administrative tasks such as schema-related tasks", '"dbAdmin"'],
+    ["dbOwner", "Provides all privileges of readWrite, dbAdmin, and userAdmin", '"dbOwner"'],
+    ["userAdmin", "Provides ability to create and modify roles and users on the current database", '"userAdmin"'],
+    ["clusterAdmin", "Provides highest cluster-level administrative privileges", '"clusterAdmin"'],
+    ["clusterManager", "Provides management and monitoring actions", '"clusterManager"'],
+    ["clusterMonitor", "Provides read-only access to monitoring tools", '"clusterMonitor"'],
+    ["hostManager", "Provides ability to monitor and manage servers", '"hostManager"'],
+    ["backup", "Provides privileges needed to back up data", '"backup"'],
+    ["restore", "Provides privileges needed to restore data", '"restore"'],
+    ["readAnyDatabase", "Provides the same privileges as read on all databases except local and config", '"readAnyDatabase"'],
+    ["readWriteAnyDatabase", "Provides the same privileges as readWrite on all databases except local and config", '"readWriteAnyDatabase"'],
+    ["userAdminAnyDatabase", "Provides the same privileges as userAdmin on all databases except local and config", '"userAdminAnyDatabase"'],
+    ["dbAdminAnyDatabase", "Provides the same privileges as dbAdmin on all databases except local and config", '"dbAdminAnyDatabase"'],
+    ["root", "Provides access to the operations and all the resources of the readWriteAnyDatabase, dbAdminAnyDatabase, userAdminAnyDatabase, clusterAdmin, restore, and backup combined", '"root"'],
+  ]),
+  $type: specs(BSON_TYPE_ALIASES),
+  bsonType: specs(BSON_TYPE_ALIASES),
+  $options: specs([
+    ["i", "Case-insensitive", '"i"'],
+    ["m", "^ and $ match at line breaks", '"m"'],
+    ["x", "Ignore whitespace and # comments in the pattern", '"x"'],
+    ["s", "Dot matches newlines", '"s"'],
+    ["u", "Unicode character classes", '"u"'],
+  ]),
+  $meta: specs([
+    ["textScore", "Access the text search score", '"textScore"'],
+    ["indexKey", "Access the index key for the document", '"indexKey"'],
+  ]),
+  geometryType: specs([
+    ["Point", "Single position", '"Point"'],
+    ["LineString", "Sequence of positions", '"LineString"'],
+    ["Polygon", "Closed ring of positions", '"Polygon"'],
+    ["MultiPoint", "Several points", '"MultiPoint"'],
+    ["MultiLineString", "Several line strings", '"MultiLineString"'],
+    ["MultiPolygon", "Several polygons", '"MultiPolygon"'],
+    ["GeometryCollection", "Mixed geometries", '"GeometryCollection"'],
+  ]),
+  returnDocument: specs([
+    ["after", "Return the document as modified", '"after"'],
+    ["before", "Return the document as it was", '"before"'],
+  ]),
+  explain: specs([
+    ["queryPlanner", "The chosen plan, without running it", '"queryPlanner"'],
+    ["executionStats", "The chosen plan and its execution statistics", '"executionStats"'],
+    ["allPlansExecution", "Every candidate plan and its statistics", '"allPlansExecution"'],
+  ]),
+  currentDateType: specs([
+    ["date", "Store a Date", '"date"'],
+    ["timestamp", "Store a Timestamp", '"timestamp"'],
+  ]),
+  caseFirst: specs([
+    ["off", "Lowercase and uppercase in code point order", '"off"'],
+    ["upper", "Uppercase first", '"upper"'],
+    ["lower", "Lowercase first", '"lower"'],
+  ]),
+  alternate: specs([
+    ["non-ignorable", "Spaces and punctuation count as base characters", '"non-ignorable"'],
+    ["shifted", "Spaces and punctuation are ignored up to maxVariable", '"shifted"'],
+  ]),
+  maxVariable: specs([
+    ["punct", "Shift both spaces and punctuation", '"punct"'],
+    ["space", "Shift spaces only", '"space"'],
+  ]),
+  validationLevel: specs([
+    ["strict", "Validate every insert and update", '"strict"'],
+    ["moderate", "Validate inserts, and updates to documents that already validate", '"moderate"'],
+    ["off", "Do not validate", '"off"'],
+  ]),
+  validationAction: specs([
+    ["error", "Reject documents that fail validation", '"error"'],
+    ["warn", "Accept them and log a warning", '"warn"'],
+  ]),
+  granularity: specs([
+    ["seconds", "Measurements seconds apart", '"seconds"'],
+    ["minutes", "Measurements minutes apart", '"minutes"'],
+    ["hours", "Measurements hours apart", '"hours"'],
+  ]),
+  strength: specs([
+    ["1", "Base letters only", "1"],
+    ["2", "Base letters and accents", "2"],
+    ["3", "Base letters, accents and case", "3"],
+    ["4", "Also punctuation, with alternate: shifted", "4"],
+    ["5", "Identical, including code points", "5"],
+  ]),
+  unit: specs([
+    ["millisecond", "Densify by milliseconds", '"millisecond"'],
+    ["second", "Densify by seconds", '"second"'],
+    ["minute", "Densify by minutes", '"minute"'],
+    ["hour", "Densify by hours", '"hour"'],
+    ["day", "Densify by days", '"day"'],
+    ["week", "Densify by weeks", '"week"'],
+    ["month", "Densify by months", '"month"'],
+    ["quarter", "Densify by quarters", '"quarter"'],
+    ["year", "Densify by years", '"year"'],
+  ]),
+  bounds: specs([
+    ["full", "Densify across entire range", '"full"'],
+    ["partition", "Densify within each partition", '"partition"'],
+  ]),
+  fillMethod: specs([
+    ["linear", "Linear interpolation between surrounding values", '"linear"'],
+    ["locf", "Last observation carried forward", '"locf"'],
+  ]),
+  boolean: specs([
+    ["true", "Boolean true", "true"],
+    ["false", "Boolean false", "false"],
+  ]),
+  $regex: specs([["/pattern/", "Regular expression literal", "/${pattern}/"]]),
+  $language: specs([
+    ["none", "No language-specific rules", '"none"'],
+    ["da", "Danish", '"da"'],
+    ["de", "German", '"de"'],
+    ["en", "English", '"en"'],
+    ["es", "Spanish", '"es"'],
+    ["fi", "Finnish", '"fi"'],
+    ["fr", "French", '"fr"'],
+    ["hu", "Hungarian", '"hu"'],
+    ["it", "Italian", '"it"'],
+    ["nb", "Norwegian", '"nb"'],
+    ["nl", "Dutch", '"nl"'],
+    ["pt", "Portuguese", '"pt"'],
+    ["ro", "Romanian", '"ro"'],
+    ["ru", "Russian", '"ru"'],
+    ["sv", "Swedish", '"sv"'],
+    ["tr", "Turkish", '"tr"'],
+    ["danish", "Danish", '"danish"'],
+    ["dutch", "Dutch", '"dutch"'],
+    ["english", "English", '"english"'],
+    ["finnish", "Finnish", '"finnish"'],
+    ["french", "French", '"french"'],
+    ["german", "German", '"german"'],
+    ["hungarian", "Hungarian", '"hungarian"'],
+    ["italian", "Italian", '"italian"'],
+    ["norwegian", "Norwegian", '"norwegian"'],
+    ["portuguese", "Portuguese", '"portuguese"'],
+    ["romanian", "Romanian", '"romanian"'],
+    ["russian", "Russian", '"russian"'],
+    ["spanish", "Spanish", '"spanish"'],
+    ["swedish", "Swedish", '"swedish"'],
+    ["turkish", "Turkish", '"turkish"'],
+  ]),
+  locale: specs([
+    ["simple", "Simple binary comparison", '"simple"'],
+    ["en", "English", '"en"'],
+    ["fr", "French", '"fr"'],
+    ["de", "German", '"de"'],
+    ["es", "Spanish", '"es"'],
+    ["pt", "Portuguese", '"pt"'],
+    ["it", "Italian", '"it"'],
+    ["ru", "Russian", '"ru"'],
+    ["zh", "Chinese", '"zh"'],
+    ["ja", "Japanese", '"ja"'],
+    ["ko", "Korean", '"ko"'],
+    ["ar", "Arabic", '"ar"'],
+  ]),
+  whenMatched: specs([
+    ["replace", "Replace the existing document", '"replace"'],
+    ["keepExisting", "Keep the existing document", '"keepExisting"'],
+    ["merge", "Merge the matching documents", '"merge"'],
+    ["fail", "Fail the aggregation operation", '"fail"'],
+  ]),
+  whenNotMatched: specs([
+    ["insert", "Insert the document", '"insert"'],
+    ["discard", "Discard the document", '"discard"'],
+    ["fail", "Fail the aggregation operation", '"fail"'],
+  ]),
+};
+
 export const BULK_WRITE_OPERATIONS: MongoOperatorSpec[] = specs([
   ["insertOne", "Insert one document", "insertOne: { document: { ${} } }"],
   ["updateOne", "Update the first matching document", "updateOne: { filter: { ${} }, update: { $set: { ${} } } }"],
@@ -408,6 +863,61 @@ export const METHOD_OPTION_KEYS: Record<string, MongoOperatorSpec[]> = {
     ["let", "Variables available to the pipeline as $$name", "let: { ${name}: ${} }"],
     ["explain", "Return the query plan instead of the results", "explain: true"],
   ]),
+  createCollection: specs([
+    ["validator", "Rules every document must satisfy", 'validator: { $jsonSchema: { bsonType: "object", required: ["${field}"], properties: {} } }'],
+    ["validationLevel", "How strictly to validate existing documents", 'validationLevel: "${strict}"'],
+    ["validationAction", "Reject or only warn on invalid documents", 'validationAction: "${error}"'],
+    ["capped", "Fixed-size collection that overwrites its oldest documents", "capped: true"],
+    ["size", "Maximum size of a capped collection, in bytes", "size: ${}"],
+    ["max", "Maximum number of documents in a capped collection", "max: ${}"],
+    ["timeseries", "Store measurements as a time series", 'timeseries: { timeField: "${timestamp}", metaField: "${meta}", granularity: "${seconds}" }'],
+    ["expireAfterSeconds", "Delete time-series documents after this age", "expireAfterSeconds: ${}"],
+    ["clusteredIndex", "Cluster the documents by _id", "clusteredIndex: { key: { _id: 1 }, unique: true }"],
+    ["collation", "Default locale-aware comparison rules", 'collation: { locale: "${en}" }'],
+    ["viewOn", "Make this a view over another collection", 'viewOn: "${collection}"'],
+    ["pipeline", "Aggregation pipeline the view applies", "pipeline: [${}]"],
+    ["changeStreamPreAndPostImages", "Record document images for change streams", "changeStreamPreAndPostImages: { enabled: true }"],
+  ]),
+  createUser: specs([
+    ["user", "User name", 'user: "${name}"'],
+    ["pwd", "User password", 'pwd: "${password}"'],
+    ["roles", "Roles granted to the user", "roles: []"],
+    ["customData", "Arbitrary information stored with the user", "customData: {}"],
+    ["mechanisms", "Authentication mechanisms", "mechanisms: [${}]"],
+  ]),
+  // Command documents run as written, so this lists the commands worth typing by hand.
+  runCommand: specs([
+    ["ping", "Check that the server responds", "ping: 1"],
+    ["hello", "Server role and replica set state", "hello: 1"],
+    ["buildInfo", "Server version and build details", "buildInfo: 1"],
+    ["serverStatus", "Server metrics", "serverStatus: 1"],
+    ["hostInfo", "Host system details", "hostInfo: 1"],
+    ["connectionStatus", "Authenticated user and roles", "connectionStatus: 1"],
+    ["dbStats", "Database storage statistics", "dbStats: 1"],
+    ["collStats", "Collection storage statistics", 'collStats: "${collection}"'],
+    ["listCollections", "Collections in this database", "listCollections: 1"],
+    ["listIndexes", "Indexes of a collection", 'listIndexes: "${collection}"'],
+    ["find", "Query a collection", 'find: "${collection}", filter: {}'],
+    ["count", "Count matching documents", 'count: "${collection}", query: {}'],
+    ["distinct", "Distinct values of a field", 'distinct: "${collection}", key: "${field}"'],
+    ["aggregate", "Run an aggregation pipeline", 'aggregate: "${collection}", pipeline: [], cursor: {}'],
+    ["explain", "Query plan for a command", 'explain: { find: "${collection}", filter: {} }'],
+    ["insert", "Insert documents", 'insert: "${collection}", documents: [{}]'],
+    ["update", "Update documents", 'update: "${collection}", updates: [{ q: {}, u: { $set: {} } }]'],
+    ["delete", "Delete documents", 'delete: "${collection}", deletes: [{ q: {}, limit: 1 }]'],
+    ["findAndModify", "Atomically modify and return one document", 'findAndModify: "${collection}", query: {}, update: { $set: {} }'],
+    ["create", "Create a collection", 'create: "${collection}"'],
+    ["drop", "Drop a collection", 'drop: "${collection}"'],
+    ["collMod", "Change a collection's options", 'collMod: "${collection}", validator: {}'],
+    ["convertToCapped", "Convert a collection to a capped one", 'convertToCapped: "${collection}", size: ${}'],
+    ["createIndexes", "Create indexes", 'createIndexes: "${collection}", indexes: [{ key: { ${field}: 1 }, name: "${name}" }]'],
+    ["dropIndexes", "Drop an index", 'dropIndexes: "${collection}", index: "${name}"'],
+    ["validate", "Check a collection's data and indexes", 'validate: "${collection}"'],
+    ["currentOp", "Operations in progress", "currentOp: 1"],
+    ["usersInfo", "Users of this database", "usersInfo: 1"],
+    ["profile", "Read the profiling level", "profile: -1"],
+    ["getLog", "Recent server log lines", 'getLog: "global"'],
+  ]),
 };
 
 /** Option keys accepted by the stages whose shape is a fixed set of names. */
@@ -475,6 +985,17 @@ export const STAGE_OPTION_KEYS: Record<string, MongoOperatorSpec[]> = {
     ["includeLocs", "Field holding the matched location", 'includeLocs: "${location}"'],
   ]),
   $replaceRoot: specs([["newRoot", "Expression producing the new root document", 'newRoot: "$${field}"']]),
+  $densify: specs([
+    ["field", "Field whose values will be densified", 'field: "${field}"'],
+    ["partitionByFields", "Fields that partition the documents", 'partitionByFields: ["${field}"]'],
+    ["range", "Range specification to densify", 'range: { step: 1, bounds: "${full}" }'],
+  ]),
+  $fill: specs([
+    ["partitionBy", "Expression to partition by", 'partitionBy: "$${field}"'],
+    ["partitionByFields", "Fields that partition the documents", 'partitionByFields: ["${field}"]'],
+    ["sortBy", "Sort order for evaluating values", "sortBy: { ${field}: 1 }"],
+    ["output", "Fields to fill", "output: { ${field}: { value: ${} } }"],
+  ]),
 };
 
 /** Literal values that are worth completing in value position. */

@@ -26,6 +26,9 @@ pub struct SshConfigHostEntry {
     /// may declare its own `ProxyJump`, which `resolve_ssh_tunnel_chain`
     /// follows recursively.
     pub proxy_jump: Option<String>,
+    /// The `ProxyCommand` line, verbatim, used to reach this host instead of
+    /// a direct TCP connection. `None` when the block declares none.
+    pub proxy_command: Option<String>,
 }
 
 /// Reads and parses `~/.ssh/config`, following `Include` directives the way
@@ -121,6 +124,7 @@ fn jump_hop_from_entry(leaf: &SshTunnelConfig, entry: SshConfigHostEntry) -> Ssh
         ssh_agent_sock_path: leaf.ssh_agent_sock_path.clone(),
         auth_method: leaf.auth_method.clone(),
         allow_exec_channel_proxy: leaf.allow_exec_channel_proxy,
+        proxy_command: entry.proxy_command.unwrap_or_default(),
         profile_id: String::new(),
     }
 }
@@ -155,6 +159,13 @@ fn apply_host_entry(ssh: &SshTunnelConfig, entry: SshConfigHostEntry) -> SshTunn
             if resolved.auth_method.is_empty() || (resolved.auth_method == "password" && resolved.password.is_empty()) {
                 resolved.auth_method = "key".to_string();
             }
+        }
+    }
+    // A ProxyCommand typed into the connection form wins; otherwise inherit
+    // the one from the matched `~/.ssh/config` block.
+    if resolved.proxy_command.trim().is_empty() {
+        if let Some(proxy_command) = entry.proxy_command {
+            resolved.proxy_command = proxy_command;
         }
     }
 
@@ -243,6 +254,7 @@ impl SshConfigLoader {
                             user: None,
                             identity_file: None,
                             proxy_jump: None,
+                            proxy_command: None,
                         });
                     }
                     self.current_aliases = aliases;
@@ -262,6 +274,9 @@ impl SshConfigLoader {
                 }),
                 "identityfile" => self.set_current_field(|entry| {
                     entry.identity_file = Some(value.to_string());
+                }),
+                "proxycommand" => self.set_current_field(|entry| {
+                    entry.proxy_command = Some(value.to_string());
                 }),
                 "proxyjump" => {
                     if let Some(first_hop) = value.split(',').next().map(str::trim).filter(|hop| !hop.is_empty()) {
@@ -365,6 +380,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: String::new(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
         }
     }
 
@@ -423,6 +439,39 @@ mod tests {
         assert_eq!(entries[0].proxy_jump, None);
     }
 
+    #[test]
+    fn parses_proxy_command_verbatim() {
+        let entries = parse_ssh_config("Host proxied\n  HostName 10.0.0.5\n  ProxyCommand nc %h %p\n");
+        assert_eq!(entries[0].proxy_command, Some("nc %h %p".to_string()));
+    }
+
+    #[test]
+    fn resolve_inherits_proxy_command_only_when_form_is_empty() {
+        let mut ssh = config("myserver");
+        let mut source = entry("myserver");
+        source.proxy_command = Some("nc %h %p".to_string());
+
+        let inherited = apply_host_entry(&ssh, source.clone());
+        assert_eq!(inherited.proxy_command, "nc %h %p");
+
+        ssh.proxy_command = "cloudflared access ssh --hostname %h".to_string();
+        let explicit = apply_host_entry(&ssh, source);
+        assert_eq!(explicit.proxy_command, "cloudflared access ssh --hostname %h");
+    }
+
+    #[test]
+    fn jump_hop_carries_its_own_proxy_command() {
+        let ssh = config("target");
+        let mut gateway = jump_entry("gateway", "1.1.1.1", None);
+        gateway.proxy_command = Some("nc %h %p".to_string());
+        let entries = [gateway, jump_entry("target", "1.1.1.2", Some("gateway"))];
+
+        let chain = resolve_chain_from_entries(&ssh, &entries);
+
+        assert_eq!(chain[0].proxy_command, "nc %h %p");
+        assert_eq!(chain[1].proxy_command, "");
+    }
+
     fn entry(alias: &str) -> SshConfigHostEntry {
         SshConfigHostEntry {
             alias: alias.to_string(),
@@ -431,6 +480,7 @@ mod tests {
             user: Some("deploy".to_string()),
             identity_file: Some("~/.ssh/id_ed25519".to_string()),
             proxy_jump: None,
+            proxy_command: None,
         }
     }
 
@@ -508,6 +558,7 @@ mod tests {
             user: None,
             identity_file: None,
             proxy_jump: proxy_jump.map(str::to_string),
+            proxy_command: None,
         }
     }
 

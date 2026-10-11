@@ -620,4 +620,13 @@ mod tests {
         assert_eq!(normalize_len_params("(unclosed"), "(unclosed");
         assert_eq!(normalize_len_params(")"), ")");
     }
+
+    #[test]
+    fn postgres_rewrites_uniqueidentifier_to_uuid() {
+        let target = DatabaseType::Postgres;
+        let source = Some(DialectKind::SqlServer);
+        assert_eq!(rewrite_column_type("uniqueidentifier", target, source), "UUID");
+        assert_eq!(rewrite_column_type("UNIQUEIDENTIFIER", target, source), "UUID");
+        assert_eq!(rewrite_column_type("uniqueidentifier", target, None), "UUID");
+    }
 }

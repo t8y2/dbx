@@ -56,8 +56,22 @@ export interface EditableQuerySource {
   alias?: string;
 }
 
-const POSTGRES_FOLDED_IDENTIFIER_TYPES = new Set(["postgres", "redshift", "gaussdb", "highgo", "uxdb", "vastbase", "kwdb", "opengauss", "questdb"]);
+export const POSTGRES_FOLDED_IDENTIFIER_TYPES = new Set(["postgres", "redshift", "gaussdb", "highgo", "uxdb", "vastbase", "kwdb", "opengauss", "questdb"]);
 const ORACLE_FOLDED_IDENTIFIER_TYPES = new Set(["oracle", "dameng", "oceanbase-oracle"]);
+
+/**
+ * Fold a SQL source identifier the way the server resolved it when the
+ * identifier was written unquoted: PostgreSQL-compatible engines store and
+ * resolve it lower case, so the folded spelling — not the query's original
+ * casing — is the only name that stays addressable when the identifier is
+ * later quoted (grid saves, generated SQL). Quoted identifiers keep their
+ * exact spelling. `undefined` passes through so callers can fall back to
+ * other identity sources.
+ */
+export function foldUnquotedPostgresMetadataIdentifier(databaseType: string, identifier: string | undefined, quoted: boolean | undefined): string | undefined {
+  if (!identifier || quoted || !POSTGRES_FOLDED_IDENTIFIER_TYPES.has(databaseType)) return identifier;
+  return identifier.toLowerCase();
+}
 
 /**
  * Resolve a SQL source identifier to the canonical name returned by table
@@ -883,7 +897,7 @@ export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: stri
       analysis.columns.flatMap((column) => {
         if (!column.sourceName) return [];
         if (sourceKey && column.sourceKey !== sourceKey) return [];
-        if (databaseType === "oracle" && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID" && column.sourceKey === sourceKey) return [DBX_ROWID_COLUMN, column.sourceName];
+        if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID" && column.sourceKey === sourceKey) return [DBX_ROWID_COLUMN, column.sourceName];
         return [column.sourceName];
       }),
     );
@@ -967,7 +981,7 @@ export function sourceColumnsForResult(analysis: EditableQueryInfo, resultColumn
   return matchedColumns.map((column) => {
     if (!column) return undefined;
     if (sourceKey && column.sourceKey !== sourceKey) return undefined;
-    if (databaseType === "oracle" && !column.sourceNameQuoted && column.sourceName?.toUpperCase() === "ROWID" && column.sourceKey === sourceKey) {
+    if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && !column.sourceNameQuoted && column.sourceName?.toUpperCase() === "ROWID" && column.sourceKey === sourceKey) {
       return primaryKeys?.length === 1 && primaryKeys[0] === DBX_ROWID_COLUMN ? DBX_ROWID_COLUMN : undefined;
     }
     return column.sourceName;

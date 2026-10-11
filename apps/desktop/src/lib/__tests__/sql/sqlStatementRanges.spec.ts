@@ -526,6 +526,16 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql)).length).toBe(2);
   });
 
+  it("keeps DuckDB Windows path literals separate from following statements", () => {
+    const sql = "SET VARIABLE path = 'C:\\path\\';\nSET VARIABLE next = 'value';\nSELECT 1;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "duckdb"))).toEqual(["SET VARIABLE path = 'C:\\path\\'", "SET VARIABLE next = 'value'", "SELECT 1"]);
+  });
+
+  it("keeps DuckDB escape string literals separate from following statements", () => {
+    const sql = "SELECT E'it\\'';\nSELECT 1;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "duckdb"))).toEqual(["SELECT E'it\\''", "SELECT 1"]);
+  });
+
   it("keeps backslash-escaped quotes as one string for MySQL (no regression)", () => {
     const sql = "SELECT 'a\\'b; still string';\nSELECT 2";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["SELECT 'a\\'b; still string'", "SELECT 2"]);
@@ -607,6 +617,11 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["select COUNT(1) FROM your_table", "select COUNT(1) FROM your_table;"]);
   });
 
+  it("accepts a MySQL delimiter reset without whitespace", () => {
+    const sql = "DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; END //\nDELIMITER;\nCALL p();";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["CREATE PROCEDURE p() BEGIN SELECT 1; END", "CALL p()"]);
+  });
+
   it("keeps MySQL routine blocks together without delimiter commands", () => {
     const ranges = splitSqlStatementRanges(mysqlRoutineFixture, "mysql");
     expect(rangeSqlTexts(ranges)).toEqual([mysqlRoutineFixture.slice(0, mysqlRoutineFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
@@ -667,6 +682,7 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
     expect(hasMultipleExecutionTargets(argoProcedureFixture, "argo")).toBe(false);
     expect(rangeSqlTexts(executableStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "transwarp"))).toEqual([argoProcedureFixture]);
   });
 
   it("statement at cursor inside an ArgoDB procedure body returns the whole definition", () => {
@@ -1678,6 +1694,20 @@ SET t.no = s.no`;
 });
 
 describe("executableStatementRanges", () => {
+  it.each(["\n\n", ";\n", "; "])("keeps SELECT after an IRIS Contains operator separate with separator %j", (separator) => {
+    const first = "select * from oec_order_adminstatus where STAT_Code [ '123'";
+    const second = "select top 10 * from Ens_HOSDocument";
+    const sql = first + separator + second;
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "iris"))).toEqual([first, second]);
+    expect(currentExecutableStatementRange(sql, sql.indexOf(second) + 7, "iris")?.sql).toBe(second);
+  });
+
+  it("keeps SQL Server bracket identifiers containing semicolons quoted", () => {
+    const sql = "SELECT [name;part] FROM [table;part]; SELECT 2;";
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual(["SELECT [name;part] FROM [table;part]", "SELECT 2"]);
+  });
+
   it.each(["doris", "starrocks"] as const)("keeps %s half-open range partitions from swallowing the next statement", (databaseType) => {
     const first = `CREATE TABLE fixed_partitions_1 (
   sale_date date NULL,
@@ -1692,6 +1722,28 @@ DISTRIBUTED BY HASH(product_id) BUCKETS 1`;
 
     expect(rangeSqlTexts(executableStatementRanges(`${first};\n\n${second};`, databaseType))).toEqual([first, second]);
   });
+
+  // Issue #11699: MyBatis XML comparison entities (`&gt;=`, `&lt;=`) end with a
+  // `;` that must not be read as a statement terminator, otherwise one query is
+  // split into fragments, its run buttons multiply, and parameters living in
+  // later fragments are lost from the execute dialog.
+  it("keeps MyBatis comparison entities from splitting a statement (issue #11699)", () => {
+    const sql = ["select * from course_user cu", "where cu.is_delete = 0", "and cu.create_time &gt;= #{param.startDateTime}", "and cu.create_time &lt;= #{param.endDateTime}", "group by cu.dept_id"].join("\n");
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual([sql]);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql]);
+    expect(hasMultipleExecutionTargets(sql, "mysql")).toBe(false);
+    expect(currentExecutableStatementRange(sql, sql.indexOf("group by"), "mysql")?.sql).toBe(sql);
+  });
+
+  it("still splits real statements after an entity and after a bitwise AND (issue #11699)", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT a FROM t WHERE b &gt;= 1;\nSELECT 2;", "mysql"))).toEqual(["SELECT a FROM t WHERE b &gt;= 1", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT a FROM t WHERE a&b;", "mysql"))).toEqual(["SELECT a FROM t WHERE a&b"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT 'Tom &amp; Jerry';\nSELECT 2;", "mysql"))).toEqual(["SELECT 'Tom &amp; Jerry'", "SELECT 2"]);
+    // Numeric refs: MySQL-family dialects (and, in this splitter, Postgres) read a
+    // bare `#` as a line comment, so use sqlserver where `#` is an identifier marker.
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT &#39; AS q;\nSELECT 2;", "sqlserver"))).toEqual(["SELECT &#39; AS q", "SELECT 2"]);
+  });
+
   it("returns statement ranges starting only at statement starts", () => {
     const sql = "SELECT *\nFROM users\nWHERE active = 1;\nSELECT 2;";
     const ranges = executableStatementRanges(sql);

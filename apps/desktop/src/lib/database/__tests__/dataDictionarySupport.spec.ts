@@ -12,6 +12,7 @@ describe("supportsDataDictionary", () => {
 
   it("is hidden for engines that cannot list table metadata", () => {
     expect(supportsDataDictionary("redis")).toBe(false);
+    expect(supportsDataDictionary("nebula")).toBe(false);
     expect(supportsDataDictionary("plugin")).toBe(false);
   });
 });

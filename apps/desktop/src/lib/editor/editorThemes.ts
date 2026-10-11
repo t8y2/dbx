@@ -92,10 +92,10 @@ const customThemeColors = {
   invalid: "#f38ba8", // 无效字符
 };
 
-export function resolveCustomThemeBackgrounds(colors?: Pick<CustomThemeColors, "background">, isDark: boolean = true): { background: string; gutterBackground: string } {
+export function resolveCustomThemeBackgrounds(colors?: Pick<CustomThemeColors, "background" | "gutterBackground">, isDark: boolean = true): { background: string; gutterBackground: string } {
   return {
     background: colors?.background ?? (isDark ? "#1e1e2e" : "#fafafa"),
-    gutterBackground: colors?.background ?? customThemeColors.gutterBackground,
+    gutterBackground: colors?.gutterBackground ?? colors?.background ?? customThemeColors.gutterBackground,
   };
 }
 
@@ -534,9 +534,6 @@ function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").Edit
         color: c.foreground,
         [EDITOR_SELECTION_BACKGROUND_CSS_VAR]: c.selection,
         [SQL_TABLE_COLOR_CSS_VAR]: c.table,
-      },
-      ".cm-scroller": {
-        backgroundColor: c.background,
       },
       ".cm-content": {
         caretColor: c.cursor,
@@ -991,6 +988,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       boxSizing: "border-box",
     },
     ".cm-tooltip.cm-tooltip-autocomplete > ul": {
+      fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`,
       maxHeight: "min(280px, calc(100vh - 32px))",
       minWidth: "min(280px, calc(100vw - 24px))",
       maxWidth: "inherit",
@@ -1122,6 +1120,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
     },
     ".cm-completionDetail": {
       color: colorMixValue("var(--muted-foreground)", "color-mix(in oklch, var(--popover-foreground) 68%, var(--popover))"),
+      fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`,
       fontSize: `clamp(11px, calc(var(${EDITOR_FONT_SIZE_CSS_VAR}, 13px) - 1px), 13px)`,
       fontWeight: "500",
       fontStyle: "normal",
@@ -1134,9 +1133,13 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       whiteSpace: "nowrap",
     },
     ".cm-tooltip.cm-completionInfo": {
+      fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`,
       maxWidth: "min(420px, calc(100vw - 24px))",
       overflowWrap: "anywhere",
       zIndex: "10000",
+    },
+    ".cm-tooltip.cm-completionInfo *": {
+      fontFamily: "inherit",
     },
   };
 }

@@ -591,6 +591,22 @@ export const AI_PROVIDER_PARTNER_PRESETS: readonly AiPartnerProviderPreset[] = [
     descriptionKey: "ai.astraflowDescription",
     badgeKey: "ai.astraflowSponsored",
   },
+  {
+    id: "packyapi",
+    label: "PackyCode",
+    iconPath: "/icons/ai/packyapi.png",
+    group: "partner",
+    provider: "openai-compatible",
+    endpoint: "https://www.packyapi.ai/v1",
+    model: "",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: true,
+    websiteUrl: "https://www.packyapi.ai/register?aff=wyDA",
+    apiKeyUrl: "https://www.packyapi.ai/register?aff=wyDA",
+    descriptionKey: "ai.packyapiDescription",
+    badgeKey: "ai.packyapiSponsored",
+  },
 ];
 
 function normalizeAiProviderEndpoint(endpoint: string): string {

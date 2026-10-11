@@ -3277,6 +3277,9 @@ export default withEnglishFallback({
     aicodemirrorDescription: "⚡ AICodeMirror menghadirkan konkurensi tingkat enterprise, invoicing cepat, dan dukungan khusus 7×24; pengguna baru mendapat kredit gratis ¥8 plus diskon 20% untuk top up pertama.",
     astraflowDescription: "AstraFlow dari UCloud menyediakan akses ke lebih dari 200 model AI populer dengan satu API key, kompatibel dengan API OpenAI.",
     astraflowSponsored: "Kredit gratis ¥50",
+    packyapiSponsored: "Kredit gratis $1",
+    packyapiDescription:
+      "⚡ PackyCode adalah relay API yang stabil untuk model AI utama: satu endpoint, satu kunci, failover otomatis, dan rute cepat khusus untuk Codex dan Claude Code.\n🎁 Pengguna baru mendapat kredit gratis $1 dan diskon top-up pertama; bayar dalam RMB 1:1 tanpa markup konversi, dengan diskon grup hingga 80%.",
     hiapiSponsored: "200 Credits gratis",
     hiapiDescription:
       "HiAPI adalah platform API untuk developer dengan model gambar, video, audio, dan teks; model teks menggunakan endpoint yang kompatibel dengan OpenAI, sementara Remote MCP dan Agent Skills menghubungkan akun yang sama ke Claude Code, Cursor, dan agen coding lainnya.\n🎁 Pengguna baru mendapat 200 Credits saat mendaftar dan 10% Credits ekstra pada setiap top-up.",

@@ -1262,7 +1262,7 @@ describe("settingsStore AI API key normalization", () => {
   it("appends AstraFlow as a partner preset without a default model", () => {
     const preset = getAiProviderPresetOption("astraflow");
 
-    expect(AI_PROVIDER_PARTNER_PRESETS.at(-1)).toBe(preset);
+    expect(AI_PROVIDER_PARTNER_PRESETS.find((candidate) => candidate.id === "astraflow")).toBe(preset);
     expect(preset).toMatchObject({
       id: "astraflow",
       label: "AstraFlow",
@@ -1319,6 +1319,31 @@ describe("settingsStore AI API key normalization", () => {
     });
     expect(getAiProviderPreset("openai-compatible", "https://api.hiapi.ai/v1")).toBe(preset);
     expect(getAiProviderPresetId("openai-compatible", " HTTPS://API.HIAPI.AI/v1/ ")).toBe("hiapi");
+  });
+
+  it("adds PackyAPI as a sponsored partner preset without a default model", () => {
+    const preset = getAiProviderPresetOption("packyapi");
+
+    expect(AI_PROVIDER_PARTNER_PRESETS.at(-1)).toBe(preset);
+    expect(preset).toMatchObject({
+      id: "packyapi",
+      label: "PackyCode",
+      iconPath: "/icons/ai/packyapi.png",
+      group: "partner",
+      provider: "openai-compatible",
+      endpoint: "https://www.packyapi.ai/v1",
+      model: "",
+      apiStyle: "completions",
+      authMethod: "bearer",
+      requiresApiKey: true,
+      websiteUrl: "https://www.packyapi.ai/register?aff=wyDA",
+      apiKeyUrl: "https://www.packyapi.ai/register?aff=wyDA",
+      descriptionKey: "ai.packyapiDescription",
+      badgeKey: "ai.packyapiSponsored",
+    });
+    expect(preset.models ?? []).toEqual([]);
+    expect(getAiProviderPreset("openai-compatible", "https://www.packyapi.ai/v1")).toBe(preset);
+    expect(getAiProviderPresetId("openai-compatible", " HTTPS://WWW.PACKYAPI.AI/v1/ ")).toBe("packyapi");
   });
 
   it("uses the mainland MiniMax endpoint only for new zh-CN presets", () => {

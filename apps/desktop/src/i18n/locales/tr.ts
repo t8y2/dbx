@@ -2950,6 +2950,9 @@ export default withEnglishFallback({
     aicodemirrorDescription: "⚡ AICodeMirror, kurumsal düzeyde eşzamanlılık, hızlı faturalandırma ve 7×24 özel destek sunar; yeni kullanıcılar ¥8 ücretsiz kredi ve ilk yüklemede %20 indirim kazanır.",
     astraflowDescription: "UCloud'un AstraFlow platformu, tek bir API anahtarıyla 200'den fazla popüler yapay zekâ modeline erişim sağlar ve OpenAI API ile uyumludur.",
     astraflowSponsored: "¥50 ücretsiz kredi",
+    packyapiSponsored: "1 $ ücretsiz kredi",
+    packyapiDescription:
+      "⚡ PackyCode, önde gelen yapay zekâ modelleri için kararlı bir API aktarım hizmetidir: tek uç nokta, tek anahtar, otomatik yük devretme ve Codex/Claude Code'a özel hızlı rotalar.\n🎁 Yeni kullanıcılara 1 $ ücretsiz kredi ve ilk yükleme indirimi; RMB ile 1:1 ödeme, ek kur ücreti yok, grup indirimleri %80'e kadar.",
     hiapiSponsored: "200 ücretsiz Credits",
     hiapiDescription:
       "HiAPI; görsel, video, ses ve metin modelleri için geliştirici odaklı bir API platformudur. Metin modelleri OpenAI uyumlu uç noktalar kullanır; Remote MCP ve Agent Skills aynı hesabı Claude Code, Cursor ve diğer kodlama ajanlarına bağlar.\n🎁 Yeni kullanıcılara kayıtta 200 Credits, yüklemelerde ise %10 ek Credits verilir.",

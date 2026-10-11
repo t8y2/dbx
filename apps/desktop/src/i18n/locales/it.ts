@@ -3234,6 +3234,9 @@ export default withEnglishFallback({
     aicodemirrorDescription: "⚡ AICodeMirror offre concorrenza di livello enterprise, fatturazione rapida e supporto dedicato 7×24; i nuovi utenti ottengono ¥8 di credito gratuito e il 20% di sconto sulla prima ricarica.",
     astraflowDescription: "AstraFlow di UCloud offre accesso a oltre 200 modelli di IA diffusi con un'unica chiave API ed è compatibile con l'API OpenAI.",
     astraflowSponsored: "¥50 di credito gratuito",
+    packyapiSponsored: "$1 di credito gratuito",
+    packyapiDescription:
+      "⚡ PackyCode è un relay API stabile per i principali modelli di IA: un endpoint, una chiave, failover automatico e rotte veloci dedicate per Codex e Claude Code.\n🎁 I nuovi utenti ricevono $1 di credito gratuito e uno sconto sul primo ricarico; paghi in RMB 1:1 senza sovrapprezzi, con sconti di gruppo fino all'80%.",
     hiapiSponsored: "200 Credits gratuiti",
     hiapiDescription:
       "HiAPI è una piattaforma API per sviluppatori con modelli di immagini, video, audio e testo; i modelli testuali usano endpoint compatibili con OpenAI, mentre Remote MCP e Agent Skills collegano l'account a Claude Code, Cursor e altri agenti di coding.\n🎁 I nuovi utenti ricevono 200 Credits alla registrazione e il 10% di Credits extra sulle ricariche.",

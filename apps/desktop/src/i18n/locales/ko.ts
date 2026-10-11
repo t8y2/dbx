@@ -3185,6 +3185,9 @@ export default withEnglishFallback({
     aicodemirrorDescription: "⚡ AICodeMirror는 기업급 동시 처리, 빠른 세금계산서 발급, 7×24 전담 기술 지원을 제공합니다. 신규 사용자는 8위안 무료 크레딧과 첫 충전 20% 할인을 받습니다.",
     astraflowDescription: "UCloud의 AstraFlow는 하나의 API 키로 200개 이상의 주요 AI 모델을 이용할 수 있는 OpenAI API 호환 플랫폼입니다.",
     astraflowSponsored: "50위안 무료 크레딧",
+    packyapiSponsored: "$1 무료 크레딧",
+    packyapiDescription:
+      "⚡ PackyCode는 주요 AI 모델을 중계하는 안정적인 API 서비스입니다. 단일 엔드포인트와 단일 키, 자동 페일오버, Codex/Claude Code 전용 고속 라우트를 제공합니다.\n🎁 신규 사용자에게는 $1 무료 크레딧과 첫 충전 할인이 제공되며, 위안화 1:1 충전에 환전 수수료가 없고 그룹 할인은 최대 80%까지입니다.",
     hiapiSponsored: "가입 시 200 Credits 증정",
     hiapiDescription:
       "HiAPI는 이미지·비디오·오디오·텍스트 모델을 위한 개발자 중심 API 플랫폼입니다. 텍스트 모델은 OpenAI 호환 엔드포인트를 제공하며, Remote MCP와 Agent Skills로 Claude Code, Cursor 등 코딩 에이전트에 연결할 수 있습니다.\n🎁 신규 가입 시 200 Credits를 증정하고, 충전 시 10% 추가 Credits를 제공합니다.",

@@ -3621,6 +3621,8 @@ export default withEnglishFallback({
     aicodemirrorDescription: "⚡ AICodeMirror 支持企业级高并发、极速开票、7×24 专属技术支持，新人免费领 8 元额度和首充 8 折。",
     astraflowDescription: "UCloud 优刻得旗下星图 AstraFlow 大模型平台，一个 API Key 即可调用 200+ 主流大模型，兼容 OpenAI API。",
     astraflowSponsored: "50 元免费额度",
+    packyapiSponsored: "$1 免费额度",
+    packyapiDescription: "⚡ PackyCode 是稳定高效的 API 中转服务商：一句话接入主流大模型，统一域名与密钥、智能容灾，并提供 Codex/Claude Code 高速通道。\n🎁 新用户领 $1 免费额度 + 首充折扣；人民币 1:1 充值无汇率无手续费，分组折扣低至 2 折。",
     hiapiSponsored: "注册送 200 Credits",
     hiapiDescription: "HiAPI 是面向开发者的图片、视频、音频及文本模型 API 平台，文本模型提供 OpenAI 兼容接口，Remote MCP 和 Agent Skills 可接入 Claude Code、Cursor 等 AI 编程工具。\n🎁 新用户注册赠送 200 Credits，充值送 10% 积分。",
     visitPartner: "访问合作伙伴网站",

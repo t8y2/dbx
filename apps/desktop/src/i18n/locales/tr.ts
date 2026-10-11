@@ -4620,6 +4620,8 @@ export default withEnglishFallback({
     triggerName: "Tetikleyici",
     triggerStatement: "Tetikleyici ifadesi",
     primary: "Birincil",
+    primaryKeyName: "Birincil anahtar adı",
+    primaryKeyNamePlaceholder: "Otomatik oluşturmak için boş bırakın",
     drop: "Sil",
     restore: "Geri yükle",
     remove: "Kaldır",

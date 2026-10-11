@@ -457,3 +457,24 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         StructureDialect::Unsupported => None,
     }
 }
+
+/// Whether the dialect persists a user-supplied primary key constraint name.
+///
+/// MySQL-family engines accept `CONSTRAINT name PRIMARY KEY` and store the
+/// symbol as the primary key index name; PostgreSQL, SQL Server, Oracle, Dameng
+/// and Oscar store real named constraints. Dialects outside this set either
+/// ignore the symbol (SQLite) or have no named PK constraint concept, so the
+/// builder keeps the anonymous form instead of emitting a no-op name.
+pub(super) fn supports_named_primary_key(dialect: StructureDialect) -> bool {
+    matches!(
+        dialect,
+        StructureDialect::Mysql
+            | StructureDialect::Doris
+            | StructureDialect::GaussdbM
+            | StructureDialect::Postgres
+            | StructureDialect::SqlServer
+            | StructureDialect::Oracle
+            | StructureDialect::Dameng
+            | StructureDialect::Oscar
+    )
+}

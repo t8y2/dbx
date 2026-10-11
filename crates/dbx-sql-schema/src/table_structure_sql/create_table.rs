@@ -275,7 +275,9 @@ pub(super) fn build_create_table_sql_with_partition_clause(
             .map(|column| quote_new_ident(options.database_type, dialect, &column.name))
             .collect::<Vec<_>>()
             .join(", ");
-        column_definitions.push(format!("PRIMARY KEY ({pk_list})"));
+        // Optional user-supplied constraint name; empty keeps the anonymous form.
+        let constraint = super::columns::new_primary_key_constraint_clause(&options, dialect);
+        column_definitions.push(format!("{constraint}PRIMARY KEY ({pk_list})"));
     }
 
     if let Some((_, definition)) = &inline_auto_index {

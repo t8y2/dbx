@@ -16,12 +16,12 @@ use super::column_format::{
     original_mysql_generated_values,
 };
 use super::comments::build_sqlserver_column_comment_sql_for_profile;
-use super::dialect::{capabilities_for, database_label, is_oracle_like, StructureDialect};
+use super::dialect::{capabilities_for, database_label, is_oracle_like, supports_named_primary_key, StructureDialect};
 use super::indexes::has_existing_index_change;
 use super::types::{ColumnInfo, EditableStructureColumn, TableStructureSqlOptions};
 use super::util::{
     clean, is_protected_manticore_id_column, normalize_default, original_comment, original_default, qualified_table,
-    quote_ident, quote_string,
+    quote_ident, quote_new_ident, quote_string,
 };
 use crate::models::connection::DatabaseType;
 use std::collections::HashSet;
@@ -397,7 +397,16 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 .map(|name| quote_ident(StructureDialect::Mysql, name))
                 .collect::<Vec<_>>()
                 .join(", ");
-            clauses.push(format!("ADD PRIMARY KEY ({pk_list})"));
+            // A pure add may carry a user-supplied constraint name (stored as the
+            // MySQL primary key index symbol). Replacing an existing key keeps the
+            // anonymous form: MySQL cannot DROP a PK by symbol, so a rename would
+            // silently diverge from the dropped constraint.
+            let constraint = if change.old_ids.is_empty() {
+                new_primary_key_constraint_clause(options, StructureDialect::Mysql)
+            } else {
+                String::new()
+            };
+            clauses.push(format!("ADD {constraint}PRIMARY KEY ({pk_list})"));
         }
         statements.push(format!("ALTER TABLE {table} {};", clauses.join(", ")));
     } else {
@@ -593,13 +602,35 @@ pub(super) fn build_primary_key_sql(
     if !change.new_names.is_empty() {
         let pk_list = change.new_names.iter().map(|name| quote_ident(dialect, name)).collect::<Vec<_>>().join(", ");
         // DM8: ADD [CONSTRAINT name] PRIMARY KEY; anonymous form matches Navicat/DBeaver/MySQL editors.
-        let constraint = persisted_primary_key_name
-            .map(|name| format!("CONSTRAINT {} ", quote_ident(dialect, name)))
-            .unwrap_or_default();
+        // A pure add (no previous key to replace) may carry a user-supplied name; a replacement
+        // keeps the persisted name so Postgres/SqlServer DROP + ADD stays on the same constraint.
+        let constraint = if change.old_ids.is_empty() {
+            new_primary_key_constraint_clause(options, dialect)
+        } else {
+            persisted_primary_key_name
+                .map(|name| format!("CONSTRAINT {} ", quote_ident(dialect, name)))
+                .unwrap_or_default()
+        };
         statements.push(format!("ALTER TABLE {table} ADD {constraint}PRIMARY KEY ({pk_list});"));
     }
 
     statements
+}
+
+/// `"CONSTRAINT <name> "` for a user-supplied primary key name, or empty when
+/// the name is blank or the dialect does not persist PK constraint names.
+pub(super) fn new_primary_key_constraint_clause(
+    options: &TableStructureSqlOptions,
+    dialect: StructureDialect,
+) -> String {
+    options
+        .primary_key_name
+        .as_deref()
+        .map(clean)
+        .filter(|name| !name.is_empty())
+        .filter(|_| supports_named_primary_key(dialect))
+        .map(|name| format!("CONSTRAINT {} ", quote_new_ident(options.database_type, dialect, &name)))
+        .unwrap_or_default()
 }
 
 /// Dialect-specific DROP for an existing primary key.

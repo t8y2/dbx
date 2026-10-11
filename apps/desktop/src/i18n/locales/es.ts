@@ -4980,6 +4980,8 @@ export default withEnglishFallback({
     triggerName: "Disparador",
     triggerStatement: "Sentencia del disparador",
     primary: "Primaria",
+    primaryKeyName: "Nombre de clave primaria",
+    primaryKeyNamePlaceholder: "Dejar en blanco para autogenerar",
     drop: "Eliminar",
     restore: "Restaurar",
     remove: "Quitar",

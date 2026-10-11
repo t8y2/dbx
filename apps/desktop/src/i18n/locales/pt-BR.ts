@@ -4795,6 +4795,8 @@ export default withEnglishFallback({
     triggerName: "Trigger",
     triggerStatement: "Comando do trigger",
     primary: "Primária",
+    primaryKeyName: "Nome da chave primária",
+    primaryKeyNamePlaceholder: "Deixe em branco para gerar automaticamente",
     drop: "Remover",
     restore: "Restaurar",
     remove: "Remover",

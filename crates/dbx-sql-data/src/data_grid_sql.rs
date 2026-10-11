@@ -583,7 +583,8 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
     let insert_columns: Vec<(&str, usize, Option<DataGridColumnInfo>)> = insertable_columns
         .iter()
         .filter(|(column, _, info)| {
-            let is_primary_key = is_primary_key_column(options.database_type, primary_keys, column, column_info, &known_columns);
+            let is_primary_key =
+                is_primary_key_column(options.database_type, primary_keys, column, column_info, &known_columns);
             match options.primary_key_mode {
                 DataGridPrimaryKeyMode::Include => true,
                 DataGridPrimaryKeyMode::ExcludeGenerated => {

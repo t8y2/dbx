@@ -10,11 +10,11 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::connection::{AppState, PoolKind};
-use crate::data_grid_sql::{extra_is_auto_generated, DataGridPrimaryKeyMode};
 use crate::csv_export::{
     csv_null_literal, format_query_result_csv_with_options, format_tsv, push_query_result_csv_row_with_options,
     push_tsv_row, CsvQuoteMode,
 };
+use crate::data_grid_sql::{extra_is_auto_generated, DataGridPrimaryKeyMode};
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
     build_export_insert_statements_excluding, is_export_cancelled, BuildExportInsertStatementsOptions,
@@ -551,7 +551,7 @@ impl SqlInsertWriter {
         self.spatial_columns = projection.project_spatial_columns(spatial_columns);
         self.columns = projection.project(&columns);
         self.exclude_columns = sql_export_excluded_primary_keys(
-            request.database_type,
+            Some(request.database_type),
             request.primary_key_mode,
             &request.primary_keys,
             &self.columns,
@@ -2283,9 +2283,14 @@ mod tests {
             ),
             keys
         );
-        assert!(
-            sql_export_excluded_primary_keys(Some(DatabaseType::Postgres), DataGridPrimaryKeyMode::Include, &keys, &columns, &extras).is_empty()
-        );
+        assert!(sql_export_excluded_primary_keys(
+            Some(DatabaseType::Postgres),
+            DataGridPrimaryKeyMode::Include,
+            &keys,
+            &columns,
+            &extras
+        )
+        .is_empty());
     }
 
     #[test]

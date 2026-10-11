@@ -1505,7 +1505,7 @@ async fn try_export_native_table_stream(
                             preserve_original_language: false,
                         }),
                         &sql_export_excluded_columns(
-                            request.database_type,
+                            Some(*db_type),
                             request.primary_key_mode,
                             primary_keys,
                             col_names,
@@ -2371,7 +2371,7 @@ async fn export_table_data_core_inner(
                         preserve_original_language: false,
                     }),
                     &sql_export_excluded_columns(
-                        request.database_type,
+                        Some(db_type),
                         request.primary_key_mode,
                         &primary_keys,
                         &col_names,
@@ -2470,9 +2470,14 @@ mod tests {
             ),
             primary_keys
         );
-        assert!(
-            sql_export_excluded_columns(Some(DatabaseType::Mysql), DataGridPrimaryKeyMode::Include, &primary_keys, &columns, &extras).is_empty()
-        );
+        assert!(sql_export_excluded_columns(
+            Some(DatabaseType::Mysql),
+            DataGridPrimaryKeyMode::Include,
+            &primary_keys,
+            &columns,
+            &extras
+        )
+        .is_empty());
     }
 
     #[test]

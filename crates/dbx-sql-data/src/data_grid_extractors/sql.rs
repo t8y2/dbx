@@ -8,8 +8,7 @@ use crate::data_grid_sql::{
     build_data_grid_copy_update_statements, data_grid_generated_table_name, format_grid_copy_insert_sql_literal,
     format_grid_sql_literal_with_identifier_quote, is_auto_generated_column, is_grid_insert_omitted_column,
     is_non_identity_generated_column, is_primary_key_column, supports_relational_copy_predicates, DataGridColumnInfo,
-    DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridPrimaryKeyMode,
-    DataGridTableMeta,
+    DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridPrimaryKeyMode, DataGridTableMeta,
 };
 use crate::models::connection::DatabaseType;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};

@@ -10617,7 +10617,7 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       const authStore = useAuthStore();
       const currentUserId = authStore.user?.id ?? undefined;
-      const nextGroup: ConnectionGroup = passwordHash ? { ...group, passwordHash, passwordSetBy: currentUserId, collapsed: true } : { id: group.id, name: group.name, collapsed: group.collapsed };
+      const nextGroup: ConnectionGroup = passwordHash ? { ...group, passwordHash, passwordSetBy: currentUserId === undefined ? undefined : String(currentUserId), collapsed: true } : { id: group.id, name: group.name, collapsed: group.collapsed };
       updateLayoutAndRebuild({
         ...sidebarLayout.value,
         groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? nextGroup : g)),

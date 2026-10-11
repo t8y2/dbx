@@ -42,6 +42,7 @@ import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOpt
 const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
+
 const settingsStore = useSettingsStore();
 const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, heartbeat, destinationRoot, error: backupError, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRuns, renameRun, runSchedule, runOneShot, runOneShotBatch, cancelRun } = useScheduledDatabaseBackups();
 const desktop = isTauriRuntime();

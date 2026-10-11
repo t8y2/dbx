@@ -84,6 +84,16 @@ pub struct PluginConnectionActionRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PluginPathBrowseRequest {
+    plugin_id: String,
+    method: String,
+    connection_id: String,
+    path: String,
+    locale: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginNotifyRequest {
     plugin_id: String,
     method: String,
@@ -425,6 +435,28 @@ pub async fn invoke_plugin_connection_action(
     Json(body): Json<PluginConnectionActionRequest>,
 ) -> Result<Json<PluginConnectionActionResult>, AppError> {
     state.app.invoke_plugin_connection_action(body.config, &body.action_id).await.map(Json).map_err(AppError::from)
+}
+
+/// Plugin-backed directory picker for manifest form fields
+/// (`picker.source: "plugin"`). Resolves the referenced stored connection
+/// server-side (secrets never leave this process) and forwards the browse
+/// call to the plugin over the generic invokePlugin channel.
+pub async fn invoke_plugin_path_browse(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<PluginPathBrowseRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    state
+        .app
+        .invoke_plugin_path_browse(
+            &request.plugin_id,
+            &request.method,
+            &request.connection_id,
+            &request.path,
+            request.locale.as_deref(),
+        )
+        .await
+        .map(Json)
+        .map_err(AppError::bad_request)
 }
 
 pub async fn notify_plugin(

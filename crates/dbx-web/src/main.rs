@@ -557,8 +557,27 @@ async fn serve() -> Result<(), String> {
     } else {
         WebMcpRuntime::disabled()
     });
+    // Scheduler (ADR §3): the web runtime serves its engine in-process — the
+    // same registry/providers/lease loop as the desktop worker. Without it the
+    // task center would enqueue work with no consumer: run-now would sit
+    // `queued` forever and scheduled/resident tasks would never fire.
+    let scheduler_registry = Arc::new(dbx_core::scheduler::TaskExecutorRegistry::new());
+    // One executor routes every plugin task provider over the frozen task/*
+    // RPC contract; provider ids decide the plugin (ADR §22).
+    scheduler_registry
+        .register_run("plugin", Arc::new(dbx_core::scheduler::providers::PluginTaskExecutor::new(app_state.clone())));
+    scheduler_registry.register_resident(
+        "plugin",
+        Arc::new(dbx_core::scheduler::providers::PluginResidentExecutor::new(app_state.clone())),
+    );
+    scheduler_registry.register_run(
+        dbx_core::scheduler::providers::CLOUD_SYNC_PROVIDER_ID,
+        Arc::new(dbx_core::scheduler::providers::CloudSyncTaskExecutor::new(app_state.clone())),
+    );
+
     let web_state = Arc::new(WebState {
         app: app_state,
+        scheduler_registry,
         data_dir,
         notes_roots: routes::docs::notes_roots_from_env(std::env::var_os("DBX_DOCS_NOTES_ROOTS").as_deref()),
         public_base_path: public_base_path.clone(),
@@ -591,6 +610,29 @@ async fn serve() -> Result<(), String> {
     let backup_stop = tokio_util::sync::CancellationToken::new();
     let backup_worker = backup_service.start(backup_stop.clone());
 
+    // The engine loop honors the same poll env knob as the desktop worker;
+    // its shutdown rides the server signal so Ctrl+C/SIGTERM drains in-flight
+    // work and releases the lease instead of leaving it to expire.
+    let scheduler_poll = std::env::var("DBX_SCHEDULER_POLL_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds >= 1)
+        .unwrap_or(10);
+    let scheduler_store = dbx_core::scheduler::SchedulerStore::new(&web_state.data_dir);
+    let scheduler_engine = Arc::new(dbx_core::scheduler::SchedulerEngine::new(
+        scheduler_store,
+        web_state.scheduler_registry.clone(),
+        format!("web-{}", uuid::Uuid::new_v4().simple()),
+        std::time::Duration::from_secs(scheduler_poll),
+    ));
+    let scheduler_stop = tokio_util::sync::CancellationToken::new();
+    let scheduler_worker_handle = {
+        let engine = scheduler_engine.clone();
+        let shutdown = scheduler_stop.clone();
+        tokio::spawn(async move { engine.run(shutdown).await })
+    };
+    tracing::info!("[scheduler] web engine started (poll every {scheduler_poll}s)");
+
     // API routes
     let api = Router::new()
         .route("/migration/status", get(routes::migration::status))
@@ -600,6 +642,7 @@ async fn serve() -> Result<(), String> {
         .route("/database-backups", post(routes::scheduled_backup::command))
         .route("/database-backups/{id}/files/{index}", get(routes::scheduled_backup::download))
         .route("/database-backups/{id}/files/{index}/restore", post(routes::scheduled_backup::prepare_restore))
+        .merge(routes::scheduler::router())
         // Auth
         // Auth payloads are tiny password strings: cap them far below the
         // global limit so the extractor cannot buffer an unauthenticated DoS
@@ -667,6 +710,7 @@ async fn serve() -> Result<(), String> {
         .route("/plugins/stop", post(routes::plugins::stop_plugin))
         .route("/plugins/invoke", post(routes::plugins::invoke_plugin))
         .route("/plugins/connection-action", post(routes::plugins::invoke_plugin_connection_action))
+        .route("/plugins/path-browse", post(routes::plugins::invoke_plugin_path_browse))
         .route("/plugins/notify", post(routes::plugins::notify_plugin))
         .route("/plugins/binary", post(routes::plugins::send_plugin_binary))
         .route("/plugins/filesystem/list", post(routes::plugins::list_plugin_filesystem_entries))
@@ -1578,6 +1622,7 @@ async fn serve() -> Result<(), String> {
             }
         }
         backup_stop.cancel();
+        scheduler_stop.cancel();
         server_shutdown_trigger.cancel();
     });
 
@@ -1606,6 +1651,10 @@ async fn serve() -> Result<(), String> {
     }
     if tokio::time::timeout(std::time::Duration::from_secs(5), backup_worker).await.is_err() {
         tracing::warn!("Scheduled backup worker did not drain within 5s; exiting with failure status");
+        exit_code = 1;
+    }
+    if tokio::time::timeout(std::time::Duration::from_secs(5), scheduler_worker_handle).await.is_err() {
+        tracing::warn!("Scheduler engine did not drain within 5s; exiting with failure status");
         exit_code = 1;
     }
     shutdown_state.shutdown(std::time::Duration::from_secs(3)).await;

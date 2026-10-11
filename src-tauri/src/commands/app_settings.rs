@@ -8,6 +8,7 @@ use dbx_core::storage::{
     AppAppearanceSettings, AppAppearanceSettingsPatch, DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState,
 };
 use tauri::{AppHandle, Manager, State, Window};
+use tauri_plugin_autostart::ManagerExt;
 
 use super::connection::AppState;
 use crate::{
@@ -61,8 +62,50 @@ pub struct DriverStoreMigrationResult {
 }
 
 #[tauri::command]
-pub async fn load_desktop_settings(state: State<'_, Arc<AppState>>) -> Result<DesktopSettings, String> {
-    state.storage.load_desktop_settings().await
+pub async fn load_desktop_settings(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<DesktopSettings, String> {
+    let settings = state.storage.load_desktop_settings().await?;
+    // The frontend loads the desktop settings once during startup (App.vue →
+    // initDesktopSettings); reconciling here applies the stored login-item
+    // preference after a reboot or first install without a second command
+    // round-trip. Best-effort: never fails the load.
+    apply_launch_at_login(&app, settings.launch_at_login);
+    Ok(settings)
+}
+
+/// What the OS login item must do to match the stored preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoginItemAction {
+    Enable,
+    Disable,
+    Noop,
+}
+
+/// Pure decision helper: reconcile the stored `launch_at_login` preference with
+/// the current OS registration state (`None` = the state could not be read).
+pub(crate) fn login_item_action(launch_at_login: bool, currently_registered: Option<bool>) -> LoginItemAction {
+    match currently_registered {
+        Some(registered) if registered == launch_at_login => LoginItemAction::Noop,
+        _ if launch_at_login => LoginItemAction::Enable,
+        _ => LoginItemAction::Disable,
+    }
+}
+
+/// Apply the stored login-item preference to the OS. Swallows and logs every
+/// failure so the preference can never block startup or saving (the same
+/// "never take the app down" rule as background_scheduler.rs). Disabling an
+/// item that is not registered is a no-op on every supported platform, so an
+/// unreadable state safely acts toward the stored preference.
+pub(crate) fn apply_launch_at_login(app: &AppHandle, launch_at_login: bool) {
+    let registered = app.autolaunch().is_enabled().ok();
+    let action = login_item_action(launch_at_login, registered);
+    let result = match action {
+        LoginItemAction::Enable => app.autolaunch().enable(),
+        LoginItemAction::Disable => app.autolaunch().disable(),
+        LoginItemAction::Noop => Ok(()),
+    };
+    if let Err(err) = result {
+        log::warn!("Failed to apply launch-at-login preference (launch_at_login={launch_at_login}): {err}");
+    }
 }
 
 #[tauri::command]
@@ -77,6 +120,9 @@ pub async fn save_desktop_settings(
     if let Err(err) = apply_desktop_settings(&app, &settings) {
         eprintln!("Failed to apply desktop settings: {err}");
     }
+    // The toggle applies immediately after the preference is persisted; the OS
+    // call is best-effort and never fails the save.
+    apply_launch_at_login(&app, settings.launch_at_login);
     Ok(())
 }
 
@@ -753,6 +799,21 @@ mod tests {
     fn isolates_open_tabs_for_development_builds() {
         assert_eq!(open_tabs_state_key(true), DEVELOPMENT_OPEN_TABS_STATE_KEY);
         assert_eq!(open_tabs_state_key(false), "open_tabs");
+    }
+
+    #[test]
+    fn login_item_action_reconciles_stored_preference() {
+        use super::{login_item_action, LoginItemAction};
+        // Matching state needs no OS call.
+        assert_eq!(login_item_action(true, Some(true)), LoginItemAction::Noop);
+        assert_eq!(login_item_action(false, Some(false)), LoginItemAction::Noop);
+        // Divergent state reconciles toward the stored preference.
+        assert_eq!(login_item_action(true, Some(false)), LoginItemAction::Enable);
+        assert_eq!(login_item_action(false, Some(true)), LoginItemAction::Disable);
+        // An unreadable OS state acts toward the stored preference; disabling an
+        // unregistered item is a documented no-op on every platform.
+        assert_eq!(login_item_action(true, None), LoginItemAction::Enable);
+        assert_eq!(login_item_action(false, None), LoginItemAction::Disable);
     }
 
     fn path(value: &str) -> String {

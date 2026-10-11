@@ -1606,6 +1606,7 @@ mod tests {
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let state = Arc::new(WebState {
             app,
+            scheduler_registry: Arc::new(dbx_core::scheduler::TaskExecutorRegistry::new()),
             data_dir: dir.clone(),
             notes_roots: Vec::new(),
             public_base_path: "/".to_string(),

@@ -1,4 +1,5 @@
 use dbx_core::connection::AppState;
+use dbx_core::scheduler::TaskExecutorRegistry;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -56,6 +57,10 @@ pub struct WebState {
     pub ssh_prompts: Arc<crate::ssh_prompt::SshPromptHub>,
     pub migration_ready: Arc<AtomicBool>,
     pub web_mcp: Arc<crate::web_mcp::WebMcpRuntime>,
+    /// Shared scheduler executor registry (ADR §3): the in-process engine and
+    /// every HTTP scheduler request must resolve providers identically — the
+    /// engine consumes what the API enqueues.
+    pub scheduler_registry: Arc<TaskExecutorRegistry>,
 }
 
 impl WebState {
@@ -87,6 +92,17 @@ impl WebState {
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
             migration_ready: Arc::new(AtomicBool::new(true)),
             web_mcp: Arc::new(crate::web_mcp::WebMcpRuntime::disabled()),
+            scheduler_registry: Arc::new(TaskExecutorRegistry::new()),
         }
+    }
+
+    /// Test seam with a populated scheduler registry: the engine consumes
+    /// exactly what these routes enqueue, so route tests that assert run
+    /// terminal states must share the registry with the driven engine.
+    #[cfg(test)]
+    pub fn for_tests_with_registry(app: Arc<AppState>, data_dir: PathBuf, registry: Arc<TaskExecutorRegistry>) -> Self {
+        let mut state = Self::for_tests(app, data_dir);
+        state.scheduler_registry = registry;
+        state
     }
 }

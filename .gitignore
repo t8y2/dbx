@@ -26,6 +26,7 @@ plugins/jdbc/target/
 plugins/jdbc/dependency-reduced-pom.xml
 plugins/jdbc/lib/*.jar
 agents/drivers/duckdb/target/
+plugins/sdk/rust/dbx-plugin-sdk/target/
 agents/drivers/etcd-go/etcd-go
 agents/drivers/etcd2-go/etcd2-go
 plugins/jdbc/.gradle/

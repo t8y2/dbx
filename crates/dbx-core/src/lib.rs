@@ -6,6 +6,7 @@ pub mod data;
 pub mod host;
 pub mod persistence;
 pub mod safety;
+pub mod scheduler;
 
 pub use dbx_ai_provider::{
     agent_events, ai_claude_code_cli, ai_cli_agent, ai_codebuddy_cli, ai_codex_cli, ai_cursor_cli, ai_effort,

@@ -55,5 +55,6 @@ mime_guess = { version = "2", optional = true }
 
 
 [dev-dependencies]
+async-trait = "0.1"
 dbx-core = { path = "../dbx-core", default-features = false, features = ["test-support"] }
 reqwest = { version = "0.12", default-features = false, features = ["multipart"] }

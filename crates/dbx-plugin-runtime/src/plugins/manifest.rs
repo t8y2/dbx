@@ -37,6 +37,7 @@ pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &[
     "host.ai",
     "host.clipboard:read",
     "host.data:read",
+    "host.scheduler",
 ];
 
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
@@ -216,6 +217,32 @@ pub struct PluginContributionLocalization {
     pub fields: BTreeMap<String, PluginFormFieldLocalization>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub actions: BTreeMap<String, PluginConnectionActionLocalization>,
+    /// task-provider trigger localizations, keyed by the provider-local
+    /// trigger id. `label` translates the trigger; `fields` translates its
+    /// config form exactly like the contribution-level `fields` map.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub triggers: BTreeMap<String, PluginTaskTriggerLocalization>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginTaskTriggerLocalization {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, PluginFormFieldLocalization>,
+    /// Per-group label translations, keyed by the group id declared on the
+    /// trigger's `groups` list. Group ids are stable identifiers; only the
+    /// label localizes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<String, PluginTaskTriggerGroupLocalization>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginTaskTriggerGroupLocalization {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -236,6 +263,8 @@ pub struct PluginFormFieldLocalization {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty_label: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub options: BTreeMap<String, String>,
 }
@@ -246,6 +275,7 @@ pub enum PluginContribution {
     ConnectionProvider(PluginConnectionProviderContribution),
     Workbench(PluginWorkbenchContribution),
     FilesystemProvider(PluginFilesystemProviderContribution),
+    TaskProvider(PluginTaskProviderContribution),
     ContextMenu(PluginContextMenuContribution),
     ResultView(PluginResultViewContribution),
     Command(PluginCommandContribution),
@@ -259,6 +289,7 @@ impl PluginContribution {
             Self::ConnectionProvider(contribution) => &contribution.id,
             Self::Workbench(contribution) => &contribution.id,
             Self::FilesystemProvider(contribution) => &contribution.id,
+            Self::TaskProvider(contribution) => &contribution.id,
             Self::ContextMenu(contribution) => &contribution.id,
             Self::ResultView(contribution) => &contribution.id,
             Self::Command(contribution) => &contribution.id,
@@ -314,6 +345,15 @@ pub struct PluginFormFieldDefinition {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
+    /// Label of the empty entry a host offers on a dynamic `options_action`
+    /// select whose value may stay empty (empty = "follow the fallback
+    /// connection"). Localization chain: the per-locale
+    /// `localizations.<locale>…fields.<key>.empty_label`, then this value,
+    /// then the host's own default wording — so pre-`empty_label` manifests
+    /// that put the hint in `placeholder` keep working. Documented in
+    /// `plugins/README.md` ("Dynamic options").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty_label: Option<String>,
     #[serde(default)]
     pub required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -335,12 +375,37 @@ pub struct PluginFormFieldDefinition {
     /// connection form fetches it and renders the field as a dynamic select.
     /// Optional and forward/backward compatible: older hosts reject the
     /// manifest, hosts without UI support keep the declared type.
+    ///
+    /// Values prefixed `host/` name the host-reserved self-service namespace
+    /// (like `picker`): the host resolves them from its own state and never
+    /// sends an RPC to the plugin — `host/connections` lists the saved
+    /// connections a provider accepts. Unprefixed values are sidecar methods
+    /// invoked as usual; the prefix keeps the two namespaces from colliding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options_action: Option<String>,
+    /// Optional render section this field belongs to. Task-trigger fields
+    /// only: the scheduler config form aggregates fields by `group` into
+    /// titled sections (declared by the trigger's `groups` list, in
+    /// declaration order); fields without `group` render in the leading
+    /// plain section. Connection dialogs ignore the attribute. Documented in
+    /// `plugins/README.md` ("Form field groups").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_when: Option<PluginFieldCondition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_when: Option<PluginFieldCondition>,
+}
+
+/// One named render section of a task trigger's config form (see
+/// [`PluginFormFieldDefinition::group`]). Declaration order is the render
+/// order; labels localize under
+/// `localizations.<locale>…triggers.<id>.groups.<id>.label`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginFormFieldGroup {
+    pub id: String,
+    pub label: String,
 }
 
 /// A `visible_when` / `required_when` expression.
@@ -563,7 +628,7 @@ pub enum PluginFormFieldBinding {
     Database,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginFormFieldOption {
     pub label: String,
@@ -587,6 +652,55 @@ pub struct PluginFormFieldPicker {
     /// sources cannot disagree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_field: Option<String>,
+    /// Switches the picker from the host's local native dialog to a
+    /// **plugin-backed browser**: the host opens a dialog that walks the
+    /// plugin's own storage tree for the connection named by
+    /// [`Self::connection_field`]. Only `directory` is defined; the omitted
+    /// source keeps the local-native behavior byte-for-byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PluginFormFieldPickerSource>,
+    /// Plugin method serving the browse (e.g. `files/listDirs`). Same generic
+    /// `invokePlugin` channel as form-field `options_action` — never a
+    /// `task/*` method (that namespace stays frozen). Required when
+    /// `source: "plugin"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Sibling field(s) supplying the connection id to browse. A string is a
+    /// single key; an array is an ordered fallback chain (first non-empty
+    /// sibling wins, then the task's bound connection). Every entry must be a
+    /// declared sibling field key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_field: Option<PluginPickerConnectionField>,
+}
+
+/// Where a plugin-backed picker browses (see
+/// [`PluginFormFieldPicker::source`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginFormFieldPickerSource {
+    /// Browse the plugin's own storage for the referenced connection instead
+    /// of a local native dialog.
+    Plugin,
+}
+
+/// A picker's `connection_field`: one sibling key or an ordered fallback chain
+/// (see [`PluginFormFieldPicker::connection_field`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PluginPickerConnectionField {
+    One(String),
+    Chain(Vec<String>),
+}
+
+impl PluginPickerConnectionField {
+    /// Referenced sibling keys in declaration order (a chain keeps duplicates
+    /// so error messages can quote the manifest verbatim).
+    pub fn keys(&self) -> &[String] {
+        match self {
+            Self::One(key) => std::slice::from_ref(key),
+            Self::Chain(keys) => keys,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -984,6 +1098,137 @@ impl PluginFilesystemCapability {
     }
 }
 
+/// A scheduled/resident task provider a plugin declares so the scheduler can
+/// drive it over the fixed `task/*` RPC contract (`docs/scheduler`
+/// §22–§36). The contribution only declares *what* the plugin can run; the
+/// host owns scheduling, and a plugin can never invent new task RPC method
+/// names — only the five fixed methods plus the four fixed task events exist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginTaskProviderContribution {
+    pub id: String,
+    pub label: String,
+    /// Connection providers (declared by the same manifest) a task may bind
+    /// to. The scheduler still validates each task's connection against this
+    /// list; secrets are hydrated by the host at execution time and never
+    /// stored with the task config.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connection_providers: Vec<String>,
+    /// Whether one task may bind several connections at once (e.g. an SSH
+    /// "run everywhere" task). Defaults to `false`: one task, one connection.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_multiple_connections: bool,
+    /// What the provider supports. `task/execute` requires `run`,
+    /// `task/start` requires `resident`, `task/stop` requires `cancel` (or
+    /// `resident`), and `task/log` / `task/progress` / `task/artifact` events
+    /// require `logs`, `progress`, and `artifacts` respectively.
+    #[serde(default)]
+    pub capabilities: Vec<PluginTaskCapability>,
+    /// User-visible task templates. Every trigger becomes one schedulable
+    /// shape (`<provider>/<trigger>` is the stable trigger identity); each
+    /// declares its own config form fields.
+    #[serde(default)]
+    pub triggers: Vec<PluginTaskTriggerContribution>,
+}
+
+impl PluginTaskProviderContribution {
+    pub fn has_capability(&self, capability: PluginTaskCapability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+
+    pub fn trigger(&self, trigger_id: &str) -> Option<&PluginTaskTriggerContribution> {
+        self.triggers.iter().find(|trigger| trigger.id == trigger_id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginTaskCapability {
+    /// One-shot executions through `task/execute`.
+    Run,
+    /// Long-lived sessions through `task/start` / `task/stop` / `task/status`.
+    Resident,
+    /// Cancelling an active run or resident session through `task/stop`.
+    Cancel,
+    /// The plugin emits `task/log` events.
+    Logs,
+    /// The plugin emits `task/progress` events.
+    Progress,
+    /// The plugin emits `task/artifact` events.
+    Artifacts,
+}
+
+impl PluginTaskCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Resident => "resident",
+            Self::Cancel => "cancel",
+            Self::Logs => "logs",
+            Self::Progress => "progress",
+            Self::Artifacts => "artifacts",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginTaskTriggerContribution {
+    pub id: String,
+    pub label: String,
+    /// Whether one execution is a one-shot run or a long-lived resident
+    /// session. Must be backed by the matching provider capability.
+    pub mode: PluginTaskMode,
+    /// UI confirmation policy: `low` needs no extra prompt, `medium` asks on
+    /// save, `high` requires explicit confirmation on create and edit. Once a
+    /// task is saved and enabled, automatic runs never re-ask.
+    #[serde(default)]
+    pub risk: PluginTaskRisk,
+    /// Config form for this trigger. Reuses the existing connection form
+    /// field system — there is no second form DSL.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<PluginFormFieldDefinition>,
+    /// Named render sections of the config form (scheduler hosts only).
+    /// Fields tagged `group: <id>` aggregate under their section in
+    /// declaration order; untagged fields keep the leading plain section.
+    /// Optional and forward/backward compatible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<PluginFormFieldGroup>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginTaskMode {
+    Run,
+    Resident,
+}
+
+impl PluginTaskMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Resident => "resident",
+        }
+    }
+
+    /// The provider capability this mode requires.
+    pub fn capability(self) -> PluginTaskCapability {
+        match self {
+            Self::Run => PluginTaskCapability::Run,
+            Self::Resident => PluginTaskCapability::Resident,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginTaskRisk {
+    #[default]
+    Low,
+    Medium,
+    High,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginCompatibility {
     pub compatible: bool,
@@ -1033,6 +1278,13 @@ impl PluginManifest {
     ) -> Result<Option<PluginFilesystemProviderContribution>, String> {
         Ok(self.contributions.iter().find_map(|contribution| match contribution {
             PluginContribution::FilesystemProvider(provider) if provider.id == provider_id => Some(provider.clone()),
+            _ => None,
+        }))
+    }
+
+    pub fn task_provider(&self, provider_id: &str) -> Result<Option<PluginTaskProviderContribution>, String> {
+        Ok(self.contributions.iter().find_map(|contribution| match contribution {
+            PluginContribution::TaskProvider(provider) if provider.id == provider_id => Some(provider.clone()),
             _ => None,
         }))
     }
@@ -1246,6 +1498,32 @@ fn validate_localizations(localizations: &BTreeMap<String, PluginManifestLocaliz
                     ));
                 }
             }
+            for (trigger_id, trigger) in &contribution.triggers {
+                if !valid_identifier(trigger_id) || trigger.label.as_ref().is_some_and(|value| value.trim().is_empty())
+                {
+                    errors.push(format!(
+                        "Plugin localization '{locale}' has an invalid trigger entry '{contribution_id}/{trigger_id}'"
+                    ));
+                }
+                for (field_key, field) in &trigger.fields {
+                    if !valid_identifier(field_key)
+                        || field.label.as_ref().is_some_and(|value| value.trim().is_empty())
+                        || field.options.values().any(|value| value.trim().is_empty())
+                    {
+                        errors.push(format!(
+                            "Plugin localization '{locale}' has an invalid trigger field entry '{contribution_id}/{trigger_id}/{field_key}'"
+                        ));
+                    }
+                }
+                for (group_id, group) in &trigger.groups {
+                    if !valid_identifier(group_id) || group.label.as_ref().is_some_and(|value| value.trim().is_empty())
+                    {
+                        errors.push(format!(
+                            "Plugin localization '{locale}' has an invalid trigger group entry '{contribution_id}/{trigger_id}/{group_id}'"
+                        ));
+                    }
+                }
+            }
         }
     }
 }
@@ -1335,8 +1613,10 @@ fn validate_contributions(
     let mut provider_ids = HashSet::new();
     let mut workbench_ids = HashSet::new();
     let mut filesystem_provider_ids = HashSet::new();
+    let mut task_provider_ids = HashSet::new();
     let mut workbench_references = Vec::new();
     let mut filesystem_references = Vec::new();
+    let mut task_connection_references = Vec::new();
     let mut context_menu_workbench_references = Vec::new();
     let mut command_ids = HashSet::new();
     let mut command_workbench_references = Vec::new();
@@ -1419,6 +1699,62 @@ fn validate_contributions(
                 );
                 if !has_ui {
                     errors.push(format!("Result view contribution '{id}' requires a UI entrypoint"));
+                }
+            }
+            PluginContribution::TaskProvider(provider) => {
+                validate_required_text(&provider.label, &format!("Task provider '{id}' label"), errors);
+                if provider.triggers.is_empty() {
+                    errors.push(format!("Task provider '{id}' must declare at least one trigger"));
+                }
+                if valid_identifier(id) {
+                    task_provider_ids.insert(id.to_string());
+                }
+                let mut seen_connection_providers = HashSet::new();
+                for connection_provider in &provider.connection_providers {
+                    if !valid_identifier(connection_provider) {
+                        errors.push(format!(
+                            "Task provider '{id}' has an invalid connection_provider reference '{connection_provider}'"
+                        ));
+                    } else if !seen_connection_providers.insert(connection_provider) {
+                        errors.push(format!(
+                            "Task provider '{id}' references connection provider '{connection_provider}' more than once"
+                        ));
+                    } else {
+                        task_connection_references.push((id.to_string(), connection_provider.clone()));
+                    }
+                }
+                let mut seen_capabilities = HashSet::new();
+                for capability in &provider.capabilities {
+                    if !seen_capabilities.insert(*capability) {
+                        errors.push(format!("Task provider '{id}' has duplicate capabilities"));
+                    }
+                }
+                let mut seen_trigger_ids = HashSet::new();
+                for trigger in &provider.triggers {
+                    if !valid_identifier(&trigger.id) || !seen_trigger_ids.insert(&trigger.id) {
+                        errors.push(format!(
+                            "Task provider '{id}' has an invalid or duplicate trigger id '{}'",
+                            trigger.id
+                        ));
+                    }
+                    validate_required_text(
+                        &trigger.label,
+                        &format!("Task provider '{id}' trigger '{}' label", trigger.id),
+                        errors,
+                    );
+                    if !provider.has_capability(trigger.mode.capability()) {
+                        errors.push(format!(
+                            "Task provider '{id}' trigger '{}' declares {} mode without the '{}' capability",
+                            trigger.id,
+                            trigger.mode.as_str(),
+                            trigger.mode.capability().as_str()
+                        ));
+                    }
+                    validate_form_fields(&trigger.fields, index, errors);
+                    validate_trigger_groups(trigger, id, index, errors);
+                }
+                if !has_backend {
+                    errors.push(format!("Task provider '{id}' requires a backend entrypoint"));
                 }
             }
             PluginContribution::ContextMenu(menu) => {
@@ -1576,6 +1912,13 @@ fn validate_contributions(
         if !filesystem_provider_ids.contains(&filesystem_provider) {
             errors.push(format!(
                 "Connection provider '{provider}' references missing filesystem provider '{filesystem_provider}'"
+            ));
+        }
+    }
+    for (provider, connection_provider) in task_connection_references {
+        if !provider_ids.contains(&connection_provider) {
+            errors.push(format!(
+                "Task provider '{provider}' references missing connection provider '{connection_provider}'"
             ));
         }
     }
@@ -1817,6 +2160,54 @@ fn validate_form_field_picker(
     if picker.kind == PluginFormFieldPickerKind::Directory && picker.content_field.is_some() {
         errors.push(format!("{location} cannot upload a directory into a content field"));
     }
+    // Plugin-backed browse (`source: "plugin"`) shares the picker attribute but
+    // has its own, stricter shape: local-only attributes are meaningless there,
+    // the action rides the generic invokePlugin channel (so `task/*` — the
+    // frozen scheduler namespace — and the reserved `host/` self-service
+    // prefix are both rejected), and only directory browsing is defined.
+    if picker.source.is_none() && (picker.action.is_some() || picker.connection_field.is_some()) {
+        errors.push(format!(
+            "{location} action/connection_field require source \"plugin\" (omit them for the local native picker)"
+        ));
+    }
+    if picker.source == Some(PluginFormFieldPickerSource::Plugin) {
+        if picker.kind != PluginFormFieldPickerKind::Directory {
+            errors.push(format!("{location} source \"plugin\" only supports kind \"directory\""));
+        }
+        if picker.content_field.is_some() {
+            errors.push(format!("{location} source \"plugin\" cannot upload into a content field"));
+        }
+        if picker.action.is_none() {
+            errors.push(format!("{location} source \"plugin\" requires action (the plugin browse method)"));
+        }
+        // connection_field stays optional: a picker without it browses the
+        // task's bound connection directly (single-connection providers).
+    }
+    if let Some(action) = &picker.action {
+        // Unlike the command action's options_action (a lowercase-only
+        // namespace), a picker action addresses the plugin's own RPC surface,
+        // whose method spelling is the plugin's choice (`files/listDirs` is
+        // camelCase like its `files/listStream` siblings). Only shape is
+        // enforced: non-empty, slash-separated, no whitespace/control bytes.
+        if !valid_plugin_method_name(action) {
+            errors.push(format!("{location} action '{action}' must look like a plugin method name"));
+        }
+        if action.starts_with("task/") {
+            errors.push(format!(
+                "{location} action '{action}' uses the frozen scheduler task/ namespace; declare a non-task plugin method"
+            ));
+        }
+        if action.starts_with("host/") {
+            errors.push(format!("{location} action '{action}' uses the reserved host/ namespace"));
+        }
+    }
+    if let Some(connection_field) = &picker.connection_field {
+        for key in connection_field.keys() {
+            if !fields.iter().any(|candidate| &candidate.key == key) {
+                errors.push(format!("{location} connection_field references unknown field '{key}'"));
+            }
+        }
+    }
     let Some(content_key) = &picker.content_field else {
         return;
     };
@@ -1834,6 +2225,19 @@ fn validate_form_field_picker(
             }
         }
     }
+}
+
+/// Shape check for a picker's plugin method name: slash-separated segments
+/// without whitespace or control bytes. The segment spelling is the plugin's
+/// own RPC convention (camelCase allowed); reserved prefixes (`task/`,
+/// `host/`) are rejected separately in [`validate_form_field_picker`].
+fn valid_plugin_method_name(action: &str) -> bool {
+    !action.is_empty()
+        && action.len() <= 128
+        && !action.starts_with('/')
+        && !action.ends_with('/')
+        && !action.contains("//")
+        && action.chars().all(|character| !character.is_whitespace() && !character.is_control())
 }
 
 /// Accept entries are file extensions (`.pem`) or MIME types (`text/plain`), so
@@ -1908,9 +2312,25 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
                 }
             }
         } else if !field.options.is_empty() {
-            errors.push(format!(
-                "Contribution at index {contribution_index} field {field_index} only supports options for select or radio fields"
-            ));
+            // A dynamic `options_action` select may also declare static
+            // options (rendered ahead of the fetched ones, deduped by value
+            // — e.g. the files tasks' reserved `local` side). The same
+            // shape rules apply; without `options_action` the declared
+            // options would be dead weight on a free-text input.
+            if field.options_action.is_none() {
+                errors.push(format!(
+                    "Contribution at index {contribution_index} field {field_index} only supports options for select or radio fields"
+                ));
+            } else {
+                let mut seen_values = HashSet::new();
+                for option in &field.options {
+                    if option.label.trim().is_empty() || !seen_values.insert(&option.value) {
+                        errors.push(format!(
+                            "Contribution at index {contribution_index} field {field_index} has invalid or duplicate choice options"
+                        ));
+                    }
+                }
+            }
         }
 
         if field.binding == Some(PluginFormFieldBinding::Port) && field.field_type != PluginFormFieldType::Number {
@@ -1970,6 +2390,50 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
 fn validate_optional_reference(value: Option<&str>, label: &str, contribution_id: &str, errors: &mut Vec<String>) {
     if value.is_some_and(|value| !valid_identifier(value)) {
         errors.push(format!("Connection provider '{contribution_id}' has an invalid {label} reference"));
+    }
+}
+
+/// Task-trigger `groups` + field `group` references (see
+/// [`PluginFormFieldGroup`]). Strict like every other `validate_*`: group ids
+/// must be valid and unique, and every tagged field must name a declared
+/// group — a dangling reference would silently strand the field outside its
+/// intended section.
+fn validate_trigger_groups(
+    trigger: &PluginTaskTriggerContribution,
+    provider_id: &str,
+    contribution_index: usize,
+    errors: &mut Vec<String>,
+) {
+    if trigger.groups.is_empty() && trigger.fields.iter().all(|field| field.group.is_none()) {
+        return;
+    }
+    let mut seen_groups = HashSet::new();
+    for (group_index, group) in trigger.groups.iter().enumerate() {
+        if !valid_identifier(&group.id) || !seen_groups.insert(group.id.as_str()) {
+            errors.push(format!(
+                "Contribution at index {contribution_index} task provider '{provider_id}' trigger '{}' group {group_index} has an invalid or duplicate id",
+                trigger.id
+            ));
+        }
+        validate_required_text(
+            &group.label,
+            &format!(
+                "Contribution at index {contribution_index} task provider '{provider_id}' trigger '{}' group '{}' label",
+                trigger.id, group.id
+            ),
+            errors,
+        );
+    }
+    for (field_index, field) in trigger.fields.iter().enumerate() {
+        let Some(group) = field.group.as_deref() else {
+            continue;
+        };
+        if !seen_groups.contains(group) {
+            errors.push(format!(
+                "Contribution at index {contribution_index} task provider '{provider_id}' trigger '{}' field {field_index} references undeclared group '{group}'",
+                trigger.id
+            ));
+        }
     }
 }
 
@@ -2047,8 +2511,8 @@ mod tests {
         PluginCommandAction, PluginCommandContribution, PluginCommandPresentation, PluginCommandRestore,
         PluginCommandReuse, PluginConnectionActionContribution, PluginConnectionProviderContribution,
         PluginContribution, PluginFormFieldBinding, PluginManifest, PluginMcpContribution, PluginMenuItem,
-        PluginMenuLocation, PluginMenusContribution, PluginOpenWorkbenchAction, SUPPORTED_PLUGIN_HOST_API_VERSION,
-        SUPPORTED_PLUGIN_PERMISSIONS,
+        PluginMenuLocation, PluginMenusContribution, PluginOpenWorkbenchAction, PluginTaskMode, PluginTaskRisk,
+        SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_PERMISSIONS,
     };
 
     fn context_menu_manifest(menu: &str) -> Result<(tempfile::TempDir, PluginManifest), Box<dyn std::error::Error>> {
@@ -2791,6 +3255,7 @@ mod tests {
             ("connection-provider", "connectionProviderContribution"),
             ("workbench", "workbenchContribution"),
             ("filesystem-provider", "filesystemProviderContribution"),
+            ("task-provider", "taskProviderContribution"),
             ("context-menu", "contextMenuContribution"),
             ("result-view", "resultViewContribution"),
             ("command", "commandContribution"),
@@ -2828,6 +3293,506 @@ mod tests {
         );
         assert_eq!(schema["$defs"]["contextMenuAction"]["properties"]["type"]["const"], "open-workbench");
         assert_eq!(schema["$defs"]["contextMenuAction"]["required"], serde_json::json!(["type", "workbench"]));
+    }
+
+    /// A minimal v1 manifest with a backend plus a task provider, matching the
+    /// frozen ADR §6.1 shape: kebab-case tags, reused form fields, and the
+    /// run/resident capability vocabulary.
+    fn task_provider_manifest() -> PluginManifest {
+        serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.ssh",
+            "name": "SSH",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "permissions": ["host.scheduler"],
+            "entrypoints": { "backend": { "executable": "backend" } },
+            "contributions": [
+                {
+                    "type": "connection-provider",
+                    "id": "io.dbx.ssh.connection",
+                    "label": "SSH",
+                    "database_type": "ssh",
+                    "fields": [{ "key": "host", "label": "Host", "type": "text", "required": true }]
+                },
+                {
+                    "type": "task-provider",
+                    "id": "io.dbx.ssh.tasks",
+                    "label": "SSH Tasks",
+                    "connection_providers": ["io.dbx.ssh.connection"],
+                    "capabilities": ["run", "resident", "cancel", "logs", "progress", "artifacts"],
+                    "triggers": [
+                        {
+                            "id": "execute",
+                            "label": "Execute Command",
+                            "mode": "run",
+                            "risk": "high",
+                            "fields": [
+                                { "key": "command", "label": "Command", "type": "textarea", "required": true },
+                                { "key": "working_directory", "label": "Working Directory", "type": "text" },
+                                { "key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 300 }
+                            ]
+                        },
+                        {
+                            "id": "resident",
+                            "label": "Resident Command",
+                            "mode": "resident",
+                            "fields": [
+                                { "key": "command", "label": "Command", "type": "textarea", "required": true }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn task_provider_contribution_parses_the_frozen_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("backend"), b"backend").unwrap();
+        let manifest = task_provider_manifest();
+        let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+
+        let provider = manifest.task_provider("io.dbx.ssh.tasks").unwrap().expect("task provider is declared");
+        assert_eq!(provider.connection_providers, vec!["io.dbx.ssh.connection"]);
+        for capability in ["run", "resident", "cancel", "logs", "progress", "artifacts"] {
+            assert!(
+                provider.capabilities.iter().any(|declared| declared.as_str() == capability),
+                "{capability} should parse"
+            );
+        }
+        assert_eq!(provider.triggers.len(), 2);
+        let execute = provider.trigger("execute").unwrap();
+        assert_eq!(execute.mode, PluginTaskMode::Run);
+        assert_eq!(execute.risk, PluginTaskRisk::High);
+        assert_eq!(execute.fields.len(), 3);
+        let resident = provider.trigger("resident").unwrap();
+        assert_eq!(resident.mode, PluginTaskMode::Resident);
+        assert_eq!(resident.risk, PluginTaskRisk::Low, "risk defaults to low");
+        assert!(provider.trigger("missing").is_none());
+    }
+
+    #[test]
+    fn task_provider_rejects_unknown_capability_and_unknown_fields() {
+        let unknown_capability = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "capabilities": ["deploy"],
+            "triggers": [{ "id": "run", "label": "Run", "mode": "run" }]
+        }));
+        assert!(unknown_capability.is_err(), "unknown capabilities must not parse");
+
+        let unknown_field = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [],
+            "custom_field": true
+        }));
+        assert!(unknown_field.is_err(), "deny_unknown_fields must hold for the frozen shape");
+
+        let unknown_trigger_field = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [{ "id": "run", "label": "Run", "mode": "run", "schedule": "* * * * *" }]
+        }));
+        assert!(unknown_trigger_field.is_err(), "triggers must not grow unfrozen fields");
+    }
+
+    #[test]
+    fn task_provider_trigger_without_declared_capability_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "capabilities": ["run"],
+            "triggers": [
+                { "id": "run", "label": "Run", "mode": "run" },
+                { "id": "resident", "label": "Resident", "mode": "resident" }
+            ]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[provider], true, false, dir.path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| {
+                error.contains("trigger 'resident'") && error.contains("without the 'resident' capability")
+            }),
+            "{errors:?}"
+        );
+        assert!(!errors.iter().any(|error| error.contains("trigger 'run'")), "{errors:?}");
+    }
+
+    #[test]
+    fn task_provider_requires_backend_trigger_and_valid_connection_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "connection_providers": ["sample.connection"],
+            "triggers": []
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[provider], false, false, dir.path(), &mut errors);
+        assert!(errors.iter().any(|error| error == "Task provider 'sample.tasks' must declare at least one trigger"));
+        assert!(errors.iter().any(|error| error == "Task provider 'sample.tasks' requires a backend entrypoint"));
+        assert!(
+            errors.iter().any(|error| error
+                == "Task provider 'sample.tasks' references missing connection provider 'sample.connection'"),
+            "{errors:?}"
+        );
+
+        let bad_reference: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "connection_providers": ["Not A Valid Id"],
+            "triggers": [{ "id": "run", "label": "Run", "mode": "run" }]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[bad_reference], true, false, dir.path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("invalid connection_provider reference 'Not A Valid Id'")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn task_provider_trigger_fields_reuse_the_form_field_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [{
+                "id": "run",
+                "label": "Run",
+                "mode": "run",
+                "fields": [
+                    { "key": "command", "label": "Command", "type": "textarea", "required": true },
+                    { "key": "command", "label": "Duplicate", "type": "text" },
+                    { "key": "retries", "label": "Retries", "type": "select" }
+                ]
+            }]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[provider], true, false, dir.path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("invalid or duplicate key")),
+            "duplicate field keys must be rejected: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|error| error.contains("choice options cannot be empty")),
+            "select fields must follow the shared form rules: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn trigger_groups_parse_and_validate_strictly() {
+        let groups_json = serde_json::json!([
+            { "id": "source", "label": "Source" },
+            { "id": "target", "label": "Target" }
+        ]);
+        let field_json = |group: serde_json::Value| {
+            serde_json::json!({
+                "type": "task-provider",
+                "id": "sample.tasks",
+                "label": "Tasks",
+                "capabilities": ["run", "cancel"],
+                "triggers": [{
+                    "id": "copy",
+                    "label": "Copy",
+                    "mode": "run",
+                    "groups": groups_json,
+                    "fields": [
+                        { "key": "mode", "label": "Mode", "type": "select", "default": "file", "options": [{ "label": "File", "value": "file" }] },
+                        { "key": "source_connection_id", "label": "Source", "type": "text", "group": group },
+                        { "key": "destination_connection_id", "label": "Target", "type": "text" }
+                    ]
+                }]
+            })
+        };
+
+        // Declared groups parse and a tagged field passes validation.
+        let provider: PluginContribution = serde_json::from_value(field_json(serde_json::json!("source"))).unwrap();
+        let PluginContribution::TaskProvider(parsed) = &provider else { unreachable!() };
+        let trigger = parsed.trigger("copy").unwrap();
+        assert_eq!(trigger.groups.len(), 2);
+        assert_eq!(trigger.groups[0].id, "source");
+        assert_eq!(trigger.groups[0].label, "Source");
+        let mut errors = Vec::new();
+        validate_contributions(
+            std::slice::from_ref(&provider),
+            true,
+            false,
+            std::env::temp_dir().as_path(),
+            &mut errors,
+        );
+        assert!(errors.is_empty(), "declared group references must pass: {errors:?}");
+
+        // An undeclared group reference is rejected (the field would strand
+        // outside its intended section).
+        let provider: PluginContribution = serde_json::from_value(field_json(serde_json::json!("missing"))).unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(
+            std::slice::from_ref(&provider),
+            true,
+            false,
+            std::env::temp_dir().as_path(),
+            &mut errors,
+        );
+        assert!(
+            errors.iter().any(|error| error.contains("references undeclared group 'missing'")),
+            "dangling group references must be rejected: {errors:?}"
+        );
+
+        // Duplicate group ids are rejected.
+        let provider: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [{
+                "id": "copy",
+                "label": "Copy",
+                "mode": "run",
+                "groups": [
+                    { "id": "source", "label": "Source" },
+                    { "id": "source", "label": "Source again" }
+                ],
+                "fields": [{ "key": "p", "label": "P", "type": "text", "group": "source" }]
+            }]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(
+            std::slice::from_ref(&provider),
+            true,
+            false,
+            std::env::temp_dir().as_path(),
+            &mut errors,
+        );
+        assert!(
+            errors.iter().any(|error| error.contains("invalid or duplicate id")),
+            "duplicate group ids must be rejected: {errors:?}"
+        );
+
+        // A field tagged `group` without any declared groups is rejected too.
+        let provider: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [{
+                "id": "copy",
+                "label": "Copy",
+                "mode": "run",
+                "fields": [{ "key": "p", "label": "P", "type": "text", "group": "source" }]
+            }]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(
+            std::slice::from_ref(&provider),
+            true,
+            false,
+            std::env::temp_dir().as_path(),
+            &mut errors,
+        );
+        assert!(
+            errors.iter().any(|error| error.contains("references undeclared group 'source'")),
+            "group tags without a groups declaration must be rejected: {errors:?}"
+        );
+
+        // Unknown fields inside a group declaration reject (deny_unknown_fields).
+        assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [{
+                "id": "copy",
+                "label": "Copy",
+                "mode": "run",
+                "groups": [{ "id": "source", "label": "Source", "order": 1 }]
+            }]
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn trigger_group_localizations_validate() {
+        use super::{PluginManifestLocalization, PluginTaskTriggerGroupLocalization};
+        let mut localizations = std::collections::BTreeMap::new();
+        let mut triggers = std::collections::BTreeMap::new();
+        let mut groups = std::collections::BTreeMap::new();
+        groups.insert("source".to_string(), PluginTaskTriggerGroupLocalization { label: Some("Quelle".to_string()) });
+        triggers.insert(
+            "copy".to_string(),
+            super::PluginTaskTriggerLocalization {
+                label: Some("Copy".to_string()),
+                fields: std::collections::BTreeMap::new(),
+                groups,
+            },
+        );
+        let mut contributions = std::collections::BTreeMap::new();
+        contributions.insert(
+            "sample.tasks".to_string(),
+            super::PluginContributionLocalization { triggers, ..Default::default() },
+        );
+        localizations.insert("de-DE".to_string(), PluginManifestLocalization { contributions, ..Default::default() });
+        let mut errors = Vec::new();
+        super::validate_localizations(&localizations, &mut errors);
+        assert!(errors.is_empty(), "valid group localizations must pass: {errors:?}");
+
+        let mut localizations = std::collections::BTreeMap::new();
+        let mut triggers = std::collections::BTreeMap::new();
+        let mut groups = std::collections::BTreeMap::new();
+        groups.insert(
+            "not an identifier".to_string(),
+            PluginTaskTriggerGroupLocalization { label: Some("Quelle".to_string()) },
+        );
+        triggers.insert(
+            "copy".to_string(),
+            super::PluginTaskTriggerLocalization { label: None, fields: std::collections::BTreeMap::new(), groups },
+        );
+        let mut contributions = std::collections::BTreeMap::new();
+        contributions.insert(
+            "sample.tasks".to_string(),
+            super::PluginContributionLocalization { triggers, ..Default::default() },
+        );
+        localizations.insert("de-DE".to_string(), PluginManifestLocalization { contributions, ..Default::default() });
+        let mut errors = Vec::new();
+        super::validate_localizations(&localizations, &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("invalid trigger group entry")),
+            "invalid group localization ids must be rejected: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn static_options_merge_requires_options_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let field_json = |options_action: serde_json::Value| {
+            serde_json::json!({
+                "type": "task-provider",
+                "id": "sample.tasks",
+                "label": "Tasks",
+                "capabilities": ["run", "cancel"],
+                "triggers": [{
+                    "id": "copy",
+                    "label": "Copy",
+                    "mode": "run",
+                    "fields": [{
+                        "key": "source_connection_id",
+                        "label": "Source",
+                        "type": "text",
+                        "options": [{ "value": "local", "label": "Local path" }],
+                        "options_action": options_action
+                    }]
+                }]
+            })
+        };
+
+        // A text field may declare static options alongside `options_action`
+        // (the reserved-value pattern, e.g. files tasks' `local` side).
+        let provider: PluginContribution =
+            serde_json::from_value(field_json(serde_json::json!("host/connections"))).unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&provider), true, false, dir.path(), &mut errors);
+        assert!(errors.is_empty(), "static+dynamic options must pass: {errors:?}");
+
+        // Without `options_action` the options are dead weight and stay rejected.
+        let provider: PluginContribution = serde_json::from_value(field_json(serde_json::json!(null))).unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&provider), true, false, dir.path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("only supports options for select or radio fields")),
+            "options without options_action must stay rejected: {errors:?}"
+        );
+
+        // The same shape rules (non-empty labels, unique values) apply.
+        let provider: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [{
+                "id": "copy",
+                "label": "Copy",
+                "mode": "run",
+                "fields": [{
+                    "key": "source_connection_id",
+                    "label": "Source",
+                    "type": "text",
+                    "options_action": "host/connections",
+                    "options": [
+                        { "value": "local", "label": "Local path" },
+                        { "value": "local", "label": "Local again" }
+                    ]
+                }]
+            }]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&provider), true, false, dir.path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("invalid or duplicate choice options")),
+            "duplicate static option values must be rejected: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn scheduler_permission_is_accepted_and_old_manifests_stay_compatible() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("backend"), b"backend").unwrap();
+        let manifest = task_provider_manifest();
+        let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        assert!(
+            manifest.compatibility(dir.path(), "0.1.0").errors.is_empty(),
+            "host.scheduler must be a supported permission"
+        );
+
+        // Backward compatibility: a manifest v1 plugin without any
+        // task-provider contribution (and without the new permission) must
+        // keep validating exactly as before.
+        let without_tasks: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+            "contributions": [{ "type": "workbench", "id": "sample.main", "label": "Sample" }]
+        }))
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+        std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
+        let compatibility = without_tasks.compatibility(dir.path(), "0.1.0");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        assert!(without_tasks.task_provider("sample.tasks").unwrap().is_none());
+
+        // An unknown contribution type keeps failing to parse, so the union
+        // stays closed even with the new variant in place.
+        let unknown_type = serde_json::from_value::<PluginManifest>(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{ "type": "scheduler-provider", "id": "sample.legacy" }]
+        }));
+        assert!(unknown_type.is_err());
     }
 
     #[test]
@@ -3730,6 +4695,186 @@ mod tests {
         assert!(errors.contains("content_field references unknown field 'missing'"), "{errors}");
         assert!(errors.contains("content_field cannot be the declaring field"), "{errors}");
         assert!(errors.contains("cannot upload a directory into a content field"), "{errors}");
+    }
+
+    /// The files plugin asks the host to browse its own storage tree: the
+    /// picker names a sidecar method (`files/listDirs`, the generic
+    /// invokePlugin channel — never `task/*`) and the sibling field(s) that
+    /// carry the connection id, with an ordered fallback chain for the
+    /// destination path (destination → source → task connection).
+    #[test]
+    fn parses_and_validates_plugin_directory_pickers() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.files",
+            "name": "Files",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.1" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "files.connection",
+                "label": "Storage",
+                "database_type": "files",
+                "fields": [
+                    {
+                        "key": "source_path",
+                        "label": "Source path",
+                        "type": "text",
+                        "binding": "config",
+                        "picker": { "kind": "directory", "source": "plugin", "action": "files/listDirs", "connection_field": "source_connection_id" }
+                    },
+                    {
+                        "key": "destination_path",
+                        "label": "Destination path",
+                        "type": "text",
+                        "binding": "config",
+                        "picker": { "kind": "directory", "source": "plugin", "action": "files/listDirs", "connection_field": ["destination_connection_id", "source_connection_id"] }
+                    },
+                    { "key": "source_connection_id", "label": "Source connection", "type": "text", "binding": "config" },
+                    { "key": "destination_connection_id", "label": "Destination connection", "type": "text", "binding": "config" }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.15");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        let provider = manifest.connection_provider("files.connection").unwrap().unwrap();
+        let source = provider.fields[0].picker.as_ref().unwrap();
+        assert_eq!(source.source, Some(super::PluginFormFieldPickerSource::Plugin));
+        assert_eq!(source.action.as_deref(), Some("files/listDirs"));
+        assert_eq!(source.connection_field.as_ref().unwrap().keys(), &["source_connection_id".to_string()][..]);
+        let destination = provider.fields[1].picker.as_ref().unwrap();
+        assert_eq!(
+            destination.connection_field.as_ref().unwrap().keys(),
+            &["destination_connection_id".to_string(), "source_connection_id".to_string()][..]
+        );
+        // Round-trip: the UI's manifest keeps the plugin-picker attributes, and
+        // legacy pickers keep omitting them.
+        let serialized = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(serialized["contributions"][0]["fields"][0]["picker"]["source"], "plugin");
+        assert_eq!(serialized["contributions"][0]["fields"][0]["picker"]["action"], "files/listDirs");
+        assert!(serialized["contributions"][0]["fields"][3]["picker"].is_null());
+    }
+
+    #[test]
+    fn rejects_invalid_plugin_directory_pickers() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.files",
+            "name": "Files",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.1" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "files.connection",
+                "label": "Storage",
+                "database_type": "files",
+                "fields": [
+                    // Local picker attributes without source: "plugin".
+                    { "key": "local_with_action", "label": "A", "type": "text", "binding": "config",
+                      "picker": { "kind": "file", "action": "files/listDirs" } },
+                    // File kind is not defined for plugin-backed browse.
+                    { "key": "plugin_file", "label": "B", "type": "text", "binding": "config",
+                      "picker": { "kind": "file", "source": "plugin", "action": "files/listDirs", "connection_field": "conn" } },
+                    // Browser-upload pairing is meaningless for plugin browse.
+                    { "key": "plugin_content", "label": "C", "type": "text", "binding": "config",
+                      "picker": { "kind": "directory", "source": "plugin", "action": "files/listDirs", "content_field": "conn" } },
+                    // task/* is the frozen scheduler namespace; host/ is reserved.
+                    { "key": "task_method", "label": "D", "type": "text", "binding": "config",
+                      "picker": { "kind": "directory", "source": "plugin", "action": "task/browse", "connection_field": "conn" } },
+                    // source "plugin" without an action cannot browse anything.
+                    { "key": "no_action", "label": "H", "type": "text", "binding": "config",
+                      "picker": { "kind": "directory", "source": "plugin", "connection_field": "conn" } },
+                    { "key": "host_method", "label": "E", "type": "text", "binding": "config",
+                      "picker": { "kind": "directory", "source": "plugin", "action": "host/browse", "connection_field": "conn" } },
+                    // Malformed method name.
+                    { "key": "bad_method", "label": "F", "type": "text", "binding": "config",
+                      "picker": { "kind": "directory", "source": "plugin", "action": "files listDirs", "connection_field": "conn" } },
+                    // connection_field must reference declared siblings.
+                    { "key": "ghost_connection", "label": "G", "type": "text", "binding": "config",
+                      "picker": { "kind": "directory", "source": "plugin", "action": "files/listDirs", "connection_field": "missing_field" } },
+                    { "key": "conn", "label": "Connection", "type": "text", "binding": "config" }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.15");
+        assert!(!compatibility.compatible);
+        let errors = compatibility.errors.join("\n");
+        assert!(errors.contains("action/connection_field require source \"plugin\""), "{errors}");
+        assert!(errors.contains("source \"plugin\" only supports kind \"directory\""), "{errors}");
+        assert!(errors.contains("source \"plugin\" cannot upload into a content field"), "{errors}");
+        assert!(errors.contains("source \"plugin\" requires action"), "{errors}");
+        assert!(errors.contains("frozen scheduler task/ namespace"), "{errors}");
+        assert!(errors.contains("reserved host/ namespace"), "{errors}");
+        assert!(errors.contains("action 'files listDirs' must look like a plugin method name"), "{errors}");
+        assert!(errors.contains("connection_field references unknown field 'missing_field'"), "{errors}");
+    }
+
+    /// `empty_label` names the empty entry a host offers on a may-stay-empty
+    /// dynamic `options_action` select (the files plugin's connection-id
+    /// fields). It localizes through the same per-field map as `placeholder`,
+    /// and fields that do not declare it keep omitting the key entirely.
+    #[test]
+    fn parses_and_serializes_empty_label() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("bin")).unwrap();
+        std::fs::write(dir.path().join("bin/placeholder"), "").unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.files",
+            "name": "Files",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.1" },
+            "entrypoints": { "backend": { "executable": "bin/placeholder" } },
+            "localizations": {
+                "zh-CN": { "contributions": { "files.tasks": { "triggers": { "copy": { "fields": {
+                    "source_connection_id": { "empty_label": "（跟随任务连接）" }
+                } } } } } }
+            },
+            "contributions": [{
+                "type": "task-provider",
+                "id": "files.tasks",
+                "label": "Files tasks",
+                "capabilities": ["run"],
+                "triggers": [{
+                    "id": "copy",
+                    "label": "Copy",
+                    "mode": "run",
+                    "fields": [
+                        { "key": "source_connection_id", "label": "Source connection id", "type": "text", "binding": "config", "options_action": "host/connections", "empty_label": "(task connection)" }
+                    ]
+                }]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.15");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        let PluginContribution::TaskProvider(provider) = &manifest.contributions[0] else {
+            panic!("task provider contribution expected");
+        };
+        let field = &provider.triggers[0].fields[0];
+        assert_eq!(field.empty_label.as_deref(), Some("(task connection)"));
+        assert_eq!(
+            manifest.localizations["zh-CN"].contributions["files.tasks"].triggers["copy"].fields
+                ["source_connection_id"]
+                .empty_label
+                .as_deref(),
+            Some("（跟随任务连接）")
+        );
+        // Round-trip keeps the declared key; fields without it stay omitted.
+        let serialized = serde_json::to_value(&manifest).unwrap();
+        let serialized_field = &serialized["contributions"][0]["triggers"][0]["fields"][0];
+        assert_eq!(serialized_field["empty_label"], "(task connection)");
+        assert!(serialized_field["placeholder"].is_null());
     }
 
     #[test]

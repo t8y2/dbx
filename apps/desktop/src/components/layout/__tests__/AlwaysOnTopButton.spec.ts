@@ -130,6 +130,7 @@ const toolbarProps = {
   showSqlFilePanel: false,
   showDriverStore: false,
   showPluginCenter: false,
+  showSchedulerPage: false,
   showSettingsPage: false,
   checkingUpdates: false,
   hasUpdateAvailable: false,

@@ -392,7 +392,16 @@ pub fn run_if_requested() -> bool {
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             dbx_core::sql_dialect::dialect_loader::register_core_dialects();
             let storage = Storage::open_unmigrated(&dir.join("dbx.db")).await?;
-            let state = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
+            let state = Arc::new(AppState::new_with_plugin_dir_and_app_version(
+                storage,
+                dir.join("plugins"),
+                env!("CARGO_PKG_VERSION"),
+            ));
+            // Same as the scheduler worker: hydrate the connection-config
+            // cache so backup runs can resolve their connections.
+            if let Err(error) = crate::commands::connection::load_connection_configs(&state).await {
+                log::warn!("[backup-worker] cannot load connection configs: {error}");
+            }
             let stop = CancellationToken::new();
             let drain = CancellationToken::new();
             let service = BackupService::new(state.clone(), &dir, None);

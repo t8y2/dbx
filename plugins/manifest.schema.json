@@ -30,7 +30,7 @@
       "uniqueItems": true,
       "items": {
         "anyOf": [
-          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.schema:read", "host.storage", "host.ai", "host.clipboard:read", "host.data:read"] },
+          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.schema:read", "host.storage", "host.ai", "host.clipboard:read", "host.data:read", "host.scheduler"] },
           { "type": "string", "pattern": "^host\\.network:https://[A-Za-z0-9._-]+(:[0-9]+)?$" }
         ]
       }
@@ -46,7 +46,7 @@
     "contributions": {
       "type": "array",
       "items": {
-        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }, { "$ref": "#/$defs/contextMenuContribution" }, { "$ref": "#/$defs/resultViewContribution" }, { "$ref": "#/$defs/commandContribution" }, { "$ref": "#/$defs/menusContribution" }, { "$ref": "#/$defs/mcpContribution" }]
+        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }, { "$ref": "#/$defs/taskProviderContribution" }, { "$ref": "#/$defs/contextMenuContribution" }, { "$ref": "#/$defs/resultViewContribution" }, { "$ref": "#/$defs/commandContribution" }, { "$ref": "#/$defs/menusContribution" }, { "$ref": "#/$defs/mcpContribution" }]
       }
     },
     "localizations": {
@@ -105,7 +105,7 @@
       }
     },
     "fieldPicker": {
-      "description": "Local-file action on a text/password/textarea field. Desktop hosts store the chosen absolute path in the declaring field; browser hosts cannot read a client path and upload the file content into 'content_field' instead.",
+      "description": "Local-file action on a text/password/textarea field. Desktop hosts store the chosen absolute path in the declaring field; browser hosts cannot read a client path and upload the file content into 'content_field' instead. With source:'plugin' the host browses the plugin's own storage tree for the connection named by connection_field instead of opening a native dialog.",
       "type": "object",
       "additionalProperties": false,
       "required": ["kind"],
@@ -127,6 +127,30 @@
         "content_field": {
           "description": "Declared sibling field that receives the file content on hosts without a client filesystem.",
           "$ref": "#/$defs/identifier"
+        },
+        "source": {
+          "description": "Switches the picker to a plugin-backed browser. Only 'plugin' is defined; omitted keeps the local native picker. Requires kind 'directory'.",
+          "enum": ["plugin"]
+        },
+  "action": {
+    "description": "Plugin method serving the directory browse over the generic invokePlugin channel (never task/*, never host/*), e.g. 'files/listDirs'. Receives {connectionId, path, locale} and returns {entries: [{name, path, is_dir}], truncated?, resolved_path?}: resolved_path names the directory actually listed when the requested path is not a directory and the plugin answers from its parent. Requires source 'plugin'.",
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 128,
+    "pattern": "^(?!/)(?!.*//).+$"
+  },
+        "connection_field": {
+          "description": "Sibling field key (or ordered fallback chain of keys) supplying the connection id to browse; the host falls back to the task's bound connection. Requires source 'plugin'.",
+          "oneOf": [
+            { "$ref": "#/$defs/identifier" },
+            {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/identifier" }
+            }
+          ]
         }
       }
     },
@@ -137,6 +161,7 @@
         "label": { "type": "string", "minLength": 1 },
         "description": { "type": "string" },
         "placeholder": { "type": "string" },
+        "empty_label": { "type": "string", "description": "Localized label of the empty entry a host offers on a may-stay-empty dynamic `options_action` select." },
         "options": { "type": "object", "propertyNames": { "minLength": 1 }, "additionalProperties": { "type": "string", "minLength": 1 } }
       }
     },
@@ -155,7 +180,34 @@
         "label": { "type": "string", "minLength": 1 },
         "description": { "type": "string" },
         "fields": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/formFieldLocalization" } },
-        "actions": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/actionLocalization" } }
+        "actions": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/actionLocalization" } },
+        "triggers": {
+          "description": "task-provider trigger localizations keyed by the provider-local trigger id; `fields` translates the trigger's config form exactly like the contribution-level `fields` map.",
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/triggerLocalization" }
+        }
+      }
+    },
+    "triggerLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "fields": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/formFieldLocalization" } },
+        "groups": {
+          "description": "Per-group label translations keyed by the group id declared on the trigger's `groups` list.",
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/groupLocalization" }
+        }
+      }
+    },
+    "groupLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string", "minLength": 1 }
       }
     },
     "manifestLocalization": {
@@ -238,11 +290,24 @@
         "type": { "enum": ["text", "password", "number", "boolean", "select", "radio", "textarea"] },
         "description": { "type": ["string", "null"] },
         "placeholder": { "type": ["string", "null"] },
+        "empty_label": {
+          "description": "Label of the empty entry a host offers on a may-stay-empty dynamic `options_action` select (empty = follow the fallback connection). Hosts fall back to `placeholder`, then to their own default wording; localize via localizations.<locale>…fields.<key>.empty_label.",
+          "type": ["string", "null"]
+        },
         "required": { "type": "boolean" },
         "default": { "type": ["string", "number", "boolean", "null"] },
         "options": { "type": "array", "items": { "$ref": "#/$defs/selectOption" } },
+        "group": {
+          "description": "Render section this field belongs to (task triggers only; consumed by the scheduler task form, connection dialogs ignore it). Must name a group declared on the same trigger's `groups` list; untagged fields keep the leading plain section.",
+          "$ref": "#/$defs/identifier"
+        },
         "binding": { "enum": ["config", "secret", "name", "host", "port", "username", "password", "database"] },
         "picker": { "$ref": "#/$defs/fieldPicker" },
+        "options_action": {
+          "description": "Renders the text field as a dynamic select. `host/…` names the host-reserved self-service namespace (no plugin RPC; `host/connections` lists the saved connections a provider accepts); any other value is a sidecar method invoked with `{ locale }` and returning `{ options: [{ value, label }] }`. Declared static `options` render ahead of the fetched ones, deduplicated by value (first occurrence wins).",
+          "type": "string",
+          "minLength": 1
+        },
         "visible_when": { "$ref": "#/$defs/fieldCondition" },
         "required_when": { "$ref": "#/$defs/fieldCondition" }
       },
@@ -250,7 +315,11 @@
         {
           "if": { "properties": { "type": { "enum": ["select", "radio"] } }, "required": ["type"] },
           "then": { "required": ["options"], "properties": { "options": { "minItems": 1 } } },
-          "else": { "not": { "required": ["options"] } }
+          "else": {
+            "if": { "required": ["options_action"] },
+            "then": {},
+            "else": { "not": { "required": ["options"] } }
+          }
         },
         {
           "if": { "properties": { "binding": { "const": "port" } }, "required": ["binding"] },
@@ -336,6 +405,57 @@
         "label": { "type": "string", "minLength": 1, "maxLength": 200 },
         "prompt": { "type": "string", "minLength": 1, "maxLength": 32000 },
         "order": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 }
+      }
+    },
+    "taskProviderContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "label"],
+      "properties": {
+        "type": { "const": "task-provider" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 },
+        "connection_providers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identifier" }
+        },
+        "allow_multiple_connections": {
+          "type": "boolean",
+          "description": "Whether one task may bind several connections at once (e.g. an SSH run-everywhere task). Defaults to false."
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["run", "resident", "cancel", "logs", "progress", "artifacts"] }
+        },
+        "triggers": { "type": "array", "items": { "$ref": "#/$defs/taskTrigger" } }
+      }
+    },
+    "taskTrigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "mode"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 },
+        "mode": { "enum": ["run", "resident"] },
+        "risk": { "enum": ["low", "medium", "high"] },
+        "groups": {
+          "description": "Named render sections of the config form (scheduler task form only). Declaration order is the render order; fields tagged `group: <id>` aggregate under their section, untagged fields keep the leading plain section.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/formFieldGroup" }
+        },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/formField" } }
+      }
+    },
+    "formFieldGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 }
       }
     },
     "contextMenuContribution": {

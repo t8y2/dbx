@@ -212,6 +212,7 @@ const SqlLibraryPanel = defineAsyncComponent(() => import("@/components/layout/S
 const SqlFilePanel = defineAsyncComponent(() => import("@/components/layout/SqlFilePanel.vue"));
 const DriverStorePage = defineAsyncComponent(() => import("@/components/config/DriverStoreDialog.vue"));
 const PluginCenterPage = defineAsyncComponent(() => import("@/components/plugins/PluginContributionsPanel.vue"));
+const SchedulerPage = defineAsyncComponent(() => import("@/components/scheduler/SchedulerPage.vue"));
 const PluginBottomDock = defineAsyncComponent(() => import("@/components/plugins/PluginBottomDock.vue"));
 const EditorSettingsPage = defineAsyncComponent(() => import("@/components/editor/EditorSettingsDialog.vue"));
 const UpdateDialog = defineAsyncComponent(() => import("@/components/layout/UpdateDialog.vue"));
@@ -429,13 +430,16 @@ const driverStoreActiveTab = ref<"agent" | "jdbc" | "storage" | "runtime">("agen
 const pluginCenterTabOpen = ref(false);
 const pluginCenterActive = ref(false);
 const pluginCenterFocus = ref<PluginCenterFocus | null>(null);
+const schedulerTabOpen = ref(false);
+const schedulerActive = ref(false);
 const connectionPluginProvider = ref<PluginCenterFocus | null>(null);
-const settingsReturnSurface = ref<"query" | "driverStore" | "pluginCenter" | "welcome">("welcome");
+const settingsReturnSurface = ref<"query" | "driverStore" | "pluginCenter" | "scheduler" | "welcome">("welcome");
 const immediateSyncing = ref(false);
 const showDriverStore = computed(() => driverStoreTabOpen.value && driverStoreActive.value);
 const showPluginCenter = computed(() => pluginCenterTabOpen.value && pluginCenterActive.value);
+const showSchedulerPage = computed(() => schedulerTabOpen.value && schedulerActive.value);
 const showSettingsPage = computed(() => Boolean(settingsPageTabOpen.value && settingsStore.settingsPageActive));
-const isSpecialPageActive = computed(() => !isDetachedWindowContext && (driverStoreActive.value || pluginCenterActive.value || settingsStore.settingsPageActive));
+const isSpecialPageActive = computed(() => !isDetachedWindowContext && (driverStoreActive.value || pluginCenterActive.value || schedulerActive.value || settingsStore.settingsPageActive));
 const showQuickOpen = ref(false);
 const quickOpenForceContent = ref(false);
 const showTabSwitcher = ref(false);
@@ -1106,6 +1110,8 @@ const specialPageTabs = computed(() => ({
   pluginCenterActive: pluginCenterActive.value,
   driverStoreOpen: driverStoreTabOpen.value,
   driverStoreActive: driverStoreActive.value,
+  schedulerOpen: schedulerTabOpen.value,
+  schedulerActive: schedulerActive.value,
   driverUpdateCount: showDriverStoreUpdateBadge.value,
 }));
 provide(GROUP_TAB_BAR_PORTAL, createGroupTabBarPortal(isSpecialPageActive));
@@ -1143,6 +1149,8 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   closeSettingsPage,
   activatePluginCenter: () => openPluginCenterPage(pluginCenterFocus.value),
   closePluginCenter: closePluginCenterPage,
+  activateSchedulerPage: openSchedulerPage,
+  closeSchedulerPage,
   activateDriverStore: () => openDriverStorePage(),
   closeDriverStore: closeDriverStorePage,
 });
@@ -1265,7 +1273,7 @@ function openSettings(initialTab = "appearance", initialSection?: string) {
   settingsInitialSection.value = initialSection;
   settingsNavigationRequestId.value += 1;
   if (!settingsStore.settingsPageActive) {
-    settingsReturnSurface.value = showDriverStore.value ? "driverStore" : showPluginCenter.value ? "pluginCenter" : activeTab.value ? "query" : "welcome";
+    settingsReturnSurface.value = showDriverStore.value ? "driverStore" : showPluginCenter.value ? "pluginCenter" : showSchedulerPage.value ? "scheduler" : activeTab.value ? "query" : "welcome";
   }
   activateSettingsPage();
 }
@@ -1299,12 +1307,13 @@ async function openImmediateSync() {
   }
 }
 
-type MainContentSurface = "query" | "settings" | "driverStore" | "pluginCenter";
+type MainContentSurface = "query" | "settings" | "driverStore" | "pluginCenter" | "scheduler";
 
 function activateMainContentSurface(surface: MainContentSurface) {
   settingsStore.settingsPageActive = surface === "settings";
   driverStoreActive.value = surface === "driverStore";
   pluginCenterActive.value = surface === "pluginCenter";
+  schedulerActive.value = surface === "scheduler";
 }
 
 watch(
@@ -1349,6 +1358,10 @@ function activateOpenSpecialPageFallback() {
   }
   if (pluginCenterTabOpen.value) {
     activateMainContentSurface("pluginCenter");
+    return;
+  }
+  if (schedulerTabOpen.value) {
+    activateMainContentSurface("scheduler");
   }
 }
 
@@ -1362,12 +1375,20 @@ function closeSettingsPage() {
     activateMainContentSurface("pluginCenter");
     return;
   }
+  if (settingsReturnSurface.value === "scheduler" && schedulerTabOpen.value) {
+    activateMainContentSurface("scheduler");
+    return;
+  }
   if (driverStoreTabOpen.value) {
     activateMainContentSurface("driverStore");
     return;
   }
   if (pluginCenterTabOpen.value) {
     activateMainContentSurface("pluginCenter");
+    return;
+  }
+  if (schedulerTabOpen.value) {
+    activateMainContentSurface("scheduler");
     return;
   }
   activateMainContentSurface("query");
@@ -1400,6 +1421,8 @@ function closeDriverStorePage() {
     activateMainContentSurface("pluginCenter");
   } else if (settingsPageTabOpen.value) {
     activateMainContentSurface("settings");
+  } else if (schedulerTabOpen.value) {
+    activateMainContentSurface("scheduler");
   } else {
     activateMainContentSurface("query");
   }
@@ -1422,6 +1445,26 @@ function closePluginCenterPage() {
     activateMainContentSurface("driverStore");
   } else if (settingsPageTabOpen.value) {
     activateMainContentSurface("settings");
+  } else if (schedulerTabOpen.value) {
+    activateMainContentSurface("scheduler");
+  } else {
+    activateMainContentSurface("query");
+  }
+}
+
+function openSchedulerPage() {
+  schedulerTabOpen.value = true;
+  activateMainContentSurface("scheduler");
+}
+
+function closeSchedulerPage() {
+  schedulerTabOpen.value = false;
+  if (driverStoreTabOpen.value) {
+    activateMainContentSurface("driverStore");
+  } else if (settingsPageTabOpen.value) {
+    activateMainContentSurface("settings");
+  } else if (pluginCenterTabOpen.value) {
+    activateMainContentSurface("pluginCenter");
   } else {
     activateMainContentSurface("query");
   }
@@ -4217,6 +4260,8 @@ async function closeActiveSurface() {
     closePluginCenterPage();
   } else if (showDriverStore.value) {
     closeDriverStorePage();
+  } else if (showSchedulerPage.value) {
+    closeSchedulerPage();
   } else if (queryStore.activeTabId) {
     if (await queryStore.clearQueryResults(queryStore.activeTabId)) return;
     queryStore.closeTab(queryStore.activeTabId);
@@ -4227,7 +4272,7 @@ async function handleKeydown(e: KeyboardEvent) {
 
   const shortcuts = settingsStore.editorSettings.shortcuts;
   if (showTabSwitcher.value) return;
-  if (isFocusWhereShortcut(e, shortcuts) && !showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
+  if (isFocusWhereShortcut(e, shortcuts) && !showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value && !showSchedulerPage.value) {
     const target = e.target instanceof Element ? e.target : null;
     if (!target?.closest('[role="dialog"], [role="alertdialog"]') && contentAreaRef.value?.focusWhere()) {
       e.preventDefault();
@@ -4235,7 +4280,7 @@ async function handleKeydown(e: KeyboardEvent) {
       return;
     }
   }
-  if (isEditTableStructureShortcut(e, shortcuts) && !showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
+  if (isEditTableStructureShortcut(e, shortcuts) && !showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value && !showSchedulerPage.value) {
     const target = e.target instanceof Element ? e.target : null;
     if (!target?.closest('[role="dialog"], [role="alertdialog"]') && !eventTargetAllowsNativeClipboard(e) && contentAreaRef.value?.openTableStructureEditor?.()) {
       e.preventDefault();
@@ -4827,6 +4872,7 @@ onUnmounted(() => {
           :show-sql-file-panel="showSqlFilePanel"
           :show-driver-store="showDriverStore"
           :show-plugin-center="showPluginCenter"
+          :show-scheduler-page="showSchedulerPage"
           :show-settings-page="showSettingsPage"
           :checking-updates="checkingAllUpdates"
           :has-update-available="toolbarHasUpdateAvailable"
@@ -4854,6 +4900,7 @@ onUnmounted(() => {
           @open-settings="openSettings(showMcpSettingsUpdateBadge ? 'mcp' : 'appearance')"
           @open-driver-store="openDriverStorePage"
           @open-plugin-center="openPluginCenterPage()"
+          @open-scheduler-page="openSchedulerPage"
           @check-updates="handleToolbarUpdateClick"
           @immediate-sync="openImmediateSync"
           @open-transfer="dialogs.showTransferDialog.value = true"
@@ -4895,6 +4942,8 @@ onUnmounted(() => {
                 :driver-store-active="driverStoreActive"
                 :plugin-center-open="pluginCenterTabOpen"
                 :plugin-center-active="pluginCenterActive"
+                :scheduler-page-open="schedulerTabOpen"
+                :scheduler-page-active="schedulerActive"
                 :settings-page-open="settingsPageTabOpen"
                 :settings-page-active="settingsStore.settingsPageActive"
                 :agent-driver-update-count="toolbarAgentDriverUpdateCount"
@@ -4904,10 +4953,12 @@ onUnmounted(() => {
                 :tab-bar-collapsed="tabBarCollapsed"
                 @activate-driver-store="openDriverStorePage"
                 @activate-plugin-center="openPluginCenterPage(pluginCenterFocus)"
+                @activate-scheduler-page="openSchedulerPage"
                 @activate-settings-page="activateSettingsPage"
                 @activate-tab="activateQueryTab"
                 @close-driver-store="closeDriverStorePage"
                 @close-plugin-center="closePluginCenterPage"
+                @close-scheduler-page="closeSchedulerPage"
                 @close-settings-page="closeSettingsPage"
                 @save-tab="handleSaveTab"
                 @discard-tab-close="handleDiscardPendingTabClose"
@@ -4926,6 +4977,7 @@ onUnmounted(() => {
                   @update-count-change="updateAgentDriverUpdateCount"
                 />
                 <PluginCenterPage v-if="pluginCenterTabOpen" v-show="pluginCenterActive" class="flex-1 min-h-0" :focus-target="pluginCenterFocus" :install-url-request="pluginCenterInstallRequest" @new-connection="openPluginConnectionDialog" @plugin-runtime-replaced="refreshPluginWorkbenches" />
+                <SchedulerPage v-if="schedulerTabOpen" v-show="schedulerActive" class="flex-1 min-h-0" />
                 <EditorSettingsPage
                   v-if="settingsPageTabOpen"
                   v-show="settingsStore.settingsPageActive"
@@ -4984,7 +5036,7 @@ onUnmounted(() => {
                 </DialogContent>
               </Dialog>
               <div
-                v-show="!driverStoreActive && !pluginCenterActive && !settingsStore.settingsPageActive"
+                v-show="!driverStoreActive && !pluginCenterActive && !schedulerActive && !settingsStore.settingsPageActive"
                 class="flex min-h-0 min-w-0 flex-1"
                 :class="activeTab?.mode === 'plugin-workbench' && isVerticalTabPlacement ? (settingsStore.editorSettings.tabPlacement === 'right' ? 'flex-row-reverse' : 'flex-row') : 'flex-col'"
               >

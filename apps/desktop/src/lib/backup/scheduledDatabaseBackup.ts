@@ -17,7 +17,7 @@ export type DatabaseBackupRunSource = "scheduled" | "one-shot";
 export type DatabaseBackupTableFilterMode = "all" | "include" | "exclude" | "selected";
 export type DatabaseBackupOutputCompression = "none" | "gzip";
 
-const CONSISTENT_BACKUP_DATABASE_TYPES = new Set(["mysql", "postgres"]);
+export const CONSISTENT_BACKUP_DATABASE_TYPES = new Set(["mysql", "postgres"]);
 
 export class DatabaseBackupConnectionQueue {
   private readonly tails = new Map<string, Promise<void>>();

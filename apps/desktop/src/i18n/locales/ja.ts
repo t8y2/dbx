@@ -4901,6 +4901,8 @@ export default withEnglishFallback({
     triggerName: "トリガー",
     triggerStatement: "トリガー文",
     primary: "主キー",
+    primaryKeyName: "主キー名",
+    primaryKeyNamePlaceholder: "空欄の場合は自動生成",
     drop: "削除",
     restore: "復元",
     remove: "削除",

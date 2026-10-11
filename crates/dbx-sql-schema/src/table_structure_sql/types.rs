@@ -286,6 +286,12 @@ pub struct TableStructureSqlOptions {
     /// `StructureDialect::Mysql` so that DDL is generated with MySQL syntax.
     #[serde(default)]
     pub is_gaussdb_m_mode: bool,
+    /// Optional constraint name for a **newly created** primary key. Empty or
+    /// `None` keeps the anonymous `PRIMARY KEY (...)` form and lets the server
+    /// auto-name the constraint. Only applied when the draft adds a primary key
+    /// that did not exist before; replacing an existing key never renames it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

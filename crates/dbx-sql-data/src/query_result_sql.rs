@@ -482,9 +482,15 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
         {
             return err("unsupported");
         }
-        let end = find_top_level_trailing_order_by(statement).unwrap_or(statement.len());
+        // 词法扫描在标准串反斜杠、Oracle `q'...'` 字面量等场景会漏掉结尾
+        // ORDER BY；定位不到就无法安全剥离，追加第二个 ORDER BY 会被
+        // Oracle 系拒绝。
+        let order_by_index = find_top_level_trailing_order_by(statement);
+        if order_by_index.is_none() && query.order_by.is_some() {
+            return err("unsupported");
+        }
         return ok(append_sql_suffix(
-            statement[..end].trim_end(),
+            statement[..order_by_index.unwrap_or(statement.len())].trim_end(),
             &format!("ORDER BY {} {};", options.column_index + 1, options.direction.as_sql()),
         ));
     }
@@ -2829,6 +2835,25 @@ mod tests {
                 direction: QuerySortDirection::Asc,
             });
             assert!(!sorted.ok);
+        }
+    }
+
+    // 词法扫描在标准串反斜杠、Oracle `q'...'` 字面量后会漏掉结尾 ORDER BY；
+    // 定位不到就不能追加第二个 ORDER BY（Oracle 系会直接拒绝）。
+    #[test]
+    fn oceanbase_sort_rejects_lexically_hidden_order_by() {
+        for sql in ["SELECT * FROM t WHERE p = 'C:\\' ORDER BY id", "SELECT * FROM t WHERE p = q'[it's]' ORDER BY id"] {
+            let sorted = build_sorted_query_sql(SortedQuerySqlOptions {
+                original_sql: sql.into(),
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                result_columns: vec!["id".into()],
+                column_index: 0,
+                column: "id".into(),
+                direction: QuerySortDirection::Asc,
+            });
+
+            assert!(!sorted.ok, "must not append a second ORDER BY: {sql}");
+            assert_eq!(sorted.reason.as_deref(), Some("unsupported"), "{sql}");
         }
     }
 

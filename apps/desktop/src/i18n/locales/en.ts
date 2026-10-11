@@ -5829,6 +5829,8 @@ export default {
     triggerName: "Trigger",
     triggerStatement: "Trigger statement",
     primary: "Primary",
+    primaryKeyName: "Primary key name",
+    primaryKeyNamePlaceholder: "Leave blank to auto-generate",
     drop: "Drop",
     restore: "Restore",
     remove: "Remove",

@@ -68,6 +68,7 @@ async fn live_postgres_concurrent_index_builds_valid_index() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(
@@ -204,6 +205,7 @@ async fn live_postgres_partitioned_parent_concurrent_request_rejected() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
     assert_eq!(
         result.warnings,

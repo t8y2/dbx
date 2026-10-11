@@ -82,3 +82,8 @@ export function sortDatabaseTableNames(names: string[]): string[] {
   // Pin the collation so the order does not shift with the OS locale.
   return [...names].sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" }));
 }
+
+/** Use the selected table as the suggested filename when exporting one table. */
+export function databaseExportFileStem(database: string, selectedTables: readonly string[]): string {
+  return selectedTables.length === 1 ? selectedTables[0]! : database;
+}

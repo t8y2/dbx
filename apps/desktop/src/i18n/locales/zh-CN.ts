@@ -5820,6 +5820,8 @@ export default withEnglishFallback({
     triggerName: "触发器名",
     triggerStatement: "触发语句",
     primary: "主键",
+    primaryKeyName: "主键名",
+    primaryKeyNamePlaceholder: "留空则自动生成",
     drop: "删除",
     restore: "恢复",
     remove: "移除",

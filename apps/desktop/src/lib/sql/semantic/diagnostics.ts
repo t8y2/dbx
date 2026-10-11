@@ -369,9 +369,18 @@ export function isSqlVirtualTableReference(table: { name: string; schema?: strin
 function isVisibleProjectionAlias(sql: string, span: SqlTextSpan, name: string, databaseType?: DatabaseType): boolean {
   const range = sqlTextSpanToOffsetRange(sql, span);
   if (!range) return false;
-  const context = getSqlCompletionContext(sql, range.to, { databaseType });
-  if (!context.prioritizeSelectAliases) return false;
-  return context.selectAliases.some((alias) => normalizeName(alias) === normalizeName(name));
+  // If the identifier is at the end of a statement terminated by ';' or punctuation,
+  // evaluating completion strictly at range.to can place the cursor on or past the
+  // semicolon, causing getSqlCompletionContext to treat it as an empty subsequent
+  // statement. Testing at range.from (and range.to as fallback) ensures we evaluate
+  // inside the clause (GROUP BY / ORDER BY / HAVING) containing this alias reference.
+  for (const cursor of [range.from, range.to]) {
+    const context = getSqlCompletionContext(sql, cursor, { databaseType });
+    if (context.prioritizeSelectAliases && context.selectAliases.some((alias) => normalizeName(alias) === normalizeName(name))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function trimSqlTextSpanWhitespace(sql: string | undefined, span: SqlTextSpan): SqlTextSpan {

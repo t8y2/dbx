@@ -5389,6 +5389,8 @@ export default withEnglishFallback({
     triggerName: "Trigger",
     triggerStatement: "Statement trigger",
     primary: "Primary",
+    primaryKeyName: "Nama kunci utama",
+    primaryKeyNamePlaceholder: "Biarkan kosong untuk dibuat otomatis",
     drop: "Hapus",
     restore: "Pulihkan",
     remove: "Hapus",

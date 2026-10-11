@@ -4839,6 +4839,8 @@ export default withEnglishFallback({
     triggerName: "Trigger",
     triggerStatement: "Istruzione trigger",
     primary: "Primario",
+    primaryKeyName: "Nome chiave primaria",
+    primaryKeyNamePlaceholder: "Lascia vuoto per generarlo automaticamente",
     drop: "Elimina",
     restore: "Ripristina",
     remove: "Rimuovi",

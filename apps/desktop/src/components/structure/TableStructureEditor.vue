@@ -1943,6 +1943,21 @@ const tableOwnerRoles = ref<string[]>([]);
 const tableOwnerRolesLoading = ref(false);
 const tableOwnerRolesLoadError = ref("");
 const supportsTableOwner = computed(() => !isCreateMode.value && databaseType.value === "postgres");
+const primaryKeyName = ref("");
+// Mirrors Rust `supports_named_primary_key`: engines that persist a user-supplied
+// PK constraint name. Other dialects ignore the symbol, so the field is hidden.
+const canNamePrimaryKey = computed(() => {
+  if (connection.value?.driver_profile?.toLowerCase() === "gaussdb-m") return true;
+  const dialect = structureCapabilities.value.dialect;
+  return dialect === "mysql" || dialect === "postgres" || dialect === "sqlserver" || dialect === "oracle";
+});
+/** Whether the draft will create a primary key that did not exist before
+ * (matching the Rust builder's pure-add path; replacements never rename). */
+const willCreateNewPrimaryKey = computed(() => {
+  const active = columns.value.filter((column) => !column.markedForDrop);
+  return active.some((column) => column.isPrimaryKey) && !active.some((column) => column.original?.is_primary_key);
+});
+const canEditPrimaryKeyName = computed(() => canNamePrimaryKey.value && willCreateNewPrimaryKey.value && (isCreateMode.value || structureCapabilities.value.addPrimaryKey));
 const canEditMysqlAutoIncrement = computed(() => canEditMysqlAutoIncrementCounter(connection.value, isCreateMode.value, columns.value));
 const canBuildMysqlAutoIncrement = computed(() => !isCreateMode.value && canEditMysqlAutoIncrement.value && !mysqlAutoIncrementLoading.value && !mysqlAutoIncrementLoadError.value && originalMysqlAutoIncrementValue.value !== undefined);
 const supportsMysqlEngine = computed(() => supportsMysqlTableEngine(connection.value));
@@ -2686,6 +2701,7 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     partitioned: isPartitionedParent.value,
     foreignTable: isForeignTable.value,
     isGaussdbMMode: connection.value?.driver_profile?.toLowerCase() === "gaussdb-m",
+    primaryKeyName: willCreateNewPrimaryKey.value ? primaryKeyName.value.trim() || undefined : undefined,
   };
 }
 
@@ -5631,6 +5647,11 @@ watch(
         </TooltipTrigger>
         <TooltipContent>{{ t("structureEditor.tableCommentUnsupported") }}</TooltipContent>
       </Tooltip>
+    </div>
+
+    <div v-if="canEditPrimaryKeyName" class="flex shrink-0 items-center gap-2">
+      <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.primaryKeyName") }}</label>
+      <Input v-model="primaryKeyName" :placeholder="t('structureEditor.primaryKeyNamePlaceholder')" :class="[structureControlClass, 'max-w-[320px]']" :disabled="saving || loading" data-primary-key-name-input />
     </div>
 
     <div v-if="supportsMysqlEngine" class="flex shrink-0 items-center gap-2">

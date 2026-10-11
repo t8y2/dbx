@@ -4883,6 +4883,8 @@ export default withEnglishFallback({
     triggerName: "트리거",
     triggerStatement: "트리거 구문",
     primary: "기본",
+    primaryKeyName: "기본 키 이름",
+    primaryKeyNamePlaceholder: "비워 두면 자동 생성",
     drop: "삭제",
     restore: "복원",
     remove: "제거",

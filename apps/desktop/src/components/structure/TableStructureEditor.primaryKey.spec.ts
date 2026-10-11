@@ -520,6 +520,46 @@ describe("TableStructureEditor primary key editing", () => {
     );
   });
 
+  it("offers a primary key name input when adding a new key and sends it in the options", async () => {
+    const root = await mountEditor("postgres");
+
+    expect(root.querySelector<HTMLInputElement>("[data-primary-key-name-input]")).toBeNull();
+
+    const primaryKey = columnCheckbox(root, "structureEditor.primaryKey");
+    primaryKey.checked = true;
+    primaryKey.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+
+    const nameInput = root.querySelector<HTMLInputElement>("[data-primary-key-name-input]");
+    expect(nameInput).not.toBeNull();
+
+    nameInput!.value = "users_pkey";
+    nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ primaryKeyName: "users_pkey" }));
+  });
+
+  it("keeps the primary key anonymous when the name is left blank", async () => {
+    const root = await mountEditor("postgres");
+    const primaryKey = columnCheckbox(root, "structureEditor.primaryKey");
+    primaryKey.checked = true;
+    primaryKey.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+
+    expect(root.querySelector<HTMLInputElement>("[data-primary-key-name-input]")).not.toBeNull();
+
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ primaryKeyName: undefined }));
+  });
+
+  it("hides the primary key name input when the table already has a primary key", async () => {
+    const root = await mountEditor("postgres", true);
+
+    expect(root.querySelector<HTMLInputElement>("[data-primary-key-name-input]")).toBeNull();
+  });
+
   it.each(["oracle", "oceanbase-oracle"] as const)("enables a primary key on an existing keyless %s column and makes it not null", async (databaseType) => {
     const root = await mountEditor(databaseType);
     const primaryKey = columnCheckbox(root, "structureEditor.primaryKey");

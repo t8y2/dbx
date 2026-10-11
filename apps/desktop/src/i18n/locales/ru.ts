@@ -5416,6 +5416,8 @@ export default withEnglishFallback({
     triggerName: "Триггер",
     triggerStatement: "Оператор триггера",
     primary: "Первичный",
+    primaryKeyName: "Имя первичного ключа",
+    primaryKeyNamePlaceholder: "Оставьте пустым для автогенерации",
     drop: "Удалить",
     restore: "Восстановить",
     remove: "Убрать",

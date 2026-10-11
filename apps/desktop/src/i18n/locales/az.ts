@@ -4749,6 +4749,8 @@ export default withEnglishFallback({
     triggerName: "Tətikləyici",
     triggerStatement: "Tətikləyici əmri",
     primary: "Əsas",
+    primaryKeyName: "Əsas açar adı",
+    primaryKeyNamePlaceholder: "Avtomatik yaratmaq üçün boş buraxın",
     drop: "Sil",
     restore: "Bərpa et",
     remove: "Çıxar",

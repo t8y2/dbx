@@ -78,7 +78,11 @@ pub fn build_database_structure_search_sql(
         DatabaseType::SqlServer => sqlserver_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
         DatabaseType::Tdengine => tdengine_structure_search_sql(&options.database, &pattern_literal, limit),
         DatabaseType::Snowflake => snowflake_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Gbase => gbase_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
+        // gbase8s is Informix-compatible (see the table_structure_sql dialects)
+        // and has no information_schema; only MySQL-dialect Gbase 8a takes this path.
+        DatabaseType::Gbase if !driver_profile_is_gbase8s(options.driver_profile.as_deref()) => {
+            gbase_structure_search_sql(&options.database, options.schema.as_deref(), &pattern_literal, limit)
+        }
         DatabaseType::Jdbc if driver_profile_is_mysql(options.driver_profile.as_deref()) => {
             mysql_family_structure_search_sql(&options.database, options.schema.as_deref(), &pattern_literal, limit)
         }
@@ -107,6 +111,12 @@ fn driver_profile_is_mysql(profile: Option<&str>) -> bool {
 fn driver_profile_is_postgres(profile: Option<&str>) -> bool {
     let profile = profile.map(str::trim).unwrap_or("").to_ascii_lowercase();
     profile.contains("postgres") || profile.contains("kingbase") || profile.contains("opengauss")
+}
+
+fn driver_profile_is_gbase8s(profile: Option<&str>) -> bool {
+    profile
+        .map(str::trim)
+        .is_some_and(|profile| profile.to_ascii_lowercase().contains("gbase8s"))
 }
 
 fn driver_profile_is_oracle(profile: Option<&str>) -> bool {
@@ -273,8 +283,8 @@ fn snowflake_structure_search_sql(schema: Option<&str>, pattern_literal: &str, l
     )
 }
 
-fn gbase_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
-    let database = schema.filter(|value| !value.trim().is_empty()).unwrap_or("gbase");
+fn gbase_structure_search_sql(database: &str, schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
+    let database = if database.trim().is_empty() { "gbase" } else { database };
     mysql_family_structure_search_sql(database, schema, pattern_literal, limit)
 }
 
@@ -400,5 +410,33 @@ mod tests {
                 database_type
             );
         }
+    }
+
+    #[test]
+    fn gbase_search_uses_the_connected_database_and_drops_gbase8s() {
+        let query = build_database_structure_search_sql(DatabaseStructureSearchSqlOptions {
+            database_type: Some(DatabaseType::Gbase),
+            driver_profile: None,
+            database: "app".to_string(),
+            schema: None,
+            term: "email".to_string(),
+            limit: Some(10),
+        })
+        .unwrap();
+        assert!(query.sql.contains("TABLE_SCHEMA = 'app'"), "gbase must filter by the connected database, not a fixed literal");
+        assert!(!query.sql.contains("'gbase'"));
+
+        assert_eq!(
+            build_database_structure_search_sql(DatabaseStructureSearchSqlOptions {
+                database_type: Some(DatabaseType::Gbase),
+                driver_profile: Some("gbase8s".to_string()),
+                database: "app".to_string(),
+                schema: None,
+                term: "email".to_string(),
+                limit: Some(10),
+            }),
+            None,
+            "gbase8s is Informix-compatible and must fall back to data search"
+        );
     }
 }

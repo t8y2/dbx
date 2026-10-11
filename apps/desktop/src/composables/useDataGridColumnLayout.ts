@@ -111,6 +111,8 @@ export function useDataGridColumnLayoutState(options: {
   commentByColumn?: MaybeRefOrGetter<ReadonlyMap<string, string>>;
   displayableColumnIndexes: MaybeRefOrGetter<readonly number[]>;
   allNullColumnIndexes: MaybeRefOrGetter<readonly number[]>;
+  allEmptyColumnIndexes?: MaybeRefOrGetter<readonly number[]>;
+  hideEmptyColumns?: MaybeRefOrGetter<boolean>;
   columnOrderKeys: MaybeRefOrGetter<readonly string[]>;
   layoutScopeKey: MaybeRefOrGetter<string>;
   tableScopeKey: MaybeRefOrGetter<string>;
@@ -122,6 +124,8 @@ export function useDataGridColumnLayoutState(options: {
   const hiddenColumnIndexes = ref<Set<number>>(hiddenColumnIndexesForKeys(toValue(options.initialHiddenColumnKeys), toValue(options.columnOrderKeys), toValue(options.displayableColumnIndexes)));
   const localNullColumnsHidden = ref(false);
   const nullColumnsHidden = computed(() => (options.hideNullColumns === undefined ? localNullColumnsHidden.value : toValue(options.hideNullColumns)));
+  const emptyColumnsHidden = computed(() => options.hideEmptyColumns !== undefined && toValue(options.hideEmptyColumns));
+  const automaticHiddenColumnIndexes = computed(() => [...new Set([...(nullColumnsHidden.value ? toValue(options.allNullColumnIndexes) : []), ...(emptyColumnsHidden.value && options.allEmptyColumnIndexes !== undefined ? toValue(options.allEmptyColumnIndexes) : [])])]);
   const autoHiddenNullColumnIndexes = ref<Set<number>>(new Set());
   const persistedColumnOrderKeys = ref<string[]>([]);
   const persistedHiddenColumnKeys = ref<string[]>([...(toValue(options.initialHiddenColumnKeys) ?? [])]);
@@ -401,8 +405,8 @@ export function useDataGridColumnLayoutState(options: {
   function applyNullColumnVisibility(hidden: boolean) {
     hiddenColumnIndexes.value = removeAutoHiddenColumnIndexes(hiddenColumnIndexes.value, autoHiddenNullColumnIndexes.value);
     autoHiddenNullColumnIndexes.value = new Set();
-    if (!hidden) return;
-    const next = hiddenColumnIndexesWithAllNullColumns({ availableIndexes: [...toValue(options.displayableColumnIndexes)], hiddenIndexes: hiddenColumnIndexes.value, allNullIndexes: new Set(toValue(options.allNullColumnIndexes)) });
+    if (!hidden && !emptyColumnsHidden.value) return;
+    const next = hiddenColumnIndexesWithAllNullColumns({ availableIndexes: [...toValue(options.displayableColumnIndexes)], hiddenIndexes: hiddenColumnIndexes.value, allNullIndexes: new Set(automaticHiddenColumnIndexes.value) });
     hiddenColumnIndexes.value = next.hiddenIndexes;
     autoHiddenNullColumnIndexes.value = next.autoHiddenIndexes;
   }
@@ -433,7 +437,7 @@ export function useDataGridColumnLayoutState(options: {
   }
 
   onScopeDispose(flushPersistColumnLayout);
-  watch([() => nullColumnsHidden.value, () => [...toValue(options.allNullColumnIndexes)], () => [...toValue(options.displayableColumnIndexes)]], ([hidden]) => applyNullColumnVisibility(hidden as boolean), { immediate: true });
+  watch([() => nullColumnsHidden.value, automaticHiddenColumnIndexes, () => [...toValue(options.displayableColumnIndexes)]], ([hidden]) => applyNullColumnVisibility(hidden as boolean), { immediate: true });
   watch(
     () => visibleColumnIndexes.value.length,
     (visibleCount) => {

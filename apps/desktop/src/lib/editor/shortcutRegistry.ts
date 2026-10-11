@@ -20,6 +20,8 @@ export type ShortcutActionId =
   | "deleteLine"
   | "moveLineUp"
   | "moveLineDown"
+  | "scrollLineUp"
+  | "scrollLineDown"
   | "copyLineUp"
   | "copyLineDown"
   | "undo"
@@ -178,6 +180,18 @@ const EDIT_TABLE_STRUCTURE_DEFAULT = "Mod+Shift+D";
 const TAB_NAVIGATION_HISTORY_ACTIONS: ShortcutActionId[] = ["navigateTabHistoryBack", "navigateTabHistoryForward"];
 
 export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
+  {
+    id: "scrollLineUp",
+    labelKey: "settings.shortcutScrollLineUp",
+    scope: "editor",
+    defaultShortcut: "Ctrl+ArrowUp",
+  },
+  {
+    id: "scrollLineDown",
+    labelKey: "settings.shortcutScrollLineDown",
+    scope: "editor",
+    defaultShortcut: "Ctrl+ArrowDown",
+  },
   {
     id: "executeSql",
     labelKey: "settings.shortcutExecuteSql",
@@ -763,6 +777,7 @@ function shortcutsUseSameKeys(first: string, second: string, platform = globalTh
 }
 
 function shortcutDefaultForPlatform(definition: ShortcutDefinition, platform: string): string {
+  if ((definition.id === "scrollLineUp" || definition.id === "scrollLineDown") && isMacShortcutPlatform(platform)) return definition.defaultShortcut.replace("Ctrl+", "Ctrl+Alt+");
   if (definition.id === "addNextSelectionOccurrence") return selectionOccurrenceDefaultShortcut("addNextSelectionOccurrence", platform);
   if (definition.id === "selectAllSelectionOccurrences") return selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences", platform);
   if (definition.id === "selectLineEnds") return selectLineEndsDefaultShortcut(platform);

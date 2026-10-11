@@ -176,7 +176,9 @@ function specialPageTabClass(active: boolean): string[] {
 
 function specialPageTabStyle(active: boolean) {
   if (!active) return undefined;
-  if (isVerticalLayout.value) return { "--app-tab-background": "var(--accent)" };
+  // Vertical active pills take the neutral wash from appTabBar.css; an inline
+  // --app-tab-background here would repaint the special pages in solid accent.
+  if (isVerticalLayout.value) return undefined;
   if (!isClassicLayout.value) return { "--app-tab-background": appTabActiveBackground(), borderColor: "var(--ring)" };
   return { "--app-tab-background": appTabActiveBackground(), boxShadow: appTabActiveIndicator() };
 }
@@ -1071,14 +1073,23 @@ const stripSections = computed(() => {
 });
 
 function tabColorStyle(tab: QueryTab): CSSProperties | undefined {
-  // Sidebar tabs carry their group/connection color as a soft active wash;
-  // the active indicator itself comes from the vertical CSS rules.
+  // Keep ungrouped sidebar tabs aligned with the horizontal tab strip: every
+  // tab gets a connection-colored wash, while the active tab gets the stronger
+  // border and leading accent.
   if (isVerticalLayout.value) {
-    if (!isTabActive(tab)) {
-      return undefined;
-    }
-    const color = settingsStore.editorSettings.colorizeConnectionTabs ? tabConnectionColor(tab.connectionId) : "";
-    return { "--app-tab-background": color ? hexToRgba(color, 0.12) : "var(--accent)" } as CSSProperties;
+    if (settingsStore.editorSettings.tabGroupMode !== "none" || !settingsStore.editorSettings.colorizeConnectionTabs) return undefined;
+    const active = isTabActive(tab);
+    const color = tabConnectionColor(tab.connectionId);
+    return {
+      "--app-tab-background": hexToRgba(color, active ? 0.24 : 0.09),
+      "--app-tab-hover-background": hexToRgba(color, 0.16),
+      ...(active
+        ? {
+            "--app-tab-active-border": hexToRgba(color, 0.72),
+            "--app-tab-active-accent": color,
+          }
+        : { borderColor: hexToRgba(color, 0.18) }),
+    } as CSSProperties;
   }
   return sharedTabColorStyle(tab, isTabActive(tab), isClassicLayout.value);
 }

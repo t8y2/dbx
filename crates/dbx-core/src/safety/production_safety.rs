@@ -589,6 +589,8 @@ struct SqlScanLexerRules {
     backslash_escaped_quotes: bool,
     /// `E'...'` literals escape with a backslash (PostgreSQL family).
     postgres_escape_strings: bool,
+    /// `q'...'` / `nq'...'` alternative-quoted literals (Oracle family).
+    oracle_alternative_quotes: bool,
 }
 
 impl SqlScanLexerRules {
@@ -612,6 +614,7 @@ impl SqlScanLexerRules {
                 | DatabaseType::Uxdb
                 | DatabaseType::Kwdb
         );
+        let oracle_family = matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle);
         Self {
             hash_line_comments: mysql_family,
             // Only claim the escape where the engine has it: MySQL, and
@@ -621,6 +624,7 @@ impl SqlScanLexerRules {
             // so they may ask once too often — the safe direction here.)
             backslash_escaped_quotes: mysql_family,
             postgres_escape_strings: postgres_family,
+            oracle_alternative_quotes: oracle_family,
         }
     }
 }
@@ -633,6 +637,53 @@ fn ends_with_escape_string_prefix(prefix: &[char]) -> bool {
         return false;
     }
     !chars.next().is_some_and(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '$')
+}
+
+/// Oracle alternative quoting: `q'...'` / `nq'...'` literals delimited by
+/// `[`/`]`, `{`/`}`, `(`/`)`, `<`/`>` or a self-delimiting character, where the
+/// quote character may appear inside the literal unchanged. The literal ends at
+/// the first `closer + '` — Oracle has no escape or nesting inside these
+/// literals. Mirrors `readOracleAlternativeQuoteEnd` in
+/// `apps/desktop/src/lib/sql/sqlRisk.ts`.
+fn read_oracle_alternative_quote_end(chars: &[char], index: usize) -> Option<usize> {
+    let mut quote_index = index;
+    match chars.get(index)? {
+        'n' | 'N' => {
+            if !matches!(chars.get(index + 1), Some('q' | 'Q')) {
+                return None;
+            }
+            quote_index += 1;
+        }
+        'q' | 'Q' => {}
+        _ => return None,
+    }
+    if chars.get(quote_index + 1) != Some(&'\'') {
+        return None;
+    }
+    // The introducer must start its own token, so `aq'...'` and `q '...'` stay
+    // ordinary strings. Oracle identifiers may contain `$` and `#`.
+    if chars[..index].last().is_some_and(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '$' || *ch == '#') {
+        return None;
+    }
+    let opener = *chars.get(quote_index + 2)?;
+    if opener.is_whitespace() {
+        return None;
+    }
+    let closer = match opener {
+        '[' => ']',
+        '{' => '}',
+        '(' => ')',
+        '<' => '>',
+        other => other,
+    };
+    let mut scan = quote_index + 3;
+    while scan + 1 < chars.len() {
+        if chars[scan] == closer && chars[scan + 1] == '\'' {
+            return Some(scan + 2);
+        }
+        scan += 1;
+    }
+    Some(chars.len())
 }
 
 fn append_sql_target_safety_text(chars: &[char], rules: SqlScanLexerRules, result: &mut SqlTargetSafetyText) {
@@ -683,6 +734,13 @@ fn append_sql_target_safety_text(chars: &[char], rules: SqlScanLexerRules, resul
             index = (index + tag_len).min(chars.len());
             result.text.push(' ');
             continue;
+        }
+        if rules.oracle_alternative_quotes && matches!(ch, 'q' | 'Q' | 'n' | 'N') {
+            if let Some(end) = read_oracle_alternative_quote_end(chars, index) {
+                index = end;
+                result.text.push(' ');
+                continue;
+            }
         }
         if ch == '\'' {
             index = skip_string_literal(chars, index, '\'', '\'', rules);
@@ -959,6 +1017,41 @@ mod tests {
 
         let escape_string = sql_target_safety_text(r#"SELECT E'it\'s; DELETE FROM users;'"#, &DatabaseType::Postgres);
         assert!(!escape_string.text.contains("DELETE FROM users"), "{}", escape_string.text);
+    }
+
+    #[test]
+    fn scans_oracle_alternative_quoted_strings_by_the_dialect_lexer_rules() {
+        for literal in ["q'[O'Reilly]'", "nq'{O'Reilly}'", "Q'<O'Reilly>'", "q'!O'Reilly!'"] {
+            let sql = format!("SELECT {literal} FROM dual; DELETE FROM users;");
+            // The quote inside q'...' is literal, so the DELETE after the
+            // literal is real code and must stay visible to the gate.
+            let scanned = sql_target_safety_text(&sql, &DatabaseType::Oracle);
+            assert!(scanned.text.contains("DELETE FROM users"), "{literal}: {}", scanned.text);
+            let scanned = sql_target_safety_text(&sql, &DatabaseType::OceanbaseOracle);
+            assert!(scanned.text.contains("DELETE FROM users"), "{literal}: {}", scanned.text);
+        }
+
+        // SQL-looking text inside the literal stays literal data.
+        let inside =
+            sql_target_safety_text(r#"SELECT q'[it's; DELETE FROM users;]' FROM dual;"#, &DatabaseType::Oracle);
+        assert!(!inside.text.contains("DELETE FROM users"), "{}", inside.text);
+    }
+
+    #[test]
+    fn keeps_alternative_quoting_specific_to_the_oracle_family() {
+        // Oracle reads the whole `q'[O' AS label FROM dual;` as an unterminated
+        // alternative-quoted literal; PostgreSQL has no `q'...'` introducer.
+        let oracle = sql_target_safety_text("SELECT q'[O' AS label FROM dual;", &DatabaseType::Oracle);
+        assert!(!oracle.text.contains("AS label"), "{}", oracle.text);
+        let postgres = sql_target_safety_text("SELECT q'[O' AS label FROM dual;", &DatabaseType::Postgres);
+        assert!(postgres.text.contains("AS label"), "{}", postgres.text);
+    }
+
+    #[test]
+    fn keeps_an_identifier_character_before_q_out_of_the_alternative_quote_rules() {
+        // `aq` is one identifier, so the following literal is ordinary.
+        let scanned = sql_target_safety_text(r#"SELECT aq'[x]' FROM dual; DELETE FROM users;"#, &DatabaseType::Oracle);
+        assert!(scanned.text.contains("DELETE FROM users"), "{}", scanned.text);
     }
 
     #[test]

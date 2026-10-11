@@ -1,5 +1,5 @@
 import type { SqlCompletionScope } from "@/lib/sql/sqlCompletionLookupTarget";
-import type { DatabaseType } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
@@ -22,6 +22,7 @@ export interface QueryEditorProps {
   compressRequestId?: number;
   executionError?: string;
   executionErrorSql?: string;
+  executionErrorResult?: QueryResult;
   resultColumns?: string[];
   resultSourceStatement?: string;
   resultSourceFrom?: number;

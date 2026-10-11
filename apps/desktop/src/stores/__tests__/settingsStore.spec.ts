@@ -28,6 +28,12 @@ import { DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/da
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("keeps empty-column hiding opt-in and independent from NULL-only hiding", () => {
+    expect(normalizeEditorSettings({})).toMatchObject({ dataGridHideNullColumns: false, dataGridHideEmptyColumns: false });
+    expect(normalizeEditorSettings({ dataGridHideNullColumns: true })).toMatchObject({ dataGridHideNullColumns: true, dataGridHideEmptyColumns: false });
+    expect(normalizeEditorSettings({ dataGridHideEmptyColumns: true })).toMatchObject({ dataGridHideNullColumns: false, dataGridHideEmptyColumns: true });
+    expect(normalizeEditorSettings({ dataGridHideEmptyColumns: "true" } as any).dataGridHideEmptyColumns).toBe(false);
+  });
   it("preserves comment-first naming for existing settings and permits opting out", () => {
     expect(DEFAULT_EDITOR_SETTINGS.resultTabPreferComments).toBe(true);
     expect(normalizeEditorSettings({}).resultTabPreferComments).toBe(true);

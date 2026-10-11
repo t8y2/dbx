@@ -6,6 +6,7 @@ import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/c
 import { ref, computed, watch, markRaw } from "vue";
 import { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
+import { useAuthStore } from "@/stores/authStore";
 import type {
   ColumnInfo,
   CompletionAssistantCandidate,
@@ -13,6 +14,7 @@ import type {
   CompletionAssistantObjectKind,
   CompletionAssistantRequest,
   ConnectionConfig,
+  ConnectionGroup,
   ConnectionLivenessMessage,
   DatabaseType,
   DatabaseConnectionInfo,
@@ -680,6 +682,7 @@ export const useConnectionStore = defineStore("connection", () => {
     allDatabases?: boolean;
   } | null>(null);
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
+  const unlockedConnectionGroupIds = ref<ReadonlySet<string>>(new Set());
   const tableVGroupLayouts = ref<Record<string, TableVGroupLayout>>({});
   const lastDataGripFallbackUsernamesCount = ref(0);
   const dirtyTableVGroupScopeKeys = new Set<string>();
@@ -10581,10 +10584,43 @@ export const useConnectionStore = defineStore("connection", () => {
     loadSidebarTableSearchIndex,
     loadSidebarTableSearchIndexScopes,
     refreshSidebarTableSearchIndex,
-    createConnectionGroup(name: string, parentGroupId?: string | null) {
-      const result = createGroupOp(sidebarLayout.value, name, parentGroupId);
+    createConnectionGroup(name: string, parentGroupId?: string | null, passwordHash?: string) {
+      const result = createGroupOp(sidebarLayout.value, name, parentGroupId, passwordHash);
       updateLayoutAndRebuild(result.layout);
       return result.groupId;
+    },
+    isConnectionGroupUnlocked(groupId: string) {
+      return unlockedConnectionGroupIds.value.has(groupId);
+    },
+    unlockConnectionGroup(groupId: string) {
+      const next = new Set(unlockedConnectionGroupIds.value);
+      next.add(groupId);
+      unlockedConnectionGroupIds.value = next;
+      rebuildTreeNodes();
+    },
+    lockConnectionGroup(groupId: string) {
+      if (!unlockedConnectionGroupIds.value.has(groupId)) return;
+      const next = new Set(unlockedConnectionGroupIds.value);
+      next.delete(groupId);
+      unlockedConnectionGroupIds.value = next;
+      rebuildTreeNodes();
+    },
+    setConnectionGroupPassword(groupId: string, passwordHash: string | null) {
+      const group = sidebarLayout.value.groups.find((g) => g.id === groupId);
+      if (!group) return;
+      // Invalidate unlock state when password changes
+      if (unlockedConnectionGroupIds.value.has(groupId)) {
+        const next = new Set(unlockedConnectionGroupIds.value);
+        next.delete(groupId);
+        unlockedConnectionGroupIds.value = next;
+      }
+      const authStore = useAuthStore();
+      const currentUserId = authStore.user?.id ?? undefined;
+      const nextGroup: ConnectionGroup = passwordHash ? { ...group, passwordHash, passwordSetBy: currentUserId, collapsed: true } : { id: group.id, name: group.name, collapsed: group.collapsed };
+      updateLayoutAndRebuild({
+        ...sidebarLayout.value,
+        groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? nextGroup : g)),
+      });
     },
     renameConnectionGroup(groupId: string, name: string) {
       updateLayoutAndRebuild(renameGroupOp(sidebarLayout.value, groupId, name));

@@ -2,7 +2,34 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, LogOut, CloudDownload, Package, PlugZap, FileDown, FolderTree, Pin, PinOff, CalendarClock, Waypoints, RefreshCw } from "@lucide/vue";
+import {
+  ChevronsRight,
+  DatabaseZap,
+  FilePlus2,
+  Moon,
+  Sun,
+  SunMoon,
+  History,
+  Bot,
+  ArrowLeftRight,
+  FileCode,
+  BookMarked,
+  GitCompareArrows,
+  TableProperties,
+  Settings,
+  LogOut,
+  CloudDownload,
+  Package,
+  PlugZap,
+  FileDown,
+  FolderTree,
+  Pin,
+  PinOff,
+  CalendarClock,
+  Waypoints,
+  RefreshCw,
+  User,
+} from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown, { type LightDropdownItem } from "@/components/ui/LightDropdown.vue";
@@ -14,6 +41,7 @@ import AppLogo from "@/components/icons/AppLogo.vue";
 import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useAuthStore } from "@/stores/authStore";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
 import { formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 
@@ -87,10 +115,17 @@ const { t } = useI18n();
 const { toast } = useToast();
 
 const settingsStore = useSettingsStore();
+const authStore = useAuthStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const webLogoPosition = computed(() => settingsStore.editorSettings.webLogoPosition ?? "left");
 const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates || props.hasUpdateAvailable);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop, close } = useWindowControls();
+
+// Current user display name
+const currentUserDisplay = computed(() => {
+  if (!authStore.user) return null;
+  return authStore.user.display_name || authStore.user.username;
+});
 // The always-on-top control is opt-in (外观 → 工具栏): the right side of the
 // toolbar is the most crowded strip in the app. It stays visible while the
 // window is actually pinned even with the setting off, so turning the setting
@@ -854,6 +889,12 @@ const toolbarStyle = computed(() => {
       </TooltipTrigger>
       <TooltipContent>{{ t("auth.logout") }}</TooltipContent>
     </Tooltip>
+
+    <!-- Current user display -->
+    <div v-if="currentUserDisplay" class="flex items-center gap-1.5 px-2 h-8 rounded-md bg-muted/50 shrink-0 select-none">
+      <User class="h-3.5 w-3.5 text-muted-foreground" />
+      <span class="text-xs font-medium text-foreground/90 truncate max-w-[120px]" :title="currentUserDisplay">{{ currentUserDisplay }}</span>
+    </div>
 
     <WindowControls v-if="showControls" :is-maximized="isMaximized" @minimize="minimize" @toggle-maximize="toggleMaximize" @close="close" />
   </div>

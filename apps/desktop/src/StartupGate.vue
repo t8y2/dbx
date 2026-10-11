@@ -7,6 +7,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { webPath } from "@/lib/common/webPath";
 import { loadSavedLocale } from "@/i18n";
 import { checkStartupAuthentication, type StartupAuthentication } from "@/lib/startup/startupAuthentication";
+import { useAuthStore } from "@/stores/authStore";
 import { markStartupPhase } from "@/lib/startup/startupTiming";
 import { retryStartupAfterPreloadFailure } from "@/lib/startup/startupPreloadRecovery";
 
@@ -28,6 +29,7 @@ const SecurityMigrationWizard = defineAsyncComponent({ ...startupAsyncOptions, l
 const props = defineProps<{ localeReady?: Promise<void> }>();
 const { t } = useI18n();
 const migration = useMigrationStore();
+const auth = useAuthStore();
 const { blocking } = migration;
 const checkingAuth = ref(true);
 const loginRequired = ref(false);
@@ -84,8 +86,9 @@ async function initialize() {
     if (!request.signal.aborted) checkingAuth.value = false;
   }
 }
-async function authenticated() {
+async function authenticated(payload?: StartupAuthentication) {
   history.replaceState(null, "", webPath("/"));
+  if (payload) auth.applyCheckResponse(payload);
   await initialize();
 }
 onMounted(() => {

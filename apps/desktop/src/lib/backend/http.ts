@@ -350,11 +350,12 @@ const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   sidebar_table_page_size: 1000,
 };
 
-async function post<T>(url: string, body: unknown): Promise<T> {
+export async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(apiUrl(url), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    credentials: "include",
   });
   if (!res.ok) throw await backendResponseError(res);
   if (res.status === 204) return undefined as T;
@@ -410,23 +411,24 @@ async function postQueryWithDiagnostics<T>(url: string, body: unknown, traceId?:
   return result;
 }
 
-async function get<T>(url: string): Promise<T> {
-  const res = await fetch(apiUrl(url));
+export async function get<T>(url: string): Promise<T> {
+  const res = await fetch(apiUrl(url), { credentials: "include" });
   if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 
-async function del<T>(url: string): Promise<T> {
-  const res = await fetch(apiUrl(url), { method: "DELETE" });
+export async function del<T>(url: string): Promise<T> {
+  const res = await fetch(apiUrl(url), { method: "DELETE", credentials: "include" });
   if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 
-async function put<T>(url: string, body: unknown): Promise<T> {
+export async function put<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(apiUrl(url), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    credentials: "include",
   });
   if (!res.ok) throw await backendResponseError(res);
   return res.json();

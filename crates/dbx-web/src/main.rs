@@ -1,13 +1,15 @@
 mod auth;
+mod blacklist;
 mod demo;
 mod error;
+mod request_context;
 mod routes;
 mod sse;
 mod ssh_prompt;
 mod state;
 mod web_mcp;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -457,6 +459,38 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
 }
 
+/// 启动引导：旧单口令体系平滑迁移到多用户体系。
+///
+/// 用户表非空 -> 幂等跳过（不改动任何数据）。
+/// 用户表为空时按以下优先级创建首个 admin：
+///
+/// 1. `DBX_PASSWORD` env 存在 -> 用 env 口令的 Argon2 哈希创建；
+/// 2. `app_settings.password_hash` 存在旧哈希 -> 直接复用；
+/// 3. 两者都没有 -> 不创建，`setup_required = true` 走前端向导。
+async fn bootstrap_first_admin(
+    storage: &dbx_core::storage::Storage,
+    env_password: Option<&str>,
+    legacy_hash: Option<&str>,
+) -> Result<bool, String> {
+    if storage.count_users().await? > 0 {
+        return Ok(false);
+    }
+    let password_hash = if let Some(password) = env_password {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|_| "failed to hash DBX_PASSWORD for the bootstrap admin".to_string())?
+            .to_string()
+    } else if let Some(hash) = legacy_hash {
+        hash.to_string()
+    } else {
+        return Ok(false);
+    };
+    storage.create_user("admin", &password_hash, None, None, true).await?;
+    log::info!("Bootstrapped the first admin user from the legacy single-password configuration");
+    Ok(true)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if help_requested(&args) {
@@ -536,13 +570,37 @@ async fn serve() -> Result<(), String> {
         .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
 
+    let trust_proxy = std::env::var("DBX_TRUST_PROXY")
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+
+    // 启动引导：旧单口令体系 -> 多用户体系（见 bootstrap_first_admin）。
+    let env_password = std::env::var("DBX_PASSWORD").ok().filter(|value| !value.is_empty());
+    let legacy_hash =
+        if password_disabled { None } else { app_state.storage.load_password_hash().await.unwrap_or(None) };
+    let bootstrap_created_admin =
+        bootstrap_first_admin(&app_state.storage, env_password.as_deref(), legacy_hash.as_deref()).await;
+    if let Err(error) = bootstrap_created_admin {
+        panic!("Failed to bootstrap the first admin user: {error}");
+    }
+    let user_system_ready = app_state.storage.count_users().await.unwrap_or(0) > 0;
+
     let password_hash = if password_disabled {
         None
-    } else if let Ok(pw) = std::env::var("DBX_PASSWORD") {
+    } else if let Some(pw) = env_password {
         let salt = SaltString::generate(&mut OsRng);
         Some(Argon2::default().hash_password(pw.as_bytes(), &salt).expect("Failed to hash password").to_string())
     } else {
-        app_state.storage.load_password_hash().await.unwrap_or(None)
+        legacy_hash
+    };
+
+    // 登录黑名单内存缓存（含 IP 屏蔽中间件的判定源）。
+    let blacklist = match blacklist::BlacklistCache::load(&app_state.storage).await {
+        Ok(cache) => Arc::new(cache),
+        Err(error) => {
+            log::warn!("Failed to load the login blacklist cache: {error}");
+            Arc::new(blacklist::BlacklistCache::empty())
+        }
     };
 
     let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
@@ -564,19 +622,23 @@ async fn serve() -> Result<(), String> {
         public_base_path: public_base_path.clone(),
         demo_mode,
         password_disabled,
+        trust_proxy,
         password_hash: RwLock::new(password_hash),
-        sessions: RwLock::new(HashSet::new()),
+        sessions: RwLock::new(HashMap::new()),
         sse_channels: RwLock::new(HashMap::new()),
         transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
         managed_sql_previews: Default::default(),
         nacos_imports: RwLock::new(HashMap::new()),
-        login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
+        login_rate_limit: tokio::sync::Mutex::new(HashMap::new()),
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
         migration_ready: Arc::new(AtomicBool::new(migration_ready)),
         web_mcp,
+        blacklist,
+        permission_cache: RwLock::new(HashMap::new()),
+        user_system_ready: Arc::new(AtomicBool::new(user_system_ready)),
     });
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
@@ -1284,6 +1346,21 @@ async fn serve() -> Result<(), String> {
         )
         .route("/saved-sql/folders", post(routes::saved_sql::save_saved_sql_folder))
         .route("/saved-sql/folders/{id}", delete(routes::saved_sql::delete_saved_sql_folder))
+        // Admin
+        .route("/admin/users", get(routes::admin::list_users).post(routes::admin::create_user))
+        .route("/admin/users/{id}", put(routes::admin::update_user).delete(routes::admin::delete_user))
+        .route("/admin/users/{id}/reset-password", post(routes::admin::reset_user_password))
+        .route("/admin/departments", get(routes::admin::list_departments).post(routes::admin::create_department))
+        .route(
+            "/admin/departments/{id}",
+            put(routes::admin::update_department).delete(routes::admin::delete_department),
+        )
+        .route("/admin/roles", get(routes::admin::list_roles).post(routes::admin::create_role))
+        .route("/admin/roles/{id}", put(routes::admin::update_role).delete(routes::admin::delete_role))
+        .route("/admin/blacklist", get(routes::admin::list_blacklist).post(routes::admin::create_blacklist))
+        .route("/admin/blacklist/{id}", delete(routes::admin::delete_blacklist))
+        .route("/admin/scope-tree", get(routes::admin::scope_tree))
+        .route("/admin/clear-protection-password", post(routes::admin::clear_protection_password))
         // AI
         .route("/ai/config", post(routes::ai::save_ai_config).get(routes::ai::load_ai_config))
         .route("/ai/provider-config", post(routes::ai::save_ai_provider_config))
@@ -1499,6 +1576,10 @@ async fn serve() -> Result<(), String> {
     };
     app = mount_static_assets(app, &public_base_path, static_source);
 
+    // IP 黑名单门：挂在全站最外层（migration_gate / auth 之前），对全部请求
+    // （含静态资源与 MCP 端点）生效。
+    app = app.layer(middleware::from_fn_with_state(web_state.clone(), blacklist::ip_blacklist_middleware));
+
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
     // Defaults to all interfaces for container deployments; operators who
@@ -1576,9 +1657,10 @@ async fn serve() -> Result<(), String> {
     });
 
     let shutdown_wait = server_shutdown.clone();
-    let serve_future = axum::serve(listener, app).with_graceful_shutdown(async move {
-        shutdown_wait.cancelled().await;
-    });
+    let serve_future = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(async move {
+            shutdown_wait.cancelled().await;
+        });
 
     // If graceful shutdown of HTTP connections takes longer than 5 seconds, abort to ensure prompt termination on Ctrl+C.
     // Non-zero exit codes keep systemd's Restart=on-failure meaningful: a serve error or an

@@ -15,6 +15,11 @@ pub struct SavedSqlFolder {
     pub order_index: i64,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub password_hash: Option<String>,
+    /// User ID who set the protection password. Used to restrict password clearing to the original setter.
+    #[serde(default)]
+    pub password_set_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

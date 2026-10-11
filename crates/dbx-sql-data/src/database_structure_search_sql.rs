@@ -33,7 +33,9 @@ pub fn supports_database_structure_search(database_type: Option<DatabaseType>, d
     .is_some()
 }
 
-pub fn build_database_structure_search_sql(options: DatabaseStructureSearchSqlOptions) -> Option<DatabaseStructureSearchSql> {
+pub fn build_database_structure_search_sql(
+    options: DatabaseStructureSearchSqlOptions,
+) -> Option<DatabaseStructureSearchSql> {
     let term = clean_term(&options.term);
     if term.is_empty() {
         return None;
@@ -44,7 +46,11 @@ pub fn build_database_structure_search_sql(options: DatabaseStructureSearchSqlOp
 
     let database_type = options.database_type?;
     let sql = match database_type {
-        DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::Starrocks | DatabaseType::Manticoresearch | DatabaseType::Goldendb => {
+        DatabaseType::Mysql
+        | DatabaseType::Doris
+        | DatabaseType::StarRocks
+        | DatabaseType::ManticoreSearch
+        | DatabaseType::Goldendb => {
             mysql_family_structure_search_sql(&options.database, options.schema.as_deref(), &pattern_literal, limit)
         }
         DatabaseType::Postgres
@@ -56,14 +62,24 @@ pub fn build_database_structure_search_sql(options: DatabaseStructureSearchSqlOp
         | DatabaseType::Gaussdb
         | DatabaseType::Kwdb
         | DatabaseType::Yashandb
-        | DatabaseType::Oscar => postgres_family_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Redshift => postgres_family_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
+        | DatabaseType::Oscar => {
+            postgres_family_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit)
+        }
+        DatabaseType::Redshift => {
+            postgres_family_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit)
+        }
         DatabaseType::Sqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 | DatabaseType::Rqlite => {
             sqlite_family_structure_search_sql(&pattern_literal, limit)
         }
         DatabaseType::ClickHouse => clickhouse_structure_search_sql(&options.database, &pattern_literal, limit),
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => {
-            oracle_family_structure_search_sql(database_type, options.schema.as_deref(), &options.database, &pattern_literal, limit)
+            oracle_family_structure_search_sql(
+                database_type,
+                options.schema.as_deref(),
+                &options.database,
+                &pattern_literal,
+                limit,
+            )
         }
         DatabaseType::SqlServer => sqlserver_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
         DatabaseType::Tdengine => tdengine_structure_search_sql(&options.database, &pattern_literal, limit),
@@ -93,7 +109,13 @@ pub fn build_database_structure_search_sql(options: DatabaseStructureSearchSqlOp
             postgres_family_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit)
         }
         DatabaseType::Jdbc if driver_profile_is_oracle(options.driver_profile.as_deref()) => {
-            oracle_family_structure_search_sql(DatabaseType::Oracle, options.schema.as_deref(), &options.database, &pattern_literal, limit)
+            oracle_family_structure_search_sql(
+                DatabaseType::Oracle,
+                options.schema.as_deref(),
+                &options.database,
+                &pattern_literal,
+                limit,
+            )
         }
         _ => return None,
     };
@@ -121,16 +143,18 @@ fn driver_profile_is_oracle(profile: Option<&str>) -> bool {
     profile.contains("oracle") || profile.contains("dameng") || profile.contains("dm")
 }
 
-fn mysql_family_structure_search_sql(database: &str, schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
+fn mysql_family_structure_search_sql(
+    database: &str,
+    schema: Option<&str>,
+    pattern_literal: &str,
+    limit: usize,
+) -> String {
     let schema_filter = if let Some(schema) = schema.filter(|value| !value.trim().is_empty()) {
         format!(" AND TABLE_SCHEMA = {}", sql_string_literal(schema))
     } else {
         format!(" AND TABLE_SCHEMA = {}", sql_string_literal(database))
     };
-    let comment_match = format!(
-        " OR LOWER(COLUMN_COMMENT) LIKE LOWER({}) ESCAPE '~'",
-        pattern_literal
-    );
+    let comment_match = format!(" OR LOWER(COLUMN_COMMENT) LIKE LOWER({}) ESCAPE '~'", pattern_literal);
     format!(
         "SELECT TABLE_SCHEMA AS object_schema, TABLE_NAME AS object_name, COLUMN_NAME AS column_name, \
          COLUMN_COMMENT AS column_comment \
@@ -140,8 +164,7 @@ fn mysql_family_structure_search_sql(database: &str, schema: Option<&str>, patte
          AND TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys') \
          ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION \
          LIMIT {limit}",
-        pattern_literal,
-        comment_match,
+        pattern_literal, comment_match,
     )
 }
 
@@ -208,11 +231,7 @@ fn oracle_family_structure_search_sql(
 ) -> String {
     let owner = schema.filter(|value| !value.trim().is_empty()).unwrap_or(database);
     let owner_literal = sql_string_literal(owner);
-    let name_expr = if database_type == DatabaseType::Dameng {
-        "LOWER(c.COLUMN_NAME)"
-    } else {
-        "LOWER(c.COLUMN_NAME)"
-    };
+    let name_expr = if database_type == DatabaseType::Dameng { "LOWER(c.COLUMN_NAME)" } else { "LOWER(c.COLUMN_NAME)" };
     let bounded = format!(
         "SELECT * FROM ( \
          SELECT c.OWNER AS object_schema, c.TABLE_NAME AS object_name, c.COLUMN_NAME AS column_name, m.COMMENTS AS column_comment \
@@ -285,7 +304,12 @@ fn db2_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: 
     )
 }
 
-fn hive_family_structure_search_sql(database: &str, schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
+fn hive_family_structure_search_sql(
+    database: &str,
+    schema: Option<&str>,
+    pattern_literal: &str,
+    limit: usize,
+) -> String {
     let schema_name = schema.filter(|value| !value.trim().is_empty()).unwrap_or(database);
     format!(
         "SELECT table_schema AS object_schema, table_name AS object_name, column_name AS column_name, comment AS column_comment \
@@ -444,7 +468,12 @@ fn questdb_structure_search_sql(pattern_literal: &str, limit: usize) -> String {
     )
 }
 
-fn presto_family_structure_search_sql(database: &str, schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
+fn presto_family_structure_search_sql(
+    database: &str,
+    schema: Option<&str>,
+    pattern_literal: &str,
+    limit: usize,
+) -> String {
     hive_family_structure_search_sql(database, schema, pattern_literal, limit)
 }
 

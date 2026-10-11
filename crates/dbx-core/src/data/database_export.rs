@@ -1464,12 +1464,11 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
             let column_type = export_column_type(&options.column_types, index, options.database_type, &spatial_columns);
             let column_name = column.trim();
             let excluded = excluded_names.contains(column_name)
-                || (!matches!(options.database_type, Some(DatabaseType::Postgres | DatabaseType::Redshift))
-                    && exclude_columns
-                        .iter()
-                        .filter(|excluded| excluded.trim().eq_ignore_ascii_case(column_name))
-                        .count()
-                        == 1
+                || (exclude_columns
+                    .iter()
+                    .filter(|excluded| excluded.trim().eq_ignore_ascii_case(column_name))
+                    .count()
+                    == 1
                     && options
                         .columns
                         .iter()

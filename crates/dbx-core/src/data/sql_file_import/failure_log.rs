@@ -637,9 +637,9 @@ async fn open_log_file(dir: &Path, path: &Path) -> Result<tokio::fs::File, Strin
     options.create(true).truncate(true).write(true);
     // POSIX: the log holds full SQL text and database errors, so keep it private.
     // On Windows the file inherits the user-profile ACL of the data directory.
+    // `mode` is tokio's own unix-only method, so no std extension trait is needed.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     options.open(path).await.map_err(|error| format!("Cannot create failure log: {error}"))
@@ -653,7 +653,6 @@ async fn create_log_dir(dir: &Path) -> Result<(), String> {
     builder.recursive(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
     builder.create(dir).await.map_err(|error| format!("Cannot create failure log directory: {error}"))
@@ -748,7 +747,7 @@ pub fn prune_sql_file_failure_logs_with_limits(
         let modified = metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
         entries.push((path, modified, metadata.len()));
     }
-    entries.sort_by(|left, right| right.1.cmp(&left.1));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     let mut removed = 0u64;
     let mut kept_bytes = 0u64;

@@ -320,6 +320,7 @@ watch(
     v-if="dialogs.showFieldLineageDialog.value"
     v-model:open="dialogs.showFieldLineageDialog.value"
     :prefill-connection-id="dialogs.lineagePrefillConnectionId.value"
+    :prefill-database-type="dialogs.lineagePrefillDatabaseType.value"
     :prefill-database="dialogs.lineagePrefillDatabase.value"
     :prefill-schema="dialogs.lineagePrefillSchema.value"
     :prefill-table="dialogs.lineagePrefillTable.value"

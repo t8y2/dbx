@@ -10,12 +10,14 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
-import { analyzeFieldLineage, summarizeLineageCounts, type FieldLineageConfidence, type FieldLineageItem, type FieldLineageResult, type FieldLineageTable, type FieldLineageView } from "@/lib/diagram/fieldLineage";
+import { analyzeFieldLineage, filterFieldLineageHistory, summarizeLineageCounts, type FieldLineageConfidence, type FieldLineageItem, type FieldLineageResult, type FieldLineageTable, type FieldLineageView } from "@/lib/diagram/fieldLineage";
+import type { DatabaseType } from "@/types/database";
 import { copyToClipboard } from "@/lib/common/clipboard";
 
 const props = defineProps<{
   open: boolean;
   prefillConnectionId: string;
+  prefillDatabaseType?: DatabaseType;
   prefillDatabase: string;
   prefillSchema?: string;
   prefillTable: string;
@@ -58,6 +60,7 @@ const result = ref<FieldLineageResult | null>(null);
 const confidenceFilter = ref<"all" | FieldLineageConfidence>("all");
 const searchText = ref("");
 const copiedId = ref("");
+const incompleteCoverage = ref({ skippedTables: 0, skippedViews: 0, omittedTables: 0, omittedViews: 0 });
 let runId = 0;
 
 const targetLabel = computed(() => {
@@ -66,6 +69,8 @@ const targetLabel = computed(() => {
 });
 
 const counts = computed(() => summarizeLineageCounts(result.value?.items ?? []));
+const isXugu = computed(() => props.prefillDatabaseType === "xugu");
+const hasIncompleteCoverage = computed(() => Object.values(incompleteCoverage.value).some((count) => count > 0));
 
 const confidenceOptions = computed<Array<{ value: "all" | FieldLineageConfidence; label: string; count: number }>>(() => [
   { value: "all", label: t("lineage.all"), count: result.value?.items.length ?? 0 },
@@ -118,6 +123,7 @@ async function loadLineage() {
   cancelled.value = false;
   error.value = "";
   result.value = null;
+  incompleteCoverage.value = { skippedTables: 0, skippedViews: 0, omittedTables: 0, omittedViews: 0 };
   progressDone.value = 0;
   progressTotal.value = 0;
 
@@ -126,14 +132,26 @@ async function loadLineage() {
     if (isStale(currentRun)) return;
 
     const schema = props.prefillSchema || props.prefillDatabase;
-    const tableInfos = prioritizeTargetTable(await api.listTables(props.prefillConnectionId, props.prefillDatabase, schema), props.prefillTable).slice(0, MAX_TABLES);
-    const viewInfos = tableInfos.filter((table) => table.table_type.toUpperCase().includes("VIEW")).slice(0, MAX_VIEW_DDLS);
-    progressTotal.value = tableInfos.length + viewInfos.length + 1;
+    const listedTables = prioritizeTargetTable(await api.listTables(props.prefillConnectionId, props.prefillDatabase, schema), props.prefillTable);
+    const tableInfos = listedTables.slice(0, MAX_TABLES);
+    const listedViews = tableInfos.filter((table) => table.table_type.toUpperCase().includes("VIEW"));
+    const viewInfos = listedViews.slice(0, MAX_VIEW_DDLS);
+    // Xugu's list_tables result contains both tables and views. A view is
+    // scanned below from its definition; sending it through table metadata
+    // can execute the view as a SELECT and incorrectly report the same broken
+    // view as both a skipped table and a skipped view.
+    const tableMetadataInfos = isXugu.value ? tableInfos.filter((table) => !table.table_type.toUpperCase().includes("VIEW")) : tableInfos;
+    if (isXugu.value) {
+      incompleteCoverage.value.omittedTables = Math.max(0, listedTables.length - tableInfos.length);
+      incompleteCoverage.value.omittedViews = Math.max(0, listedViews.length - viewInfos.length);
+    }
+    progressTotal.value = tableMetadataInfos.length + viewInfos.length + 1;
 
     const tables: FieldLineageTable[] = [];
-    for (let i = 0; i < tableInfos.length; i += BATCH_SIZE) {
+    let skippedTables = 0;
+    for (let i = 0; i < tableMetadataInfos.length; i += BATCH_SIZE) {
       if (isStale(currentRun)) return;
-      const batch = tableInfos.slice(i, i + BATCH_SIZE);
+      const batch = tableMetadataInfos.slice(i, i + BATCH_SIZE);
       const loaded = await Promise.all(
         batch.map(async (table) => {
           try {
@@ -146,6 +164,7 @@ async function loadLineage() {
               foreignKeys,
             };
           } catch {
+            skippedTables++;
             return { schema, name: table.name, columns: [], foreignKeys: [] };
           }
         }),
@@ -155,19 +174,31 @@ async function loadLineage() {
     }
 
     const views: FieldLineageView[] = [];
+    let skippedViews = 0;
     for (const view of viewInfos) {
       if (isStale(currentRun)) return;
       try {
-        const ddl = await api.getTableDdl(props.prefillConnectionId, props.prefillDatabase, schema, view.name);
+        const ddl = await api.getTableDdl(props.prefillConnectionId, props.prefillDatabase, schema, view.name, isXugu.value ? "VIEW" : undefined);
         views.push({ schema, name: view.name, ddl });
       } catch {
+        skippedViews++;
         // Some drivers may not expose view DDL consistently; keep the rest of the lineage usable.
       } finally {
         progressDone.value++;
       }
     }
 
-    const histories = (await api.loadHistory(200, 0)).filter((entry) => !entry.database || entry.database === props.prefillDatabase).map((entry) => ({ id: entry.id, sql: entry.sql, executed_at: entry.executed_at }));
+    const historyEntries = await api.loadHistory(200, 0);
+    const scopedHistory = filterFieldLineageHistory(historyEntries, {
+      database: props.prefillDatabase,
+      connectionId: props.prefillConnectionId,
+      requireConnectionMatch: isXugu.value,
+    });
+    const histories = scopedHistory.map((entry) => ({ id: entry.id, sql: entry.sql, executed_at: entry.executed_at }));
+    if (isXugu.value) {
+      incompleteCoverage.value.skippedTables = skippedTables;
+      incompleteCoverage.value.skippedViews = skippedViews;
+    }
     progressDone.value++;
     if (isStale(currentRun)) return;
 
@@ -316,6 +347,19 @@ function openItemTarget(item: FieldLineageItem) {
         </div>
 
         <div class="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+          <div v-if="isXugu" class="mb-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs leading-5 text-muted-foreground">
+            {{ t("lineage.xuguScopeNotice", { schema: props.prefillSchema || props.prefillDatabase }) }}
+          </div>
+          <div v-if="isXugu && hasIncompleteCoverage" class="mb-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs leading-5 text-amber-800 dark:text-amber-200">
+            {{
+              t("lineage.xuguPartialCoverage", {
+                skippedTables: incompleteCoverage.skippedTables,
+                skippedViews: incompleteCoverage.skippedViews,
+                omittedTables: incompleteCoverage.omittedTables,
+                omittedViews: incompleteCoverage.omittedViews,
+              })
+            }}
+          </div>
           <div v-if="loading" class="rounded-md border bg-muted/20 p-4">
             <div class="flex items-center gap-2 text-sm text-muted-foreground tabular-nums">
               <Loader2 class="h-4 w-4 animate-spin" />

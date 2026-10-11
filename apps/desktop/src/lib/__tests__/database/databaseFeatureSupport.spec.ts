@@ -352,8 +352,10 @@ describe("supportsTableImport", () => {
 });
 
 describe("supportsFieldLineage", () => {
-  it("enables DB2 field lineage", () => {
+  it("enables field lineage only for databases that advertise support", () => {
     expect(supportsFieldLineage("db2")).toBe(true);
+    expect(supportsFieldLineage("xugu")).toBe(true);
+    expect(supportsFieldLineage("redis")).toBe(false);
   });
 });
 

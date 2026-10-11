@@ -3294,6 +3294,9 @@ export default {
     title: "Field Lineage",
     open: "View Field Lineage",
     loading: "Reading metadata {done}/{total}",
+    xuguScopeNotice:
+      "Xugu field lineage is an assistive analysis: it scans tables and views only in the current schema ({schema}); SQL history is limited to entries for this connection found in the latest 200 locally stored records. Same-name fields indicate possible relevance, not a database dependency.",
+    xuguPartialCoverage: "Results may be incomplete: skipped {skippedTables} tables with metadata read failures and {skippedViews} view definitions; {omittedTables} tables and {omittedViews} views were also omitted by scan limits.",
     empty: "No related lineage found",
     noFiltered: "No results match the current filters",
     targetField: "Current Field",

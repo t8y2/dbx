@@ -3228,6 +3228,8 @@ export default withEnglishFallback({
     title: "字段血缘",
     open: "查看字段血缘",
     loading: "正在读取元数据 {done}/{total}",
+    xuguScopeNotice: "虚谷字段血缘是辅助分析：仅扫描当前模式「{schema}」中的表和视图；SQL 历史只取本地最近 200 条记录中属于当前连接的部分。同名字段只表示可能相关，不等于数据库依赖。",
+    xuguPartialCoverage: "本次结果可能不完整：跳过 {skippedTables} 张元数据读取失败的表、{skippedViews} 个视图定义；另有 {omittedTables} 张表和 {omittedViews} 个视图因扫描上限未纳入。",
     empty: "没有找到相关血缘",
     noFiltered: "当前筛选条件下没有结果",
     targetField: "当前字段",

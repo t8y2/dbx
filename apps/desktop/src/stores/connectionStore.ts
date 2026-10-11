@@ -661,6 +661,7 @@ export const useConnectionStore = defineStore("connection", () => {
   } | null>(null);
   const fieldLineageSource = ref<{
     connectionId: string;
+    databaseType?: DatabaseType;
     database: string;
     schema?: string;
     tableName: string;

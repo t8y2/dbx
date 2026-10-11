@@ -200,6 +200,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     if (node.type !== "column" || !node.connectionId || !node.database || !node.tableName || !column) return;
     connectionStore.fieldLineageSource = {
       connectionId: node.connectionId,
+      databaseType: connectionStore.getConfig(node.connectionId)?.db_type,
       database: node.database,
       schema: node.schema,
       tableName: node.tableName,

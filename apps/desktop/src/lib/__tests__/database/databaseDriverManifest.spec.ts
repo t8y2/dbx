@@ -16,7 +16,7 @@ describe("databaseDriverManifest", () => {
       dataTransfer: true,
       sqlFileExecution: true,
       databaseCreate: false,
-      fieldLineage: false,
+      fieldLineage: true,
       sqlExplain: true,
       userAdmin: true,
       driverManagement: true,

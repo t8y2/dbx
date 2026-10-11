@@ -775,6 +775,7 @@ const editDataGridKeepFilterEditorExpanded = ref(settingsStore.editorSettings.da
 const dataGridFilterViewPreviewExpanded = ref(true);
 const editDataGridTextFilterPanelHeight = ref(settingsStore.editorSettings.dataGridTextFilterPanelHeight);
 const editDefaultAutoKeepResults = ref(settingsStore.editorSettings.defaultAutoKeepResults);
+const editPinResultOnTabClick = ref(settingsStore.editorSettings.pinResultOnTabClick);
 const editMultiStatementDefaultView = ref<MultiStatementDefaultView>(settingsStore.editorSettings.multiStatementDefaultView);
 const editDefaultExplainView = ref<DefaultExplainView>(settingsStore.editorSettings.defaultExplainView);
 const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
@@ -1149,6 +1150,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridKeepFilterEditorExpanded: editDataGridKeepFilterEditorExpanded.value,
     dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight.value,
     defaultAutoKeepResults: editDefaultAutoKeepResults.value,
+    pinResultOnTabClick: editPinResultOnTabClick.value,
     multiStatementDefaultView: editMultiStatementDefaultView.value,
     defaultExplainView: editDefaultExplainView.value,
     dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
@@ -1836,6 +1838,7 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridKeepFilterEditorExpanded.value = settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
   editDataGridTextFilterPanelHeight.value = settingsStore.editorSettings.dataGridTextFilterPanelHeight;
   editDefaultAutoKeepResults.value = settingsStore.editorSettings.defaultAutoKeepResults;
+  editPinResultOnTabClick.value = settingsStore.editorSettings.pinResultOnTabClick;
   editMultiStatementDefaultView.value = settingsStore.editorSettings.multiStatementDefaultView;
   editDefaultExplainView.value = settingsStore.editorSettings.defaultExplainView;
   editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
@@ -1998,6 +2001,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   dataGridKeepFilterEditorExpanded: editDataGridKeepFilterEditorExpanded,
   dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight,
   defaultAutoKeepResults: editDefaultAutoKeepResults,
+  pinResultOnTabClick: editPinResultOnTabClick,
   multiStatementDefaultView: editMultiStatementDefaultView,
   defaultExplainView: editDefaultExplainView,
   dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow,
@@ -2600,6 +2604,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridKeepFilterEditorExpanded.value = DEFAULT_EDITOR_SETTINGS.dataGridKeepFilterEditorExpanded;
     editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
     editDefaultAutoKeepResults.value = DEFAULT_EDITOR_SETTINGS.defaultAutoKeepResults;
+    editPinResultOnTabClick.value = DEFAULT_EDITOR_SETTINGS.pinResultOnTabClick;
     editMultiStatementDefaultView.value = DEFAULT_EDITOR_SETTINGS.multiStatementDefaultView;
     editDefaultExplainView.value = DEFAULT_EDITOR_SETTINGS.defaultExplainView;
     editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
@@ -2727,6 +2732,7 @@ function resetAllDefaults() {
   editDataGridKeepFilterEditorExpanded.value = DEFAULT_EDITOR_SETTINGS.dataGridKeepFilterEditorExpanded;
   editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
   editDefaultAutoKeepResults.value = DEFAULT_EDITOR_SETTINGS.defaultAutoKeepResults;
+  editPinResultOnTabClick.value = DEFAULT_EDITOR_SETTINGS.pinResultOnTabClick;
   editMultiStatementDefaultView.value = DEFAULT_EDITOR_SETTINGS.multiStatementDefaultView;
   editDefaultExplainView.value = DEFAULT_EDITOR_SETTINGS.defaultExplainView;
   editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
@@ -8756,6 +8762,13 @@ onUnmounted(() => {
                     <p class="text-xs text-muted-foreground">{{ t("settings.defaultAutoKeepResultsDescription") }}</p>
                   </div>
                   <Switch id="default-auto-keep-results" v-model="editDefaultAutoKeepResults" :aria-label="t('settings.defaultAutoKeepResults')" />
+                </div>
+                <div data-settings-search-id="pin-result-on-tab-click" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('pin-result-on-tab-click')]">
+                  <div class="min-w-0 space-y-1">
+                    <Label for="pin-result-on-tab-click">{{ t("settings.pinResultOnTabClick") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.pinResultOnTabClickDescription") }}</p>
+                  </div>
+                  <Switch id="pin-result-on-tab-click" v-model="editPinResultOnTabClick" :aria-label="t('settings.pinResultOnTabClick')" />
                 </div>
                 <div data-settings-search-id="multi-statement-default-view" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('multi-statement-default-view')]">
                   <div class="min-w-0 space-y-1">

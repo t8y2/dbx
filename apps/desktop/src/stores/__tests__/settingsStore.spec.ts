@@ -54,6 +54,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ welcomePageMode: "workspace", welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION }).welcomePageMode).toBe("workspace");
   });
 
+  it("keeps result-tab click pinning enabled for existing settings and preserves an explicit opt-out", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.pinResultOnTabClick).toBe(true);
+    expect(normalizeEditorSettings({}).pinResultOnTabClick).toBe(true);
+    expect(normalizeEditorSettings({ pinResultOnTabClick: false }).pinResultOnTabClick).toBe(false);
+    expect(normalizeEditorSettings({ pinResultOnTabClick: true }).pinResultOnTabClick).toBe(true);
+  });
   it("defaults and sanitizes AI conversation typography independently", () => {
     expect(normalizeEditorSettings({})).toMatchObject({ aiFontFamily: "", aiFontSize: 12 });
     expect(

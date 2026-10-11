@@ -74,6 +74,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "dataGridKeepFilterEditorExpanded",
   "dataGridTextFilterPanelHeight",
   "defaultAutoKeepResults",
+  "pinResultOnTabClick",
   "multiStatementDefaultView",
   "defaultExplainView",
   "dataGridAutoTransposeSingleRow",

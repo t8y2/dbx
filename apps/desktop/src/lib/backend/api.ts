@@ -468,6 +468,9 @@ export const listLocalSshKeys = forward("listLocalSshKeys");
 export const previewSqlFile = forward("previewSqlFile");
 export const releaseSqlFilePreview = forward("releaseSqlFilePreview");
 export const executeSqlFile = forward("executeSqlFile");
+export const sqlFileFailureLogInfo = forward("sqlFileFailureLogInfo");
+export const exportSqlFileFailureLog = forward("exportSqlFileFailureLog");
+export const readSqlFileFailureLogText = forward("readSqlFileFailureLogText");
 export const executeSqlFiles = forward("executeSqlFiles");
 export const cancelSqlFileExecution = forward("cancelSqlFileExecution");
 export const inspectSqlFileTables = forward("inspectSqlFileTables");
@@ -980,6 +983,11 @@ export type { AiConfigItem };
 
 export type {
   AppSupportInfo,
+  SqlFileFailureLogExportPayload,
+  SqlFileFailureLogInfo,
+  SqlFileFailureLogKey,
+  SqlFileFailureLogStatus,
+  SqlFileFailureLogTextPayload,
   AiMessage,
   AiToolCallRef,
   AiCompletionRequest,

@@ -2,7 +2,9 @@ import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRest
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
-import type { PluginUiStorageItemRef, SyncCatalogItem, SyncSelection, SyncSnapshotCatalog } from "@/lib/backend/tauri";
+import type { PluginUiStorageItemRef, SqlFileFailureLogExportPayload, SqlFileFailureLogInfo, SqlFileFailureLogKey, SqlFileFailureLogTextPayload, SyncCatalogItem, SyncSelection, SyncSnapshotCatalog } from "@/lib/backend/tauri";
+import { FAILURE_LOG_TEXT_TOO_LARGE } from "@/lib/export/failureLogExport";
+import { saveTextFile } from "@/lib/export/saveTextFile";
 
 export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
   return post("/api/database-backups", command);
@@ -2763,6 +2765,33 @@ export async function previewSqlFile(fileOrPath: string | File): Promise<SqlFile
 
 export async function releaseSqlFilePreview(cleanupToken: string): Promise<void> {
   return post("/api/sql-file/preview/release", { cleanupToken });
+}
+
+/**
+ * Failure log of one execution for the Web runtime (dbx#11619). The whole-log
+ * export streams from the server as an attachment; a selected subset travels as
+ * capped text because only the full log has a streaming route.
+ */
+export async function sqlFileFailureLogInfo(executionId: string): Promise<SqlFileFailureLogInfo | null> {
+  return get(`/api/sql-file/failure-log/${encodeURIComponent(executionId)}/info`);
+}
+
+export async function readSqlFileFailureLogText(executionId: string, format?: string, keys?: SqlFileFailureLogKey[]): Promise<SqlFileFailureLogTextPayload> {
+  return post("/api/sql-file/failure-log/text", { executionId, format, keys });
+}
+
+export async function exportSqlFileFailureLog(executionId: string, format: string, targetPath: string, keys?: SqlFileFailureLogKey[]): Promise<SqlFileFailureLogExportPayload> {
+  if (keys && keys.length > 0) {
+    const payload = await readSqlFileFailureLogText(executionId, format, keys);
+    if (payload.tooLarge || payload.text === undefined) throw new Error(FAILURE_LOG_TEXT_TOO_LARGE);
+    const fileName = targetPath.trim() || `sql-file-failures.${format}`;
+    await saveTextFile(payload.text, fileName, format.toUpperCase(), format);
+    return { records: keys.length, bytes: payload.text.length, format };
+  }
+  const anchor = document.createElement("a");
+  anchor.href = apiUrl(`/api/sql-file/failure-log/${encodeURIComponent(executionId)}?format=${encodeURIComponent(format)}`);
+  anchor.click();
+  return { records: 0, bytes: 0, format };
 }
 
 export async function executeSqlFile(request: SqlFileRequest): Promise<void> {

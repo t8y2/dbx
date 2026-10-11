@@ -1,6 +1,6 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
-import { classifySqlRisk, isSqlRiskMutation, usesMysqlLexerRules } from "@/lib/sql/sqlRisk";
+import { classifySqlRisk, endsWithEscapeStringPrefix, isSqlRiskMutation, usesMysqlLexerRules, usesPostgresEscapeStrings } from "@/lib/sql/sqlRisk";
 
 export type ProductionContextReason = "connection" | "database" | "sql_target";
 
@@ -272,6 +272,7 @@ function splitTargetStatements(sql: string): string[] {
  */
 function sqlTargetSafetyText(sql: string, dialect?: DatabaseType | string, quotedIdentifiers = new Map<string, string>()): SqlTargetSafetyText {
   const mysqlLexer = usesMysqlLexerRules(dialect);
+  const postgresEscapeStrings = usesPostgresEscapeStrings(dialect);
   let output = "";
   let index = 0;
 
@@ -316,7 +317,8 @@ function sqlTargetSafetyText(sql: string, dialect?: DatabaseType | string, quote
     }
 
     if (char === "'") {
-      index = readQuotedEnd(sql, index, "'", "'", mysqlLexer);
+      const backslashEscapes = mysqlLexer || (postgresEscapeStrings && endsWithEscapeStringPrefix(sql, index));
+      index = readQuotedEnd(sql, index, "'", "'", backslashEscapes);
       output += " ";
       continue;
     }

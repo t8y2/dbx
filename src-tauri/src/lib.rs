@@ -175,16 +175,24 @@ pub(crate) fn linux_compositing_available() -> bool {
     gtk::gdk::Screen::default().is_some_and(|screen| screen.is_composited())
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn should_enable_linux_floating_frame(compositing: bool, opt_in: Option<&std::ffi::OsStr>) -> bool {
+    compositing && opt_in == Some(std::ffi::OsStr::new("1"))
+}
+
 /// The Linux config declares the main window with `create: false` so its transparency can
-/// depend on the compositor, which is only known at runtime.
+/// be explicitly opted into at runtime when a compositor is available.
 #[cfg(target_os = "linux")]
 fn create_linux_main_window(app: &tauri::App) -> tauri::Result<()> {
     let Some(config) = app.config().app.windows.iter().find(|window| window.label == "main").cloned() else {
         return Ok(());
     };
     let compositing = linux_compositing_available();
-    let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.transparent(compositing);
-    if compositing {
+    let opt_in = std::env::var_os("DBX_LINUX_FLOATING_FRAME");
+    let floating_frame = should_enable_linux_floating_frame(compositing, opt_in.as_deref());
+    log::info!("[WINDOW] Linux main window compositing={compositing}; floating_frame={floating_frame}");
+    let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.transparent(floating_frame);
+    if floating_frame {
         // Read by index.html before first paint to draw the rounded, shadowed frame.
         builder = builder.initialization_script("window.__DBX_LINUX_FLOATING__ = true;");
     }
@@ -1053,14 +1061,33 @@ mod tests {
         linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state, linux_pci_id_from_sysfs_value,
         linux_selected_drm_render_device, linux_uses_native_wayland, linux_webkit_environment_override,
         linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
-        should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_before_exit,
-        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
-        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
-        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
+        should_enable_linux_floating_frame, should_enable_single_instance, should_fallback_to_native_quit,
+        should_hide_window_before_exit, should_hide_window_on_close, should_setup_desktop_tray,
+        should_show_main_window_after_setup, should_show_main_window_before_setup_tasks, startup_data_dir_mode,
+        tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn linux_floating_frame_is_disabled_by_default() {
+        assert!(!should_enable_linux_floating_frame(true, None));
+        assert!(!should_enable_linux_floating_frame(false, None));
+    }
+
+    #[test]
+    fn linux_floating_frame_requires_explicit_opt_in() {
+        assert!(should_enable_linux_floating_frame(true, Some(OsStr::new("1"))));
+        for value in ["", "0", "false", "true", "auto", "yes", "01"] {
+            assert!(!should_enable_linux_floating_frame(true, Some(OsStr::new(value))));
+        }
+    }
+
+    #[test]
+    fn linux_floating_frame_requires_compositing_even_when_opted_in() {
+        assert!(!should_enable_linux_floating_frame(false, Some(OsStr::new("1"))));
+    }
 
     #[test]
     fn tray_menu_labels_follow_locale() {
@@ -1632,6 +1659,11 @@ pub fn run() {
             }
             let db_path = data_dir.join("dbx.db");
 
+            // Failure logs from previous runs are kept only within their retention
+            // limits; prune once at startup so a killed process cannot leave the
+            // directory growing forever.
+            commands::sql_file::prune_desktop_sql_file_failure_logs(&data_dir);
+
             let t = Instant::now();
             append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
@@ -2129,6 +2161,8 @@ pub fn run() {
             commands::query::build_dropped_file_preview_sql,
             commands::query::build_table_select_sql,
             commands::query::build_database_search_sql,
+            commands::query::build_database_structure_search_sql,
+            commands::query::supports_database_structure_search,
             commands::query::build_search_result_where,
             commands::query::build_rename_object_sql,
             commands::query::build_rename_database_sql,
@@ -2188,6 +2222,9 @@ pub fn run() {
             commands::sql_file::execute_sql_file,
             commands::sql_file::execute_sql_files,
             commands::sql_file::cancel_sql_file_execution,
+            commands::sql_file::sql_file_failure_log_info,
+            commands::sql_file::export_sql_file_failure_log,
+            commands::sql_file::read_sql_file_failure_log_text,
             commands::external_sql::pending_open_sql_files,
             commands::external_sql::read_external_sql_file,
             commands::external_sql::inspect_external_sql_file,

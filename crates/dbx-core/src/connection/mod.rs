@@ -2080,6 +2080,7 @@ impl AppState {
         pool: PoolKind,
         config: &ConnectionConfig,
         wait_for_drain: bool,
+        keep_existing: bool,
     ) -> Result<(), String> {
         if wait_for_drain {
             self.wait_for_pool_drain(&pool_key).await;
@@ -2093,6 +2094,14 @@ impl AppState {
         let routing = self.pool_routing_control();
         let previous = loop {
             let mut connections = self.connections.write().await;
+            if keep_existing && connections.get(&pool_key).is_some_and(PoolKind::is_available_for_routing) {
+                // A concurrent request published this key while our candidate was connecting.
+                // Replacing it would close a pool other requests may already be using.
+                drop(connections);
+                routing.close_pool_with_timeout(pool_key.clone(), pool).await;
+                self.touch_pool_activity(&pool_key).await;
+                return Ok(());
+            }
             if !pool.is_available_for_routing() {
                 break Err(pool);
             }
@@ -2161,7 +2170,21 @@ impl AppState {
         pool: PoolKind,
         config: &ConnectionConfig,
     ) -> Result<(), String> {
-        self.insert_connection_pool_inner(pool_key, pool, config, true).await
+        self.insert_connection_pool_inner(pool_key, pool, config, true, false).await
+    }
+
+    /// Publishes a pool created on demand, keeping the existing pool when a concurrent request
+    /// published the same key first.
+    async fn publish_created_pool(
+        &self,
+        pool_key: String,
+        pool: PoolKind,
+        config: &ConnectionConfig,
+    ) -> Result<(), String> {
+        // A no-save pool records its credential owner only after publication, so an existing
+        // pool cannot be proven to belong to the current session here. Keep replacing it.
+        let keep_existing = config.save_password;
+        self.insert_connection_pool_inner(pool_key, pool, config, true, keep_existing).await
     }
 
     pub async fn begin_connection_attempt(&self, connection_id: &str) -> u64 {
@@ -3425,7 +3448,7 @@ impl AppState {
             self.discard_stale_connection_attempt_pool(connection_id, pool_key.clone(), pool, &db_config).await;
             return Err(err);
         }
-        self.insert_connection_pool(pool_key.clone(), pool, &db_config).await?;
+        self.publish_created_pool(pool_key.clone(), pool, &db_config).await?;
         Ok(pool_key)
     }
 
@@ -5138,7 +5161,7 @@ impl AppState {
             config_for_pool_key(pool_key, &configs).cloned()
         };
         if let Some(config) = config {
-            let _ = self.insert_connection_pool_inner(pool_key.to_string(), pool, &config, false).await;
+            let _ = self.insert_connection_pool_inner(pool_key.to_string(), pool, &config, false, false).await;
         } else {
             self.pool_activity.write().await.insert(pool_key.to_string(), PoolActivity::now());
             self.connections.write().await.insert(pool_key.to_string(), pool);
@@ -8621,6 +8644,37 @@ mod tests {
         assert!(state.test_tunnel_profile(&ssh).await.is_err());
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn publish_two_created_sqlite_pools(save_password: bool) -> bool {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Sqlite;
+        config.save_password = save_password;
+        let first = db::sqlite::connect_path_create_if_missing(&dir.join("first.db").to_string_lossy()).await.unwrap();
+        let second =
+            db::sqlite::connect_path_create_if_missing(&dir.join("second.db").to_string_lossy()).await.unwrap();
+
+        state.publish_created_pool("conn".to_string(), PoolKind::Sqlite(first), &config).await.unwrap();
+        let published = state.pool_publication_snapshot("conn").await.unwrap().publication;
+        state.publish_created_pool("conn".to_string(), PoolKind::Sqlite(second), &config).await.unwrap();
+        let current = state.pool_publication_snapshot("conn").await.unwrap().publication;
+
+        assert_eq!(state.connections.read().await.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+        current.is_same(&published)
+    }
+
+    // Issue #11579: concurrent first requests for one database each create a pool. A late
+    // creator used to replace and close the pool that earlier requests were already using.
+    #[tokio::test]
+    async fn concurrently_created_pool_keeps_the_first_published_pool() {
+        assert!(publish_two_created_sqlite_pools(true).await);
+    }
+
+    #[tokio::test]
+    async fn concurrently_created_no_save_pool_still_replaces_the_existing_pool() {
+        assert!(!publish_two_created_sqlite_pools(false).await);
     }
 
     #[tokio::test]

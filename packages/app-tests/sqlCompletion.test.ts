@@ -3285,6 +3285,22 @@ test("adds CTE tables to referenced tables in context", () => {
   assert.ok(cteRef.columns!.includes("name"));
 });
 
+test("expands nested CTE columns referencing earlier CTE (#11479)", () => {
+  const sql = `with test_a as (
+    select '1' as 字段
+)
+, test_b as (
+    select ta.*
+        , '2' as 追加字段
+    from test_a ta
+)
+select * from test_b`;
+  const ctes = extractCteDefinitions(sql);
+  assert.equal(ctes.length, 2);
+  assert.deepEqual(ctes[0]?.columns, ["字段"]);
+  assert.deepEqual(ctes[1]?.columns, ["字段", "追加字段"]);
+});
+
 // --- INSERT column list detection ---
 
 test("detects INSERT INTO column list context", () => {

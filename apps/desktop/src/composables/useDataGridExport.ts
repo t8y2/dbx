@@ -37,7 +37,8 @@ import { formatTemporalRowsForExport } from "@/lib/dataGrid/columnFormatter";
 import { translateBackendError } from "@/i18n/backend-errors";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import i18n from "@/i18n";
-import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import { isPartiallyLoadedCopy, partialLoadCopyHintKey, type PartialLoadCopyInfo } from "@/lib/dataGrid/copyPartialLoadHint";
 
 /**
  * Format metadata for backend table exports. Each entry maps a format key
@@ -160,6 +161,8 @@ export interface UseDataGridExportOptions {
    * slow query is never re-run just to export rows that are already on screen.
    */
   hasCompleteLocalResult?: ComputedRef<boolean>;
+  /** Present when the grid cannot guarantee the whole result set is loaded; drives the partial-copy hint. */
+  partialLoadCopyInfo?: ComputedRef<PartialLoadCopyInfo | null>;
   /**
    * The raw in-memory QueryResult to use for "export all" when
    * hasCompleteLocalResult is true. Exports the original query result (all
@@ -245,6 +248,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     fullExportResult,
     queryResultExportRequest,
     hasCompleteLocalResult,
+    partialLoadCopyInfo,
     completeLocalResult,
     allExportResults,
     currentResultLabel,
@@ -588,7 +592,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return resultPageSql?.value || currentExportSql();
   }
 
-  async function writeXlsxResult(outputPath: string, result: { columns: string[]; columnTypes: string[]; columnComments?: (string | null)[]; rows: CellValue[][] }, includeSqlSheet: boolean, autoFilter: boolean, sqlOverride?: string) {
+  async function writeXlsxResult(outputPath: string, result: { columns: string[]; columnTypes: string[]; columnComments?: (string | null)[]; rows: CellValue[][] }, includeSqlSheet: boolean, autoFilter: boolean, sqlOverride?: string, headerCommentRows = false) {
     const effectiveSql = sqlOverride ?? currentExportSql();
     const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet([{ sql: effectiveSql || "" }]) : undefined;
     const rightAlign = useSettingsStore().editorSettings.numericColumnRightAlign;
@@ -597,7 +601,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     // a `SSS` pattern silently displays as `yyyy-mm-dd hh:mm:ss`.
     const dateTimeFormat = useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined;
     if (!sqlWorksheet) {
-      await api.exportQueryResultXlsx(outputPath, currentXlsxSheetName(), result.columns, result.columnTypes, result.columnComments, result.rows, rightAlign, autoFilter, dateTimeFormat);
+      await api.exportQueryResultXlsx(outputPath, currentXlsxSheetName(), result.columns, result.columnTypes, result.columnComments, result.rows, rightAlign, autoFilter, dateTimeFormat, headerCommentRows);
       return;
     }
     await api.exportQueryResultsXlsx(
@@ -611,6 +615,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           rows: result.rows,
           numericColumnRightAlign: rightAlign,
           autoFilter,
+          headerCommentRows,
         },
         { ...sqlWorksheet, autoFilter: false },
       ],
@@ -871,6 +876,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     },
     buildMongoInsert: buildMongoExtractorInsert,
     buildMongoUpdate: buildMongoExtractorUpdate,
+    partialLoadInfo: partialLoadCopyInfo,
     canBuildMongoUpdate: canBuildMongoExtractorUpdate,
     externalCellValue: (value, columnIndex) => {
       const externalValue = options.externalCellValue?.(value as CellValue, columnIndex);
@@ -884,7 +890,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const rows = (await resolveVisibleRowValues(displayItems.value.filter((item) => !item.isDraft))).map((item) => item.data);
     // formatTsv 引用处理解码后文本中可能出现的制表符/换行；内部副本仍用原始 rows（hex）保证回粘无损。
     const decodedRows = rows.map((row) => row.map((cell, index) => externalCellValue(binaryClipboardCellValue(cell, index), index)));
-    await copyText(formatTsv(columns.value, decodedRows), { rows, header: columns.value });
+    const copied = await copyText(formatTsv(columns.value, decodedRows), { rows, header: columns.value });
+    const partialLoadInfo = options.partialLoadCopyInfo?.value;
+    if (copied && partialLoadInfo && isPartiallyLoadedCopy(partialLoadInfo)) {
+      toast(t(partialLoadCopyHintKey(partialLoadInfo), { loaded: partialLoadInfo.loadedRows, total: partialLoadInfo.totalRows ?? undefined }), 5000);
+    }
   }
 
   // --- Export functions ---
@@ -1272,7 +1282,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             totalRows: result.rows.length,
           };
         }
-        await writeXlsxResult(outputPath, result, includeSqlSheet, exportOptions.autoFilter);
+        await writeXlsxResult(outputPath, result, includeSqlSheet, exportOptions.autoFilter, undefined, xlsxHeaderUsesCommentRows(exportOptions.headerMode));
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
@@ -1332,7 +1342,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           outputPath = path;
         }
         const result = await resultToExport({ columnIndexes }, undefined, false, true, exportOptions.headerMode);
-        await writeXlsxResult(outputPath, result, includeSqlSheet, exportOptions.autoFilter, currentPageExportSql());
+        await writeXlsxResult(outputPath, result, includeSqlSheet, exportOptions.autoFilter, currentPageExportSql(), xlsxHeaderUsesCommentRows(exportOptions.headerMode));
         notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
@@ -1378,6 +1388,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           rows: formatTemporalRowsForExport(sheet.result.rows, sheet.result.column_types ?? [], exportPattern),
           numericColumnRightAlign: rightAlign,
           autoFilter: exportOptions.autoFilter,
+          headerCommentRows: xlsxHeaderUsesCommentRows(exportOptions.headerMode),
         }));
         const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet(sheets.map((sheet) => ({ resultName: sheet.sheetName, sql: sheet.sql || sheet.result.sourceStatement || "" }))) : undefined;
         await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [...worksheets, { ...sqlWorksheet, autoFilter: false }] : worksheets, exportOptions.autoFilter, exportPattern || undefined);
@@ -1516,6 +1527,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           columnTypes: columnTypes.value,
           ...(format === "sql" ? { columnExtras: sqlExportColumnExtras(effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!)) } : {}),
           columnComments: format === "xlsx" ? buildXlsxHeaderOverrides(columns.value, visibleXlsxColumnComments.value, headerMode) : undefined,
+          headerCommentRows: format === "xlsx" ? xlsxHeaderUsesCommentRows(headerMode) : undefined,
           primaryKeys: meta.primaryKeys,
           ...sqlExportPrimaryKeyOptions(),
           whereInput: whereInput.value,
@@ -1598,11 +1610,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       includeSqlSheet,
       exportTableName: insertTarget?.tableName,
       exportSchema: insertTarget?.tableName ? sqlInsertTargetSchema(insertTarget) : undefined,
-      exportColumnTypes: format === "sql" ? allColumnTypes.value?.map((type) => type ?? null) : undefined,
+      exportColumnTypes: format === "sql" || format === "xlsx" ? allColumnTypes.value?.map((type) => type ?? null) : undefined,
       exportColumnExtras: format === "sql" ? sqlExportColumnExtras(allColumns.value) : undefined,
       ...(format === "sql" && sqlExportOptions ? { insertMode: sqlExportOptions.insertMode } : {}),
     });
     const columnComments = format === "xlsx" ? buildXlsxHeaderOverrides(allColumns.value, allXlsxColumnComments.value, headerMode) : undefined;
+    const headerCommentRows = format === "xlsx" && xlsxHeaderUsesCommentRows(headerMode);
     const request = baseRequest
       ? {
           ...baseRequest,
@@ -1613,6 +1626,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined,
           numericColumnRightAlign: useSettingsStore().editorSettings.numericColumnRightAlign ?? true,
           columnComments,
+          headerCommentRows,
           autoFilter: format === "xlsx" ? autoFilter : undefined,
         }
       : undefined;

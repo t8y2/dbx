@@ -474,6 +474,7 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         timeout_secs: Some(30),
         keyset_optimization_enabled: false,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-mysql-query-export-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
@@ -484,6 +485,7 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         selected_columns: None,
         export_column_extras: None,
         column_comments: None,
+        header_comment_rows: false,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
@@ -571,6 +573,7 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
         timeout_secs: Some(30),
         keyset_optimization_enabled: false,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-mysql-issue-8803-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
@@ -581,6 +584,7 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
         selected_columns: None,
         export_column_extras: None,
         column_comments: None,
+        header_comment_rows: false,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
@@ -692,6 +696,7 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         timeout_secs: Some(1),
         keyset_optimization_enabled: false,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-mysql-query-export-timeout-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
@@ -702,6 +707,7 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         selected_columns: None,
         export_column_extras: None,
         column_comments: None,
+        header_comment_rows: false,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
@@ -1370,6 +1376,7 @@ INSERT INTO install_check (id) VALUES (1), (2);
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
     };
 
     let _ = execute_sql_statement(
@@ -1460,6 +1467,7 @@ INSERT INTO children (parent_id) VALUES (LAST_INSERT_ID());
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
     };
 
     let _ = execute_sql_statement(
@@ -1534,6 +1542,7 @@ async fn live_sql_file_import_preserves_raw_mysql_binary_literal_bytes() {
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
     };
 
     tokio::fs::write(&request.file_path, script).await.unwrap();

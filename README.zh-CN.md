@@ -131,7 +131,7 @@
       </a>
     </td>
     <td>
-      HiAPI 是面向开发者的图片、视频、音频及文本模型 API 平台——GPT Image 2.5（Flare 与 Sunburst）、OpenAI 兼容文本接口，并可通过 Remote MCP/Agent Skills 接入 Claude Code、Cursor 等编程工具。按量付费、无最低消费；新用户注册赠送 200 Credits，首充最高加赠 12% 积分。
+      HiAPI 是面向开发者的图片、视频、音频及文本模型 API 平台——GPT Image 2.5（Flare 与 Sunburst）、OpenAI 兼容文本接口，并可通过 Remote MCP/Agent Skills 接入 Claude Code、Cursor 等编程工具。按量付费、无最低消费；新用户注册赠送 200 Credits，充值送 10% 积分。
       <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-zh" target="_blank">访问 HiAPI</a>
     </td>
   </tr>
@@ -144,6 +144,17 @@
     <td>
       UCloud 优刻得是国内首家公有云科创板上市公司，覆盖国内、亚洲、欧洲、北美等 28 个地域的云主机、数据库、CDN 等服务，注册享新客优惠 0.9 折起；星图 AstraFlow 大模型平台支持主流 200+ 大模型一键调用。
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">访问 UCloud 优刻得</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://mate.vip/ee/" target="_blank">
+        <img src="docs/public/sponsors/taiyi-card.png" alt="太一企业版" width="175" />
+      </a>
+    </td>
+    <td>
+      太一智能体企业版是面向央国企的私有化智能体平台，采用“1+N+N”架构：1 个平台、N 个终端、N 个场景。<strong>可信</strong>：Java 微服务架构，私有化部署，全程留痕可审计。<strong>可控</strong>：关键操作人工审批，资料按密级管理。<strong>可达</strong>：按单位模板直接生成公文、台账和汇报材料。<strong>可复制</strong>：场景方案包化交付，便于推广和二次开发。欢迎预约演示，或在 GitHub 搜索 MateClaw。
+      <a href="https://mate.vip/ee/" target="_blank">访问太一企业版</a>
     </td>
   </tr>
   <tr>

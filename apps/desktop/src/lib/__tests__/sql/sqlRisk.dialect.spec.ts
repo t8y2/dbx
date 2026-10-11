@@ -65,6 +65,40 @@ describe("SQL risk dialect lexer rules", () => {
     });
   });
 
+  it("scans PostgreSQL escape strings by the dialect lexer rules", () => {
+    // Inside E'...' a backslash escapes the quote, so the DELETE stays literal
+    // data and must not raise the risk (matches the Rust scanner).
+    const inside = "SELECT E'it\\'s; DELETE FROM users;'";
+
+    expect(sqlSafetyText(inside, "postgres")).not.toContain("DELETE FROM users");
+    expect(classifySqlRisk(inside, { dialect: "postgres" }).risk).toBe("read");
+
+    // Outside the E-string the DELETE is real code and must be classified.
+    const after = "SELECT E'it\\'s'; DELETE FROM users;";
+
+    expect(sqlSafetyText(after, "postgres")).toContain("DELETE FROM users");
+    expect(splitSqlStatementsForSafety(after, "postgres")).toEqual(["SELECT E", "DELETE FROM users"]);
+    expect(classifySqlRisk(after, { dialect: "postgres" }).risk).toBe("write");
+    expect(classifySqlRisk(after, { dialect: "kingbase" }).risk).toBe("write");
+  });
+
+  it("does not auto-execute a PostgreSQL write hidden behind an escape string", () => {
+    const sql = "SELECT E'it\\'s'; DELETE FROM users;";
+
+    expect(classifyAiSqlExecution(sql, postgresConnection)).toMatchObject({
+      action: "confirm",
+      category: "write",
+    });
+  });
+
+  it("keeps an E that ends an identifier out of the escape-string rules", () => {
+    // `xE` is one identifier, so the following literal is ordinary (same as
+    // `ends_with_escape_string_prefix` in the Rust scanner).
+    const sql = "SELECT xE'it\\'s'; DELETE FROM users;";
+
+    expect(sqlSafetyText(sql, "postgres")).not.toContain("DELETE FROM users");
+  });
+
   it("still reads # as a line comment on MySQL", () => {
     const sql = "SELECT * FROM #tmp; DELETE FROM #tmp;";
 

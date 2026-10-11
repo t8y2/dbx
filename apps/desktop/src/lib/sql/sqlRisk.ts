@@ -55,6 +55,32 @@ export function usesMysqlLexerRules(dialect?: DatabaseType | string): boolean {
   return typeof dialect === "string" && MYSQL_LEXER_DATABASE_TYPES.has(dialect.trim().toLowerCase());
 }
 
+/**
+ * PostgreSQL-family engines also read a backslash as an escape inside `E'...'`
+ * literals, even though `standard_conforming_strings` keeps ordinary `'...'`
+ * literals backslash-literal. The `E`/`e` must start its own token, so
+ * `DATE'2020-01-01'` and `x$e'...'` stay ordinary strings. Mirrors the
+ * `postgres_escape_strings` rule of `SqlScanLexerRules` in
+ * `crates/dbx-core/src/safety/production_safety.rs`.
+ */
+const POSTGRES_ESCAPE_STRING_DATABASE_TYPES = new Set<string>(["postgres", "opengauss", "gaussdb", "vastbase", "kingbase", "highgo", "uxdb", "kwdb"]);
+
+export function usesPostgresEscapeStrings(dialect?: DatabaseType | string): boolean {
+  return typeof dialect === "string" && POSTGRES_ESCAPE_STRING_DATABASE_TYPES.has(dialect.trim().toLowerCase());
+}
+
+/**
+ * True when the `E'`/`e'` introducer before `quoteIndex` starts its own token,
+ * so `DATE'2020-01-01'` and `x$e'...'` stay ordinary strings. Mirrors
+ * `ends_with_escape_string_prefix` in `crates/dbx-core/src/safety/production_safety.rs`.
+ */
+export function endsWithEscapeStringPrefix(sql: string, quoteIndex: number): boolean {
+  const introducer = sql[quoteIndex - 1];
+  if (introducer !== "E" && introducer !== "e") return false;
+  const before = sql[quoteIndex - 2];
+  return before === undefined || !/[\p{L}\p{N}_$]/u.test(before);
+}
+
 const RISK_ORDER: Record<SqlRiskLevel, number> = {
   read: 0,
   write: 1,
@@ -184,6 +210,7 @@ export function isSqlRiskMutation(risk: SqlRiskLevel): boolean {
 
 export function sqlSafetyText(sql: string, dialect?: DatabaseType | string): string {
   const mysqlLexer = usesMysqlLexerRules(dialect);
+  const postgresEscapeStrings = usesPostgresEscapeStrings(dialect);
   let output = "";
   let index = 0;
 
@@ -228,7 +255,8 @@ export function sqlSafetyText(sql: string, dialect?: DatabaseType | string): str
     }
 
     if (char === "'") {
-      index = readQuotedEnd(sql, index, "'", "'", mysqlLexer);
+      const backslashEscapes = mysqlLexer || (postgresEscapeStrings && endsWithEscapeStringPrefix(sql, index));
+      index = readQuotedEnd(sql, index, "'", "'", backslashEscapes);
       output += " ";
       continue;
     }

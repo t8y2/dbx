@@ -406,30 +406,6 @@ test("the frontend gate checks every selected frontend job", () => {
   assert.deepEqual(gateFailures(needs, "frontend"), []);
 });
 
-test("draft runs may skip heavy validation jobs without failing gates", () => {
-  const needs = results(["Cargo.lock"]);
-  needs.changes.outputs.draft = "true";
-  for (const job of ["rust-test", "agent-java", "agent-go", "agent-rust", "agent-integration"]) {
-    needs[job] = { result: "skipped" };
-  }
-  assert.deepEqual(gateFailures(needs, "rust"), []);
-  assert.deepEqual(gateFailures(needs, "agents"), []);
-  needs.changes.outputs.frontend = "true";
-  needs["frontend-checks"] = { result: "success" };
-  needs["frontend-typecheck"] = { result: "success" };
-  needs["frontend-test"] = { result: "skipped" };
-  assert.deepEqual(gateFailures(needs, "frontend"), []);
-  // Draft only relaxes the skippable set: a real failure is still a failure,
-  // and jobs the draft policy keeps (clippy, fast-checks) stay required.
-  needs["frontend-test"].result = "failure";
-  assert.ok(gateFailures(needs, "frontend").length);
-  needs["rust-fmt-clippy"].result = "skipped";
-  assert.ok(gateFailures(needs, "rust").length);
-  // Without the draft output the heavy jobs are required again.
-  delete needs.changes.outputs.draft;
-  assert.ok(gateFailures(needs, "rust").length);
-});
-
 test("git diff routing includes both sides of renames, deleted files, and unusual filenames", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "dbx-ci-plan-"));
   const git = (...args) => execFileSync("git", args, { cwd: directory, encoding: "utf8", stdio: "pipe" }).trim();

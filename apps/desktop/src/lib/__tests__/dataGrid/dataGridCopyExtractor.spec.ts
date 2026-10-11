@@ -50,6 +50,13 @@ describe("data-grid extractor options", () => {
     expect(normalizeDataGridExtractorOptions({ json: { camelCaseFieldNames: "true" } }).json.camelCaseFieldNames).toBe(false);
   });
 
+  it("keeps values-only JSON arrays explicit and disabled by default", () => {
+    expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.json.valuesOnly).toBe(false);
+    expect(normalizeDataGridExtractorOptions({ json: {} }).json.valuesOnly).toBe(false);
+    expect(normalizeDataGridExtractorOptions({ json: { valuesOnly: true } }).json.valuesOnly).toBe(true);
+    expect(normalizeDataGridExtractorOptions({ json: { valuesOnly: "true" } }).json.valuesOnly).toBe(false);
+  });
+
   it("rejects overlapping effective row and column separators", () => {
     const options = normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS);
     options.dsv.rowSeparator = ",";

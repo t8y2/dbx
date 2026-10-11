@@ -39,7 +39,7 @@ const props = defineProps<{
   importBinaryValue: (detail: DataGridCellDetail | null) => void | Promise<void>;
   openImagePreview: (src: string, title: string) => void;
   canCopySqlCondition: () => boolean;
-  /** BLOB 文本预览与编辑写回一致，仅在 MySQL 连接开启。 */
+  /** BLOB 文本预览与编辑写回一致，在 MySQL / Oracle（含 OceanBase-Oracle）连接开启。 */
   databaseType?: DatabaseType;
 }>();
 

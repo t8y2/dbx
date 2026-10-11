@@ -10,7 +10,7 @@
         "resizable": true,
         "fullscreen": false,
         "visible": false,
-        "transparent": true,
+        "transparent": false,
         "hiddenTitle": true,
         "acceptFirstMouse": true,
         "create": false

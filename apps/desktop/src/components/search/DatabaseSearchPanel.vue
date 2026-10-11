@@ -7,11 +7,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
 import { buildDatabaseSearchSql, buildSearchResultWhere, findMatchedSearchColumns } from "@/lib/database/databaseSearch";
 import { databaseSearchBatchRange, databaseSearchNextBatchSize } from "@/lib/database/databaseSearchBatch";
-import type { DatabaseSearchResultItem, DatabaseSearchTableTask, DatabaseSearchTabState, DatabaseType, TableInfo } from "@/types/database";
+import type { DatabaseSearchResultItem, DatabaseSearchScope, DatabaseSearchTableTask, DatabaseSearchTabState, DatabaseType, TableInfo } from "@/types/database";
+import { buildDatabaseStructureSearchSql, effectiveDatabaseSearchScope, runDatabaseStructureSearch, structureHitPreview, supportsDatabaseStructureSearchFromManifest } from "@/lib/database/databaseStructureSearch";
+import { usesDocumentStructureSearch, usesSqlCatalogStructureSearch } from "@/lib/database/databaseStructureSearchCapabilities";
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 
@@ -44,6 +47,7 @@ const SYSTEM_SCHEMAS = new Set(["information_schema", "pg_catalog", "sys", "syst
 const keywordInputRef = ref<any>(null);
 
 const keyword = ref(props.initialState?.keyword ?? "");
+const searchScope = ref<DatabaseSearchScope>(props.initialState?.searchScope ?? "data");
 const perTableLimit = ref(props.initialState?.perTableLimit ?? 20);
 const running = ref(false);
 const cancelled = ref(false);
@@ -63,6 +67,9 @@ let runId = 0;
 const connection = computed(() => (props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined));
 const scopeLabel = computed(() => [connection.value?.name, props.database, props.schema].filter(Boolean).join(" / "));
 const canSearch = computed(() => Boolean(props.connectionId && props.database && keyword.value.trim() && !running.value));
+const structureSearchAvailable = computed(() => supportsDatabaseStructureSearchFromManifest(connection.value?.db_type, connection.value?.driver_profile));
+const effectiveSearchScope = computed(() => effectiveDatabaseSearchScope(searchScope.value, connection.value?.db_type, connection.value?.driver_profile));
+const isStructureMode = computed(() => effectiveSearchScope.value === "structure");
 const progressLabel = computed(() => t("databaseSearch.progress", { done: progressDone.value, total: progressTotal.value }));
 const remainingTableCount = computed(() => Math.max(0, tableTasks.value.length - nextTableIndex.value));
 const nextBatchSize = computed(() => databaseSearchNextBatchSize(nextTableIndex.value, tableTasks.value.length));
@@ -71,6 +78,7 @@ const canContinueSearch = computed(() => !running.value && !loadingTables.value 
 function getCurrentState(): DatabaseSearchTabState {
   return {
     keyword: keyword.value,
+    searchScope: searchScope.value,
     perTableLimit: perTableLimit.value,
     results: results.value,
     tableErrors: tableErrors.value,
@@ -88,7 +96,7 @@ function emitState() {
   emit("update:state", getCurrentState());
 }
 
-watch([keyword, perTableLimit], () => {
+watch([keyword, searchScope, perTableLimit], () => {
   emitState();
 });
 
@@ -97,6 +105,7 @@ watch(
   (incoming) => {
     if (!incoming || running.value) return;
     if (incoming.keyword !== undefined && incoming.keyword !== keyword.value) keyword.value = incoming.keyword;
+    if (incoming.searchScope !== undefined && incoming.searchScope !== searchScope.value) searchScope.value = incoming.searchScope;
     if (incoming.perTableLimit !== undefined && incoming.perTableLimit !== perTableLimit.value) perTableLimit.value = incoming.perTableLimit;
     if (incoming.results) results.value = [...incoming.results];
     if (incoming.tableErrors) tableErrors.value = [...incoming.tableErrors];
@@ -188,11 +197,30 @@ async function startSearch() {
   running.value = true;
   loadingTables.value = true;
   activeKeyword.value = keyword.value.trim();
-  activePerTableLimit.value = Math.min(100, Math.max(1, Math.trunc(Number(perTableLimit.value) || 20)));
+  activePerTableLimit.value = Math.min(500, Math.max(1, Math.trunc(Number(perTableLimit.value) || 20)));
   emitState();
 
   try {
     await connectionStore.ensureConnected(props.connectionId);
+    if (isStructureMode.value) {
+      const databaseType = connection.value.db_type;
+      let useStructurePath = usesDocumentStructureSearch(databaseType);
+      if (!useStructurePath && usesSqlCatalogStructureSearch(databaseType)) {
+        const catalogSql = await buildDatabaseStructureSearchSql({
+          databaseType,
+          driverProfile: connection.value.driver_profile,
+          database: props.database,
+          schema: props.schema,
+          term: activeKeyword.value,
+          limit: activePerTableLimit.value,
+        });
+        useStructurePath = Boolean(catalogSql?.sql);
+      }
+      if (useStructurePath) {
+        await runStructureSearch(currentRun);
+        return;
+      }
+    }
     tableTasks.value = await listSearchTables();
     if (currentRun !== runId || cancelled.value) return;
     progressTotal.value = tableTasks.value.length;
@@ -236,6 +264,70 @@ async function continueSearch(scanAllRemaining: boolean) {
       currentExecutionId.value = "";
       emitState();
     }
+  }
+}
+
+async function runStructureSearch(currentRun: number) {
+  const databaseType = connection.value!.db_type;
+  progressTotal.value = 1;
+  progressDone.value = 0;
+  loadingTables.value = false;
+  emitState();
+  const executionId = makeExecutionId();
+  currentExecutionId.value = executionId;
+  try {
+    const schemaNames = props.schema ? [props.schema] : isSchemaAware(databaseType) ? filterSearchSchemas(await api.listSchemas(props.connectionId, props.database)) : [undefined];
+    const limit = Math.min(5000, Math.max(1, activePerTableLimit.value * 10));
+    const merged: DatabaseSearchResultItem[] = [];
+    const tableTypeByName = new Map<string, string>();
+    for (const schema of schemaNames) {
+      if (currentRun !== runId || cancelled.value) return;
+      const resolvedSchema = schema ?? props.database;
+      const catalogTables = await api.listTables(props.connectionId, props.database, resolvedSchema);
+      for (const table of catalogTables) {
+        tableTypeByName.set(table.name, table.table_type);
+      }
+      const hits = await runDatabaseStructureSearch({
+        connectionId: props.connectionId,
+        databaseType,
+        driverProfile: connection.value?.driver_profile,
+        database: props.database,
+        schema,
+        term: activeKeyword.value,
+        limit,
+        executionId,
+        shouldAbort: () => currentRun !== runId || cancelled.value,
+        listTables: async (taskSchema) => {
+          const listSchema = taskSchema || props.database;
+          const tables = await api.listTables(props.connectionId, props.database, listSchema);
+          return tables.filter(isSearchableTable);
+        },
+        getColumns: (taskSchema, tableName) => api.getColumns(props.connectionId, props.database, taskSchema, tableName),
+        executeQuery: (sql, runExecutionId) => api.executeQuery(props.connectionId, props.database, sql, undefined, runExecutionId),
+      });
+      for (const [index, hit] of hits.entries()) {
+        merged.push({
+          id: `${hit.schema ? `${hit.schema}.` : ""}${hit.tableName}:${hit.columnName}:${index}`,
+          schema: hit.schema ?? schema,
+          tableName: hit.tableName,
+          tableType: hit.tableType ?? tableTypeByName.get(hit.tableName) ?? "UNKNOWN",
+          matchedColumns: [hit.columnName],
+          preview: structureHitPreview(hit),
+          whereInput: "",
+          searchScope: "structure",
+          columnName: hit.columnName,
+          columnComment: hit.columnComment,
+          structureMatchIn: hit.matchedIn,
+        });
+      }
+    }
+    if (currentRun === runId && !cancelled.value) {
+      results.value = merged;
+      progressDone.value = 1;
+      emitState();
+    }
+  } finally {
+    if (currentExecutionId.value === executionId) currentExecutionId.value = "";
   }
 }
 
@@ -333,6 +425,8 @@ function openResult(item: DatabaseSearchResultItem) {
     tableName: item.tableName,
     tableType: item.tableType,
     whereInput: item.whereInput,
+    columnName: item.columnName,
+    searchScope: item.searchScope ?? "data",
   });
 }
 
@@ -390,9 +484,21 @@ defineExpose({
           <Label class="text-xs">{{ t("databaseSearch.keyword") }}</Label>
           <Input ref="keywordInputRef" v-model="keyword" class="h-9" :placeholder="t('databaseSearch.keywordPlaceholder')" :disabled="running" @keydown.enter.prevent="startSearch" />
         </div>
+        <div v-if="structureSearchAvailable" class="space-y-1.5">
+          <Label class="text-xs">{{ t("databaseSearch.scope") }}</Label>
+          <Select v-model="searchScope" :disabled="running">
+            <SelectTrigger class="h-9">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="data">{{ t("databaseSearch.scopeData") }}</SelectItem>
+              <SelectItem value="structure">{{ t("databaseSearch.scopeStructure") }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
         <div class="space-y-1.5">
-          <Label class="text-xs">{{ t("databaseSearch.limitPerTable") }}</Label>
-          <Input v-model.number="perTableLimit" class="h-9" type="number" min="1" max="100" :disabled="running" />
+          <Label class="text-xs">{{ isStructureMode ? t("databaseSearch.limitStructure") : t("databaseSearch.limitPerTable") }}</Label>
+          <Input v-model.number="perTableLimit" class="h-9" type="number" min="1" :max="isStructureMode ? 500 : 100" :disabled="running" />
         </div>
         <div class="flex items-end gap-2">
           <Button class="h-9" :disabled="!canSearch" @click="startSearch">
@@ -408,13 +514,13 @@ defineExpose({
       </div>
 
       <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground shrink-0">
-        {{ t("databaseSearch.hint") }}
+        {{ isStructureMode ? t("databaseSearch.hintStructure") : t("databaseSearch.hint") }}
       </div>
 
       <div v-if="running || progressTotal" class="flex flex-wrap items-center gap-3 text-xs text-muted-foreground shrink-0">
-        <span class="tabular-nums">{{ loadingTables ? t("databaseSearch.loadingTables") : progressLabel }}</span>
+        <span class="tabular-nums">{{ loadingTables ? t("databaseSearch.loadingTables") : isStructureMode ? t("databaseSearch.progressStructure") : progressLabel }}</span>
         <span class="tabular-nums">{{ t("databaseSearch.resultCount", { count: results.length }) }}</span>
-        <div v-if="canContinueSearch" class="ml-auto flex flex-wrap items-center gap-2">
+        <div v-if="canContinueSearch && !isStructureMode" class="ml-auto flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" class="h-7 text-xs" @click="continueSearch(false)">
             {{ t("databaseSearch.continueNextBatch", { count: nextBatchSize }) }}
           </Button>

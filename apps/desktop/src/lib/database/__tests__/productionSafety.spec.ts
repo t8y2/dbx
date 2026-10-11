@@ -66,6 +66,11 @@ describe("production SQL safety", () => {
     }
   });
 
+  it("keeps production DDL visible after PostgreSQL E'...' escape strings", () => {
+    const pg = connection({ db_type: "postgres" });
+    expect(assessProductionSql("SELECT E'a\\''; DROP DATABASE prod_app;", pg, "staging")).toMatchObject({ active: true, reason: "sql_target", isMutation: true, databases: ["prod_app"] });
+  });
+
   it("matches the shared SQL target safety corpus", () => {
     for (const corpusCase of productionSafetyCorpus) {
       const assessment = assessProductionSql(

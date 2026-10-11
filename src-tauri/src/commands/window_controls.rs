@@ -180,7 +180,7 @@ mod tests {
             base_window.as_object_mut().unwrap().remove(key);
         }
         assert_eq!(linux_window["create"], Value::Bool(false));
-        assert_eq!(linux_window["transparent"], Value::Bool(true));
+        assert_eq!(linux_window["transparent"], Value::Bool(false));
         for key in ["create", "transparent"] {
             linux_window.as_object_mut().unwrap().remove(key);
         }

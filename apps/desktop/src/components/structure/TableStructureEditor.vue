@@ -132,6 +132,7 @@ import {
   generateUniqueIndexName,
   generateUniqueShortIndexName,
   structureIndexKind,
+  canIndexTypeHaveSpecialIssue,
   specialIndexColumnIssue,
   type StructureIndexKind,
   getColumnEditorControls,
@@ -1622,6 +1623,38 @@ function structureColumnComparisonKey(name: string): string {
   return tableStructureIdentifierComparisonKey(name, databaseType.value, connection.value?.database_info);
 }
 
+const activeColumnByName = computed(() => {
+  const map = new Map<string, EditableStructureColumn>();
+  for (const item of columns.value) {
+    if (!item.markedForDrop) map.set(item.name, item);
+  }
+  return map;
+});
+
+const activeColumnByComparisonKey = computed(() => {
+  const map = new Map<string, EditableStructureColumn>();
+  for (const item of columns.value) {
+    if (item.markedForDrop) continue;
+    if (item.name) map.set(structureColumnComparisonKey(item.name), item);
+    if (item.original?.name) map.set(structureColumnComparisonKey(item.original.name), item);
+  }
+  return map;
+});
+
+const indexesByColumnComparisonKey = computed(() => {
+  const map = new Map<string, EditableStructureIndex[]>();
+  for (const index of indexes.value) {
+    if (index.markedForDrop || index.isPrimary) continue;
+    for (const name of index.columns) {
+      const key = structureColumnComparisonKey(name);
+      const list = map.get(key);
+      if (list) list.push(index);
+      else map.set(key, [index]);
+    }
+  }
+  return map;
+});
+
 function indexContainsColumn(index: EditableStructureIndex, column: EditableStructureColumn): boolean {
   const names = [column.name, column.original?.name].filter((name): name is string => !!name).map(structureColumnComparisonKey);
   return index.columns.some((name) => names.includes(structureColumnComparisonKey(name)));
@@ -1629,7 +1662,21 @@ function indexContainsColumn(index: EditableStructureIndex, column: EditableStru
 
 function columnIndexes(column: EditableStructureColumn): EditableStructureIndex[] {
   if (!column.name.trim() || column.markedForDrop) return [];
-  return indexes.value.filter((index) => !index.markedForDrop && !index.isPrimary && indexContainsColumn(index, column));
+  const key1 = structureColumnComparisonKey(column.name);
+  const key2 = column.original?.name ? structureColumnComparisonKey(column.original.name) : null;
+  const list1 = indexesByColumnComparisonKey.value.get(key1) ?? [];
+  if (!key2 || key1 === key2) return list1;
+  const list2 = indexesByColumnComparisonKey.value.get(key2) ?? [];
+  if (!list2.length) return list1;
+  const set = new Set(list1);
+  const result = [...list1];
+  for (const idx of list2) {
+    if (!set.has(idx)) {
+      set.add(idx);
+      result.push(idx);
+    }
+  }
+  return result;
 }
 
 const indexKindOrder: StructureIndexKind[] = ["primary", "unique", "index", "fulltext", "spatial"];
@@ -4084,13 +4131,14 @@ function columnRowClass(column: EditableStructureColumn, index: number) {
   const dragState = columnDragState.value;
   const isSearchMatch = filteredColumnRowIds.value.has(column.id);
   const isSelected = selectedColumnIds.value.has(column.id) && !column.markedForDrop;
+  const kind = columnIndexKind(column);
   return {
     "bg-destructive/5 opacity-60": column.markedForDrop,
-    "structure-column-primary-key": columnIndexKind(column) === "primary",
-    "structure-column-unique-key": columnIndexKind(column) === "unique",
-    "structure-column-index-key": columnIndexKind(column) === "index",
-    "structure-column-fulltext-key": columnIndexKind(column) === "fulltext",
-    "structure-column-spatial-key": columnIndexKind(column) === "spatial",
+    "structure-column-primary-key": kind === "primary",
+    "structure-column-unique-key": kind === "unique",
+    "structure-column-index-key": kind === "index",
+    "structure-column-fulltext-key": kind === "fulltext",
+    "structure-column-spatial-key": kind === "spatial",
     "structure-column-search-match": isSearchMatch,
     // Reuse the existing search-current highlight for the active/selected row.
     "structure-column-search-current": highlightedColumnId.value === column.id || isSelected,
@@ -4629,10 +4677,25 @@ const availableColumnNames = computed(() =>
     .filter(Boolean),
 );
 
+const defaultIndexColumnOptions = computed(() => {
+  return availableColumnNames.value.map((name) => {
+    const column = activeColumnByName.value.get(name);
+    return { name, dataType: column?.dataType ?? "", disabled: false };
+  });
+});
+
 function indexColumnPickerOptions(index: EditableStructureIndex, included = false) {
   const selected = included ? index.includedColumns : index.columns;
+  const isSpecial = !included && canIndexTypeHaveSpecialIssue(structureDialect.value, index.indexType);
+  const availableSet = new Set(availableColumnNames.value);
+  const hasUnavailableSelected = selected.some((name) => name.trim() && !availableSet.has(name));
+
+  if (!isSpecial && !hasUnavailableSelected) {
+    return defaultIndexColumnOptions.value;
+  }
+
   return filterStructureIndexColumnOptions(availableColumnNames.value, selected).map((name) => {
-    const column = columns.value.find((item) => item.name === name && !item.markedForDrop);
+    const column = activeColumnByName.value.get(name);
     return { name, dataType: column?.dataType ?? "", disabled: !included && !canToggleIndexColumn(index, name) };
   });
 }
@@ -4652,8 +4715,9 @@ function toggleIndexColumn(index: EditableStructureIndex, col: string) {
 }
 
 function indexColumnsIssue(index: EditableStructureIndex, names = index.columns, indexType = index.indexType, isUnique = index.isUnique) {
+  if (!canIndexTypeHaveSpecialIssue(structureDialect.value, indexType)) return null;
   const fields = names.flatMap((name) => {
-    const column = columns.value.find((item) => !item.markedForDrop && [item.name, item.original?.name].some((value) => value && structureColumnComparisonKey(value) === structureColumnComparisonKey(name)));
+    const column = activeColumnByComparisonKey.value.get(structureColumnComparisonKey(name));
     return column ? [column] : [];
   });
   return specialIndexColumnIssue(structureDialect.value, indexType, fields, isUnique);
@@ -4666,6 +4730,7 @@ function needsIndexColumnValidation(index: EditableStructureIndex): boolean {
 }
 
 function canToggleIndexColumn(index: EditableStructureIndex, name: string): boolean {
+  if (!canIndexTypeHaveSpecialIssue(structureDialect.value, index.indexType)) return true;
   return index.columns.includes(name) || !indexColumnsIssue(index, [...index.columns, name]);
 }
 

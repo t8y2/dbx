@@ -1618,6 +1618,7 @@ mod tests {
             transfer_progress_channels: RwLock::new(HashMap::new()),
             table_import_channels: RwLock::new(HashMap::new()),
             sql_file_executions: RwLock::new(HashMap::new()),
+            sql_file_failure_logs: Default::default(),
             managed_sql_previews: Default::default(),
             nacos_imports: RwLock::new(HashMap::new()),
             login_rate_limit: Mutex::new(HashMap::new()),

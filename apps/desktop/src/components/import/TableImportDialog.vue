@@ -1698,6 +1698,13 @@ watch(rawProgressPercent, (percent) => {
               <Label class="text-xs">{{ t("tableImport.lastDataRow") }}</Label>
               <Input v-model.number="lastDataRow" type="number" min="0" class="h-8 text-xs" />
             </div>
+            <div class="col-span-4 space-y-1">
+              <label class="flex items-center gap-2 text-xs">
+                <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
+                {{ t("tableImport.emptyStringAsNull") }}
+              </label>
+              <p class="text-[11px] text-muted-foreground">{{ t("tableImport.emptyStringAsNullExcelHint") }}</p>
+            </div>
           </div>
 
           <div v-if="supportsImportConflictPolicy" class="space-y-1.5 rounded-md border p-3">

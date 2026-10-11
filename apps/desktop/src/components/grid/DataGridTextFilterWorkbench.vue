@@ -7,7 +7,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
-import type { DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
+import type { DataGridDistinctValueSource, DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
 import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_MAX, DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_MIN } from "@/lib/dataGrid/dataGridTextFilterPanel";
 
@@ -40,6 +40,7 @@ const emit = defineEmits<{
   openValueSuggestions: [id: string, target: DataGridDistinctValueSuggestionTarget];
   closeValueSuggestions: [];
   updateValueSuggestionSearch: [value: string];
+  updateValueSuggestionSource: [source: DataGridDistinctValueSource];
   selectValueSuggestion: [option: DataGridLocalFilterOption];
   toggleValueSuggestion: [option: DataGridLocalFilterOption];
   toggleAllValueSuggestions: [];
@@ -180,6 +181,7 @@ watch(
         @open-value-suggestions="(id, target) => emit('openValueSuggestions', id, target)"
         @close-value-suggestions="emit('closeValueSuggestions')"
         @update-value-suggestion-search="emit('updateValueSuggestionSearch', $event)"
+        @update-value-suggestion-source="emit('updateValueSuggestionSource', $event)"
         @select-value-suggestion="emit('selectValueSuggestion', $event)"
         @toggle-value-suggestion="emit('toggleValueSuggestion', $event)"
         @toggle-all-value-suggestions="emit('toggleAllValueSuggestions')"

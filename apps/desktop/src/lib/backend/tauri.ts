@@ -157,6 +157,7 @@ import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, SchemaSyncSql
 import type { BuildCreatePartitionedTableSqlOptions, BuildTableOwnerChangeSqlOptions, BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, SqliteTableStructureChangePreview, TablePartitionSqlOptions, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
 import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
+import type { DatabaseStructureSearchSql, DatabaseStructureSearchSqlOptions } from "@/lib/database/databaseStructureSearch";
 import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput } from "@/lib/table/objectSourceEditor";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
@@ -1964,6 +1965,12 @@ export interface ExecuteMultiProgress {
   error?: BackendError;
 }
 
+export async function subscribeQueryMessages(executionId: string, onMessages: (messages: import("@/types/database").QueryMessage[]) => void): Promise<() => void> {
+  return listen<{ executionId: string; messages: import("@/types/database").QueryMessage[] }>("query-messages", (event) => {
+    if (event.payload.executionId === executionId) onMessages(event.payload.messages);
+  });
+}
+
 export async function executeMultiWithProgress(
   connectionId: string,
   database: string,
@@ -2197,6 +2204,14 @@ export async function buildTableSelectSql(options: BuildTableSelectSqlOptions): 
 
 export async function buildDatabaseSearchSql(options: DatabaseSearchSqlOptions): Promise<DatabaseSearchSql | null> {
   return invoke("build_database_search_sql", { options });
+}
+
+export async function buildDatabaseStructureSearchSql(options: DatabaseStructureSearchSqlOptions): Promise<DatabaseStructureSearchSql | null> {
+  return invoke("build_database_structure_search_sql", { options });
+}
+
+export async function supportsDatabaseStructureSearch(databaseType?: DatabaseType, driverProfile?: string): Promise<boolean> {
+  return invoke("supports_database_structure_search", { databaseType, driverProfile });
 }
 
 export async function buildSearchResultWhere(options: SearchResultWhereOptions): Promise<string> {
@@ -5581,6 +5596,47 @@ export async function previewSqlFile(filePath: string): Promise<SqlFilePreview> 
   return invoke("preview_sql_file", { filePath });
 }
 
+export type SqlFileFailureLogStatus = "available" | "degraded" | "unavailable";
+
+/** Health of one execution's failure log (dbx#11619). */
+export interface SqlFileFailureLogInfo {
+  status: SqlFileFailureLogStatus;
+  reason?: string;
+  /** Desktop only: the local log file, used by "open log folder". */
+  path?: string;
+}
+
+/** Stable identity of one failure row, matching what the backend logged. */
+export interface SqlFileFailureLogKey {
+  fileIndex: number;
+  statementIndex: number;
+}
+
+export interface SqlFileFailureLogTextPayload {
+  text?: string;
+  /** The derived text exceeded `limitBytes`; the caller should export to a file. */
+  tooLarge: boolean;
+  limitBytes: number;
+}
+
+export interface SqlFileFailureLogExportPayload {
+  records: number;
+  bytes: number;
+  format: string;
+}
+
+export async function sqlFileFailureLogInfo(executionId: string): Promise<SqlFileFailureLogInfo | null> {
+  return invoke("sql_file_failure_log_info", { executionId });
+}
+
+export async function exportSqlFileFailureLog(executionId: string, format: string, targetPath: string, keys?: SqlFileFailureLogKey[]): Promise<SqlFileFailureLogExportPayload> {
+  return invoke("export_sql_file_failure_log", { executionId, format, targetPath, keys });
+}
+
+export async function readSqlFileFailureLogText(executionId: string, format?: string, keys?: SqlFileFailureLogKey[]): Promise<SqlFileFailureLogTextPayload> {
+  return invoke("read_sql_file_failure_log_text", { executionId, format, keys });
+}
+
 export async function executeSqlFile(request: SqlFileRequest): Promise<void> {
   return invoke("execute_sql_file", { request });
 }
@@ -6172,6 +6228,8 @@ export interface TableExportRequest {
   /** 与 `columns` 对齐的列 EXTRA 元数据（identity 等），用于 SQL INSERT 导出的 `SET IDENTITY_INSERT`。 */
   columnExtras?: Array<string | null | undefined>;
   columnComments?: Array<string | null> | null;
+  /** xlsx 专用：注释作为第二行表头（第 1 行列名、第 2 行注释、数据从第 3 行开始）。 */
+  headerCommentRows?: boolean;
   primaryKeys?: string[];
   /** 导出 SQL 时是否排除主键列（对应数据提取设置里的“排除主键”）。 */
   excludePrimaryKeys?: boolean;
@@ -6238,6 +6296,8 @@ export interface QueryResultExportRequest {
   timeoutSecs?: number;
   keysetOptimizationEnabled: boolean;
   clientSessionId?: string;
+  /** Open manual transaction to read through, so the export sees its uncommitted changes. */
+  txnSessionId?: string;
   executionId?: string;
   dateTimeFormat?: string;
   exportTableName?: string;
@@ -6252,6 +6312,8 @@ export interface QueryResultExportRequest {
   exportColumnExtras?: Array<string | null | undefined>;
   numericColumnRightAlign?: boolean;
   columnComments?: Array<string | null> | null;
+  /** xlsx 专用：注释作为第二行表头（第 1 行列名、第 2 行注释、数据从第 3 行开始）。 */
+  headerCommentRows?: boolean;
   autoFilter?: boolean;
   identifierQuote?: string;
   /** 导出 SQL 时是否排除主键列（对应数据提取设置里的“排除主键”）。 */
@@ -6420,6 +6482,7 @@ export async function exportQueryResultXlsx(
   numericColumnRightAlign?: boolean,
   autoFilter?: boolean,
   dateTimeFormat?: string,
+  headerCommentRows?: boolean,
 ): Promise<void> {
   return invoke("export_query_result_xlsx", {
     request: {
@@ -6432,6 +6495,7 @@ export async function exportQueryResultXlsx(
       numericColumnRightAlign,
       autoFilter,
       dateTimeFormat,
+      headerCommentRows,
     },
   });
 }
@@ -6446,6 +6510,7 @@ export async function exportQueryResultsXlsx(
     rows: readonly (readonly XlsxCellValue[])[];
     numericColumnRightAlign?: boolean;
     autoFilter?: boolean;
+    headerCommentRows?: boolean;
   }[],
   autoFilter?: boolean,
   dateTimeFormat?: string,

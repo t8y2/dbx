@@ -118,7 +118,7 @@ const settingsStore = useSettingsStore();
 const authStore = useAuthStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const webLogoPosition = computed(() => settingsStore.editorSettings.webLogoPosition ?? "left");
-const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates || props.hasUpdateAvailable);
+const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop, close } = useWindowControls();
 
 // Current user display name

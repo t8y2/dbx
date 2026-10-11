@@ -12,7 +12,7 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-async function mountNavigator(inputResults?: QueryResult[], canExportXlsx = true, displayMode: "tabs" | "list" = "tabs", activeIndex = 1) {
+async function mountNavigator(inputResults?: QueryResult[], canExportXlsx = true, displayMode: "tabs" | "list" = "tabs", activeIndex = 1, hasSiblingRunTabs = false) {
   // Include a non-tabular result so ordinal and storage index are different.
   const results = inputResults ?? ([{ columns: [], rows: [] }, ...Array.from({ length: 100 }, (_, i) => ({ columns: ["value"], rows: [[i + 1]], sourceStatement: `SELECT ${i + 1} AS value` }))] as QueryResult[]);
   const select = vi.fn();
@@ -21,7 +21,7 @@ async function mountNavigator(inputResults?: QueryResult[], canExportXlsx = true
   const exportXlsx = vi.fn();
   const container = document.createElement("div");
   document.body.append(container);
-  app = createApp(ResultSetNavigator, { items: tabularResultItems(results), activeIndex, active: true, canExportXlsx, displayMode, onSelect: select, onCopySql: copySql, onCopyQuerySql: copyQuerySql, onExportXlsx: exportXlsx });
+  app = createApp(ResultSetNavigator, { items: tabularResultItems(results), activeIndex, active: true, canExportXlsx, displayMode, hasSiblingRunTabs, onSelect: select, onCopySql: copySql, onCopyQuerySql: copyQuerySql, onExportXlsx: exportXlsx });
   app.use(
     createI18n({
       legacy: false,
@@ -238,5 +238,20 @@ describe("large result-set navigation", () => {
     const button = container.querySelector<HTMLButtonElement>("button")!;
     expect(button.textContent?.trim()).toBe("Result sets");
     expect(button.querySelector("svg")).toBeNull();
+  });
+
+  it("uses flex-1 when hasSiblingRunTabs is false or omitted", async () => {
+    const { container } = await mountNavigator();
+    const region = container.querySelector("[data-result-set-tabs-region]")!;
+    expect(region.classList.contains("flex-1")).toBe(true);
+    expect(region.classList.contains("shrink-0")).toBe(false);
+  });
+
+  it("constrains width with shrink-0 max-w-[50%] when hasSiblingRunTabs is true", async () => {
+    const { container } = await mountNavigator(undefined, true, "tabs", 1, true);
+    const region = container.querySelector("[data-result-set-tabs-region]")!;
+    expect(region.classList.contains("shrink-0")).toBe(true);
+    expect(region.classList.contains("max-w-[50%]")).toBe(true);
+    expect(region.classList.contains("flex-1")).toBe(false);
   });
 });

@@ -31,4 +31,13 @@ describe("TableStructureEditor selected-row styles", () => {
       expect(scopedStyle).toContain(className);
     }
   });
+
+  it("guards index column options and column issues against hot-path recalculations (#11637)", () => {
+    expect(source).toContain("canIndexTypeHaveSpecialIssue(structureDialect.value, indexType)");
+    expect(source).toContain("canIndexTypeHaveSpecialIssue(structureDialect.value, index.indexType)");
+    expect(source).toContain("defaultIndexColumnOptions = computed");
+    expect(source).toContain("activeColumnByName = computed");
+    expect(source).toContain("activeColumnByComparisonKey = computed");
+    expect(source).toContain("indexesByColumnComparisonKey = computed");
+  });
 });

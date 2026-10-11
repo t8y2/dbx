@@ -94,6 +94,7 @@ import { isLoginUserSchemaNode } from "@/lib/sidebar/loginUserNode";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectNameFilter";
+import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { isWindows } from "@/lib/backend/platform";
 import { flattenTree } from "@/composables/useFlatTree";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
@@ -487,7 +488,7 @@ const isLockedConnectionGroup = computed(() => {
 });
 
 function hasActiveObjectNameFilter(node: TreeNode): boolean {
-  if (!supportsSidebarObjectNameFilter(node) || !node.connectionId || !node.database) return false;
+  if (!supportsSidebarObjectNameFilter(node) || !node.connectionId || !hasTreeNodeDatabaseContext(node)) return false;
   const filter = connectionStore.tableNameFilterForScope({
     connectionId: node.connectionId,
     database: node.database,

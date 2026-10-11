@@ -1,5 +1,6 @@
 import { hasShortDataGridSqlPage } from "@/lib/dataGrid/dataGridPagination";
 import { createQueryRequestTiming } from "@/lib/queryRequestTiming";
+import { mergeQueryMessages, queryResultMessages } from "@/lib/query/queryResultMessages";
 import { appendNeo4jNodeCells, extractNeo4jNodeCells } from "@/lib/neo4j/neo4jNodeResult";
 import { UPDATE_RESTORE_KEY, assertUpdateAllowsInteraction } from "@/lib/app/updatePreparation";
 import { defineStore } from "pinia";
@@ -107,10 +108,10 @@ import { replaceSqlServerLeadingUseQuery, sqlServerLeadingUseScript, switchesDat
 import { classifySqlRisk } from "@/lib/sql/sqlRisk";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
-import { combineDataGridOrderByInputs } from "@/composables/useDataGridSortBuilder";
+import { combineDataGridOrderByInputs, copyDataGridSortBuilderStatesForTab } from "@/composables/useDataGridSortBuilder";
 import { beginClosingDataGridViewSnapshotsForTab, clearDataGridViewSnapshot, clearDataGridViewSnapshotsForTab } from "@/lib/dataGrid/dataGridViewStateCache";
 import { beginClosingBrowserState } from "@/lib/tabs/documentBrowserStateCache";
-import { clearDataGridStructuredFilterStatesForTab } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { clearDataGridStructuredFilterStatesForTab, copyDataGridStructuredFilterStatesForTab } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { clearDataGridSearchStatesForTab } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
 import { estimateQueryResultsBytes, selectInactiveResultEvictions } from "@/lib/tabs/queryResultSize";
@@ -297,6 +298,12 @@ interface TableDataRefreshTarget {
 
 function tabClientSessionId(tab: Pick<QueryTab, "id">, suffix?: (typeof BACKGROUND_CLIENT_SESSION_SUFFIXES)[number]): string {
   return suffix ? `${tab.id}:${suffix}` : tab.id;
+}
+
+// The export session is a separate connection, so it only sees committed data.
+// An open manual transaction is passed along for the backend to read through.
+function exportTxnSessionId(tab: Pick<QueryTab, "autoCommit" | "txnSessionId">): string | undefined {
+  return tab.autoCommit === false ? tab.txnSessionId : undefined;
 }
 
 function resultRunCacheKey(tabId: string, runId: string): string {
@@ -1762,6 +1769,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function clearResultPayload(tab: QueryTab, options: { evicted?: boolean; preserveCacheSnapshot?: boolean } = {}) {
+    if (!tab.isExecuting) tab.liveQueryMessages = undefined;
     tab.result = undefined;
     tab.results = undefined;
     tab.activeResultIndex = undefined;
@@ -4816,6 +4824,12 @@ export const useQueryStore = defineStore("query", () => {
       previewSql: original.previewSql,
     };
     initializeResultAutoSave(newTab);
+    if (newTab.mode === "data") {
+      // Seed builder state before the new grid mounts; the combined WHERE alone
+      // cannot recover which conditions belong to the manual input or quick UI.
+      copyDataGridStructuredFilterStatesForTab(id, newId);
+      copyDataGridSortBuilderStatesForTab(id, newId);
+    }
     tabs.value.splice(idx + 1, 0, newTab);
 
     const owner = groupForTab(id);
@@ -7107,6 +7121,7 @@ export const useQueryStore = defineStore("query", () => {
     }
     tab.executionId = executionId;
     const tableDataNativeSelectionBlockOwner = tab.mode === "data" ? {} : undefined;
+    tab.liveQueryMessages = [];
     if (tableDataNativeSelectionBlockOwner) beginDataGridNativeSelectionBlock(tableDataNativeSelectionBlockOwner);
     const previousDisplayedSql = tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
     tab.lastExecutedSql = sql;
@@ -7158,6 +7173,7 @@ export const useQueryStore = defineStore("query", () => {
     let countSql: string | undefined;
     let exactQueryRowBound: number | undefined;
     let useAgentResultSession = false;
+    let unsubscribeQueryMessages: (() => void) | undefined;
     let paginationRowNumberColumn: string | undefined;
     let executionDispatched = false;
     let clientRequestStartedAt: number | undefined;
@@ -7170,6 +7186,14 @@ export const useQueryStore = defineStore("query", () => {
     // the row/column locate flow. These locals live inside the try block.
     let errorLocateContext: { databaseType: DatabaseType | undefined; parameterOptions: SqlParameterOptions | undefined; sourceOffset: number | undefined; executedSql: string | undefined } | undefined;
     try {
+      if (isTauriRuntime()) {
+        unsubscribeQueryMessages = await api.subscribeQueryMessages(executionId, (messages) => {
+          const current = findExecutionTab(id);
+          if (current?.executionId === executionId && current.isExecuting) {
+            current.liveQueryMessages = [...(current.liveQueryMessages ?? []), ...messages].slice(0, 1001);
+          }
+        });
+      }
       await waitForTabSessionReset(id);
       const connStore = useConnectionStore();
       const executionTarget = resumedExecutionTarget ?? options?.executionTarget;
@@ -8554,9 +8578,18 @@ export const useQueryStore = defineStore("query", () => {
         syncDisplayedResultRun(current, queryBaseSql, captureResultRun);
       }
     } finally {
+      unsubscribeQueryMessages?.();
       if (tableDataNativeSelectionBlockOwner) finishDataGridNativeSelectionBlock(tableDataNativeSelectionBlockOwner);
       const current = findExecutionTab(id);
       if (current?.executionId === executionId) {
+        if (producedResult && current.result && current.liveQueryMessages?.length) {
+          const results = current.results?.length ? current.results : [current.result];
+          const completed = results.flatMap(queryResultMessages);
+          const missing = mergeQueryMessages(completed, current.liveQueryMessages).slice(completed.length);
+          current.result.messages = [...queryResultMessages(current.result), ...missing];
+          current.liveQueryMessages = undefined;
+        }
+        if (!current.liveQueryMessages?.length) current.liveQueryMessages = undefined;
         const liveBatch = liveBatchSqlExecutions.get(current);
         if (liveBatch?.executionId === executionId) current.batchSqlExecution = liveBatch;
         finishBatchSqlExecution(current, executionId, current.isCancelling === true);
@@ -9833,6 +9866,7 @@ export const useQueryStore = defineStore("query", () => {
       keysetOptimizationEnabled: settings.queryExportKeysetOptimizationEnabled,
       csvQuoteMode: settings.csvQuoteMode,
       clientSessionId,
+      txnSessionId: exportTxnSessionId(tab),
       nullLiteral: csvNullLiteralForMode(settings.csvNullMode),
       executionId: uuid(),
       exportTableName: options.format === "sql" && hasUniqueInsertTarget ? options.exportTableName : undefined,
@@ -9875,6 +9909,7 @@ export const useQueryStore = defineStore("query", () => {
       keysetOptimizationEnabled: settings.queryExportKeysetOptimizationEnabled,
       csvQuoteMode: settings.csvQuoteMode,
       clientSessionId: `${tabClientSessionId(tab, "export")}:${exportId}`,
+      txnSessionId: exportTxnSessionId(tab),
       nullLiteral: csvNullLiteralForMode(settings.csvNullMode),
       executionId: uuid(),
       numericColumnRightAlign: settings.numericColumnRightAlign,

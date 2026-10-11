@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { computed, nextTick, ref, watch, type ComponentPublicInstance } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -103,13 +103,35 @@ function syncConnectionPickerWidth() {
   if (width > 0) connectionPickerWidth.value = width;
 }
 
+function handleScrollOutside(event: Event) {
+  if (!connectionPickerOpen.value) return;
+  const target = event.target;
+  if (target instanceof HTMLElement && target.closest?.('[data-slot="popover-content"]')) return;
+  connectionPickerOpen.value = false;
+}
+
 watch(connectionPickerOpen, async (open) => {
   if (!open) {
+    window.removeEventListener("scroll", handleScrollOutside, { capture: true });
     connectionSearch.value = "";
     return;
   }
+  window.addEventListener("scroll", handleScrollOutside, { capture: true, passive: true });
   await nextTick();
   syncConnectionPickerWidth();
+});
+
+watch(
+  () => props.draft,
+  () => {
+    connectionPickerOpen.value = false;
+    connectionSearch.value = "";
+    databaseSearch.value = "";
+  },
+);
+
+onBeforeUnmount(() => {
+  window.removeEventListener("scroll", handleScrollOutside, { capture: true });
 });
 
 watch(
@@ -131,7 +153,7 @@ watch(
             <ChevronDown class="ml-2 h-4 w-4 shrink-0 opacity-50" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent align="start" :collision-padding="24" class="w-[var(--reka-popover-trigger-width)] max-w-[calc(100vw-48px)] p-1" :style="connectionPickerWidth ? { width: `${connectionPickerWidth}px` } : undefined">
+        <PopoverContent align="start" :collision-padding="24" :hide-when-detached="true" class="w-[var(--reka-popover-trigger-width)] max-w-[calc(100vw-48px)] p-1" :style="connectionPickerWidth ? { width: `${connectionPickerWidth}px` } : undefined">
           <div class="relative">
             <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input v-model="connectionSearch" data-backup-connection-search class="h-9 pl-8" :aria-label="t('databaseBackup.searchConnections')" :placeholder="t('databaseBackup.searchConnections')" />

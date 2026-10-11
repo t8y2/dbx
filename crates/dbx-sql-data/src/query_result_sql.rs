@@ -1783,7 +1783,25 @@ fn add_questdb_limit(statement: &str, limit: usize, offset: usize) -> String {
 }
 
 fn has_top_level_limit(sql: &str) -> bool {
-    top_level_sql_tokens(sql).iter().any(|token| token.text == "LIMIT")
+    top_level_sql_tokens(sql).iter().any(|token| token.text == "LIMIT") || ast_top_level_limit(sql).is_some()
+}
+
+/// 词法扫描在字符串里的反斜杠（Postgres 标准串、SQLite 等）会让引号配对错乱，
+/// 漏掉顶层 LIMIT；AST 解析不受影响，作为 `has_top_level_limit` /
+/// `top_level_limit_row_count` 的补位。外层 `None` 表示没有顶层行数上限
+/// （单独的 `OFFSET` 不算），内层 `None` 表示有上限但行数不是字面量。
+fn ast_top_level_limit(sql: &str) -> Option<Option<usize>> {
+    let statements = Parser::parse_sql(&GenericDialect {}, sql).ok()?;
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return None;
+    };
+    if let Some(LimitClause::LimitOffset { limit: Some(expr), .. }) = &query.limit_clause {
+        return Some(match expr {
+            Expr::Value(ValueWithSpan { value: Value::Number(text, _), .. }) => text.to_string().parse().ok(),
+            _ => None,
+        });
+    }
+    query.fetch.is_some().then_some(None)
 }
 
 /// True when the statement has a top-level `TOP` clause (SQL Server dialect).
@@ -2114,7 +2132,11 @@ fn add_standard_limit(
         }
         // A user/top-level LIMIT can still be wider than the selected grid page size.
         // Wrap it so the first page respects the UI page limit while preserving the user's cap.
-        if offset > 0 || top_level_limit_row_count(statement).is_some_and(|row_count| row_count > limit) {
+        if offset > 0
+            || top_level_limit_row_count(statement)
+                .or_else(|| ast_top_level_limit(statement).flatten())
+                .is_some_and(|row_count| row_count > limit)
+        {
             return add_outer_standard_limit(statement, database_type, limit, offset, "");
         }
         return format!("{statement};");
@@ -2611,9 +2633,15 @@ fn build_derived_column_aliases(result_columns: &[String]) -> Vec<String> {
 
 fn normalize_alias_base(column: &str, index: usize) -> String {
     let compact = column.split_whitespace().collect::<Vec<_>>().join("_");
+    // A name that is already safe is kept verbatim. Trimming its underscores
+    // would rename the hidden `__DBX_PK_n` key column, so the grid no longer
+    // recognises it as hidden after a database sort (#11623).
+    if !compact.is_empty() && compact.chars().all(is_safe_alias_char) {
+        return compact;
+    }
     let safe = compact
         .chars()
-        .map(|ch| if ch.is_alphanumeric() || matches!(ch, '_' | '$') { ch } else { '_' })
+        .map(|ch| if is_safe_alias_char(ch) { ch } else { '_' })
         .collect::<String>()
         .trim_matches('_')
         .to_string();
@@ -2622,6 +2650,10 @@ fn normalize_alias_base(column: &str, index: usize) -> String {
     } else {
         safe
     }
+}
+
+fn is_safe_alias_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '_' | '$')
 }
 
 fn fallback_alias(index: usize) -> String {
@@ -2933,6 +2965,56 @@ mod tests {
 
         assert!(result.ok);
         assert_eq!(result.sql.unwrap(), "SELECT id, name FROM users LIMIT 100 OFFSET 200;");
+    }
+
+    // 词法扫描在标准串（反斜杠）后漏掉顶层 LIMIT 时，不能再追加第二个 LIMIT。
+    #[test]
+    fn postgres_hidden_limit_is_not_appended_twice() {
+        for (offset, expected) in [
+            (0usize, "SELECT * FROM t WHERE p = 'C:\\' LIMIT 10;"),
+            (500, "SELECT * FROM (SELECT * FROM t WHERE p = 'C:\\' LIMIT 10) \"dbx_page\" LIMIT 500 OFFSET 500;"),
+        ] {
+            let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+                original_sql: "SELECT * FROM t WHERE p = 'C:\\' LIMIT 10".to_string(),
+                database_type: Some(DatabaseType::Postgres),
+                limit: 500,
+                offset,
+            });
+
+            assert!(result.ok);
+            assert_eq!(result.sql.unwrap(), expected, "offset {offset}");
+        }
+    }
+
+    // 隐藏的 LIMIT 比页大小更宽时，与可见场景一致：包一层并保持页大小。
+    #[test]
+    fn postgres_hidden_limit_over_page_size_is_wrapped() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT * FROM t WHERE p = 'C:\\' LIMIT 1000".to_string(),
+            database_type: Some(DatabaseType::Postgres),
+            limit: 500,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT * FROM t WHERE p = 'C:\\' LIMIT 1000) \"dbx_page\" LIMIT 500 OFFSET 0;"
+        );
+    }
+
+    // 只有 OFFSET 的语句不算已限行，不能被 AST 补位误判成"已有分页"。
+    #[test]
+    fn postgres_offset_only_query_still_gets_a_limit() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT * FROM t OFFSET 5".to_string(),
+            database_type: Some(DatabaseType::Postgres),
+            limit: 500,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        assert_eq!(result.sql.unwrap(), "SELECT * FROM t OFFSET 5 LIMIT 500;");
     }
 
     #[test]
@@ -6375,6 +6457,31 @@ WHERE u.id = picked.id;
         assert_eq!(
             result.sql.unwrap(),
             "SELECT * FROM (SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id) t ORDER BY 2 ASC;"
+        );
+    }
+
+    #[test]
+    fn postgres_sort_keeps_hidden_primary_key_alias() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT name, score, \"id\" AS \"__DBX_PK_0\" FROM t1".to_string(),
+            database_type: Some(DatabaseType::Postgres),
+            result_columns: vec!["name".to_string(), "score".to_string(), "__DBX_PK_0".to_string()],
+            column_index: 1,
+            column: "score".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT name, score, \"id\" AS \"__DBX_PK_0\" FROM t1) t(\"name\", \"score\", \"__DBX_PK_0\") ORDER BY \"score\" ASC;"
+        );
+    }
+
+    #[test]
+    fn derived_column_aliases_keep_underscores_of_safe_names() {
+        assert_eq!(
+            build_derived_column_aliases(&["_id".to_string(), "count(*)".to_string(), "total_".to_string()]),
+            vec!["_id".to_string(), "count".to_string(), "total_".to_string()]
         );
     }
 

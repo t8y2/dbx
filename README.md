@@ -131,7 +131,7 @@
       </a>
     </td>
     <td>
-      HiAPI is a developer-focused API platform for image, video, audio, and text models — GPT Image 2.5 (Flare & Sunburst), OpenAI-compatible text endpoints, and Remote MCP/Agent Skills for Claude Code, Cursor, and more. Pay as you go with no minimum spend; new users get 200 Credits on signup, plus up to 12% extra Credits on the first top-up.
+      HiAPI is a developer-focused API platform for image, video, audio, and text models — GPT Image 2.5 (Flare & Sunburst), OpenAI-compatible text endpoints, and Remote MCP/Agent Skills for Claude Code, Cursor, and more. Pay as you go with no minimum spend; new users get 200 Credits on signup, plus 10% bonus Credits on top-ups.
       <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-en" target="_blank">Visit HiAPI</a>
     </td>
   </tr>
@@ -144,6 +144,17 @@
     <td>
       UCloud is the first public cloud provider listed on China's STAR Market, with 28 global regions for cloud hosting, databases, and CDN; its AstraFlow platform offers one-click access to 200+ mainstream LLMs.
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">Visit UCloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://mate.vip/ee/" target="_blank">
+        <img src="docs/public/sponsors/taiyi-card.png" alt="太一企业版" width="175" />
+      </a>
+    </td>
+    <td>
+      太一智能体企业版是面向央国企的私有化智能体平台，采用“1+N+N”架构：1 个平台、N 个终端、N 个场景。<strong>可信</strong>：Java 微服务架构，私有化部署，全程留痕可审计。<strong>可控</strong>：关键操作人工审批，资料按密级管理。<strong>可达</strong>：按单位模板直接生成公文、台账和汇报材料。<strong>可复制</strong>：场景方案包化交付，便于推广和二次开发。欢迎预约演示，或在 GitHub 搜索 MateClaw。
+      <a href="https://mate.vip/ee/" target="_blank">访问太一企业版</a>
     </td>
   </tr>
   <tr>

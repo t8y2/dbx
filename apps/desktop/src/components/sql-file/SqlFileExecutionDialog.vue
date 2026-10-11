@@ -13,6 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useToast } from "@/composables/useToast";
+import FailureDetailsList from "@/components/sql-file/FailureDetailsList.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -32,7 +33,7 @@ import { orderConnectionsForSidebarDisplay } from "@/lib/sidebar/connectionListS
 import SqlFileProgressIndicator from "./SqlFileProgressIndicator.vue";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { Check, CheckSquare, ChevronRight, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
+import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -339,6 +340,10 @@ const statusIcon = computed(() => {
 });
 
 const sqlFileFailures = computed(() => activeExecutionTask.value?.sqlFileFailures ?? []);
+// Default name of an exported failure log: the executed script(s), so a log is
+// recognizable next to the file it came from.
+const failureLogFileNameHint = computed(() => previews.value.map((item) => displayFileNames.value.get(item.filePath) ?? item.fileName).join("-") || "sql-file");
+
 const sqlFileFailureCount = computed(() => sqlFileFailures.value.length + (activeExecutionTask.value?.sqlFileFailuresOmitted ?? 0));
 const unlistedTerminalError = computed(() => {
   const error = progress.value?.error || terminalError.value;
@@ -1158,26 +1163,18 @@ watch(
             </div>
           </div>
 
-          <div v-if="sqlFileFailureCount > 0" class="min-w-0 space-y-1.5">
-            <button type="button" class="flex items-center gap-1 text-xs font-medium text-foreground hover:text-primary" :aria-expanded="failureDetailsExpanded" @click="failureDetailsExpanded = !failureDetailsExpanded">
-              <ChevronRight class="h-3.5 w-3.5 shrink-0 transition-transform" :class="{ 'rotate-90': failureDetailsExpanded }" />
-              {{ failureDetailsExpanded ? t("exportProgress.hideFailureDetails") : t("exportProgress.showFailureDetails", { count: sqlFileFailureCount }) }}
-            </button>
-            <div v-if="failureDetailsExpanded" class="max-h-[min(30vh,280px)] min-w-0 overflow-y-auto rounded-md border border-destructive/20 bg-destructive/5 text-xs">
-              <div v-for="failure in sqlFileFailures" :key="`${failure.fileIndex ?? -1}:${failure.statementIndex}`" class="border-b border-destructive/15 p-2.5 last:border-b-0">
-                <div class="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
-                  <span class="shrink-0">#{{ failure.statementIndex }}</span>
-                  <span v-if="failure.fileName" class="truncate text-muted-foreground" :title="failure.fileName">{{ failure.fileName }}</span>
-                </div>
-                <div v-if="failure.statementSummary" class="mt-1 max-w-full overflow-auto font-mono whitespace-pre-wrap break-words text-foreground">{{ failure.statementSummary }}</div>
-                <div class="mt-1 select-text whitespace-pre-wrap break-words text-destructive">{{ translateBackendError(t, failure.error) }}</div>
-                <div v-if="failure.truncated" class="mt-1 text-muted-foreground">{{ t("exportProgress.failureDetailTruncated") }}</div>
-              </div>
-              <div v-if="activeExecutionTask?.sqlFileFailuresOmitted" class="p-2.5 text-muted-foreground">
-                {{ t("exportProgress.failureDetailsOmitted", { count: activeExecutionTask.sqlFileFailuresOmitted }) }}
-              </div>
-            </div>
-          </div>
+          <!-- The list is capped in memory while the backend log keeps every
+               failed statement, so the export/copy actions live in the shared
+               component that also renders these rows (dbx#11619). -->
+          <FailureDetailsList
+            v-if="sqlFileFailureCount > 0"
+            v-model:expanded="failureDetailsExpanded"
+            :execution-id="executionId || activeExecutionTask?.exportId || undefined"
+            :failures="sqlFileFailures"
+            :omitted="activeExecutionTask?.sqlFileFailuresOmitted ?? 0"
+            :file-name-hint="failureLogFileNameHint"
+            variant="dialog"
+          />
 
           <div v-if="unlistedTerminalError" class="max-w-full overflow-auto rounded-md border bg-destructive/5 p-2 text-xs text-destructive whitespace-pre-wrap">
             {{ translateBackendError(t, unlistedTerminalError) }}

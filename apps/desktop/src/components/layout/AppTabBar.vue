@@ -177,7 +177,12 @@ function closeOtherActiveTabs() {
   queryStore.closeTab(activeTabId);
 }
 
-defineExpose({ closeOtherActiveTabs });
+function closeAllTabs() {
+  closeSpecialRegularSurfaces();
+  queryStore.closeAllTabs();
+}
+
+defineExpose({ closeOtherActiveTabs, closeAllTabs });
 
 function handleSaveAndClose() {
   const id = queryStore.saveAndClosePendingTab();

@@ -21,8 +21,9 @@ use crate::database_export::{
 };
 use crate::models::connection::DatabaseType;
 use crate::query::{
-    await_stream_with_progress_timeout, canceled_error, close_query_session, execute_sql_statement_with_options,
-    operation_budget_for_pool_key, QueryExecutionOptions, StreamProgressClock, QUERY_CANCELED,
+    await_stream_with_progress_timeout, canceled_error, close_query_session,
+    execute_in_manual_transaction_with_options, execute_sql_statement_with_options, operation_budget_for_pool_key,
+    ManualTransactionExecutionOptions, QueryExecutionOptions, StreamProgressClock, QUERY_CANCELED,
 };
 use crate::query_result_sql::{
     build_query_pagination_execution_plan, has_top_level_top, top_level_top_row_count, QueryPagination,
@@ -105,6 +106,12 @@ pub struct QueryResultExportRequest {
     pub keyset_optimization_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_session_id: Option<String>,
+    /// Open manual transaction of the source query tab. When set, every page is
+    /// read through that transaction's connection so the export sees the same
+    /// uncommitted changes as the result grid; a separate session would only
+    /// see committed data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub txn_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,6 +140,10 @@ pub struct QueryResultExportRequest {
     pub numeric_column_right_align: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_comments: Option<Vec<Option<String>>>,
+    /// Render `column_comments` as a second header row (names on row 1,
+    /// comments on row 2, data from row 3) instead of overriding headers.
+    #[serde(default)]
+    pub header_comment_rows: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_filter: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -254,7 +265,29 @@ fn query_sql_worksheets(request: &QueryResultExportRequest) -> Vec<XlsxWorksheet
         rows: split_excel_cell_text(&request.sql).into_iter().map(|sql| vec![Value::String(sql)]).collect(),
         numeric_column_right_align: false,
         auto_filter: Some(false),
+        header_comment_rows: false,
     }]
+}
+
+fn resolve_export_column_types(
+    columns: &[String],
+    inferred_types: &[String],
+    overrides: Option<&[Option<String>]>,
+) -> Vec<String> {
+    let overrides = overrides.unwrap_or(&[]);
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, _col)| {
+            if let Some(Some(override_type)) = overrides.get(index) {
+                let trimmed = override_type.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+            inferred_types.get(index).map(|t| t.trim().to_string()).unwrap_or_default()
+        })
+        .collect()
 }
 
 fn start_query_result_xlsx_workbook<W: Write + Seek>(
@@ -265,16 +298,19 @@ fn start_query_result_xlsx_workbook<W: Write + Seek>(
 ) -> Result<StreamingXlsxWriter<W>, String> {
     let trailing_sheets = query_sql_worksheets(request);
     let column_comments: &[Option<String>] = request.column_comments.as_deref().unwrap_or(&[]);
+    let effective_column_types =
+        resolve_export_column_types(columns, column_types, request.export_column_types.as_deref());
     start_streaming_xlsx_workbook_with_options(
         writer,
         Some("Result"),
         columns,
-        column_types,
+        &effective_column_types,
         column_comments,
         &trailing_sheets,
         request.date_time_format.as_deref(),
         request.numeric_column_right_align,
         request.auto_filter.unwrap_or(true),
+        request.header_comment_rows,
     )
 }
 
@@ -668,6 +704,7 @@ fn streaming_pagination_preflight_error(
     page_size: usize,
     has_keyset_plan: bool,
     has_single_execution_bound: bool,
+    use_agent_cursor: bool,
 ) -> Option<&'static str> {
     if has_keyset_plan || supports_streaming_offset_pagination(request, page_size) || has_single_execution_bound {
         return None;
@@ -675,7 +712,7 @@ fn streaming_pagination_preflight_error(
     if request.database_type == DatabaseType::Highgo {
         return Some(HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR);
     }
-    (!request.use_agent_cursor).then_some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+    (!use_agent_cursor).then_some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
 }
 
 /// Enforceable in-memory row bound for a single-execution export, or `None`
@@ -911,24 +948,34 @@ async fn export_query_result_core_inner(
 
     on_progress(progress(request, 0, ExportStatus::Running, None));
 
-    if try_export_postgres_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
-        return Ok(());
-    }
+    // The streaming fast paths below check out their own pooled connection, which
+    // cannot see an open manual transaction. Inside a transaction the export pages
+    // through the transaction's connection instead, the same way the result grid
+    // pages, and result-session cursors are not opened there.
+    let txn_session_id = request.txn_session_id.as_deref().map(str::trim).filter(|id| !id.is_empty());
+    let use_agent_cursor = request.use_agent_cursor && txn_session_id.is_none();
 
-    if try_export_sqlserver_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
-        return Ok(());
-    }
+    if txn_session_id.is_none() {
+        if try_export_postgres_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
+            return Ok(());
+        }
 
-    // MySQL does not guarantee a stable row order for independent LIMIT/OFFSET
-    // executions without ORDER BY, so query-result export must stream one run.
-    if try_export_mysql_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
-        return Ok(());
-    }
+        if try_export_sqlserver_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
+            return Ok(());
+        }
 
-    // ClickHouse HTTP pagination is unsafe for unsorted result sets; stream one
-    // response so large exports preserve the server's single execution order.
-    if try_export_clickhouse_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
-        return Ok(());
+        // MySQL does not guarantee a stable row order for independent LIMIT/OFFSET
+        // executions without ORDER BY, so query-result export must stream one run.
+        if try_export_mysql_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
+            return Ok(());
+        }
+
+        // ClickHouse HTTP pagination is unsafe for unsorted result sets; stream one
+        // response so large exports preserve the server's single execution order.
+        if try_export_clickhouse_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await?
+        {
+            return Ok(());
+        }
     }
 
     let mut text_file = if format == "csv" || format == "txt" {
@@ -958,6 +1005,7 @@ async fn export_query_result_core_inner(
         page_size,
         keyset_plan.is_some(),
         single_execution_bound.is_some(),
+        use_agent_cursor,
     ) {
         return Err(error.to_string());
     }
@@ -1000,7 +1048,7 @@ async fn export_query_result_core_inner(
                     query_base_sql: request.query_base_sql.clone(),
                     database_type: Some(request.database_type),
                     pagination: QueryPagination { limit: this_page, offset, session_id: session_id.clone() },
-                    use_agent_cursor: request.use_agent_cursor,
+                    use_agent_cursor,
                     first_page_uses_actual_sql: true,
                 });
                 if let Some(error) = plan.pagination_error {
@@ -1036,17 +1084,41 @@ async fn export_query_result_core_inner(
             }
         };
 
-        let mut result = match execute_sql_statement_with_options(
-            state,
-            &request.connection_id,
-            &request.database,
-            &sql_to_execute,
-            request.schema.as_deref(),
-            cancel_token.clone(),
-            options,
-        )
-        .await
-        {
+        let page_result = if let Some(txn_session_id) = txn_session_id {
+            execute_in_manual_transaction_with_options(
+                state,
+                txn_session_id,
+                &sql_to_execute,
+                &request.database,
+                request.schema.as_deref(),
+                ManualTransactionExecutionOptions {
+                    max_rows: Some(plan_limit),
+                    execution_id: request.execution_id.clone(),
+                    timeout_secs: request.timeout_secs,
+                    ..Default::default()
+                },
+            )
+            .await
+            .and_then(|results| {
+                results
+                    .into_iter()
+                    .next()
+                    .map(|result| result.result)
+                    .ok_or_else(|| "Manual transaction export returned no result".to_string())
+            })
+        } else {
+            execute_sql_statement_with_options(
+                state,
+                &request.connection_id,
+                &request.database,
+                &sql_to_execute,
+                request.schema.as_deref(),
+                cancel_token.clone(),
+                options,
+            )
+            .await
+        };
+        let mut result = match page_result {
             Ok(result) => result,
             Err(error) => {
                 if error == QUERY_CANCELED
@@ -1079,7 +1151,8 @@ async fn export_query_result_core_inner(
 
         let page_column_types = if columns.is_empty() {
             columns = result.columns.clone();
-            column_types = result.column_types.clone();
+            column_types =
+                resolve_export_column_types(&columns, &result.column_types, request.export_column_types.as_deref());
             if let Some(writer) = sql_writer.as_mut() {
                 writer.set_columns(columns.clone(), &column_types, &result.spatial_columns, request)?;
             }
@@ -1091,7 +1164,9 @@ async fn export_query_result_core_inner(
             // must be aligned by column name; writing page rows positionally
             // dropped/duplicated values into the wrong columns.
             let remap = export_column_remap(&result.columns, &columns);
-            let page_column_types = realign_page_cells(&remap, result.column_types.clone());
+            let page_inferred = realign_page_cells(&remap, result.column_types.clone());
+            let page_column_types =
+                resolve_export_column_types(&columns, &page_inferred, request.export_column_types.as_deref());
             result.rows = realign_page_rows(&remap, mem::take(&mut result.rows));
             if !result.spatial_values.is_empty() {
                 result.spatial_values = realign_page_rows(&remap, mem::take(&mut result.spatial_values));
@@ -2239,6 +2314,7 @@ mod tests {
             timeout_secs: None,
             keyset_optimization_enabled: false,
             client_session_id: None,
+            txn_session_id: None,
             execution_id: None,
             date_time_format: None,
             export_table_name: Some("gen_table".to_string()),
@@ -2249,6 +2325,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             identifier_quote: None,
             insert_mode: SqlInsertMode::Batch,
             csv_quote_mode: Default::default(),
@@ -2331,6 +2408,7 @@ mod tests {
             timeout_secs: None,
             keyset_optimization_enabled: false,
             client_session_id: None,
+            txn_session_id: None,
             execution_id: None,
             date_time_format: None,
             export_table_name: Some("users".to_string()),
@@ -2341,6 +2419,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             identifier_quote: None,
             insert_mode: Default::default(),
             csv_quote_mode: Default::default(),
@@ -2418,6 +2497,7 @@ mod tests {
             timeout_secs: None,
             keyset_optimization_enabled: true,
             client_session_id: None,
+            txn_session_id: None,
             execution_id: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
@@ -2430,6 +2510,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             identifier_quote: None,
             exclude_primary_keys: false,
             primary_keys: Vec::new(),
@@ -2620,7 +2701,7 @@ mod tests {
 
         assert!(!supports_streaming_offset_pagination(&req, 100));
         assert_eq!(
-            streaming_pagination_preflight_error(&req, 100, false, false),
+            streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor),
             Some(HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR)
         );
     }
@@ -2633,7 +2714,7 @@ mod tests {
         req.sql = "SELECT * FROM users; SELECT 1".to_string();
         req.query_base_sql = req.sql.clone();
 
-        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false), None);
+        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor), None);
     }
 
     #[test]
@@ -2647,12 +2728,12 @@ mod tests {
             req.query_base_sql = req.sql.clone();
             req.use_agent_cursor = true;
             assert!(!supports_streaming_offset_pagination(&req, 100));
-            assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false), None);
+            assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor), None);
             assert!(should_fetch_next_page(true, true, 100, 100, 100));
             assert!(!should_fetch_next_page(true, false, 100, 100, 100));
             req.use_agent_cursor = false;
             assert_eq!(
-                streaming_pagination_preflight_error(&req, 100, false, false),
+                streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor),
                 Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
             );
         }
@@ -3174,5 +3255,54 @@ mod tests {
         cancel_token.cancel();
 
         assert_eq!(task.await.unwrap(), Err(QUERY_CANCELED.to_string()));
+    }
+
+    #[test]
+    fn resolve_export_column_types_handles_overrides_and_inferred() {
+        let cols = vec!["id".to_string(), "amount".to_string(), "name".to_string()];
+
+        // Overrides take precedence when non-empty
+        let overrides = Some(vec![Some("bigint".to_string()), Some("decimal(18, 2)".to_string()), None]);
+        let inferred = vec!["int".to_string(), "".to_string(), "varchar".to_string()];
+        let resolved = resolve_export_column_types(&cols, &inferred, overrides.as_deref());
+        assert_eq!(resolved, vec!["bigint", "decimal(18, 2)", "varchar"]);
+
+        // Empty inferred (e.g. DuckDB) with overrides
+        let duckdb_overrides = Some(vec![Some("int".to_string()), Some("decimal".to_string()), None]);
+        let resolved = resolve_export_column_types(&cols, &[], duckdb_overrides.as_deref());
+        assert_eq!(resolved, vec!["int", "decimal", ""]);
+
+        // No overrides
+        let resolved = resolve_export_column_types(&cols, &inferred, None);
+        assert_eq!(resolved, vec!["int", "", "varchar"]);
+    }
+
+    #[test]
+    fn start_query_result_xlsx_workbook_uses_export_column_types_override() {
+        use std::io::Read;
+
+        let mut req = request("xlsx", None, None);
+        req.export_column_types = Some(vec![Some("decimal(18, 2)".to_string())]);
+
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        // Inferred column_types is empty (like DuckDB query result)
+        let mut writer =
+            start_query_result_xlsx_workbook(&mut cursor, &req, &["amount".to_string()], &[]).expect("start workbook");
+        writer.write_row(&[serde_json::Value::String("123.45".to_string())]).expect("write row");
+        finish_streaming_xlsx_workbook(writer).expect("finish workbook");
+        let bytes = cursor.into_inner();
+
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("open zip");
+        let mut sheet_file = zip.by_name("xl/worksheets/sheet1.xml").expect("sheet1.xml");
+        let mut sheet_xml = String::new();
+        sheet_file.read_to_string(&mut sheet_xml).expect("read sheet1");
+
+        // The decimal value must be exported as a numeric cell (<v>123.45</v>) rather than text
+        assert!(sheet_xml.contains("<v>123.45</v>"), "expected numeric cell in sheet XML, got: {sheet_xml}");
+        assert!(
+            !sheet_xml.contains(r#"<c r="A2" t="inlineStr""#),
+            "did not expect cell A2 to be inlineStr, got: {sheet_xml}"
+        );
+        assert!(!sheet_xml.contains("<t>123.45</t>"), "did not expect 123.45 to be exported as text, got: {sheet_xml}");
     }
 }

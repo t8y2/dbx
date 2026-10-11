@@ -1217,6 +1217,29 @@ export function filterStructureIndexColumnOptions(availableColumns: readonly str
   return query ? options.filter((column) => column.toLowerCase().includes(query)) : options;
 }
 
+const indexColumnNameCollator = typeof Intl !== "undefined" && typeof Intl.Collator === "function" ? new Intl.Collator(undefined, { sensitivity: "base", numeric: true }) : null;
+
+/**
+ * Order index-column picker rows: picked columns first in their index order,
+ * then unpicked columns alphabetically (case-insensitive, numeric-aware) so a
+ * long field list is scannable (#11747).
+ */
+export function sortStructureIndexColumnOptions<T extends { name: string }>(options: readonly T[], selectedPositions: ReadonlyMap<string, number>): T[] {
+  if (options.length <= 1) return [...options];
+  const picked: T[] = [];
+  const unpicked: T[] = [];
+  for (const option of options) {
+    if (selectedPositions.has(option.name)) {
+      picked.push(option);
+    } else {
+      unpicked.push(option);
+    }
+  }
+  picked.sort((left, right) => (selectedPositions.get(left.name) ?? 0) - (selectedPositions.get(right.name) ?? 0));
+  unpicked.sort((left, right) => (indexColumnNameCollator ? indexColumnNameCollator.compare(left.name, right.name) : left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true })));
+  return [...picked, ...unpicked];
+}
+
 export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[] {
   return indexes.map((index) => ({
     id: `existing:${index.name}`,
@@ -1298,6 +1321,12 @@ export function structureIndexKind(index: IndexNamingOptions): StructureIndexKin
 }
 
 export type SpecialIndexColumnIssue = "specialIndexUnique" | "fulltextIndexColumns" | "spatialIndexColumn" | "spatialIndexNullable";
+
+export function canIndexTypeHaveSpecialIssue(dialect: string, indexType?: string | null): boolean {
+  if (!indexType) return false;
+  const type = indexType.trim().toUpperCase();
+  return (dialect === "mysql" && type === "FULLTEXT") || ((dialect === "mysql" || dialect === "sqlserver") && type === "SPATIAL");
+}
 
 export function specialIndexColumnIssue(dialect: string, indexType: string, columns: readonly Pick<EditableStructureColumn, "dataType" | "isNullable">[], isUnique = false): SpecialIndexColumnIssue | null {
   const type = indexType.trim().toUpperCase();

@@ -11827,6 +11827,7 @@ for line in sys.stdin:
             selected_tables: None,
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
+            failure_log_enabled: true,
         }
     }
 

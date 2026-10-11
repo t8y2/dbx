@@ -1632,6 +1632,11 @@ pub fn run() {
             }
             let db_path = data_dir.join("dbx.db");
 
+            // Failure logs from previous runs are kept only within their retention
+            // limits; prune once at startup so a killed process cannot leave the
+            // directory growing forever.
+            commands::sql_file::prune_desktop_sql_file_failure_logs(&data_dir);
+
             let t = Instant::now();
             append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
@@ -2188,6 +2193,9 @@ pub fn run() {
             commands::sql_file::execute_sql_file,
             commands::sql_file::execute_sql_files,
             commands::sql_file::cancel_sql_file_execution,
+            commands::sql_file::sql_file_failure_log_info,
+            commands::sql_file::export_sql_file_failure_log,
+            commands::sql_file::read_sql_file_failure_log_text,
             commands::external_sql::pending_open_sql_files,
             commands::external_sql::read_external_sql_file,
             commands::external_sql::inspect_external_sql_file,

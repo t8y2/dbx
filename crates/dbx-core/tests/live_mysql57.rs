@@ -1370,6 +1370,7 @@ INSERT INTO install_check (id) VALUES (1), (2);
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
     };
 
     let _ = execute_sql_statement(
@@ -1460,6 +1461,7 @@ INSERT INTO children (parent_id) VALUES (LAST_INSERT_ID());
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
     };
 
     let _ = execute_sql_statement(
@@ -1534,6 +1536,7 @@ async fn live_sql_file_import_preserves_raw_mysql_binary_literal_bytes() {
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
     };
 
     tokio::fs::write(&request.file_path, script).await.unwrap();

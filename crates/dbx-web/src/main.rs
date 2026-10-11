@@ -570,6 +570,7 @@ async fn serve() -> Result<(), String> {
         transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
+        sql_file_failure_logs: Default::default(),
         managed_sql_previews: Default::default(),
         nacos_imports: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
@@ -1362,6 +1363,9 @@ async fn serve() -> Result<(), String> {
         .route("/sql-file/tables", post(routes::sql_file::inspect_sql_file_tables))
         .route("/sql-file/progress/{executionId}", get(routes::sql_file::sql_file_progress))
         .route("/sql-file/cancel", post(routes::sql_file::cancel_sql_file))
+        .route("/sql-file/failure-log/text", post(routes::sql_file::sql_file_failure_log_text))
+        .route("/sql-file/failure-log/{executionId}", get(routes::sql_file::sql_file_failure_log_download))
+        .route("/sql-file/failure-log/{executionId}/info", get(routes::sql_file::sql_file_failure_log_info))
         // Table import
         .route(
             "/import/preview",

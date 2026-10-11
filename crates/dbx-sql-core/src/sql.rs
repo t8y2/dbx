@@ -82,6 +82,15 @@ pub struct SqlFileRequest {
     /// and (on PostgreSQL) other trigger-enforced constraints.
     #[serde(default)]
     pub skip_relational_constraints: bool,
+    /// Whether the backend writes a JSONL failure log for this execution
+    /// (dbx#11619). Absent in requests from older frontends, which must keep
+    /// logging enabled, so the serde default is `true`.
+    #[serde(default = "sql_file_failure_log_enabled_by_default")]
+    pub failure_log_enabled: bool,
+}
+
+fn sql_file_failure_log_enabled_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,6 +439,13 @@ pub struct SqlFileProgress {
     /// When processing multiple files, the name of the current file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_name: Option<String>,
+    /// Full source SQL behind a `StatementFailed` event, used by the backend to
+    /// write the failure log. It is deliberately never serialized: the frontend
+    /// only ever needs the 120-char summary, and shipping every failing statement
+    /// over IPC would bloat the progress stream it already throttles.
+    #[serde(skip)]
+    #[serde(default)]
+    pub failure_sql: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3442,6 +3458,26 @@ mod tests {
         starts_with_executable_sql_keyword_for_database, starts_with_oracle_style_routine_body, SqlDialectProfile,
         SqlFileRequest, SqlFileStatementAction, SqlParsingOptions, SqlStatementSplitter,
     };
+
+    #[test]
+    fn sql_file_request_keeps_failure_logging_on_when_the_field_is_absent() {
+        // Older frontends never send the flag; their imports must keep writing
+        // the failure log (dbx#11619), so the serde default is "enabled".
+        let base = serde_json::json!({
+            "executionId": "exec-1",
+            "connectionId": "conn-1",
+            "database": "shop",
+            "filePath": "/tmp/dump.sql",
+            "continueOnError": false
+        });
+        let legacy: SqlFileRequest = serde_json::from_value(base.clone()).unwrap();
+        assert!(legacy.failure_log_enabled);
+
+        let mut explicit_off = base;
+        explicit_off["failureLogEnabled"] = serde_json::Value::Bool(false);
+        let disabled: SqlFileRequest = serde_json::from_value(explicit_off).unwrap();
+        assert!(!disabled.failure_log_enabled);
+    }
 
     #[test]
     fn sql_file_request_schema_is_optional_and_round_trips_when_present() {

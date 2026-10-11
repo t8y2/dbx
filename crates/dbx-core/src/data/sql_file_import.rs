@@ -36,6 +36,22 @@ mod table_restore;
 pub use table_restore::SqlFileTable;
 use table_restore::TableRestoreFilter;
 
+mod failure_log;
+mod failure_log_derive;
+pub use failure_log::{
+    prune_sql_file_failure_logs, prune_sql_file_failure_logs_with_limits, start_sql_file_failure_log,
+    SqlFileFailureLogFileInfo, SqlFileFailureLogHandle, SqlFileFailureLogInfo, SqlFileFailureLogLimits,
+    SqlFileFailureLogMeta, SqlFileFailureLogRegistry, SqlFileFailureLogRunCounters, SqlFileFailureLogStatus,
+    SqlFileFailureLogStatusProbe, SqlFileFailureLogSummary, SQL_FILE_FAILURE_LOG_DIR,
+    SQL_FILE_FAILURE_LOG_MAX_DIR_BYTES, SQL_FILE_FAILURE_LOG_MAX_FILES, SQL_FILE_FAILURE_LOG_MAX_STATEMENT_BYTES,
+    SQL_FILE_FAILURE_LOG_MAX_TOTAL_BYTES,
+};
+pub use failure_log_derive::{
+    export_sql_file_failure_log, sql_file_failure_log_text, SqlFileFailureLogDeriveError,
+    SqlFileFailureLogDeriveSummary, SqlFileFailureLogFormat, SqlFileFailureLogKey,
+    SQL_FILE_FAILURE_LOG_CLIPBOARD_MAX_BYTES,
+};
+
 /// How the database compatibility mode used for SQL statement splitting was
 /// resolved. `Option<String>` cannot express the difference between "this
 /// database has no compatibility mode concept" and "the probe failed", and
@@ -922,6 +938,7 @@ async fn execute_sql_file_paths_inner(
                     phase: None,
                     file_index: Some(file_index),
                     file_name: Some(file_name.clone()),
+                    failure_sql: None,
                 });
             }
 
@@ -1078,6 +1095,7 @@ async fn execute_sql_file_paths_inner(
                     phase: None,
                     file_index: Some(file_index),
                     file_name: Some(file_name),
+                    failure_sql: None,
                 });
                 prev_statement_index = progress.statement_index;
                 prev_success_count = progress.success_count;
@@ -2151,6 +2169,7 @@ pub fn sql_file_progress(
         phase: None,
         file_index: None,
         file_name: None,
+        failure_sql: None,
     }
 }
 
@@ -2588,6 +2607,7 @@ async fn execute_statement_with_progress(
                 *failure_count,
                 *affected_rows,
                 &summary,
+                &statement.sql,
                 error,
             );
 
@@ -2681,6 +2701,7 @@ async fn execute_merged_statement_fallback_with_progress(
                     *failure_count,
                     *affected_rows,
                     &summary,
+                    source_sql,
                     error,
                 );
 
@@ -2780,6 +2801,7 @@ fn statement_error_decision(
     failure_count: usize,
     affected_rows: u64,
     summary: &str,
+    statement_sql: &str,
     error: String,
 ) -> StatementErrorDecision {
     if token.is_cancelled() {
@@ -2801,7 +2823,7 @@ fn statement_error_decision(
     }
 
     let failure_count = failure_count + 1;
-    let statement_failed = sql_file_progress(
+    let mut statement_failed = sql_file_progress(
         execution_id,
         SqlFileStatus::StatementFailed,
         statement_index,
@@ -2812,6 +2834,9 @@ fn statement_error_decision(
         summary,
         Some(error.clone()),
     );
+    // The full source statement rides along for the backend failure log (the
+    // field is skipped by serde, so the frontend never receives it).
+    statement_failed.failure_sql = Some(statement_sql.to_string());
 
     if continue_on_error {
         return StatementErrorDecision { progress: vec![statement_failed], failure_count, result: Ok(false) };
@@ -2873,6 +2898,7 @@ mod tests {
             selected_tables: None,
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
+            failure_log_enabled: true,
         };
         let mut events = Vec::new();
         let error = execute_sql_file_content(
@@ -3075,6 +3101,7 @@ mod tests {
             phase: None,
             file_index: None,
             file_name: None,
+            failure_sql: None,
         }
     }
 
@@ -3226,6 +3253,7 @@ mod tests {
                 selected_tables: None,
                 part_cooldown_ms: 0,
                 skip_relational_constraints: false,
+                failure_log_enabled: true,
             };
             let token = CancellationToken::new();
             let mut events = Vec::new();
@@ -3835,6 +3863,7 @@ mod tests {
             selected_tables: None,
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
+            failure_log_enabled: true,
         };
         let mut progress = Vec::new();
 
@@ -3884,6 +3913,7 @@ mod tests {
             0,
             5,
             "bad statement",
+            "INSERT INTO t VALUES (1)",
             "syntax error".to_string(),
         );
 
@@ -3910,6 +3940,7 @@ mod tests {
             4,
             9,
             "slow statement",
+            "SELECT pg_sleep(10)",
             "Query canceled".to_string(),
         );
 

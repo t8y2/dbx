@@ -300,7 +300,7 @@ class JdbcExecutorTest {
     }
 
     @Test
-    void executePageKeepsWarningsHiddenWithoutADriverMessageReader() {
+    void executePageRetainsWarningsWithoutReplacingTheResult() {
         QueryPageResult result = JdbcExecutor.INSTANCE.executePage(
             executionConnection(
                 false,
@@ -318,6 +318,7 @@ class JdbcExecutorTest {
 
         assertEquals(Collections.emptyList(), result.getColumns());
         assertEquals(Collections.emptyList(), result.getRows());
+        assertEquals("existing paged warning", result.getMessages().get(0).get("message"));
     }
 
     @Test
@@ -332,6 +333,23 @@ class JdbcExecutorTest {
 
         assertEquals(Arrays.asList("id", "name"), result.getColumns());
         assertEquals(Arrays.asList(Arrays.asList(1, "Ada")), result.getRows());
+        assertEquals("informational", result.getMessages().get(0).get("message"));
+    }
+
+    @Test
+    void executePageRetainsWarningsWithOrdinaryRows() {
+        CountingResultSetFixture fixture = countingResultSet(new Object[][]{{1, "Ada"}});
+        QueryPageResult result = JdbcExecutor.INSTANCE.executePage(
+            executionConnection(true, -1, new SQLWarning("notice with rows"), new AtomicInteger(), fixture.resultSet(), null),
+            "SELECT id, name FROM people",
+            "",
+            schema -> "",
+            new QueryPageOptions()
+        );
+
+        assertEquals(Arrays.asList("id", "name"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList(1, "Ada")), result.getRows());
+        assertEquals("notice with rows", result.getMessages().get(0).get("message"));
     }
 
     @Test

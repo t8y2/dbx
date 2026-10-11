@@ -117,6 +117,7 @@ import { restoreGlobalNavigationEntry } from "@/lib/navigation/globalNavigationE
 import {
   isBrowserReloadShortcut,
   isBrowserTaskManagerShortcut,
+  isCloseAllTabsShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
   isCloseWindowShortcut,
@@ -151,6 +152,7 @@ import {
 } from "@/lib/editor/keyboardShortcuts";
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
 import { initialTabSwitcherSelection, moveTabSwitcherSelection, tabSwitcherOrder } from "@/lib/tabs/tabSwitcher";
+import { createModifierDoubleTapShortcutController, isModifierDoubleTapShortcut, matchesModifierDoubleTapShortcut } from "@/lib/editor/modifierDoubleTapShortcut";
 import { createTabSwitcherKeyboardController } from "@/lib/tabs/tabSwitcherKeyboard";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
@@ -165,7 +167,7 @@ import type { DriverStoreFocus, DriverStoreTab } from "@/lib/connection/agentDri
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { webPath } from "@/lib/common/webPath";
 import { eventTargetAllowsNativeClipboard, shouldBlockAppNativeSelectAll } from "@/lib/common/clipboard";
-import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, FONT_MONO_CSS_VAR } from "@/lib/app/appFonts";
+import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, EDITOR_FONT_FAMILY_CSS_VAR, FONT_MONO_CSS_VAR } from "@/lib/app/appFonts";
 import { DATA_GRID_TYPE_COLOR_KEYS, dataGridTypeColorCssVar, resolveActiveDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
 import { useUiFontFamilyPreview } from "@/composables/useUiFontFamilyPreview";
@@ -174,6 +176,7 @@ import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { savedSqlDefaultTargetForWrite } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
+import { dismissOpenModalSurface } from "@/lib/ui/modalSurface";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { objectBrowserTablesToAiTreeNodes } from "@/lib/ai/objectBrowserToAiTargets";
 import { aiTargetFromTab, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
@@ -1703,7 +1706,9 @@ function applyUiFontFamily(fontFamily: string, options?: { debouncePluginBumpMs?
 // Mirrors the editor font onto the global mono token so host mono surfaces and
 // plugin sandboxes (via the plugin bridge's token push) follow the same setting.
 function applyMonoFontFamily(fontFamily: string) {
-  writeRootToken(FONT_MONO_CSS_VAR, fontFamily || DEFAULT_MONO_FONT_FAMILY);
+  const value = fontFamily || DEFAULT_MONO_FONT_FAMILY;
+  writeRootToken(FONT_MONO_CSS_VAR, value);
+  writeRootToken(EDITOR_FONT_FAMILY_CSS_VAR, value);
 }
 
 function applyDataGridFontFamily(fontFamily: string) {
@@ -4026,7 +4031,35 @@ function closeTabSwitcher(commit: boolean) {
   if (tab) activateQueryTab(tab.id);
 }
 
+const modifierDoubleTapSearch = createModifierDoubleTapShortcutController();
+watch(
+  () => [settingsStore.editorSettings.shortcuts.quickOpen, settingsStore.editorSettings.shortcuts.globalSearch],
+  () => modifierDoubleTapSearch.reset(),
+  { flush: "sync" },
+);
+
+function canCaptureModifierDoubleTapSearch(e: KeyboardEvent): boolean {
+  const target = e.target instanceof Element ? e.target : document.activeElement;
+  const shortcuts = settingsStore.editorSettings.shortcuts;
+  const enabled = isModifierDoubleTapShortcut(shortcuts.quickOpen) || isModifierDoubleTapShortcut(shortcuts.globalSearch);
+  // Capture runs before the settings input can stop propagation.
+  if (e.defaultPrevented || showTabSwitcher.value || !enabled || target?.closest("[data-shortcut-input], [data-sql-shortcut-input]")) {
+    modifierDoubleTapSearch.reset();
+    return false;
+  }
+  return true;
+}
+
 function handleKeyup(e: KeyboardEvent) {
+  const shortcut = canCaptureModifierDoubleTapSearch(e) ? modifierDoubleTapSearch.handleKeyup(e) : null;
+  const shortcuts = settingsStore.editorSettings.shortcuts;
+  const quickOpenMatched = !!shortcut && matchesModifierDoubleTapShortcut(shortcut, shortcuts.quickOpen);
+  if (shortcut && (quickOpenMatched || matchesModifierDoubleTapShortcut(shortcut, shortcuts.globalSearch))) {
+    e.preventDefault();
+    e.stopPropagation();
+    quickOpenForceContent.value = !quickOpenMatched;
+    showQuickOpen.value = true;
+  }
   tabSwitcherKeyboard.handleKeyup(e);
 }
 
@@ -4035,6 +4068,9 @@ function handleTabSwitcherKeydownCapture(e: KeyboardEvent) {
 }
 
 function handleGlobalSearchKeydownCapture(e: KeyboardEvent) {
+  if (canCaptureModifierDoubleTapSearch(e)) modifierDoubleTapSearch.handleKeydown(e);
+  const target = e.target instanceof Element ? e.target : document.activeElement;
+  if (target?.closest("[data-shortcut-input], [data-sql-shortcut-input]")) return;
   if (e.defaultPrevented || !isGlobalSearchShortcut(e, settingsStore.editorSettings.shortcuts)) return;
   e.preventDefault();
   e.stopPropagation();
@@ -4051,10 +4087,12 @@ function handleAuxiliarySearchKeydownCapture(e: KeyboardEvent) {
 }
 
 function handleTabSwitcherWindowBlur() {
+  modifierDoubleTapSearch.reset();
   tabSwitcherKeyboard.handleWindowBlur();
 }
 
 function handleTabSwitcherVisibilityChange() {
+  modifierDoubleTapSearch.reset();
   tabSwitcherKeyboard.handleVisibilityChange(document.visibilityState);
 }
 
@@ -4169,6 +4207,10 @@ function refreshPluginWorkbenches(pluginId: string): void {
 }
 
 async function closeActiveSurface() {
+  // Cmd+W (and the native macOS "Close Tab" menu item) must not reach the surface behind
+  // an open modal dialog. While a dialog owns the window the keystroke dismisses that
+  // dialog instead, exactly like Esc, so the shortcut never goes dead on the user.
+  if (dismissOpenModalSurface()) return;
   if (showSettingsPage.value) {
     closeSettingsPage();
   } else if (showPluginCenter.value) {
@@ -4319,6 +4361,12 @@ async function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     e.stopPropagation();
     appTabBarRef.value?.closeOtherActiveTabs();
+    return;
+  }
+  if (isCloseAllTabsShortcut(e, shortcuts)) {
+    e.preventDefault();
+    e.stopPropagation();
+    appTabBarRef.value?.closeAllTabs();
     return;
   }
   if (isDisconnectAllActiveConnectionsShortcut(e, shortcuts)) {
@@ -4637,6 +4685,9 @@ onMounted(async () => {
   });
   applyTheme();
   void applyUiScale(settingsStore.editorSettings.uiScale);
+  window.addEventListener("pointerdown", modifierDoubleTapSearch.cancel, true);
+  window.addEventListener("focusin", modifierDoubleTapSearch.cancel, true);
+  window.addEventListener("compositionstart", modifierDoubleTapSearch.cancel, true);
   window.addEventListener("keydown", handleGlobalSearchKeydownCapture, true);
   window.addEventListener("keydown", handleTabSwitcherKeydownCapture, true);
   window.addEventListener("keydown", handleAuxiliarySearchKeydownCapture, true);
@@ -4729,6 +4780,10 @@ onUnmounted(() => {
     clearInterval(updateCheckTimer);
   }
   window.removeEventListener("keydown", handleNativeSelectAll, true);
+  modifierDoubleTapSearch.reset();
+  window.removeEventListener("pointerdown", modifierDoubleTapSearch.cancel, true);
+  window.removeEventListener("focusin", modifierDoubleTapSearch.cancel, true);
+  window.removeEventListener("compositionstart", modifierDoubleTapSearch.cancel, true);
   window.removeEventListener("keydown", handleGlobalSearchKeydownCapture, true);
   window.removeEventListener("keydown", handleTabSwitcherKeydownCapture, true);
   window.removeEventListener("keydown", handleAuxiliarySearchKeydownCapture, true);

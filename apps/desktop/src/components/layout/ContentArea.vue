@@ -798,6 +798,7 @@ const canShowExplainOutput = computed(() => !!props.activeTab.explainPlan || !!p
 // of only the active result's — otherwise a statement with no result set
 // silently loses its notices once a later statement owns the active result.
 const resultMessages = computed<QueryMessage[]>(() => {
+  if (props.activeTab.liveQueryMessages?.length) return props.activeTab.liveQueryMessages;
   const results = props.activeTab.results?.length ? props.activeTab.results : props.activeTab.result ? [props.activeTab.result] : [];
   return results.flatMap(queryResultMessages);
 });
@@ -1091,6 +1092,15 @@ watch(
   () => props.activeTab.id,
   () => {
     resultsPaneOpen.value = hasQueryOutput.value;
+  },
+);
+
+watch(
+  () => props.activeTab.liveQueryMessages?.length ?? 0,
+  (count, previousCount) => {
+    if (count > 0 && !previousCount && props.activeTab.isExecuting && !props.editorOnly && !hasTabularResult.value && (props.activeOutputView === "result" || props.activeOutputView === "summary")) {
+      emit("update:activeOutputView", props.activeTab.id, "messages");
+    }
   },
 );
 

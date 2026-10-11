@@ -32,6 +32,7 @@ import { createSidebarSearchExpansionState } from "@/lib/sidebar/sidebarSearchEx
 import { createSidebarSearchLoadingTracker } from "@/lib/sidebar/sidebarSearchLoadingTracker";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
 import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
+import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
 import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -649,11 +650,38 @@ function isCurrentTableSearchInteraction(focusRestore: TableSearchFocusRestore):
 }
 
 function restoreTableSearchInput(focusRestore: TableSearchFocusRestore) {
-  void nextTick(() => {
+  void nextTick(async () => {
     if (!isCurrentTableSearchInteraction(focusRestore) || !focusRestore.shouldRestoreFocus) return;
     const root = rootRef.value;
     if (!root) return;
-    const input = Array.from(root.querySelectorAll<HTMLInputElement>("[data-sidebar-table-search-parent-id]")).find((item) => item.dataset.sidebarTableSearchParentId === focusRestore.parentNodeId);
+    const active = document.activeElement;
+    if (active !== document.body && !(active instanceof HTMLInputElement && active.dataset.sidebarTableSearchParentId === focusRestore.parentNodeId)) return;
+
+    // Filtering can move the old scroll position into another database/schema.
+    // Reveal the edited scope before looking for its input: the original row
+    // may not even be mounted in the virtual renderer at the old position.
+    const pinnedSearchIsVisible = stickyTableSearchNode.value?.node.tableSearchParentId === focusRestore.parentNodeId && !stickyHeaderStyle.value.transform;
+    const searchIndex = flatNodes.value.findIndex(({ node }) => isSidebarTableSearchControlNode(node) && node.tableSearchParentId === focusRestore.parentNodeId);
+    if (searchIndex < 0) return;
+    const scroller = currentTreeScroller();
+    if (!pinnedSearchIsVisible && scroller) {
+      scroller.scrollTop = scrollTopForSidebarNode({
+        index: searchIndex,
+        currentScrollTop: scroller.scrollTop,
+        viewportHeight: scroller.clientHeight,
+        scrollHeight: scroller.scrollHeight,
+        rowHeight: sidebarTreeRowHeight.value,
+        topOcclusionHeight: sidebarTreeRowHeight.value,
+        align: "nearest",
+      });
+      updateSidebarScrollMetrics();
+      if (useVirtualTree.value) treeScrollerRef.value?.updateVisibleItems(true);
+      await nextTick();
+      if (!isCurrentTableSearchInteraction(focusRestore)) return;
+    }
+    // Prefer the pinned copy when both the original row and overlay exist.
+    const inputs = Array.from(root.querySelectorAll<HTMLInputElement>("[data-sidebar-table-search-parent-id]")).filter((item) => item.dataset.sidebarTableSearchParentId === focusRestore.parentNodeId);
+    const input = inputs.find((item) => item.closest(".sticky-database-header")) ?? inputs[0];
     if (!input) return;
 
     // Keep the browser's current selection when the tree update preserved the
@@ -1163,6 +1191,46 @@ const stickyContainerIndex = computed(() => {
 
 const stickyNode = computed<FlatTreeNode | null>(() => flatNodes.value[stickyContainerIndex.value] ?? null);
 
+// Search controls belong to their parent subtree, including schema and table
+// group scopes. Build the lookup once per tree change, not on every scroll.
+type StickyTableSearchScope = { item: FlatTreeNode; endIndex: number };
+function buildTableSearchScopeIndex(nodes: readonly FlatTreeNode[]): (StickyTableSearchScope | undefined)[] {
+  const stack: { depth: number; scope: StickyTableSearchScope }[] = [];
+  const byIndex: (StickyTableSearchScope | undefined)[] = [];
+  for (let index = 0; index < nodes.length; index += 1) {
+    const item = nodes[index];
+    while (stack.length && item.depth <= stack[stack.length - 1].depth) {
+      stack.pop()!.scope.endIndex = index;
+    }
+    if (isSidebarTableSearchControlNode(item.node)) {
+      const scope = { item, endIndex: nodes.length };
+      stack.push({ depth: item.depth - 1, scope });
+    }
+    byIndex.push(stack[stack.length - 1]?.scope);
+  }
+  return byIndex;
+}
+const tableSearchScopeByIndex = computed(() => buildTableSearchScopeIndex(flatNodes.value));
+
+const stickyTableSearchScope = computed(() => {
+  const containerIndex = stickyContainerIndex.value;
+  if (containerIndex < 0) return null;
+  // The search row pins as it reaches the bottom of the database header.
+  const topIndex = Math.min(Math.floor(stickyScrollTop.value / sidebarTreeRowHeight.value), flatNodes.value.length - 1);
+  const nextNode = flatNodes.value[topIndex + 1];
+  const index = nextNode && isSidebarTableSearchControlNode(nextNode.node) ? topIndex + 1 : topIndex;
+  const scope = tableSearchScopeByIndex.value[index];
+  if (!scope || flatTreeIndex.value.stickyContainerIndexByIndex[index] !== containerIndex) return null;
+  // A sibling group/schema ends the search scope, not the database header.
+  // Remove only the search row before it would cover that sibling. Database
+  // and connection boundaries still push the complete overlay out below.
+  const scopeEndsInSameContainer = flatTreeIndex.value.stickyContainerIndexByIndex[scope.endIndex] === containerIndex;
+  if (scopeEndsInSameContainer && scope.endIndex * sidebarTreeRowHeight.value - stickyScrollTop.value <= 2 * sidebarTreeRowHeight.value) return null;
+  return scope;
+});
+const stickyTableSearchNode = computed(() => stickyTableSearchScope.value?.item ?? null);
+const stickyHeaderHeight = computed(() => sidebarTreeRowHeight.value * (stickyTableSearchNode.value ? 2 : 1));
+
 const stickyHeaderStyle = computed<CSSProperties>(() => {
   const currentIndex = stickyContainerIndex.value;
   if (currentIndex < 0) return {};
@@ -1173,14 +1241,14 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
   const nextCollisionIndex = nextContainerIndex < 0 ? nextBoundaryIndex : nextBoundaryIndex < 0 ? nextContainerIndex : Math.min(nextContainerIndex, nextBoundaryIndex);
   if (nextCollisionIndex < 0) return {};
   const distanceToNext = nextCollisionIndex * sidebarTreeRowHeight.value - stickyScrollTop.value;
-  if (distanceToNext >= sidebarTreeRowHeight.value) return {};
+  if (distanceToNext >= stickyHeaderHeight.value) return {};
   return {
-    transform: `translateY(${Math.min(0, distanceToNext - sidebarTreeRowHeight.value)}px)`,
+    transform: `translateY(${Math.min(0, distanceToNext - stickyHeaderHeight.value)}px)`,
   };
 });
 
-// Reset tracking when the tree rebuilds (connect/disconnect/collapse) so a
-// stale scrollTop doesn't keep the overlay mounted after a structural change.
+// Clamp tracking when the tree rebuilds, preserving the search input in the
+// overlay when its results change instead of unmounting it on each keystroke.
 watch(flatNodes, (nodes, previousNodes) => {
   // The diagnostic events walk the whole expanded tree; only do that work when
   // the layout monitor is actually armed (dev default, disabled in production).
@@ -1211,7 +1279,7 @@ watch(flatNodes, (nodes, previousNodes) => {
       sidebarContextMenuTarget.value = null;
     }
   }
-  stickyScrollTop.value = 0;
+  stickyScrollTop.value = Math.min(stickyScrollTop.value, Math.max(0, nodes.length * sidebarTreeRowHeight.value - sidebarScrollMetrics.value.clientHeight));
   void nextTick(scheduleSidebarScrollMetricsUpdate);
   // After a structural change (list grew/shrunk, e.g. a Dameng connection
   // expands or collapses) or a same-length search projection replacement,
@@ -1506,7 +1574,7 @@ async function flashSidebarNode(nodeId: string) {
 function topOcclusionHeightForSidebarNode(nodeId: string): number {
   const sticky = stickyNode.value;
   if (!sticky || sticky.id === nodeId) return 0;
-  return sidebarTreeRowHeight.value;
+  return stickyHeaderHeight.value;
 }
 
 /** Select and reveal a freshly created table group. */
@@ -1975,8 +2043,18 @@ function findSchemaNode(nodes: TreeNode[], connId: string, database: string, sch
 function onSearchToggle(node: TreeNode) {
   if (!isTreeSearchFiltering.value || !node.children) return;
   const next = new Set(searchCollapsedIds.value);
-  if (node.isExpanded) next.add(node.id);
-  else next.delete(node.id);
+  if (node.isExpanded) {
+    next.add(node.id);
+    const collectDescendants = (children: readonly TreeNode[]) => {
+      for (const child of children) {
+        next.add(child.id);
+        if (child.children?.length) collectDescendants(child.children);
+      }
+    };
+    collectDescendants(node.children);
+  } else {
+    next.delete(node.id);
+  }
   searchCollapsedIds.value = next;
 }
 
@@ -2083,7 +2161,7 @@ function tableDdlObjectTypeForSidebarNode(type: TreeNodeType): ObjectSourceKind 
 }
 
 function openSidebarDdl(node: TreeNode) {
-  if (!node.connectionId || !node.database) return;
+  if (!node.connectionId || !hasTreeNodeDatabaseContext(node)) return;
   beginSidebarAction();
   sidebarDdlTarget.value = createSidebarActionTarget(node);
   sidebarDdlOpen.value = true;
@@ -2105,7 +2183,7 @@ function openSidebarElasticsearchIndexMetadata(node: TreeNode, kind: Elasticsear
 }
 
 function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
-  if (!node.connectionId || !node.database || !objectSourceTargetForTreeNode(node)) return;
+  if (!node.connectionId || !hasTreeNodeDatabaseContext(node) || !objectSourceTargetForTreeNode(node)) return;
   // TYPE/TYPE_BODY only have a source implementation on Xugu; PostgreSQL-family
   // connections list user-defined types without a CREATE TYPE getter this cycle.
   if ((node.type === "type" || node.type === "type-body") && !supportsTypeObjectSource(store.getConfig(node.connectionId)?.db_type)) return;
@@ -2122,7 +2200,7 @@ function openSidebarSettings(initialTab: string) {
 }
 
 function openSidebarProcedure(node: TreeNode) {
-  if (node.type !== "procedure" || !node.connectionId || !node.database) return;
+  if (node.type !== "procedure" || !node.connectionId || !hasTreeNodeDatabaseContext(node)) return;
   beginSidebarAction();
   sidebarProcedureTarget.value = createSidebarActionTarget(node);
   sidebarProcedureOpen.value = true;
@@ -2168,7 +2246,7 @@ function openSidebarVisibleNacosNamespaces(node: TreeNode) {
 }
 
 function tableNameFilterScopeForNode(node: TreeNode): string | null {
-  if (!node.connectionId || !node.database) return null;
+  if (!node.connectionId || !hasTreeNodeDatabaseContext(node)) return null;
   return store.tableNameFilterScopeKey({
     connectionId: node.connectionId,
     database: node.database,
@@ -2713,6 +2791,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
             :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
             @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
           />
+          <TreeItem v-if="stickyTableSearchNode" :key="stickyTableSearchNode.renderKey" :node="stickyTableSearchNode.node" :depth="stickyTableSearchNode.depth" :reorder-disabled="true" :reference-drag-disabled="true" />
         </div>
         <div
           v-if="hasSidebarVerticalOverflow"
@@ -2761,6 +2840,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
             :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
             @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
           />
+          <TreeItem v-if="stickyTableSearchNode" :key="stickyTableSearchNode.renderKey" :node="stickyTableSearchNode.node" :depth="stickyTableSearchNode.depth" :reorder-disabled="true" :reference-drag-disabled="true" />
         </div>
         <div
           v-if="hasSidebarVerticalOverflow"
@@ -2901,6 +2981,8 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
 <style scoped>
 .sticky-database-header {
   background-color: var(--sidebar);
+  container-type: inline-size;
+  overflow: clip;
 }
 
 .connection-tree-scroller {

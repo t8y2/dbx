@@ -376,6 +376,13 @@ export interface GenerateSchemaSyncPlanOptions {
   sourceDialect?: string;
   fieldMappings?: FieldMappingEntry[];
   enableRollback?: boolean;
+  /**
+   * Bracket the generated forward and rollback scripts with MySQL's
+   * `SET FOREIGN_KEY_CHECKS = 0` / `= 1` pair so a deploy can drop and recreate
+   * foreign-key-related objects in any order. The backend applies it for MySQL
+   * targets only and returns every other engine's script unchanged.
+   */
+  ignoreForeignKeyChecks?: boolean;
 }
 
 const MYSQL_LIKE_SCHEMA_DIFF_TARGET_TYPES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb", "sundb", "databend", "gbase"]);

@@ -1142,7 +1142,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       }
     }
 
-    const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc);
+    const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc, props.databaseType);
     for (const refTable of completionContext.referencedTables) {
       if (refTable.columns?.length) {
         columnsByTable.set(
@@ -1571,7 +1571,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     }
 
     // Populate CTE columns from parsed definitions
-    const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc);
+    const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc, props.databaseType);
     for (const refTable of refs) {
       if (refTable.columns) continue;
       const cteDef = cteDefs.find((c) => c.name.toLowerCase() === refTable.name.toLowerCase());

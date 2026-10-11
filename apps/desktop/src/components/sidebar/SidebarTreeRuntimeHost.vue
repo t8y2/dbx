@@ -53,6 +53,7 @@ import {
   Code2,
   Wrench,
   ListFilter,
+  ListPlus,
   Clipboard,
   UsersRound,
   ShieldCheck,
@@ -115,7 +116,8 @@ import { buildXuguSchedulerJobSql, type XuguSchedulerJobAction } from "@/lib/dat
 import { canViewDatabaseObjectDependencies, databaseDependencyProviderFor } from "@/lib/database/databaseObjectDependencies";
 import { elasticsearchClearIndexPreview, isElasticsearchClearConfirmed, isElasticsearchIndexPattern } from "@/lib/sidebar/elasticsearchIndexActions";
 import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
-import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
+import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate, insertTemplatePrimaryKeyConflicts } from "@/lib/table/tableSqlTemplates";
+import SqlTemplateInsertRowsDialog from "@/components/sidebar/SqlTemplateInsertRowsDialog.vue";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
 import { qualifiedTableName } from "@/lib/table/tableSelectSql";
 import { driverStoreFocusForInstallError } from "@/lib/connection/agentDriverInstallHint";
@@ -244,6 +246,7 @@ import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
+import { collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
 import { createSidebarMenuContext, normalizeSidebarMenuDescriptors } from "@/lib/sidebar/sidebarTreeMenuDescriptors";
 import { driverProfileDatabaseWorkspace } from "@/lib/database/driverProfileExtensions";
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
@@ -872,6 +875,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   if (node.isLoading) {
     if (node.isExpanded) {
       node.isExpanded = false;
+      collapseSubtreeDescendants(node);
       if (shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
       connectionStore.cancelTreeNodeLoad(node.id);
       emitNodeToggled(node, true, false);
@@ -886,6 +890,7 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.type === "connection-group") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     connectionStore.toggleConnectionGroupCollapsed(node.id);
     emitNodeToggled(node, wasExpanded);
     return;
@@ -893,12 +898,14 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.type === "group-partitions") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if (node.type === "table-vgroup") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     if (node.vgroupId) connectionStore.toggleTableVGroupCollapsed(node, node.vgroupId);
     emitNodeToggled(node, wasExpanded);
     return;
@@ -906,6 +913,7 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.type === "type" && customTypeCapabilities(currentDatabaseType()).details && node.children !== undefined) {
     node.isExpanded = node.children.length > 0 ? !node.isExpanded : false;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
@@ -917,6 +925,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   // schema and replace the package's member list with unrelated objects.
   if (currentDatabaseType() === "xugu" && (node.type === "group-procedures" || node.type === "group-functions") && node.parentType === "package") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     // Package member groups have no group-level reload path: their children
     // are hydrated together with the owning package. Releasing a large group
     // here would leave it empty on the next local-only expand.
@@ -931,6 +940,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   const needsConfiguredTablePageDrain = node.type === "group-tables" && connectionStore.getConfig(node.connectionId || "")?.sidebar_auto_load_all_tables === true && hasTableTreeLoadMore(node.children ?? []);
   if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node) && !needsConfiguredTablePageDrain) {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded);
     return;
@@ -938,18 +948,21 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.type === "type-attributes" || node.type === "type-methods") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if (node.type === "saved-sql-root" || node.type === "saved-sql-folder") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if ((node.type === "group-extensions" || node.type === "group-event-triggers") && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded);
     return;
@@ -959,6 +972,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   // with the tablespace listing; expanding them is a pure local toggle.
   if (node.type === "tablespace" || node.type === "group-datafiles") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
@@ -966,6 +980,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   if (node.type === "group-tablespaces") {
     if (connectionStore.canUseLoadedTreeNodeToggle(node)) {
       node.isExpanded = !node.isExpanded;
+      if (!node.isExpanded) collapseSubtreeDescendants(node);
       if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
       emitNodeToggled(node, wasExpanded);
       return;
@@ -975,7 +990,10 @@ async function toggle(requestId = beginNavigationRequest()) {
       emitNodeToggled(node, wasExpanded);
     } catch (e: any) {
       if (!isCurrentNavigationRequest(requestId)) return;
-      if (!wasExpanded) node.isExpanded = false;
+      if (!wasExpanded) {
+        node.isExpanded = false;
+        collapseSubtreeDescendants(node);
+      }
       const errMsg = e?.message || String(e);
       if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
       toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
@@ -992,6 +1010,7 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.isExpanded) {
     node.isExpanded = false;
+    collapseSubtreeDescendants(node);
     if (shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded, false);
     return;
@@ -2174,17 +2193,15 @@ async function loadTemplateContext(allowView = false, node: TreeNode = activeNod
   return { node, dbType, driverProfile: config?.driver_profile, identifierQuote, tableSchema, columns, tableType };
 }
 
-async function openMultiTableSqlTemplate(targets: Array<TreeNode & { connectionId: string; database: string }>, buildSql: (context: NonNullable<Awaited<ReturnType<typeof loadTemplateContext>>>) => string, allowView: boolean, titlePrefix: string) {
-  const parts: string[] = [];
-  const tabTarget = targets.find((target) => target.id === activeNode.value.id) ?? targets[0]!;
-  for (const target of targets) {
-    const context = await loadTemplateContext(allowView, target);
-    if (!context) continue;
-    parts.push(buildSql(context));
-  }
+type TableTemplateContext = NonNullable<Awaited<ReturnType<typeof loadTemplateContext>>>;
+
+async function openMultiTableSqlTemplate(targets: Array<TreeNode & { connectionId: string; database: string }>, buildSql: (context: TableTemplateContext) => string, allowView: boolean, titlePrefix: string) {
+  const contexts = (await Promise.all(targets.map((target) => loadTemplateContext(allowView, target)))).filter((context): context is TableTemplateContext => context !== null);
+  const parts = contexts.map((context) => buildSql(context));
   if (!parts.length) return;
   const sql = parts.length === 1 ? parts[0]! : joinExportedDdls(parts);
   const title = targets.length === 1 ? undefined : `${titlePrefix} - ${targets.map((target) => target.label).join(", ")}`;
+  const tabTarget = targets.find((target) => target.id === activeNode.value.id) ?? targets[0]!;
   openSqlTemplateTab(tabTarget.connectionId, tabTarget.database, tabTarget.schema, tabTarget.catalog, sql, title);
 }
 
@@ -2238,46 +2255,72 @@ async function newSelectTemplate() {
 }
 
 async function newInsertTemplate() {
+  await runInsertTemplate(1);
+}
+
+const insertTemplateRowsOpen = ref(false);
+let insertTemplateRowsPrefetch: Promise<TableTemplateContext[] | null> | null = null;
+
+async function loadInsertTemplateContexts(): Promise<TableTemplateContext[]> {
+  const targets = selectedDdlTargets().filter((target) => target.type === "table");
+  if (targets.length > 1) {
+    const contexts = await Promise.all(targets.map((target) => loadTemplateContext(false, target)));
+    return contexts.filter((context): context is TableTemplateContext => context !== null);
+  }
+  const context = await loadTemplateContext(false);
+  return context ? [context] : [];
+}
+
+function openInsertTemplateRowsDialog() {
+  insertTemplateRowsOpen.value = true;
+  // Run the health check + getColumns roundtrips while the user picks a row
+  // count, so confirming the dialog does not wait on them again.
+  insertTemplateRowsPrefetch = loadInsertTemplateContexts().catch((e) => {
+    console.warn("[DBX][tableSqlTemplate:prefetch:error]", e);
+    return null;
+  });
+}
+
+async function confirmInsertTemplateRows(count: number) {
+  const prefetched = insertTemplateRowsPrefetch;
+  insertTemplateRowsPrefetch = null;
+  await runInsertTemplate(count, prefetched ? await prefetched : null);
+}
+
+function insertTemplateOptions(context: TableTemplateContext, rowCount: number) {
+  return {
+    databaseType: context.dbType,
+    driverProfile: context.driverProfile,
+    identifierQuote: context.identifierQuote,
+    catalog: context.node.catalog,
+    database: context.node.database,
+    schema: context.tableSchema,
+    includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+    tableName: context.node.label,
+    columns: context.columns,
+    tableType: context.tableType,
+    rowCount,
+  };
+}
+
+function warnInsertTemplatePkConflicts(contexts: TableTemplateContext[], rowCount: number) {
+  const conflicts = contexts.flatMap((context) => insertTemplatePrimaryKeyConflicts(context.columns, rowCount));
+  if (conflicts.length) {
+    toast(t("contextMenu.insertRowsPkConflictWarning", { columns: conflicts.map((conflict) => conflict.column).join(", "), rows: rowCount }), 6000);
+  }
+}
+
+async function runInsertTemplate(rowCount: number, prefetchedContexts?: TableTemplateContext[] | null) {
   try {
-    const targets = selectedDdlTargets().filter((target) => target.type === "table");
-    if (targets.length > 1) {
-      await openMultiTableSqlTemplate(
-        targets,
-        (context) =>
-          buildTableInsertTemplate({
-            databaseType: context.dbType,
-            driverProfile: context.driverProfile,
-            identifierQuote: context.identifierQuote,
-            catalog: context.node.catalog,
-            database: context.node.database,
-            schema: context.tableSchema,
-            includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-            quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
-            tableName: context.node.label,
-            columns: context.columns,
-            tableType: context.tableType,
-          }),
-        false,
-        "INSERT",
-      );
-      return;
-    }
-    const context = await loadTemplateContext(false);
-    if (!context) return;
-    const sql = buildTableInsertTemplate({
-      databaseType: context.dbType,
-      driverProfile: context.driverProfile,
-      identifierQuote: context.identifierQuote,
-      catalog: context.node.catalog,
-      database: context.node.database,
-      schema: context.tableSchema,
-      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
-      tableName: context.node.label,
-      columns: context.columns,
-      tableType: context.tableType,
-    });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
+    const contexts = prefetchedContexts ?? (await loadInsertTemplateContexts());
+    if (!contexts.length) return;
+    warnInsertTemplatePkConflicts(contexts, rowCount);
+    const parts = contexts.map((context) => buildTableInsertTemplate(insertTemplateOptions(context, rowCount)));
+    const sql = parts.length === 1 ? parts[0]! : joinExportedDdls(parts);
+    const tabTarget = contexts.find((context) => context.node.id === activeNode.value.id)?.node ?? contexts[0]!.node;
+    const title = contexts.length === 1 ? undefined : `INSERT - ${contexts.map((context) => context.node.label).join(", ")}`;
+    openSqlTemplateTab(tabTarget.connectionId!, tabTarget.database!, tabTarget.schema, tabTarget.catalog, sql, title);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
@@ -6638,6 +6681,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         ? [
             { label: "SELECT", action: newSelectTemplate, icon: TerminalSquare },
             { label: "INSERT", action: newInsertTemplate, icon: FilePlus },
+            { label: "INSERT (N)…", action: openInsertTemplateRowsDialog, icon: ListPlus },
             { label: "UPDATE", action: newUpdateTemplate, icon: SquarePen },
             { label: "DELETE", action: newDeleteTemplate, icon: ListX },
             { label: "DDL", action: generateDdlTemplate, icon: FileCode },
@@ -7277,7 +7321,14 @@ function activateRuntimeNode(node: TreeNode) {
 function emitNodeToggled(node: TreeNode, wasExpanded: boolean, expandedOverride?: boolean) {
   const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
   activeNode.value = liveNode;
-  emit("node-toggled", node, expandedOverride ?? !wasExpanded);
+  const isExpanded = expandedOverride ?? !wasExpanded;
+  if (!isExpanded) {
+    collapseSubtreeDescendants(node);
+    if (liveNode !== node) {
+      collapseSubtreeDescendants(liveNode);
+    }
+  }
+  emit("node-toggled", node, isExpanded);
 }
 
 function activateActionTarget(target: SidebarActionTarget) {
@@ -7406,6 +7457,7 @@ defineExpose({
 
 <template>
   <ModelGenerateDialog v-if="modelGenerationTarget" :key="modelGenerationTarget.id" :target="modelGenerationTarget" @close="modelGenerationTarget = null" />
+  <SqlTemplateInsertRowsDialog v-model:open="insertTemplateRowsOpen" @confirm="confirmInsertTemplateRows" />
   <Dialog
     :open="!!pluginDialog"
     @update:open="

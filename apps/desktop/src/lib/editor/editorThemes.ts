@@ -988,6 +988,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       boxSizing: "border-box",
     },
     ".cm-tooltip.cm-tooltip-autocomplete > ul": {
+      fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`,
       maxHeight: "min(280px, calc(100vh - 32px))",
       minWidth: "min(280px, calc(100vw - 24px))",
       maxWidth: "inherit",
@@ -1119,6 +1120,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
     },
     ".cm-completionDetail": {
       color: colorMixValue("var(--muted-foreground)", "color-mix(in oklch, var(--popover-foreground) 68%, var(--popover))"),
+      fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`,
       fontSize: `clamp(11px, calc(var(${EDITOR_FONT_SIZE_CSS_VAR}, 13px) - 1px), 13px)`,
       fontWeight: "500",
       fontStyle: "normal",
@@ -1135,6 +1137,9 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       maxWidth: "min(420px, calc(100vw - 24px))",
       overflowWrap: "anywhere",
       zIndex: "10000",
+    },
+    ".cm-tooltip.cm-completionInfo *": {
+      fontFamily: "inherit",
     },
   };
 }

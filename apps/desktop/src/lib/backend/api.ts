@@ -269,6 +269,7 @@ export const executeQuery = forward("executeQuery");
 export const executeConditionalUpdate = forward("executeConditionalUpdate");
 export const executeMulti = forward("executeMulti");
 export const executeMultiWithProgress = forward("executeMultiWithProgress");
+export const subscribeQueryMessages = forward("subscribeQueryMessages");
 export const executeBatch = forward("executeBatch");
 export const executeScript = forward("executeScript");
 export const executeScriptWith2pc = forward("executeScriptWith2pc");

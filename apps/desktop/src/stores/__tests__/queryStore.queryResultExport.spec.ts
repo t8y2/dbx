@@ -469,6 +469,27 @@ describe("queryStore query result export", () => {
     expect(mocks.connectionIdentifierQuote).toHaveBeenCalledWith("kingbase-1");
   });
 
+  it.each([
+    [false, "txn-1", "txn-1"],
+    [true, "txn-1", undefined],
+    [false, undefined, undefined],
+  ])("passes the open manual transaction to the backend export (autoCommit=%s, txn=%s)", async (autoCommit, txnSessionId, expected) => {
+    mocks.getConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql", database: "app" });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.autoCommit = autoCommit;
+    tab.txnSessionId = txnSessionId;
+    tab.sql = "SELECT id FROM items";
+    tab.lastExecutedSql = tab.sql;
+    tab.result = { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+
+    const request = await store.buildQueryResultExportRequest(tabId, { exportId: "export-txn", filePath: "items.csv", format: "csv" });
+
+    expect(request?.txnSessionId).toBe(expected);
+  });
+
   it("passes the selected SQL INSERT mode to the backend request", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

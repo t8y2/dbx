@@ -297,6 +297,18 @@ function jdbcCredentialParams(config: ConnectionUrlCopyConfig, withCredentials: 
  * Returns `undefined` when the type is not a special dialect, `null` when the
  * dialect is special but cannot be built from this config.
  */
+/**
+ * Oracle Easy Connect Plus property values are not URI-decoded by the driver,
+ * so percent-encoding credentials produces a URL that silently changes the
+ * password. Only values that can be embedded verbatim without breaking the
+ * `?key=value&key=value` grammar are safe to offer as a with-credentials URL.
+ */
+const ORACLE_SAFE_PROPERTY_VALUE = /^[A-Za-z0-9^%#_\-+!*'()]+$/;
+
+function isOracleSafePropertyValue(value: string): boolean {
+  return ORACLE_SAFE_PROPERTY_VALUE.test(value);
+}
+
 function buildSpecialJdbcUrl(config: ConnectionUrlCopyConfig, database: string, withCredentials: boolean): string | null | undefined {
   const host = config.host?.trim() ?? "";
   const rawParams = (config.url_params ?? "").trim();
@@ -323,7 +335,18 @@ function buildSpecialJdbcUrl(config: ConnectionUrlCopyConfig, database: string, 
         return explicit ? explicit : null;
       }
       const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
-      const query = joinNonEmpty("&", [...credentials, rawParams.replace(/^[?&]+/, "")]);
+      // Oracle Easy Connect Plus does not URI-decode credentials. Offer the
+      // with-credentials item only when the stored values can be embedded
+      // verbatim; otherwise the copied URL would silently change the password.
+      let oracleCredentials: string[] = [];
+      if (withCredentials) {
+        const user = effectiveUsername(config);
+        const password = config.password ?? "";
+        if (user && !isOracleSafePropertyValue(user)) return null;
+        if (password && !isOracleSafePropertyValue(password)) return null;
+        oracleCredentials = jdbcCredentialParams(config, true, (value) => value);
+      }
+      const query = joinNonEmpty("&", [...oracleCredentials, rawParams.replace(/^[?&]+/, "")]);
       if (connectionType === "sid") {
         return `jdbc:oracle:thin:@${formatHostForUrl(host)}${portPart}:${database}${query ? `?${query}` : ""}`;
       }

@@ -813,6 +813,7 @@ function assignSelectedSource(source: string | File) {
   delimiter.value = sourceFormat.value === "tsv" ? "\\t" : ",";
   selectedSheet.value = "";
   wizardStep.value = "options";
+  void loadPreview(source);
 }
 
 function activateBatchTask(index: number) {
@@ -1019,6 +1020,10 @@ function wizardStepCircleClass(step: TableImportWizardStep) {
 }
 
 async function goNext() {
+  if (wizardStep.value === "source" && !preview.value && selectedSource.value && !isBatchImport.value) {
+    await loadPreview();
+    if (!preview.value) return;
+  }
   if (wizardStep.value === "options" && !preview.value) {
     await loadPreview();
     if (!preview.value) return;
@@ -1246,7 +1251,7 @@ async function cancelImport() {
 
 function schedulePreviewReload() {
   // Batch tasks own independent previews and mappings; reloading the active task would overwrite its saved configuration.
-  if (isBatchImport.value || !preview.value || !selectedSource.value || loadingPreview.value || running.value) return;
+  if (isBatchImport.value || !selectedSource.value || running.value) return;
   if (previewReloadTimer) clearTimeout(previewReloadTimer);
   previewReloadTimer = setTimeout(() => {
     void loadPreview();
@@ -1338,6 +1343,9 @@ watch(wizardStep, (step) => {
   if (step === "options") {
     if (showSchemaSelector.value) void loadSchemaOptions();
     void loadExistingTables();
+    if (!preview.value && selectedSource.value && !isBatchImport.value && !loadingPreview.value) {
+      void loadPreview();
+    }
   }
 });
 watch(targetMode, (mode) => {
@@ -1689,6 +1697,13 @@ watch(rawProgressPercent, (percent) => {
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.lastDataRow") }}</Label>
               <Input v-model.number="lastDataRow" type="number" min="0" class="h-8 text-xs" />
+            </div>
+            <div class="col-span-4 space-y-1">
+              <label class="flex items-center gap-2 text-xs">
+                <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
+                {{ t("tableImport.emptyStringAsNull") }}
+              </label>
+              <p class="text-[11px] text-muted-foreground">{{ t("tableImport.emptyStringAsNullExcelHint") }}</p>
             </div>
           </div>
 

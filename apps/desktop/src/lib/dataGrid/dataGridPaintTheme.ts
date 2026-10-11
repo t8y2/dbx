@@ -43,8 +43,11 @@ export const DATA_GRID_DARK_SEARCH_COLORS = {
   current: "rgb(116, 87, 0)",
   currentBorder: "rgb(239, 177, 0)",
 } as const;
-export const DATA_GRID_LIGHT_ACTIVE_ROW_BG = "rgb(244, 248, 255)";
-export const DATA_GRID_DARK_ACTIVE_ROW_BG = "rgb(25, 34, 46)";
+// 活动行底色：需在白底/斑马纹上清晰可辨（避免看岔行，#11649），同时仍比选中格底色
+// （cellSelectedSingle）浅，使行内被点击的单元格依然突出。网格组件样式里的
+// --data-grid-cell-active-bg / --data-grid-row-number-active-bg 需与此保持一致。
+export const DATA_GRID_LIGHT_ACTIVE_ROW_BG = "rgb(219, 234, 254)";
+export const DATA_GRID_DARK_ACTIVE_ROW_BG = "rgb(27, 46, 70)";
 // 十字行/列底色：混入背景的实色（color-mix(in srgb, var(--primary) P%, var(--background))），
 // 而非透明叠加——铺在浅底上的半透明色会被冲淡到几乎不可见，对比度不足正 jira #7276 的核心痛点。
 // 行/列占 primary 34%/50%（CSS 方向：P% primary + 其余 background）；现有 28%/40% 在浅色

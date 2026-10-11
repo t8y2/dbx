@@ -1691,6 +1691,51 @@ describe("DataGridDistinctValuePopover", () => {
     await mounted.setProps({ selectedKeys: new Set(options.map((option) => option.key)) });
     expect(findSelectAll().props["aria-checked"]).toBe(true);
   });
+
+  it("renders the current page value switch and emits update:source", async () => {
+    const updateSource = vi.fn();
+    const mounted = mountComponent(DataGridDistinctValuePopover, {
+      open: true,
+      search: "",
+      options: [{ key: "str:open", label: "open", count: 12, value: "open" }],
+      loading: false,
+      error: "",
+      limited: false,
+      limit: 1000,
+      source: "database",
+      "onUpdate:source": updateSource,
+    });
+
+    expect(hostText(mounted.root)).toContain("grid.filterFromCurrentPage");
+    const switchEl = findOne(mounted.root, (node) => node.props["data-distinct-value-page-switch"] === "");
+    expect(switchEl.props["model-value"] ?? switchEl.props.modelValue).toBe(false);
+
+    (switchEl.props["onUpdate:model-value"] ?? switchEl.props["onUpdate:modelValue"])(true);
+    expect(updateSource).toHaveBeenCalledWith("page");
+
+    await mounted.setProps({ source: "page" });
+    const switchElPage = findOne(mounted.root, (node) => node.props["data-distinct-value-page-switch"] === "");
+    expect(switchElPage.props["model-value"] ?? switchElPage.props.modelValue).toBe(true);
+
+    (switchElPage.props["onUpdate:model-value"] ?? switchElPage.props["onUpdate:modelValue"])(false);
+    expect(updateSource).toHaveBeenCalledWith("database");
+  });
+
+  it("disables source switch when server filter is not supported", () => {
+    const mounted = mountComponent(DataGridDistinctValuePopover, {
+      open: true,
+      search: "",
+      options: [{ key: "str:open", label: "open", count: 12, value: "open" }],
+      loading: false,
+      error: "",
+      limited: false,
+      limit: 1000,
+      canUseServerFilter: false,
+    });
+    const switchEl = findOne(mounted.root, (node) => node.props["data-distinct-value-page-switch"] === "");
+    expect(switchEl.props.disabled).toBe(true);
+    expect(switchEl.props["model-value"] ?? switchEl.props.modelValue).toBe(true);
+  });
 });
 
 describe("DataGridFilterWorkbench", () => {
@@ -1751,6 +1796,24 @@ describe("DataGridFilterWorkbench", () => {
     });
 
     expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
+  });
+
+  it("forwards distinct value source updates in the conditions workbench", () => {
+    const updateSource = vi.fn();
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "",
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      columns: ["status"],
+      filteredColumns: ["status"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      valueSuggestions: { ruleId: "r1", target: "value", source: "database", search: "", options: [], loading: false, error: "", limited: false, limit: 1000, selectedKeys: new Set<string>() },
+      onUpdateValueSuggestionSource: updateSource,
+    });
+
+    const switchEl = findOne(mounted.root, (node) => node.props["data-distinct-value-page-switch"] === "");
+    (switchEl.props["onUpdate:model-value"] ?? switchEl.props["onUpdate:modelValue"])(true);
+    expect(updateSource).toHaveBeenCalledWith("page");
   });
 
   it("scrolls to the newest rule when a condition is added", async () => {

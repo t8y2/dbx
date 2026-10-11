@@ -589,10 +589,12 @@ public final class JdbcExecutor {
                             Math.max(options.getMaxRows(), 1),
                             statementMessageReader
                         );
+                    } else {
+                        appendStatementWarnings(result, stmt);
                     }
                     activeStatements.remove(stmt);
                     stmt.close();
-                    return new QueryPageResult(
+                    QueryPageResult page = new QueryPageResult(
                         result.getColumns(),
                         result.getColumn_types(),
                         result.getRows(),
@@ -602,6 +604,8 @@ public final class JdbcExecutor {
                         null,
                         false
                     );
+                    page.setMessages(result.getMessages());
+                    return page;
                 }
 
                 phaseStarted = System.nanoTime();
@@ -926,8 +930,9 @@ public final class JdbcExecutor {
 
             while (rows.size() < effectivePageSize && session.rowsRead < session.maxRows) {
                 if (!session.resultSet.next()) {
+                    QueryPageResult page = sessionPageResult(session, rows, executionTimeMs, false, null, false);
                     closeSession(targetSessions, session.id);
-                    return sessionPageResult(session, rows, executionTimeMs, false, null, false);
+                    return page;
                 }
                 rows.add(rowValues(session.resultSet, session.valueReader, session.sqlTypeByIndex, session.typeNameByIndex));
                 session.rowsRead += 1;
@@ -935,14 +940,16 @@ public final class JdbcExecutor {
 
             if (session.rowsRead >= session.maxRows) {
                 boolean truncated = session.resultSet.next();
+                QueryPageResult page = sessionPageResult(session, rows, executionTimeMs, truncated, null, false);
                 closeSession(targetSessions, session.id);
-                return sessionPageResult(session, rows, executionTimeMs, truncated, null, false);
+                return page;
             }
 
             boolean hasMore = session.resultSet.next();
             if (!hasMore) {
+                QueryPageResult page = sessionPageResult(session, rows, executionTimeMs, false, null, false);
                 closeSession(targetSessions, session.id);
-                return sessionPageResult(session, rows, executionTimeMs, false, null, false);
+                return page;
             }
 
             session.pendingRow = rowValues(session.resultSet, session.valueReader, session.sqlTypeByIndex, session.typeNameByIndex);
@@ -960,6 +967,9 @@ public final class JdbcExecutor {
         boolean hasMore
     ) {
         QueryPageResult result = new QueryPageResult(session.columns, session.columnTypes, rows, 0L, executionTimeMs, truncated, sessionId, hasMore);
+        QueryResult messages = new QueryResult();
+        appendStatementWarnings(messages, session.statement);
+        result.setMessages(messages.getMessages());
         result.setCursor_rows_read(session.rowsRead);
         return result;
     }
@@ -1066,6 +1076,7 @@ public final class JdbcExecutor {
         StatementMessageReader statementMessageReader
     ) {
         if (!result.getColumns().isEmpty() || !result.getRows().isEmpty()) {
+            appendStatementWarnings(result, stmt);
             return result;
         }
 
@@ -1082,6 +1093,7 @@ public final class JdbcExecutor {
                         break;
                     }
                     rows.add(Collections.singletonList(message));
+                    result.addInformationalMessage(message, warning.getSQLState());
                 }
             }
             stmt.clearWarnings();
@@ -1102,6 +1114,7 @@ public final class JdbcExecutor {
                         break;
                     }
                     rows.add(Collections.singletonList(message));
+                    result.addInformationalMessage(message, null);
                 }
             }
         } catch (Exception ignored) {
@@ -1111,7 +1124,7 @@ public final class JdbcExecutor {
         if (rows.isEmpty()) {
             return result;
         }
-        return new QueryResult(
+        QueryResult messageResult = new QueryResult(
             Collections.singletonList("Message"),
             Collections.singletonList("nvarchar"),
             rows,
@@ -1119,6 +1132,8 @@ public final class JdbcExecutor {
             result.getExecution_time_ms(),
             truncated
         );
+        messageResult.setMessages(result.getMessages());
+        return messageResult;
     }
 
     private QueryResult emptyQueryResult(long start) {

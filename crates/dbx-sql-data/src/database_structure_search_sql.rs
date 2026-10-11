@@ -114,9 +114,7 @@ fn driver_profile_is_postgres(profile: Option<&str>) -> bool {
 }
 
 fn driver_profile_is_gbase8s(profile: Option<&str>) -> bool {
-    profile
-        .map(str::trim)
-        .is_some_and(|profile| profile.to_ascii_lowercase().contains("gbase8s"))
+    profile.map(str::trim).is_some_and(|profile| profile.to_ascii_lowercase().contains("gbase8s"))
 }
 
 fn driver_profile_is_oracle(profile: Option<&str>) -> bool {
@@ -423,7 +421,10 @@ mod tests {
             limit: Some(10),
         })
         .unwrap();
-        assert!(query.sql.contains("TABLE_SCHEMA = 'app'"), "gbase must filter by the connected database, not a fixed literal");
+        assert!(
+            query.sql.contains("TABLE_SCHEMA = 'app'"),
+            "gbase must filter by the connected database, not a fixed literal"
+        );
         assert!(!query.sql.contains("'gbase'"));
 
         assert_eq!(

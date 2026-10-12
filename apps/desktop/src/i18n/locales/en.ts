@@ -1,5 +1,6 @@
 import { sidebarMenuEn as sidebarMenu } from "./sidebarMenuMessages";
 import { redisGroupingEn as redisGrouping } from "./redisGrouping";
+import { favoritesEn as favorites } from "./favorites";
 import docs from "./docs/en";
 import { dataDictionaryEn as dataDictionary } from "./dataDictionaryMessages";
 import { consulUiMessages } from "./consulUi";
@@ -62,6 +63,7 @@ const consul = {
 };
 
 export default {
+  favorites,
   sidebarMenu,
   modelGeneration: {
     title: "Generate model",

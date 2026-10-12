@@ -356,10 +356,11 @@ export function rejectsAliasReferenceInHaving(dbType?: string): boolean {
  * a second session, and only the Oracle agent implements the `pl_debug_*`
  * operations.
  *
- * OceanBase Oracle Mode (`oceanbase-oracle`) also ships a Java `pl_debug_*`
- * implementation, but it has never been exercised against a real OceanBase
- * instance, so its debug entry stays hidden until that verification happens.
- * Re-adding it here is all that is needed to expose the entry again.
+ * OceanBase Oracle Mode (`oceanbase-oracle`) also had a Java `pl_debug_*`
+ * implementation, but it was never exercised against a real OceanBase instance;
+ * it now lives on the `feature/ob-oracle-pl-debug` branch, so its debug entry
+ * stays hidden here. Re-adding it to this set is all that is needed to expose
+ * the entry again.
  */
 const PL_DEBUG_DATABASE_TYPES: ReadonlySet<string> = new Set(["oracle"]);
 

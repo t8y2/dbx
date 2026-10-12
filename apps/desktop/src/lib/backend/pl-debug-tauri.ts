@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 /**
- * PL/SQL 调试（OceanBase Oracle 模式）。
+ * PL/SQL 调试（Oracle）。
  *
  * 后端由 Java agent 的双连接（debuggee + debugger）与 DBMS_DEBUG 承载；
  * 这里的接口一一对应 Tauri 命令。resume/step/abort 为阻塞调用：它们直到
@@ -164,9 +164,10 @@ export async function plDebugStart(connectionId: string, database: string, reque
 }
 
 /**
- * 断点增删的返回体在两种 agent 下形状不同：Java（oceanbase-oracle）回
- * `{ok, breakpoints}`，Go（oracle）直接回数组。调用方只关心断点列表，这里统一
- * 摊平成数组，避免两种后端下 store 的本地缓存一个有一个没有。
+ * 断点增删的返回体在两种 agent 下形状不同：Java（oceanbase-oracle，现居
+ * `feature/ob-oracle-pl-debug` 分支）回 `{ok, breakpoints}`，Go（oracle）直接回
+ * 数组。调用方只关心断点列表，这里统一摊平成数组，避免两种后端下 store 的本地
+ * 缓存一个有一个没有。
  */
 function normalizeBreakpointResponse(response: unknown): PlDebugBreakpoint[] {
   if (Array.isArray(response)) return response as PlDebugBreakpoint[];

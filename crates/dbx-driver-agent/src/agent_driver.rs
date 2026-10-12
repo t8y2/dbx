@@ -1333,10 +1333,11 @@ pub enum AgentMethod {
     BeginManualTransaction,
     CommitManualTransaction,
     RollbackManualTransaction,
-    // PL/SQL debugging (OceanBase Oracle only). These stay out of `ALL`
-    // (the commonMethods contract) exactly like other driver-specific
-    // methods: the oceanbase-oracle agent serves them, other agents reject
-    // them with the unsupported default.
+    // PL/SQL debugging (served by the oracle-go agent for Oracle connections).
+    // These stay out of `ALL` (the commonMethods contract) exactly like other
+    // driver-specific methods: agents that do not implement them reject them
+    // with the unsupported default. The OceanBase Oracle (Java) agent that
+    // shares this contract lives on the feature/ob-oracle-pl-debug branch.
     PlDebugProbe,
     PlDebugStart,
     PlDebugSetBreakpoints,
@@ -1345,16 +1346,15 @@ pub enum AgentMethod {
     // ENABLE_BREAKPOINT / DISABLE_BREAKPOINT) instead of deleting and re-setting
     // it. The response body carries `serverSupported`: false means the server
     // exposes no such primitive and the caller keeps its client-side fallback
-    // (delete + re-set). Served by both the oceanbase-oracle (Java) agent and the
-    // oracle-go agent, which expose the matching
-    // `pl_debug_set_breakpoint_enabled` request branch and
+    // (delete + re-set). Served by the oracle-go agent, which exposes the
+    // matching `pl_debug_set_breakpoint_enabled` request branch and
     // AgentProtocol.METHOD_PL_DEBUG_SET_BREAKPOINT_ENABLED constant.
     PlDebugSetBreakpointEnabled,
     PlDebugListBreakpoints,
     PlDebugResume,
     // Runs the debuggee to completion while ignoring every remaining
-    // breakpoint (ODC's resumeIgnoreBreakpoints / CNT_EXIT). Served by both the
-    // oracle-go agent and the oceanbase-oracle (Java) agent, which exposes the
+    // breakpoint (ODC's resumeIgnoreBreakpoints; the agent drives it itself, not
+    // the helper's CNT_EXIT). Served by the oracle-go agent, which exposes the
     // matching `pl_debug_resume_ignore_breakpoints` request branch and
     // AgentProtocol.METHOD_PL_DEBUG_RESUME_IGNORE_BREAKPOINTS constant.
     PlDebugResumeIgnoreBreakpoints,
@@ -2728,7 +2728,8 @@ impl AgentDriverClient {
     }
 
     // ------------------------------------------------------------------
-    // PL/SQL debugging (served by the oceanbase-oracle agent).
+    // PL/SQL debugging (served by the oracle-go agent; the OceanBase Oracle
+    // agent on feature/ob-oracle-pl-debug shares the same contract).
     // Continuation calls (resume / step / abort / variables) block on the
     // server until the debuggee reaches the next stop or finishes, so callers
     // pass the debug session timeout rather than the metadata timeout.

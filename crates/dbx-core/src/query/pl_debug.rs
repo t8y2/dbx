@@ -1,14 +1,17 @@
-//! PL/SQL debugging orchestration for OceanBase Oracle connections.
+//! PL/SQL debugging orchestration for Oracle connections.
 //!
-//! The Java agent owns the two JDBC debug connections and all `DBMS_DEBUG`
-//! state; this module keeps the routing table (debug id → the dedicated agent
-//! session that owns it) and exposes the operations the Tauri commands call.
+//! The oracle-go agent owns the debug session and all `DBMS_DEBUG` state; this
+//! module keeps the routing table (debug id → the dedicated agent session that
+//! owns it) and exposes the operations the Tauri commands call.
 //!
 //! Each debug session runs on its own client session id, so its agent
 //! instance is isolated from metadata/query pools: continuation calls block on
 //! the server until the debuggee reaches its next stop, and that blocking
 //! must never occupy the pool every other request shares. Closing a session
 //! releases the agent-side connections and tears the isolated pool down.
+//!
+//! The OceanBase Oracle (Java) agent that shares this contract lives on the
+//! `feature/ob-oracle-pl-debug` branch.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,7 +44,7 @@ pub struct PlDebugSessionHandle {
 }
 
 fn supports_pl_debug(config: Option<&ConnectionConfig>) -> bool {
-    config.is_some_and(|config| matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
+    config.is_some_and(|config| matches!(config.db_type, DatabaseType::Oracle))
 }
 
 fn unsupported_probe_result(config: Option<&ConnectionConfig>) -> Value {
@@ -49,7 +52,7 @@ fn unsupported_probe_result(config: Option<&ConnectionConfig>) -> Value {
     json!({
         "supported": false,
         "reason": format!(
-            "PL/SQL debugging is only available for Oracle and OceanBase Oracle mode connections (current: {scope})"
+            "PL/SQL debugging is only available for Oracle connections (current: {scope})"
         ),
     })
 }
@@ -83,7 +86,7 @@ pub async fn pl_debug_start_core(
 ) -> Result<Value, String> {
     let config = state.configs.read().await.get(connection_id).cloned();
     if !supports_pl_debug(config.as_ref()) {
-        return Err("PL/SQL debugging is only available for Oracle and OceanBase Oracle mode connections".to_string());
+        return Err("PL/SQL debugging is only available for Oracle connections".to_string());
     }
     let client_session_id = format!("{PL_DEBUG_CLIENT_SESSION_PREFIX}{}", uuid::Uuid::new_v4().simple());
     let pool_key =
@@ -163,8 +166,7 @@ pub async fn pl_debug_list_breakpoints_core(state: &AppState, debug_id: &str) ->
 /// The agent response body is forwarded as-is: it carries `ok` / `result` /
 /// `message` plus `serverSupported`, where `serverSupported = false` means the
 /// server exposes no enable/disable primitive (not an error) and the caller must
-/// keep its client-side fallback. Served by both the oceanbase-oracle (Java)
-/// agent and the oracle-go agent.
+/// keep its client-side fallback. Served by the oracle-go agent.
 pub async fn pl_debug_set_breakpoint_enabled_core(
     state: &AppState,
     debug_id: &str,
@@ -185,12 +187,13 @@ pub async fn pl_debug_resume_core(state: &AppState, debug_id: &str) -> Result<Va
 }
 
 /// Runs the debuggee to completion while ignoring every remaining breakpoint
-/// (ODC's `resumeIgnoreBreakpoints`, the helper package's `DBX_CNT_EXIT`). The
+/// (ODC's `resumeIgnoreBreakpoints`). The agent drives the run itself -- the
+/// helper package's `DBX_CNT_EXIT` is no longer usable (its step loop cannot
+/// end on this architecture, see the Go agent's resumeIgnoreBreakpoints). The
 /// blocking budget matches the other continuation calls because the agent only
 /// returns once the interpreter has exited.
 ///
-/// Both the oceanbase-oracle (Java) agent and the oracle-go agent serve this
-/// operation: the Java side has the `pl_debug_resume_ignore_breakpoints`
+/// Served by the oracle-go agent with the `pl_debug_resume_ignore_breakpoints`
 /// request branch backed by
 /// `AgentProtocol.METHOD_PL_DEBUG_RESUME_IGNORE_BREAKPOINTS`.
 pub async fn pl_debug_resume_ignore_breakpoints_core(state: &AppState, debug_id: &str) -> Result<Value, String> {
@@ -261,8 +264,8 @@ pub async fn pl_debug_get_variables_core(
     let client = pl_debug_client(state, debug_id).await?;
     let mut guard = client.lock().await;
     let result = guard.pl_debug_get_variables::<Value>(debug_id, frame, Some(PL_DEBUG_QUICK_TIMEOUT)).await?;
-    // OceanBase serializes GET_VALUES as a JSON object; Oracle returns the
-    // legacy `*name*type*value` delimited text. Normalize both here so the
+    // A JSON-shaped payload is flattened as well as the legacy
+    // `*name*type*value` delimited text the Oracle agent returns, so the
     // frontend always receives a flat variables array.
     let scalar_values = result.get("scalarValues").and_then(Value::as_str).unwrap_or("");
     let variables = parse_scalar_values(scalar_values);
@@ -277,7 +280,7 @@ fn parse_scalar_values(payload: &str) -> Value {
     if trimmed.is_empty() {
         return json!([]);
     }
-    // OceanBase: a JSON object mapping variable names to values/types.
+    // A JSON object mapping variable names to values/types.
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         if let Ok(element) = serde_json::from_str::<Value>(trimmed) {
             let mut variables = Vec::new();
@@ -432,10 +435,11 @@ mod tests {
     }
 
     #[test]
-    fn supports_pl_debug_only_for_oracle_flavours() {
+    fn supports_pl_debug_only_for_oracle() {
         assert!(!supports_pl_debug(None));
         assert!(supports_pl_debug(Some(&config(DatabaseType::Oracle))));
-        assert!(supports_pl_debug(Some(&config(DatabaseType::OceanbaseOracle))));
+        // The OceanBase Oracle debugger lives on the feature/ob-oracle-pl-debug branch.
+        assert!(!supports_pl_debug(Some(&config(DatabaseType::OceanbaseOracle))));
         assert!(!supports_pl_debug(Some(&config(DatabaseType::Mysql))));
     }
 

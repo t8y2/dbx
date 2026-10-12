@@ -16,6 +16,9 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[cfg(feature = "mq-admin")]
+use dbx_types::mqtt::{MqttMessage, MqttMessageDirection};
+
 use crate::ai::{
     AiChatMessage, AiChatSelectionState, AiConfig, AiConfigItem, AiConversation, AiProvider, AiRun, AiRunFifoCategory,
     AiRunStatus,
@@ -83,6 +86,25 @@ const PLUGIN_DATA_GRANTS_KEY: &str = "plugin_data_grants";
 const MAX_PLUGIN_DATA_GRANTS_PER_PLUGIN: usize = 512;
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
 const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
+// Keep the existing key so previously persisted publish records remain readable.
+const MQTT_MESSAGE_HISTORY_STATE_KEY_PREFIX: &str = "mqtt.sent_history.";
+#[cfg(feature = "mq-admin")]
+const MQTT_MESSAGE_HISTORY_MAX_MESSAGES: usize = 200;
+#[cfg(feature = "mq-admin")]
+const MQTT_MESSAGE_HISTORY_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+#[cfg(feature = "mq-admin")]
+fn mqtt_history_message_identity(message: &MqttMessage) -> (String, String, Option<String>, u8, bool, bool, u64) {
+    (
+        message.topic.clone(),
+        message.payload_base64.clone(),
+        message.payload_text.clone(),
+        message.qos,
+        message.retain,
+        message.direction == MqttMessageDirection::Sent,
+        message.received_at_ms,
+    )
+}
 const SNIPPET_SYNC_IDS_KEY: &str = "snippet_sync_ids";
 const SNIPPET_PENDING_CLEANUPS_KEY: &str = "snippet_pending_legacy_cleanups";
 const USER_DATA_TABLES: &[&str] = &[
@@ -6952,6 +6974,8 @@ impl Storage {
                 tx.execute("DELETE FROM connections WHERE id = ?1", [id]).map_err(|e| e.to_string())?;
                 tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [id])
                     .map_err(|e| e.to_string())?;
+                let mqtt_history_key = format!("{MQTT_MESSAGE_HISTORY_STATE_KEY_PREFIX}{id}");
+                tx.execute("DELETE FROM state_store WHERE key = ?1", [mqtt_history_key]).map_err(|e| e.to_string())?;
             }
             tx.commit().map_err(|e| e.to_string())
         })
@@ -7060,6 +7084,8 @@ impl Storage {
             if removed {
                 tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [&connection_id])
                     .map_err(|e| e.to_string())?;
+                let mqtt_history_key = format!("{MQTT_MESSAGE_HISTORY_STATE_KEY_PREFIX}{connection_id}");
+                tx.execute("DELETE FROM state_store WHERE key = ?1", [mqtt_history_key]).map_err(|e| e.to_string())?;
             }
             tx.commit().map_err(|e| e.to_string())?;
             Ok(removed)
@@ -7164,6 +7190,128 @@ impl Storage {
                 .map_err(|error| error.to_string())?
         })
         .await
+    }
+
+    /// Append one successfully published message to a connection's bounded
+    /// local history. The read-modify-write runs in one SQLite transaction so
+    /// concurrent publishes do not overwrite each other's records.
+    #[cfg(feature = "mq-admin")]
+    pub async fn append_mqtt_sent_message(&self, connection_id: &str, message: &MqttMessage) -> Result<(), String> {
+        if message.direction != MqttMessageDirection::Sent {
+            return Err("MQTT sent history accepts outgoing messages only".to_string());
+        }
+        self.append_mqtt_history_messages(connection_id, std::slice::from_ref(message), false).await
+    }
+
+    /// Persist newly observed inbound messages without re-adding the same live
+    /// buffer entries on each console poll.
+    #[cfg(feature = "mq-admin")]
+    pub async fn append_mqtt_received_messages_if_new(
+        &self,
+        connection_id: &str,
+        messages: &[MqttMessage],
+    ) -> Result<(), String> {
+        if messages.iter().any(|message| message.direction != MqttMessageDirection::Received) {
+            return Err("MQTT received history accepts incoming messages only".to_string());
+        }
+        self.append_mqtt_history_messages(connection_id, messages, true).await
+    }
+
+    #[cfg(feature = "mq-admin")]
+    async fn append_mqtt_history_messages(
+        &self,
+        connection_id: &str,
+        incoming_messages: &[MqttMessage],
+        skip_existing: bool,
+    ) -> Result<(), String> {
+        if incoming_messages.is_empty() {
+            return Ok(());
+        }
+        let key = format!("{MQTT_MESSAGE_HISTORY_STATE_KEY_PREFIX}{connection_id}");
+        let incoming_messages = incoming_messages.to_vec();
+        self.with_conn(move |conn| {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            let current: Option<Vec<u8>> = tx
+                .query_row("SELECT value FROM state_store WHERE key = ?1", [&key], |row| row.get(0))
+                .optional()
+                .map_err(|error| error.to_string())?;
+            let mut stored_messages: Vec<MqttMessage> = current
+                .map(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
+                .transpose()?
+                .unwrap_or_default();
+            let mut message_counts = HashMap::<(String, String, Option<String>, u8, bool, bool, u64), usize>::new();
+            for message in &stored_messages {
+                *message_counts.entry(mqtt_history_message_identity(message)).or_default() += 1;
+            }
+            let mut changed = false;
+            for message in incoming_messages {
+                let identity = mqtt_history_message_identity(&message);
+                if skip_existing {
+                    if let Some(count) = message_counts.get_mut(&identity) {
+                        if *count > 0 {
+                            *count -= 1;
+                            continue;
+                        }
+                    }
+                    *message_counts.entry(identity).or_default() += 1;
+                }
+                stored_messages.push(message);
+                changed = true;
+            }
+            if !changed {
+                tx.commit().map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            stored_messages.sort_by_key(|entry| entry.received_at_ms);
+            if stored_messages.len() > MQTT_MESSAGE_HISTORY_MAX_MESSAGES {
+                stored_messages.drain(..stored_messages.len() - MQTT_MESSAGE_HISTORY_MAX_MESSAGES);
+            }
+
+            let bytes = loop {
+                let bytes = serde_json::to_vec(&stored_messages).map_err(|error| error.to_string())?;
+                if bytes.len() <= MQTT_MESSAGE_HISTORY_MAX_BYTES {
+                    break bytes;
+                }
+                if stored_messages.len() <= 1 {
+                    // Keep the previous history if one message alone is too large.
+                    tx.commit().map_err(|error| error.to_string())?;
+                    return Ok(());
+                }
+                stored_messages.remove(0);
+            };
+            tx.execute(
+                "INSERT INTO state_store (key, value, content_type, version, payload) \
+                 VALUES (?1, ?2, 'application/json', 1, x'') \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, content_type = excluded.content_type, \
+                 version = version + 1, payload = excluded.payload",
+                params![key, bytes],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Load the bounded MQTT message history for one connection.
+    #[cfg(feature = "mq-admin")]
+    pub async fn load_mqtt_message_history(&self, connection_id: &str) -> Result<Vec<MqttMessage>, String> {
+        let key = format!("{MQTT_MESSAGE_HISTORY_STATE_KEY_PREFIX}{connection_id}");
+        let Some((bytes, _)) = self.load_state(&key).await? else {
+            return Ok(Vec::new());
+        };
+        let mut messages: Vec<MqttMessage> = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        if messages.len() > MQTT_MESSAGE_HISTORY_MAX_MESSAGES {
+            messages.drain(..messages.len() - MQTT_MESSAGE_HISTORY_MAX_MESSAGES);
+        }
+        Ok(messages)
+    }
+
+    /// Remove MQTT message history when the user clears the console messages.
+    #[cfg(feature = "mq-admin")]
+    pub async fn clear_mqtt_message_history(&self, connection_id: &str) -> Result<(), String> {
+        let key = format!("{MQTT_MESSAGE_HISTORY_STATE_KEY_PREFIX}{connection_id}");
+        self.delete_state(&key).await
     }
 
     /// Update only the persisted driver identity for an existing connection.

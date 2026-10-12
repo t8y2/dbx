@@ -41,7 +41,7 @@ pub async fn unsubscribe(client: &Arc<MqttClient>, topic: &str) -> Result<(), St
 }
 
 /// 发布消息
-pub async fn publish(client: &Arc<MqttClient>, request: &MqttPublishRequest) -> Result<(), String> {
+pub async fn publish(client: &Arc<MqttClient>, request: &MqttPublishRequest) -> Result<MqttMessage, String> {
     client.publish(request).await
 }
 

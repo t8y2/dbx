@@ -1,4 +1,5 @@
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::State;
 
@@ -6,6 +7,48 @@ use crate::commands::connection::AppState;
 use dbx_core::connection::PoolKind;
 use dbx_core::mqtt::service;
 use dbx_core::mqtt::types::*;
+
+const MQTT_LIVE_MESSAGE_LIMIT: usize = 200;
+const MQTT_VISIBLE_MESSAGE_LIMIT: usize = MQTT_LIVE_MESSAGE_LIMIT * 2;
+
+type MqttMessageIdentity = (String, String, Option<String>, u8, bool, bool, u64);
+
+fn mqtt_message_identity(message: &MqttMessage) -> MqttMessageIdentity {
+    (
+        message.topic.clone(),
+        message.payload_base64.clone(),
+        message.payload_text.clone(),
+        message.qos,
+        message.retain,
+        message.direction == MqttMessageDirection::Sent,
+        message.received_at_ms,
+    )
+}
+
+fn mqtt_topic_matches_filter(topic: &str, filter: &str) -> bool {
+    let topic_segments = topic.split('/').collect::<Vec<_>>();
+    let filter_segments = filter.split('/').collect::<Vec<_>>();
+    let (mut topic_index, mut filter_index) = (0, 0);
+    while filter_index < filter_segments.len() {
+        match filter_segments[filter_index] {
+            "#" => return filter_index + 1 == filter_segments.len(),
+            "+" if topic_index < topic_segments.len() => {
+                topic_index += 1;
+                filter_index += 1;
+            }
+            segment if topic_index < topic_segments.len() && topic_segments[topic_index] == segment => {
+                topic_index += 1;
+                filter_index += 1;
+            }
+            _ => return false,
+        }
+    }
+    topic_index == topic_segments.len()
+}
+
+fn mqtt_message_matches_filter(message: &MqttMessage, filter: Option<&str>) -> bool {
+    filter.is_none_or(|filter| message.topic == filter || mqtt_topic_matches_filter(&message.topic, filter))
+}
 
 /// 从 connections map 中获取 MQTT 客户端
 async fn get_mqtt_client(
@@ -16,6 +59,22 @@ async fn get_mqtt_client(
     match pool {
         PoolKind::Mqtt(client) => Ok(client),
         _ => Err(format!("连接 {} 不是 MQTT 类型", connection_id)),
+    }
+}
+
+/// 断开连接前归档客户端缓冲区中的接收消息，包含暂停显示期间到达的消息。
+pub async fn persist_history_before_disconnect(state: &AppState, connection_id: &str) {
+    let Ok(client) = get_mqtt_client(state, connection_id).await else {
+        return;
+    };
+    let received_messages = service::get_messages(&client, None, MQTT_LIVE_MESSAGE_LIMIT)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|message| message.direction == MqttMessageDirection::Received)
+        .collect::<Vec<_>>();
+    if let Err(error) = state.storage.append_mqtt_received_messages_if_new(connection_id, &received_messages).await {
+        log::warn!("断开 MQTT 连接前保存接收历史失败: {error}");
     }
 }
 
@@ -108,7 +167,12 @@ pub async fn mqtt_publish(
     request: MqttPublishRequest,
 ) -> Result<(), String> {
     let client = get_mqtt_client(&state, &connection_id).await?;
-    service::publish(&client, &request).await
+    let published_message = service::publish(&client, &request).await?;
+
+    if let Err(error) = state.storage.append_mqtt_sent_message(&connection_id, &published_message).await {
+        log::warn!("保存 MQTT 发布历史失败: {error}");
+    }
+    Ok(())
 }
 
 /// 获取已订阅的 topic 列表
@@ -150,12 +214,51 @@ pub async fn mqtt_get_messages(
     limit: Option<usize>,
 ) -> Result<Vec<MqttMessage>, String> {
     let client = get_mqtt_client(&state, &connection_id).await?;
-    service::get_messages(&client, topic_filter.as_deref(), limit.unwrap_or(50)).await
+    let live_messages = service::get_messages(&client, None, MQTT_LIVE_MESSAGE_LIMIT).await?;
+    let received_messages = live_messages
+        .iter()
+        .filter(|message| message.direction == MqttMessageDirection::Received)
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Err(error) = state.storage.append_mqtt_received_messages_if_new(&connection_id, &received_messages).await {
+        log::warn!("保存 MQTT 接收历史失败: {error}");
+    }
+    let history = match state.storage.load_mqtt_message_history(&connection_id).await {
+        Ok(history) => history,
+        Err(error) => {
+            log::warn!("读取 MQTT 消息历史失败: {error}");
+            Vec::new()
+        }
+    };
+    let mut history_counts = HashMap::<MqttMessageIdentity, usize>::new();
+    for message in &history {
+        *history_counts.entry(mqtt_message_identity(message)).or_default() += 1;
+    }
+    let mut messages = history;
+    for message in live_messages {
+        let identity = mqtt_message_identity(&message);
+        if let Some(count) = history_counts.get_mut(&identity) {
+            if *count > 0 {
+                *count -= 1;
+                continue;
+            }
+        }
+        messages.push(message);
+    }
+    messages.sort_by_key(|message| message.received_at_ms);
+    let limit = limit.unwrap_or(50).min(MQTT_VISIBLE_MESSAGE_LIMIT);
+    Ok(messages
+        .into_iter()
+        .filter(|message| mqtt_message_matches_filter(message, topic_filter.as_deref()))
+        .rev()
+        .take(limit)
+        .collect())
 }
 
 /// 清空消息历史记录
 #[tauri::command]
 pub async fn mqtt_clear_messages(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
     let client = get_mqtt_client(&state, &connection_id).await?;
-    service::clear_messages(&client).await
+    service::clear_messages(&client).await?;
+    state.storage.clear_mqtt_message_history(&connection_id).await
 }

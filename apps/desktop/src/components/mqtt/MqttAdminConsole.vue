@@ -64,6 +64,7 @@ const formNoLocal = ref(restoredUiState.formNoLocal ?? false);
 const formEnabled = ref(restoredUiState.formEnabled ?? true);
 const editingTopic = ref<string | null>(restoredUiState.editingTopic ?? null);
 const MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY = "dbx-mqtt-publish-panel-collapsed";
+const MQTT_MESSAGE_HISTORY_LIMIT = 400;
 const publishPanelCollapsed = ref(restoredUiState.publishPanelCollapsed ?? safeLocalStorageGet(MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY) === "true");
 
 trackUiState(() => ({
@@ -150,7 +151,7 @@ async function refreshData() {
       mqttGetBrokerInfo(props.connectionId) as Promise<MqttBrokerInfo>,
       mqttListTopics(props.connectionId) as Promise<[string, string][]>,
       mqttListSavedTopicConfigs(props.connectionId) as Promise<MqttSavedTopic[]>,
-      mqttGetMessages(props.connectionId, selectedTopic.value || undefined, 50) as Promise<MqttMessage[]>,
+      mqttGetMessages(props.connectionId, selectedTopic.value || undefined, MQTT_MESSAGE_HISTORY_LIMIT) as Promise<MqttMessage[]>,
     ]);
     brokerInfo.value = info;
     subscribedTopics.value = active;
@@ -305,7 +306,7 @@ function startPolling() {
   pollingTimer.value = setInterval(async () => {
     if (messagesPaused.value) return;
     try {
-      const nextMessages = (await mqttGetMessages(props.connectionId, selectedTopic.value || undefined, 50)) as MqttMessage[];
+      const nextMessages = (await mqttGetMessages(props.connectionId, selectedTopic.value || undefined, MQTT_MESSAGE_HISTORY_LIMIT)) as MqttMessage[];
       if (!messagesPaused.value) messages.value = nextMessages;
     } catch {
       /* ignore polling errors */

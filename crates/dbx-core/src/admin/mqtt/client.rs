@@ -1052,7 +1052,7 @@ impl MqttClient {
     }
 
     /// 发布消息；QoS 0 等待写入网络，QoS 1/2 分别等待 PUBACK/PUBCOMP。
-    pub async fn publish(&self, request: &MqttPublishRequest) -> Result<(), String> {
+    pub async fn publish(&self, request: &MqttPublishRequest) -> Result<MqttMessage, String> {
         validate_publish_topic(&request.topic)?;
         let payload = if let Some(ref text) = request.payload_text {
             text.as_bytes().to_vec()
@@ -1088,6 +1088,7 @@ impl MqttClient {
             received_at_ms: now_ms,
             direction: MqttMessageDirection::Sent,
         };
+        let published_message = sent_msg.clone();
 
         let _send_guard = self.publish_send_lock.lock().await;
         let (completion, result) = oneshot::channel();
@@ -1097,7 +1098,8 @@ impl MqttClient {
             return Err(error);
         }
         drop(_send_guard);
-        result.await.map_err(|_| "发布确认通道已关闭，请检查 MQTT 连接状态".to_string())?
+        result.await.map_err(|_| "发布确认通道已关闭，请检查 MQTT 连接状态".to_string())??;
+        Ok(published_message)
     }
 
     /// 获取已订阅的 topic 列表

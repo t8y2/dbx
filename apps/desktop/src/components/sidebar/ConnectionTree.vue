@@ -66,7 +66,7 @@ import { createSidebarTableSearchDebouncer, invalidateSidebarTableSearchBuild, l
 import { runSidebarSearchTasks, type SidebarSearchTask } from "./sidebarSearchTaskRunner";
 import TreeItem from "./TreeItem.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
-import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { showSidebarStickyProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
 import { resolveSidebarStickyProductionNode } from "@/lib/sidebar/sidebarStickyProductionContext";
 import ActiveConnectionFilterButton from "./ActiveConnectionFilterButton.vue";
 import SidebarListOptionsIcon from "./SidebarListOptionsIcon.vue";
@@ -1257,7 +1257,7 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
 // handovers do not cover or remount it. Both tree renderers share this context.
 const stickyProductionContext = computed(() => {
   const node = resolveSidebarStickyProductionNode(flatNodes.value, flatTreeIndex.value, stickyContainerIndex.value, stickyScrollTop.value, sidebarTreeRowHeight.value)?.node;
-  return !!node && productionContextForDatabase(node.connectionId ? store.getConfig(node.connectionId) : undefined, node.database).active;
+  return showSidebarStickyProductionBadge(node, node?.connectionId ? store.getConfig(node.connectionId) : undefined);
 });
 
 // Clamp tracking when the tree rebuilds, preserving the search input in the

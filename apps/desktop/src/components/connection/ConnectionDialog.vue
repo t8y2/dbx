@@ -9,6 +9,8 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
+import { sidebarProductionBadgeScope } from "@/lib/sidebar/sidebarProductionBadge";
+import type { ProductionBadgeScope } from "@/types/database";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -454,6 +456,7 @@ const defaultForm = (): ConnectionForm => ({
   sidebar_auto_load_all_tables: false,
   is_production: false,
   production_databases: [],
+  production_badge_scope: "database",
   visible_databases: undefined,
   save_password: true,
 });
@@ -3147,6 +3150,7 @@ watch(
         sidebar_auto_load_all_tables: config.sidebar_auto_load_all_tables === true,
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
+        production_badge_scope: sidebarProductionBadgeScope(config),
         visible_databases: config.visible_databases,
         visible_schemas: config.visible_schemas,
         save_password: config.save_password !== false,
@@ -10363,6 +10367,19 @@ function openExternalUrl(url: string) {
                     </div>
                     <p v-if="!productionProtectionEnabled" class="text-xs leading-5 text-muted-foreground">{{ t(productionDisabledDescriptionKey) }}</p>
                     <template v-else>
+                      <div class="grid gap-1.5">
+                        <Label for="production-badge-scope" class="text-xs font-medium">{{ t("production.badgeScope") }}</Label>
+                        <Select :model-value="form.production_badge_scope || 'database'" @update:model-value="form.production_badge_scope = $event as ProductionBadgeScope">
+                          <SelectTrigger id="production-badge-scope" class="h-8" :aria-label="t('production.badgeScope')"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="connection">{{ t("production.badgeScopeConnection") }}</SelectItem>
+                            <SelectItem value="database">{{ t("production.badgeScopeDatabase") }}</SelectItem>
+                            <SelectItem value="table">{{ t("production.badgeScopeTable") }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t(`production.badgeScopeHint${form.production_badge_scope === "connection" ? "Connection" : form.production_badge_scope === "table" ? "Table" : "Database"}`) }}</p>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("production.badgeScopeSafetyHint") }}</p>
+                      </div>
                       <Label class="text-xs font-medium">{{ t("production.scope") }}</Label>
                       <Tabs v-model="productionScope" class="w-full">
                         <TabsList class="grid h-8 w-full grid-cols-2">

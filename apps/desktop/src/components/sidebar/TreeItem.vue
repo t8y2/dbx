@@ -96,7 +96,7 @@ import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectName
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { isWindows } from "@/lib/backend/platform";
 import { flattenTree } from "@/composables/useFlatTree";
-import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { showSidebarRowProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
@@ -233,8 +233,7 @@ const isDisabledTrigger = computed(() => activeNode.value.type === "trigger" && 
 
 const showProductionBadge = computed(() => {
   const node = activeNode.value;
-  const context = productionContextForDatabase(node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined, node.database);
-  return node.type === "connection" && context.active;
+  return showSidebarRowProductionBadge(node, node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined, props.isStickyContext);
 });
 
 function currentDatabaseType(): DatabaseType | undefined {

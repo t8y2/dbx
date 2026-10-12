@@ -6,6 +6,8 @@ import i18n from "@/i18n";
 import type { ConnectionConfig } from "@/types/database";
 import { parseConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
 
+const visibleTab = vi.hoisted(() => ({ value: "connection" }));
+
 const { store, settings, backend } = vi.hoisted(() => ({
   store: {
     connectionGroupOptions: [],
@@ -121,7 +123,7 @@ vi.mock("@/components/ui/tabs", async () => {
     setup:
       (props, { slots }) =>
       () =>
-        props.value === "connection" ? h("div", slots.default?.()) : null,
+        props.value === visibleTab.value ? h("div", slots.default?.()) : null,
   });
   return { Tabs: pass, TabsContent, TabsList: pass, TabsTrigger: pass };
 });
@@ -156,6 +158,7 @@ function savedConnection(overrides: Partial<ConnectionConfig> = {}): ConnectionC
     read_only: true,
     is_production: true,
     production_databases: ["orders"],
+    production_badge_scope: "table",
     save_password: true,
     visible_databases: ["orders"],
     url_params: "connectTimeout=25",
@@ -192,6 +195,7 @@ async function mountDialog(config: ConnectionConfig, url: string, initiallyOpen 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  visibleTab.value = "connection";
   i18n.global.locale.value = "en";
   for (const fn of Object.values(backend)) fn.mockResolvedValue([]);
   backend.listenAgentInstallProgress.mockResolvedValue(() => {});
@@ -205,6 +209,30 @@ afterEach(() => {
 });
 
 describe("ConnectionDialog deep-link edit confirmation", () => {
+  it("changes the advanced badge picker and persists it while retaining production protection", async () => {
+    visibleTab.value = "advanced";
+    await mountDialog(savedConnection({ production_badge_scope: "connection" }), "dbx://connection/new?id=saved-production");
+    const trigger = document.querySelector<HTMLButtonElement>("#production-badge-scope");
+    expect(trigger?.textContent).toContain("Connection");
+    trigger!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((element) => element.textContent?.trim() === "Table / object");
+    expect(option).toBeTruthy();
+    option!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    expect(trigger?.textContent).toContain("Table / object");
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
+    save!.click();
+    await settle();
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ production_badge_scope: "table", is_production: true, production_databases: ["orders"] }));
+  });
+
+  it("shows the default badge picker for an old saved connection", async () => {
+    visibleTab.value = "advanced";
+    await mountDialog(savedConnection({ production_badge_scope: undefined }), "dbx://connection/new?id=saved-production");
+    expect(document.querySelector("#production-badge-scope")?.textContent).toContain("Database / schema (default)");
+  });
+
   it("does not save, connect, or send retained credentials before confirmation", async () => {
     const saved = savedConnection();
     await mountDialog(saved, "dbx://connection/new?id=saved-production&host=new.example.test");
@@ -254,6 +282,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
         read_only: true,
         is_production: true,
         production_databases: ["orders"],
+        production_badge_scope: "table",
         visible_databases: ["orders"],
         sidebar_auto_load_all_tables: true,
         url_params: "connectTimeout=25",

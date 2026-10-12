@@ -81,7 +81,7 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32
 [dev-dependencies]
 dbx-driver-support = { path = "../dbx-driver-support", features = ["test-support"] }
 dbx-platform = { path = "../dbx-platform", features = ["test-support"] }
-mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }
+mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "374c9d5c24f76a00b678d5b1d7103d6ceb4edb8c", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
 tokio-openssl = "0.6"
 

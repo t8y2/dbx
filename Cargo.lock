@@ -2388,7 +2388,7 @@ dependencies = [
  "futures",
  "log",
  "mysql_async",
- "mysql_common",
+ "mysql_common 0.38.2",
  "percent-encoding",
  "rust_decimal",
  "serde_json",
@@ -2516,7 +2516,7 @@ dependencies = [
  "libsqlite3-hotbundle",
  "log",
  "mysql_async",
- "mysql_common",
+ "mysql_common 0.38.2",
  "nix 0.31.3",
  "openssl",
  "pageant",
@@ -5924,7 +5924,7 @@ dependencies = [
  "futures-util",
  "keyed_priority_queue",
  "lru 0.18.1",
- "mysql_common",
+ "mysql_common 0.38.0",
  "percent-encoding",
  "rand 0.10.2",
  "rustls 0.23.43",
@@ -5965,6 +5965,32 @@ dependencies = [
  "serde_json",
  "sha1 0.10.7",
  "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "uuid",
+]
+
+[[package]]
+name = "mysql_common"
+version = "0.38.2"
+source = "git+https://github.com/t8y2/rust_mysql_common.git?rev=374c9d5c24f76a00b678d5b1d7103d6ceb4edb8c#374c9d5c24f76a00b678d5b1d7103d6ceb4edb8c"
+dependencies = [
+ "base64 0.22.1",
+ "bitflags 2.13.1",
+ "btoi",
+ "byteorder",
+ "bytes",
+ "crc32fast",
+ "flate2",
+ "getrandom 0.4.3",
+ "hex",
+ "num-bigint 0.5.1",
+ "num-traits",
+ "regex",
+ "saturating",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
  "thiserror 2.0.19",
  "uuid",
 ]

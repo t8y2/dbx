@@ -26,4 +26,4 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 
 [dev-dependencies]
-mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }
+mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "374c9d5c24f76a00b678d5b1d7103d6ceb4edb8c", default-features = false }

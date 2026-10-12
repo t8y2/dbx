@@ -470,9 +470,11 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     // with duplicate labels fails with ORA-00918 no matter how ORDER BY refers
     // to the column. Sort the original statement by position instead.
     let oracle_has_duplicate_labels = options.database_type == Some(DatabaseType::Oracle)
-        && options.result_columns.iter().enumerate().any(|(index, column)| {
-            options.result_columns[..index].iter().any(|candidate| candidate.eq_ignore_ascii_case(column))
-        });
+        && options
+            .result_columns
+            .iter()
+            .enumerate()
+            .any(|(index, column)| options.result_columns[..index].iter().any(|candidate| candidate == column));
     if oracle_has_duplicate_labels
         || (options.database_type == Some(DatabaseType::OceanbaseOracle)
             && !rownum_wrapper_projection_is_safe(statement))
@@ -6509,6 +6511,23 @@ WHERE u.id = picked.id;
 
         assert!(!result.ok);
         assert_eq!(result.reason.as_deref(), Some("unsupported"));
+    }
+
+    #[test]
+    fn oracle_sort_with_case_distinct_quoted_labels_keeps_the_derived_table() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT id AS \"x\", id AS \"X\" FROM t WHERE ROWNUM <= 10".to_string(),
+            database_type: Some(DatabaseType::Oracle),
+            result_columns: vec!["x".to_string(), "X".to_string()],
+            column_index: 1,
+            column: "X".to_string(),
+            direction: QuerySortDirection::Desc,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT id AS \"x\", id AS \"X\" FROM t WHERE ROWNUM <= 10) t ORDER BY \"X\" DESC;"
+        );
     }
 
     #[test]

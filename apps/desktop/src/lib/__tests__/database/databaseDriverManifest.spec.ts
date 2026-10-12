@@ -16,7 +16,7 @@ describe("databaseDriverManifest", () => {
       dataTransfer: true,
       sqlFileExecution: true,
       databaseCreate: false,
-      fieldLineage: false,
+      fieldLineage: true,
       sqlExplain: true,
       userAdmin: true,
       driverManagement: true,
@@ -71,5 +71,9 @@ describe("databaseDriverManifest", () => {
     expect(databaseConnectionFormKind("mq")).toBe("mq");
     expect(databaseConnectionFormKind("mqtt")).toBe("mqtt");
     expect(databaseConnectionFormKind("nacos")).toBe("nacos");
+  });
+
+  it("advertises tableDataEdit capability for InterSystems IRIS / Caché (#11808)", () => {
+    expect(supportsDatabaseFeature("iris", "tableDataEdit")).toBe(true);
   });
 });

@@ -30,7 +30,7 @@ capabilities:
   objectSource: true
   schemaSearch: true
   diagram: true
-  tableDataEdit: false
+  tableDataEdit: true
   tableStructureEdit: true
   tableImport: false
   dataTransfer: true

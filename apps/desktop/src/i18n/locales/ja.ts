@@ -3204,6 +3204,9 @@ export default withEnglishFallback({
     title: "フィールドリネージ",
     open: "フィールドリネージを表示",
     loading: "メタデータを読み取り中 {done}/{total}",
+    xuguScopeNotice:
+      "Xugu のフィールドリネージは参考情報としての分析です。現在のスキーマ（{schema}）内のテーブルとビューのみをスキャンします。SQL 履歴は、ローカルに保存された最新 200 件のうち、この接続に属する記録に限定されます。同名のフィールドは関連している可能性を示すもので、データベース上の依存関係を意味するものではありません。",
+    xuguPartialCoverage: "結果が不完全な可能性があります。メタデータの読み取りに失敗したテーブル {skippedTables} 件とビュー定義 {skippedViews} 件をスキップしました。また、スキャン上限によりテーブル {omittedTables} 件とビュー {omittedViews} 件も対象外になりました。",
     empty: "関連するリネージが見つかりません",
     noFiltered: "現在のフィルターに一致する結果はありません",
     targetField: "現在のフィールド",

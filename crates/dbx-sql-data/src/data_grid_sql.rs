@@ -5021,6 +5021,97 @@ mod tests {
     }
 
     #[test]
+    fn iris_keyless_save_uses_full_row_predicate() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Iris),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("SQLUser".to_string()),
+                table_name: "Unkeyed".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![
+                    column("DocId", "integer", false, None),
+                    column("Title", "varchar(64)", true, None),
+                ]),
+            },
+            columns: vec!["DocId".to_string(), "Title".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(7), json!("draft")]],
+            dirty_rows: vec![(0, vec![(1, json!("final"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE SQLUser.Unkeyed SET Title = 'final' WHERE DocId = 7 AND Title = 'draft';"]
+        );
+    }
+
+    #[test]
+    fn iris_keyless_save_rejects_unidentifiable_rows() {
+        // Mirrors the computed-column case: when no result column maps to a
+        // table column the row predicate is empty and the save must stay
+        // disabled instead of emitting a dangling WHERE.
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Iris),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("SQLUser".to_string()),
+                table_name: "Unkeyed".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("DocId", "integer", true, None), column("Title", "varchar(64)", true, None)]),
+            },
+            columns: vec!["expr".to_string(), "display".to_string()],
+            source_columns: Some(vec![None, None]),
+            rows: vec![vec![json!("x"), json!("draft")]],
+            dirty_rows: vec![(0, vec![(1, json!("final"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert!(result.validation_error.is_some(), "{:?}", result.validation_error);
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn iris_identity_columns_are_omitted_from_new_row_inserts() {
+        let row_id = column("PAPMI_RowId", "integer", false, Some("identity"));
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Iris),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("SQLUser".to_string()),
+                table_name: "PA_PatMas".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![row_id, column("PAPMI_ID", "varchar(32)", false, None)]),
+            },
+            columns: vec!["PAPMI_RowId".to_string(), "PAPMI_ID".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, json!("new-id")]],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["INSERT INTO SQLUser.PA_PatMas (PAPMI_ID) VALUES ('new-id');"]);
+    }
+
+    #[test]
     fn iris_data_grid_save_quotes_only_delimited_identifiers_across_mutations() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Iris),
@@ -7700,7 +7791,7 @@ mod tests {
                         column_types: Some(vec![Some(data_type.to_string())]),
                         source_columns: None,
                         rows: vec![vec![json!(value)], vec![Value::Null]],
-                        exclude_primary_keys: false,
+                        primary_key_mode: DataGridPrimaryKeyMode::Include,
                         include_computed_columns: false,
                         include_database_name: false,
                         insert_mode: DataGridCopyInsertMode::RowByRow,

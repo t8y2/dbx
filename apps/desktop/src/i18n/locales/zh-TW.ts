@@ -3186,6 +3186,8 @@ export default withEnglishFallback({
     title: "欄位血緣",
     open: "檢視欄位血緣",
     loading: "正在讀取 metadata {done}/{total}",
+    xuguScopeNotice: "虛谷欄位血緣是輔助分析：只掃描目前綱要（{schema}）中的資料表和檢視；SQL 歷史僅包含本機最近 200 筆記錄中屬於目前連線的項目。同名欄位只表示可能相關，並不代表資料庫相依關係。",
+    xuguPartialCoverage: "結果可能不完整：因 metadata 讀取失敗而略過 {skippedTables} 個資料表及 {skippedViews} 個檢視定義；另有 {omittedTables} 個資料表及 {omittedViews} 個檢視因掃描上限而未納入。",
     empty: "沒有找到相關血緣",
     noFiltered: "目前篩選條件下沒有結果",
     targetField: "目前欄位",

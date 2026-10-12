@@ -3180,6 +3180,9 @@ export default withEnglishFallback({
     title: "Lineage dei Campi",
     open: "Visualizza Lineage dei Campi",
     loading: "Lettura metadati in corso {done}/{total}",
+    xuguScopeNotice:
+      "La lineage dei campi Xugu è un'analisi orientativa: esamina solo le tabelle e le viste dello schema corrente ({schema}); la cronologia SQL è limitata alle voci di questa connessione presenti negli ultimi 200 record salvati localmente. I campi con lo stesso nome possono essere correlati, ma non costituiscono una dipendenza del database.",
+    xuguPartialCoverage: "I risultati potrebbero essere incompleti: sono state ignorate {skippedTables} tabelle per errori di lettura dei metadati e {skippedViews} definizioni di vista; inoltre, i limiti di scansione hanno escluso {omittedTables} tabelle e {omittedViews} viste.",
     empty: "Nessun lineage correlato trovato",
     noFiltered: "Nessun risultato corrisponde ai filtri correnti",
     targetField: "Campo Corrente",

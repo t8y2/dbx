@@ -9,6 +9,7 @@ import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
+import { objectBrowserTargetForNamespaceRow } from "@/lib/database/objectBrowserTarget";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "@/components/sidebar/SidebarTreeItemDialogs.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
@@ -127,12 +128,14 @@ const visibleRows = computed(() => {
 });
 
 function openDatabase(database: string) {
-  const tabId = queryStore.openObjectBrowser(props.connection.id, database);
+  const target = objectBrowserTargetForNamespaceRow(props.connection, database);
+  const tabId = queryStore.openObjectBrowser(props.connection.id, target.database, target.schema);
   void nextTick(() => requestObjectBrowserSearchFocus(tabId));
 }
 
 function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
-  const node: TreeNode = { id: `${props.connection.id}:${row.name}`, label: row.name, type: "database", connectionId: props.connection.id, database: row.name };
+  const target = objectBrowserTargetForNamespaceRow(props.connection, row.name);
+  const node: TreeNode = { id: `${props.connection.id}:${row.name}`, label: row.name, type: "database", connectionId: props.connection.id, database: target.database, schema: target.schema };
   const runtimeItems = sidebarRuntimeHost.value?.buildContextMenu(node);
   if (runtimeItems?.length) return presentMenu(removeUnsupportedDatabaseItems(runtimeItems), "database");
   const isDefault = props.connection.database === row.name;

@@ -3328,6 +3328,9 @@ export default withEnglishFallback({
     title: "Linaje de campo",
     open: "Ver linaje de campo",
     loading: "Leyendo metadatos {done}/{total}",
+    xuguScopeNotice:
+      "El linaje de campos de Xugu es un análisis orientativo: solo analiza las tablas y vistas del esquema actual ({schema}); el historial SQL se limita a las entradas de esta conexión entre los 200 registros locales más recientes. Los campos con el mismo nombre pueden estar relacionados, pero no constituyen una dependencia de la base de datos.",
+    xuguPartialCoverage: "Los resultados pueden estar incompletos: se omitieron {skippedTables} tablas por errores al leer sus metadatos y {skippedViews} definiciones de vista; además, los límites del análisis excluyeron {omittedTables} tablas y {omittedViews} vistas.",
     empty: "Sin linaje relacionado",
     noFiltered: "Ningún resultado coincide con los filtros actuales",
     targetField: "Campo actual",

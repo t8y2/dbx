@@ -3132,6 +3132,8 @@ export default withEnglishFallback({
     title: "필드 계보",
     open: "필드 계보 보기",
     loading: "메타데이터 읽는 중 {done}/{total}",
+    xuguScopeNotice: "Xugu 필드 계보는 참고용 분석입니다. 현재 스키마({schema})의 테이블과 뷰만 검색합니다. SQL 기록은 로컬에 저장된 최신 200개 항목 중 현재 연결에 해당하는 항목으로 제한됩니다. 이름이 같은 필드는 관련 가능성을 나타낼 뿐, 데이터베이스 종속성을 의미하지는 않습니다.",
+    xuguPartialCoverage: "결과가 불완전할 수 있습니다. 메타데이터를 읽지 못한 테이블 {skippedTables}개와 뷰 정의 {skippedViews}개를 건너뛰었으며, 검색 한도로 인해 테이블 {omittedTables}개와 뷰 {omittedViews}개도 제외되었습니다.",
     empty: "관련 계보를 찾을 수 없습니다",
     noFiltered: "현재 필터와 일치하는 결과가 없습니다",
     targetField: "현재 필드",

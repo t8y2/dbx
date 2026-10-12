@@ -3180,6 +3180,9 @@ export default withEnglishFallback({
     title: "Linhagem de Campo",
     open: "Visualizar Linhagem de Campo",
     loading: "Lendo metadados {done}/{total}",
+    xuguScopeNotice:
+      "A linhagem de campos do Xugu é uma análise de apoio: ela examina apenas as tabelas e visões do esquema atual ({schema}); o histórico SQL se limita às entradas desta conexão entre os 200 registros locais mais recentes. Campos com o mesmo nome podem estar relacionados, mas isso não constitui uma dependência do banco de dados.",
+    xuguPartialCoverage: "Os resultados podem estar incompletos: {skippedTables} tabelas foram ignoradas devido a falhas na leitura de metadados e {skippedViews} definições de visão não foram lidas; além disso, os limites da análise excluíram {omittedTables} tabelas e {omittedViews} visões.",
     empty: "Nenhuma linhagem relacionada encontrada",
     noFiltered: "Nenhum resultado corresponde aos filtros atuais",
     targetField: "Campo Atual",

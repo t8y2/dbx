@@ -261,11 +261,10 @@ fn build_create_table_sql_impl(
             && column.extra.as_ref().is_some_and(|e| e.auto_increment.unwrap_or(false))
         {
             parts.push("PRIMARY KEY".to_string());
-        } else if column.is_primary_key && create_dialect.explicit_primary_key_not_null() {
-            parts.push("NOT NULL".to_string());
-        } else if !column.is_nullable
-            && !column.is_primary_key
-            && !matches!(dialect, StructureDialect::ClickHouse | StructureDialect::ManticoreSearch)
+        } else if (column.is_primary_key && create_dialect.explicit_primary_key_not_null())
+            || (!column.is_nullable
+                && !column.is_primary_key
+                && !matches!(dialect, StructureDialect::ClickHouse | StructureDialect::ManticoreSearch))
         {
             parts.push("NOT NULL".to_string());
         } else if column.is_nullable

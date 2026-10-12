@@ -263,6 +263,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcstr"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
+
+[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1527,9 +1533,9 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "combine"
-version = "4.6.7"
+version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
+checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
  "futures-core",
@@ -2137,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.40"
+version = "0.6.41"
 dependencies = [
  "anyhow",
  "axum",
@@ -2221,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.115"
+version = "0.4.116"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2429,7 +2435,9 @@ dependencies = [
  "base64 0.22.1",
  "dbx-driver-support",
  "dbx-types",
+ "futures-util",
  "redis",
+ "rustls 0.23.43",
  "serde",
  "serde_json",
  "tokio",
@@ -2558,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.115"
+version = "0.4.116"
 dependencies = [
  "async-trait",
  "axum",
@@ -2742,7 +2750,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.40"
+version = "0.6.41"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -5893,7 +5901,7 @@ dependencies = [
  "darling 0.23.0",
  "heck 0.5.0",
  "manyhow",
- "num-bigint",
+ "num-bigint 0.4.8",
  "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
@@ -5948,7 +5956,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "mysql-common-derive",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "regex",
  "rust_decimal",
@@ -6099,7 +6107,7 @@ version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-complex",
  "num-integer",
  "num-iter",
@@ -6112,6 +6120,16 @@ name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -6173,7 +6191,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
 ]
@@ -7628,22 +7646,24 @@ dependencies = [
 
 [[package]]
 name = "redis"
-version = "0.32.7"
+version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "014cc767fefab6a3e798ca45112bccad9c6e0e218fbd49720042716c73cfef44"
+checksum = "ed5b98ae99461e02895c3a96a25dbe4d852a3d5e5b815d31d5d9e4b5344d99e9"
 dependencies = [
+ "arcstr",
+ "async-lock",
  "bytes",
  "cfg-if",
  "combine",
  "crc16",
- "futures-sink",
+ "futures-channel",
  "futures-util",
  "itoa",
  "log",
- "num-bigint",
+ "num-bigint 0.5.1",
  "percent-encoding",
  "pin-project-lite",
- "rand 0.9.5",
+ "rand 0.10.2",
  "rustls 0.23.43",
  "rustls-native-certs 0.8.4",
  "ryu",
@@ -7653,6 +7673,7 @@ dependencies = [
  "tokio-rustls 0.26.4",
  "tokio-util",
  "url",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -8056,7 +8077,7 @@ dependencies = [
  "md5",
  "ml-kem",
  "module-lattice",
- "num-bigint",
+ "num-bigint 0.4.8",
  "p256",
  "p384",
  "p521",
@@ -9056,7 +9077,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "thiserror 2.0.19",
  "time",
@@ -12112,6 +12133,12 @@ dependencies = [
  "libc",
  "windows-sys 0.59.0",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
 
 [[package]]
 name = "yeslogic-fontconfig-sys"

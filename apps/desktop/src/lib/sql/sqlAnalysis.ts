@@ -1,5 +1,7 @@
 import type { DatabaseType } from "@/types/database";
 import { DBX_ROWID_COLUMN } from "@/lib/table/tableEditing";
+import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
+import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 
 // Binary column types that should not be edited inline
 export const BINARY_TYPES = new Set(["blob", "clob", "bytea", "varbinary", "binary", "image", "longblob", "mediumblob", "tinyblob", "blob sub_type 2004", "blob sub_type 2005"]);
@@ -266,6 +268,7 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   // so it cannot be mapped to base rows like an ordinary DISTINCT projection.
   if (distinct && /^ON\b/i.test(selectBodyWithoutDistinct)) return { editable: false, reason: "aggregation" };
   const selectBody = stripSqlServerTopClause(selectBodyWithoutDistinct);
+  if (containsTopLevelAggregate(selectBody)) return { editable: false, reason: "aggregation" };
 
   const groupIndex = findTopLevelKeyword(normalized, "GROUP", fromIndex + 4);
   const havingIndex = findTopLevelKeyword(normalized, "HAVING", fromIndex + 4);
@@ -275,7 +278,7 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   // Row-locking FOR clauses change concurrency behavior, not the base-row
   // mapping. Output/read-only FOR modes must stay non-editable.
   if (forIndex >= 0 && !/^FOR\s+(?:UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b/i.test(normalized.slice(forIndex))) return { editable: false, reason: "complex-source" };
-  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR"], fromIndex + 4);
+  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR"], fromIndex + 4);
   const fromBody = normalized.slice(fromIndex + 4, fromEnd < 0 ? normalized.length : fromEnd).trim();
   if (isExternalFromSource(fromBody)) return { editable: false, reason: "external-source" };
   const sources = parseFromSources(fromBody);
@@ -799,21 +802,128 @@ function skipWhitespace(text: string, pos: number): number {
   return pos;
 }
 
-function stripSqlComments(sql: string): string {
-  return sql.replace(/--.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+const AGGREGATE_FUNCTION_PATTERN = /\b(?:COUNT|SUM|AVG|MIN|MAX|EVERY|ANY|SOME|STDDEV(?:_POP|_SAMP)?|VAR(?:IANCE|_POP|_SAMP)?|GROUP_CONCAT|STRING_AGG|LISTAGG|ARRAY_AGG|JSON_ARRAYAGG|JSON_OBJECTAGG|XMLAGG|APPROX_COUNT_DISTINCT)\s*\(/i;
+
+function containsTopLevelAggregate(expression: string): boolean {
+  let quote: string | null = null;
+  let cleaned = "";
+  let depth = 0;
+  let subqueryDepth: number | undefined;
+  for (let i = 0; i < expression.length; i++) {
+    const ch = expression[i]!;
+    if (quote) {
+      if (ch === quote) {
+        if (quote === "'" && expression[i + 1] === "'") {
+          i++;
+          continue;
+        }
+        quote = null;
+      } else if (quote === "]" && ch === "]") {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      cleaned += " ";
+      continue;
+    }
+    if (ch === "[") {
+      quote = "]";
+      cleaned += " ";
+      continue;
+    }
+    if (ch === "(") depth++;
+    if (ch === ")") {
+      depth--;
+      if (subqueryDepth !== undefined && depth < subqueryDepth) subqueryDepth = undefined;
+    }
+    if (subqueryDepth !== undefined) continue;
+    if (depth > 0 && (ch === "S" || ch === "s") && expression.slice(i, i + 6).toUpperCase() === "SELECT" && !isIdentifierChar(expression[i - 1] ?? "") && !isIdentifierChar(expression[i + 6] ?? "")) {
+      subqueryDepth = depth;
+      cleaned += " ";
+      continue;
+    }
+    cleaned += ch;
+  }
+  return AGGREGATE_FUNCTION_PATTERN.test(cleaned);
 }
 
-function hasTopLevelKeyword(sql: string, keywords: string[]): boolean {
-  return keywords.some((keyword) => findTopLevelKeyword(sql, keyword, 0) >= 0);
+function stripSqlComments(sql: string): string {
+  let result = "";
+  let quote: string | null = null;
+  let i = 0;
+  while (i < sql.length) {
+    const ch = sql[i]!;
+    if (quote) {
+      result += ch;
+      if (ch === quote) {
+        if (quote === "'" && sql[i + 1] === "'") {
+          result += sql[i + 1]!;
+          i += 2;
+          continue;
+        }
+        quote = null;
+      }
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      result += ch;
+      i++;
+      continue;
+    }
+    if (ch === "[") {
+      quote = "]";
+      result += ch;
+      i++;
+      continue;
+    }
+    if (ch === "-" && sql[i + 1] === "-") {
+      i += 2;
+      while (i < sql.length && sql[i] !== "\n") {
+        i++;
+      }
+      continue;
+    }
+    if (ch === "/" && sql[i + 1] === "*") {
+      i += 2;
+      while (i < sql.length && !(sql[i] === "*" && sql[i + 1] === "/")) {
+        i++;
+      }
+      if (i < sql.length) i += 2;
+      continue;
+    }
+    result += ch;
+    i++;
+  }
+  return result;
+}
+
+export function hasTopLevelKeyword(sql: string, keywords: string[], databaseType?: DatabaseType): boolean {
+  const dialect = sqlSemanticDialectFor({ databaseType });
+  const mysqlFamily = dialect.id === "mysql" || dialect.id === "doris";
+  const tokens = tokenizeSqlSemantic(sql, dialect.id, { mysqlDashCommentRequiresWhitespace: mysqlFamily, mysqlBackslashEscape: mysqlFamily });
+  const normalizedKeywords = new Set(keywords.map((keyword) => keyword.toLowerCase()));
+  return tokens.some((token) => token.kind === "word" && token.depth === 0 && normalizedKeywords.has(token.normalized));
 }
 
 function hasTopLevelSemicolon(sql: string): boolean {
   let depth = 0;
   let quote: string | null = null;
   for (let i = 0; i < sql.length; i++) {
-    const ch = sql[i];
+    const ch = sql[i]!;
     if (quote) {
-      if (ch === quote || (quote === "]" && ch === "]")) quote = null;
+      if (ch === quote) {
+        if (quote === "'" && sql[i + 1] === "'") {
+          i++;
+          continue;
+        }
+        quote = null;
+      } else if (quote === "]" && ch === "]") {
+        quote = null;
+      }
       continue;
     }
     if (ch === "'" || ch === '"' || ch === "`") {
@@ -847,9 +957,17 @@ function findTopLevelKeyword(sql: string, keyword: string, start: number): numbe
   let quote: string | null = null;
   const upperKeyword = keyword.toUpperCase();
   for (let i = start; i < sql.length; i++) {
-    const ch = sql[i];
+    const ch = sql[i]!;
     if (quote) {
-      if (ch === quote || (quote === "]" && ch === "]")) quote = null;
+      if (ch === quote) {
+        if (quote === "'" && sql[i + 1] === "'") {
+          i++;
+          continue;
+        }
+        quote = null;
+      } else if (quote === "]" && ch === "]") {
+        quote = null;
+      }
       continue;
     }
     if (ch === "'" || ch === '"' || ch === "`") {
@@ -870,7 +988,7 @@ function findTopLevelKeyword(sql: string, keyword: string, start: number): numbe
     }
     if (depth !== 0) continue;
     if (sql.slice(i, i + keyword.length).toUpperCase() !== upperKeyword) continue;
-    const before = i === 0 ? "" : sql[i - 1];
+    const before = i === 0 ? "" : sql[i - 1]!;
     const after = sql[i + keyword.length] ?? "";
     if (!isIdentifierChar(before) && !isIdentifierChar(after)) return i;
   }

@@ -4925,7 +4925,16 @@ onUnmounted(() => {
                   :focus-target="driverStoreFocus"
                   @update-count-change="updateAgentDriverUpdateCount"
                 />
-                <PluginCenterPage v-if="pluginCenterTabOpen" v-show="pluginCenterActive" class="flex-1 min-h-0" :focus-target="pluginCenterFocus" :install-url-request="pluginCenterInstallRequest" @new-connection="openPluginConnectionDialog" @plugin-runtime-replaced="refreshPluginWorkbenches" />
+                <PluginCenterPage
+                  v-if="pluginCenterTabOpen"
+                  v-show="pluginCenterActive"
+                  class="flex-1 min-h-0"
+                  :focus-target="pluginCenterFocus"
+                  :install-url-request="pluginCenterInstallRequest"
+                  @opened="activateMainContentSurface('query')"
+                  @new-connection="openPluginConnectionDialog"
+                  @plugin-runtime-replaced="refreshPluginWorkbenches"
+                />
                 <EditorSettingsPage
                   v-if="settingsPageTabOpen"
                   v-show="settingsStore.settingsPageActive"

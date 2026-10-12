@@ -41,6 +41,7 @@ import {
   analyzeEditableQueryEditability,
   analyzeSelectStructureForDisplay,
   foldUnquotedPostgresMetadataIdentifier,
+  hasTopLevelKeyword,
   resolveMetadataColumnName,
   resolveSourceColumnsByOrdinal,
   sourceColumnsForResult,
@@ -6411,6 +6412,7 @@ export const useQueryStore = defineStore("query", () => {
     const stableLobSource = databaseType === "oracle" ? oracleRowIdIsSafeForQuery(tab, loaded) : databaseType === "db2";
     const largeValuePreview = (databaseType === "oracle" || databaseType === "db2") && primaryKeys.length > 0 && stableLobSource && columnsAllowDeferredLobMarkers(loaded.tableMeta.columns) && queryProjectsDeferredLob(databaseType, metadataAnalysis, loaded.source.key, loaded.tableMeta.columns);
     const unchanged = { sql, metadataSql: sql, hiddenPrimaryKeys: [], largeValuePreview };
+    if (hasTopLevelKeyword(sql, ["GROUP", "HAVING"], databaseType)) return unchanged;
     const missingPrimaryKeys =
       declaredPrimaryKeys.length === 0
         ? primaryKeys.filter(
@@ -6444,9 +6446,11 @@ export const useQueryStore = defineStore("query", () => {
     if (!databaseType || !HIDDEN_QUERY_KEY_DATABASE_TYPES.has(databaseType) || !tab.connectionId) return unchanged;
 
     try {
+      if (hasTopLevelKeyword(sql, ["GROUP", "HAVING"], databaseType)) return unchanged;
       const editability = analyzeEditableQueryEditability(sql);
       if (!editability.editable || !editability.analysis) return unchanged;
       const analysis = editability.analysis;
+      if (analysis.groupByColumns?.length || analysis.hasHavingClause) return unchanged;
       const sources = editableQuerySources(analysis);
       if (sources.length !== 1 || analysis.distinct) return unchanged;
       const source = sources[0]!;

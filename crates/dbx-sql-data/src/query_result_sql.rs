@@ -2855,6 +2855,19 @@ mod tests {
             assert!(!sorted.ok, "must not append a second ORDER BY: {sql}");
             assert_eq!(sorted.reason.as_deref(), Some("unsupported"), "{sql}");
         }
+
+        // 对照：完全没有 ORDER BY 时照常在末尾追加序号排序；这条路径就是
+        // `order_by_index.unwrap_or(statement.len())` 的 None 分支。
+        let sorted = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT * FROM t".into(),
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            result_columns: vec!["id".into()],
+            column_index: 0,
+            column: "id".into(),
+            direction: QuerySortDirection::Asc,
+        });
+        assert!(sorted.ok);
+        assert_eq!(sorted.sql.unwrap(), "SELECT * FROM t ORDER BY 1 ASC;");
     }
 
     #[test]

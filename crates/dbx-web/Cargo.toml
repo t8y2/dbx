@@ -1,6 +1,6 @@
 [package]
 name = "dbx-web"
-version = "0.6.40"
+version = "0.6.41"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -27,7 +27,7 @@ embed-static = ["dep:rust-embed", "dep:mime_guess"]
 [dependencies]
 dbx-core = { path = "../dbx-core", default-features = false, features = ["openapi"] }
 dbx-mcp = { path = "../dbx-mcp", default-features = false }
-redis = { version = "0.32", features = ["tokio-comp"] }
+redis = { version = "1.7.1", features = ["tokio-comp"] }
 axum = { version = "0.8", features = ["multipart", "ws"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "compression-gzip", "trace"] }
 tokio = { version = "1", features = ["full"] }

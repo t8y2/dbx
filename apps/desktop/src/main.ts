@@ -93,6 +93,13 @@ async function bootstrap() {
   // durable appearance record before importing i18n and the theme composable;
   // those modules synchronously read the compatibility keys during evaluation.
   await hydrateAppAppearance();
+  if (new URLSearchParams(window.location.search).get("tabDragPreview") === "1") {
+    const [{ default: i18n, loadSavedLocale }, { default: Preview }] = await Promise.all([import("./i18n"), import("./components/layout/TabDragPreviewWindow.vue")]);
+    await loadSavedLocale();
+    createApp(Preview).use(createPinia()).use(i18n).mount("#root");
+    window.dispatchEvent(new Event("dbx:startup-ready"));
+    return;
+  }
   // A floating plugin window is a widget, not the workbench: it mounts its own
   // root (one plugin workbench on a transparent page) and skips StartupGate/App,
   // so shell singletons — authentication, tab restore, update prompts — stay in

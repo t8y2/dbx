@@ -3,8 +3,9 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
 import { invoke } from "@tauri-apps/api/core";
+import { isWorkspaceWindow } from "@/lib/app/windowContext";
 
-export type AppCloseAction = "quit" | "hide";
+export type AppCloseAction = "quit" | "hide" | "window";
 type AppCloseRequestTarget = "settings" | "quit";
 
 export interface AppCloseRequestOptions {
@@ -27,6 +28,10 @@ export function useCloseActionPrompt(options: { requestClose: (action: AppCloseA
 
   async function performCloseAction(action: AppCloseAction) {
     if (!isTauriRuntime()) return;
+    if (action === "window") {
+      await invoke("complete_workspace_window_close");
+      return;
+    }
     await api.completeAppClose(action);
   }
 
@@ -60,6 +65,8 @@ export function useCloseActionPrompt(options: { requestClose: (action: AppCloseA
 
   function setupCloseActionPromptListener() {
     if (!isTauriRuntime()) return;
+    // 子工作窗口通过自己的关闭事件处理，不响应 main 的应用级退出广播。
+    if (isWorkspaceWindow()) return;
     void import("@tauri-apps/api/event").then(({ listen }) => {
       listen<AppCloseRequestTarget>("dbx-app-close-requested", (event: AppCloseRequestPayload) => {
         handleCloseRequest(event.payload === "quit" ? "quit" : "settings");

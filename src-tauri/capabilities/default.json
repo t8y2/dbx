@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "enables the default permissions",
-  "windows": ["main", "detached-tab-*", "plugin-floating-*"],
+  "windows": ["main", "detached-tab-*", "plugin-floating-*", "dbx-tab-*"],
   "permissions": [
     "core:default",
     "core:window:allow-show",
@@ -33,6 +33,8 @@
     "core:window:allow-available-monitors",
     "core:window:allow-current-monitor",
     "core:window:allow-cursor-position",
+    "core:window:allow-monitor-from-point",
+    "core:window:allow-set-ignore-cursor-events",
     "core:webview:allow-create-webview-window",
     "core:webview:allow-set-webview-zoom",
     "clipboard-manager:allow-read-text",

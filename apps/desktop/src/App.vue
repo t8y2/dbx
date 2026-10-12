@@ -69,6 +69,7 @@ import { useDataGridActions } from "@/composables/useDataGridActions";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { useTauriEvents } from "@/composables/useTauriEvents";
 import { useCloseActionPrompt, type AppCloseAction, type AppCloseRequestOptions } from "@/composables/useCloseActionPrompt";
+import { useWorkspaceTabWindows } from "@/composables/useWorkspaceTabWindows";
 import { disposeAllSqlServerActivityTraces } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import { useExternalSqlFileChanges } from "@/composables/useExternalSqlFileChanges";
@@ -319,6 +320,14 @@ const { openInStreamingExecutorOnTooLarge } = useLargeSqlFileStreamingFallback()
 const isDesktop = isTauriRuntime();
 const componentUpdates = useComponentUpdates({ isDesktop: isDesktop || isUpdatePreviewMockEnabled() });
 const windowContext = resolveWindowContext();
+const isWorkspaceWindowContext = windowContext.kind === "workspace";
+const workspaceWindows = useWorkspaceTabWindows({
+  requestClose: () => requestAppClose("window"),
+  assertCloseSafe: () => {
+    if (pendingAppCloseAction.value || trackedUpdateTaskCount.value > 0 || blockingDesktopAiRunsForUpdate().length > 0 || queryStore.tabs.some((tab) => tab.isExecuting || tab.isCancelling || tab.isExplaining || tab.txnSessionId)) throw new Error(t("updates.preparationTasks"));
+    if (queryStore.tabs.some((tab) => (tab.pendingDataChangeCount ?? 0) > 0 || tab.hasPendingDataEditorDraft || (queryStore.isTabDirty(tab) && (tab.mode !== "query" || settingsStore.editorSettings.appCloseUnsavedTabsMode !== "keep-drafts")))) throw new Error(t("updates.preparationDrafts"));
+  },
+});
 const isDetachedWindowContext = windowContext.kind === "detached-tab";
 const detachedContextTabId = windowContext.kind === "detached-tab" ? windowContext.tabId : undefined;
 let updateWindowReady = false;
@@ -865,6 +874,11 @@ async function setupFloatingWindowEvents() {
 }
 
 async function detachTab(tab: QueryTab, position?: { x: number; y: number }) {
+  if (workspaceWindows.enabled.value) {
+    await workspaceWindows.moveTab(tab);
+    return;
+  }
+  if (isWorkspaceWindowContext) return;
   if (isDetachedWindowContext || !isDetachableTab(tab)) return;
   try {
     const handoff = await queryStore.prepareDetachedTab(tab.id, { activeOutputView: tab.id === queryStore.activeTabId ? activeOutputView.value : (tab.uiState?.activeOutputView ?? "result") });
@@ -1235,10 +1249,22 @@ const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
   openPluginInstallDeepLink,
   refreshPluginWorkbenches,
 });
-const { showCloseActionPrompt, chooseQuit, chooseMinimize, cancelCloseActionPrompt, performCloseAction, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt({ requestClose: requestAppClose });
+const { showCloseActionPrompt, chooseQuit, chooseMinimize, cancelCloseActionPrompt, performCloseAction: performNativeCloseAction, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt({ requestClose: requestAppClose });
+
+async function performCloseAction(action: AppCloseAction) {
+  let release: (() => void) | undefined;
+  try {
+    if (action === "quit") release = await workspaceWindows.prepareAppClose();
+    await performNativeCloseAction(action);
+  } catch (error) {
+    toast(t("settings.appCloseDraftPersistFailed", { message: error instanceof Error ? error.message : String(error) }), 8000);
+  } finally {
+    release?.();
+  }
+}
 useVisibilityChange();
-useWebDavAutoUpload();
-useScheduledDatabaseBackups({ scheduler: true });
+if (!isWorkspaceWindowContext) useWebDavAutoUpload();
+useScheduledDatabaseBackups({ scheduler: !isWorkspaceWindowContext });
 
 const appVersion = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
@@ -2230,6 +2256,7 @@ function closePendingSavedTab() {
   const shouldCloseTab = pendingSaveShouldCloseTab.value;
   pendingSaveShouldCloseTab.value = true;
   if (shouldCloseTab) queryStore.closeTab(closeId, { force: true });
+  else if (pendingAppCloseAction.value === "window") completePendingTabSave(closeId);
 }
 
 function cancelPendingSaveAndClose() {
@@ -2266,7 +2293,7 @@ async function finishPendingAppClose(action: AppCloseAction) {
   pendingAppCloseAction.value = null;
   pendingSaveShouldCloseTab.value = true;
   const disposeRuntimeBeforeClose = () => (action === "quit" ? disposeAllSqlServerActivityTraces().catch(() => undefined) : Promise.resolve());
-  if (queryStore.requiresAppCloseDraftPersist) {
+  if (isWorkspaceWindowContext || queryStore.requiresAppCloseDraftPersist) {
     await finishAppCloseWithRequiredPersist({
       persist: () => queryStore.flushPendingPersist(),
       beforeClose: disposeRuntimeBeforeClose,
@@ -2305,6 +2332,14 @@ function continuePendingAppCloseAfterSave() {
 
 function requestAppClose(action: AppCloseAction, options: AppCloseRequestOptions = {}) {
   if (isUpdatePreparationActive()) return;
+  if (action === "window" && queryStore.tabs.some((tab) => (tab.pendingDataChangeCount ?? 0) > 0 || tab.hasPendingDataEditorDraft)) {
+    toast(t("updates.preparationDrafts"), 8000);
+    return;
+  }
+  if (action === "window" && (trackedUpdateTaskCount.value > 0 || blockingDesktopAiRunsForUpdate().length > 0 || queryStore.tabs.some((tab) => tab.isExecuting || tab.isCancelling || tab.isExplaining || tab.txnSessionId))) {
+    toast(t("updates.preparationTasks"), 8000);
+    return;
+  }
   pendingCloseActionChoice.value = !!options.requireCloseActionChoice;
   if (queryStore.hasDirtyTabs) {
     pendingAppCloseAction.value = action;
@@ -4476,6 +4511,7 @@ async function initApp() {
     markStartupPhase("connections-ready");
     console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
     await queryStore.initOpenTabs({ validConnectionIds: connectionStore.connections.map((connection) => connection.id) });
+    await workspaceWindows.setup();
     markStartupPhase("tabs-restored");
     console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
   };
@@ -4503,13 +4539,13 @@ async function initApp() {
         toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
       });
     await runPendingComponentUpdatesBeforePluginReconnect({
-      hasPendingComponentUpdates: () => !isDetachedWindowContext && hasPendingComponentUpdatesAfterAppRestart(),
+      hasPendingComponentUpdates: () => windowContext.kind === "main" && hasPendingComponentUpdatesAfterAppRestart(),
       prepareStartup: async () => {
         await settingsStore.initDesktopSettings().catch(() => {});
         if (isDesktop) {
           updateWindowReady = true;
           await initializeUpdatePreparation();
-          await initializeUpdater();
+          if (windowContext.kind === "main") await initializeUpdater();
         }
       },
       consumePendingComponentUpdates: consumePendingComponentUpdatesAfterRestart,
@@ -4689,6 +4725,11 @@ onMounted(async () => {
   desktopOpenTabsRestorationBarrier = createOpenTabsRestorationBarrier();
   void initApp();
   setupFileDrop().catch(() => {});
+  // 外部文件、全局更新和上游独立标签回收仍只由固定 main 处理。
+  if (isWorkspaceWindowContext) {
+    void api.getAppVersion().then((version) => { appVersion.value = version; }).catch(() => {});
+    return;
+  }
   setTimeout(() => {
     runUpdateNotificationChecks();
     if (!updateCheckTimer) {
@@ -5409,7 +5450,7 @@ onUnmounted(() => {
         :database-type="queryEditorDdlDatabaseType"
         :dialect="queryEditorDdlDialect"
       />
-      <McpSqlApprovalDialog v-if="isDesktop && !isDetachedWindowContext" />
+      <McpSqlApprovalDialog v-if="isDesktop && windowContext.kind === 'main'" />
       <QueryEditorObjectSourceDialog
         v-if="queryEditorObjectSourceTarget"
         v-model:open="showQueryEditorObjectSourceDialog"

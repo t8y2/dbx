@@ -76,3 +76,5 @@ pub mod vector_cmd;
 pub mod window_controls;
 pub mod xlsx_export;
 pub mod zookeeper_cmd;
+pub mod workspace_tabs;
+pub mod tab_drag_preview;

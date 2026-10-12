@@ -190,7 +190,11 @@ pub fn mark_frontend_ready(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn request_app_close_from_window_controls(app: AppHandle) -> Result<(), String> {
+pub async fn request_app_close_from_window_controls(app: AppHandle, window: Window) -> Result<(), String> {
+    if super::workspace_tabs::is_workspace_window(window.label()) {
+        super::workspace_tabs::request_workspace_close(&window);
+        return Ok(());
+    }
     request_app_close(&app, "settings");
     Ok(())
 }
@@ -252,13 +256,23 @@ pub async fn save_global_search_settings(app: AppHandle, settings: serde_json::V
 }
 
 #[tauri::command]
-pub async fn load_open_tabs_state(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
-    state.storage.load_open_tabs_state_with_key(open_tabs_state_key(cfg!(debug_assertions))).await
+pub async fn load_open_tabs_state(
+    app: AppHandle,
+    window: Window,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<serde_json::Value>, String> {
+    super::workspace_tabs::load_window_tabs(&app, &window, &state, open_tabs_state_key(cfg!(debug_assertions))).await
 }
 
 #[tauri::command]
-pub async fn save_open_tabs_state(state: State<'_, Arc<AppState>>, payload: serde_json::Value) -> Result<(), String> {
-    state.storage.save_open_tabs_state_with_key(open_tabs_state_key(cfg!(debug_assertions)), &payload).await
+pub async fn save_open_tabs_state(
+    app: AppHandle,
+    window: Window,
+    state: State<'_, Arc<AppState>>,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    super::workspace_tabs::save_window_tabs(&app, &window, &state, open_tabs_state_key(cfg!(debug_assertions)), &payload)
+        .await
 }
 
 #[tauri::command]

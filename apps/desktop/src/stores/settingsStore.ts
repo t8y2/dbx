@@ -963,6 +963,7 @@ export interface EditorSettings {
   welcomePageMode: WelcomePageMode;
   welcomePageModeDefaultVersion: number;
   compactTabTitle: boolean;
+  crossWindowTabDragPreviewEnabled: boolean;
   tabLayout: TabLayoutMode;
   tabPlacement: TabPlacement;
   colorizeConnectionTabs: boolean;
@@ -1309,6 +1310,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   welcomePageMode: "workspace",
   welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
   compactTabTitle: false,
+  crossWindowTabDragPreviewEnabled: true,
   tabLayout: "scroll",
   tabPlacement: "top",
   colorizeConnectionTabs: true,
@@ -1950,6 +1952,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     welcomePageMode: hasCurrentWelcomePageDefault && (settings.welcomePageMode === "intro" || settings.welcomePageMode === "workspace") ? settings.welcomePageMode : DEFAULT_EDITOR_SETTINGS.welcomePageMode,
     welcomePageModeDefaultVersion,
     compactTabTitle: settings.compactTabTitle ?? DEFAULT_EDITOR_SETTINGS.compactTabTitle,
+    crossWindowTabDragPreviewEnabled: typeof settings.crossWindowTabDragPreviewEnabled === "boolean" ? settings.crossWindowTabDragPreviewEnabled : DEFAULT_EDITOR_SETTINGS.crossWindowTabDragPreviewEnabled,
     tabLayout: normalizeTabLayout(settings.tabLayout),
     tabPlacement: normalizeTabPlacement(settings.tabPlacement),
     colorizeConnectionTabs: typeof settings.colorizeConnectionTabs === "boolean" ? settings.colorizeConnectionTabs : DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabs,
@@ -2824,6 +2827,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.savedSqlOpenTargetMode !== undefined) editorSettings.value.savedSqlOpenTargetMode = partial.savedSqlOpenTargetMode === "current" ? "current" : "saved";
     if (partial.welcomePageMode !== undefined) editorSettings.value.welcomePageMode = partial.welcomePageMode === "intro" || partial.welcomePageMode === "workspace" ? partial.welcomePageMode : DEFAULT_EDITOR_SETTINGS.welcomePageMode;
     if (partial.compactTabTitle !== undefined) editorSettings.value.compactTabTitle = partial.compactTabTitle;
+    if (partial.crossWindowTabDragPreviewEnabled !== undefined) editorSettings.value.crossWindowTabDragPreviewEnabled = partial.crossWindowTabDragPreviewEnabled === true;
     if (partial.tabLayout !== undefined) editorSettings.value.tabLayout = normalizeTabLayout(partial.tabLayout);
     if (partial.tabPlacement !== undefined) editorSettings.value.tabPlacement = normalizeTabPlacement(partial.tabPlacement);
     if (partial.colorizeConnectionTabs !== undefined) editorSettings.value.colorizeConnectionTabs = partial.colorizeConnectionTabs === true;

@@ -1,7 +1,8 @@
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
-import { ref } from "vue";
+import { onScopeDispose, ref } from "vue";
 import * as api from "@/lib/backend/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type { HistoryConnectionOption, HistoryCursor, HistoryEntry, HistorySearchRequest } from "@/lib/backend/api";
 
 const DEFAULT_HISTORY_SEARCH: HistorySearchRequest = {
@@ -36,6 +37,23 @@ export const useHistoryStore = defineStore("history", () => {
   let historyPanelActive = false;
   let optionsRequestSerial = 0;
   let latestRequestedSearch = copyRequest(DEFAULT_HISTORY_SEARCH);
+  let stopHistorySync: (() => void) | undefined;
+  let disposed = false;
+  let refreshQueued = false;
+  if (isTauriRuntime()) {
+    void import("@tauri-apps/api/event").then(({ listen }) => listen("dbx:history-changed", () => {
+      invalidateConnectionOptionRequests();
+      if (!historyPanelActive || refreshQueued || disposed) return;
+      refreshQueued = true;
+      queueMicrotask(() => {
+        refreshQueued = false;
+        if (!historyPanelActive || disposed) return;
+        void search(latestRequestedSearch).catch(() => {});
+        void loadConnectionOptions().catch(() => {});
+      });
+    })).then((stop) => { if (disposed) stop(); else stopHistorySync = stop; }).catch((error) => console.warn("[DBX][history:sync-listen:error]", error));
+  }
+  onScopeDispose(() => { disposed = true; stopHistorySync?.(); });
 
   function invalidateConnectionOptionRequests() {
     optionsRequestSerial += 1;

@@ -1590,12 +1590,14 @@ pub fn run() {
 
     builder
         .manage(CloseBehaviorState::new())
+        .manage(commands::workspace_tabs::WorkspaceTabsState::default())
+        .manage(commands::tab_drag_preview::TabDragPreviewState::default())
         .manage(commands::plugin_file::PluginFileState::new())
         .manage(commands::plugin_media::PluginMediaState::new())
         .manage(commands::plugin_storage::PluginUiStorageState::new())
         .manage(AppLocaleState::new())
         .on_page_load(|webview, payload| {
-            if payload.event() == PageLoadEvent::Started {
+            if webview.label() == "main" && payload.event() == PageLoadEvent::Started {
                 if let Some(state) = webview.app_handle().try_state::<CloseBehaviorState>() {
                     state.set_frontend_ready(false);
                 }
@@ -1848,6 +1850,11 @@ pub fn run() {
                 return;
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if commands::workspace_tabs::is_workspace_window(window.label()) {
+                    api.prevent_close();
+                    commands::workspace_tabs::request_workspace_close(window);
+                    return;
+                }
                 // Floating plugin widgets (label prefix shared with the frontend's
                 // floatingWindowLabel) close like ordinary windows. Hiding them to
                 // the tray would keep their plugin instance — audio included —
@@ -1930,6 +1937,10 @@ pub fn run() {
             commands::app_settings::update_app_appearance_settings,
             commands::app_settings::set_app_locale,
             commands::app_settings::complete_app_close,
+            commands::workspace_tabs::workspace_tab_transfer,
+            commands::workspace_tabs::complete_workspace_window_close,
+            commands::tab_drag_preview::start_tab_drag_preview,
+            commands::tab_drag_preview::stop_tab_drag_preview,
             commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,
             commands::window_controls::set_macos_traffic_light_position,

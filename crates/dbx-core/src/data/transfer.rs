@@ -115,6 +115,11 @@ static INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE: std::sync::LazyLock<Regex> = std::
         .expect("valid inline foreign key constraint line regex")
 });
 
+static ORACLE_TRIGGER_STATEMENT_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?|ALTER\s+)TRIGGER\s")
+        .expect("valid Oracle trigger statement regex")
+});
+
 // Upper bound for a single generated INSERT/upsert statement. Raised from
 // 512 KiB so one `batchSize` page normally becomes one multi-row INSERT.
 // MySQL-family targets additionally cap batches by the live
@@ -7458,6 +7463,15 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
         } else {
             statements
         }
+    } else if matches!(db_type, DatabaseType::Oracle) {
+        // The Oracle agent appends index, trigger and comment DDL to the table
+        // DDL, which the target rejects as one statement with `ORA-03405`.
+        let statements = split_sql_statements_for_database(sql, *db_type);
+        if statements.is_empty() {
+            vec![sql.trim().to_string()]
+        } else {
+            statements.into_iter().filter(|statement| !is_oracle_trigger_statement(statement)).collect()
+        }
     } else {
         vec![sql.to_string()]
     }
@@ -7515,6 +7529,15 @@ fn is_postgres_post_table_index_statement(statement: &str) -> bool {
     normalized.starts_with("CREATE INDEX ")
         || normalized.starts_with("CREATE UNIQUE INDEX ")
         || normalized.starts_with("COMMENT ON INDEX ")
+}
+
+/// Trigger DDL is dropped from reused Oracle table DDL. Created together with the
+/// table, a trigger would fire while transfer copies the rows, and one that reads
+/// a sequence is still invalid then because sequences are transferred after
+/// tables, so every insert fails with `ORA-04098`. Selected triggers are created
+/// by the schema object phase instead, which runs after the data and the sequences.
+fn is_oracle_trigger_statement(statement: &str) -> bool {
+    ORACLE_TRIGGER_STATEMENT_RE.is_match(statement)
 }
 
 /// Standalone `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY` statements are
@@ -8668,6 +8691,7 @@ where
             transfer_oracle_schema_objects(
                 state,
                 &filtered_request,
+                &target_db_type,
                 source_pool_key,
                 target_pool_key,
                 progress_callback,
@@ -8763,6 +8787,7 @@ fn resolve_oracle_schema(schema: &str, database: &str) -> String {
 async fn transfer_oracle_schema_objects<F>(
     state: &AppState,
     request: &TransferRequest,
+    target_db_type: &DatabaseType,
     source_pool_key: &str,
     target_pool_key: &str,
     mut progress_callback: F,
@@ -8816,8 +8841,8 @@ where
                 .ok_or_else(|| format!("No DDL returned for Oracle {:?} {name}", kind))?
                 .to_string();
             let ddl = rewrite_oracle_schema_qualifier(&ddl, &source_schema, &target_schema);
-            match execute_on_pool(state, target_pool_key, &ddl).await {
-                Ok(_) => {
+            match execute_oracle_object_ddl_on_pool(state, target_pool_key, &ddl, target_db_type).await {
+                Ok(()) => {
                     outcome.transferred.push(format!("{kind:?}:{name}"));
                     progress(&mut outcome, TransferStatus::Running, None);
                 }
@@ -8829,6 +8854,34 @@ where
         }
     }
     Ok(outcome)
+}
+
+/// `DBMS_METADATA.GET_DDL('TRIGGER', ...)` returns the trigger body followed by an
+/// `ALTER TRIGGER ... ENABLE` statement. Sent as one statement, Oracle compiles the
+/// `ALTER` as part of the PL/SQL body and the trigger is created invalid with
+/// `PLS-00103`, so Oracle targets run each statement separately.
+async fn execute_oracle_object_ddl_on_pool(
+    state: &AppState,
+    pool_key: &str,
+    ddl: &str,
+    target_db_type: &DatabaseType,
+) -> Result<(), String> {
+    for statement in oracle_object_ddl_statements(ddl, target_db_type) {
+        execute_on_pool(state, pool_key, &statement).await?;
+    }
+    Ok(())
+}
+
+fn oracle_object_ddl_statements(ddl: &str, target_db_type: &DatabaseType) -> Vec<String> {
+    if !matches!(target_db_type, DatabaseType::Oracle) {
+        return vec![ddl.to_string()];
+    }
+    let statements = split_sql_statements_for_database(ddl, *target_db_type);
+    if statements.is_empty() {
+        vec![ddl.trim().to_string()]
+    } else {
+        statements
+    }
 }
 
 async fn transfer_sqlserver_schema_objects<F>(
@@ -16620,6 +16673,52 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 "COMMENT ON COLUMN \"APP\".\"ITEMS\".\"NOTE\" IS 'line; two'".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn oracle_transfer_ddl_splits_reused_table_ddl_and_drops_triggers() {
+        let ddl = "\n  CREATE TABLE \"APP\".\"ORDERS\" (\"ID\" NUMBER, \"NOTE\" VARCHAR2(50));\n\n\
+                   CREATE INDEX \"APP\".\"ORDERS_NOTE_IX\" ON \"APP\".\"ORDERS\" (\"NOTE\");\n\n\
+                   CREATE OR REPLACE EDITIONABLE TRIGGER \"APP\".\"ORDERS_TRG\" BEFORE INSERT ON \"APP\".\"ORDERS\" FOR EACH ROW\n\
+                   BEGIN\n  IF :NEW.ID IS NULL THEN SELECT \"APP\".\"ORDERS_SEQ\".NEXTVAL INTO :NEW.ID FROM DUAL; END IF;\nEND;\n\
+                   ALTER TRIGGER \"APP\".\"ORDERS_TRG\" ENABLE;\n\n\
+                   COMMENT ON TABLE \"APP\".\"ORDERS\" IS 'trigger; orders';";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Oracle);
+
+        assert_eq!(
+            statements,
+            vec![
+                "CREATE TABLE \"APP\".\"ORDERS\" (\"ID\" NUMBER, \"NOTE\" VARCHAR2(50))".to_string(),
+                "CREATE INDEX \"APP\".\"ORDERS_NOTE_IX\" ON \"APP\".\"ORDERS\" (\"NOTE\")".to_string(),
+                "COMMENT ON TABLE \"APP\".\"ORDERS\" IS 'trigger; orders'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_trigger_statement_detection_ignores_other_ddl() {
+        assert!(is_oracle_trigger_statement("CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN NULL; END;"));
+        assert!(is_oracle_trigger_statement("create or replace noneditionable trigger \"T\" ..."));
+        assert!(is_oracle_trigger_statement("\n  ALTER TRIGGER \"APP\".\"T\" ENABLE"));
+        assert!(!is_oracle_trigger_statement("CREATE TABLE \"TRIGGER_LOG\" (\"ID\" NUMBER)"));
+        assert!(!is_oracle_trigger_statement("COMMENT ON TABLE \"T\" IS 'CREATE TRIGGER x'"));
+        assert!(!is_oracle_trigger_statement("ALTER TABLE \"T\" DISABLE ALL TRIGGERS"));
+    }
+
+    #[test]
+    fn oracle_object_ddl_splits_trigger_enable_statement_for_oracle_targets() {
+        let ddl = "\n  CREATE OR REPLACE EDITIONABLE TRIGGER \"APP\".\"ORDERS_TRG\" BEFORE INSERT ON \"APP\".\"ORDERS\" FOR EACH ROW\n\
+                   BEGIN\n  NULL;\nEND;\n\
+                   ALTER TRIGGER \"APP\".\"ORDERS_TRG\" ENABLE";
+
+        let statements = oracle_object_ddl_statements(ddl, &DatabaseType::Oracle);
+
+        assert_eq!(statements.len(), 2, "{statements:#?}");
+        assert!(statements[0].starts_with("CREATE OR REPLACE EDITIONABLE TRIGGER"));
+        assert!(statements[0].ends_with("END;"));
+        assert_eq!(statements[1], "ALTER TRIGGER \"APP\".\"ORDERS_TRG\" ENABLE");
+        assert_eq!(oracle_object_ddl_statements(ddl, &DatabaseType::Dameng), vec![ddl.to_string()]);
     }
 
     #[test]

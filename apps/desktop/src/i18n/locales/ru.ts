@@ -7006,6 +7006,7 @@ export default withEnglishFallback({
       toolNotFound: "Инструменты клиентов Dameng (dexp/dimp) не найдены в настроенном каталоге bin.",
       connectionRequired: "Нативный экспорт dexp/dimp доступен только для подключений Dameng.",
       passwordMissing: "У подключения нет сохранённого пароля; сначала переподключитесь и введите пароль.",
+      useridInvalid: "Имя пользователя или пароль подключения содержит / или {'@'}, что нельзя закодировать в аргументе USERID dexp/dimp; задача не была запущена.",
     },
   },
   mongo: {

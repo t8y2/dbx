@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   migrationStart: vi.fn(),
   migrationRetry: vi.fn(),
   migrationCleanupBackups: vi.fn(),
+  loadWebCapabilities: vi.fn(),
 }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.desktop }));
 vi.mock("@/lib/backend/api", () => mocks);
@@ -39,6 +40,7 @@ beforeEach(() => {
   mocks.desktop.mockReturnValue(true);
   mocks.migrationStatus.mockResolvedValue(readyStatus);
   mocks.reloadLocale.mockResolvedValue(undefined);
+  mocks.loadWebCapabilities.mockResolvedValue({ passwordViewerEnabled: true });
   businessReady = deferred<void>();
   root = document.createElement("div");
   document.body.append(root);

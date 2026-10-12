@@ -210,12 +210,10 @@ pub fn restore(
             for (index, layer) in restored.transport_layers.iter().enumerate() {
                 let source = original_value["transport_layers"][index].take();
                 // Only compare layers that actually reference this saved profile.
-                if contains_tunnel_reference(&source, &id) {
-                    if tunnel_target(layer) != tunnel_target(expected) {
-                        return Err(AppError::forbidden(
-                            "Saved tunnel credentials cannot be used with a different tunnel target.",
-                        ));
-                    }
+                if contains_tunnel_reference(&source, &id) && tunnel_target(layer) != tunnel_target(expected) {
+                    return Err(AppError::forbidden(
+                        "Saved tunnel credentials cannot be used with a different tunnel target.",
+                    ));
                 }
             }
         } else if credential_target(&restored) != credential_target(&saved[&id]) {

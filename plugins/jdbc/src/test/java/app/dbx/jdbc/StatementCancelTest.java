@@ -12,12 +12,19 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.sql.Statement;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -62,7 +69,96 @@ final class StatementCancelTest {
         assertTrue(await(2).has("error"), "the cancelled query reports an error");
     }
 
+    @Test
+    void cancelStatementRemembersARequestWhileItIsQueued() throws Exception {
+        ExecutorService defaultRequests = Executors.newSingleThreadExecutor();
+        startServer(defaultRequests);
+        assertNull(send(1, "connect", params()).path("error").textValue());
+
+        CountDownLatch workerBlocked = new CountDownLatch(1);
+        CountDownLatch releaseWorker = new CountDownLatch(1);
+        defaultRequests.execute(() -> {
+            workerBlocked.countDown();
+            try {
+                releaseWorker.await();
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertTrue(workerBlocked.await(5, TimeUnit.SECONDS));
+
+        try {
+            ObjectNode queued = params()
+                .put("sql", "CREATE TABLE CANCELLED_BEFORE_START(ID INT)")
+                .put(DbxJdbcPlugin.CANCEL_TOKEN_PARAM, "queued-token");
+            write(2, "executeQuery", queued);
+            ObjectNode cancel = MAPPER.createObjectNode().put(DbxJdbcPlugin.CANCEL_TOKEN_PARAM, "queued-token");
+            assertTrue(send(3, DbxJdbcPlugin.CANCEL_STATEMENT_METHOD, cancel)
+                .path("result").path("cancelled").asBoolean());
+        } finally {
+            releaseWorker.countDown();
+        }
+
+        assertTrue(await(2).has("error"));
+        JsonNode tables = send(4, "executeQuery", params().put(
+            "sql",
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'CANCELLED_BEFORE_START'"
+        ));
+        assertEquals(0, tables.path("result").path("rows").path(0).path(0).asInt(), tables.toString());
+    }
+
+    @Test
+    void cancelStatementUsesTheStatementCapturedWithTheMatchingToken() throws Exception {
+        AtomicInteger abandonedCancels = new AtomicInteger();
+        AtomicInteger replacementCancels = new AtomicInteger();
+        Statement abandoned = statement(abandonedCancels);
+        Statement replacement = statement(replacementCancels);
+        DbxJdbcPlugin.CancellationRequest abandonedRequest = DbxJdbcPlugin.registerCancellationRequest(
+            request(1, "abandoned-token")
+        );
+        DbxJdbcPlugin.CancellationRequest replacementRequest = DbxJdbcPlugin.registerCancellationRequest(
+            request(2, "replacement-token")
+        );
+        DbxJdbcPlugin.trackActiveStatement(abandoned, abandonedRequest);
+
+        CountDownLatch statementCaptured = new CountDownLatch(1);
+        CountDownLatch replacementTracked = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread cancel = new Thread(() -> {
+            try {
+                DbxJdbcPlugin.StatementCancellation cancellation =
+                    DbxJdbcPlugin.markCancellationRequested("abandoned-token");
+                assertTrue(cancellation.matched());
+                statementCaptured.countDown();
+                assertTrue(replacementTracked.await(5, TimeUnit.SECONDS));
+                DbxJdbcPlugin.cancelCapturedStatement(cancellation.statement());
+            } catch (Throwable error) {
+                failure.set(error);
+            }
+        });
+        cancel.start();
+
+        try {
+            assertTrue(statementCaptured.await(5, TimeUnit.SECONDS));
+            DbxJdbcPlugin.trackActiveStatement(replacement, replacementRequest);
+            replacementTracked.countDown();
+            cancel.join(TimeUnit.SECONDS.toMillis(5));
+            assertFalse(cancel.isAlive());
+            assertNull(failure.get());
+            assertEquals(1, abandonedCancels.get());
+            assertEquals(0, replacementCancels.get());
+        } finally {
+            replacementTracked.countDown();
+            DbxJdbcPlugin.finishCancellationRequest(abandonedRequest);
+            DbxJdbcPlugin.finishCancellationRequest(replacementRequest);
+        }
+    }
+
     private void startServer() throws Exception {
+        startServer(Executors.newSingleThreadExecutor());
+    }
+
+    private void startServer(ExecutorService defaultRequests) throws Exception {
         PipedOutputStream hostOut = new PipedOutputStream();
         PipedInputStream pluginIn = new PipedInputStream(hostOut, 1 << 16);
         PipedOutputStream pluginOut = new PipedOutputStream();
@@ -73,7 +169,7 @@ final class StatementCancelTest {
                 BufferedReader reader = new BufferedReader(new InputStreamReader(pluginIn, StandardCharsets.UTF_8));
                 BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(pluginOut, StandardCharsets.UTF_8))
             ) {
-                DbxJdbcPlugin.serve(reader, writer);
+                DbxJdbcPlugin.serve(reader, writer, defaultRequests);
             } catch (Exception ignored) {
                 // The pipe closes when the test ends.
             }
@@ -102,6 +198,33 @@ final class StatementCancelTest {
         ObjectNode params = MAPPER.createObjectNode();
         params.set("connection", connection);
         return params;
+    }
+
+    private static ObjectNode request(int id, String token) {
+        ObjectNode request = MAPPER.createObjectNode().put("id", id).put("method", "executeQuery");
+        request.set("params", params().put(DbxJdbcPlugin.CANCEL_TOKEN_PARAM, token));
+        return request;
+    }
+
+    private static Statement statement(AtomicInteger cancels) {
+        return (Statement) Proxy.newProxyInstance(
+            StatementCancelTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> {
+                if ("cancel".equals(method.getName())) cancels.incrementAndGet();
+                Class<?> returnType = method.getReturnType();
+                if (!returnType.isPrimitive()) return null;
+                if (returnType == boolean.class) return false;
+                if (returnType == byte.class) return (byte) 0;
+                if (returnType == short.class) return (short) 0;
+                if (returnType == int.class) return 0;
+                if (returnType == long.class) return 0L;
+                if (returnType == float.class) return 0F;
+                if (returnType == double.class) return 0D;
+                if (returnType == char.class) return '\0';
+                return null;
+            }
+        );
     }
 
     private BlockingQueue<JsonNode> queue(int id) {

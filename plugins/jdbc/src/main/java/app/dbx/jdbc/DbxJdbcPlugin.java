@@ -182,6 +182,7 @@ public final class DbxJdbcPlugin {
     private static final ThreadLocal<JdbcConnectionState> CONNECTION_STATE =
         ThreadLocal.withInitial(() -> DEFAULT_CONNECTION_STATE);
     private static final Map<String, JdbcConnectionState> LOGICAL_SESSIONS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final ThreadLocal<CancellationRequest> CANCELLATION_REQUEST = new ThreadLocal<>();
     private static volatile boolean shuttingDown;
 
     private static final class JdbcConnectionState {
@@ -189,12 +190,23 @@ public final class DbxJdbcPlugin {
         Connection sharedConnection;
         boolean manualTransactionActive;
         final Map<String, QuerySession> querySessions = new HashMap<>();
+        final Map<String, CancellationRequest> cancellationRequests = new HashMap<>();
         volatile Statement activeStatement;
-        String cancelToken;
-        boolean cancelRequested;
         volatile boolean closing;
         final java.util.concurrent.locks.ReentrantLock operation = new java.util.concurrent.locks.ReentrantLock();
     }
+
+    static final class CancellationRequest {
+        final String token;
+        boolean cancelled;
+        Statement statement;
+
+        CancellationRequest(String token) {
+            this.token = token;
+        }
+    }
+
+    record StatementCancellation(boolean matched, Statement statement) {}
 
     private static JdbcConnectionState connectionState() {
         return CONNECTION_STATE.get();
@@ -324,10 +336,15 @@ public final class DbxJdbcPlugin {
     }
 
     static void serve(BufferedReader reader, BufferedWriter writer) throws Exception {
-        java.util.concurrent.ExecutorService requests = java.util.concurrent.Executors.newCachedThreadPool();
         // Requests without a logical session run in order on one worker so the reader stays free to
         // handle `cancelStatement` while a statement is still executing on the shared connection.
         java.util.concurrent.ExecutorService defaultRequests = java.util.concurrent.Executors.newSingleThreadExecutor();
+        serve(reader, writer, defaultRequests);
+    }
+
+    static void serve(BufferedReader reader, BufferedWriter writer,
+                      java.util.concurrent.ExecutorService defaultRequests) throws Exception {
+        java.util.concurrent.ExecutorService requests = java.util.concurrent.Executors.newCachedThreadPool();
         try {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -350,10 +367,13 @@ public final class DbxJdbcPlugin {
                     });
                     continue;
                 }
+                CancellationRequest cancellationRequest = registerCancellationRequest(incoming);
                 if ("close".equals(incoming.path("method").asText())) {
                     shuttingDown = true;
                     String closeLine = line;
-                    ObjectNode response = defaultRequests.submit(() -> handleDefaultRequest(closeLine, incoming)).get();
+                    ObjectNode response = defaultRequests.submit(
+                        () -> handleDefaultRequest(closeLine, incoming, cancellationRequest)
+                    ).get();
                     writeResponse(writer, response);
                     if (response.path("_dbx_close").asBoolean(false)) {
                         break;
@@ -363,7 +383,7 @@ public final class DbxJdbcPlugin {
                 String requestLine = line;
                 defaultRequests.execute(() -> {
                     try {
-                        writeResponse(writer, handleDefaultRequest(requestLine, incoming));
+                        writeResponse(writer, handleDefaultRequest(requestLine, incoming, cancellationRequest));
                     } catch (Exception error) {
                         System.err.println("JDBC response failed: " + error.getClass().getSimpleName());
                     }
@@ -385,18 +405,53 @@ public final class DbxJdbcPlugin {
         }
     }
 
-    private static ObjectNode handleDefaultRequest(String line, JsonNode request) throws Exception {
-        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
-        synchronized (state) {
-            state.cancelToken = optionalText(request.path("params"), CANCEL_TOKEN_PARAM);
-            state.cancelRequested = false;
-        }
+    private static ObjectNode handleDefaultRequest(String line, JsonNode request,
+                                                   CancellationRequest cancellationRequest) throws Exception {
+        CANCELLATION_REQUEST.set(cancellationRequest);
         try {
+            if (isCancellationRequested(cancellationRequest)) return cancelledResponse(request);
             return handleLine(line);
         } finally {
-            synchronized (state) {
-                state.cancelToken = null;
-                state.cancelRequested = false;
+            finishCancellationRequest(cancellationRequest);
+            CANCELLATION_REQUEST.remove();
+        }
+    }
+
+    static CancellationRequest registerCancellationRequest(JsonNode request) {
+        String token = optionalText(request.path("params"), CANCEL_TOKEN_PARAM);
+        if (token == null) return null;
+        CancellationRequest cancellationRequest = new CancellationRequest(token);
+        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
+        synchronized (state) {
+            state.cancellationRequests.put(token, cancellationRequest);
+        }
+        return cancellationRequest;
+    }
+
+    private static boolean isCancellationRequested(CancellationRequest cancellationRequest) {
+        if (cancellationRequest == null) return false;
+        synchronized (DEFAULT_CONNECTION_STATE) {
+            return cancellationRequest.cancelled;
+        }
+    }
+
+    private static ObjectNode cancelledResponse(JsonNode request) {
+        JsonNode id = request.path("id");
+        ObjectNode response = MAPPER.createObjectNode();
+        response.set("id", id.isMissingNode() ? MAPPER.getNodeFactory().numberNode(1) : id);
+        response.set("error", MAPPER.createObjectNode().put("message", "JDBC request cancelled"));
+        return response;
+    }
+
+    static void finishCancellationRequest(CancellationRequest cancellationRequest) {
+        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
+        synchronized (state) {
+            Statement statement = cancellationRequest == null ? null : cancellationRequest.statement;
+            if (cancellationRequest != null) {
+                state.cancellationRequests.remove(cancellationRequest.token, cancellationRequest);
+                cancellationRequest.statement = null;
+            }
+            if (cancellationRequest == null || state.activeStatement == statement) {
                 state.activeStatement = null;
             }
         }
@@ -412,21 +467,25 @@ public final class DbxJdbcPlugin {
         ObjectNode response = MAPPER.createObjectNode();
         response.set("id", id.isMissingNode() ? MAPPER.getNodeFactory().numberNode(1) : id);
         String token = optionalText(request.path("params"), CANCEL_TOKEN_PARAM);
-        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
-        boolean matched;
-        synchronized (state) {
-            matched = token != null && token.equals(state.cancelToken);
-            if (matched) state.cancelRequested = true;
-        }
-        if (matched) cancelActiveStatement(state);
+        StatementCancellation cancellation = markCancellationRequested(token);
+        cancelCapturedStatement(cancellation.statement());
         ObjectNode result = MAPPER.createObjectNode();
-        result.put("cancelled", matched);
+        result.put("cancelled", cancellation.matched());
         response.set("result", result);
         return response;
     }
 
-    private static void cancelActiveStatement(JdbcConnectionState state) {
-        Statement statement = state.activeStatement;
+    static StatementCancellation markCancellationRequested(String token) {
+        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
+        synchronized (state) {
+            CancellationRequest cancellationRequest = token == null ? null : state.cancellationRequests.get(token);
+            if (cancellationRequest == null) return new StatementCancellation(false, null);
+            cancellationRequest.cancelled = true;
+            return new StatementCancellation(true, cancellationRequest.statement);
+        }
+    }
+
+    static void cancelCapturedStatement(Statement statement) {
         if (statement == null) return;
         try {
             statement.cancel();
@@ -435,15 +494,24 @@ public final class DbxJdbcPlugin {
         }
     }
 
+    private static void cancelActiveStatement(JdbcConnectionState state) {
+        cancelCapturedStatement(state.activeStatement);
+    }
+
     private static void trackActiveStatement(Statement statement) {
+        trackActiveStatement(statement, CANCELLATION_REQUEST.get());
+    }
+
+    static void trackActiveStatement(Statement statement, CancellationRequest cancellationRequest) {
         JdbcConnectionState state = connectionState();
         boolean cancelRequested;
         synchronized (state) {
             state.activeStatement = statement;
-            cancelRequested = state.cancelRequested;
+            if (cancellationRequest != null) cancellationRequest.statement = statement;
+            cancelRequested = cancellationRequest != null && cancellationRequest.cancelled;
         }
         // A cancel can arrive before the request created its statement.
-        if (cancelRequested) cancelActiveStatement(state);
+        if (cancelRequested) cancelCapturedStatement(statement);
     }
 
     private static void writeResponse(BufferedWriter writer, ObjectNode response) throws IOException {

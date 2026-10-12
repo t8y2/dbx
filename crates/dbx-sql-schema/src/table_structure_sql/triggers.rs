@@ -46,44 +46,70 @@ fn build_trigger_sql_with_mode(
             continue;
         }
 
+        let mut needs_recreate = trigger.original.is_none();
+        let mut needs_alter_enabled = false;
+
         if let Some(original) = &trigger.original {
-            if dialect == StructureDialect::Oracle {
-                if has_trigger_change(trigger, original) {
-                    warnings.push(format!(
-                        "Editing existing Oracle trigger \"{}\" requires its complete source definition.",
-                        original.name
-                    ));
-                }
-                continue;
-            }
             if !has_trigger_change(trigger, original) {
                 continue;
             }
-            // Oracle can replace a trigger in place; renames still require dropping the old object.
-            if dialect != StructureDialect::Oracle || clean(&trigger.name) != clean(&original.name) {
-                statements.push(drop_trigger_sql(dialect, options.schema.as_deref(), &original.name));
+            
+            if has_trigger_body_change(trigger, original) {
+                needs_recreate = true;
+                // Oracle can replace a trigger in place; renames still require dropping the old object.
+                if dialect != StructureDialect::Oracle || clean(&trigger.name) != clean(&original.name) {
+                    statements.push(drop_trigger_sql(dialect, options.schema.as_deref(), &original.name));
+                }
+            } else if trigger.enabled.is_some() && trigger.enabled != original.enabled {
+                needs_alter_enabled = true;
             }
         }
 
-        if let Some(sql) = create_trigger_sql(
-            options.database_type,
-            dialect,
-            options.schema.as_deref(),
-            &table,
-            trigger,
-            warnings,
-            for_new_table,
-        ) {
-            statements.push(sql);
-            // SQL Server rebuilds via DROP + CREATE, which resets is_disabled to
-            // enabled; restore the catalog-reported disabled state explicitly.
-            // `table` is already qualified the same way the CREATE's ON clause is.
-            if dialect == StructureDialect::SqlServer
-                && trigger.original.as_ref().is_some_and(|original| original.enabled == Some(false))
-            {
+        if needs_recreate {
+            if let Some(sql) = create_trigger_sql(
+                options.database_type,
+                dialect,
+                options.schema.as_deref(),
+                &table,
+                trigger,
+                warnings,
+                for_new_table,
+            ) {
+                statements.push(sql);
+                // SQL Server rebuilds via DROP + CREATE, which resets is_disabled to
+                // enabled; restore the catalog-reported disabled state explicitly.
+                // `table` is already qualified the same way the CREATE's ON clause is.
+                if dialect == StructureDialect::SqlServer {
+                    let enabled = trigger.enabled.unwrap_or_else(|| {
+                        trigger.original.as_ref().and_then(|o| o.enabled).unwrap_or(true)
+                    });
+                    if !enabled {
+                        let schema = options.schema.as_deref();
+                        let trigger_name = qualified_trigger_object_name(dialect, schema, &trigger.name);
+                        statements.push(format!("DISABLE TRIGGER {trigger_name} ON {table};"));
+                    }
+                } else if dialect == StructureDialect::Oracle {
+                    let enabled = trigger.enabled.unwrap_or_else(|| {
+                        trigger.original.as_ref().and_then(|o| o.enabled).unwrap_or(true)
+                    });
+                    if !enabled {
+                        let schema = options.schema.as_deref();
+                        let trigger_name = qualified_trigger_object_name(dialect, schema, &trigger.name);
+                        statements.push(format!("ALTER TRIGGER {trigger_name} DISABLE;"));
+                    }
+                }
+            }
+        } else if needs_alter_enabled {
+            if dialect == StructureDialect::Oracle {
                 let schema = options.schema.as_deref();
                 let trigger_name = qualified_trigger_object_name(dialect, schema, &trigger.name);
-                statements.push(format!("DISABLE TRIGGER {trigger_name} ON {table};"));
+                let state = if trigger.enabled == Some(true) { "ENABLE" } else { "DISABLE" };
+                statements.push(format!("ALTER TRIGGER {trigger_name} {state};"));
+            } else if dialect == StructureDialect::SqlServer {
+                let schema = options.schema.as_deref();
+                let trigger_name = qualified_trigger_object_name(dialect, schema, &trigger.name);
+                let state = if trigger.enabled == Some(true) { "ENABLE" } else { "DISABLE" };
+                statements.push(format!("{state} TRIGGER {trigger_name} ON {table};"));
             }
         }
     }
@@ -104,6 +130,15 @@ fn has_trigger_edit(trigger: &EditableStructureTrigger) -> bool {
 }
 
 fn has_trigger_change(trigger: &EditableStructureTrigger, original: &TriggerInfo) -> bool {
+    let has_body_change = clean(&trigger.name) != clean(&original.name)
+        || normalize_keyword(&trigger.timing) != normalize_keyword(&original.timing)
+        || normalize_keyword(&trigger.event) != normalize_keyword(&original.event)
+        || normalize_statement(&trigger.statement) != normalize_statement(original.statement.as_deref().unwrap_or(""));
+    let has_enabled_change = trigger.enabled.is_some() && trigger.enabled != original.enabled;
+    has_body_change || has_enabled_change
+}
+
+fn has_trigger_body_change(trigger: &EditableStructureTrigger, original: &TriggerInfo) -> bool {
     clean(&trigger.name) != clean(&original.name)
         || normalize_keyword(&trigger.timing) != normalize_keyword(&original.timing)
         || normalize_keyword(&trigger.event) != normalize_keyword(&original.event)

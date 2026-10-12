@@ -386,6 +386,7 @@ fn trigger(name: &str, timing: &str, event: &str, statement: &str) -> EditableSt
         timing: timing.to_string(),
         event: event.to_string(),
         statement: statement.to_string(),
+        enabled: None,
         original: None,
         marked_for_drop: false,
     }
@@ -7349,7 +7350,7 @@ fn changed_postgres_trigger_remains_unsupported() {
 }
 
 #[test]
-fn rejects_editing_existing_oracle_trigger_without_complete_source() {
+fn allows_editing_existing_oracle_trigger() {
     let mut existing = trigger(
         "DBX_TRIGGER_4320_AUDIT",
         "AFTER EACH ROW",
@@ -7385,11 +7386,13 @@ fn rejects_editing_existing_oracle_trigger_without_complete_source() {
         primary_key_name: None,
     });
 
-    assert!(result.statements.is_empty());
     assert_eq!(
-        result.warnings,
-        vec!["Editing existing Oracle trigger \"DBX_TRIGGER_4320_AUDIT\" requires its complete source definition."]
+        result.statements,
+        vec![
+            "CREATE OR REPLACE TRIGGER \"APP\".\"DBX_TRIGGER_4320_AUDIT\" AFTER INSERT OR UPDATE OR DELETE ON \"APP\".\"DBX_TRIGGER_4320\"\nFOR EACH ROW\nDECLARE\n  v_event VARCHAR2(10);\nBEGIN\n  v_event := CASE WHEN INSERTING THEN 'INSERT' WHEN UPDATING THEN 'UPDATE' ELSE 'DELETE' END;\nEND;"
+        ]
     );
+    assert!(result.warnings.is_empty());
 }
 
 #[test]

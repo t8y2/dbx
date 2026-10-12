@@ -1295,13 +1295,14 @@ export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureT
     timing: trigger.timing,
     event: trigger.event,
     statement: trigger.statement ?? "",
+    enabled: trigger.enabled,
     original: trigger,
     markedForDrop: false,
   }));
 }
 
 export function canEditStructuredTriggerDraft(databaseType: DatabaseType | undefined, trigger: EditableStructureTrigger): boolean {
-  return !trigger.original || (databaseType !== undefined && databaseType !== "oracle");
+  return !trigger.original || (databaseType !== undefined && databaseType !== "unsupported");
 }
 
 export function toColumnNames(columns: string[]): string {

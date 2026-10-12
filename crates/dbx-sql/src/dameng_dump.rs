@@ -47,11 +47,20 @@ pub struct DamengDumpRequest {
 }
 
 /// The `USERID` token, always the first argument: `USERID=<user>/<password>@<host>:<port>`.
-/// Password is NOT URL-escaped; Dameng accepts it verbatim. If the password contains
-/// characters that break the token, the caller should still pass it through — the tool
-/// parses up to the first `@`.
+/// Password is NOT URL-escaped; Dameng accepts it verbatim. A `/` or `@` inside the user or
+/// password would be parsed as a field separator (the tool parses up to the first `@`), so
+/// callers must reject those up front via [`userid_field_error`] instead of launching.
 pub fn userid_token(user: &str, password: &str, host: &str, port: u16) -> String {
     format!("USERID={user}/{password}@{host}:{port}")
+}
+
+/// Returns the field name whose value cannot be encoded in the `USERID` token
+/// (`/` separates user/password, `@` starts the host part), or `None` if both
+/// are safe to pass.
+pub fn userid_field_error(user: &str, password: &str) -> Option<&'static str> {
+    [(user, "username"), (password, "password")]
+        .into_iter()
+        .find_map(|(field, name)| (field.contains('/') || field.contains('@')).then_some(name))
 }
 
 /// Contents of the PARFILE: the non-sensitive parameters, one `KEY=value` per line.
@@ -172,6 +181,15 @@ mod tests {
     #[test]
     fn userid_is_first_and_carries_credentials() {
         assert_eq!(userid_token("SYSDBA", "Dameng123", "127.0.0.1", 5236), "USERID=SYSDBA/Dameng123@127.0.0.1:5236");
+    }
+
+    #[test]
+    fn userid_field_error_flags_breaking_chars_in_either_field() {
+        assert_eq!(userid_field_error("SYSDBA", "Dameng123"), None);
+        assert_eq!(userid_field_error("SYSDBA", "p@ss"), Some("password"));
+        assert_eq!(userid_field_error("SYSDBA", "p/ss"), Some("password"));
+        assert_eq!(userid_field_error("user@dba", "Dameng123"), Some("username"));
+        assert_eq!(userid_field_error("us/er", "Dameng123"), Some("username"));
     }
 
     #[test]

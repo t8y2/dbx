@@ -230,6 +230,11 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     message: "[damengPasswordMissing] The connection has no password available; reconnect and enter the password first.",
     key: "damengDump.errors.passwordMissing",
   },
+  {
+    name: "dameng native dump with a userid-breaking credential",
+    message: "[damengUseridInvalid] The connection's password contains '/' or '@', which the dexp/dimp USERID argument cannot encode; the task was not started.",
+    key: "damengDump.errors.useridInvalid",
+  },
 ];
 
 function translatorFor(locale: LocaleKey): BackendErrorTranslate {

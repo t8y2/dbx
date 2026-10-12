@@ -170,6 +170,7 @@ const patterns: [RegExp, string][] = [
   [/^\[damengToolNotFound\]/, "damengDump.errors.toolNotFound"],
   [/^\[damengConnectionRequired\]/, "damengDump.errors.connectionRequired"],
   [/^\[damengPasswordMissing\]/, "damengDump.errors.passwordMissing"],
+  [/^\[damengUseridInvalid\]/, "damengDump.errors.useridInvalid"],
 ];
 
 // Named placeholders for each pattern's capture groups, in capture order.

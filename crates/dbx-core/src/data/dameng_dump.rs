@@ -20,7 +20,8 @@ use tokio::io::AsyncReadExt;
 
 pub use dbx_sql::dameng_dump::DamengDumpKind as DamengDumpKindReexport;
 use dbx_sql::dameng_dump::{
-    build_command, build_parfile_contents, parse_dump_log, DamengDumpKind, DamengDumpOutcome, DamengDumpRequest,
+    build_command, build_parfile_contents, parse_dump_log, userid_field_error, DamengDumpKind, DamengDumpOutcome,
+    DamengDumpRequest,
 };
 
 use crate::connection::AppState;
@@ -98,6 +99,7 @@ pub struct DamengDumpProgress {
 pub const DAMENG_TOOL_NOT_FOUND_TAG: &str = "damengToolNotFound";
 pub const DAMENG_CONNECTION_NOT_DAMENG_TAG: &str = "damengConnectionRequired";
 pub const DAMENG_PASSWORD_MISSING_TAG: &str = "damengPasswordMissing";
+pub const DAMENG_USERID_INVALID_TAG: &str = "damengUseridInvalid";
 
 fn tagged(tag: &str, message: &str) -> String {
     format!("[{tag}] {message}")
@@ -132,17 +134,41 @@ pub fn resolve_damp_tool_path(bin_dir: &str, kind: DamengDumpKind) -> Result<Pat
     })
 }
 
-/// Export side: the native tool refuses to overwrite non-interactively (it
-/// prompts `y/n` on the console, which we do not feed). The frontend's save
-/// dialog has already asked the user to confirm the replacement, so removing
-/// the existing file here only honors that confirmation.
-fn prepare_export_target(file_path: &Path) -> Result<(), String> {
+/// Export side: only validate the target — the actual write goes to a sibling
+/// temp file (see [`sibling_temp_dump_path`]) that is renamed over the target
+/// after a successful run, so a failed or cancelled export never destroys the
+/// user's previous dump. The frontend's save dialog has already asked the user
+/// to confirm the replacement.
+fn validate_export_target(file_path: &Path) -> Result<(), String> {
     match std::fs::metadata(file_path) {
-        Ok(_) => std::fs::remove_file(file_path)
-            .map_err(|error| format!("Failed to replace existing export file '{}': {error}", file_path.display())),
+        Ok(meta) if !meta.is_file() => Err(format!("Export target '{}' exists and is not a file.", file_path.display())),
+        Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("Cannot access export file '{}': {error}", file_path.display())),
     }
+}
+
+/// The temp `.dmp` the tool writes to during an export: same directory as the
+/// target (so the final rename stays on one volume), `.dmp` extension kept,
+/// and task-id-scoped so a leftover from an interrupted run cannot make the
+/// tool prompt `y/n` on an existing file.
+fn sibling_temp_dump_path(target: &Path, task_id: &str) -> PathBuf {
+    let stem = target.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    target.with_file_name(format!("{stem}.dbx-dameng-{task_id}-{}.tmp.dmp", std::process::id()))
+}
+
+/// Move the successful export's temp file over the user's target. On failure
+/// the temp file is kept (it holds a complete dump) and its path is surfaced
+/// so the user can recover it manually.
+fn finalize_export_target(temp_path: &Path, target: &Path) -> Result<(), String> {
+    std::fs::rename(temp_path, target)
+        .map_err(|error| {
+            format!(
+                "Export finished but replacing '{}' failed ({error}); the new dump was kept at '{}'.",
+                target.display(),
+                temp_path.display()
+            )
+        })
 }
 
 fn prepare_import_source(file_path: &Path) -> Result<(), String> {
@@ -280,6 +306,19 @@ pub async fn run_dameng_dump_task(
         emit(DamengDumpStatus::Error, false, false, None, Some(error.clone()));
         return Err(error);
     }
+    // A `/` or `@` in the user or password would be read as a USERID field
+    // separator by the tool and surface as a bogus host / connection error;
+    // reject it up front instead of launching.
+    if let Some(field) = userid_field_error(&config.username, &config.password) {
+        let error = tagged(
+            DAMENG_USERID_INVALID_TAG,
+            &format!(
+                "The connection's {field} contains '/' or '@', which the dexp/dimp USERID argument cannot encode; the task was not started."
+            ),
+        );
+        emit(DamengDumpStatus::Error, false, false, None, Some(error.clone()));
+        return Err(error);
+    }
 
     let tool_path = Path::new(&request.tool_path);
     if !tool_path.is_file() {
@@ -296,13 +335,27 @@ pub async fn run_dameng_dump_task(
     }
 
     let file_path = Path::new(&request.file_path);
-    if let Err(error) = match kind {
-        DamengDumpKind::Export => prepare_export_target(file_path),
-        DamengDumpKind::Import => prepare_import_source(file_path),
-    } {
-        emit(DamengDumpStatus::Error, false, false, None, Some(error.clone()));
-        return Err(error);
-    }
+    // Export writes to a sibling temp file first; only a successful run is
+    // renamed over the target, so a failed export leaves the previous dump intact.
+    let export_temp_path = match kind {
+        DamengDumpKind::Export => {
+            if let Err(error) = validate_export_target(file_path) {
+                emit(DamengDumpStatus::Error, false, false, None, Some(error.clone()));
+                return Err(error);
+            }
+            let temp_path = sibling_temp_dump_path(file_path, &request.task_id);
+            // A leftover from an interrupted run would make the tool prompt y/n.
+            remove_if_exists(&temp_path);
+            Some(temp_path)
+        }
+        DamengDumpKind::Import => {
+            if let Err(error) = prepare_import_source(file_path) {
+                emit(DamengDumpStatus::Error, false, false, None, Some(error.clone()));
+                return Err(error);
+            }
+            None
+        }
+    };
 
     let temp_dir = std::env::temp_dir().join("dbx-dameng-dump");
     if let Err(error) = std::fs::create_dir_all(&temp_dir) {
@@ -324,7 +377,10 @@ pub async fn run_dameng_dump_task(
         port: config.port,
         user: config.username.clone(),
         password: config.password.clone(),
-        file_path: request.file_path.clone(),
+        file_path: export_temp_path
+            .as_deref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| request.file_path.clone()),
         log_path: log_path.to_string_lossy().into_owned(),
         schemas: request.schemas.clone(),
         tables: request.tables.clone(),
@@ -350,11 +406,17 @@ pub async fn run_dameng_dump_task(
         Ok(text) => text,
         Err(error) if error == EXPORT_CANCELLED_ERROR => {
             remove_if_exists(&log_path);
+            if let Some(temp_path) = &export_temp_path {
+                remove_if_exists(temp_path);
+            }
             emit(DamengDumpStatus::Cancelled, false, false, None, None);
             return Ok(());
         }
         Err(error) => {
             remove_if_exists(&log_path);
+            if let Some(temp_path) = &export_temp_path {
+                remove_if_exists(temp_path);
+            }
             emit(DamengDumpStatus::Error, false, false, None, Some(error.clone()));
             return Err(error);
         }
@@ -363,9 +425,18 @@ pub async fn run_dameng_dump_task(
 
     let outcome: DamengDumpOutcome = parse_dump_log(&text, kind);
     if outcome.success {
+        if let Some(temp_path) = &export_temp_path {
+            if let Err(error) = finalize_export_target(temp_path, file_path) {
+                emit(DamengDumpStatus::Error, false, outcome.warnings, outcome.elapsed_seconds.clone(), Some(error.clone()));
+                return Err(error);
+            }
+        }
         emit(DamengDumpStatus::Done, true, outcome.warnings, outcome.elapsed_seconds, None);
         Ok(())
     } else {
+        if let Some(temp_path) = &export_temp_path {
+            remove_if_exists(temp_path);
+        }
         let error = outcome
             .error
             .clone()
@@ -410,12 +481,43 @@ mod tests {
     }
 
     #[test]
-    fn prepare_export_target_replaces_existing_file() {
+    fn validate_export_target_keeps_existing_file() {
         let file = std::env::temp_dir().join(format!("dbx-dameng-overwrite-{}.dmp", std::process::id()));
         std::fs::write(&file, b"old").unwrap();
-        prepare_export_target(&file).unwrap();
-        assert!(!file.exists());
-        prepare_export_target(&file).unwrap();
+        validate_export_target(&file).unwrap();
+        assert!(file.exists(), "a failed or unstarted export must never remove the previous dump");
+        let dir = std::env::temp_dir().join(format!("dbx-dameng-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = validate_export_target(&dir).unwrap_err();
+        assert!(error.contains("is not a file"), "got: {error}");
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn sibling_temp_dump_path_stays_in_target_dir_with_dmp_suffix() {
+        let target = std::path::Path::new("/data/exports/dcss.dmp");
+        let temp = sibling_temp_dump_path(target, "task-7");
+        assert_eq!(temp.parent(), target.parent());
+        assert_eq!(temp.extension().and_then(|e| e.to_str()), Some("dmp"));
+        let name = temp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("dcss.dbx-dameng-task-7-"), "got: {name}");
+    }
+
+    #[test]
+    fn finalize_export_target_replaces_old_dump_atomically() {
+        let dir = std::env::temp_dir().join(format!("dbx-dameng-finalize-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("out.dmp");
+        std::fs::write(&target, b"old").unwrap();
+        let temp = sibling_temp_dump_path(&target, "task-9");
+        std::fs::write(&temp, b"new").unwrap();
+        finalize_export_target(&temp, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!temp.exists(), "the temp file must be gone after the rename");
+        let error = finalize_export_target(&temp, &target).unwrap_err();
+        assert!(error.contains("was kept at"), "a failed rename must point at the kept dump: {error}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

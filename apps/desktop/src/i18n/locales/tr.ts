@@ -107,6 +107,11 @@ export default withEnglishFallback({
     shortcutsVisiblePlugins: "Görünür eklentiler",
     shortcutsShowInSidebar: "Kenar çubuğunda göster",
     shortcutsResize: "Yüksekliği ayarlamak için sürükleyin; otomatik yükseklik için çift tıklayın",
+    uninstallBlockedByConnections: "Bu bağlantılar '{plugin}' eklentisini hâlâ kullandığından kaldırılamıyor: {labels}. Önce bu bağlantıları silin, sonra kaldırmayı tekrar deneyin.",
+    uninstallDependentsTitle: "Eklenti bağlantılarının önce kaldırılması gerekiyor",
+    uninstallDependentsBody: "{name} hâlâ bu kayıtlı bağlantılar tarafından kullanılıyor. Bir bağlantıyı silmek, kayıtlı ayarlarını da kaldırır:",
+    uninstallDependentsConfirm: "Bağlantıları sil ve kaldır",
+    batchUninstallDependentsSkipped: "Bu eklentilerin hâlâ kayıtlı bağlantıları var ve kaldırılmadılar: {names}. Kullandıkları bağlantıları inceleyip kaldırmak için eklentileri tek tek kaldırın.",
   },
   cellTransform: {
     title: "Dönüştürme önizlemesi",

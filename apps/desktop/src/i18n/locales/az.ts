@@ -107,6 +107,11 @@ export default withEnglishFallback({
     shortcutsVisiblePlugins: "Görünən plaginlər",
     shortcutsShowInSidebar: "Yan paneldə göstər",
     shortcutsResize: "Hündürlüyü dəyişmək üçün sürükləyin; avtomatik hündürlük üçün iki dəfə klikləyin",
+    uninstallBlockedByConnections: "Bu bağlantılar '{plugin}' plagini hələ istifadə etdiyi üçün silinə bilmir: {labels}. Əvvəlcə bu bağlantıları silin, sonra yenidən silməyə çalışın.",
+    uninstallDependentsTitle: "Praqin bağlantıları əvvəlcə silinməlidir",
+    uninstallDependentsBody: "{name} hələ bu saxlanmış bağlantılar tərəfindən istifadə olunur. Bağlantını silmək onun saxlanmış tənzimləmələrini də silir:",
+    uninstallDependentsConfirm: "Bağlantıları sil və qaldır",
+    batchUninstallDependentsSkipped: "Bu praqinlərin hələ saxlanmış bağlantıları var və silinmədi: {names}. İstifadə etdikləri bağlantıları nəzərdən keçirib silmək üçün praqinləri tək-tək silin.",
   },
   cellTransform: {
     title: "Çevirmə önizləməsi",

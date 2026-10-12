@@ -4180,11 +4180,41 @@ fn is_hash_field_update_cluster_script_rejection(error: &str) -> bool {
     detail.contains("bad lua script for redis cluster") && (detail.contains("httl") || detail.contains("hexpire"))
 }
 
-pub async fn list_push<C>(con: &mut C, key: &[u8], value: &str, ttl: Option<i64>) -> Result<(), String>
+/// Which end of a Redis list to push to. `Right` (RPUSH) is the historical
+/// default; `Left` (LPUSH) lets users prepend when using lists as queues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListPushSide {
+    Left,
+    Right,
+}
+
+impl ListPushSide {
+    pub fn from_str_lossy(value: Option<&str>) -> Self {
+        match value.map(str::to_ascii_lowercase).as_deref() {
+            Some("left") => ListPushSide::Left,
+            _ => ListPushSide::Right,
+        }
+    }
+
+    fn command(self) -> &'static str {
+        match self {
+            ListPushSide::Left => "LPUSH",
+            ListPushSide::Right => "RPUSH",
+        }
+    }
+}
+
+pub async fn list_push<C>(
+    con: &mut C,
+    key: &[u8],
+    value: &str,
+    ttl: Option<i64>,
+    side: ListPushSide,
+) -> Result<(), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    redis::cmd("RPUSH").arg(key).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+    redis::cmd(side.command()).arg(key).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())?;
     apply_expire_if_needed(con, key, ttl).await
 }
 

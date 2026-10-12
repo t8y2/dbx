@@ -16,6 +16,17 @@ function packageNode(): TreeNode {
 }
 
 describe("package member tree", () => {
+  it("keeps OceanBase overload identities when their signatures are unknown or identical", () => {
+    const candidates: CompletionAssistantCandidate[] = [
+      { name: "RUN", kind: "procedure", signature: null, routine_id: "APP:101:1" },
+      { name: "RUN", kind: "procedure", signature: null, routine_id: "APP:101:2" },
+      { name: "RUN", kind: "procedure", signature: null, routine_id: "APP:101:2" },
+      { name: "Run", kind: "procedure", signature: "", routine_id: "APP:101:3" },
+    ];
+    const nodes = buildPackageMemberNodes(packageNode(), candidates, "oceanbase-oracle");
+    expect(nodes.map((node) => node.objectName)).toEqual(["RUN", "RUN", "Run"]);
+    expect(new Set(nodes.map((node) => node.id)).size).toBe(3);
+  });
   it("marks package specifications as expandable without changing other objects", () => {
     const nodes: TreeNode[] = [packageNode(), { id: "body", label: "business_api", type: "package-body" }, { id: "proc", label: "standalone", type: "procedure" }];
     const result = markPackageNodesExpandable(nodes);

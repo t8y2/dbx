@@ -865,6 +865,8 @@ fn parse_describe_columns(describe: &Value) -> Vec<ColumnInfo> {
                         character_maximum_length: length.and_then(|l| i32::try_from(l).ok()),
                         enum_values: picklist_values,
                         resolved_schema: None,
+                        resolved_table: None,
+                        resolved_object_type: None,
                         // Plugin-provided column metadata capabilities do not apply:
                         // the describe payload is parsed here, not by a plugin driver.
                         metadata_capabilities: None,

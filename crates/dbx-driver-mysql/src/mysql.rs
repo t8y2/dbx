@@ -3440,6 +3440,7 @@ pub async fn completion_assistant_search(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                routine_id: None,
                 signature: None,
             });
         }
@@ -3467,6 +3468,7 @@ pub async fn completion_assistant_search(
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
                 data_type: None,
+                routine_id: None,
                 signature: None,
             });
         }
@@ -3495,6 +3497,7 @@ pub async fn completion_assistant_search(
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
                 data_type: get_opt_str(&row, "data_type"),
+                routine_id: None,
                 signature: None,
             });
         }
@@ -3518,6 +3521,7 @@ pub async fn completion_assistant_search(
                         .map(|s| fix_potential_double_encoding(&s))
                         .filter(|s| !s.is_empty()),
                     data_type: Some(get_str_by_name(&row, "data_type")),
+                    routine_id: None,
                     signature: None,
                 });
             }
@@ -4989,6 +4993,8 @@ where
                 name,
                 data_type: column_type,
                 resolved_schema: None,
+                resolved_table: None,
+                resolved_object_type: None,
                 is_nullable: get_str_by_name(row, "IS_NULLABLE") == "YES",
                 column_default: get_opt_str(row, "COLUMN_DEFAULT"),
                 extra: get_opt_str(row, "EXTRA"),
@@ -5062,6 +5068,8 @@ async fn fetch_columns_show(
                 name,
                 data_type: get_str_by_name(row, "Type"),
                 resolved_schema: None,
+                resolved_table: None,
+                resolved_object_type: None,
                 is_nullable: get_str_by_name(row, "Null").eq_ignore_ascii_case("YES"),
                 column_default: get_opt_str(row, "Default"),
                 is_primary_key: key.eq_ignore_ascii_case("PRI"),
@@ -8847,6 +8855,8 @@ mod tests {
             name: " state value".to_string(),
             data_type: "unknown".to_string(),
             resolved_schema: Some("analytics".to_string()),
+            resolved_table: None,
+            resolved_object_type: None,
             is_nullable: true,
             column_default: Some("seed".to_string()),
             is_primary_key: true,

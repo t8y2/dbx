@@ -262,7 +262,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 String.format(baseSql, placeholders(objectTypes.size())),
                 "OBJECT_NAME, TABLE_TYPE, COMMENTS",
                 "o.OBJECT_NAME",
-                "ORDER BY OBJECT_NAME",
+                "ORDER BY OBJECT_NAME, o.OBJECT_ID",
                 owner,
                 objectTypes,
                 constraints
@@ -319,7 +319,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                     WHEN 'PACKAGE BODY' THEN 5
                     WHEN 'SEQUENCE' THEN 6
                     ELSE 7
-                END, OBJECT_NAME
+                END, OBJECT_NAME, o.OBJECT_ID
                 """.stripIndent().trim(),
                 owner,
                 objectTypes,
@@ -327,17 +327,13 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             );
 
             List<ObjectInfo> result = new ArrayList<>();
-            String sql = query.sql;
-            if (constraints.hasLimit() || constraints.hasOffset()) {
-                sql += "\nORDER BY DBX_RN";
-            }
-            try (var stmt = requireConnection().prepareStatement(sql)) {
+            try (var stmt = requireConnection().prepareStatement(query.sql)) {
                 bind(stmt, query.args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String objectType = rs.getString(2);
                         result.add(new ObjectInfo(rs.getString(1),
-                            "PACKAGE BODY".equals(objectType) ? "PACKAGE_BODY" : objectType, owner, rs.getString(3)));
+                            objectType.replace(' ', '_'), owner, rs.getString(3)));
                     }
                 }
             }
@@ -350,7 +346,194 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         if (hasTableLikeCompletionKind(request.getObject_kinds())) {
             return unchecked(() -> completionAssistantTables(request));
         }
+        if (request.getObject_kinds().stream().anyMatch(kind -> kind == CompletionAssistantObjectKind.ROUTINE
+            || kind == CompletionAssistantObjectKind.PROCEDURE || kind == CompletionAssistantObjectKind.FUNCTION
+            || kind == CompletionAssistantObjectKind.SEQUENCE)) {
+            return unchecked(() -> completionAssistantRoutines(request));
+        }
         return super.completionAssistantSearch(request);
+    }
+
+    private CompletionAssistantResponse completionAssistantRoutines(CompletionAssistantRequest request) throws SQLException {
+        if (firstNonBlank(request.getParent_name()) != null) {
+            return completionAssistantPackageMembers(request);
+        }
+        int limit = boundedCompletionLimit(request.getMax_results());
+        String preferredSchema = preferredCompletionSchema(request);
+        List<CompletionAssistantObjectKind> kinds = request.getObject_kinds();
+        List<Object> args = new ArrayList<>();
+        String types = kinds.contains(CompletionAssistantObjectKind.ROUTINE)
+            || (kinds.contains(CompletionAssistantObjectKind.PROCEDURE) && kinds.contains(CompletionAssistantObjectKind.FUNCTION))
+            ? "'PROCEDURE', 'FUNCTION'"
+            : kinds.contains(CompletionAssistantObjectKind.PROCEDURE) ? "'PROCEDURE'"
+                : kinds.contains(CompletionAssistantObjectKind.FUNCTION) ? "'FUNCTION'" : "";
+        if (kinds.contains(CompletionAssistantObjectKind.SEQUENCE)) types += types.isEmpty() ? "'SEQUENCE'" : ", 'SEQUENCE'";
+        String pattern = completionLikePattern(request.getMask(), request.getMatch_mode());
+        args.add(request.getCase_sensitive() ? pattern : pattern.toUpperCase(Locale.ROOT));
+        String ownerFilter = "";
+        if (!request.getGlobal_search()) {
+            ownerFilter = " AND OWNER = ?";
+            args.add(firstNonBlank(request.getParent_schema(), request.getSchema(), preferredSchema));
+        }
+        args.add(preferredSchema);
+        args.add(limit + 1);
+        String sql = """
+            SELECT OWNER, OBJECT_NAME, OBJECT_TYPE FROM (
+                SELECT OWNER, OBJECT_NAME, OBJECT_TYPE FROM ALL_OBJECTS
+                WHERE OBJECT_TYPE IN (%s) AND %s%s
+                ORDER BY CASE WHEN OWNER = ? THEN 0 ELSE 1 END, OBJECT_NAME, OWNER, OBJECT_TYPE
+            ) WHERE ROWNUM <= ?
+            """.formatted(types, completionNamePredicate("OBJECT_NAME", request.getCase_sensitive()), ownerFilter);
+        List<CompletionAssistantCandidate> candidates = new ArrayList<>();
+        boolean incomplete = false;
+        try (PreparedStatement stmt = requireConnection().prepareStatement(sql)) {
+            bindCompletionArgs(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    if (candidates.size() == limit) {
+                        incomplete = true;
+                        break;
+                    }
+                    String objectType = rs.getString(3);
+                    candidates.add(new CompletionAssistantCandidate(rs.getString(2),
+                        "PROCEDURE".equals(objectType) ? CompletionAssistantCandidateKind.PROCEDURE
+                            : "SEQUENCE".equals(objectType) ? CompletionAssistantCandidateKind.SEQUENCE : CompletionAssistantCandidateKind.FUNCTION,
+                        blankToNull(request.getDatabase()), rs.getString(1), null, null, null, objectType));
+                }
+            }
+        }
+        return new CompletionAssistantResponse(candidates, incomplete, false, true);
+    }
+
+    private CompletionAssistantResponse completionAssistantPackageMembers(CompletionAssistantRequest request) throws SQLException {
+        String owner = firstNonBlank(request.getParent_schema(), request.getSchema(), preferredCompletionSchema(request));
+        String packageName = request.getParent_name();
+        String objectId;
+        try (PreparedStatement stmt = requireConnection().prepareStatement(
+            "SELECT OBJECT_ID FROM ALL_OBJECTS WHERE OWNER = ? AND OBJECT_NAME = ? AND OBJECT_TYPE = 'PACKAGE'")) {
+            bindCompletionArgs(stmt, List.of(owner, packageName));
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) throw new SQLException("Package is not visible: " + owner + "." + packageName);
+                objectId = rs.getString(1);
+            }
+        }
+        int limit = boundedCompletionLimit(request.getMax_results());
+        String pattern = completionLikePattern(request.getMask(), request.getMatch_mode());
+        List<Object> args = new ArrayList<>(List.of(owner, packageName, objectId,
+            request.getCase_sensitive() ? pattern : pattern.toUpperCase(Locale.ROOT)));
+        String kindFilter = request.getObject_kinds().contains(CompletionAssistantObjectKind.ROUTINE)
+            || (request.getObject_kinds().contains(CompletionAssistantObjectKind.PROCEDURE)
+                && request.getObject_kinds().contains(CompletionAssistantObjectKind.FUNCTION))
+            ? "" : request.getObject_kinds().contains(CompletionAssistantObjectKind.FUNCTION)
+                ? " WHERE ROUTINE_KIND = 'FUNCTION'" : " WHERE ROUTINE_KIND = 'PROCEDURE'";
+        args.add(limit + 1);
+        // Limit subprograms before loading arguments, so the last signature cannot be cut in half.
+        String sql = """
+            SELECT PROCEDURE_NAME, SUBPROGRAM_ID, ROUTINE_KIND FROM (
+                SELECT * FROM (
+                    SELECT p.PROCEDURE_NAME, p.SUBPROGRAM_ID,
+                        CASE WHEN EXISTS (SELECT 1 FROM ALL_ARGUMENTS a
+                            WHERE a.OWNER = p.OWNER AND a.OBJECT_ID = p.OBJECT_ID
+                              AND a.SUBPROGRAM_ID = p.SUBPROGRAM_ID AND a.DATA_LEVEL = 0 AND a.POSITION = 0)
+                            THEN 'FUNCTION' ELSE 'PROCEDURE' END ROUTINE_KIND
+                    FROM ALL_PROCEDURES p
+                    WHERE p.OWNER = ? AND p.OBJECT_NAME = ? AND p.OBJECT_ID = ?
+                      AND p.OBJECT_TYPE = 'PACKAGE' AND p.PROCEDURE_NAME IS NOT NULL AND %s
+                )%s ORDER BY PROCEDURE_NAME, SUBPROGRAM_ID
+            ) WHERE ROWNUM <= ?
+            """.formatted(completionNamePredicate("p.PROCEDURE_NAME", request.getCase_sensitive()), kindFilter);
+        List<PackageCompletionMember> members = new ArrayList<>();
+        boolean incomplete = false;
+        try (PreparedStatement stmt = requireConnection().prepareStatement(sql)) {
+            bindCompletionArgs(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    if (members.size() == limit) { incomplete = true; break; }
+                    members.add(new PackageCompletionMember(rs.getString(1), rs.getString(2), "FUNCTION".equals(rs.getString(3))));
+                }
+            }
+        }
+        if (!members.isEmpty()) {
+            String placeholders = String.join(",", Collections.nCopies(members.size(), "?"));
+            String argumentSql = """
+                SELECT a.SUBPROGRAM_ID, a.POSITION, a.ARGUMENT_NAME, a.IN_OUT, a.DATA_TYPE,
+                    a.TYPE_OWNER, a.TYPE_NAME, a.TYPE_SUBNAME, a.DEFAULTED, type_owner_object.OWNER AS TYPE_SCHEMA
+                FROM ALL_ARGUMENTS a
+                LEFT JOIN ALL_OBJECTS type_owner_object
+                    ON type_owner_object.OBJECT_TYPE = 'DATABASE'
+                    AND TO_CHAR(type_owner_object.OBJECT_ID) = TRIM(a.TYPE_OWNER)
+                WHERE a.OWNER = ? AND a.OBJECT_ID = ? AND a.DATA_LEVEL = 0 AND a.SUBPROGRAM_ID IN (%s)
+                ORDER BY a.SUBPROGRAM_ID, a.POSITION, a.SEQUENCE
+                """.formatted(placeholders);
+            List<Object> argumentArgs = new ArrayList<>(List.of(owner, objectId));
+            Map<String, PackageCompletionMember> byId = new LinkedHashMap<>();
+            for (PackageCompletionMember member : members) {
+                argumentArgs.add(member.id);
+                byId.put(member.id, member);
+            }
+            try (PreparedStatement stmt = requireConnection().prepareStatement(argumentSql)) {
+                bindCompletionArgs(stmt, argumentArgs);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        PackageCompletionMember member = byId.get(rs.getString(1));
+                        if (member == null) continue;
+                        String typeName = rs.getString(7);
+                        String typeOwner = rs.getString(6);
+                        // OB can expose a padded database object ID instead of the schema name.
+                        if (typeOwner != null && typeOwner.matches("[0-9]+ +")) typeOwner = rs.getString(10);
+                        if (typeName != null && typeOwner == null) {
+                            member.signatureKnown = false;
+                            continue;
+                        }
+                        String type = typeName == null ? rs.getString(5)
+                            : java.util.stream.Stream.of(typeOwner, typeName, rs.getString(8))
+                                .filter(value -> value != null && !value.isBlank())
+                                .map(OceanBaseOracleAgent::quotePackageCompletionIdentifier)
+                                .collect(java.util.stream.Collectors.joining("."));
+                        if (rs.getInt(2) == 0) {
+                            member.returnType = type;
+                            continue;
+                        }
+                        String name = rs.getString(3);
+                        String direction = rs.getString(4);
+                        if (name == null || type == null || direction == null) {
+                            member.signatureKnown = false;
+                            continue;
+                        }
+                        member.parameters.add(quotePackageCompletionIdentifier(name) + " " + direction + " " + type
+                            + ("Y".equals(rs.getString(9)) ? " DEFAULT" : ""));
+                    }
+                }
+            }
+        }
+        List<CompletionAssistantCandidate> candidates = new ArrayList<>();
+        for (PackageCompletionMember member : members) {
+            String identity = owner.length() + ":" + owner + ":" + objectId + ":" + member.id;
+            candidates.add(new CompletionAssistantCandidate(member.name,
+                member.function ? CompletionAssistantCandidateKind.FUNCTION : CompletionAssistantCandidateKind.PROCEDURE,
+                blankToNull(request.getDatabase()), owner, owner, packageName, null, member.returnType,
+                member.signatureKnown ? String.join(", ", member.parameters) : null, identity));
+        }
+        return new CompletionAssistantResponse(candidates, incomplete, false, true);
+    }
+
+    private static String quotePackageCompletionIdentifier(String identifier) {
+        return identifier.matches("[A-Z][A-Z0-9_$#]*") ? identifier : "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    private static final class PackageCompletionMember {
+        final String name;
+        final String id;
+        final boolean function;
+        final List<String> parameters = new ArrayList<>();
+        boolean signatureKnown = true;
+        String returnType;
+
+        PackageCompletionMember(String name, String id, boolean function) {
+            this.name = name;
+            this.id = id;
+            this.function = function;
+        }
     }
 
     private CompletionAssistantResponse completionAssistantTables(CompletionAssistantRequest request) throws SQLException {
@@ -696,13 +879,16 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             sql = "SELECT " + selectList + "\nFROM (\n  SELECT DBX_Q.*, ROWNUM AS DBX_RN\n  FROM (\n"
                 + sql
                 + "\n  ) DBX_Q\n  WHERE ROWNUM <= ?\n)\nWHERE DBX_RN > ?";
-            args.add(offset + constraints.getLimit());
+            args.add((long) offset + constraints.getLimit());
             args.add(offset);
         } else if (constraints.hasOffset()) {
             sql = "SELECT " + selectList + "\nFROM (\n  SELECT DBX_Q.*, ROWNUM AS DBX_RN\n  FROM (\n"
                 + sql
                 + "\n  ) DBX_Q\n)\nWHERE DBX_RN > ?";
             args.add(constraints.getOffset());
+        }
+        if (constraints.hasLimit() || constraints.hasOffset()) {
+            sql += "\nORDER BY DBX_RN";
         }
         return new MetadataSql(sql, args);
     }
@@ -722,7 +908,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     private static List<String> oceanBaseObjectTypes(MetadataListConstraints constraints) {
-        List<String> supported = List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE", "SYNONYM");
+        List<String> supported = List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE", "SYNONYM", "TYPE", "TYPE BODY");
         if (!constraints.hasObjectTypes()) {
             return supported;
         }
@@ -895,6 +1081,8 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             Object arg = args.get(index);
             if (arg instanceof Integer) {
                 stmt.setInt(index + 1, (Integer) arg);
+            } else if (arg instanceof Long) {
+                stmt.setLong(index + 1, (Long) arg);
             } else {
                 stmt.setString(index + 1, String.valueOf(arg));
             }
@@ -913,6 +1101,142 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
     @Override
     public List<ColumnInfo> getColumns(String schema, String table) {
+        return getColumnsInContext(schema, table, null);
+    }
+
+    @Override
+    public List<ColumnInfo> getColumnsInContext(String schema, String table, String currentSchema) {
+        return unchecked(() -> {
+            String owner = normalizeSchema(schema == null || schema.isBlank() ? currentSchema : schema);
+            String tableName = normalizeObjectName(table);
+            String initialOwner = owner;
+            String initialName = tableName;
+            boolean publicFallback = false;
+            Set<List<String>> visited = new HashSet<>();
+            for (int depth = 0; depth <= 32; depth++) {
+                if (!visited.add(List.of(owner, tableName))) {
+                    throw new SQLException("Synonym cycle detected at " + owner + "." + tableName);
+                }
+                List<ColumnInfo> columns = getObjectColumns(owner, tableName);
+                if (!columns.isEmpty()) {
+                    if (depth > 0) {
+                        if (publicFallback) verifyPublicColumnTarget(initialOwner, initialName, owner, tableName);
+                        String objectType = queryColumnObjectType(owner, tableName);
+                        for (ColumnInfo column : columns) {
+                            column.setResolved_schema(owner);
+                            column.setResolved_table(tableName);
+                            column.setResolved_object_type(objectType);
+                        }
+                    }
+                    return columns;
+                }
+                String objectType = queryColumnObjectType(owner, tableName);
+                if (objectType != null && !"SYNONYM".equals(objectType)) {
+                    throw new SQLException("Column metadata for " + owner + "." + tableName + " (" + objectType + ") is not accessible or not available");
+                }
+                SynonymTarget target = queryColumnSynonym(owner, tableName);
+                if (target == null && objectType == null && depth == 0 && (schema == null || schema.isBlank())) {
+                    target = queryColumnSynonym("PUBLIC", tableName);
+                    // OceanBase 4.2.5 exposes public synonyms under its internal dictionary owner.
+                    if (target == null) target = queryColumnSynonym("__public", tableName);
+                    publicFallback = target != null;
+                }
+                if (target == null) {
+                    throw new SQLException("Object " + owner + "." + tableName + " not found or not accessible for column metadata");
+                }
+                if (target.databaseLink() != null && !target.databaseLink().isBlank()) {
+                    throw new SQLException("Column metadata for DBLink synonyms is not supported: " + owner + "." + tableName);
+                }
+                if (target.owner() == null || target.owner().isBlank() || target.name() == null || target.name().isBlank()) {
+                    throw new SQLException("Incomplete synonym target metadata for " + owner + "." + tableName);
+                }
+                owner = target.owner();
+                tableName = target.name();
+            }
+            throw new SQLException("Synonym resolution exceeded 32 links");
+        });
+    }
+
+    private record SynonymTarget(String owner, String name, String databaseLink) {}
+
+    private void verifyPublicColumnTarget(String owner, String name, String targetOwner, String targetName) throws SQLException {
+        // ALL_OBJECTS can hide a foreign-schema object that still shadows a public synonym.
+        // NAME_RESOLVE stops at DBLinks; no remote resolution is performed here.
+        String originalSchema = currentSchema();
+        if (originalSchema.isBlank()) throw new SQLException("Cannot determine current schema for public synonym resolution");
+        boolean switchSchema = !owner.equals(originalSchema);
+        Exception primaryError = null;
+        try {
+            if (switchSchema) {
+                try (var stmt = requireConnection().createStatement()) {
+                    stmt.execute(setSchemaSQL(owner));
+                }
+            }
+            try (var stmt = requireConnection().prepareCall("BEGIN DBMS_UTILITY.NAME_RESOLVE(?, ?, ?, ?, ?, ?, ?, ?); END;")) {
+                stmt.setString(1, quoteIdentifier(name));
+                stmt.setInt(2, 0);
+                for (int index = 3; index <= 6; index++) stmt.registerOutParameter(index, Types.VARCHAR);
+                stmt.registerOutParameter(7, Types.NUMERIC);
+                stmt.registerOutParameter(8, Types.NUMERIC);
+                stmt.execute();
+                String databaseLink = stmt.getString(6);
+                if (databaseLink != null && !databaseLink.isBlank()) {
+                    throw new SQLException("Column metadata for DBLink synonyms is not supported: " + owner + "." + name);
+                }
+                if (!targetOwner.equals(stmt.getString(3)) || !targetName.equals(stmt.getString(4))) {
+                    throw new SQLException("Public synonym target does not match database name resolution for " + owner + "." + name
+                        + "; a local object may be inaccessible");
+                }
+            }
+        } catch (SQLException | RuntimeException error) {
+            primaryError = error;
+            throw error;
+        } finally {
+            if (switchSchema) {
+                try (var stmt = requireConnection().createStatement()) {
+                    stmt.execute(setSchemaSQL(originalSchema));
+                } catch (SQLException restoreError) {
+                    if (primaryError == null) throw restoreError;
+                    primaryError.addSuppressed(restoreError);
+                }
+            }
+        }
+    }
+
+    private SynonymTarget queryColumnSynonym(String owner, String name) throws SQLException {
+        String sql = "SELECT TABLE_OWNER, TABLE_NAME, DB_LINK FROM ALL_SYNONYMS WHERE OWNER = ? AND SYNONYM_NAME = ?";
+        try (var stmt = requireConnection().prepareStatement(sql)) {
+            stmt.setString(1, owner);
+            stmt.setString(2, name);
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next() ? new SynonymTarget(rs.getString("TABLE_OWNER"), rs.getString("TABLE_NAME"), rs.getString("DB_LINK")) : null;
+            }
+        }
+    }
+
+    private String queryColumnObjectType(String owner, String name) throws SQLException {
+        String sql = """
+            SELECT OBJECT_TYPE FROM ALL_OBJECTS
+            WHERE OWNER = ? AND OBJECT_NAME = ?
+              AND OBJECT_TYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'SYNONYM',
+                'SEQUENCE', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'TYPE')
+            """;
+        try (var stmt = requireConnection().prepareStatement(sql)) {
+            stmt.setString(1, owner);
+            stmt.setString(2, name);
+            try (ResultSet rs = stmt.executeQuery()) {
+                String type = null;
+                while (rs.next()) {
+                    String candidate = rs.getString("OBJECT_TYPE");
+                    if ("MATERIALIZED VIEW".equals(candidate)) return candidate;
+                    if (type == null || "VIEW".equals(candidate)) type = candidate;
+                }
+                return type;
+            }
+        }
+    }
+
+    private List<ColumnInfo> getObjectColumns(String schema, String table) {
         return unchecked(() -> {
             String owner = normalizeSchema(schema);
             String tableName = normalizeObjectName(table);

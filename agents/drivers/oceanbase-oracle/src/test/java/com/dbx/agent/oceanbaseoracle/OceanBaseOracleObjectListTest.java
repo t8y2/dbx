@@ -57,7 +57,7 @@ class OceanBaseOracleObjectListTest {
             case "_" -> "%\\_%";
             default -> "%\\\\%";
         };
-        assertEquals(List.of("Mixed.Owner", "TABLE", pattern, pattern, 3, 2), call.args);
+        assertEquals(List.of("Mixed.Owner", "TABLE", pattern, pattern, 3L, 2), call.args);
         call.assertClosed();
     }
 
@@ -78,13 +78,13 @@ class OceanBaseOracleObjectListTest {
             };
 
             assertEquals(List.of("APP", "TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE",
-                "PACKAGE BODY", "SEQUENCE", "SYNONYM"), call.args);
+                "PACKAGE BODY", "SEQUENCE", "SYNONYM", "TYPE", "TYPE BODY"), call.args);
             assertEquals(List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE",
                 "PACKAGE_BODY", "SEQUENCE", "SYNONYM"), objects.stream().map(ObjectInfo::getObject_type).toList());
             assertEquals(8, objects.size());
             assertTrue(objects.stream().allMatch(object -> "APP".equals(object.getSchema())));
             assertTrue(objects.stream().allMatch(object -> object.getValid() == null));
-            assertTrue(call.sql.contains("OBJECT_TYPE IN (?, ?, ?, ?, ?, ?, ?, ?)"), call.sql);
+            assertTrue(call.sql.contains("OBJECT_TYPE IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"), call.sql);
             assertFalse(call.sql.contains("ROWNUM"), call.sql);
             assertObjectOrder(call.sql);
             call.assertClosed();
@@ -135,6 +135,17 @@ class OceanBaseOracleObjectListTest {
     }
 
     @Test
+    void typeFilterRequestsSpecificationsAndBodiesBeforePaging() {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall call = jdbc.rows(row("CUSTOM_TYPE", "TYPE"), row("CUSTOM_TYPE", "TYPE BODY"));
+        assertEquals(List.of(new ObjectInfo("CUSTOM_TYPE", "TYPE", "APP", null),
+                new ObjectInfo("CUSTOM_TYPE", "TYPE_BODY", "APP", null)),
+            jdbc.agent.listObjects("APP", constraints(null, 3, 0, "TYPE", "TYPE_BODY")));
+        assertEquals(List.of("APP", "TYPE", "TYPE BODY", 3L, 0), call.args);
+        call.assertClosed();
+    }
+
+    @Test
     void filteredPagesKeepSameNameSpecAndBodyAndDoNotApplyOffsetTwice() {
         JdbcFixture jdbc = new JdbcFixture();
         List<ObjectInfo> pages = new ArrayList<>();
@@ -143,7 +154,7 @@ class OceanBaseOracleObjectListTest {
             pages.addAll(jdbc.agent.listObjects("APP",
                 constraints("k_'%", 1, offset, "PACKAGE", "PACKAGE_BODY")));
 
-            assertEquals(List.of("APP", "PACKAGE", "PACKAGE BODY", "%K%\\_%'%\\%%", "%K%\\_%'%\\%%", offset + 1, offset), call.args);
+            assertEquals(List.of("APP", "PACKAGE", "PACKAGE BODY", "%K%\\_%'%\\%%", "%K%\\_%'%\\%%", offset + 1L, offset), call.args);
             assertTrue(call.sql.contains("UPPER(OBJECT_NAME) LIKE ? ESCAPE '\\'"), call.sql);
             assertTrue(call.sql.contains("ROWNUM <= ?"), call.sql);
             assertTrue(call.sql.contains("WHERE DBX_RN > ?"), call.sql);
@@ -169,6 +180,27 @@ class OceanBaseOracleObjectListTest {
         call.assertClosed();
     }
 
+    @Test
+    void tablePagesKeepTheOuterOrder() {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall call = jdbc.rows(row("Z_LATE", "TABLE", "订单"));
+
+        assertEquals("Z_LATE", jdbc.agent.listTables("APP", constraints("订单", 1, 2, "TABLE")).get(0).getName());
+        assertTrue(call.sql.endsWith("ORDER BY DBX_RN"), call.sql);
+        assertTrue(call.sql.contains("ORDER BY OBJECT_NAME, o.OBJECT_ID"), call.sql);
+        call.assertClosed();
+    }
+
+    @Test
+    void pageUpperBoundDoesNotOverflowTheProtocolIntegerRange() {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall call = jdbc.rows();
+
+        assertEquals(List.of(), jdbc.agent.listObjects("APP", constraints(null, 2, Integer.MAX_VALUE, "TABLE")));
+        assertEquals(List.of("APP", "TABLE", 2147483649L, Integer.MAX_VALUE), call.args);
+        call.assertClosed();
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM"})
     void unrelatedTypeRequestsKeepTheirParametersAndMapping(String type) {
@@ -185,7 +217,7 @@ class OceanBaseOracleObjectListTest {
     void unsupportedTypesDoNotQueryTheDatabase() {
         JdbcFixture jdbc = new JdbcFixture();
 
-        assertEquals(List.of(), jdbc.agent.listObjects("APP", constraints(null, null, null, "TRIGGER", "TYPE_BODY")));
+        assertEquals(List.of(), jdbc.agent.listObjects("APP", constraints(null, null, null, "TRIGGER", "EVENT")));
         assertEquals(0, jdbc.prepared);
     }
 
@@ -318,7 +350,7 @@ class OceanBaseOracleObjectListTest {
         for (int rank = 0; rank < types.size(); rank++) {
             assertTrue(sql.contains("WHEN '" + types.get(rank) + "' THEN " + rank), sql);
         }
-        assertTrue(sql.contains("ELSE 7\nEND, OBJECT_NAME"), sql);
+        assertTrue(sql.contains("ELSE 7\nEND, OBJECT_NAME, o.OBJECT_ID"), sql);
     }
 
     private static final class JdbcFixture {
@@ -363,7 +395,7 @@ class OceanBaseOracleObjectListTest {
 
         PreparedStatement statement() {
             return proxy(PreparedStatement.class, (statement, method, values) -> switch (method.getName()) {
-                case "setString", "setInt", "setObject" -> {
+                case "setString", "setInt", "setLong", "setObject" -> {
                     assertEquals(args.size() + 1, values[0]);
                     args.add(values[1]);
                     yield null;

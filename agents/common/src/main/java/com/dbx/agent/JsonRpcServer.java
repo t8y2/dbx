@@ -265,7 +265,9 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_GET_COLUMNS.equals(method)) {
             switchCatalog(params);
-            return agent.getColumns(params.get("schema").getAsString(), params.get("table").getAsString());
+            String currentSchema = params.has("current_schema") && !params.get("current_schema").isJsonNull()
+                ? params.get("current_schema").getAsString() : null;
+            return agent.getColumnsInContext(params.get("schema").getAsString(), params.get("table").getAsString(), currentSchema);
         }
         if (AgentProtocol.METHOD_LIST_INDEXES.equals(method)) {
             switchCatalog(params);

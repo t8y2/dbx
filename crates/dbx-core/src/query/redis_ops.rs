@@ -5,6 +5,8 @@ use crate::db::redis_driver::{
     RedisStreamPendingPage, RedisValue,
 };
 
+pub use redis_driver::ListPushSide;
+
 async fn ensure_redis_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
     state.get_or_create_pool(connection_id, None).await.map(|_| ())
 }
@@ -620,8 +622,9 @@ pub async fn redis_list_push_core(
     key: &str,
     value: &str,
     ttl: Option<i64>,
+    side: redis_driver::ListPushSide,
 ) -> Result<(), String> {
-    redis_list_push_in_db_core(state, connection_id, 0, key, value, ttl).await
+    redis_list_push_in_db_core(state, connection_id, 0, key, value, ttl, side).await
 }
 
 pub async fn redis_list_push_in_db_core(
@@ -631,6 +634,7 @@ pub async fn redis_list_push_in_db_core(
     key_raw: &str,
     value: &str,
     ttl: Option<i64>,
+    side: redis_driver::ListPushSide,
 ) -> Result<(), String> {
     ensure_redis_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
@@ -641,12 +645,12 @@ pub async fn redis_list_push_in_db_core(
                 RedisConnection::Direct(con) => {
                     let mut con = con.lock().await;
                     redis_driver::select_db(&mut *con, db).await?;
-                    redis_driver::list_push(&mut *con, &key, value, ttl).await
+                    redis_driver::list_push(&mut *con, &key, value, ttl, side).await
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_database(cluster, db).await?;
                     let mut con = redis_driver::cluster_key_connection_in_db(cluster, &key, db).await?;
-                    redis_driver::list_push(&mut con, &key, value, ttl).await
+                    redis_driver::list_push(&mut con, &key, value, ttl, side).await
                 }
             }
         }

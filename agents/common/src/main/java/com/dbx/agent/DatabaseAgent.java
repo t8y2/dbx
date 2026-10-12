@@ -86,6 +86,10 @@ public interface DatabaseAgent {
 
     List<ColumnInfo> getColumns(String schema, String table);
 
+    default List<ColumnInfo> getColumnsInContext(String schema, String table, String currentSchema) {
+        return getColumns(schema, table);
+    }
+
     default ObjectSource getObjectSource(String schema, String name, String objectType) {
         throw new UnsupportedOperationException("Object source is not supported");
     }

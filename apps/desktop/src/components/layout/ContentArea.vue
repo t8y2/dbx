@@ -1321,6 +1321,7 @@ async function loadActiveDdlViewer(force: boolean) {
         connectionId: tab.connectionId,
         database: tab.database,
         schema: ddlViewer.schema || tab.database,
+        queryTimeoutSecs: (connectionStore.getConfig(tab.connectionId) ?? props.activeConnection)?.query_timeout_secs,
         tableName: ddlViewer.tableName,
         objectType: ddlViewer.objectType,
         catalog: tab.catalog,

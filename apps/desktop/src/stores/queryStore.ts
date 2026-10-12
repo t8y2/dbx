@@ -3194,6 +3194,7 @@ export const useQueryStore = defineStore("query", () => {
       const { ddl } = await loadObjectDdl(
         {
           connectionId,
+          queryTimeoutSecs: connectionStore.getConfig(connectionId)?.query_timeout_secs,
           database,
           schema: ddlViewer.schema || database,
           tableName: ddlViewer.tableName,
@@ -6186,6 +6187,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function canUseQueryKeylessRowPredicate(databaseType: DatabaseType, loaded: LoadedEditableSource): boolean {
+    if (loaded.tableMeta.columns.some((column) => column.resolved_table) && loaded.tableMeta.tableType?.trim().toUpperCase() !== "TABLE") return false;
     if (!canUseKeylessRowPredicate(databaseType, loaded.tableMeta.primaryKeys)) return false;
     // An unknown Oracle object may be a view whose query shape rejects ROWID
     // and whose rows cannot be mapped safely for writes. Keep the result
@@ -6243,7 +6245,10 @@ export const useQueryStore = defineStore("query", () => {
     // (issue #10567). Fold the SQL-text schema, not a tab-selected one — the
     // object tree already reports the stored spelling.
     const foldedSourceSchema = foldUnquotedPostgresMetadataIdentifier(metadataDbType, source.schema, source.schemaQuoted);
-    const schema = foldedSourceSchema || (dbType === "sqlserver" ? "" : tab.schema) || "";
+    // An OceanBase public synonym is eligible only for an unqualified name.
+    // Keep the selected CURRENT_SCHEMA separate from an explicit SQL owner.
+    const resolveInCurrentOceanbaseSchema = metadataDbType === "oceanbase-oracle" && !source.schema;
+    const schema = foldedSourceSchema || (dbType === "sqlserver" || resolveInCurrentOceanbaseSchema ? "" : tab.schema) || "";
     // Oracle-family connection databases are service names, not schemas. When
     // the query does not qualify a schema, let the driver resolve the current
     // login user's schema instead of looking up metadata under the service name.
@@ -6275,7 +6280,7 @@ export const useQueryStore = defineStore("query", () => {
     // Keep SQL Server writes unqualified unless the SELECT source explicitly
     // named a schema, so SELECT and UPDATE resolve the same object.
     const writeSchema = dbType === "sqlserver" && !source.schema ? undefined : metadataSchema || undefined;
-    const localTableType = oracleCompletionTableType(tab, metadataDbType, metadataDatabase, metadataSchema || conn?.default_schema || "", metadataTableName, metadataCatalog);
+    const localTableType = oracleCompletionTableType(tab, metadataDbType, metadataDatabase, metadataSchema || (resolveInCurrentOceanbaseSchema ? tab.schema : undefined) || conn?.default_schema || "", metadataTableName, metadataCatalog);
     const knownTableType = localTableType ?? (tab.tableMeta?.tableName.toLowerCase() === metadataTableName.toLowerCase() && normalizeOptionalSchema(tab.tableMeta.schema) === normalizeOptionalSchema(metadataSchema) ? tab.tableMeta.tableType : undefined);
     return {
       source: metadataSource,
@@ -6285,6 +6290,7 @@ export const useQueryStore = defineStore("query", () => {
         connectionId: tab.connectionId!,
         database: metadataDatabase,
         schema: metadataSchema,
+        ...(resolveInCurrentOceanbaseSchema && tab.schema ? { currentSchema: tab.schema } : {}),
         tableName: metadataTableName,
         tableType: knownTableType,
         databaseType: dbType,
@@ -6296,7 +6302,8 @@ export const useQueryStore = defineStore("query", () => {
 
   function loadedEditableSourceFromMetadata(target: EditableSourceMetadataTarget, metadata: Awaited<ReturnType<typeof loadTableMetadata>>["metadata"]): LoadedEditableSource {
     const usesReportedSchema = target.request.databaseType === "vastbase" || target.request.databaseType === "kingbase";
-    const writeSchema = usesReportedSchema && !target.writeSchema ? metadata.schema : target.writeSchema;
+    const resolvedTarget = metadata.columns.find((column) => column.resolved_table);
+    const writeSchema = resolvedTarget?.resolved_schema ?? (usesReportedSchema && !target.writeSchema ? metadata.schema : target.writeSchema || target.request.currentSchema);
     return {
       source: target.source,
       analysis: target.analysis,
@@ -6304,7 +6311,7 @@ export const useQueryStore = defineStore("query", () => {
         catalog: target.request.catalog,
         database: target.request.database,
         schema: writeSchema,
-        tableName: target.request.tableName,
+        tableName: resolvedTarget?.resolved_table ?? target.request.tableName,
         tableType: metadata.tableType,
         columns: metadata.columns,
         primaryKeys: metadata.primaryKeys,

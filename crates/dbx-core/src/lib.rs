@@ -37,6 +37,7 @@ pub use admin::consul;
 pub use connection::connection_secrets;
 pub use data::correction;
 pub use data::csv_export;
+pub use data::dameng_dump;
 pub use data::data_compare;
 pub use data::database_export;
 pub use dbx_drivers::database_capabilities;

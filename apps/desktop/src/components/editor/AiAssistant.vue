@@ -1655,9 +1655,9 @@ let responsiveControlDragEpoch = 0;
 interface AiTableMentionCandidate {
   kind: "table";
   /**
-   * Owning database, set only while several databases are selected (#11660).
-   * Single-database candidates stay unqualified so their label, raw text and
-   * resolution are unchanged.
+   * Owning database (#11660): every listed candidate records the database it
+   * came from. Whether it is also displayed is decided by
+   * `aiTableMentionQualifier`, so a single-database list reads as before.
    */
   database?: string;
   schema?: string;
@@ -3149,8 +3149,11 @@ function addSelectedMention(candidate: AiMentionCandidate) {
   // leaves the mention unqualified and resolved at request time, as before.
   const ownDatabase = candidate.database;
   const raw = formatAiTableMention(candidate.schema, candidate.name, mentionQualifier(ownDatabase));
-  const key = aiTableMentionKey(candidate.schema, candidate.name, ownDatabase);
-  if (selectedMentions.value.some((mention) => aiTableMentionKey(mention.schema, mention.table, mention.database ?? mentionPrimaryDatabase()) === key)) return;
+  // Both sides key an unqualified mention by the primary database, so a caller
+  // that names no database cannot add a second chip for a table already listed.
+  const primaryDatabase = mentionPrimaryDatabase();
+  const key = aiTableMentionKey(candidate.schema, candidate.name, ownDatabase ?? primaryDatabase);
+  if (selectedMentions.value.some((mention) => aiTableMentionKey(mention.schema, mention.table, mention.database ?? primaryDatabase) === key)) return;
   selectedMentions.value.push(ownDatabase ? { raw, database: ownDatabase, schema: candidate.schema, table: candidate.name } : { raw, schema: candidate.schema, table: candidate.name });
 }
 

@@ -934,14 +934,15 @@ export async function buildAiContext(
     // An unqualified mention belongs to the run's own database, so it is keyed
     // with that database — otherwise it could not deduplicate against the same
     // table loaded below under its database (#11660).
-    const key = aiTableMentionKey(mention.schema, mention.table, mention.database ?? database);
+    const mentionDatabase = aiMentionDatabaseNamespace(mention, connection, database);
+    const key = aiTableMentionKey(mention.schema, mention.table, mentionDatabase);
     if (tableKeys.has(key)) continue;
     const entry = await loadMentionedTableContext(tab, connection, mention, maxColumnsPerTable, maxIndexesPerTable, maxFksPerTable, allowedDatabases.size > 1).catch(() => undefined);
     if (!entry) continue;
     // The entry itself only carries a database while it has to be displayed with
     // one, but the deduplication key always uses the database it was read from,
     // so the same table cannot be added twice (#11660).
-    tableKeys.add(aiTableMentionKey(entry.schema, entry.name, mention.database ?? database));
+    tableKeys.add(aiTableMentionKey(entry.schema, entry.name, mentionDatabase));
     tables.push(entry);
   }
 
@@ -1046,7 +1047,7 @@ async function loadMentionedTableContext(tab: AiContextTarget, connection: Conne
   const runDatabase = aiDatabaseNamespace(tab, connection);
   // A qualified mention resolves against its own database so a table of another
   // selected database is read from where it actually lives (#11660).
-  const database = mention.database || runDatabase;
+  const database = aiMentionDatabaseNamespace(mention, connection, runDatabase);
   const schema = await resolveMentionedTableSchema(tab, connection, mention, database);
   const [columns, indexes, foreignKeys, tableComment] = await Promise.all([
     api.getColumns(tab.connectionId, database, schema, mention.table),
@@ -1054,10 +1055,11 @@ async function loadMentionedTableContext(tab: AiContextTarget, connection: Conne
     api.listForeignKeys(tab.connectionId, database, schema, mention.table).catch(() => [] as ForeignKeyInfo[]),
     loadTableComment(tab.connectionId, database, schema, mention.table).catch(() => undefined),
   ]);
+  // Only named while several databases are in play, so the schema block of a
+  // single-database run reads exactly as it did before (#11660).
+  const qualifier = aiTableMentionQualifier(mention.database ? database : undefined, runDatabase, multipleDatabases);
   return {
-    // Only named while several databases are in play, so the schema block of a
-    // single-database run reads exactly as it did before (#11660).
-    ...(aiTableMentionQualifier(mention.database, runDatabase, multipleDatabases) ? { database: mention.database } : {}),
+    ...(qualifier ? { database: qualifier } : {}),
     schema: schema === database && !isSchemaAware(databaseType) ? undefined : schema,
     name: mention.table,
     tableType: "TABLE",
@@ -1122,6 +1124,15 @@ export function aiSchemaSelectionSupported(connection: ConnectionConfig): boolea
 
 function aiDatabaseNamespace(tab: AiNamespaceSource, connection: ConnectionConfig): string {
   return resolveAiDatabaseTarget(tab, connection).database;
+}
+
+/**
+ * Database a table mention is read from: its own database when it names one,
+ * otherwise the run's. The mention's own value goes through the same namespace
+ * resolution as the run's, so a SQLite file-path value still reads from `main`.
+ */
+function aiMentionDatabaseNamespace(mention: AiTableMention, connection: ConnectionConfig, runDatabase: string): string {
+  return mention.database ? aiDatabaseNamespace({ database: mention.database }, connection) : runDatabase;
 }
 
 export function resolveAiNamespaceSelection(tab: AiNamespaceSource, connection: ConnectionConfig): AiNamespaceSelection {

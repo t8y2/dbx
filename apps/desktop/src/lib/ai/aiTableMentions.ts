@@ -1,10 +1,10 @@
 export interface AiTableMention {
   raw: string;
   /**
-   * Owning database, set only when the mention has to be told apart from the
-   * run's primary database (#11660). Mentions created while a single database
-   * is selected keep it undefined so their resolution stays byte-identical to
-   * the pre-multi-database behavior.
+   * Owning database (#11660). Chips picked from the candidate list always record
+   * it; a hand-typed mention carries it only when its leading segment names a
+   * selected database. Whether it is also written into the raw text is decided
+   * by `aiTableMentionQualifier`, so a single-database mention reads as before.
    */
   database?: string;
   schema?: string;

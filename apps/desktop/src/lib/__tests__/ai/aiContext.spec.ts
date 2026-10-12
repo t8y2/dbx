@@ -101,6 +101,18 @@ describe("SQLite AI context routing", () => {
     expect(context.database).toBe("analytics");
     expect(apiMock.listTables).toHaveBeenCalledWith("sqlite-1", "analytics", "analytics");
   });
+
+  // A mention records the database it was listed from verbatim; it has to be
+  // read through the same namespace resolution as the run (#11660).
+  it("reads a mention recorded with a path-shaped SQLite database from main", async () => {
+    const context = await buildAiContext(queryTab("/tmp/real.sqlite"), sqliteConnection(), {
+      mentionedTables: [{ raw: "@users", database: "/tmp/real.sqlite", table: "users" }],
+    });
+
+    expect(apiMock.getColumns).toHaveBeenCalledWith("sqlite-1", "main", "main", "users");
+    expect(context.tables).toEqual([expect.objectContaining({ name: "users" })]);
+    expect(context.tables[0]?.database).toBeUndefined();
+  });
 });
 
 describe("Dameng AI context routing", () => {

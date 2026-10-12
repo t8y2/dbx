@@ -42,6 +42,7 @@
     "mcp",
     "web-api",
     "---Safety and Configuration---",
+    "access-control",
     "production-safety",
     "data-security-migration",
     "connection-import",

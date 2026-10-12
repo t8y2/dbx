@@ -389,7 +389,8 @@ pub async fn test_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
-    run_temporary_connection_test(&state.app, body.config, false)
+    let config = state.resolve_connection_credentials(body.config).await?;
+    run_temporary_connection_test(&state.app, config, false)
         .await
         .map(|result| Json(result.message))
         .map_err(AppError::from)
@@ -399,14 +400,16 @@ pub async fn test_connection_with_info(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<ConnectionTestResult>, AppError> {
-    run_temporary_connection_test(&state.app, body.config, true).await.map(Json).map_err(AppError::from)
+    let config = state.resolve_connection_credentials(body.config).await?;
+    run_temporary_connection_test(&state.app, config, true).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn test_ssh_tunnel(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
-    state.app.test_connection_ssh_tunnel(&body.config.canonicalized()).await.map(Json).map_err(AppError::from)
+    let config = state.resolve_connection_credentials(body.config).await?;
+    state.app.test_connection_ssh_tunnel(&config.canonicalized()).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn connect_db(
@@ -414,7 +417,7 @@ pub async fn connect_db(
     headers: HeaderMap,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
-    let config = body.config;
+    let config = state.resolve_connection_credentials(body.config).await?;
     // 演示模式：只允许连接已保存的连接，端点身份以存储为准，防止伪造 body
     // 配置把服务器拨向任意主机（见 demo 模块）。
     if state.demo_mode {
@@ -563,7 +566,7 @@ pub async fn connection_final_proxy_port(
     headers: HeaderMap,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<u16>, AppError> {
-    let runtime_config = body.config.canonicalized();
+    let runtime_config = state.resolve_connection_credentials(body.config).await?.canonicalized();
     if !runtime_config.has_effective_transport_layers() {
         return Err(AppError::from("Connection has no configured transport layers".to_string()));
     }
@@ -769,7 +772,15 @@ pub async fn save_connections(
     headers: HeaderMap,
     Json(body): Json<SaveConnectionsRequest>,
 ) -> Result<Json<()>, AppError> {
-    for config in &body.configs {
+    let mut configs = body.configs;
+    if configs.iter().any(|config| crate::credentials::contains_reference(&serde_json::to_value(config).unwrap())) {
+        let saved = state.saved_credential_configs().await?;
+        configs = configs
+            .into_iter()
+            .map(|config| crate::credentials::restore(config, &saved))
+            .collect::<Result<Vec<_>, AppError>>()?;
+    }
+    for config in &configs {
         if config.db_type == dbx_core::models::connection::DatabaseType::Sqlite {
             dbx_core::db::sqlite::validate_persistent_attachments(
                 &config.host,
@@ -782,9 +793,9 @@ pub async fn save_connections(
     if !body.removed_ids.is_empty() {
         state.app.storage.delete_connections(&body.removed_ids).await.map_err(AppError::from)?;
     }
-    state.app.storage.save_connections(&body.configs).await.map_err(AppError::from)?;
+    state.app.storage.save_connections(&configs).await.map_err(AppError::from)?;
     let owner = session_token_from_headers(&headers).unwrap_or_default();
-    let runtime_configs = body.configs.iter().cloned().map(prepare_runtime_config).collect::<Vec<_>>();
+    let runtime_configs = configs.iter().cloned().map(prepare_runtime_config).collect::<Vec<_>>();
     // Saving is an upsert, so the request only describes the connections of this
     // client. Sync the runtime cache against the whole persisted list instead of
     // the request payload, otherwise a concurrent save from another client would
@@ -804,11 +815,12 @@ pub async fn mcp_add_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<McpAddConnectionRequest>,
 ) -> Result<Json<ConnectionConfig>, AppError> {
-    let saved = state.app.storage.add_connection_for_mcp(body.config).await.map_err(AppError::from)?;
+    let config = state.resolve_connection_credentials(body.config).await?;
+    let saved = state.app.storage.add_connection_for_mcp(config).await.map_err(AppError::from)?;
     state.app.session_credentials.clear_connection(&saved.id);
     state.app.remove_connection_pools_detached(&saved.id).await;
     state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
-    Ok(Json(saved))
+    Ok(Json(state.connection_response(saved)))
 }
 
 pub async fn mcp_duplicate_connection(
@@ -824,7 +836,7 @@ pub async fn mcp_duplicate_connection(
     state.app.session_credentials.clear_connection(&saved.id);
     state.app.remove_connection_pools_detached(&saved.id).await;
     state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
-    Ok(Json(saved))
+    Ok(Json(state.connection_response(saved)))
 }
 
 pub async fn mcp_remove_connection(
@@ -854,7 +866,7 @@ pub async fn load_connections(
     remove_connection_pools_for_connection_ids(&state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(&state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(&state, &sync.mq_adapter_ids_to_drop).await;
-    Ok(Json(configs))
+    Ok(Json(configs.into_iter().map(|config| state.connection_response(config)).collect()))
 }
 
 struct ConnectionConfigSync {

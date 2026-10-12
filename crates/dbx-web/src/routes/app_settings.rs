@@ -69,6 +69,16 @@ pub async fn save_mcp_global_policy(
     Ok(Json(()))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebCapabilities {
+    pub password_viewer_enabled: bool,
+}
+
+pub async fn load_web_capabilities(State(state): State<Arc<WebState>>) -> Json<WebCapabilities> {
+    Json(WebCapabilities { password_viewer_enabled: state.password_viewer_enabled })
+}
+
 pub async fn load_web_mcp_http_status(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let endpoint_path =
         if state.public_base_path == "/" { "/mcp".to_string() } else { format!("{}/mcp", state.public_base_path) };

@@ -2379,6 +2379,10 @@ export async function rotateWebMcpToken(): Promise<import("@/lib/backend/tauri")
   return res.json();
 }
 
+export async function loadWebCapabilities(): Promise<import("@/lib/backend/tauri").WebCapabilities> {
+  return get("/api/app-settings/web-capabilities");
+}
+
 export async function loadMaxAgentTurns(): Promise<number> {
   return get("/api/app-settings/max-agent-turns");
 }

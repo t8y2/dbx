@@ -964,6 +964,7 @@ export const rotateMcpHttpServerToken = forward("rotateMcpHttpServerToken");
 export const loadWebMcpHttpStatus = forward("loadWebMcpHttpStatus");
 export const saveWebMcpHttpSettings = forward("saveWebMcpHttpSettings");
 export const rotateWebMcpToken = forward("rotateWebMcpToken");
+export const loadWebCapabilities = forward("loadWebCapabilities");
 export const checkForUpdates = forward("checkForUpdates");
 export const fetchChangelog = forward("fetchChangelog");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
@@ -1044,6 +1045,7 @@ export type {
   McpHttpServerStatus,
   WebMcpHttpStatus,
   WebMcpHttpSettings,
+  WebCapabilities,
   UpdateInfo,
   DownloadedUpdate,
   RedisBlob,

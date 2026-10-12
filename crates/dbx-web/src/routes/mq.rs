@@ -1610,6 +1610,7 @@ mod tests {
             notes_roots: Vec::new(),
             public_base_path: "/".to_string(),
             password_disabled: false,
+            password_viewer_enabled: true,
             demo_mode: false,
             password_hash: RwLock::new(None),
             sessions: RwLock::new(HashSet::new()),

@@ -6487,7 +6487,8 @@ fn ensure_mcp_connection_change_allowed_in_tx(
     Ok(())
 }
 
-fn sanitized_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
+/// Connection metadata with every field managed by the secret store removed.
+pub fn sanitized_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
     let mut sanitized = config.clone().canonicalized();
     sanitized.password = String::new();
     sanitized.url_params = None;

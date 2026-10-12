@@ -232,6 +232,7 @@ import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructur
 import { formatSidebarTableCopyText, type FormatSidebarTableNamesOptions } from "@/lib/sidebar/sidebarTableNameCopy";
 import { supportsScheduledDatabaseBackup } from "@/lib/backup/scheduledDatabaseBackup";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { passwordViewerEnabled } from "@/lib/security/passwordViewer";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { buildConnectionUrlCopy, CONNECTION_URL_COPY_WITH_PASSWORD_FORMATS, connectionUrlCopyFormats, type ConnectionUrlCopyFormat } from "@/lib/connection/connectionUrlBuilder";
 import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/savedSqlHistory";
@@ -2647,7 +2648,7 @@ function connectionUrlCopyMenuItem(databaseOverride?: string): ContextMenuItem |
   const node = activeNode.value;
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
   if (!config) return null;
-  const formats = connectionUrlCopyFormats(config);
+  const formats = connectionUrlCopyFormats(config).filter((format) => passwordViewerEnabled.value || !CONNECTION_URL_COPY_WITH_PASSWORD_FORMATS.has(format));
   if (formats.length === 0) return null;
   return {
     sidebarActionId: "contextMenu.copyConnectionInfo",

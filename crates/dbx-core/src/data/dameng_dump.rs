@@ -141,7 +141,9 @@ pub fn resolve_damp_tool_path(bin_dir: &str, kind: DamengDumpKind) -> Result<Pat
 /// to confirm the replacement.
 fn validate_export_target(file_path: &Path) -> Result<(), String> {
     match std::fs::metadata(file_path) {
-        Ok(meta) if !meta.is_file() => Err(format!("Export target '{}' exists and is not a file.", file_path.display())),
+        Ok(meta) if !meta.is_file() => {
+            Err(format!("Export target '{}' exists and is not a file.", file_path.display()))
+        }
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("Cannot access export file '{}': {error}", file_path.display())),
@@ -161,14 +163,13 @@ fn sibling_temp_dump_path(target: &Path, task_id: &str) -> PathBuf {
 /// the temp file is kept (it holds a complete dump) and its path is surfaced
 /// so the user can recover it manually.
 fn finalize_export_target(temp_path: &Path, target: &Path) -> Result<(), String> {
-    std::fs::rename(temp_path, target)
-        .map_err(|error| {
-            format!(
-                "Export finished but replacing '{}' failed ({error}); the new dump was kept at '{}'.",
-                target.display(),
-                temp_path.display()
-            )
-        })
+    std::fs::rename(temp_path, target).map_err(|error| {
+        format!(
+            "Export finished but replacing '{}' failed ({error}); the new dump was kept at '{}'.",
+            target.display(),
+            temp_path.display()
+        )
+    })
 }
 
 fn prepare_import_source(file_path: &Path) -> Result<(), String> {
@@ -427,7 +428,13 @@ pub async fn run_dameng_dump_task(
     if outcome.success {
         if let Some(temp_path) = &export_temp_path {
             if let Err(error) = finalize_export_target(temp_path, file_path) {
-                emit(DamengDumpStatus::Error, false, outcome.warnings, outcome.elapsed_seconds.clone(), Some(error.clone()));
+                emit(
+                    DamengDumpStatus::Error,
+                    false,
+                    outcome.warnings,
+                    outcome.elapsed_seconds.clone(),
+                    Some(error.clone()),
+                );
                 return Err(error);
             }
         }

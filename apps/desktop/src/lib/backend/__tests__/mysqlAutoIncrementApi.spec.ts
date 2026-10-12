@@ -16,6 +16,7 @@ describe("MySQL AUTO_INCREMENT web API", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(getMysqlTableAutoIncrement("connection 1", "sales/db", "order items")).resolves.toBe("42");
-    expect(fetchMock).toHaveBeenCalledWith("/api/schema/mysql/auto-increment?connection_id=connection+1&database=sales%2Fdb&table=order+items");
+    // RBAC Web 会话：GET 封装携带 cookie（credentials: "include"）。
+    expect(fetchMock).toHaveBeenCalledWith("/api/schema/mysql/auto-increment?connection_id=connection+1&database=sales%2Fdb&table=order+items", { credentials: "include" });
   });
 });

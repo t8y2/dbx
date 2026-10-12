@@ -12,16 +12,19 @@ export interface AuthenticatedUser {
 /**
  * Full shape of `GET /api/auth/check` (and of successful login/setup
  * responses, which reuse the same contract). Older consumers only read the
- * first three fields, so the extension stays backwards compatible.
+ * first three fields, so the extension stays backwards compatible. The
+ * extended RBAC fields are optional and only present when the server
+ * payload carries them, keeping the transport a faithful pass-through of
+ * what the server sent.
  */
 export interface StartupAuthentication {
   required: boolean;
   authenticated: boolean;
   setup_required: boolean;
-  user: AuthenticatedUser | null;
-  permissions: string[];
-  must_change_password: boolean;
-  password_expires_in_days: number | null;
+  user?: AuthenticatedUser | null;
+  permissions?: string[];
+  must_change_password?: boolean;
+  password_expires_in_days?: number | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -51,15 +54,18 @@ function parsePermissions(value: unknown): string[] {
  */
 export function normalizeStartupAuthentication(result: unknown): StartupAuthentication | null {
   if (!isRecord(result) || typeof result.required !== "boolean" || typeof result.authenticated !== "boolean") return null;
-  return {
+  const normalized: StartupAuthentication = {
     required: result.required,
     authenticated: result.authenticated,
     setup_required: result.setup_required === true,
-    user: parseUser(result.user),
-    permissions: parsePermissions(result.permissions),
-    must_change_password: result.must_change_password === true,
-    password_expires_in_days: typeof result.password_expires_in_days === "number" ? result.password_expires_in_days : null,
   };
+  // 扩展字段仅在服务端响应携带时出现，避免规范化向旧响应注入服务端
+  // 从未发送的字段（保持透传语义，兼容只含前三字段的历史契约与测试）。
+  if ("user" in result) normalized.user = parseUser(result.user);
+  if ("permissions" in result) normalized.permissions = parsePermissions(result.permissions);
+  if ("must_change_password" in result) normalized.must_change_password = result.must_change_password === true;
+  if ("password_expires_in_days" in result) normalized.password_expires_in_days = typeof result.password_expires_in_days === "number" ? result.password_expires_in_days : null;
+  return normalized;
 }
 
 export async function checkStartupAuthentication(signal?: AbortSignal): Promise<StartupAuthentication> {

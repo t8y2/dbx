@@ -652,7 +652,9 @@ describe("backend error wording is pinned to the Rust sources", () => {
     ["crates/dbx-core/src/admin/mq/adapters/kafka.rs", "Kafka does not support unloading topics"],
     ["crates/dbx-plugin-runtime/src/plugins/installer.rs", "Plugin update source change requires confirmation:"],
     ["crates/dbx-plugin-runtime/src/plugins/installer.rs", "Plugin downgrade to version "],
-    ["crates/dbx-web/src/auth.rs", "Please try again in {remaining}s"],
+    // RBAC 重写登录限流为 error_response(TOO_MANY_REQUESTS, "rate_limited")，
+    // 前端收到 {"error":"rate_limited"}，pin 条目从旧的重试提示改为限流码。
+    ["crates/dbx-web/src/auth.rs", '"rate_limited"'],
     ["crates/dbx-web/src/routes/agents.rs", "Close these database connections before updating drivers: "],
     ["src-tauri/src/commands/agents.rs", "Close these database connections before updating drivers: "],
     ["src-tauri/src/commands/fs_open.rs", "file does not exist: "],

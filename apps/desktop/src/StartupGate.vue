@@ -29,8 +29,21 @@ const SecurityMigrationWizard = defineAsyncComponent({ ...startupAsyncOptions, l
 const props = defineProps<{ localeReady?: Promise<void> }>();
 const { t } = useI18n();
 const migration = useMigrationStore();
-const auth = useAuthStore();
 const { blocking } = migration;
+// RBAC 会话状态回填用 store。StartupGate 是应用根组件，可能被早于 pinia
+// 安装的场景直接挂载（单元测试、启动早期），此时 useAuthStore() 会抛
+// "no active Pinia"，需惰性容错获取：拿不到就跳过回填，不影响门控流程。
+let authStore: ReturnType<typeof useAuthStore> | undefined;
+function currentAuth(): ReturnType<typeof useAuthStore> | undefined {
+  if (authStore === undefined) {
+    try {
+      authStore = useAuthStore();
+    } catch {
+      authStore = undefined;
+    }
+  }
+  return authStore;
+}
 const checkingAuth = ref(true);
 const loginRequired = ref(false);
 const setupRequired = ref(false);
@@ -74,7 +87,7 @@ async function initialize() {
       // Refresh path: the login path reaches applyCheckResponse via LoginPage,
       // but a plain reload never does, leaving the account UI and admin-only
       // modules unpopulated even though the session cookie is still valid.
-      auth.applyCheckResponse(result);
+      currentAuth()?.applyCheckResponse(result);
       setupRequired.value = result.setup_required === true;
       loginRequired.value = setupRequired.value || (result.required && !result.authenticated);
       if (loginRequired.value) {
@@ -92,7 +105,7 @@ async function initialize() {
 }
 async function authenticated(payload?: StartupAuthentication) {
   history.replaceState(null, "", webPath("/"));
-  if (payload) auth.applyCheckResponse(payload);
+  if (payload) currentAuth()?.applyCheckResponse(payload);
   await initialize();
 }
 onMounted(() => {

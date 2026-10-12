@@ -408,13 +408,30 @@ const { t, locale: appLocale } = useI18n();
 
 const connectionStore = useConnectionStore();
 
-const authStore = useAuthStore();
-
 const queryStore = useQueryStore();
 
 const settingsStore = useSettingsStore();
 
 const savedSqlStore = useSavedSqlStore();
+
+// 惰性获取 auth store：本组件会被无 Pinia 的单测直接挂载，顶层 eager 调用
+// useAuthStore() 会抛 "no active Pinia"。获取失败或权限未加载时按未授权处理，
+// 保持上游默认菜单（「新建连接」项是 RBAC 新增的门控，上游菜单无此项）。
+let authStoreInstance: ReturnType<typeof useAuthStore> | undefined;
+function currentAuthStore(): ReturnType<typeof useAuthStore> | undefined {
+  if (authStoreInstance === undefined) {
+    try {
+      authStoreInstance = useAuthStore();
+    } catch {
+      authStoreInstance = undefined;
+    }
+  }
+  return authStoreInstance;
+}
+function currentAuthHas(permission: string): boolean {
+  const store = currentAuthStore();
+  return store !== undefined && store.loaded && store.hasPermission(permission);
+}
 
 const { toast } = useToast();
 const installedPlugins = ref<InstalledPlugin[]>([]);
@@ -6144,7 +6161,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
   if (node.type === "connection-group") {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
-    if (authStore.hasPermission("connection.manage")) {
+    if (currentAuthHas("connection.manage")) {
       items.push({ label: t("toolbar.newConnection"), action: newConnectionInGroup, icon: Plus, disabled: connectionGroupPasswordLockable() });
     }
     items.push({ label: t("connectionGroup.newGroup"), action: newSubgroup, icon: FolderPlus, disabled: connectionGroupPasswordLockable() });

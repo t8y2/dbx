@@ -559,6 +559,9 @@ export default {
       updated: "Role updated",
       deleted: "Role deleted",
       inUse: "This role is assigned to users and cannot be deleted.",
+      manageWarningTitle: "Remove manage connections",
+      manageWarningMessage: "Without the manage-connections permission, users cannot connect to databases or execute scripts.",
+      manageWarningConfirm: "Uncheck anyway",
     },
     blacklist: {
       title: "Blacklist Management",
@@ -600,6 +603,17 @@ export default {
       import: { data: "Import Data" },
       export: { data: "Export Data" },
       mcp: "MCP",
+    },
+    permissionHints: {
+      connection: { manage: "Create, edit and delete database connections and groups, and manage connection-level settings (passwords, read-only, etc.)." },
+      transfer: "Run transfer tasks to move schema and data across databases, schemas and tables.",
+      sqlfile: { execute: "Upload SQL script files and execute them in batches, with progress tracking for large files." },
+      schema: { compare: "Compare object structures (tables, views, indexes, ...) between two databases or schemas." },
+      data: { compare: "Compare data differences between two tables, with sampling and row-level review." },
+      backup: { restore: "Back up database objects and data, and restore them when needed." },
+      import: { data: "Import CSV/Excel and other data files into database tables." },
+      export: { data: "Export query results or table data to CSV/Excel/JSON and other formats." },
+      mcp: "Expose database connections and querying to external AI tools via the MCP protocol.",
     },
     errors: {
       already_exists: "An item with the same value already exists.",

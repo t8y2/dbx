@@ -496,6 +496,9 @@ export default withEnglishFallback({
       updated: "角色已更新",
       deleted: "角色已删除",
       inUse: "该角色已被用户引用，无法删除。",
+      manageWarningTitle: "取消管理连接",
+      manageWarningMessage: "取消管理连接则不能连接数据库和执行脚本。",
+      manageWarningConfirm: "仍要取消",
     },
     blacklist: {
       title: "黑名单管理",
@@ -537,6 +540,17 @@ export default withEnglishFallback({
       import: { data: "导入数据" },
       export: { data: "导出数据" },
       mcp: "MCP",
+    },
+    permissionHints: {
+      connection: { manage: "创建、编辑、删除数据库连接与连接分组，并管理连接级设置（密码、只读等）。" },
+      transfer: "使用数据传输任务，在数据库、模式、表之间迁移结构与数据。",
+      sqlfile: { execute: "上传 SQL 脚本文件并批量执行，支持大文件分段与进度查看。" },
+      schema: { compare: "比对两个数据库或模式之间表、视图、索引等对象的结构差异。" },
+      data: { compare: "比对两个表之间的数据差异，支持抽样与逐行核对。" },
+      backup: { restore: "备份数据库对象与数据，并在需要时执行恢复。" },
+      import: { data: "将 CSV/Excel 等数据文件导入数据库表。" },
+      export: { data: "将查询结果或表数据导出为 CSV/Excel/JSON 等格式。" },
+      mcp: "通过 MCP 协议向外部 AI 工具开放数据库连接与查询能力。",
     },
     errors: {
       already_exists: "相同内容已存在。",

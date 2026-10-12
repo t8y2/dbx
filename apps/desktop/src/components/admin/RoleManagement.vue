@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/composables/useToast";
 import { PERMISSION_KEYS, type PermissionKey } from "@/lib/auth/permissions";
 import { adminErrorCode, createAdminRole, deleteAdminRole, listAdminRoles, updateAdminRole, type AdminRole, type AdminScope } from "@/lib/admin/adminApi";
@@ -26,6 +27,9 @@ const description = ref("");
 const permissions = ref<PermissionKey[]>([]);
 const scope = ref<AdminScope>({ allowed_group_ids: [], allowed_connection_ids: [], query_write_group_ids: [], query_write_connection_ids: [] });
 const formValid = computed(() => name.value.trim().length > 0);
+/// 新建角色时默认勾选的功能权限。
+const DEFAULT_ROLE_PERMISSIONS: PermissionKey[] = ["connection.manage", "sqlfile.execute"];
+const manageWarningOpen = ref(false);
 
 async function loadRoles() {
   loading.value = true;
@@ -42,7 +46,7 @@ function openCreate() {
   editing.value = null;
   name.value = "";
   description.value = "";
-  permissions.value = [];
+  permissions.value = [...DEFAULT_ROLE_PERMISSIONS];
   scope.value = { allowed_group_ids: [], allowed_connection_ids: [], query_write_group_ids: [], query_write_connection_ids: [] };
   formOpen.value = true;
 }
@@ -62,7 +66,17 @@ function openEdit(role: AdminRole) {
 }
 
 function togglePermission(key: PermissionKey) {
+  // 取消勾选「管理连接」需要先经确认框提醒：该权限掌管连接数据库与执行脚本。
+  if (key === "connection.manage" && permissions.value.includes(key)) {
+    manageWarningOpen.value = true;
+    return;
+  }
   permissions.value = permissions.value.includes(key) ? permissions.value.filter((item) => item !== key) : [...permissions.value, key];
+}
+
+function confirmUncheckManageConnection() {
+  permissions.value = permissions.value.filter((item) => item !== "connection.manage");
+  manageWarningOpen.value = false;
 }
 
 async function submitForm() {
@@ -180,19 +194,15 @@ onMounted(loadRoles);
               <h3 class="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{{ t("accessControl.roles.functionalPermissions") }}</h3>
               <p class="mb-3 text-xs text-muted-foreground">{{ t("accessControl.roles.permissionsHint") }}</p>
               <div class="grid gap-2 sm:grid-cols-2">
-                <button
-                  v-for="key in PERMISSION_KEYS"
-                  :key="key"
-                  type="button"
-                  role="checkbox"
-                  :aria-checked="permissions.includes(key)"
-                  class="flex items-center gap-2 rounded-md border px-3 py-2 text-left text-xs hover:bg-accent"
-                  :class="permissions.includes(key) ? 'border-primary bg-primary/5' : ''"
-                  @click="togglePermission(key)"
-                >
-                  <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="permissions.includes(key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'"><Check v-if="permissions.includes(key)" class="h-3 w-3" /></span>
-                  <span>{{ t(`accessControl.permissions.${key}`) }}</span>
-                </button>
+                <Tooltip v-for="key in PERMISSION_KEYS" :key="key">
+                  <TooltipTrigger as-child>
+                    <button type="button" role="checkbox" :aria-checked="permissions.includes(key)" class="flex items-center gap-2 rounded-md border px-3 py-2 text-left text-xs hover:bg-accent" :class="permissions.includes(key) ? 'border-primary bg-primary/5' : ''" @click="togglePermission(key)">
+                      <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="permissions.includes(key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'"><Check v-if="permissions.includes(key)" class="h-3 w-3" /></span>
+                      <span>{{ t(`accessControl.permissions.${key}`) }}</span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" class="max-w-64">{{ t(`accessControl.permissionHints.${key}`) }}</TooltipContent>
+                </Tooltip>
               </div>
             </section>
           </div>
@@ -214,6 +224,19 @@ onMounted(loadRoles);
         <DialogFooter
           ><Button variant="outline" @click="deleteOpen = false">{{ t("accessControl.cancel") }}</Button
           ><Button variant="destructive" :disabled="saving" @click="confirmDelete">{{ t("accessControl.delete") }}</Button></DialogFooter
+        >
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="manageWarningOpen">
+      <DialogContent class="max-w-sm">
+        <DialogHeader
+          ><DialogTitle>{{ t("accessControl.roles.manageWarningTitle") }}</DialogTitle></DialogHeader
+        >
+        <p class="text-sm text-muted-foreground">{{ t("accessControl.roles.manageWarningMessage") }}</p>
+        <DialogFooter
+          ><Button variant="outline" @click="manageWarningOpen = false">{{ t("accessControl.cancel") }}</Button
+          ><Button variant="destructive" @click="confirmUncheckManageConnection">{{ t("accessControl.roles.manageWarningConfirm") }}</Button></DialogFooter
         >
       </DialogContent>
     </Dialog>

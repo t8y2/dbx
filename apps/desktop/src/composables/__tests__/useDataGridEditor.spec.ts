@@ -1338,6 +1338,7 @@ describe("useDataGridEditor saveChanges reload", () => {
       databaseType?: import("@/types/database").DatabaseType;
       primaryKeys?: string[];
       onExecuteSql?: (sql: string) => Promise<void>;
+      prepareSaveBaseline?: import("@/composables/useDataGridEditor").UseDataGridEditorOptions["prepareSaveBaseline"];
     } = {},
   ) {
     const emit = vi.fn();
@@ -1386,10 +1387,80 @@ describe("useDataGridEditor saveChanges reload", () => {
       getRowItem: () => undefined,
       prepareFullReload: options.prepareFullReload,
       refreshSavedRows: options.refreshSavedRows,
+      prepareSaveBaseline: options.prepareSaveBaseline,
       emit,
     });
     return { editor, emit, currentPage, ensureManualTransactionSession };
   }
+
+  it.each(["batch", "transaction", "manual"] as const)("passes reviewed BLOB bindings through the %s save entrypoint", async (route) => {
+    const statements = route === "transaction" ? ["reviewed BLOB save", "ordinary update"] : ["reviewed BLOB save"];
+    const boundStatements = statements.map((previewSql, index) => ({ previewSql, sql: index === 0 ? "UPDATE t SET b=?" : previewSql, blobParameters: index === 0 ? ["00ff80"] : [] }));
+    mocks.prepareDataGridSave.mockResolvedValue({ statements, boundStatements, rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 1 });
+    mocks.executeInTransaction.mockResolvedValue({ affected_rows: 2 });
+    mocks.executeInManualTransaction.mockResolvedValue([{ affected_rows: 1 }]);
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", manualTransactionSessionId: route === "manual" ? "session-1" : undefined });
+    editor.dirtyRows.value.set(0, new Map([[1, "changed"]]));
+    await editor.saveChanges();
+    const call = route === "manual" ? mocks.executeInManualTransaction.mock.calls[0] : route === "transaction" ? mocks.executeInTransaction.mock.calls[0] : mocks.executeBatch.mock.calls[0];
+    expect(call?.[route === "manual" ? 11 : route === "transaction" ? 5 : 6]).toEqual(boundStatements);
+    expect(editor.saveError.value).toBe("");
+  });
+
+  it("keeps joined ordinary and BLOB statements aligned in their original execution order", async () => {
+    const targets = [
+      { tableMeta: { tableName: "users", primaryKeys: ["id"], columns: [] }, sourceColumns: ["id", "name", undefined, undefined] },
+      { tableMeta: { tableName: "papers", primaryKeys: ["id"], columns: [] }, sourceColumns: [undefined, undefined, "id", "title"] },
+    ];
+    mocks.prepareDataGridSave.mockImplementation(async (options) =>
+      options.tableMeta.tableName === "users" ? { statements: ["ordinary update"], rollbackStatements: [] } : { statements: ["reviewed BLOB save"], rollbackStatements: [], boundStatements: [{ previewSql: "reviewed BLOB save", sql: "UPDATE papers SET b=?", blobParameters: ["00ff80"] }] },
+    );
+    mocks.executeInTransaction.mockResolvedValue({ affected_rows: 2 });
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", joinedWriteTargets: targets, queryResult: { columns: ["id", "name", "paper_id", "title"], rows: [[1, "old", 20, "old"]] } });
+    editor.dirtyRows.value.set(
+      0,
+      new Map([
+        [1, "new name"],
+        [3, "new title"],
+      ]),
+    );
+    await editor.saveChanges();
+    expect(mocks.executeInTransaction.mock.calls[0]?.[2]).toEqual(["ordinary update", "reviewed BLOB save"]);
+    expect(mocks.executeInTransaction.mock.calls[0]?.[5]).toEqual([
+      { previewSql: "ordinary update", sql: "ordinary update", blobParameters: [] },
+      { previewSql: "reviewed BLOB save", sql: "UPDATE papers SET b=?", blobParameters: ["00ff80"] },
+    ]);
+  });
+
+  it("loads complete original baselines before generating forward and rollback SQL", async () => {
+    const source = { columns: ["id", "status"], rows: [[1, "LOB preview"]] as CellValue[][] };
+    const prepareSaveBaseline = vi.fn(async (changes: Parameters<NonNullable<import("@/composables/useDataGridEditor").UseDataGridEditorOptions["prepareSaveBaseline"]>>[0]) => {
+      expect(changes.dirtyRows.get(0).get(1)).toBeNull();
+      source.rows[0]![1] = "complete original LOB";
+    });
+    mocks.prepareDataGridSave.mockImplementation(async (options) => {
+      expect(options.rows[0][1]).toBe("complete original LOB");
+      expect(options.dirtyRows).toEqual([[0, [[1, null]]]]);
+      return { statements: ["UPDATE orders_test SET status=NULL WHERE id=1"], rollbackStatements: ["UPDATE orders_test SET status='complete original LOB' WHERE id=1"] };
+    });
+    const { editor } = createSaveTestEditor({ queryResult: source, prepareSaveBaseline });
+    editor.dirtyRows.value.set(0, new Map([[1, null]]));
+    await expect(editor.previewChanges()).resolves.toEqual(["UPDATE orders_test SET status=NULL WHERE id=1"]);
+    expect(prepareSaveBaseline).toHaveBeenCalledOnce();
+  });
+
+  it("blocks writes and keeps pending changes when the original LOB baseline expired", async () => {
+    const { editor } = createSaveTestEditor({ prepareSaveBaseline: vi.fn().mockRejectedValue(new Error("LOB snapshot expired")) });
+    editor.dirtyRows.value.set(0, new Map([[1, null]]));
+    await editor.saveChanges();
+    expect(mocks.prepareDataGridSave).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(mocks.executeInTransaction).not.toHaveBeenCalled();
+    expect(mocks.executeInManualTransaction).not.toHaveBeenCalled();
+    expect(editor.dirtyRows.value.get(0)!.get(1)).toBeNull();
+    expect(editor.saveError.value).toContain("LOB snapshot expired");
+  });
 
   // https://github.com/t8y2/dbx/issues/8321: without a primary key the row is
   // addressed by matching every column value, and the loaded page cannot show
@@ -1399,6 +1470,92 @@ describe("useDataGridEditor saveChanges reload", () => {
     maxMatchedRows: 1,
     message: "Cannot safely update or delete this row: more than one row matches.",
   };
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps a missed single ROWID update pending (%s)", async (databaseType) => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 0 });
+    const { editor, emit } = createSaveTestEditor({ databaseType, primaryKeys: ["__DBX_ROWID"] });
+    editor.dirtyRows.value = new Map([[1, new Map([[1, "shipped"]])]]);
+    await editor.saveChanges();
+    expect(editor.saveError.value).toContain("no longer matches");
+    expect(editor.dirtyRows.value.get(1)?.get(1)).toBe("shipped");
+    expect(editor.manualSaveRequired.value).toBe(true);
+    expect(mocks.addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: false, affected_rows: undefined }));
+    expect(emit).not.toHaveBeenCalled();
+    await editor.saveChanges({ autoSave: true });
+    expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([1, -1, undefined, NaN])("does not report a ROWID update conflict for successful or unknown counts: %s", async (affectedRows) => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: affectedRows });
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"] });
+    editor.dirtyRows.value.set(1, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+    expect(editor.saveError.value).toBe("");
+    expect(editor.dirtyRows.value.size).toBe(0);
+    expect(mocks.addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+  });
+
+  it.each([
+    [{ affected_rows: 0 }, true],
+    [{ affected_rows: -1 }, false],
+    [{}, false],
+  ] as const)("uses the manual transaction's single raw update count %j", async (result, conflict) => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';"], rollbackStatements: [] });
+    mocks.executeInManualTransaction.mockResolvedValue([result]);
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"], manualTransactionSessionId: "manual-1" });
+    editor.dirtyRows.value.set(1, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+    expect(Boolean(editor.saveError.value)).toBe(conflict);
+    expect(editor.dirtyRows.value.size).toBe(conflict ? 1 : 0);
+  });
+
+  it.each([
+    ["BEGIN UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22'; END;"],
+    ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';", "DELETE FROM orders_test WHERE ROWIDTOCHAR(ROWID)='ROW-21';"],
+    ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';", "UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-21';"],
+  ])("does not infer a single-update conflict from block or batch counts: %j", async (...statements) => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements, rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 0 });
+    mocks.executeInTransaction.mockResolvedValue({ affected_rows: 0 });
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"] });
+    editor.dirtyRows.value.set(1, new Map([[1, "shipped"]]));
+    if (statements[1]?.startsWith("DELETE")) editor.deletedRows.value.add(0);
+    else if (statements.length > 1) editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+    expect(editor.saveError.value).toBe("");
+  });
+
+  it("preserves physical-primary-key zero-update behavior", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE id=2;"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 0 });
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["id"] });
+    editor.dirtyRows.value.set(1, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+    expect(editor.saveError.value).toBe("");
+    expect(editor.dirtyRows.value.size).toBe(0);
+  });
+
+  it("does not interpret missing manual transaction results as zero matched rows", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';"], rollbackStatements: [] });
+    mocks.executeInManualTransaction.mockResolvedValue([]);
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"], manualTransactionSessionId: "manual-1" });
+    editor.dirtyRows.value = new Map([[1, new Map([[1, "shipped"]])]]);
+    await editor.saveChanges();
+    expect(editor.saveError.value).toBe("");
+  });
+
+  it("does not infer an update conflict from a mixed insert batch", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';", "INSERT INTO orders_test VALUES(3, 'new');"], rollbackStatements: [] });
+    mocks.executeInTransaction.mockResolvedValue({ affected_rows: 0 });
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"] });
+    editor.dirtyRows.value = new Map([[1, new Map([[1, "shipped"]])]]);
+    editor.newRows.value = [[3, "new"]];
+    await editor.saveChanges();
+    expect(editor.saveError.value).toBe("");
+    expect(mocks.executeInTransaction).toHaveBeenCalledTimes(1);
+  });
 
   it.each(["oracle", "oceanbase-oracle"] as const)("reports a concurrently deleted ROWID target without keeping an impossible retry pending (%s)", async (databaseType) => {
     mocks.prepareDataGridSave.mockResolvedValue({ statements: ["DELETE FROM orders_test WHERE ROWID='ROW-22'"], rollbackStatements: ["restore ROW-22"] });

@@ -497,6 +497,7 @@ function applyDdlGenerationPreferences(sql: string, dialect: SqlFormatDialect): 
 
 type StructureDdlRequest = {
   connectionId: string;
+  queryTimeoutSecs?: number;
   database: string;
   schema: string;
   tableName: string;
@@ -507,6 +508,7 @@ type StructureDdlRequest = {
 function ddlRequest(): StructureDdlRequest {
   return {
     connectionId: props.connectionId,
+    queryTimeoutSecs: store.getConfig(props.connectionId)?.query_timeout_secs,
     database: props.database,
     schema: metadataSchema.value,
     tableName: props.tableName,
@@ -2509,10 +2511,10 @@ async function hydrateRestoredDraftFromDatabase() {
   let shouldRefreshPreview = false;
   try {
     await store.ensureConnected(connectionId);
-    let { value: nextColumns } = await loadObjectMetadataFacet({ connectionId, database, schema, tableName, catalog }, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog));
+    let { value: nextColumns } = await loadObjectMetadataFacet({ connectionId, database, schema, tableName, catalog, queryTimeoutSecs: store.getConfig(connectionId)?.query_timeout_secs }, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog));
     if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
       try {
-        const { ddl } = await loadObjectDdl({ connectionId, database, schema, tableName, catalog });
+        const { ddl } = await loadObjectDdl({ connectionId, database, schema, tableName, catalog, queryTimeoutSecs: store.getConfig(connectionId)?.query_timeout_secs });
         rawDdlContent.value = await formatStructureDdl(ddl);
         ddlFetched.value = true;
         nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
@@ -3073,7 +3075,7 @@ async function loadVisibleTableComment(force = false, preserveDraft = false) {
   const loadPromise = (async () => {
     try {
       await store.ensureConnected(connectionId);
-      const { value } = await loadCachedTableComment({ connectionId, database, schema, tableName, catalog }, force);
+      const { value } = await loadCachedTableComment({ connectionId, database, schema, tableName, catalog, queryTimeoutSecs: store.getConfig(connectionId)?.query_timeout_secs }, force);
       if (requestId !== tableCommentLoadRequestId) return;
       if (connectionId !== props.connectionId || database !== props.database || schema !== metadataSchema.value || tableName !== props.tableName || (catalog || "") !== (props.catalog || "")) return;
       if (value === undefined) return;
@@ -3171,7 +3173,7 @@ async function loadTableOwner(force = false, preserveDraft = false) {
   tableOwnerLoadError.value = "";
   try {
     await store.ensureConnected(connectionId);
-    const result = await loadObjectMetadataFacet({ connectionId, database, schema, tableName, catalog }, "owner", () => api.getTableOwner(connectionId, database, schema, tableName), { force });
+    const result = await loadObjectMetadataFacet({ connectionId, database, schema, tableName, catalog, queryTimeoutSecs: store.getConfig(connectionId)?.query_timeout_secs }, "owner", () => api.getTableOwner(connectionId, database, schema, tableName), { force });
     if (requestId !== tableOwnerLoadRequestId) return;
     const owner = result.value || "";
     originalTableOwner.value = owner;
@@ -3297,7 +3299,7 @@ async function loadStructure(
     if (nextColumns) {
       if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
         try {
-          const { ddl } = await loadObjectDdl({ connectionId, database, schema, tableName, catalog }, { force: options.forceDdl });
+          const { ddl } = await loadObjectDdl({ connectionId, database, schema, tableName, catalog, queryTimeoutSecs: store.getConfig(connectionId)?.query_timeout_secs }, { force: options.forceDdl });
           rawDdlContent.value = await formatStructureDdl(ddl);
           ddlFetched.value = true;
           nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
@@ -3449,7 +3451,7 @@ async function revalidateCachedStructureMetadata(loadRequestId: number, scope: {
   const tableName = props.tableName;
   if (!connectionId || !database || !tableName) return;
   const revalidationId = ++structureMetadataRevalidationId;
-  const metadataRequest = { connectionId, database, schema, tableName, catalog };
+  const metadataRequest = { connectionId, database, schema, tableName, catalog, queryTimeoutSecs: store.getConfig(connectionId)?.query_timeout_secs };
   try {
     await store.ensureConnected(connectionId);
     // Force alone only clears this facet's own key; the web backend keeps its

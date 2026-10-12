@@ -1,6 +1,7 @@
 import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
+import { hasUnparsedQuerySource } from "@/lib/sql/sqlAnalysis";
 import type { DatabaseType } from "@/types/database";
 
 const HIDDEN_PRIMARY_KEY_ALIAS_PREFIX = "__DBX_PK_";
@@ -17,6 +18,7 @@ export interface HiddenPrimaryKeyQuery {
 
 export function buildQueryWithHiddenPrimaryKeys(options: { sql: string; databaseType: DatabaseType; primaryKeys: string[]; existingResultNames: string[]; sourceExpressions?: Record<string, string> }): HiddenPrimaryKeyQuery | undefined {
   if (options.primaryKeys.length === 0) return undefined;
+  if (hasUnparsedQuerySource(options.sql)) return undefined;
 
   const dialect = sqlSemanticDialectFor({ databaseType: options.databaseType });
   const usedNames = new Set(options.existingResultNames.map((name) => name.toLowerCase()));
@@ -63,7 +65,9 @@ function appendSelectProjections(sql: string, expressions: string[], databaseTyp
 
   const projectionTokens = tokens.slice(selectIndex + 1, fromIndex).filter((token) => token.kind !== "comment");
   const bareWildcard = projectionTokens.length === 1 && projectionTokens[0]?.text === "*" ? projectionTokens[0] : undefined;
-  const sourceReference = bareWildcard && databaseType === "oracle" ? singleOracleSourceReference(sql, bareWildcard.span.start) : undefined;
+  const oracleWildcard = bareWildcard && (databaseType === "oracle" || databaseType === "oceanbase-oracle");
+  const sourceReference = oracleWildcard ? singleOracleSourceReference(sql, bareWildcard.span.start) : undefined;
+  if (oracleWildcard && !sourceReference) return undefined;
   if (!sourceReference || !bareWildcard) {
     return `${sql.slice(0, projectionEnd)}, ${expressions.join(", ")}${sql.slice(projectionEnd)}`;
   }

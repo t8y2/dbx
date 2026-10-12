@@ -641,10 +641,10 @@ test("table data SQL export keeps source column names", async () => {
   }
 });
 
-function sqlExclusionOptions(): DataGridExtractorOptions {
+function sqlExclusionOptions(primaryKeyMode: DataGridExtractorOptions["sql"]["primaryKeyMode"] = "exclude-generated"): DataGridExtractorOptions {
   return {
     ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-    sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+    sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode },
   };
 }
 
@@ -666,7 +666,8 @@ test("table data SQL export passes primary key exclusion to the backend", async 
 
   await composable.exportSql();
 
-  assert.equal(apiMock.startTableExport.mock.calls[0][0].excludePrimaryKeys, true);
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].primaryKeyMode, "exclude-generated");
+  assert.deepEqual(apiMock.startTableExport.mock.calls[0][0].primaryKeys, ["id"]);
 });
 
 test("query result SQL export passes primary key exclusion and keys to the backend", async () => {
@@ -687,7 +688,7 @@ test("query result SQL export passes primary key exclusion and keys to the backe
 
   await composable.exportSql();
 
-  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].excludePrimaryKeys, true);
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].primaryKeyMode, "exclude-generated");
   assert.deepEqual(apiMock.startQueryResultExport.mock.calls[0][0].primaryKeys, ["id"]);
 });
 
@@ -706,15 +707,35 @@ test("table data SQL export keeps manually-assigned primary keys", async () => {
 
   await composable.exportSql();
 
-  assert.equal(apiMock.startTableExport.mock.calls[0][0].excludePrimaryKeys, undefined);
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].primaryKeyMode, "exclude-generated");
+  assert.deepEqual(apiMock.startTableExport.mock.calls[0][0].primaryKeys, ["user_code"]);
+});
+
+test("table data SQL export passes all-primary-key mode including manual keys", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/users-all-keys.sql");
+  const { composable } = buildExportHarness({
+    context: "table-data",
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["user_code"],
+      columns: [{ name: "user_code", data_type: "varchar", is_nullable: false, is_primary_key: true }],
+    },
+    extractorOptions: sqlExclusionOptions("exclude-all"),
+  });
+
+  await composable.exportSql();
+
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].primaryKeyMode, "exclude-all");
+  assert.deepEqual(apiMock.startTableExport.mock.calls[0][0].primaryKeys, ["user_code"]);
 });
 
 test("local SQL export asks the backend to drop primary key columns", async () => {
   const download = installTextDownloadCapture();
   const completeLocalResult: QueryResult = {
-    columns: ["id", "name"],
-    column_types: ["int4", "text"],
-    rows: [[1, "Ada"]],
+    columns: ["user_code", "name"],
+    column_types: ["varchar", "text"],
+    rows: [["A-1", "Ada"]],
     affected_rows: 0,
     execution_time_ms: 1,
     truncated: false,
@@ -729,19 +750,19 @@ test("local SQL export asks the backend to drop primary key columns", async () =
       completeLocalResult,
       tableMeta: {
         tableName: "users",
-        primaryKeys: ["id"],
+        primaryKeys: ["user_code"],
         columns: [
-          { name: "id", data_type: "int4", is_nullable: false, is_primary_key: true, extra: "auto_increment" },
+          { name: "user_code", data_type: "varchar", is_nullable: false, is_primary_key: true },
           { name: "name", data_type: "text", is_nullable: true },
         ],
       },
-      extractorOptions: sqlExclusionOptions(),
+      extractorOptions: sqlExclusionOptions("exclude-all"),
     });
 
     await composable.exportSql();
 
-    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].excludeColumns, ["id"]);
-    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].columns, ["id", "name"]);
+    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].excludeColumns, ["user_code"]);
+    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].columns, ["user_code", "name"]);
   } finally {
     download.restore();
   }

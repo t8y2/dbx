@@ -1237,7 +1237,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         header_comment_rows: false,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);

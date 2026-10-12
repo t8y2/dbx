@@ -157,6 +157,8 @@ const savingJson = ref(false);
 const newField = ref("");
 const newValue = ref("");
 const newScore = ref("");
+// Queue side for pushing into a list: "right" (RPUSH, historical default) or "left" (LPUSH).
+const listPushSide = ref<"left" | "right">("right");
 const showDeleteConfirm = ref(false);
 const showMemberDetail = ref(false);
 const editingTtl = ref(false);
@@ -2632,7 +2634,7 @@ async function listPush() {
     toast(t("redis.valueRequired"), 3000);
     return;
   }
-  await api.redisListPush(props.connectionId, props.db, props.keyRaw, newValue.value);
+  await api.redisListPush(props.connectionId, props.db, props.keyRaw, newValue.value, undefined, listPushSide.value);
   newValue.value = "";
   await load();
 }
@@ -3182,6 +3184,15 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           <span class="text-xs text-muted-foreground shrink-0">{{ collectionCountLabel("items", listRows.length, activeCollectionSearchQuery ? null : collectionTotal) }}</span>
           <span class="flex-1" />
           <Input v-model="newValue" class="h-6 w-40 text-xs" :placeholder="t('redis.valuePlaceholder')" @keydown.enter="listPush" />
+          <Select v-model="listPushSide">
+            <SelectTrigger class="h-6 w-auto min-w-[120px] gap-1 px-2 text-xs" :aria-label="t('redis.pushSide')">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="right" class="text-xs">{{ t("redis.pushSideRight") }}</SelectItem>
+              <SelectItem value="left" class="text-xs">{{ t("redis.pushSideLeft") }}</SelectItem>
+            </SelectContent>
+          </Select>
           <Button variant="ghost" size="sm" class="h-6 text-xs" @click="listPush"><Plus class="w-3 h-3 mr-1" />{{ t("redis.pushAction") }}</Button>
         </div>
         <div class="grid grid-cols-[60px_1fr_84px] border-b bg-muted/50 shrink-0">

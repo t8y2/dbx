@@ -7,7 +7,7 @@ import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsC
 import { invalidateMetadataRuntimeCachePrefix } from "@/lib/metadata/metadataRuntimeCache";
 import type { ConnectionConfig } from "@/types/database";
 
-const mocks = vi.hoisted(() => ({ listConstraints: vi.fn() }));
+const mocks = vi.hoisted(() => ({ listConstraints: vi.fn(), getTableComment: vi.fn(), getTablePartitionStatus: vi.fn(), getTablePartitioning: vi.fn(), toast: vi.fn() }));
 vi.mock("@/lib/backend/api", () => ({
   listObjects: vi.fn().mockResolvedValue([{ name: "O01_CONSTRAINTS", object_type: "TABLE", schema: "TESTER" }]),
   listSchemas: vi.fn().mockResolvedValue(["TESTER"]),
@@ -17,6 +17,9 @@ vi.mock("@/lib/backend/api", () => ({
   saveSchemaCache: vi.fn().mockResolvedValue(undefined),
   deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
   listConstraints: (...args: unknown[]) => mocks.listConstraints(...args),
+  getTableComment: (...args: unknown[]) => mocks.getTableComment(...args),
+  getTablePartitionStatus: (...args: unknown[]) => mocks.getTablePartitionStatus(...args),
+  getTablePartitioning: (...args: unknown[]) => mocks.getTablePartitioning(...args),
 }));
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
@@ -39,7 +42,7 @@ vi.mock("@/stores/settingsStore", () => ({
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key, locale: ref("en-US") }) }));
 vi.mock("@/i18n", () => ({ default: { install: () => undefined } }));
 vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ highlight: (sql: string) => sql }) }));
-vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("vue-virtual-scroller", () => ({
   RecycleScroller: defineComponent({
     props: { items: { type: Array, default: () => [] } },
@@ -65,6 +68,11 @@ const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
+  connection.db_type = "oceanbase-oracle";
+  connection.query_timeout_secs = undefined;
+  mocks.getTableComment.mockReset().mockResolvedValue(null);
+  mocks.getTablePartitionStatus.mockReset().mockResolvedValue({ isPartitionedParent: true, isPartition: false });
+  mocks.getTablePartitioning.mockReset().mockResolvedValue(null);
   mocks.listConstraints.mockResolvedValue([
     {
       name: "O01_UK",
@@ -80,6 +88,7 @@ beforeEach(() => {
   invalidateMetadataRuntimeCachePrefix("");
 });
 afterEach(() => {
+  vi.useRealTimers();
   for (const { app, host } of mountedApps.splice(0)) {
     app.unmount();
     host.remove();
@@ -102,6 +111,36 @@ async function openConstraints() {
 }
 
 describe("OceanBase Oracle constraint information", () => {
+  it.each([120, 0])("keeps a constraint request alive beyond 35 seconds with timeout %s", async (timeout) => {
+    vi.useFakeTimers();
+    connection.query_timeout_secs = timeout;
+    let resolve!: (rows: unknown[]) => void;
+    mocks.listConstraints.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const host = await openConstraints();
+    await vi.waitFor(() => expect(mocks.listConstraints).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(40_000);
+    resolve([{ name: "SLOW_CONSTRAINT", constraint_type: "UNIQUE", definition: "UNIQUE (A)", columns: ["A"], ref_columns: [], enabled: true, valid: true }]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.textContent).toContain("SLOW_CONSTRAINT");
+    expect(mocks.toast).not.toHaveBeenCalledWith(expect.stringContaining("Metadata loading timed out"), 5000);
+  });
+  it.each(["overview", "partitions"])("ends a stalled %s metadata wait through the actual detail tab", async (kind) => {
+    // Partition tabs are currently PostgreSQL-only; keep their shared lifecycle bounded too.
+    if (kind === "partitions") connection.db_type = "postgres";
+    const host = await openConstraints();
+    vi.useFakeTimers();
+    const stalled = kind === "overview" ? mocks.getTableComment : mocks.getTablePartitioning;
+    stalled.mockReturnValueOnce(new Promise(() => undefined));
+    const title = kind === "overview" ? "grid.tableInfoOverview" : "structureEditor.partitions";
+    host.querySelector<HTMLButtonElement>(`button[title="${title}"]`)!.click();
+    await vi.advanceTimersByTimeAsync(35_001);
+    expect(stalled).toHaveBeenCalled();
+    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("Metadata loading timed out"), 5000);
+  });
   it("opens its read-only Constraints tab and displays ordered metadata from the agent", async () => {
     const host = await openConstraints();
     await vi.waitFor(() => expect(host.textContent).toContain('UNIQUE ("B", "A")'));

@@ -136,6 +136,7 @@ import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { applyDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
+import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
@@ -167,7 +168,7 @@ import {
 } from "@/lib/table/objectBrowserRows";
 import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, singleClickRowAction, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
 import { objectBrowserTableSelectionAnchor, objectBrowserTableSelectionRange } from "@/lib/table/objectBrowserSelection";
-import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
+import { customTypeCapabilities, supportsTypeObjectSource, type SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { visibleMongoCollections } from "@/lib/sidebar/mongoCollectionMutation";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
@@ -176,6 +177,7 @@ import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPr
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRowsForScaffold, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
+import { metadataLoadBudgetMs } from "@/lib/metadata/metadataLoadBudget";
 import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
@@ -231,12 +233,16 @@ const selectedSchema = ref<string | undefined>(props.schema);
 const rows = ref<ObjectBrowserRow[]>([]);
 const rootRef = ref<HTMLElement>();
 const search = ref(props.initialSearchQuery ?? "");
-const objectFilter = ref<ObjectFilter>("all");
+const objectFilter = ref<ObjectFilter>(props.connection.db_type === "oceanbase-oracle" ? (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables") : "all");
 const userHasSelectedFilter = ref(false);
 const sortKey = ref<ObjectBrowserSortKey>("name");
 const sortDirection = ref<ObjectBrowserSortDirection>("asc");
 const loadingSchemas = ref(false);
 const loadingObjects = ref(false);
+const loadingMoreObjects = ref(false);
+const hasMoreObjects = ref(false);
+let objectPageOffset = 0;
+let objectSearchTimer: ReturnType<typeof setTimeout> | undefined;
 const refreshingObjects = ref(false);
 const scaffoldRefreshError = ref("");
 const sourceLoading = ref(false);
@@ -319,6 +325,8 @@ const sidePanelGuard = createSidePanelRequestGuard();
 const sidePanelRef = ref<InstanceType<typeof CustomTypeInfoPanel> | null>(null);
 const tableMetadataCapabilities = computed<TableMetadataCapabilities>(() => getTableMetadataCapabilities(effectiveDatabaseType.value));
 const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
+const usesServerObjectPaging = computed(() => props.connection.db_type === "oceanbase-oracle");
+const objectPageSize = computed(() => Math.max(1, Math.min(10_000, Math.floor(settingsStore.desktopSettings?.sidebar_table_page_size || 500))));
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
 const isVictoriaMetrics = computed(() => effectiveDatabaseType.value === "victoriametrics");
 const isMongodb = computed(() => props.connection.db_type === "mongodb");
@@ -327,7 +335,7 @@ const supportsObjectSizeStats = computed(() => !isVictoriaMetrics.value && effec
 // The batch table toolbar (export/copy/truncate/empty/drop selected) is SQL-only:
 // MongoDB collections are not dropped or truncated through it.
 const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !isMongodb.value && effectiveDatabaseType.value !== "nebula");
-const showTableStatistics = computed(() => effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
+const showTableStatistics = computed(() => !usesServerObjectPaging.value && effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
 const showObjectRowStats = computed(() => showTableStatistics.value);
 const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
@@ -433,23 +441,25 @@ const vacuumRiskMessage = computed(() => (vacuumExecuting.value ? t("contextMenu
 const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(effectiveDatabaseType.value));
 const objectFilters = computed<ObjectFilter[]>(() =>
-  (
-    [
-      ["all", objectCounts.value.all],
-      ["tables", objectCounts.value.tables],
-      ["views", objectCounts.value.views],
-      ["materializedViews", objectCounts.value.materializedViews],
-      ["procedures", objectCounts.value.procedures],
-      ["functions", objectCounts.value.functions],
-      ["triggers", objectCounts.value.triggers],
-      ["events", objectCounts.value.events],
-      ["sequences", objectCounts.value.sequences],
-      ["packages", objectCounts.value.packages],
-      ["types", objectCounts.value.types],
-    ] as Array<[ObjectFilter, number]>
-  )
-    .filter(([filter, count]) => filter === "all" || count > 0)
-    .map(([filter]) => filter),
+  usesServerObjectPaging.value
+    ? ["all", "tables", "views", "procedures", "functions", "sequences", "packages", "types"]
+    : (
+        [
+          ["all", objectCounts.value.all],
+          ["tables", objectCounts.value.tables],
+          ["views", objectCounts.value.views],
+          ["materializedViews", objectCounts.value.materializedViews],
+          ["procedures", objectCounts.value.procedures],
+          ["functions", objectCounts.value.functions],
+          ["triggers", objectCounts.value.triggers],
+          ["events", objectCounts.value.events],
+          ["sequences", objectCounts.value.sequences],
+          ["packages", objectCounts.value.packages],
+          ["types", objectCounts.value.types],
+        ] as Array<[ObjectFilter, number]>
+      )
+        .filter(([filter, count]) => filter === "all" || count > 0)
+        .map(([filter]) => filter),
 );
 const showObjectFilter = computed(() => objectFilters.value.length > 2);
 // A scope that holds a single object kind makes "全部 14" and "表 14" the same number, so the
@@ -613,10 +623,24 @@ watch([sortKey, sortDirection], () => scrollObjectsToTop());
 
 // Also jump to the top when the search query or object-type filter changes —
 // filtered results bear no relation to the previous scroll position.
-watch(search, (value) => {
-  scrollObjectsToTop();
-  emit("searchChange", value);
-});
+watch(
+  search,
+  (value) => {
+    scrollObjectsToTop();
+    emit("searchChange", value);
+    if (usesServerObjectPaging.value) {
+      clearTimeout(objectSearchTimer);
+      objectBrowserRowsLoadGuard.invalidate();
+      rows.value = [];
+      hasMoreObjects.value = false;
+      loadingMoreObjects.value = false;
+      loadingObjects.value = true;
+      if (!value.trim()) void loadObjects();
+      else objectSearchTimer = setTimeout(() => void loadObjects(), 300);
+    }
+  },
+  { flush: "sync" },
+);
 watch(objectFilter, () => {
   if (preserveObjectFilterScrollOnce) {
     preserveObjectFilterScrollOnce = false;
@@ -806,11 +830,13 @@ function typeLabel(row: ObjectBrowserRow) {
 }
 
 function sortIconFor(key: ObjectBrowserSortKey) {
+  if (usesServerObjectPaging.value) return null;
   if (sortKey.value !== key) return null;
   return sortDirection.value === "asc" ? ArrowUp : ArrowDown;
 }
 
 function toggleSort(key: ObjectBrowserSortKey) {
+  if (usesServerObjectPaging.value) return;
   if (sortKey.value === key) {
     sortDirection.value = sortDirection.value === "asc" ? "desc" : "asc";
     return;
@@ -962,6 +988,7 @@ function removePinnedObjectBrowserRows(rows: readonly ObjectBrowserRow[]) {
 }
 
 function groupedFilteredRows() {
+  if (usesServerObjectPaging.value) return { rows: rows.value, depths: new Map<string, number>() };
   return groupObjectBrowserRows({
     rows: rows.value.filter(rowMatchesObjectFilter),
     matchingRows: objectSearchSummary.value.matchingRows.filter(rowMatchesObjectFilter),
@@ -1197,7 +1224,7 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   }
   sidePanelRow.value = row;
   sidePanelMode.value = "table-info";
-  sidePanelGuard.bump();
+  const epoch = sidePanelGuard.start();
   // Reset state
   tableColumns.value = [];
   tableOverviewStats.value = null;
@@ -1225,14 +1252,17 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   // partition status first so a persisted `partitions` tab is not rejected (and
   // overwritten) before the probe lands.
   await probeTablePartitionStatus();
+  if (sidePanelGuard.isStale(epoch)) return;
   const firstTab = initialTab ?? tableInfoTab.value;
   await selectTableInfoTab(firstTab);
 }
 
 async function selectTableInfoTab(tab: TableInfoTab) {
+  const epoch = sidePanelGuard.capture();
   // The panel can be re-selected (or restored) without `openTableInfo`, so make
   // sure the partition status has been probed before the tab list is consulted.
   if (!tablePartitionStatusResolved.value) await probeTablePartitionStatus();
+  if (sidePanelGuard.isStale(epoch)) return;
   const nextTab = tableInfoTabs.value.some((item) => item.id === tab) ? tab : tableInfoTabs.value[0]?.id;
   if (!nextTab) return;
   tableInfoTab.value = nextTab;
@@ -1254,11 +1284,17 @@ async function fetchTableOverview(force = false) {
   const schema = row.schema || selectedSchema.value || props.database;
   tableOverviewLoading.value = true;
   try {
-    const [statistics, comment] = await Promise.all([api.listObjectStatistics(props.connection.id, props.database, schema).catch(() => [] as ObjectStatistics[]), api.getTableComment(props.connection.id, props.database, schema, row.name, props.catalog).catch(() => null)]);
+    const [statistics, comment] = await sidePanelGuard.wait(
+      epoch,
+      Promise.all([api.listObjectStatistics(props.connection.id, props.database, schema).catch(() => [] as ObjectStatistics[]), api.getTableComment(props.connection.id, props.database, schema, row.name, props.catalog).catch(() => null)]),
+      metadataLoadBudgetMs(props.connection.query_timeout_secs),
+    );
     if (sidePanelGuard.isStale(epoch)) return;
     tableOverviewStats.value = findTableStatistics(statistics, row.name, schema) ?? null;
     tableOverviewComment.value = comment;
     tableOverviewLoaded.value = true;
+  } catch (error) {
+    if (sidePanelGuard.isFresh(epoch)) toast(translateBackendError(t, error), 5000);
   } finally {
     if (sidePanelGuard.isFresh(epoch)) tableOverviewLoading.value = false;
   }
@@ -1267,6 +1303,7 @@ async function fetchTableOverview(force = false) {
 function tableMetadataRequest(row: ObjectBrowserRow): ObjectDdlRequest {
   return {
     connectionId: props.connection.id,
+    queryTimeoutSecs: props.connection.query_timeout_secs,
     database: props.database || "",
     schema: row.schema || selectedSchema.value || props.database,
     tableName: row.name,
@@ -1282,7 +1319,7 @@ async function fetchTableDdl(force = settingsStore.editorSettings.refreshDdlOnOp
   tableDdlLoading.value = true;
   let loadedSuccessfully = false;
   try {
-    const { ddl } = await loadObjectDdl(tableMetadataRequest(row), { force });
+    const { ddl } = await sidePanelGuard.wait(epoch, loadObjectDdl(tableMetadataRequest(row), { force }), metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (sidePanelGuard.isStale(epoch)) return;
     const formatDialect = sqlFormatDialectForDbType(effectiveDatabaseType.value);
     const unqualified = applyDdlDatabaseQualifier(ddl, formatDialect, effectiveDatabaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
@@ -1307,7 +1344,11 @@ async function fetchTableColumns(force = false) {
   let loadedSuccessfully = false;
   try {
     const request = tableMetadataRequest(row);
-    const { value: columns } = await loadObjectMetadataFacet(request, "columns", () => api.getColumns(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
+    const { value: columns } = await sidePanelGuard.wait(
+      epoch,
+      loadObjectMetadataFacet(request, "columns", () => api.getColumns(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force }),
+      metadataLoadBudgetMs(props.connection.query_timeout_secs),
+    );
     if (sidePanelGuard.isStale(epoch)) return;
     tableColumns.value = columns;
     loadedSuccessfully = true;
@@ -1331,7 +1372,11 @@ async function fetchTableIndexes(force = false) {
   let loadedSuccessfully = false;
   try {
     const request = tableMetadataRequest(row);
-    const { value: indexes } = await loadObjectMetadataFacet(request, "indexes", () => api.listIndexes(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
+    const { value: indexes } = await sidePanelGuard.wait(
+      epoch,
+      loadObjectMetadataFacet(request, "indexes", () => api.listIndexes(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force }),
+      metadataLoadBudgetMs(props.connection.query_timeout_secs),
+    );
     if (sidePanelGuard.isStale(epoch)) return;
     tableIndexes.value = indexes;
     loadedSuccessfully = true;
@@ -1355,7 +1400,11 @@ async function fetchTableForeignKeys(force = false) {
   let loadedSuccessfully = false;
   try {
     const request = tableMetadataRequest(row);
-    const { value: fks } = await loadObjectMetadataFacet(request, "foreign-keys", () => api.listForeignKeys(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
+    const { value: fks } = await sidePanelGuard.wait(
+      epoch,
+      loadObjectMetadataFacet(request, "foreign-keys", () => api.listForeignKeys(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force }),
+      metadataLoadBudgetMs(props.connection.query_timeout_secs),
+    );
     if (sidePanelGuard.isStale(epoch)) return;
     tableForeignKeys.value = fks;
     loadedSuccessfully = true;
@@ -1379,7 +1428,11 @@ async function fetchTableTriggers(force = false) {
   let loadedSuccessfully = false;
   try {
     const request = tableMetadataRequest(row);
-    const { value: triggers } = await loadObjectMetadataFacet(request, "triggers", () => api.listTriggers(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
+    const { value: triggers } = await sidePanelGuard.wait(
+      epoch,
+      loadObjectMetadataFacet(request, "triggers", () => api.listTriggers(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force }),
+      metadataLoadBudgetMs(props.connection.query_timeout_secs),
+    );
     if (sidePanelGuard.isStale(epoch)) return;
     tableTriggers.value = triggers;
     loadedSuccessfully = true;
@@ -1405,7 +1458,7 @@ async function probeTablePartitionStatus() {
   const epoch = sidePanelGuard.capture();
   try {
     const request = tableMetadataRequest(row);
-    const status = await api.getTablePartitionStatus(request.connectionId, request.database, request.schema || request.database, request.tableName);
+    const status = await sidePanelGuard.wait(epoch, api.getTablePartitionStatus(request.connectionId, request.database, request.schema || request.database, request.tableName), metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (sidePanelGuard.isStale(epoch)) return;
     tableIsPartitioned.value = status.isPartitionedParent || status.isPartition;
   } catch {
@@ -1426,7 +1479,7 @@ async function fetchTablePartitions(force = false) {
   try {
     const request = tableMetadataRequest(row);
     // Live catalog read: partition metadata has no persisted cache facet.
-    const value = await api.getTablePartitioning(request.connectionId, request.database, request.schema || request.database, request.tableName);
+    const value = await sidePanelGuard.wait(epoch, api.getTablePartitioning(request.connectionId, request.database, request.schema || request.database, request.tableName), metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (sidePanelGuard.isStale(epoch)) return;
     tablePartitions.value = value;
     loadedSuccessfully = true;
@@ -1451,7 +1504,11 @@ async function fetchTableConstraints(force = false) {
   let loadedSuccessfully = false;
   try {
     const request = tableMetadataRequest(row);
-    const { value: constraints } = await loadObjectMetadataFacet(request, "constraints", () => api.listConstraints(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
+    const { value: constraints } = await sidePanelGuard.wait(
+      epoch,
+      loadObjectMetadataFacet(request, "constraints", () => api.listConstraints(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force }),
+      metadataLoadBudgetMs(props.connection.query_timeout_secs),
+    );
     if (sidePanelGuard.isStale(epoch)) return;
     tableConstraints.value = constraints;
     loadedSuccessfully = true;
@@ -1640,17 +1697,21 @@ async function loadSourcePanel(row: ObjectBrowserRow, options?: { preserveEditin
   const database = props.database;
   const schema = row.schema || selectedSchema.value || database;
   try {
-    const result = await api.getObjectSource(connectionId, database, schema, row.name, row.type as ObjectSourceKind, row.signature ?? undefined);
+    const result = await sidePanelGuard.wait(epoch, api.getObjectSource(connectionId, database, schema, row.name, row.type as ObjectSourceKind, row.signature ?? undefined), metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (sidePanelGuard.isStale(epoch)) return;
     sourceCanEdit.value = result.editable !== false && !["TRIGGER", "TYPE", "TYPE_BODY"].includes(row.type) && (row.type !== "SEQUENCE" || effectiveDatabaseType.value === "oceanbase-oracle");
     const editable = sourceCanEdit.value
-      ? await api.buildEditableObjectSource({
-          databaseType: effectiveDatabaseType.value,
-          objectType: row.type as ObjectSourceKind,
-          schema,
-          name: row.name,
-          source: result.source,
-        })
+      ? await sidePanelGuard.wait(
+          epoch,
+          api.buildEditableObjectSource({
+            databaseType: effectiveDatabaseType.value,
+            objectType: row.type as ObjectSourceKind,
+            schema,
+            name: row.name,
+            source: result.source,
+          }),
+          metadataLoadBudgetMs(props.connection.query_timeout_secs),
+        )
       : result.source;
     if (sidePanelGuard.isStale(epoch)) return;
     // Viewing database source must preserve its original whitespace and comments;
@@ -3193,7 +3254,7 @@ async function loadSchemas(epoch: number): Promise<boolean> {
   const connectionId = props.connection.id;
   const database = props.database;
   try {
-    const names = filterSchemaNamesForConnection(await api.listSchemas(connectionId, database), props.connection, database, {
+    const names = filterSchemaNamesForConnection(await schemaListLoadGuard.wait(epoch, api.listSchemas(connectionId, database), metadataLoadBudgetMs(props.connection.query_timeout_secs)), props.connection, database, {
       showSystemSchemas: props.connection.show_system_schemas === true,
     });
     if (!schemaListLoadGuard.isEpochCurrent(epoch)) return false;
@@ -3255,7 +3316,7 @@ function openInitialEventIfNeeded() {
 function finishObjectBrowserRowsLoad() {
   loadingObjects.value = false;
   const preferredFilter = props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables");
-  if (!userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
+  if (!usesServerObjectPaging.value && !userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
     // The default table filter is a presentation choice, not a user query
     // change, so preserve the tab's saved scroll offset across remounts.
     preserveObjectFilterScrollOnce = objectFilter.value !== "tables";
@@ -3278,6 +3339,8 @@ watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () =
 // (#8301)。经 objectListSchemaForConnection 回退到连接用户名（大写），仅限
 // 达梦；oracle/oceanbase-oracle 维持空 schema 由后端解析当前 schema。
 async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean }) {
+  clearTimeout(objectSearchTimer);
+  if (usesServerObjectPaging.value) return loadObjectPage(false);
   error.value = "";
   // A new load supersedes any in-flight one, so reset the transient refresh flags
   // on entry. A superseded request's finally() can no longer run (the guard's
@@ -3331,7 +3394,8 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
   }
 
   try {
-    const nextRows = props.connection.db_type === "mongodb" ? await loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : await loadSqlObjectBrowserRows(request);
+    const load = props.connection.db_type === "mongodb" ? loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : loadSqlObjectBrowserRows(request);
+    const nextRows = await objectBrowserRowsLoadGuard.wait(request.epoch, load, metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     applyObjectBrowserRows(nextRows);
     const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
@@ -3350,6 +3414,65 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
       loadingObjects.value = false;
       refreshingObjects.value = false;
       finishOnce();
+    }
+  }
+}
+
+async function loadObjectPage(append: boolean) {
+  if (append && (loadingObjects.value || loadingMoreObjects.value || !hasMoreObjects.value)) return;
+  const schema = needsSchema.value ? objectListSchemaForConnection(props.connection, selectedSchema.value) : props.database;
+  const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));
+  const offset = append ? objectPageOffset : 0;
+  const pageSize = objectPageSize.value;
+  const filter = search.value.trim();
+  const typeFilter = objectFilter.value;
+  const objectTypes: Partial<Record<ObjectFilter, (SidebarObjectKind | "EVENT")[]>> = {
+    tables: ["TABLE"],
+    views: ["VIEW"],
+    materializedViews: ["MATERIALIZED_VIEW"],
+    procedures: ["PROCEDURE"],
+    functions: ["FUNCTION"],
+    triggers: ["TRIGGER"],
+    events: ["EVENT"],
+    sequences: ["SEQUENCE"],
+    packages: ["PACKAGE", "PACKAGE_BODY"],
+    types: ["TYPE", "TYPE_BODY"],
+  };
+  const isCurrent = () => objectBrowserRowsLoadGuard.isCurrent(request) && search.value.trim() === filter && objectFilter.value === typeFilter;
+  error.value = "";
+  scaffoldRefreshError.value = "";
+  loadingObjects.value = !append;
+  loadingMoreObjects.value = append;
+  if (!append) {
+    rows.value = [];
+    hasMoreObjects.value = false;
+    objectPageOffset = 0;
+  }
+  try {
+    if (parseSlashDelimitedRegexQuery(filter)) {
+      error.value = t("objects.pagedRegexUnsupported");
+      return;
+    }
+    const objects = await objectBrowserRowsLoadGuard.wait(
+      request.epoch,
+      api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, objectTypes[typeFilter], filter || undefined, pageSize + 1, offset, request.scope.catalog),
+      metadataLoadBudgetMs(props.connection.query_timeout_secs),
+    );
+    if (!isCurrent()) return;
+    const page = objects.slice(0, pageSize);
+    const pageRows = buildObjectBrowserRows({ objects: page, database: request.scope.database, fallbackSchema: request.scope.schema, rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value) });
+    applyObjectBrowserRows(append ? [...rows.value, ...pageRows] : pageRows);
+    objectPageOffset = offset + page.length;
+    hasMoreObjects.value = objects.length > pageSize;
+  } catch (e: unknown) {
+    if (!isCurrent()) return;
+    if (append) scaffoldRefreshError.value = translateBackendError(t, e);
+    else error.value = translateBackendError(t, e);
+  } finally {
+    if (isCurrent()) {
+      loadingObjects.value = false;
+      loadingMoreObjects.value = false;
+      if (!append) finishObjectBrowserRowsLoad();
     }
   }
 }
@@ -3454,7 +3577,7 @@ function onSchemaChange(value: any) {
   selectedSchema.value = typeof value === "string" && value ? value : undefined;
   emit("schemaChange", selectedSchema.value);
   userHasSelectedFilter.value = false;
-  objectFilter.value = "all";
+  objectFilter.value = usesServerObjectPaging.value ? (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables") : "all";
   void loadObjects();
 }
 
@@ -3487,13 +3610,15 @@ function filterLabel(filter: ObjectFilter) {
                       : filter === "types"
                         ? "tree.types"
                         : "objects.all";
-  return `${t(key)} ${filterCount(filter)}`;
+  return usesServerObjectPaging.value ? t(key) : `${t(key)} ${filterCount(filter)}`;
 }
 
 function selectObjectFilter(filter: ObjectFilter) {
+  if (filter === objectFilter.value) return;
   userHasSelectedFilter.value = true;
   objectFilter.value = filter;
   emit("filterChange", filter);
+  if (usesServerObjectPaging.value) void loadObjects();
 }
 
 function getSearchInput(): HTMLInputElement | null {
@@ -3535,10 +3660,26 @@ function matchesRefreshScope(scope: { schema?: string; catalog?: string }): bool
 defineExpose({ focusSearch, refresh, matchesRefreshScope });
 
 onBeforeUnmount(() => {
+  clearTimeout(objectSearchTimer);
+  sidePanelGuard.bump();
   objectBrowserRowsLoadGuard.invalidate();
   schemaListLoadGuard.invalidate();
   stopColumnResize?.();
 });
+
+watch(
+  () => connectionStore.metadataGenerationFor?.(props.connection.id, props.database),
+  () => {
+    clearTimeout(objectSearchTimer);
+    objectBrowserRowsLoadGuard.invalidate();
+    schemaListLoadGuard.invalidate();
+    closeSidePanel();
+    loadingSchemas.value = false;
+    loadingObjects.value = false;
+    loadingMoreObjects.value = false;
+    refreshingObjects.value = false;
+  },
+);
 
 watch(
   [() => props.connection.id, () => props.database, () => props.schema],
@@ -3547,7 +3688,7 @@ watch(
     const contextEpoch = schemaListLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
-    objectFilter.value = "all";
+    objectFilter.value = usesServerObjectPaging.value ? (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables") : "all";
     clearTableSelection();
     // Close side panel and invalidate any pending source/table-info requests
     // so stale results from the old context don't overwrite new state.
@@ -3906,7 +4047,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         @update:model-value="onSchemaChange"
       />
       <!-- Sort selector -->
-      <div v-if="showInlineSortAndView" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
+      <div v-if="showInlineSortAndView && !usesServerObjectPaging" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
         <select
           class="h-6 cursor-pointer appearance-none rounded-sm bg-transparent px-1.5 text-xs text-muted-foreground outline-none hover:text-foreground focus:text-foreground"
           :value="sortKey"
@@ -3942,7 +4083,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         {{ t("objects.pasteTableSelected") }}
       </Button>
       <ToolbarOverflowMenu v-if="showToolbarOverflow" :label="t('toolbar.moreActions')" button-class="h-7 w-7">
-        <DropdownMenuSub>
+        <DropdownMenuSub v-if="!usesServerObjectPaging">
           <DropdownMenuSubTrigger>
             <ArrowDown class="h-3.5 w-3.5" />
             {{ t("objects.sortBy") }}
@@ -3954,7 +4095,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             </DropdownMenuItem>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
-        <DropdownMenuItem @select="sortDirection = sortDirection === 'asc' ? 'desc' : 'asc'">
+        <DropdownMenuItem v-if="!usesServerObjectPaging" @select="sortDirection = sortDirection === 'asc' ? 'desc' : 'asc'">
           <ArrowUp v-if="sortDirection === 'asc'" class="h-3.5 w-3.5" />
           <ArrowDown v-else class="h-3.5 w-3.5" />
           {{ sortDirection === "asc" ? t("objects.sortDesc") : t("objects.sortAsc") }}
@@ -4038,7 +4179,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('name')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('name')">
                   <span class="truncate">{{ t("objects.name") }}</span>
                   <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4047,7 +4188,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('type')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('type')">
                   <span class="truncate">{{ t("objects.type") }}</span>
                   <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4056,7 +4197,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div v-if="showObjectRowStats" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
                   <span class="truncate">{{ objectRowsLabel }}</span>
                   <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4069,7 +4210,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div v-if="showObjectSizeStats" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
                   <span class="truncate">{{ t("objects.size") }}</span>
                   <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4082,7 +4223,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div v-if="hasCreatedAt" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('created_at')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('created_at')">
                   <span class="truncate">{{ t("objects.createdAt") }}</span>
                   <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4095,7 +4236,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div v-if="hasUpdatedAt" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('updated_at')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('updated_at')">
                   <span class="truncate">{{ t("objects.updatedAt") }}</span>
                   <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4108,7 +4249,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
               <div class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('comment')">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('comment')">
                   <span class="truncate">{{ t("objects.comment") }}</span>
                   <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
                 </button>
@@ -4237,6 +4378,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </div>
             </template>
           </RecycleScroller>
+        </div>
+        <div v-if="usesServerObjectPaging" class="flex shrink-0 items-center justify-between gap-2 border-t px-3 py-2 text-xs text-muted-foreground">
+          <span>{{ t("objects.pagedOrder", { count: rows.length }) }}</span>
+          <Button v-if="hasMoreObjects" data-object-load-more variant="outline" size="sm" :disabled="loadingMoreObjects" @click="loadObjectPage(true)">
+            <Loader2 v-if="loadingMoreObjects" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            {{ t("tree.loadMore") }}
+          </Button>
         </div>
       </div>
       <!-- Right-side panel: table info or source -->

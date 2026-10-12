@@ -1908,7 +1908,8 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean
       return;
     }
     if (hasTreeNodeDatabaseContext(node)) {
-      const tabId = queryStore.openObjectBrowser(node.connectionId, node.database, node.schema, node.catalog, eventName, eventReadOnly, objectFilter, eventCreateRequestId);
+      const database = node.schema && connectionUsesVisibleSchemaFilter(connection) ? connection.database || node.database : node.database;
+      const tabId = queryStore.openObjectBrowser(node.connectionId, database, node.schema, node.catalog, eventName, eventReadOnly, objectFilter, eventCreateRequestId);
       if (focusSearch) await nextTick(() => requestObjectBrowserSearchFocus(tabId));
       return;
     }

@@ -643,6 +643,21 @@ function isSelectStar(body: string, alias: string | undefined): boolean {
   return new RegExp(`^${escapeRegExp(alias)}\\s*\\.\\s*\\*$`, "i").test(trimmed);
 }
 
+export function hasUnparsedQuerySource(sql: string): boolean {
+  const normalized = stripSqlComments(sql).trim();
+  if (/^WITH\b/i.test(normalized) || hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"])) return false;
+  const fromIndex = findTopLevelKeyword(normalized, "FROM", 0);
+  if (fromIndex < 0) return false;
+  const forIndex = findTopLevelKeyword(normalized, "FOR", fromIndex + 4);
+  const forLocksRows = forIndex >= 0 && /^FOR\s+(?:UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b/i.test(normalized.slice(forIndex));
+  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", ...(forLocksRows ? ["FOR"] : [])], fromIndex + 4);
+  const fromBody = normalized
+    .slice(fromIndex + 4, fromEnd < 0 ? normalized.length : fromEnd)
+    .replace(/;+\s*$/, "")
+    .trim();
+  return parseFromSources(fromBody).length === 0;
+}
+
 function parseFromSources(body: string): EditableQuerySource[] {
   if (!body) return [];
   const sources: EditableQuerySource[] = [];
@@ -663,7 +678,10 @@ function parseFromSources(body: string): EditableQuerySource[] {
       continue;
     }
     const joinIndex = findTopLevelKeyword(body, "JOIN", pos);
-    if (joinIndex < 0) break;
+    const joinPrefix = body.slice(pos, joinIndex < 0 ? body.length : joinIndex).trim();
+    const hasJoinCondition = startsWithKeyword(body, pos, "ON") || startsWithKeyword(body, pos, "USING");
+    if (joinIndex < 0) return hasJoinCondition ? sources : [];
+    if (!hasJoinCondition && !/^(?:(?:LEFT|RIGHT|INNER|FULL|CROSS|OUTER|NATURAL)\s*)*$/i.test(joinPrefix)) return [];
     const next = parseTableSourceAt(body, joinIndex + "JOIN".length, sources.length);
     if (!next) return [];
     sources.push(next.source);
@@ -695,6 +713,14 @@ function parseTableSourceAt(text: string, start: number, index: number): { sourc
     alias = aliasIdent.value;
     end = aliasIdent.end;
   }
+  tailPos = skipWhitespace(text, end);
+  if (startsWithKeyword(text, tailPos, "WITH")) {
+    const hintTokens = tokenizeSqlSemantic(text.slice(tailPos), "sqlserver");
+    if (hintTokens[1]?.text !== "(") return null;
+    const closingHint = hintTokens.find((token) => token.text === ")" && token.depth === 0);
+    if (!closingHint) return null;
+    end = tailPos + closingHint.span.end;
+  }
 
   const tableName = ident.parts[ident.parts.length - 1]!;
   const tableNameQuoted = ident.quoted[ident.quoted.length - 1];
@@ -724,7 +750,7 @@ function isExternalFromSource(body: string): boolean {
 function tableSourceTerminatorAt(text: string, pos: number): boolean {
   if (pos >= text.length) return true;
   if (text[pos] === ",") return true;
-  return ["ON", "USING", "JOIN", "LEFT", "RIGHT", "INNER", "FULL", "CROSS", "OUTER", "NATURAL"].some((keyword) => startsWithKeyword(text, pos, keyword));
+  return ["ON", "USING", "JOIN", "LEFT", "RIGHT", "INNER", "FULL", "CROSS", "OUTER", "NATURAL", "WITH"].some((keyword) => startsWithKeyword(text, pos, keyword));
 }
 
 function startsWithKeyword(text: string, pos: number, keyword: string): boolean {

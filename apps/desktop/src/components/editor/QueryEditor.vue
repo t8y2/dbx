@@ -350,6 +350,7 @@ async function loadStructurePeekColumns(panelId: string, requestId: number, targ
   try {
     const objectMetadataRequest = {
       connectionId: props.connectionId,
+      queryTimeoutSecs: connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
       database,
       schema,
       tableName: target.name,

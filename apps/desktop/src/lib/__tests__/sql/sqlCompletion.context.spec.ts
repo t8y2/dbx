@@ -14,6 +14,40 @@ import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion"
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts } from "@/lib/sql/sqlCompletionTriggerPolicy";
 
+describe("OceanBase quoted routine lookup context", () => {
+  it("does not trust a cached package owner when the current schema is unknown", () => {
+    const sql = "CALL PKG.R";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+      tables: [],
+      columnsByTable: new Map(),
+      objects: [{ name: "RUN", schema: "OTHER", parentSchema: "OTHER", parentName: "PKG", type: "procedure", signature: "P NUMBER", routineId: "other-run" }],
+    });
+    expect(items.some((item) => item.label === "RUN")).toBe(false);
+  });
+
+  it.each([
+    ["CALL PKG.R", "APP", "APP.PKG.RUN"],
+    ["CALL OTHER.PKG.R", "APP", "OTHER.PKG.RUN"],
+    ["CALL OTHER.R", "APP", "OTHER.RUN"],
+    ["CALL PKG.R", "OTHER", "OTHER.PKG.RUN"],
+  ])("keeps cached package owners scoped for %s in %s", (sql, currentSchema, expected) => {
+    const objects = [
+      { name: "RUN", schema: "APP", parentSchema: "APP", parentName: "PKG", type: "procedure" as const, signature: "P VARCHAR2", routineId: "app-run" },
+      { name: "RUN", schema: "OTHER", parentSchema: "OTHER", parentName: "PKG", type: "procedure" as const, signature: "P NUMBER", routineId: "other-run" },
+      { name: "RUN", schema: "OTHER", type: "procedure" as const, signature: "P DATE", routineId: "standalone-run" },
+    ];
+    const items = buildSqlCompletionItems(sql, sql.length, { databaseType: "oceanbase-oracle", dialect: "oracle", currentSchema, tables: [], columnsByTable: new Map(), objects });
+    expect(items.filter((item) => item.label === "RUN").map((item) => item.info?.split("\n")[0])).toEqual([expected]);
+  });
+
+  it.each(['CALL "Mixed.Owner"."Do', 'CALL "Mixed.Owner"."Do"'])("preserves quoted prefixes in %s", (sql) => {
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "oceanbase-oracle" });
+    expect(context).toMatchObject({ prefix: "Do", prefixQuoted: true, qualifierParts: ["Mixed.Owner"], qualifierQuoted: [true] });
+  });
+});
+
 describe("SQL completion replacement", () => {
   const columnItem = { label: "price", type: "column" as const, apply: "price", boost: 0 };
 

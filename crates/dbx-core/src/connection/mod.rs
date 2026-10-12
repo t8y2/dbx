@@ -1473,6 +1473,22 @@ impl AppState {
         self.connection_liveness.subscribe()
     }
 
+    /// A locator belongs to its original workload session; never recreate it during lookup.
+    pub(crate) async fn existing_workload_pool_for_session(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        client_session_id: Option<&str>,
+    ) -> Option<(String, PoolKind)> {
+        let config = self.configs.read().await.get(connection_id).cloned()?;
+        let base_key = base_pool_key_for_config(Some(&config), connection_id, database, None, false);
+        let key = pool_key_for_session_role(Some(&config), base_key, client_session_id, AgentSessionRole::Workload);
+        if self.pool_credential_owner_mismatch(&config, &key).await {
+            return None;
+        }
+        self.pool_handle(&key).await.map(|pool| (key, pool))
+    }
+
     /// Find an already-registered metadata/workload pool for a metadata read.
     /// Unlike `get_or_create_metadata_pool_for_session`, this is a pure lookup:
     /// it never validates credentials, starts an agent, or opens a transport.

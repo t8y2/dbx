@@ -398,18 +398,20 @@ pub async fn get_columns(
     table: String,
     catalog: Option<String>,
     client_session_id: Option<String>,
+    current_schema: Option<String>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::get_doris_catalog_columns_core(&state, &connection_id, &catalog, &database, &table)
             .await;
     }
-    dbx_core::schema::get_columns_core_for_session(
+    dbx_core::schema::get_columns_core_for_session_in_context(
         &state,
         &connection_id,
         &database,
         &schema,
         &table,
         client_session_id.as_deref(),
+        current_schema.as_deref(),
     )
     .await
 }

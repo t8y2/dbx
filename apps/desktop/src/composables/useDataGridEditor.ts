@@ -155,6 +155,7 @@ export interface UseDataGridEditorOptions {
   cacheKey?: ComputedRef<string | undefined>;
   /** 保存成功后结果负载被原地修改时通知宿主，使缓存的字节估算失效。 */
   onResultPayloadMutated?: () => void;
+  prepareSaveBaseline?: (changes: { dirtyRows: ReadonlyMap<number, ReadonlyMap<number, CellValue>>; deletedRows: ReadonlySet<number> }) => Promise<void>;
   refreshSavedRows?: (request: { dirtyRows: ReadonlyMap<number, ReadonlyMap<number, CellValue>>; columns: readonly string[]; rows: readonly (readonly CellValue[])[] }) => Promise<boolean>;
   onCellValueChanged?: (rowId: number, columnIndex: number) => void;
   prepareFullReload?: () => void;
@@ -1753,6 +1754,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     for (const group of groups) {
       const part = await api.prepareDataGridSave(group, saveDriverProfile());
       if (part.validationError) return part;
+      if (part.boundStatements?.length || prepared.boundStatements) {
+        prepared.boundStatements ??= prepared.statements.map((sql) => ({ previewSql: sql, sql, blobParameters: [] }));
+        prepared.boundStatements.push(...(part.boundStatements ?? part.statements.map((sql) => ({ previewSql: sql, sql, blobParameters: [] }))));
+      }
       prepared.statements.push(...part.statements);
       prepared.rollbackStatements.unshift(...part.rollbackStatements);
       prepared.keylessGuards!.push(...(part.keylessGuards ?? []));
@@ -2121,6 +2126,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       return;
     }
 
+    try {
+      if (options.prepareSaveBaseline) await options.prepareSaveBaseline(snapshot);
+    } catch (error) {
+      saveError.value = normalizeDataGridSaveError(databaseType.value, error);
+      await finishInterruptedSaveChanges(snapshot);
+      return;
+    }
     const stmtOptions = saveStatementOptions(snapshot);
     let preparedSave: Awaited<ReturnType<typeof api.prepareDataGridSave>> | undefined;
     if (stmtOptions) {
@@ -2214,6 +2226,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
     const start = Date.now();
     let apiResult: { affected_rows?: number } | undefined;
+    let singleStatementAffectedRows: number | undefined;
     console.info("[DBX][dataGrid:save-statements]", {
       databaseType: databaseType.value,
       table: tableMeta.value ? [tableMeta.value.schema, tableMeta.value.tableName].filter(Boolean).join(".") : undefined,
@@ -2223,10 +2236,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (txnSessionId && hasBackendSaveTarget.value) {
       options.onManualTransactionMutation?.();
       try {
-        const results = await api.executeInManualTransaction(txnSessionId, stmts.join(";\n"), database.value ?? "", preparedSave?.executionSchema);
+        const results = preparedSave?.boundStatements?.length
+          ? await api.executeInManualTransaction(txnSessionId, stmts.join(";\n"), database.value ?? "", preparedSave?.executionSchema, undefined, undefined, undefined, undefined, undefined, undefined, undefined, preparedSave.boundStatements)
+          : await api.executeInManualTransaction(txnSessionId, stmts.join(";\n"), database.value ?? "", preparedSave?.executionSchema);
         apiResult = {
           affected_rows: results.reduce((total, result) => total + (result.affected_rows ?? 0), 0),
         };
+        if (stmts.length === 1 && results.length === 1) singleStatementAffectedRows = results[0]?.affected_rows;
       } catch (e: any) {
         saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, snapshot, e);
         await finishInterruptedSaveChanges(snapshot);
@@ -2234,7 +2250,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
     } else if (useTransaction.value && stmts.length > 1 && hasBackendSaveTarget.value) {
       try {
-        apiResult = await api.executeInTransaction(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
+        apiResult = preparedSave?.boundStatements?.length
+          ? await api.executeInTransaction(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema, undefined, preparedSave.boundStatements)
+          : await api.executeInTransaction(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
       } catch (e: any) {
         saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, snapshot, e);
         await finishInterruptedSaveChanges(snapshot);
@@ -2242,7 +2260,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
     } else if (hasBackendSaveTarget.value) {
       try {
-        apiResult = await api.executeBatch(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
+        apiResult = preparedSave?.boundStatements?.length
+          ? await api.executeBatch(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema, undefined, undefined, preparedSave.boundStatements)
+          : await api.executeBatch(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
+        if (stmts.length === 1) singleStatementAffectedRows = apiResult?.affected_rows;
       } catch (e: any) {
         saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, snapshot, e);
         await finishInterruptedSaveChanges(snapshot);
@@ -2258,6 +2279,22 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         await finishInterruptedSaveChanges(snapshot);
         return;
       }
+    }
+    const missedSingleRowIdUpdate =
+      (resolvedDatabaseType.value === "oracle" || resolvedDatabaseType.value === "oceanbase-oracle") &&
+      usesSyntheticRowIdKey(resolvedDatabaseType.value, stmtOptions?.tableMeta.primaryKeys ?? []) &&
+      !joinedWriteTargets.value?.length &&
+      snapshot.dirtyRows.size === 1 &&
+      snapshot.newRows.length === 0 &&
+      snapshot.deletedRows.size === 0 &&
+      stmts.length === 1 &&
+      /^\s*UPDATE\b/i.test(stmts[0]!) &&
+      singleStatementAffectedRows === 0;
+    if (missedSingleRowIdUpdate) {
+      manualSaveRequired.value = true;
+      saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, snapshot, new Error(i18n.global.t("grid.rowIdUpdateConflict")));
+      await finishInterruptedSaveChanges(snapshot);
+      return;
     }
     // Anonymous PL/SQL reports zero for an unknown JDBC update count; its
     // SQL%ROWCOUNT guard owns concurrency checks. Only compare plain DELETEs.
@@ -2433,7 +2470,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         if (preview) return await preview({ dirtyRows: dirtyRows.value, newRows: newRows.value, newRowMeta: cloneNewRowMeta(newRowMeta.value), deletedRows: deletedRows.value, columns: result.value.columns, rows: result.value.rows });
         return [];
       }
-      const stmtOptions = saveStatementOptions();
+      const snapshot = snapshotPendingSaveChanges();
+      if (options.prepareSaveBaseline) await options.prepareSaveBaseline(snapshot);
+      const stmtOptions = saveStatementOptions(snapshot);
       if (!stmtOptions) return [];
       const prepared = await prepareSaveStatements(stmtOptions);
       if (prepared?.validationError) {

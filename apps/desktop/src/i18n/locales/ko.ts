@@ -1573,6 +1573,10 @@ export default withEnglishFallback({
     pluginSshKeyEncrypted: "암호화됨",
     objectCacheRefreshFailed: "개체 캐시 새로 고침 실패: {message}",
     mqttMaxPacketSize: "최대 패킷 크기(바이트)",
+    mqttMessageDirectionFilterLabel: "메시지 방향으로 필터링",
+    mqttDirectionFilterAll: "전체",
+    mqttDirectionFilterReceived: "수신됨",
+    mqttDirectionFilterSent: "발신됨",
   },
   editor: {
     duckdbDraining: "이전 DuckDB 쿼리가 아직 중지 중입니다. 잠시 후 다시 시도해 주세요.",

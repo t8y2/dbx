@@ -1,6 +1,8 @@
 package com.dbx.agent.oceanbaseoracle;
 
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.BlobBoundStatement;
+import com.dbx.agent.BlobBoundExecutor;
 import com.dbx.agent.AgentProtocol;
 import com.dbx.agent.CompletionAssistantCandidate;
 import com.dbx.agent.CompletionAssistantCandidateKind;
@@ -29,6 +31,7 @@ import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.QueryTiming;
+import com.dbx.agent.SpatialColumn;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 
@@ -67,6 +70,8 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         "GGSYS", "FLOWS_FILES", "APEX_PUBLIC_USER", "GSMROOTUSER", "SYSRAC"
     );
     private boolean queryTimeoutChanged;
+    private final OceanBaseLobValues lobValues = new OceanBaseLobValues();
+    private boolean deferCharacterLobs;
 
     public static final JdbcAgentProfile OCEANBASE_ORACLE_PROFILE = new JdbcAgentProfile(
         "com.oceanbase.jdbc.Driver",
@@ -90,17 +95,46 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     public boolean supportsQueryTiming() { return true; }
 
     @Override
+    public boolean supportsBlobBindStatements() { return true; }
+
+    @Override
+    public QueryResult executeBlobBoundStatements(List<String> previews, List<BlobBoundStatement> statements,
+        String schema, int timeoutSecs, boolean transaction) {
+        return BlobBoundExecutor.execute(requireConnected(), previews, statements, schema,
+            this::setSchemaSQL, this::resetSchemaSQL, timeoutSecs, transaction, OceanBaseLobStatements.binding(this::discardConnection));
+    }
+
+    @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+        var lobCheckpoint = lobValues.checkpoint();
         try (QueryTiming timing = QueryTiming.begin()) {
+            prepareLobExecution(sql, options.getDeferLobs());
             QueryResult result = super.executeQuery(sql, schema, options);
+            var marked = OceanBaseLobValues.mark(result.getColumns(), result.getColumn_types(), result.getRows());
+            if (marked != null) {
+                var spatialColumns = remapLobSpatialColumns(result.getSpatial_columns(), marked.columns());
+                var spatialValues = remapLobSpatialValues(result.getSpatial_values(), marked.columns());
+                result.setColumns(marked.columns());
+                result.setColumn_types(marked.types());
+                result.setRows(marked.rows());
+                result.setSpatial_columns(spatialColumns);
+                result.setSpatial_values(spatialValues);
+            }
             result.setQuery_timings_ms(timing.finish());
             return result;
+        } catch (RuntimeException error) {
+            lobValues.releaseSince(lobCheckpoint);
+            throw error;
+        } finally {
+            deferCharacterLobs = false;
         }
     }
 
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
+        var lobCheckpoint = lobValues.checkpoint();
         try (QueryTiming timing = QueryTiming.begin()) {
+            prepareLobExecution(sql, options.getDeferLobs());
             long prepareStarted = System.nanoTime();
             Connection connection = requireConnected();
             uncheckedVoid(() -> beforeQueryExecution(connection, options.getTimeoutSecs()));
@@ -108,8 +142,14 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             QueryPageResult result = JdbcExecutor.current().executeBoundedPage(
                 connection, sql, schema, this::setSchemaSQL, this::resetSchemaSQL, options, resultValueReader()
             );
+            markLobPage(result);
             result.setQuery_timings_ms(timing.finish());
             return result;
+        } catch (RuntimeException error) {
+            lobValues.releaseSince(lobCheckpoint);
+            throw error;
+        } finally {
+            deferCharacterLobs = false;
         }
     }
 
@@ -117,10 +157,165 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     public QueryPageResult fetchQueryPage(String sessionId, int pageSize) {
         try (QueryTiming timing = QueryTiming.begin()) {
             QueryPageResult result = super.fetchQueryPage(sessionId, pageSize);
+            markLobPage(result);
             result.setQuery_timings_ms(timing.finish());
             return result;
         }
     }
+
+    @Override
+    public QueryPageResult startTableRead(String sql, String schema, QueryPageOptions options) {
+        var lobCheckpoint = lobValues.checkpoint();
+        prepareLobExecution(sql, options.getDeferLobs());
+        try {
+            QueryPageResult result = super.startTableRead(sql, schema, options);
+            markLobPage(result);
+            return result;
+        } catch (RuntimeException error) {
+            lobValues.releaseSince(lobCheckpoint);
+            throw error;
+        } finally {
+            deferCharacterLobs = false;
+        }
+    }
+
+    @Override
+    public QueryPageResult fetchTableReadPage(String sessionId, int pageSize) {
+        QueryPageResult result = super.fetchTableReadPage(sessionId, pageSize);
+        markLobPage(result);
+        return result;
+    }
+
+    private static void markLobPage(QueryPageResult result) {
+        var marked = OceanBaseLobValues.mark(result.getColumns(), result.getColumn_types(), result.getRows());
+        if (marked == null) return;
+        var spatialColumns = remapLobSpatialColumns(result.getSpatial_columns(), marked.columns());
+        var spatialValues = remapLobSpatialValues(result.getSpatial_values(), marked.columns());
+        result.setColumns(marked.columns());
+        result.setColumn_types(marked.types());
+        result.setRows(marked.rows());
+        result.setSpatial_columns(spatialColumns);
+        result.setSpatial_values(spatialValues);
+    }
+
+    private static List<SpatialColumn> remapLobSpatialColumns(List<SpatialColumn> spatial, List<String> columns) {
+        List<Integer> retained = new ArrayList<>();
+        for (int index = 0; index < columns.size(); index++) {
+            if (!columns.get(index).startsWith(OceanBaseLobValues.MARKER_PREFIX)) retained.add(index);
+        }
+        List<SpatialColumn> remapped = new ArrayList<>();
+        for (SpatialColumn column : spatial) remapped.add(new SpatialColumn(retained.get(column.getColumn_index()), column.getSrid()));
+        return remapped;
+    }
+
+    private static List<List<Integer>> remapLobSpatialValues(List<List<Integer>> spatial, List<String> columns) {
+        List<List<Integer>> remapped = new ArrayList<>();
+        for (List<Integer> row : spatial) {
+            List<Integer> expanded = new ArrayList<>();
+            int sourceIndex = 0;
+            for (String column : columns) {
+                expanded.add(column.startsWith(OceanBaseLobValues.MARKER_PREFIX) ? null : row.get(sourceIndex++));
+            }
+            remapped.add(expanded);
+        }
+        return remapped;
+    }
+
+    private void prepareLobExecution(String sql, boolean requested) {
+        // Unproven statements may end the transaction or replace an object. Fail closed.
+        String leading = sql.replaceFirst("(?s)^(?:\\s|--[^\\r\\n]*(?:\\r?\\n|$)|/\\*.*?\\*/)*", "");
+        if (!leading.matches("(?is)^SELECT\\b.*") && !isSelectWithClause(leading)) lobValues.clear();
+        deferCharacterLobs = requested;
+    }
+
+    // Recognize ordinary subquery factoring only. PL/SQL declarations and unproven
+    // WITH forms retain the conservative invalidation behavior.
+    private static boolean isSelectWithClause(String sql) {
+        if (!sql.matches("(?is)^WITH\\b.*")) return false;
+        var matcher = java.util.regex.Pattern.compile("(?s)--[^\\r\\n]*|/\\*.*?\\*/|'(?:''|[^'])*+'|\"(?:\"\"|[^\"])*+\"|[A-Za-z_][A-Za-z0-9_$#]*|\\S").matcher(sql);
+        List<String> tokens = new ArrayList<>();
+        while (matcher.find()) {
+            String token = matcher.group();
+            int end = matcher.end();
+            if ((token.equalsIgnoreCase("q") || token.equalsIgnoreCase("nq")) && end + 1 < sql.length() && sql.charAt(end) == '\'') {
+                char opening = sql.charAt(end + 1);
+                char closing = switch (opening) {
+                    case '[' -> ']';
+                    case '{' -> '}';
+                    case '(' -> ')';
+                    case '<' -> '>';
+                    default -> opening;
+                };
+                int close = sql.indexOf("" + closing + '\'', end + 2);
+                if (Character.isWhitespace(opening) || close < 0) return false;
+                tokens.add("'literal'");
+                matcher.region(close + 2, sql.length());
+                continue;
+            }
+            if (!token.startsWith("--") && !token.startsWith("/*")) tokens.add(token);
+        }
+        if (tokens.isEmpty() || !tokens.get(0).equalsIgnoreCase("WITH")) return false;
+        int index = 1;
+        while (index < tokens.size()) {
+            String name = tokens.get(index++);
+            if (!name.matches("[A-Za-z_][A-Za-z0-9_$#]*|\"(?:\"\"|[^\"])++\"")) return false;
+            if (index < tokens.size() && tokens.get(index).equals("(")) {
+                index = afterLobQueryParentheses(tokens, index);
+                if (index < 0) return false;
+            }
+            if (index >= tokens.size() || !tokens.get(index++).equalsIgnoreCase("AS")) return false;
+            if (index + 1 >= tokens.size() || !tokens.get(index).equals("(") || !tokens.get(index + 1).equalsIgnoreCase("SELECT")) return false;
+            index = afterLobQueryParentheses(tokens, index);
+            if (index < 0 || index >= tokens.size()) return false;
+            if (tokens.get(index).equals(",")) {
+                index++;
+                continue;
+            }
+            if (!tokens.get(index).equalsIgnoreCase("SELECT")) return false;
+            for (int rest = index + 1; rest < tokens.size(); rest++) {
+                if (tokens.get(rest).equals(";") && rest != tokens.size() - 1) return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private static int afterLobQueryParentheses(List<String> tokens, int start) {
+        int depth = 0;
+        for (int index = start; index < tokens.size(); index++) {
+            String token = tokens.get(index);
+            if (token.equals(";")) return -1;
+            if (token.equals("(")) depth++;
+            else if (token.equals(")") && --depth == 0) return index + 1;
+        }
+        return -1;
+    }
+
+    @Override
+    protected JdbcExecutor.ResultValueReader resultValueReader() {
+        if (!deferCharacterLobs) return super.resultValueReader();
+        return (JdbcExecutor.ColumnAwareResultValueReader) (rs, index, sqlType, typeName) -> {
+            Object preview = lobValues.preview(rs, index, sqlType, typeName);
+            return preview == null ? resultValue(rs, index, sqlType) : preview;
+        };
+    }
+
+    @Override
+    protected boolean hasRetainedResultResources() { return lobValues.hasValues(); }
+
+    @Override
+    protected void releaseRetainedResultResources() { lobValues.clear(); }
+
+    @Override
+    public void invalidateLargeValues() { lobValues.clear(); }
+
+    @Override
+    public Object readLargeValueChunk(String valueRef, long offset, int limit) {
+        return unchecked(() -> lobValues.fetch(requireConnected(), valueRef, offset, limit));
+    }
+
+    @Override
+    public boolean releaseLargeValue(String valueRef) { return lobValues.release(valueRef); }
 
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
@@ -1891,6 +2086,6 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new MultiSessionJsonRpcServer(OceanBaseOracleAgent::new).run();
+        MultiSessionJsonRpcServer.withBlobBindings(OceanBaseOracleAgent::new).run();
     }
 }

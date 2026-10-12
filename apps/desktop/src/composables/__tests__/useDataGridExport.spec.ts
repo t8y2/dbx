@@ -1,14 +1,14 @@
-import { computed, ref } from "vue";
+import { computed, effectScope, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridExport, type UseDataGridExportOptions } from "@/composables/useDataGridExport";
-import type { DatabaseType } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
 import { buildDataGridCopyUpdateStatements } from "@/lib/dataGrid/dataGridSql";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import type { CellSelectionMatrix, SelectionData } from "@/lib/dataGrid/gridSelection";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
-import { extractDataGridSelection, exportQueryResultCsv, exportQueryResultJson } from "@/lib/backend/api";
+import { cancelQuery, extractDataGridSelection, exportQueryResultCsv, exportQueryResultJson, exportQueryResultMarkdown, exportQueryResultXlsx, exportSnapshotResult, readLargeValueChunk } from "@/lib/backend/api";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { clearDataGridClipboardCopy, parseDataGridClipboard } from "@/lib/dataGrid/dataGridClipboard";
 import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridExternalValue } from "@/lib/mongo/mongoDocumentValues";
@@ -52,6 +52,11 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     extractDataGridSelection: vi.fn(),
     exportQueryResultCsv: vi.fn(),
     exportQueryResultJson: vi.fn(),
+    exportQueryResultMarkdown: vi.fn(),
+    exportQueryResultXlsx: vi.fn(),
+    exportSnapshotResult: vi.fn(),
+    readLargeValueChunk: vi.fn(),
+    cancelQuery: vi.fn(),
   };
 });
 
@@ -143,6 +148,7 @@ function createExportState(
   contextColumn?: number,
   databaseType: DatabaseType = "mysql",
   displayValue?: (value: CellValue, columnIndex: number) => string,
+  overrides: Partial<UseDataGridExportOptions> = {},
 ) {
   const rows = (rowDataList ?? [rowData ?? columns.map((column, index) => (column === "id" ? 1 : `value-${index}`))]).map((data, index) => ({ ...row(data), id: index + 1 }));
   const resolvedContextRowId = contextRowId === undefined ? (rows[0]?.id ?? null) : contextRowId;
@@ -175,8 +181,186 @@ function createExportState(
     selectedRowIds,
     hasRowSelection: computed(() => selectedRowIds.value.size > 0),
   };
-  return useDataGridExport(options);
+  return { ...useDataGridExport({ ...options, ...overrides }), contextCell: options.contextCell };
 }
+
+describe("original LOB result exports", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+    vi.mocked(exportSnapshotResult).mockResolvedValue(undefined);
+  });
+  function snapshotState() {
+    const original = {
+      columns: ["id", "name"],
+      rows: [[1, "preview"]],
+      column_types: ["NUMBER", "CLOB"],
+      large_value_context: { connectionId: "original-connection", database: "original-database", clientSessionId: "original-session" },
+      large_value_cells: [{ row_index: 0, column_index: 1, value_ref: "original-locator", value_kind: "text" }],
+    } as QueryResult;
+    return {
+      original,
+      state: createExportState(editableTable, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "oracle", undefined, {
+        snapshotResult: computed(() => original),
+        hasCompleteLocalResult: computed(() => true),
+        completeLocalResult: computed(() => original),
+      }),
+    };
+  }
+  it.each(["csv", "json"] as const)("streams export-all %s from captured locators without frontend hydration or requery", async (format) => {
+    const { state } = snapshotState();
+    await (format === "csv" ? state.exportCsv() : state.exportJson());
+    expect(exportSnapshotResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        format,
+        context: expect.objectContaining({ connectionId: "original-connection", clientSessionId: "original-session" }),
+        cells: [{ rowIndex: 0, columnIndex: 1, valueRef: "original-locator" }],
+      }),
+      expect.any(String),
+      expect.any(AbortSignal),
+    );
+    expect(readLargeValueChunk).not.toHaveBeenCalled();
+    expect(exportQueryResultCsv).not.toHaveBeenCalled();
+    expect(exportQueryResultJson).not.toHaveBeenCalled();
+  });
+  it.each(["csv", "json"] as const)("preserves hidden-key filtering and the row limit for snapshot %s", async (format) => {
+    const { state, original } = snapshotState();
+    original.columns.push("__DBX_PK_0");
+    original.rows = [
+      [1, "preview", "rowid-1"],
+      [2, "second preview", "rowid-2"],
+    ];
+    original.hidden_column_indexes = [2];
+    original.large_value_cells!.push({ row_index: 1, column_index: 1, value_ref: "second-locator", value_kind: "text" });
+    useSettingsStore().editorSettings.exportRowLimitEnabled = true;
+    useSettingsStore().editorSettings.exportRowLimit = 1;
+    await (format === "csv" ? state.exportCsv() : state.exportJson());
+    expect(vi.mocked(exportSnapshotResult).mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        columns: ["id", "name"],
+        rows: [[1, "preview"]],
+        cells: [{ rowIndex: 0, columnIndex: 1, valueRef: "original-locator" }],
+      }),
+    );
+  });
+  it("settles snapshot export on scope disposal even when backend cancellation fails", async () => {
+    const scope = effectScope();
+    const { state } = scope.run(snapshotState)!;
+    vi.mocked(exportSnapshotResult).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(cancelQuery).mockRejectedValueOnce(new Error("backend unavailable"));
+    let settled = false;
+    const pending = state.exportJson().finally(() => {
+      settled = true;
+    });
+    try {
+      await vi.waitFor(() => expect(exportSnapshotResult).toHaveBeenCalledOnce());
+      scope.stop();
+      await vi.waitFor(() => expect(settled).toBe(true));
+      await pending;
+      expect(vi.mocked(exportSnapshotResult).mock.calls[0]?.[2]?.aborted).toBe(true);
+      expect(cancelQuery).toHaveBeenCalledOnce();
+      expect(exportQueryResultJson).not.toHaveBeenCalled();
+    } finally {
+      scope.stop();
+    }
+  });
+  it("does not publish a legacy preview export when the snapshot backend fails", async () => {
+    const { state, original } = snapshotState();
+    vi.mocked(exportSnapshotResult).mockRejectedValue(new Error("LOB snapshot expired"));
+    await state.exportJson();
+    expect(exportQueryResultJson).not.toHaveBeenCalled();
+    expect(original.rows[0]![1]).toBe("preview");
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("LOB snapshot expired"), 5000);
+  });
+  it.each(["unselected column", "hidden column", "row beyond limit"])("does not read an expired LOB in an %s during bounded export", async (excluded) => {
+    const { original } = snapshotState();
+    if (excluded === "hidden column") original.hidden_column_indexes = [1];
+    if (excluded === "row beyond limit") {
+      original.rows = [
+        [1, "plain text"],
+        [2, "preview"],
+      ];
+      original.large_value_cells![0]!.row_index = 1;
+      useSettingsStore().editorSettings.exportRowLimitEnabled = true;
+      useSettingsStore().editorSettings.exportRowLimit = 1;
+    }
+    const state = createExportState(editableTable, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "oracle", undefined, {
+      context: computed(() => "results"),
+      snapshotResult: computed(() => original),
+      hasCompleteLocalResult: computed(() => true),
+      completeLocalResult: computed(() => original),
+    });
+    vi.mocked(readLargeValueChunk).mockRejectedValue(new Error("excluded LOB expired"));
+    await state.exportMarkdown(excluded === "unselected column" ? { columnIndexes: [0] } : undefined);
+    expect(exportQueryResultMarkdown).toHaveBeenCalledWith(expect.any(String), excluded === "row beyond limit" ? ["id", "name"] : ["id"], excluded === "row beyond limit" ? [[1, "plain text"]] : [[1]]);
+    expect(readLargeValueChunk).not.toHaveBeenCalled();
+  });
+  it("fails bounded export when the selected LOB snapshot has expired", async () => {
+    const { original } = snapshotState();
+    const state = createExportState(editableTable, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "oracle", undefined, {
+      context: computed(() => "results"),
+      snapshotResult: computed(() => original),
+      hasCompleteLocalResult: computed(() => true),
+      completeLocalResult: computed(() => original),
+    });
+    vi.mocked(readLargeValueChunk).mockRejectedValue(new Error("selected LOB expired"));
+    await state.exportMarkdown({ columnIndexes: [1] });
+    expect(readLargeValueChunk).toHaveBeenCalledWith(expect.objectContaining({ valueRef: "original-locator" }));
+    expect(exportQueryResultMarkdown).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("selected LOB expired"), 5000);
+  });
+  it.each(["replacement", "disposal"])("settles pending XLSX snapshot reads on %s even if server cancellation fails", async (change) => {
+    const scope = effectScope();
+    const { original } = snapshotState();
+    const current = ref(original);
+    const state = scope.run(() =>
+      createExportState(editableTable, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "oracle", undefined, {
+        context: computed(() => "results"),
+        snapshotResult: computed(() => current.value),
+        hasCompleteLocalResult: computed(() => true),
+        completeLocalResult: computed(() => current.value),
+      }),
+    )!;
+    let deliver!: (chunk: Awaited<ReturnType<typeof readLargeValueChunk>>) => void;
+    vi.mocked(readLargeValueChunk).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          deliver = resolve;
+        }),
+    );
+    vi.mocked(cancelQuery).mockRejectedValueOnce(new Error("cancel unavailable"));
+    let settled = false;
+    const pending = state.exportXlsx().finally(() => {
+      settled = true;
+    });
+    try {
+      await vi.waitFor(() => expect(readLargeValueChunk).toHaveBeenCalledOnce());
+      if (change === "replacement") current.value = { ...original, rows: [[2, "new result"]] };
+      else scope.stop();
+      await vi.waitFor(() => expect(settled).toBe(true));
+      expect(cancelQuery).toHaveBeenCalledWith(expect.any(String));
+      expect(vi.mocked(readLargeValueChunk).mock.calls[0]?.[0].executionId).toBe(vi.mocked(cancelQuery).mock.calls[0]?.[0]);
+    } finally {
+      deliver({ status: "ok", data: "late", next_offset: 4, eof: true, value_kind: "text" });
+      await pending;
+      scope.stop();
+    }
+    expect(exportQueryResultXlsx).not.toHaveBeenCalled();
+  });
+  it("materializes export-all for bounded formats rather than passing preview rows", async () => {
+    const { original } = snapshotState();
+    const localState = createExportState(editableTable, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "oracle", undefined, {
+      context: computed(() => "results"),
+      snapshotResult: computed(() => original),
+      hasCompleteLocalResult: computed(() => true),
+      completeLocalResult: computed(() => original),
+    });
+    vi.mocked(readLargeValueChunk).mockResolvedValue({ status: "ok", data: "complete original text", next_offset: 22, eof: true, value_kind: "text" });
+    await localState.exportMarkdown();
+    expect(exportQueryResultMarkdown).toHaveBeenCalledWith(expect.any(String), original.columns, [[1, "complete original text"]]);
+    expect(original.rows[0]![1]).toBe("preview");
+  });
+});
 
 const editableTable: DataGridTableMeta = {
   tableName: "users",
@@ -192,6 +376,19 @@ describe("useDataGridExport prepared row statements", () => {
     vi.clearAllMocks();
     clearDataGridClipboardCopy();
     vi.mocked(saveTextFile).mockResolvedValue(true);
+  });
+
+  it.each(["closed", "retargeted"] as const)("copies the clicked cell when the context menu is %s before its async callback finishes", async (menuState) => {
+    const state = createExportState(editableTable, ["id", "name"], undefined, [1, "clicked cell"]);
+    state.contextCell.value = { rowId: 1, rowIndex: 0, col: 1 };
+
+    const pendingCopy = state.copyCell();
+    // The menu starts the action, then clears or replaces its target on close.
+    state.contextCell.value = menuState === "closed" ? null : { rowId: 1, rowIndex: 0, col: 0 };
+
+    await expect(pendingCopy).resolves.toBeUndefined();
+    expect(copyToClipboard).toHaveBeenCalledWith("clicked cell");
+    expect(parseDataGridClipboard("clicked cell")).toEqual([["clicked cell"]]);
   });
 
   it("disables row copy when the result has no rows", () => {
@@ -1022,7 +1219,7 @@ describe("useDataGridExport prepared row statements", () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
     const excludePrimaryKeys = {
       ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, skipGeneratedColumns: false, excludePrimaryKeysFromInsert: true },
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, skipGeneratedColumns: false, primaryKeyMode: "exclude-generated" },
     };
 
     const state = createExportState(autoIncrementTable, ["id"], matrix, [1], undefined, undefined, [], excludePrimaryKeys);
@@ -1048,7 +1245,7 @@ describe("useDataGridExport prepared row statements", () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
     const excludePrimaryKeys = {
       ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-generated" },
     };
 
     const state = createExportState(serialTable, ["id"], matrix, [1], undefined, undefined, [], excludePrimaryKeys);
@@ -1103,7 +1300,7 @@ describe("useDataGridExport prepared row statements", () => {
     expect(createExportState(table, ["created_at"], matrix, ["2026-09-30 10:00:00"]).canCopyWithExtractor("sql-inserts")).toBe(true);
   });
 
-  it("keeps a manually-assigned primary key insertable under primary-key exclusion", () => {
+  it("keeps INSERT enabled when generated-key exclusion preserves the only selected manual key", () => {
     const compositeKeyTable: DataGridTableMeta = {
       tableName: "daily_stats",
       primaryKeys: ["id", "stat_date"],
@@ -1116,10 +1313,110 @@ describe("useDataGridExport prepared row statements", () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["stat_date"], rows: [["2026-08-18"]] };
     const excludePrimaryKeys = {
       ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, skipGeneratedColumns: false, excludePrimaryKeysFromInsert: true },
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, skipGeneratedColumns: false, primaryKeyMode: "exclude-generated" },
     };
 
     const state = createExportState(compositeKeyTable, ["id", "stat_date", "name"], matrix, [1, "2026-08-18", "Ada"], undefined, undefined, [], excludePrimaryKeys);
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
+  });
+
+  it("disables INSERT when the all-primary-keys mode removes the only selected manual key", () => {
+    const table: DataGridTableMeta = {
+      tableName: "countries",
+      primaryKeys: ["code"],
+      columns: [{ name: "code", data_type: "varchar(2)", is_nullable: false, is_primary_key: true }],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["code"], rows: [["US"]] };
+    const options = {
+      ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-all" },
+    };
+
+    const state = createExportState(table, ["code"], matrix, ["US"], undefined, undefined, [], options);
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
+  });
+
+  it("keeps a case-distinct PostgreSQL column insertable when excluding a primary key", () => {
+    const table: DataGridTableMeta = {
+      tableName: "quoted_ids",
+      primaryKeys: ["ID"],
+      columns: [
+        { name: "ID", data_type: "text", is_nullable: false, is_primary_key: true },
+        { name: "id", data_type: "text", is_nullable: false },
+      ],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["id"], rows: [["lowercase"]] };
+    const excludePrimaryKeys = {
+      ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-all" },
+    };
+
+    const state = createExportState(table, ["ID", "id"], matrix, ["key", "lowercase"], undefined, undefined, [], excludePrimaryKeys, false, undefined, false, undefined, undefined, "postgres");
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
+  });
+
+  it("uses exact PostgreSQL primary-key names when column metadata is incomplete", () => {
+    const table: DataGridTableMeta = {
+      tableName: "quoted_ids",
+      primaryKeys: ["ID"],
+      columns: [{ name: "ID", data_type: "integer", is_nullable: false, is_primary_key: true, extra: "identity" }],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [["lowercase"]] };
+    const excludePrimaryKeys = {
+      ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-generated" },
+    };
+
+    const state = createExportState(table, ["id"], matrix, ["lowercase"], undefined, undefined, [], excludePrimaryKeys, false, undefined, false, undefined, undefined, "postgres");
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
+  });
+
+  it("uses the exact column metadata for a case-distinct PostgreSQL identity primary key", () => {
+    const table: DataGridTableMeta = {
+      tableName: "quoted_ids",
+      primaryKeys: ["ID"],
+      columns: [
+        { name: "ID", data_type: "integer", is_nullable: false, is_primary_key: true, extra: "identity" },
+        { name: "id", data_type: "text", is_nullable: false },
+      ],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["id"], rows: [["lowercase"]] };
+
+    const state = createExportState(table, ["ID", "id"], matrix, ["key", "lowercase"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, undefined, undefined, "postgres");
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
+  });
+
+  it("excludes a MySQL primary key when its listed name differs only by case", () => {
+    const table: DataGridTableMeta = {
+      tableName: "users",
+      primaryKeys: ["ID"],
+      columns: [{ name: "id", data_type: "int", is_nullable: false, is_primary_key: false }],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
+    const excludePrimaryKeys = {
+      ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-all" },
+    };
+
+    const state = createExportState(table, ["id"], matrix, [1], undefined, undefined, [], excludePrimaryKeys, false, undefined, false, undefined, undefined, "mysql");
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
+  });
+
+  it("keeps a MySQL identity primary key when its listed name differs only by case", () => {
+    const table: DataGridTableMeta = {
+      tableName: "users",
+      primaryKeys: ["ID"],
+      columns: [{ name: "id", data_type: "int", is_nullable: false, is_primary_key: false, extra: "auto_increment" }],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
+
+    const state = createExportState(table, ["id"], matrix, [1], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, undefined, undefined, "mysql");
 
     expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
   });
@@ -1149,11 +1446,11 @@ describe("useDataGridExport prepared row statements", () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[7]] };
     const savedOptions = {
       ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-generated" },
     };
     const includePrimaryKeys = {
       ...savedOptions,
-      sql: { ...savedOptions.sql, excludePrimaryKeysFromInsert: false },
+      sql: { ...savedOptions.sql, primaryKeyMode: "include" },
     };
     vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
       text: "INSERT INTO `users` (`id`) VALUES (7);",
@@ -1167,8 +1464,8 @@ describe("useDataGridExport prepared row statements", () => {
     expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
     expect(state.canCopyWithExtractor("sql-inserts", includePrimaryKeys)).toBe(true);
     await expect(state.copyWithExtractor("sql-inserts", includePrimaryKeys)).resolves.toBe(true);
-    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ options: expect.objectContaining({ sql: expect.objectContaining({ excludePrimaryKeysFromInsert: false }) }) }));
-    expect(savedOptions.sql.excludePrimaryKeysFromInsert).toBe(true);
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ options: expect.objectContaining({ sql: expect.objectContaining({ primaryKeyMode: "include" }) }) }));
+    expect(savedOptions.sql.primaryKeyMode).toBe("exclude-generated");
   });
 
   it("sends only selected values for non-SQL extraction and marks column selections", async () => {
@@ -1187,7 +1484,7 @@ describe("useDataGridExport prepared row statements", () => {
     const request = vi.mocked(extractDataGridSelection).mock.calls[0]?.[0];
     expect(request).toEqual(
       expect.objectContaining({
-        columns: [{ displayName: "name", sourceName: "name", sourceIndex: 0 }],
+        columns: [{ displayName: "name", sourceName: "name", sourceIndex: 0, dataType: "varchar" }],
         selectedColumnIndexes: [0],
         rows: [["Ada"]],
         selectionKind: "columns",

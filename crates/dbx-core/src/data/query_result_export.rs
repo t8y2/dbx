@@ -14,10 +14,11 @@ use crate::csv_export::{
     csv_null_literal, format_query_result_csv_with_options, format_tsv, push_query_result_csv_row_with_options,
     push_tsv_row, CsvQuoteMode,
 };
+use crate::data_grid_sql::DataGridPrimaryKeyMode;
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
-    build_export_insert_statements_excluding, is_export_cancelled, BuildExportInsertStatementsOptions,
-    SqlExportProjection, SqlInsertMode,
+    build_export_insert_statements_excluding, is_export_cancelled, sql_export_column_index,
+    sql_export_excluded_primary_keys, BuildExportInsertStatementsOptions, SqlExportProjection, SqlInsertMode,
 };
 use crate::models::connection::DatabaseType;
 use crate::query::{
@@ -148,9 +149,9 @@ pub struct QueryResultExportRequest {
     pub auto_filter: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier_quote: Option<String>,
-    /// 导出 SQL 时是否排除主键列（对应前端数据提取设置里的“排除主键”）。
+    /// SQL INSERT 导出使用的数据提取器主键模式。
     #[serde(default)]
-    pub exclude_primary_keys: bool,
+    pub primary_key_mode: DataGridPrimaryKeyMode,
     /// 结果集对应的原表主键列名。查询结果导出由前端从表元数据带过来；
     /// 没有表元数据（例如自由 SQL 查询）时为空，此时无法排除主键。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -485,7 +486,7 @@ impl SqlInsertWriter {
             table_name,
             identifier_quote: request.identifier_quote.clone(),
             projection: None,
-            exclude_columns: if request.exclude_primary_keys { request.primary_keys.clone() } else { Vec::new() },
+            exclude_columns: Vec::new(),
         })
     }
 
@@ -514,6 +515,19 @@ impl SqlInsertWriter {
         self.column_extras = projection.project_request(request.export_column_extras.as_deref().unwrap_or_default());
         self.spatial_columns = projection.project_spatial_columns(spatial_columns);
         self.columns = projection.project(&columns);
+        let primary_keys = request
+            .primary_keys
+            .iter()
+            .filter_map(|key| sql_export_column_index(Some(request.database_type), key, &columns))
+            .map(|index| columns[index].clone())
+            .collect::<Vec<_>>();
+        self.exclude_columns = sql_export_excluded_primary_keys(
+            Some(request.database_type),
+            request.primary_key_mode,
+            &projection.project_excluded_columns(&columns, &primary_keys),
+            &self.columns,
+            &self.column_extras,
+        );
         self.projection = request.selected_columns.as_ref().map(|_| projection);
         Ok(())
     }
@@ -2215,6 +2229,54 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn query_sql_export_primary_key_modes_distinguish_generated_and_manual_keys() {
+        let keys = vec!["id".to_string(), "stat_date".to_string()];
+        let columns = vec!["id".to_string(), "stat_date".to_string()];
+        let extras = vec![Some("identity".to_string()), None];
+
+        assert_eq!(
+            sql_export_excluded_primary_keys(
+                Some(DatabaseType::Postgres),
+                DataGridPrimaryKeyMode::ExcludeGenerated,
+                &keys,
+                &columns,
+                &extras,
+            ),
+            vec!["id"]
+        );
+        assert_eq!(
+            sql_export_excluded_primary_keys(
+                Some(DatabaseType::Postgres),
+                DataGridPrimaryKeyMode::ExcludeAll,
+                &keys,
+                &columns,
+                &extras,
+            ),
+            keys
+        );
+        assert!(sql_export_excluded_primary_keys(
+            Some(DatabaseType::Postgres),
+            DataGridPrimaryKeyMode::Include,
+            &keys,
+            &columns,
+            &extras
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn query_generated_key_export_matches_case_distinct_column_names_exactly() {
+        assert!(sql_export_excluded_primary_keys(
+            Some(DatabaseType::Postgres),
+            DataGridPrimaryKeyMode::ExcludeGenerated,
+            &["id".to_string()],
+            &["ID".to_string(), "id".to_string()],
+            &[Some("identity".to_string()), None],
+        )
+        .is_empty());
+    }
+
+    #[test]
     fn export_column_remap_follows_column_names_across_pages() {
         // Elasticsearch-style page drift: the second page reports `beta` where the
         // header has `alpha`, so the `alpha` cell must be filled with NULL instead
@@ -2330,7 +2392,7 @@ mod tests {
             insert_mode: SqlInsertMode::Batch,
             csv_quote_mode: Default::default(),
             null_literal: String::new(),
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             primary_keys: Vec::new(),
         }
     }
@@ -2385,7 +2447,7 @@ mod tests {
     }
 
     #[test]
-    fn sql_insert_writer_omits_excluded_primary_key_columns() {
+    fn sql_insert_writer_excludes_all_primary_keys_in_all_keys_mode() {
         let dir = tempfile::tempdir().expect("temp dir");
         let file_path = dir.path().join("users.sql");
         let request = QueryResultExportRequest {
@@ -2424,7 +2486,7 @@ mod tests {
             insert_mode: Default::default(),
             csv_quote_mode: Default::default(),
             null_literal: String::new(),
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
             primary_keys: vec!["id".to_string()],
         };
 
@@ -2443,6 +2505,71 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&file_path).expect("read sql export"),
             "INSERT INTO \"public\".\"users\" (\"name\") VALUES ('Ada');\n"
+        );
+    }
+
+    #[test]
+    fn sql_insert_writer_keeps_projected_case_distinct_non_primary_key() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("users.sql");
+        let mut request = sqlserver_identity_export_request(&file_path, None);
+        request.database_type = DatabaseType::Postgres;
+        request.export_schema = Some("public".into());
+        request.export_table_name = Some("users".into());
+        request.export_column_types = None;
+        request.primary_keys = vec!["id".into()];
+        request.primary_key_mode = DataGridPrimaryKeyMode::ExcludeAll;
+        request.selected_columns = Some(vec![
+            crate::types::SqlExportColumnSelection { source_index: 0, name: "ID".into(), name_occurrence: 0 },
+            crate::types::SqlExportColumnSelection { source_index: 2, name: "name".into(), name_occurrence: 0 },
+        ]);
+
+        let mut writer = SqlInsertWriter::create(&request).expect("create SQL writer");
+        writer
+            .set_columns(
+                vec!["ID".into(), "id".into(), "name".into()],
+                &["integer".into(), "integer".into(), "text".into()],
+                &[],
+                &request,
+            )
+            .expect("set SQL export columns");
+        writer.write_row(vec![json!(91), json!(1), json!("Ada")], None).expect("write row");
+        writer.finish().expect("finish export");
+
+        assert_eq!(
+            std::fs::read_to_string(&file_path).expect("read SQL export"),
+            "INSERT INTO \"public\".\"users\" (\"ID\", \"name\") VALUES (91, 'Ada');\n"
+        );
+    }
+
+    #[test]
+    fn sql_insert_writer_keeps_manual_key_with_case_distinct_identity_metadata() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("users.sql");
+        let mut request =
+            sqlserver_identity_export_request(&file_path, Some(vec![Some("identity".into()), None, None]));
+        request.database_type = DatabaseType::Postgres;
+        request.export_schema = Some("public".into());
+        request.export_table_name = Some("users".into());
+        request.export_column_types = None;
+        request.primary_keys = vec!["id".into()];
+        request.primary_key_mode = DataGridPrimaryKeyMode::ExcludeGenerated;
+
+        let mut writer = SqlInsertWriter::create(&request).expect("create SQL writer");
+        writer
+            .set_columns(
+                vec!["ID".into(), "id".into(), "name".into()],
+                &["integer".into(), "integer".into(), "text".into()],
+                &[],
+                &request,
+            )
+            .expect("set SQL export columns");
+        writer.write_row(vec![json!(91), json!(1), json!("Ada")], None).expect("write row");
+        writer.finish().expect("finish export");
+
+        assert_eq!(
+            std::fs::read_to_string(&file_path).expect("read SQL export"),
+            "INSERT INTO \"public\".\"users\" (\"ID\", \"id\", \"name\") VALUES (91, 1, 'Ada');\n"
         );
     }
 
@@ -2512,7 +2639,7 @@ mod tests {
             auto_filter: None,
             header_comment_rows: false,
             identifier_quote: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             primary_keys: Vec::new(),
         }
     }

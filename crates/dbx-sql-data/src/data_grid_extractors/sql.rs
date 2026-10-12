@@ -7,8 +7,8 @@ use crate::data_grid_sql::{
     build_column_predicate, build_data_grid_copy_insert_statement_with_formatters,
     build_data_grid_copy_update_statements, data_grid_generated_table_name, format_grid_copy_insert_sql_literal,
     format_grid_sql_literal_with_identifier_quote, is_auto_generated_column, is_grid_insert_omitted_column,
-    is_non_identity_generated_column, supports_relational_copy_predicates, DataGridColumnInfo,
-    DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridTableMeta,
+    is_non_identity_generated_column, is_primary_key_column, supports_relational_copy_predicates, DataGridColumnInfo,
+    DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridPrimaryKeyMode, DataGridTableMeta,
 };
 use crate::models::connection::DatabaseType;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
@@ -79,7 +79,7 @@ pub(super) fn write_sql_inserts(
             column_types: Some(data.column_types),
             source_columns: Some(data.source_columns),
             rows: data.rows,
-            exclude_primary_keys: context.request.options.sql.exclude_primary_keys_from_insert,
+            primary_key_mode: context.request.options.sql.primary_key_mode,
             include_computed_columns: !context.request.options.sql.skip_computed_columns,
             include_database_name: context.request.options.sql.include_database_name,
             insert_mode: context.request.options.sql.insert_mode,
@@ -323,12 +323,22 @@ fn sql_selected_data(context: &ExtractContext<'_>, for_update: bool) -> Result<S
     let mut included = Vec::new();
     let mut omitted = Vec::new();
     let mut included_indexes = Vec::new();
+    let known_columns: Vec<String> = context
+        .selected_columns
+        .iter()
+        .map(|column| column.source_name.as_deref().unwrap_or(&column.display_name).to_string())
+        .collect();
+    let table_meta = context.request.table_meta.as_ref();
+    let primary_keys = table_meta.map(|meta| meta.primary_keys.as_slice()).unwrap_or_default();
+    let column_info = table_meta.and_then(|meta| meta.columns.as_deref()).unwrap_or_default();
     for (index, column) in context.selected_columns.iter().enumerate() {
         let source_name = column.source_name.as_deref().unwrap_or(&column.display_name);
         let info = context.selected_column_info[index];
-        let is_primary_key = context.request.table_meta.as_ref().is_some_and(|meta| {
-            meta.primary_keys.iter().any(|primary_key| normalized_name_eq(primary_key, source_name))
-        });
+        let is_primary_key = if for_update {
+            primary_keys.iter().any(|primary_key| normalized_name_eq(primary_key, source_name))
+        } else {
+            is_primary_key_column(context.request.database_type, primary_keys, source_name, column_info, &known_columns)
+        };
         let omit = (!for_update
             && is_grid_insert_omitted_column(
                 context.request.database_type,
@@ -343,13 +353,14 @@ fn sql_selected_data(context: &ExtractContext<'_>, for_update: bool) -> Result<S
                 && info.is_some_and(is_auto_generated_column)
                 && !is_primary_key)
             || (for_update && is_primary_key)
-            // Exclude only auto-generated primary keys; manually-assigned key
-            // columns must survive "without primary keys" INSERT copies
-            // (composite keys would otherwise lose NOT NULL data).
             || (!for_update
-                && context.request.options.sql.exclude_primary_keys_from_insert
-                && is_primary_key
-                && info.is_some_and(is_auto_generated_column));
+                && match context.request.options.sql.primary_key_mode {
+                    DataGridPrimaryKeyMode::Include => false,
+                    DataGridPrimaryKeyMode::ExcludeGenerated => {
+                        is_primary_key && info.is_some_and(is_auto_generated_column)
+                    }
+                    DataGridPrimaryKeyMode::ExcludeAll => is_primary_key,
+                });
         if omit {
             omitted.push(source_name.to_string());
         } else {
@@ -370,7 +381,11 @@ fn sql_selected_data(context: &ExtractContext<'_>, for_update: bool) -> Result<S
         .collect();
     let column_types = included_indexes
         .iter()
-        .map(|index| context.selected_column_info[*index].map(|info| info.data_type.clone()))
+        .map(|index| {
+            context.selected_column_info[*index]
+                .map(|info| info.data_type.clone())
+                .or_else(|| context.selected_columns[*index].data_type.clone())
+        })
         .collect();
     let rows = context
         .request

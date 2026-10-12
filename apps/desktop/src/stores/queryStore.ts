@@ -383,6 +383,10 @@ export function appendQueryResultSegment(previous: QueryResult, segment: QueryRe
     spatial_columns: spatial_columns.length > 0 ? spatial_columns : undefined,
     spatial_values: appendParallelValues(previous.spatial_values, segment.spatial_values),
     large_value_cells: appendLargeValueCells(previous.large_value_cells, segment.large_value_cells, previous.rows.length, appendedRowCount),
+    large_value_context: segment.large_value_context ?? previous.large_value_context,
+    large_value_refs: [
+      ...new Set([...(previous.large_value_refs ?? []), ...(segment.large_value_refs ?? []), ...(previous.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : [])), ...(segment.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []))]),
+    ],
     mongo_documents: appendParallelValues(previous.mongo_documents, segment.mongo_documents),
     mongo_copy_documents: appendParallelValues(previous.mongo_copy_documents, segment.mongo_copy_documents),
     execution_time_ms: (previous.execution_time_ms ?? 0) + (segment.execution_time_ms ?? 0),
@@ -855,7 +859,7 @@ function projectsAllColumnsForSource(analysis: EditableQueryInfo, sourceKey: str
 }
 
 function queryProjectsDeferredLob(databaseType: DatabaseType, analysis: EditableQueryInfo, sourceKey: string, columns: readonly { name: string; data_type: string }[]): boolean {
-  const deferredTypes = databaseType === "oracle" ? ORACLE_DEFERRED_LOB_TYPES : databaseType === "db2" ? DB2_DEFERRED_LOB_TYPES : undefined;
+  const deferredTypes = databaseType === "oracle" || databaseType === "oceanbase-oracle" ? ORACLE_DEFERRED_LOB_TYPES : databaseType === "db2" ? DB2_DEFERRED_LOB_TYPES : undefined;
   if (!deferredTypes) return false;
   const deferredColumns = new Set(
     columns
@@ -2071,6 +2075,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab || !tab.resultRuns || runIndex < 0) return false;
 
     const removedRun = tab.resultRuns[runIndex];
+    if (removedRun) void releaseResultLargeValues(removedRun.result, ...(removedRun.results ?? []));
     if (removedRun?.resultSessionId) void closeResultRunSession(tab, removedRun);
     if (removedRun?.resultCacheKey) void deleteTabResultSnapshot(removedRun.resultCacheKey);
     if (removedRun) clearResultRunPayload(removedRun);
@@ -2100,9 +2105,10 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab.result && !tab.results?.length && !tab.resultEvicted) return false;
 
     const closeSession = closeResultSession(tab);
+    const releaseValues = releaseResultLargeValues(tab.result, ...(tab.results ?? []));
     releaseTabResultObjectPayloads(tab);
     clearResultPayload(tab);
-    await closeSession;
+    await Promise.all([closeSession, releaseValues]);
     return true;
   }
 
@@ -2117,8 +2123,10 @@ export const useQueryStore = defineStore("query", () => {
     const currentSessionId = tab.resultSessionId ?? tab.result?.session_id;
     if (currentSessionId) closedSessionIds.add(currentSessionId);
     const closeOperations = [closeResultSession(tab)];
+    closeOperations.push(releaseResultLargeValues(tab.result, ...(tab.results ?? [])));
 
     for (const run of resultRuns) {
+      closeOperations.push(releaseResultLargeValues(run.result, ...(run.results ?? [])));
       if (run.resultCacheKey) void deleteTabResultSnapshot(run.resultCacheKey);
       if (!run.resultSessionId || closedSessionIds.has(run.resultSessionId)) continue;
       closedSessionIds.add(run.resultSessionId);
@@ -2134,6 +2142,34 @@ export const useQueryStore = defineStore("query", () => {
 
   function nextResultRunSequence(tab: QueryTab): number {
     return (tab.resultRuns?.reduce((max, run) => Math.max(max, run.sequence), 0) ?? 0) + 1;
+  }
+
+  function resultLargeValueKey(result: QueryResult, valueRef: string): string {
+    const context = result.large_value_context;
+    return JSON.stringify([context?.connectionId, context?.database, context?.clientSessionId, context?.txnSessionId, context?.catalog, valueRef]);
+  }
+
+  function resultLargeValueKeys(result?: QueryResult): string[] {
+    if (!result?.large_value_context) return [];
+    return [...(result.large_value_refs ?? []), ...(result.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []))].map((ref) => resultLargeValueKey(result, ref));
+  }
+
+  async function releaseResultLargeValues(...results: Array<QueryResult | undefined>) {
+    const released = new Set<string>();
+    for (const result of results) {
+      const context = result?.large_value_context;
+      if (!context) continue;
+      const refs = new Set([...(result.large_value_refs ?? []), ...(result.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []))]);
+      for (const valueRef of refs) {
+        if (released.has(valueRef)) continue;
+        released.add(valueRef);
+        try {
+          await api.releaseLargeValue({ ...context, valueRef });
+        } catch (error) {
+          console.warn("[DBX][large-value:release:error]", error);
+        }
+      }
+    }
   }
 
   async function closeResultRunSession(tab: QueryTab, run: NonNullable<QueryTab["resultRuns"]>[number]) {
@@ -2338,6 +2374,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab.activeResultRunId || !tab.resultRuns?.length) return;
     const index = tab.resultRuns.findIndex((run) => run.id === tab.activeResultRunId);
     if (index < 0) return;
+    const previousRun = tab.resultRuns[index];
     const run = {
       ...tab.resultRuns[index],
       ...(sql ? { sql } : {}),
@@ -2385,6 +2422,14 @@ export const useQueryStore = defineStore("query", () => {
     };
     void persistResultRun(tab, run);
     tab.resultRuns[index] = run;
+    const retainedResults = [tab.result, ...(tab.results ?? []), ...tab.resultRuns.flatMap((item) => [item.result, ...(item.results ?? [])])];
+    const retainedRefs = new Set(retainedResults.flatMap((result) => resultLargeValueKeys(result)));
+    const discardedResults = [previousRun.result, ...(previousRun.results ?? [])].map((result) => {
+      if (!result) return undefined;
+      const refs = [...(result.large_value_refs ?? []), ...(result.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []))];
+      return { ...result, large_value_cells: [], large_value_refs: refs.filter((valueRef) => !retainedRefs.has(resultLargeValueKey(result, valueRef))) };
+    });
+    void releaseResultLargeValues(...discardedResults);
   }
 
   function syncDisplayedResultRun(tab: QueryTab, sql: string, captureNewRun = false, options: ResultRunCaptureOptions = {}) {
@@ -6430,8 +6475,13 @@ export const useQueryStore = defineStore("query", () => {
 
   function buildHiddenPrimaryKeyPreparation(tab: QueryTab, sql: string, databaseType: DatabaseType, loaded: LoadedEditableSource, primaryKeys: string[], declaredPrimaryKeys: string[], traceId: string, elapsed: () => string): EditableQueryExecutionPreparation {
     const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(databaseType, loaded.analysis, loaded.source, loaded.tableMeta.columns), loaded.source, loaded.tableMeta.columns);
-    const stableLobSource = databaseType === "oracle" ? oracleRowIdIsSafeForQuery(tab, loaded) : databaseType === "db2";
-    const largeValuePreview = (databaseType === "oracle" || databaseType === "db2") && primaryKeys.length > 0 && stableLobSource && columnsAllowDeferredLobMarkers(loaded.tableMeta.columns) && queryProjectsDeferredLob(databaseType, metadataAnalysis, loaded.source.key, loaded.tableMeta.columns);
+    const stableLobSource = databaseType === "oracle" || databaseType === "oceanbase-oracle" ? oracleRowIdIsSafeForQuery(tab, loaded) : databaseType === "db2";
+    const largeValuePreview =
+      (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "db2") &&
+      primaryKeys.length > 0 &&
+      stableLobSource &&
+      columnsAllowDeferredLobMarkers(loaded.tableMeta.columns) &&
+      queryProjectsDeferredLob(databaseType, metadataAnalysis, loaded.source.key, loaded.tableMeta.columns);
     const unchanged = { sql, metadataSql: sql, hiddenPrimaryKeys: [], largeValuePreview };
     if (hasTopLevelKeyword(sql, ["GROUP", "HAVING"], databaseType)) return unchanged;
     const missingPrimaryKeys =
@@ -7176,6 +7226,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultTotalRowCountLoading = false;
     const previousResultSessionClose = closeResultSession(tab, options?.pagination?.sessionId);
     if (!preserveResultDuringExecution || !tab.result) {
+      if (!captureResultRun) void releaseResultLargeValues(tab.result, ...(tab.results ?? []));
       clearResultPayload(tab, { preserveCacheSnapshot: captureResultRun && pendingResultRunRestores.has(executionId) });
     }
     queryExecutionLog("info", "start", {
@@ -8035,6 +8086,10 @@ export const useQueryStore = defineStore("query", () => {
       // would return the first page again (#8993).
       const isOffsetJumpPage = typeof pageOffset === "number" && pageOffset > 0 && !options?.pagination?.sessionId;
       const frontendTimeoutSecs = frontendQueryTimeoutSecsForSql(sqlToExecute, effectiveDbType, queryTimeoutSecs, sqlStatementParameterOptions);
+      if (tab.mode === "data" && effectiveDbType === "oceanbase-oracle") {
+        const meta = tableMetaForDataTab(tab);
+        useLargeValuePreview = !!meta && /^(?:BASE )?TABLE$/i.test(meta.tableType ?? "") && columnsAllowDeferredLobMarkers(meta.columns) && meta.columns.some((column) => /^(N?CLOB|BLOB)$/i.test(column.data_type.trim()));
+      }
       const sourceLabelDatabase = targetDatabase || conn?.database;
       const executionClientSessionId = options?.pagination?.clientSessionId ?? (tab.mode === "query" || tab.mode === "data" ? tabClientSessionId(tab) : undefined);
       const currentBeforeDispatch = findExecutionTab(id);
@@ -8250,6 +8305,28 @@ export const useQueryStore = defineStore("query", () => {
       const responseResults = await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }), () => {
         void api.cancelQuery(executionId).catch((error) => queryExecutionLog("warn", "frontend-timeout:cancel-failed", { traceId, error }));
       });
+      for (const result of responseResults) {
+        if (effectiveDbType === "oceanbase-oracle" && !useLargeValuePreview && result.column_types?.some((type) => /^(N?CLOB|BLOB)$/i.test(type.trim()))) {
+          result.messages = [
+            ...(result.messages ?? []),
+            {
+              severity: "INFO",
+              code: "LOB_COMPLETE_READ_FALLBACK",
+              message: "LOB values were read completely because this result does not have a verified single-table preview source.",
+            },
+          ];
+        }
+        if (result.large_value_cells?.some((cell) => cell.value_ref)) {
+          result.large_value_refs = result.large_value_cells.flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []));
+          result.large_value_context = {
+            connectionId: executionConnectionId,
+            database: executionDatabase,
+            clientSessionId: executionClientSessionId,
+            txnSessionId: tab.autoCommit === false ? tab.txnSessionId : undefined,
+            catalog: executionCatalog,
+          };
+        }
+      }
       if (findExecutionTab(id) !== tab || tab.executionId !== executionId || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) return false;
       // A single result has an unambiguous request boundary. This includes fetch and
       // transport, but excludes SQL preparation and the grid's later render work.

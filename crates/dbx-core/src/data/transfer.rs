@@ -8841,7 +8841,7 @@ where
                 .ok_or_else(|| format!("No DDL returned for Oracle {:?} {name}", kind))?
                 .to_string();
             let ddl = rewrite_oracle_schema_qualifier(&ddl, &source_schema, &target_schema);
-            match execute_oracle_object_ddl_on_pool(state, target_pool_key, &ddl, target_db_type).await {
+            match execute_oracle_object_ddl_on_pool(state, target_pool_key, &ddl, &kind, target_db_type).await {
                 Ok(()) => {
                     outcome.transferred.push(format!("{kind:?}:{name}"));
                     progress(&mut outcome, TransferStatus::Running, None);
@@ -8864,16 +8864,20 @@ async fn execute_oracle_object_ddl_on_pool(
     state: &AppState,
     pool_key: &str,
     ddl: &str,
+    kind: &TransferObjectKind,
     target_db_type: &DatabaseType,
 ) -> Result<(), String> {
-    for statement in oracle_object_ddl_statements(ddl, target_db_type) {
+    for statement in oracle_object_ddl_statements(ddl, kind, target_db_type) {
         execute_on_pool(state, pool_key, &statement).await?;
     }
     Ok(())
 }
 
-fn oracle_object_ddl_statements(ddl: &str, target_db_type: &DatabaseType) -> Vec<String> {
-    if !matches!(target_db_type, DatabaseType::Oracle) {
+fn oracle_object_ddl_statements(ddl: &str, kind: &TransferObjectKind, target_db_type: &DatabaseType) -> Vec<String> {
+    // Only trigger DDL carries a trailing statement. Every other object kind is a
+    // single CREATE statement and keeps being sent as returned, so a routine body or
+    // a `WITH FUNCTION` view is never cut at its inner semicolons.
+    if !matches!(target_db_type, DatabaseType::Oracle) || !matches!(kind, TransferObjectKind::Trigger) {
         return vec![ddl.to_string()];
     }
     let statements = split_sql_statements_for_database(ddl, *target_db_type);
@@ -16712,13 +16716,70 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                    BEGIN\n  NULL;\nEND;\n\
                    ALTER TRIGGER \"APP\".\"ORDERS_TRG\" ENABLE";
 
-        let statements = oracle_object_ddl_statements(ddl, &DatabaseType::Oracle);
+        let statements = oracle_object_ddl_statements(ddl, &TransferObjectKind::Trigger, &DatabaseType::Oracle);
 
         assert_eq!(statements.len(), 2, "{statements:#?}");
         assert!(statements[0].starts_with("CREATE OR REPLACE EDITIONABLE TRIGGER"));
         assert!(statements[0].ends_with("END;"));
         assert_eq!(statements[1], "ALTER TRIGGER \"APP\".\"ORDERS_TRG\" ENABLE");
-        assert_eq!(oracle_object_ddl_statements(ddl, &DatabaseType::Dameng), vec![ddl.to_string()]);
+        assert_eq!(
+            oracle_object_ddl_statements(ddl, &TransferObjectKind::Trigger, &DatabaseType::Dameng),
+            vec![ddl.to_string()]
+        );
+    }
+
+    // Only trigger DDL carries a trailing statement; other object DDL must reach the
+    // target exactly as `DBMS_METADATA` returned it, never cut at inner semicolons.
+    #[test]
+    fn oracle_object_ddl_keeps_non_trigger_objects_whole() {
+        let cases = [
+            (
+                TransferObjectKind::Procedure,
+                "\n  CREATE OR REPLACE EDITIONABLE PROCEDURE \"APP\".\"P\" AS\n  PROCEDURE inner_p IS BEGIN NULL; END;\nBEGIN\n  inner_p;\nEND;",
+            ),
+            (
+                TransferObjectKind::Function,
+                "\n  CREATE OR REPLACE EDITIONABLE FUNCTION \"APP\".\"F\" RETURN NUMBER AS\n  FUNCTION g RETURN NUMBER IS BEGIN RETURN 1; END g;\nBEGIN\n  RETURN g;\nEND;",
+            ),
+            (
+                TransferObjectKind::View,
+                "\n  CREATE OR REPLACE FORCE EDITIONABLE VIEW \"APP\".\"V\" AS WITH FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END; SELECT f FROM dual",
+            ),
+        ];
+
+        for (kind, ddl) in cases {
+            assert_eq!(
+                oracle_object_ddl_statements(ddl, &kind, &DatabaseType::Oracle),
+                vec![ddl.to_string()],
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn oracle_object_ddl_splits_compound_trigger_enable_statement() {
+        let trigger =
+            "CREATE OR REPLACE EDITIONABLE TRIGGER \"APP\".\"T\" FOR INSERT ON \"APP\".\"X\" COMPOUND TRIGGER\n  \
+                       BEFORE EACH ROW IS BEGIN NULL; END BEFORE EACH ROW;\nEND \"T\";";
+        let ddl = format!("\n  {trigger}\nALTER TRIGGER \"APP\".\"T\" ENABLE");
+
+        assert_eq!(
+            oracle_object_ddl_statements(&ddl, &TransferObjectKind::Trigger, &DatabaseType::Oracle),
+            vec![trigger.to_string(), "ALTER TRIGGER \"APP\".\"T\" ENABLE".to_string()]
+        );
+    }
+
+    #[test]
+    fn oracle_transfer_ddl_drops_compound_trigger_whole() {
+        let ddl = "\n  CREATE TABLE \"APP\".\"X\" (\"ID\" NUMBER);\n\n\
+                   CREATE OR REPLACE EDITIONABLE TRIGGER \"APP\".\"T\" FOR INSERT ON \"APP\".\"X\" COMPOUND TRIGGER\n  \
+                   BEFORE EACH ROW IS BEGIN NULL; END BEFORE EACH ROW;\nEND \"T\";\n\
+                   ALTER TRIGGER \"APP\".\"T\" ENABLE;";
+
+        assert_eq!(
+            transfer_ddl_statements(ddl, &DatabaseType::Oracle),
+            vec!["CREATE TABLE \"APP\".\"X\" (\"ID\" NUMBER)".to_string()]
+        );
     }
 
     #[test]

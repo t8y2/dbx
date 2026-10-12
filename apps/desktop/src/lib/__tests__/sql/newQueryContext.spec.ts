@@ -108,10 +108,8 @@ describe("resolveNewQueryTarget", () => {
   });
 
   it("prefers the active tab over a selected sidebar node when no explicit source is given", () => {
-    // Every ad-hoc entry (app toolbar, shortcut, welcome screen, editor-group
-    // "+") resolves through this default order, so a sidebar node that merely
-    // happens to be selected must not outrank the editor the user is looking at
-    // (issue #11517).
+    // A sidebar node that merely stays selected must not outrank the editor the
+    // user is looking at (issue #11517).
     expect(
       resolveNewQueryTarget({
         activeTab: { connectionId: "conn-tab", database: "bilibili" },
@@ -122,6 +120,22 @@ describe("resolveNewQueryTarget", () => {
         ],
       }),
     ).toMatchObject({ connectionId: "conn-tab", database: "bilibili" });
+  });
+
+  it("prefers the selected sidebar database over the active tab after a sidebar interaction", () => {
+    // Selecting a database in the sidebar and then using the new-query shortcut
+    // must open the query on that database, as the context menu does (issue #11791).
+    expect(
+      resolveNewQueryTarget({
+        activeTab: { connectionId: "conn-tab", database: "bilibili" },
+        selectedTreeNode: { connectionId: "conn-tree", database: "reporting" },
+        connections: [
+          { id: "conn-tree", host: "localhost", database: "", db_type: "postgres" },
+          { id: "conn-tab", host: "localhost", database: "bilibili", db_type: "mysql" },
+        ],
+        preferredSource: "sidebar",
+      }),
+    ).toMatchObject({ connectionId: "conn-tree", database: "reporting", shouldRefreshDefaultDatabase: false });
   });
 
   it("falls back to the single online connection instead of the first configured one", () => {

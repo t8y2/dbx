@@ -1,14 +1,16 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-// Regression coverage for https://github.com/t8y2/dbx/issues/11517.
+// Regression coverage for https://github.com/t8y2/dbx/issues/11517 and
+// https://github.com/t8y2/dbx/issues/11791.
 //
 // Every ad-hoc "new query" entry (app toolbar, keyboard shortcut, welcome
-// screen, editor-group "+") funnels into App.vue's newQuery(). That shared entry
-// used to carry a sticky `newQueryContextSource`, which the sidebar selection
-// watcher set to "sidebar" while only the active-tab watcher and editor-group
-// "+" reset it. The global toolbar and shortcut could therefore use a stale
-// sidebar connection instead of the editor the user was looking at.
+// screen, editor-group "+") funnels into App.vue's newQuery(). The context
+// source it passes to the resolver must follow the surface the user last
+// worked in. It used to be set by a watcher on the sidebar selection id and
+// reset only on tab switches, so returning to the editor without switching
+// tabs kept a stale sidebar context (#11517). Removing the source altogether
+// then made a freshly selected sidebar database lose to the active tab (#11791).
 //
 // The precedence itself is unit-tested in newQueryContext.spec.ts; this suite
 // pins the App.vue wiring, because App.vue is a large SFC the suite never mounts.
@@ -30,15 +32,18 @@ function bodyOf(fnSignature: string): string {
 }
 
 describe("new query entry context wiring", () => {
-  it("does not keep a sticky context source that can outrank the active tab", () => {
-    expect(appSource).not.toContain("newQueryContextSource");
+  it("derives the context source from pointer and focus events on the sidebar and editor area", () => {
+    const sidebar = appSource.slice(appSource.indexOf("<AppSidebar"), appSource.indexOf("/>", appSource.indexOf("<AppSidebar")));
+    expect(sidebar).toContain(`@pointerdown.capture="newQueryContextSource = 'sidebar'"`);
+    expect(sidebar).toContain(`@focusin.capture="newQueryContextSource = 'sidebar'"`);
+    const editorArea = appSource.slice(appSource.indexOf("data-editor-content"), appSource.indexOf(">", appSource.indexOf("data-editor-content")));
+    expect(editorArea).toContain(`@pointerdown.capture="newQueryContextSource = 'tab'"`);
+    expect(editorArea).toContain(`@focusin.capture="newQueryContextSource = 'tab'"`);
   });
 
-  it("resolves the shared new-query entry from the active tab and unique online SQL connection", () => {
+  it("resolves the shared new-query entry from the context source and unique online SQL connection", () => {
     const body = bodyOf("async function newQuery()");
-    // Without an explicit source the resolver defaults to the active tab first
-    // and the selected sidebar node second, so all ad-hoc entries agree.
-    expect(body).not.toContain("preferredSource");
+    expect(body.match(/preferredSource: newQueryContextSource\.value,/g)).toHaveLength(2);
     expect(body).toContain('quickConnectionOpenTarget(connection).kind === "query"');
     expect(body).toContain("connectedSqlConnectionIds,");
   });
@@ -50,6 +55,8 @@ describe("new query entry context wiring", () => {
   });
 
   it("keeps the editor-group entry focused on its own group", () => {
-    expect(bodyOf("newQuery: (groupId: string) =>")).toContain("queryStore.focusGroup(groupId)");
+    const body = bodyOf("newQuery: (groupId: string) =>");
+    expect(body).toContain("queryStore.focusGroup(groupId)");
+    expect(body).toContain('newQueryContextSource.value = "tab"');
   });
 });

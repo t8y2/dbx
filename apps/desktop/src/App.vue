@@ -88,7 +88,7 @@ import { OBJECT_BROWSER_SEARCH_FOCUS_EVENT, objectBrowserSearchFocusTabId } from
 import { parseRecentConnectionIds, rankRecentConnections, RECENT_CONNECTION_IDS_STORAGE_KEY, recordRecentConnection } from "@/lib/connection/recentConnections";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
-import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } from "@/lib/sql/newQueryContext";
+import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql, type NewQueryContextSource } from "@/lib/sql/newQueryContext";
 import { isSqlObjectNavigationRoutineType, normalizeOracleNavigationTarget, sqlObjectNavigationSourceKind, sqlObjectNavigationSourceName, sqlObjectNavigationSourceSchema, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { loadEditableObjectSourceForEditor } from "@/lib/table/objectSourceLoad";
@@ -493,6 +493,12 @@ const activeOutputView = computed<TabOutputView>({
     if (tab) queryStore.updateTabUiState(tab.id, { activeOutputView: view });
   },
 });
+// Ad-hoc new-query entries follow the surface the user last worked in: the
+// sidebar after a tree interaction, the active tab after an editor-area
+// interaction. It is driven by pointer and focus events rather than by the tree
+// selection id, so returning to the editor without switching tabs also hands
+// the context back to the active tab.
+const newQueryContextSource = ref<NewQueryContextSource>("tab");
 const queryEditorDdlTarget = ref<{ connectionId: string; database: string; catalog?: string; schema?: string; tableName: string; objectType?: ObjectSourceKind } | null>(null);
 const queryEditorObjectSourceTarget = ref<{
   connectionId: string;
@@ -1113,6 +1119,7 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   canNewQuery: canCreateNewQuery,
   newQuery: (groupId: string) => {
     queryStore.focusGroup(groupId);
+    newQueryContextSource.value = "tab";
     void newQuery();
   },
   explainMode,
@@ -1758,6 +1765,7 @@ watch(
         }),
       );
     }
+    if (id) newQueryContextSource.value = "tab";
     if (id) activateQuerySurface();
     else if (previousId) activateOpenSpecialPageFallback();
     if (id && pluginCenterActive.value) pluginCenterActive.value = false;
@@ -3100,6 +3108,7 @@ async function newQuery() {
     selectedTreeNode: findTreeNodeById(connectionStore.treeNodes, connectionStore.selectedTreeNodeId),
     activeConnectionId: connectionStore.activeConnectionId,
     connections: connectionStore.connections,
+    preferredSource: newQueryContextSource.value,
     connectedSqlConnectionIds,
   });
   if (!target) {
@@ -3157,6 +3166,7 @@ async function newQuery() {
   const initialSql = resolveNewQueryInitialSql({
     activeTab: activeTab.value,
     selectedTreeNode: findTreeNodeById(connectionStore.treeNodes, connectionStore.selectedTreeNodeId),
+    preferredSource: newQueryContextSource.value,
     prefillEnabled: settingsStore.editorSettings.prefillNewQueryWithSelect,
     targetConnectionId: target.connectionId,
     targetDatabase: target.database,
@@ -4880,10 +4890,14 @@ onUnmounted(() => {
             @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
             @add-to-ai="addToAi"
             @mousedown="rememberSidebarSearchSurface"
+            @pointerdown.capture="newQueryContextSource = 'sidebar'"
+            @focusin.capture="newQueryContextSource = 'sidebar'"
           />
 
           <div
             data-editor-content
+            @pointerdown.capture="newQueryContextSource = 'tab'"
+            @focusin.capture="newQueryContextSource = 'tab'"
             v-show="isSpecialPageActive || (!isAiPanelMaximized && !isHistoryPanelMaximized) || isZenMode"
             :class="isDetachedWindowContext ? 'flex-1 min-w-0 overflow-hidden bg-background' : isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'"
           >

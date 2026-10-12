@@ -22,12 +22,13 @@ public final class QueryPageResult {
     private Long server_execute_time_us;
     private java.util.Map<String, Double> query_timings_ms;
     /**
-     * Optional protocol field: DBMS_OUTPUT lines the statement that opened this
-     * page produced. It is only ever filled for the first page (the statement that
-     * ran), never for a later page fetched from the open cursor -- there is no new
-     * statement to attribute output to. A null backing field is an absent
-     * {@code messages} key, which is what keeps an existing client's payload
-     * unchanged when there is no server output.
+     * Optional protocol field. The page path fills it with the statement's warnings
+     * (see JdbcExecutor), and the Oracle-family drivers append the DBMS_OUTPUT lines
+     * the statement that opened the page produced -- only ever for the first page,
+     * never for a later page fetched from the open cursor, because there is no new
+     * statement to attribute output to. {@link #addInformationalMessage} is the
+     * append entry point; {@link #setMessages} keeps the plain replacement semantics
+     * the shared page path has always used.
      */
     private List<java.util.Map<String, Object>> messages;
     /** Number of rows read by this JDBC cursor across all pages; never sent over JSON RPC. */
@@ -35,7 +36,6 @@ public final class QueryPageResult {
     private boolean truncated;
     private String session_id;
     private boolean has_more;
-    private List<java.util.Map<String, Object>> messages;
 
     public List<java.util.Map<String, Object>> getMessages() {
         return messages == null ? Collections.emptyList() : messages;
@@ -45,21 +45,23 @@ public final class QueryPageResult {
         this.messages = messages;
     }
 
-    public List<java.util.Map<String, Object>> getMessages() {
-        return messages == null ? Collections.emptyList() : messages;
-    }
-
-    public void setMessages(List<java.util.Map<String, Object>> messages) {
-        this.messages = messages == null || messages.isEmpty() ? null : messages;
-    }
-
     /**
      * Appends one informational message in the same shape {@code QueryResult} uses
      * ({@code severity}/{@code message} and an optional {@code code}), so a client
      * reads a page's server output exactly like a single-statement result's.
+     *
+     * The backing list is copied on the first append unless it is already this class's
+     * own ArrayList: the shared page path stores the result of
+     * {@code QueryResult.getMessages()}, which is {@code Collections.emptyList()} --
+     * immutable -- when the statement had no warnings, and appending to that would
+     * throw. Copying keeps any warnings already stored on the page.
      */
     public void addInformationalMessage(String message, String code) {
-        if (messages == null) messages = new java.util.ArrayList<>();
+        if (!(messages instanceof java.util.ArrayList)) {
+            messages = messages == null
+                ? new java.util.ArrayList<>()
+                : new java.util.ArrayList<>(messages);
+        }
         if (messages.size() >= MAX_INFORMATIONAL_MESSAGES) return;
         java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();
         entry.put("severity", "INFO");

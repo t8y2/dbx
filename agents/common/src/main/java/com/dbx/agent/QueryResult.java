@@ -10,14 +10,6 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 
 public final class QueryResult {
-    /**
-     * Hard cap on informational messages one result may carry. It used to be 512,
-     * which silently dropped everything past the 511th DBMS_OUTPUT line; the
-     * Oracle-family drivers report 10000 lines plus one truncation notice, so the
-     * shared cap has to admit that (10001) instead of cutting the notice off.
-     * Only server output and statement warnings use this path.
-     */
-    private static final int MAX_INFORMATIONAL_MESSAGES = 10001;
     private List<String> columns;
     private List<String> column_types;
     private List<SpatialColumn> spatial_columns;
@@ -41,7 +33,7 @@ public final class QueryResult {
 
     public void addInformationalMessage(String message, String code) {
         if (messages == null) messages = new ArrayList<>();
-        if (messages.size() >= MAX_INFORMATIONAL_MESSAGES) return;
+        if (messages.size() >= 512) return;
         Map<String, Object> entry = new java.util.LinkedHashMap<>();
         entry.put("severity", "INFO");
         entry.put("message", message);

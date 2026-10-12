@@ -52,29 +52,6 @@ public final class AgentProtocol {
     public static final String METHOD_DISCONNECT = "disconnect";
     public static final String METHOD_SHUTDOWN = "shutdown";
 
-    // PL/SQL debugger (OceanBase Oracle mode only). These methods are served by
-    // the oceanbase-oracle agent; other agents reject them with the default
-    // DatabaseAgent implementation. They are intentionally excluded from
-    // COMMON_METHODS so the handshake of unrelated drivers stays unchanged.
-    public static final String METHOD_PL_DEBUG_PROBE = "pl_debug_probe";
-    public static final String METHOD_PL_DEBUG_START = "pl_debug_start";
-    public static final String METHOD_PL_DEBUG_SET_BREAKPOINTS = "pl_debug_set_breakpoints";
-    public static final String METHOD_PL_DEBUG_DELETE_BREAKPOINTS = "pl_debug_delete_breakpoints";
-    public static final String METHOD_PL_DEBUG_LIST_BREAKPOINTS = "pl_debug_list_breakpoints";
-    public static final String METHOD_PL_DEBUG_RESUME = "pl_debug_resume";
-    public static final String METHOD_PL_DEBUG_STEP_OVER = "pl_debug_step_over";
-    public static final String METHOD_PL_DEBUG_STEP_IN = "pl_debug_step_in";
-    public static final String METHOD_PL_DEBUG_STEP_OUT = "pl_debug_step_out";
-    public static final String METHOD_PL_DEBUG_RESUME_IGNORE_BREAKPOINTS = "pl_debug_resume_ignore_breakpoints";
-    public static final String METHOD_PL_DEBUG_ABORT = "pl_debug_abort";
-    public static final String METHOD_PL_DEBUG_GET_VARIABLES = "pl_debug_get_variables";
-    public static final String METHOD_PL_DEBUG_SET_VALUE = "pl_debug_set_value";
-    public static final String METHOD_PL_DEBUG_SET_EXCEPTION_BREAKPOINT = "pl_debug_set_exception_breakpoint";
-    public static final String METHOD_PL_DEBUG_SET_BREAKPOINT_ENABLED = "pl_debug_set_breakpoint_enabled";
-    public static final String METHOD_PL_DEBUG_GET_STACK = "pl_debug_get_stack";
-    public static final String METHOD_PL_DEBUG_GET_LOG = "pl_debug_get_log";
-    public static final String METHOD_PL_DEBUG_CLOSE = "pl_debug_close";
-
     public static final String MONGO_METHOD_LIST_DATABASES = "list_databases";
     public static final String MONGO_METHOD_LIST_COLLECTIONS = "list_collections";
     public static final String MONGO_METHOD_FIND_DOCUMENTS = "find_documents";

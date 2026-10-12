@@ -5,13 +5,6 @@ import java.util.List;
 import java.util.Objects;
 
 public final class QueryPageResult {
-    /**
-     * Hard cap on informational messages one page may carry, matching
-     * {@code QueryResult}'s cap. The Oracle-family drivers report at most 10000
-     * DBMS_OUTPUT lines plus one truncation notice, so the shared cap has to admit
-     * that (10001) instead of cutting the notice off.
-     */
-    private static final int MAX_INFORMATIONAL_MESSAGES = 10001;
     private List<String> columns;
     private List<String> column_types;
     private List<SpatialColumn> spatial_columns;
@@ -21,21 +14,12 @@ public final class QueryPageResult {
     private long execution_time_ms;
     private Long server_execute_time_us;
     private java.util.Map<String, Double> query_timings_ms;
-    /**
-     * Optional protocol field. The page path fills it with the statement's warnings
-     * (see JdbcExecutor), and the Oracle-family drivers append the DBMS_OUTPUT lines
-     * the statement that opened the page produced -- only ever for the first page,
-     * never for a later page fetched from the open cursor, because there is no new
-     * statement to attribute output to. {@link #addInformationalMessage} is the
-     * append entry point; {@link #setMessages} keeps the plain replacement semantics
-     * the shared page path has always used.
-     */
-    private List<java.util.Map<String, Object>> messages;
     /** Number of rows read by this JDBC cursor across all pages; never sent over JSON RPC. */
     private transient long cursor_rows_read;
     private boolean truncated;
     private String session_id;
     private boolean has_more;
+    private List<java.util.Map<String, Object>> messages;
 
     public List<java.util.Map<String, Object>> getMessages() {
         return messages == null ? Collections.emptyList() : messages;
@@ -43,31 +27,6 @@ public final class QueryPageResult {
 
     public void setMessages(List<java.util.Map<String, Object>> messages) {
         this.messages = messages;
-    }
-
-    /**
-     * Appends one informational message in the same shape {@code QueryResult} uses
-     * ({@code severity}/{@code message} and an optional {@code code}), so a client
-     * reads a page's server output exactly like a single-statement result's.
-     *
-     * The backing list is copied on the first append unless it is already this class's
-     * own ArrayList: the shared page path stores the result of
-     * {@code QueryResult.getMessages()}, which is {@code Collections.emptyList()} --
-     * immutable -- when the statement had no warnings, and appending to that would
-     * throw. Copying keeps any warnings already stored on the page.
-     */
-    public void addInformationalMessage(String message, String code) {
-        if (!(messages instanceof java.util.ArrayList)) {
-            messages = messages == null
-                ? new java.util.ArrayList<>()
-                : new java.util.ArrayList<>(messages);
-        }
-        if (messages.size() >= MAX_INFORMATIONAL_MESSAGES) return;
-        java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();
-        entry.put("severity", "INFO");
-        entry.put("message", message);
-        if (code != null) entry.put("code", code);
-        messages.add(entry);
     }
 
     public QueryPageResult() {

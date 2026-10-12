@@ -14,9 +14,11 @@ import (
 
 // PL/SQL debugging over Oracle's DBMS_DEBUG package, implemented for pure
 // Oracle connections the same way the oceanbase-oracle Java agent does it for
-// OceanBase Oracle tenants: two dedicated sessions (debuggee + debugger), a
-// per-schema helper package (DBX_PL_DEBUG_PACKAGE) that wraps the DBMS_DEBUG
-// primitives with OUT registers, and the same request flow:
+// OceanBase Oracle tenants (that Java implementation lives on the
+// feature/ob-oracle-pl-debug branch; this branch keeps the Oracle agent only):
+// two dedicated sessions (debuggee + debugger), a per-schema helper package
+// (DBX_PL_DEBUG_PACKAGE) that wraps the DBMS_DEBUG primitives with OUT
+// registers, and the same request flow:
 //
 //	debuggee: SET_TIMEOUT_BEHAVIOUR -> INITIALIZE -> DEBUG_ON -> run target
 //	debugger: ATTACH_SESSION(id) -> breakpoints -> continue/step -> values

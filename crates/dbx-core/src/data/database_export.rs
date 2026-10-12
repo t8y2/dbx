@@ -12,6 +12,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 use crate::connection::task_client_session_id;
+use crate::data_grid_sql::{extra_is_auto_generated, DataGridPrimaryKeyMode};
 use crate::models::connection::DatabaseType;
 use crate::mysql_ddl_normalize::DdlNormalizeOptions;
 use crate::object_source_sql::build_export_object_source_sql;
@@ -1673,6 +1674,43 @@ fn export_sql_statement_bytes(database_type: Option<DatabaseType>, text: &str) -
     }
 }
 
+pub(crate) fn sql_export_excluded_primary_keys(
+    database_type: Option<DatabaseType>,
+    mode: DataGridPrimaryKeyMode,
+    primary_keys: &[String],
+    columns: &[String],
+    column_extras: &[Option<String>],
+) -> Vec<String> {
+    match mode {
+        DataGridPrimaryKeyMode::Include => Vec::new(),
+        DataGridPrimaryKeyMode::ExcludeAll | DataGridPrimaryKeyMode::ExcludeGenerated => primary_keys
+            .iter()
+            .filter_map(|key| sql_export_column_index(database_type, key, columns))
+            .filter(|index| {
+                mode == DataGridPrimaryKeyMode::ExcludeAll
+                    || column_extras.get(*index).and_then(|extra| extra.as_deref()).is_some_and(extra_is_auto_generated)
+            })
+            .map(|index| columns[index].clone())
+            .collect(),
+    }
+}
+
+pub(crate) fn sql_export_column_index(
+    database_type: Option<DatabaseType>,
+    name: &str,
+    columns: &[String],
+) -> Option<usize> {
+    if let Some(index) = columns.iter().position(|column| column == name) {
+        return Some(index);
+    }
+    if matches!(database_type, Some(DatabaseType::Postgres | DatabaseType::Redshift)) {
+        return None;
+    }
+    let mut matches = columns.iter().enumerate().filter(|(_, column)| column.eq_ignore_ascii_case(name));
+    let index = matches.next()?.0;
+    matches.next().is_none().then_some(index)
+}
+
 pub(crate) fn is_internal_export_column(database_type: Option<DatabaseType>, column: &str) -> bool {
     // Synthetic ROWID is injected only to identify editable rows. It is not a
     // physical table column and must never propagate into exports.
@@ -1723,6 +1761,15 @@ impl SqlExportProjection {
 
     pub(crate) fn project_request<T: Clone + Default>(&self, values: &[T]) -> Vec<T> {
         self.entries.iter().map(|(_, request_index)| values.get(*request_index).cloned().unwrap_or_default()).collect()
+    }
+
+    pub(crate) fn project_excluded_columns(&self, columns: &[String], exclude_columns: &[String]) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter_map(|(index, _)| columns.get(*index))
+            .filter(|column| exclude_columns.contains(column))
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn project_owned<T: Default>(&self, mut values: Vec<T>) -> Vec<T> {

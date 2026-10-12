@@ -14,11 +14,11 @@ use crate::csv_export::{
     csv_null_literal, format_query_result_csv_with_options, format_tsv, push_query_result_csv_row_with_options,
     push_tsv_row, CsvQuoteMode,
 };
-use crate::data_grid_sql::{extra_is_auto_generated, DataGridPrimaryKeyMode};
+use crate::data_grid_sql::DataGridPrimaryKeyMode;
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
-    build_export_insert_statements_excluding, is_export_cancelled, BuildExportInsertStatementsOptions,
-    SqlExportProjection, SqlInsertMode,
+    build_export_insert_statements_excluding, is_export_cancelled, sql_export_column_index,
+    sql_export_excluded_primary_keys, BuildExportInsertStatementsOptions, SqlExportProjection, SqlInsertMode,
 };
 use crate::models::connection::DatabaseType;
 use crate::query::{
@@ -54,41 +54,6 @@ const AGENT_SESSION_MISSING_ERROR: &str =
 const STREAM_PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(1);
 const EXCEL_CELL_CHARACTER_LIMIT: usize = 32_767;
 const SQL_INSERT_BATCH_SIZE: usize = 100;
-
-fn sql_export_excluded_primary_keys(
-    database_type: Option<DatabaseType>,
-    mode: DataGridPrimaryKeyMode,
-    primary_keys: &[String],
-    columns: &[String],
-    column_extras: &[Option<String>],
-) -> Vec<String> {
-    match mode {
-        DataGridPrimaryKeyMode::Include => Vec::new(),
-        DataGridPrimaryKeyMode::ExcludeAll => primary_keys.to_vec(),
-        DataGridPrimaryKeyMode::ExcludeGenerated => primary_keys
-            .iter()
-            .filter(|key| {
-                sql_export_column_index(database_type, key, columns)
-                    .and_then(|index| column_extras.get(index))
-                    .and_then(|extra| extra.as_deref())
-                    .is_some_and(extra_is_auto_generated)
-            })
-            .cloned()
-            .collect(),
-    }
-}
-
-fn sql_export_column_index(database_type: Option<DatabaseType>, name: &str, columns: &[String]) -> Option<usize> {
-    if let Some(index) = columns.iter().position(|column| column == name) {
-        return Some(index);
-    }
-    if matches!(database_type, Some(DatabaseType::Postgres | DatabaseType::Redshift)) {
-        return None;
-    }
-    let mut matches = columns.iter().enumerate().filter(|(_, column)| column.eq_ignore_ascii_case(name));
-    let index = matches.next()?.0;
-    matches.next().is_none().then_some(index)
-}
 
 async fn disconnect_with_timeout<C, F, Fut>(
     connection: C,
@@ -550,10 +515,16 @@ impl SqlInsertWriter {
         self.column_extras = projection.project_request(request.export_column_extras.as_deref().unwrap_or_default());
         self.spatial_columns = projection.project_spatial_columns(spatial_columns);
         self.columns = projection.project(&columns);
+        let primary_keys = request
+            .primary_keys
+            .iter()
+            .filter_map(|key| sql_export_column_index(Some(request.database_type), key, &columns))
+            .map(|index| columns[index].clone())
+            .collect::<Vec<_>>();
         self.exclude_columns = sql_export_excluded_primary_keys(
             Some(request.database_type),
             request.primary_key_mode,
-            &request.primary_keys,
+            &projection.project_excluded_columns(&columns, &primary_keys),
             &self.columns,
             &self.column_extras,
         );
@@ -2534,6 +2505,71 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&file_path).expect("read sql export"),
             "INSERT INTO \"public\".\"users\" (\"name\") VALUES ('Ada');\n"
+        );
+    }
+
+    #[test]
+    fn sql_insert_writer_keeps_projected_case_distinct_non_primary_key() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("users.sql");
+        let mut request = sqlserver_identity_export_request(&file_path, None);
+        request.database_type = DatabaseType::Postgres;
+        request.export_schema = Some("public".into());
+        request.export_table_name = Some("users".into());
+        request.export_column_types = None;
+        request.primary_keys = vec!["id".into()];
+        request.primary_key_mode = DataGridPrimaryKeyMode::ExcludeAll;
+        request.selected_columns = Some(vec![
+            crate::types::SqlExportColumnSelection { source_index: 0, name: "ID".into(), name_occurrence: 0 },
+            crate::types::SqlExportColumnSelection { source_index: 2, name: "name".into(), name_occurrence: 0 },
+        ]);
+
+        let mut writer = SqlInsertWriter::create(&request).expect("create SQL writer");
+        writer
+            .set_columns(
+                vec!["ID".into(), "id".into(), "name".into()],
+                &["integer".into(), "integer".into(), "text".into()],
+                &[],
+                &request,
+            )
+            .expect("set SQL export columns");
+        writer.write_row(vec![json!(91), json!(1), json!("Ada")], None).expect("write row");
+        writer.finish().expect("finish export");
+
+        assert_eq!(
+            std::fs::read_to_string(&file_path).expect("read SQL export"),
+            "INSERT INTO \"public\".\"users\" (\"ID\", \"name\") VALUES (91, 'Ada');\n"
+        );
+    }
+
+    #[test]
+    fn sql_insert_writer_keeps_manual_key_with_case_distinct_identity_metadata() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("users.sql");
+        let mut request =
+            sqlserver_identity_export_request(&file_path, Some(vec![Some("identity".into()), None, None]));
+        request.database_type = DatabaseType::Postgres;
+        request.export_schema = Some("public".into());
+        request.export_table_name = Some("users".into());
+        request.export_column_types = None;
+        request.primary_keys = vec!["id".into()];
+        request.primary_key_mode = DataGridPrimaryKeyMode::ExcludeGenerated;
+
+        let mut writer = SqlInsertWriter::create(&request).expect("create SQL writer");
+        writer
+            .set_columns(
+                vec!["ID".into(), "id".into(), "name".into()],
+                &["integer".into(), "integer".into(), "text".into()],
+                &[],
+                &request,
+            )
+            .expect("set SQL export columns");
+        writer.write_row(vec![json!(91), json!(1), json!("Ada")], None).expect("write row");
+        writer.finish().expect("finish export");
+
+        assert_eq!(
+            std::fs::read_to_string(&file_path).expect("read SQL export"),
+            "INSERT INTO \"public\".\"users\" (\"ID\", \"id\", \"name\") VALUES (91, 1, 'Ada');\n"
         );
     }
 

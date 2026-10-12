@@ -64,6 +64,8 @@ public final class DbxJdbcPlugin {
     private static final ObjectMapper MAPPER =
         new ObjectMapper().configure(SerializationFeature.WRITE_BIGDECIMAL_AS_PLAIN, true);
     private static final int MAX_ROWS = 10_000;
+    static final String CANCEL_STATEMENT_METHOD = "cancelStatement";
+    static final String CANCEL_TOKEN_PARAM = "cancelToken";
     private static final String JDBCX_URL_PREFIX = "jdbcx:";
     private static final String JDBCX_EXTENSION_WHITELIST_PROPERTY = "jdbcx.extension.whitelist";
     private static final String JDBCX_HIGH_PRIVILEGE_EXTENSIONS_OPT_IN = "-Ddbx.jdbcx.allowHighPrivilegeExtensions=";
@@ -188,6 +190,8 @@ public final class DbxJdbcPlugin {
         boolean manualTransactionActive;
         final Map<String, QuerySession> querySessions = new HashMap<>();
         volatile Statement activeStatement;
+        String cancelToken;
+        boolean cancelRequested;
         volatile boolean closing;
         final java.util.concurrent.locks.ReentrantLock operation = new java.util.concurrent.locks.ReentrantLock();
     }
@@ -311,17 +315,30 @@ public final class DbxJdbcPlugin {
     }
 
     public static void main(String[] args) throws Exception {
-        java.util.concurrent.ExecutorService requests = java.util.concurrent.Executors.newCachedThreadPool();
         try (
             BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
             BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8))
         ) {
+            serve(reader, writer);
+        }
+    }
+
+    static void serve(BufferedReader reader, BufferedWriter writer) throws Exception {
+        java.util.concurrent.ExecutorService requests = java.util.concurrent.Executors.newCachedThreadPool();
+        // Requests without a logical session run in order on one worker so the reader stays free to
+        // handle `cancelStatement` while a statement is still executing on the shared connection.
+        java.util.concurrent.ExecutorService defaultRequests = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isBlank()) {
                     continue;
                 }
                 JsonNode incoming = MAPPER.readTree(line);
+                if (CANCEL_STATEMENT_METHOD.equals(incoming.path("method").asText())) {
+                    writeResponse(writer, cancelStatement(incoming));
+                    continue;
+                }
                 if (incoming.path("params").hasNonNull("jdbcSessionId")) {
                     JdbcConnectionState retainedState = retainLogicalState(incoming);
                     requests.execute(() -> {
@@ -333,22 +350,100 @@ public final class DbxJdbcPlugin {
                     });
                     continue;
                 }
-                if ("close".equals(incoming.path("method").asText())) shuttingDown = true;
-                ObjectNode response = handleLine(line);
-                writeResponse(writer, response);
-                if (response.path("_dbx_close").asBoolean(false)) {
-                    break;
+                if ("close".equals(incoming.path("method").asText())) {
+                    shuttingDown = true;
+                    String closeLine = line;
+                    ObjectNode response = defaultRequests.submit(() -> handleDefaultRequest(closeLine, incoming)).get();
+                    writeResponse(writer, response);
+                    if (response.path("_dbx_close").asBoolean(false)) {
+                        break;
+                    }
+                    continue;
                 }
+                String requestLine = line;
+                defaultRequests.execute(() -> {
+                    try {
+                        writeResponse(writer, handleDefaultRequest(requestLine, incoming));
+                    } catch (Exception error) {
+                        System.err.println("JDBC response failed: " + error.getClass().getSimpleName());
+                    }
+                });
             }
         } finally {
             shuttingDown = true;
+            defaultRequests.shutdown();
             for (JdbcConnectionState state : LOGICAL_SESSIONS.values()) {
                 closeLogicalSession(state);
             }
             LOGICAL_SESSIONS.clear();
             requests.shutdown();
+            if (!defaultRequests.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                cancelActiveStatement(DEFAULT_CONNECTION_STATE);
+                defaultRequests.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
             closeSharedConnection();
         }
+    }
+
+    private static ObjectNode handleDefaultRequest(String line, JsonNode request) throws Exception {
+        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
+        synchronized (state) {
+            state.cancelToken = optionalText(request.path("params"), CANCEL_TOKEN_PARAM);
+            state.cancelRequested = false;
+        }
+        try {
+            return handleLine(line);
+        } finally {
+            synchronized (state) {
+                state.cancelToken = null;
+                state.cancelRequested = false;
+                state.activeStatement = null;
+            }
+        }
+    }
+
+    /**
+     * Cancels the statement of the request that carried the same cancel token. The host sends this
+     * when it abandons a request (the user pressed stop); a token that no longer matches belongs to a
+     * request that already finished, so a later request on the same connection is never cancelled.
+     */
+    private static ObjectNode cancelStatement(JsonNode request) {
+        JsonNode id = request.path("id");
+        ObjectNode response = MAPPER.createObjectNode();
+        response.set("id", id.isMissingNode() ? MAPPER.getNodeFactory().numberNode(1) : id);
+        String token = optionalText(request.path("params"), CANCEL_TOKEN_PARAM);
+        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
+        boolean matched;
+        synchronized (state) {
+            matched = token != null && token.equals(state.cancelToken);
+            if (matched) state.cancelRequested = true;
+        }
+        if (matched) cancelActiveStatement(state);
+        ObjectNode result = MAPPER.createObjectNode();
+        result.put("cancelled", matched);
+        response.set("result", result);
+        return response;
+    }
+
+    private static void cancelActiveStatement(JdbcConnectionState state) {
+        Statement statement = state.activeStatement;
+        if (statement == null) return;
+        try {
+            statement.cancel();
+        } catch (SQLException ignored) {
+            // The statement finished or was closed while the cancel was in flight.
+        }
+    }
+
+    private static void trackActiveStatement(Statement statement) {
+        JdbcConnectionState state = connectionState();
+        boolean cancelRequested;
+        synchronized (state) {
+            state.activeStatement = statement;
+            cancelRequested = state.cancelRequested;
+        }
+        // A cancel can arrive before the request created its statement.
+        if (cancelRequested) cancelActiveStatement(state);
     }
 
     private static void writeResponse(BufferedWriter writer, ObjectNode response) throws IOException {
@@ -1247,7 +1342,7 @@ public final class DbxJdbcPlugin {
         boolean bitStringColumns = usesBitStringColumns(connection);
         boolean fullPrecisionIntegers = usesFullPrecisionIntegers(connection);
         try (Statement statement = conn.createStatement()) {
-            connectionState().activeStatement = statement;
+            trackActiveStatement(statement);
             if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             String trimmedSql = trimStatementSql(sql);
@@ -1429,7 +1524,7 @@ public final class DbxJdbcPlugin {
         Statement statement;
         try {
             statement = createPagedQueryStatement(conn);
-            connectionState().activeStatement = statement;
+            trackActiveStatement(statement);
         } catch (Exception | LinkageError error) {
             restorePagedQueryTransaction(conn, restoreAutoCommit);
             throw error;
@@ -1535,7 +1630,7 @@ public final class DbxJdbcPlugin {
     }
 
     private static JsonNode readQuerySessionPage(QuerySession session, int pageSize) throws SQLException {
-        connectionState().activeStatement = session.statement;
+        trackActiveStatement(session.statement);
         if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
         int effectivePageSize = Math.max(1, pageSize);
         ArrayNode rows = MAPPER.createArrayNode();

@@ -213,6 +213,9 @@ fn storage_write_error(operation: &str, error: String) -> Response {
     }
 }
 
+// Err 变体（Response）超过 clippy 阈值；admin 端点统一以 Response 返回错误，
+// 与上游 handler 约定一致，按项目惯例豁免。
+#[allow(clippy::result_large_err)]
 fn require_admin(state: &WebState) -> Result<RequestUser, Response> {
     if let Some(response) = state.admin_gating_response() {
         return Err(response);
@@ -250,6 +253,7 @@ fn department_response(department: DepartmentRecord) -> DepartmentResponse {
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn load_user_responses(state: &WebState) -> Result<Vec<UserResponse>, Response> {
     let users = state.app.storage.list_users().await.map_err(|error| internal_error("list users", error))?;
     let roles = state.app.storage.list_roles().await.map_err(|error| internal_error("list roles", error))?;
@@ -278,6 +282,7 @@ fn user_response(user: UserSummary, role_ids: &HashMap<String, i64>) -> UserResp
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn load_user_response(state: &WebState, user_id: i64) -> Result<UserResponse, Response> {
     load_user_responses(state)
         .await?
@@ -286,6 +291,7 @@ async fn load_user_response(state: &WebState, user_id: i64) -> Result<UserRespon
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "not_found"))
 }
 
+#[allow(clippy::result_large_err)]
 async fn validate_role_ids(state: &WebState, role_ids: &[i64]) -> Result<(), Response> {
     let roles = state.app.storage.list_roles().await.map_err(|error| internal_error("validate roles", error))?;
     let known = roles.into_iter().map(|role| role.id).collect::<HashSet<_>>();

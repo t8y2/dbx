@@ -94,6 +94,7 @@ pub struct WebState {
     /// （连接守卫/可见性过滤每个端点请求一次），布局 JSON 可能很大，避免
     /// 每请求重复读 SQLite + 解析；布局改写（Storage::save_sidebar_layout）
     /// 使修订号自增，缓存因版本不匹配自然失效。
+    #[allow(clippy::type_complexity)]
     pub group_paths_cache: RwLock<Option<(u64, Arc<HashMap<String, dbx_core::mcp_policy::McpConnectionGroupPath>>)>>,
     /// `users` 表非空（认证体系已初始化）。为 false 时非 auth API 返回
     /// `403 setup_required`（迁移向导豁免端点除外，见 `auth` 模块）。

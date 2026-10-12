@@ -613,16 +613,13 @@ fn prune_unreferenced_layout_groups(layout: &mut Value) {
 
 fn collect_referenced_group_ids(entries: &[Value], referenced: &mut HashSet<String>) {
     for entry in entries {
-        match entry.get("type").and_then(Value::as_str) {
-            Some("group") => {
-                if let Some(id) = entry.get("id").and_then(Value::as_str) {
-                    referenced.insert(id.to_string());
-                }
-                if let Some(children) = entry.get("children").and_then(Value::as_array) {
-                    collect_referenced_group_ids(children, referenced);
-                }
+        if let Some("group") = entry.get("type").and_then(Value::as_str) {
+            if let Some(id) = entry.get("id").and_then(Value::as_str) {
+                referenced.insert(id.to_string());
             }
-            _ => {}
+            if let Some(children) = entry.get("children").and_then(Value::as_array) {
+                collect_referenced_group_ids(children, referenced);
+            }
         }
     }
 }

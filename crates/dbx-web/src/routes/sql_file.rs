@@ -759,7 +759,12 @@ mod tests {
     /// these tests authenticate the same way the Web client does: a session that
     /// exists in `WebState::sessions` plus its `dbx_session` cookie.
     async fn authenticated_state(state: &WebState, token: &str) -> HeaderMap {
-        state.sessions.write().await.insert(token.to_string());
+        // RBAC 多用户体系：sessions 按 token 索引 UserSession，测试会话
+        // 只需存在即可通过认证中间件。
+        state.sessions.write().await.insert(
+            token.to_string(),
+            crate::state::UserSession { user_id: 1, username: "test".to_string(), created_at: 0 },
+        );
         let mut headers = HeaderMap::new();
         headers.insert(header::COOKIE, format!("dbx_session={token}").parse().unwrap());
         headers

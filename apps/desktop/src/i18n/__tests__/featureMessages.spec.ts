@@ -98,6 +98,12 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   },
   { feature: "Consul workspace", keys: ["consul.ui.*", "consul.tools.*"] },
   { feature: "MQTT max packet size", keys: ["connection.mqttMaxPacketSize"] },
+  {
+    feature: "MQTT message direction filter (#11848)",
+    keys: under("connection", ["mqttMessageDirectionFilterLabel", "mqttDirectionFilterAll", "mqttDirectionFilterReceived", "mqttDirectionFilterSent"]),
+    locales: ["en", "az", "es", "id", "it", "ja", "pt-BR", "ru", "tr", "zh-CN", "zh-TW"],
+    translated: true,
+  },
   { feature: "sidebar search skip hint", keys: ["sidebar.searchConnectionSkipped"] },
   { feature: "PostgreSQL legacy TLS", keys: ["connection.postgresLegacyTls", "connection.postgresLegacyTlsHint"] },
   { feature: "settings search sections", keys: ["settings.syncWebDavWebDescription", "settings.performanceSection"] },

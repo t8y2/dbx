@@ -5,7 +5,10 @@ pub use dbx_drivers::runtime_config::{
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::warn;
@@ -220,6 +223,10 @@ pub struct Storage {
     /// Without this, each consumer can prompt a locked Secret Service again.
     secret_key_error_cache: Arc<Mutex<Option<CachedSecretKeyError>>>,
     migration_failure: Arc<Mutex<Option<MigrationFailure>>>,
+    /// sidebar 布局修订号：每次 `save_sidebar_layout` 成功写入自增。Web 版
+    /// 权限范围判定缓存（连接→分组路径映射）按此版本失效，避免每请求重读
+    /// 布局。进程内单一 Storage 实例，所有写入路径天然覆盖。
+    layout_version: Arc<AtomicU64>,
 }
 
 /// Key material plus the digest of every key file it was resolved from.
@@ -1436,6 +1443,7 @@ impl Storage {
             secret_codec_cache: Arc::new(Mutex::new(None)),
             secret_key_error_cache: Arc::new(Mutex::new(None)),
             migration_failure: Arc::new(Mutex::new(None)),
+            layout_version: Arc::new(AtomicU64::new(0)),
         };
         // Best-effort: switching journal mode is itself a lock-sensitive
         // operation, so a transient failure here (e.g. another process
@@ -8182,12 +8190,22 @@ impl Storage {
 impl Storage {
     pub async fn save_sidebar_layout(&self, layout: &serde_json::Value) -> Result<(), String> {
         let json = serde_json::to_string(layout).map_err(|e| e.to_string())?;
-        self.with_conn(move |conn| {
-            conn.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [json])
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        })
-        .await
+        let result = self
+            .with_conn(move |conn| {
+                conn.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [json])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .await;
+        if result.is_ok() {
+            self.layout_version.fetch_add(1, Ordering::Release);
+        }
+        result
+    }
+
+    /// 当前 sidebar 布局修订号（见字段 `layout_version`）。
+    pub fn layout_version(&self) -> u64 {
+        self.layout_version.load(Ordering::Acquire)
     }
 
     pub async fn load_sidebar_layout(&self) -> Result<Option<serde_json::Value>, String> {
@@ -14846,6 +14864,8 @@ mod tests {
                         order_index: 0,
                         created_at: String::new(),
                         updated_at: String::new(),
+                        password_hash: None,
+                        password_set_by: None,
                     },
                     SavedSqlFolder {
                         id: "duplicate-folder".to_string(),
@@ -14855,6 +14875,8 @@ mod tests {
                         order_index: 1,
                         created_at: String::new(),
                         updated_at: String::new(),
+                        password_hash: None,
+                        password_set_by: None,
                     },
                 ],
                 files: Vec::new(),

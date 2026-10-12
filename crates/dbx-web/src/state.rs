@@ -90,6 +90,11 @@ pub struct WebState {
     /// 有效权限缓存：user_id -> 聚合结果（角色/用户变更时失效，见
     /// [`WebState::invalidate_permission_cache_user`]）。
     pub permission_cache: RwLock<HashMap<i64, EffectivePermissions>>,
+    /// 连接→分组路径映射缓存（布局修订号, 映射表）。权限范围判定属热路径
+    /// （连接守卫/可见性过滤每个端点请求一次），布局 JSON 可能很大，避免
+    /// 每请求重复读 SQLite + 解析；布局改写（Storage::save_sidebar_layout）
+    /// 使修订号自增，缓存因版本不匹配自然失效。
+    pub group_paths_cache: RwLock<Option<(u64, Arc<HashMap<String, dbx_core::mcp_policy::McpConnectionGroupPath>>)>>,
     /// `users` 表非空（认证体系已初始化）。为 false 时非 auth API 返回
     /// `403 setup_required`（迁移向导豁免端点除外，见 `auth` 模块）。
     pub user_system_ready: Arc<AtomicBool>,
@@ -174,6 +179,7 @@ impl WebState {
             web_mcp: Arc::new(crate::web_mcp::WebMcpRuntime::disabled()),
             blacklist: Arc::new(crate::blacklist::BlacklistCache::empty()),
             permission_cache: RwLock::new(HashMap::new()),
+            group_paths_cache: RwLock::new(None),
             user_system_ready: Arc::new(AtomicBool::new(false)),
         }
     }

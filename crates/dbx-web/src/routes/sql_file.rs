@@ -283,6 +283,7 @@ pub async fn execute_sql_file(
     Json(body): Json<SqlFileExecuteWrapper>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let req = body.request;
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     // The failure log of this run belongs to the session that started it: the
     // export/copy routes look it up by this owner, never by path (dbx#11619).
     let log_owner = crate::auth::session_token_from_headers(&headers)

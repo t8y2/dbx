@@ -24,7 +24,7 @@ const deleting = ref<AdminRole | null>(null);
 const name = ref("");
 const description = ref("");
 const permissions = ref<PermissionKey[]>([]);
-const scope = ref<AdminScope>({ allowed_group_ids: [], allowed_connection_ids: [] });
+const scope = ref<AdminScope>({ allowed_group_ids: [], allowed_connection_ids: [], query_write_group_ids: [], query_write_connection_ids: [] });
 const formValid = computed(() => name.value.trim().length > 0);
 
 async function loadRoles() {
@@ -43,7 +43,7 @@ function openCreate() {
   name.value = "";
   description.value = "";
   permissions.value = [];
-  scope.value = { allowed_group_ids: [], allowed_connection_ids: [] };
+  scope.value = { allowed_group_ids: [], allowed_connection_ids: [], query_write_group_ids: [], query_write_connection_ids: [] };
   formOpen.value = true;
 }
 
@@ -55,6 +55,8 @@ function openEdit(role: AdminRole) {
   scope.value = {
     allowed_group_ids: [...role.scope.allowed_group_ids],
     allowed_connection_ids: [...role.scope.allowed_connection_ids],
+    query_write_group_ids: [...(role.scope.query_write_group_ids ?? [])],
+    query_write_connection_ids: [...(role.scope.query_write_connection_ids ?? [])],
   };
   formOpen.value = true;
 }

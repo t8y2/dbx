@@ -106,6 +106,12 @@ const exactMessageKeys: Record<string, string> = {
   in_use: "auth.error.inUse",
   already_exists: "auth.error.alreadyExists",
   internal_error: "auth.error.internalError",
+  // Web RBAC gate error codes (crates/dbx-web/src/access_gate.rs):
+  // 403 {"error": ...} bodies surfaced by permission_denied_response /
+  // connection_forbidden_app_error / query_write_forbidden_app_error.
+  permission_denied: "accessControl.errors.permission_denied",
+  connection_forbidden: "accessControl.errors.connectionForbidden",
+  query_write_forbidden: "accessControl.errors.queryWriteForbidden",
 };
 
 const patterns: [RegExp, string][] = [

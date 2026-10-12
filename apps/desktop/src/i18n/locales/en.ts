@@ -581,7 +581,8 @@ export default {
     },
     scope: {
       title: "Visible Scope",
-      hint: "Selecting a group grants access to all connections in its descendant groups.",
+      hint: "Selecting a group grants access to all connections in its descendant groups; the amber 'write updates' checkbox on a connection allows modifying its data (unchecked connections stay read-only).",
+      writeToggle: "Write updates",
       search: "Search groups or connections...",
       ungrouped: "Ungrouped",
       expand: "Expand {name}",
@@ -591,7 +592,6 @@ export default {
     },
     permissions: {
       connection: { manage: "Manage Connections" },
-      query: { read: "Run Read Queries", write: "Run Write Queries" },
       transfer: "Transfer Data",
       sqlfile: { execute: "Execute SQL Files" },
       schema: { compare: "Compare Schemas" },
@@ -599,6 +599,7 @@ export default {
       backup: { restore: "Backup and Restore" },
       import: { data: "Import Data" },
       export: { data: "Export Data" },
+      mcp: "MCP",
     },
     errors: {
       already_exists: "An item with the same value already exists.",
@@ -607,7 +608,9 @@ export default {
       weak_password: "The password does not meet the security requirements.",
       invalid_username: "The username format is invalid.",
       admin_required: "Administrator access is required.",
-      permission_denied: "Permission denied.",
+      permission_denied: "Operation not permitted. Ask your administrator to grant the corresponding feature permission to your role.",
+      connectionForbidden: "Access to this connection is denied (it is outside your role's data scope).",
+      queryWriteForbidden: 'This connection does not have the "write updates" option checked; read-only operations only.',
       loadFailed: "Failed to load data: {message}",
       requestFailed: "Request failed: {message}",
     },

@@ -39,6 +39,7 @@ pub async fn start_query_result_export(
     Json(body): Json<StartQueryResultExportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut req = body.request;
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let export_id = req.export_id.clone();
 
     let ext = match req.format.as_str() {

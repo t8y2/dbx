@@ -23,7 +23,18 @@ pub async fn save_sidebar_layout(
 
 pub async fn load_sidebar_layout(State(state): State<Arc<WebState>>) -> Result<Json<serde_json::Value>, AppError> {
     let layout = state.app.storage.load_sidebar_layout().await.map_err(AppError::from)?;
-    Ok(Json(layout.unwrap_or(serde_json::json!(null))))
+    // 非 admin Web 会话按 scope 过滤（与 load_connections 的连接过滤同语义）：
+    // 不可见连接条目移除，过滤后无可见后代且自身未被勾选的分组整个裁剪，
+    // groups 元数据同步收缩——分组结构不再泄露给受限用户。桌面直连与
+    // DBX_DISABLE_PASSWORD（无用户上下文）维持原行为。
+    let layout = match crate::request_context::current_request_user() {
+        Some(user) if !user.is_admin => crate::access_gate::filter_sidebar_layout_for_scope(
+            layout.unwrap_or(serde_json::json!(null)),
+            &user.permissions,
+        ),
+        _ => layout.unwrap_or(serde_json::json!(null)),
+    };
+    Ok(Json(layout))
 }
 
 #[derive(Deserialize)]

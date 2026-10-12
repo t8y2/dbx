@@ -20,9 +20,11 @@ use crate::persistence::storage::Storage;
 
 /// 连接管理权限：新建 / 编辑 / 删除连接配置。
 pub const PERMISSION_CONNECTION_MANAGE: &str = "connection.manage";
-/// 只读查询权限。
+/// 历史数据兼容 key：查询权限已改为连接粒度授权（角色数据范围树上的
+/// "写入更新"复选框，见 [`EffectivePermissions::allows_query_write`]），
+/// 不再作为功能权限勾选项；仅为解析旧角色 permissions_json 保留常量。
 pub const PERMISSION_QUERY_READ: &str = "query.read";
-/// 写操作（DML/DDL）权限。
+/// 写操作（DML/DDL）权限。历史数据兼容 key，见 [`PERMISSION_QUERY_READ`]。
 pub const PERMISSION_QUERY_WRITE: &str = "query.write";
 /// 数据传输（导入导出任务编排）权限。
 pub const PERMISSION_TRANSFER: &str = "transfer";
@@ -38,12 +40,14 @@ pub const PERMISSION_BACKUP_RESTORE: &str = "backup.restore";
 pub const PERMISSION_IMPORT_DATA: &str = "import.data";
 /// 数据导出权限。
 pub const PERMISSION_EXPORT_DATA: &str = "export.data";
+/// MCP 功能权限（MCP 设置页：HTTP 服务配置、全局策略、历史保留）。
+pub const PERMISSION_MCP: &str = "mcp";
 
-/// 全部权限 key（顺序即 `/api/auth/check` 中管理员 `permissions` 字段的顺序）。
-pub const ALL_PERMISSIONS: [&str; 10] = [
+/// 全部功能权限 key（顺序即 `/api/auth/check` 中管理员 `permissions` 字段的
+/// 顺序）。查询读写已下沉为连接级授权（数据范围 + "写入更新"勾选），不在
+/// 此列。
+pub const ALL_PERMISSIONS: [&str; 9] = [
     PERMISSION_CONNECTION_MANAGE,
-    PERMISSION_QUERY_READ,
-    PERMISSION_QUERY_WRITE,
     PERMISSION_TRANSFER,
     PERMISSION_SQLFILE_EXECUTE,
     PERMISSION_SCHEMA_COMPARE,
@@ -51,6 +55,7 @@ pub const ALL_PERMISSIONS: [&str; 10] = [
     PERMISSION_BACKUP_RESTORE,
     PERMISSION_IMPORT_DATA,
     PERMISSION_EXPORT_DATA,
+    PERMISSION_MCP,
 ];
 
 /// 密码有效期（秒）：90 天。
@@ -120,6 +125,9 @@ pub struct RoleRecord {
     pub permissions: Vec<String>,
     pub allowed_group_ids: Vec<String>,
     pub allowed_connection_ids: Vec<String>,
+    /// 允许写入查询的分组 / 连接（连接可见集合的子集；空 = 全部只读）。
+    pub query_write_group_ids: Vec<String>,
+    pub query_write_connection_ids: Vec<String>,
     pub user_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -140,14 +148,18 @@ pub struct BlacklistEntry {
 /// 用户的最终生效权限：所有角色权限与数据范围的并集。
 ///
 /// `is_admin = true` 时 [`permissions`](Self::permissions) 为 [`ALL_PERMISSIONS`]
-/// 全集；`allowed_group_ids` / `allowed_connection_ids` 为空集，调用方（路径权限
-/// 中间件、MCP scope）必须先判断 `is_admin` 再解释 scope 空集的含义。
+/// 全集；`allowed_group_ids` / `allowed_connection_ids` 与写入范围两个集合为
+/// 空集，调用方（路径权限中间件、MCP scope）必须先判断 `is_admin` 再解释
+/// scope 空集的含义。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EffectivePermissions {
     pub is_admin: bool,
     pub permissions: HashSet<String>,
     pub allowed_group_ids: HashSet<String>,
     pub allowed_connection_ids: HashSet<String>,
+    /// 允许写入查询的分组 / 连接 ID（必须是可见集合的子集；空 = 无连接可写）。
+    pub query_write_group_ids: HashSet<String>,
+    pub query_write_connection_ids: HashSet<String>,
 }
 
 impl EffectivePermissions {
@@ -158,6 +170,8 @@ impl EffectivePermissions {
             permissions: ALL_PERMISSIONS.iter().map(|key| key.to_string()).collect(),
             allowed_group_ids: HashSet::new(),
             allowed_connection_ids: HashSet::new(),
+            query_write_group_ids: HashSet::new(),
+            query_write_connection_ids: HashSet::new(),
         }
     }
 
@@ -166,20 +180,35 @@ impl EffectivePermissions {
         self.is_admin || self.permissions.contains(permission)
     }
 
-    /// 连接可见判定（Web 会话的数据范围，与 `dbx_core::mcp_policy::
-    /// policy_allows_connection` 同构）：
+    /// 连接可见判定（Web 会话的数据范围）：
     ///
-    /// - 管理员，或未配置任何范围（`allowed_group_ids` 与
-    ///   `allowed_connection_ids` 皆空，含无角色的用户）——全部连接可见；
-    /// - 勾选了范围——连接直接命中 `allowed_connection_ids`，或其任一祖先
-    ///   分组（`group_path.ids`）命中 `allowed_group_ids`（勾选分组 = 该分组
-    ///   下全部连接可见；勾选单连接 = 仅该连接）。
+    /// - 管理员（`is_admin`）——全部连接可见（调用方在 `is_admin` 为 true 时
+    ///   通常短路返回，不会到达此处）；
+    /// - 非管理员——仅当连接直接命中 `allowed_connection_ids`，或其任一祖先
+    ///   分组（`group_path.ids`）命中 `allowed_group_ids` 时可见。
+    ///   若两个集合均为空（未配置范围 / 无角色），则**无连接可见**。
     pub fn allows_connection(&self, group_path: Option<&McpConnectionGroupPath>, connection_id: &str) -> bool {
-        if self.is_admin || (self.allowed_group_ids.is_empty() && self.allowed_connection_ids.is_empty()) {
+        if self.is_admin {
             return true;
         }
         self.allowed_connection_ids.contains(connection_id)
             || group_path.is_some_and(|path| path.ids.iter().any(|id| self.allowed_group_ids.contains(id)))
+    }
+
+    /// 连接的写入查询判定（Web 会话，随 `query.write` 功能权限之后的第二道
+    /// 连接级门）：管理员恒真；非管理员要求连接可见（[`Self::allows_connection`]）
+    /// 且命中写入集合——直接命中 `query_write_connection_ids`，或其任一祖先
+    /// 分组命中 `query_write_group_ids`。写入集合为空（角色未配置写入范围）
+    /// 时无连接可写，与空可见 scope 同为默认拒绝语义。
+    pub fn allows_query_write(&self, group_path: Option<&McpConnectionGroupPath>, connection_id: &str) -> bool {
+        if self.is_admin {
+            return true;
+        }
+        if !self.allows_connection(group_path, connection_id) {
+            return false;
+        }
+        self.query_write_connection_ids.contains(connection_id)
+            || group_path.is_some_and(|path| path.ids.iter().any(|id| self.query_write_group_ids.contains(id)))
     }
 }
 
@@ -264,10 +293,12 @@ fn merge_role_json(
     }
     let scope: serde_json::Value =
         serde_json::from_str(scope_json).map_err(|e| format!("invalid role scope_json: {e}"))?;
-    for key in ["allowed_group_ids", "allowed_connection_ids"] {
+    for key in ["allowed_group_ids", "allowed_connection_ids", "query_write_group_ids", "query_write_connection_ids"] {
         let target = match key {
             "allowed_group_ids" => &mut effective.allowed_group_ids,
-            _ => &mut effective.allowed_connection_ids,
+            "allowed_connection_ids" => &mut effective.allowed_connection_ids,
+            "query_write_group_ids" => &mut effective.query_write_group_ids,
+            _ => &mut effective.query_write_connection_ids,
         };
         if let Some(values) = scope.get(key).and_then(|value| value.as_array()) {
             for value in values {
@@ -319,6 +350,8 @@ fn role_row_mapper(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoleRecord> {
         permissions: serde_json::from_str(&permissions_json).unwrap_or_default(),
         allowed_group_ids: parse_scope_ids(&scope_json, "allowed_group_ids"),
         allowed_connection_ids: parse_scope_ids(&scope_json, "allowed_connection_ids"),
+        query_write_group_ids: parse_scope_ids(&scope_json, "query_write_group_ids"),
+        query_write_connection_ids: parse_scope_ids(&scope_json, "query_write_connection_ids"),
         user_count: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
@@ -1187,10 +1220,11 @@ mod tests {
     }
 
     #[test]
-    fn allows_connection_unrestricted_when_no_scope_is_configured() {
-        let unrestricted = scope_fixture(&[], &[]);
-        assert!(unrestricted.allows_connection(None, "conn-1"));
-        assert!(unrestricted.allows_connection(Some(&group_path(&["g1"])), "conn-1"));
+    fn allows_connection_denies_all_when_no_scope_is_configured() {
+        // 非管理员且 scope 为空：无连接可见（含无角色用户）。
+        let empty = scope_fixture(&[], &[]);
+        assert!(!empty.allows_connection(None, "conn-1"));
+        assert!(!empty.allows_connection(Some(&group_path(&["g1"])), "conn-1"));
 
         // 管理员：scope 为空集但语义上全部可见。
         let admin = EffectivePermissions::admin();
@@ -1213,5 +1247,31 @@ mod tests {
         // 其他分组不可见。
         assert!(!scoped.allows_connection(Some(&in_b), "conn-in-b"));
         assert!(!scoped.allows_connection(None, "conn-ungrouped"));
+    }
+
+    #[test]
+    fn allows_query_write_requires_visibility_and_write_scope() {
+        // 写入范围为空（角色未配置写入授权）：可见连接也只读。
+        let mut readonly = scope_fixture(&["group-a"], &["conn-solo"]);
+        assert!(!readonly.allows_query_write(Some(&group_path(&["group-a"])), "conn-in-a"));
+        assert!(!readonly.allows_query_write(None, "conn-solo"));
+
+        // 勾选连接级写入：仅该连接可写。
+        readonly.query_write_connection_ids.insert("conn-solo".to_string());
+        assert!(readonly.allows_query_write(None, "conn-solo"));
+        assert!(!readonly.allows_query_write(Some(&group_path(&["group-a"])), "conn-in-a"));
+
+        // 勾选分组级写入：分组下可见连接全部可写。
+        let mut group_writable = scope_fixture(&["group-a"], &[]);
+        group_writable.query_write_group_ids.insert("group-a".to_string());
+        assert!(group_writable.allows_query_write(Some(&group_path(&["group-a"])), "conn-in-a"));
+
+        // 不可见连接即使命中写入集合也不可写（可见性优先）。
+        let mut hidden = scope_fixture(&[], &[]);
+        hidden.query_write_connection_ids.insert("conn-hidden".to_string());
+        assert!(!hidden.allows_query_write(None, "conn-hidden"));
+
+        // 管理员恒可写。
+        assert!(EffectivePermissions::admin().allows_query_write(None, "any-conn"));
     }
 }

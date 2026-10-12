@@ -82,6 +82,11 @@ pub struct RoleScope {
     pub allowed_group_ids: Vec<String>,
     #[serde(default)]
     pub allowed_connection_ids: Vec<String>,
+    /// 允许写入查询的分组 / 连接（可见集合的子集；缺省 = 全部只读）。
+    #[serde(default)]
+    pub query_write_group_ids: Vec<String>,
+    #[serde(default)]
+    pub query_write_connection_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,6 +232,8 @@ fn role_response(role: RoleRecord) -> RoleResponse {
         scope: RoleScope {
             allowed_group_ids: role.allowed_group_ids,
             allowed_connection_ids: role.allowed_connection_ids,
+            query_write_group_ids: role.query_write_group_ids,
+            query_write_connection_ids: role.query_write_connection_ids,
         },
         created_at: role.created_at,
         updated_at: role.updated_at,
@@ -603,6 +610,8 @@ pub async fn update_role(
     let scope = body.scope.unwrap_or(RoleScope {
         allowed_group_ids: current.allowed_group_ids,
         allowed_connection_ids: current.allowed_connection_ids,
+        query_write_group_ids: current.query_write_group_ids,
+        query_write_connection_ids: current.query_write_connection_ids,
     });
     let permissions_json = match serde_json::to_string(&permissions) {
         Ok(value) => value,

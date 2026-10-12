@@ -518,7 +518,8 @@ export default withEnglishFallback({
     },
     scope: {
       title: "可见范围",
-      hint: "选择分组将授权其所有子分组中的连接。",
+      hint: "选择分组将授权其所有子分组中的连接；勾选连接后的琥珀色「写入更新」复选框允许修改该连接的数据（未勾选的连接保持只读）。",
+      writeToggle: "写入更新",
       search: "搜索分组或连接...",
       ungrouped: "未分组",
       expand: "展开{name}",
@@ -528,7 +529,6 @@ export default withEnglishFallback({
     },
     permissions: {
       connection: { manage: "管理连接" },
-      query: { read: "执行只读查询", write: "执行写入查询" },
       transfer: "数据传输",
       sqlfile: { execute: "执行 SQL 文件" },
       schema: { compare: "结构对比" },
@@ -536,6 +536,7 @@ export default withEnglishFallback({
       backup: { restore: "备份与恢复" },
       import: { data: "导入数据" },
       export: { data: "导出数据" },
+      mcp: "MCP",
     },
     errors: {
       already_exists: "相同内容已存在。",
@@ -544,7 +545,9 @@ export default withEnglishFallback({
       weak_password: "密码不符合安全要求。",
       invalid_username: "用户名格式无效。",
       admin_required: "需要管理员权限。",
-      permission_denied: "没有操作权限。",
+      permission_denied: "没有操作权限，请联系管理员为您的角色勾选对应功能权限。",
+      connectionForbidden: "无权访问该连接（该连接不在角色的数据范围内）。",
+      queryWriteForbidden: "该连接未勾选「写入更新」，仅允许只读操作。",
       loadFailed: "加载失败：{message}",
       requestFailed: "请求失败：{message}",
     },

@@ -1628,6 +1628,7 @@ mod tests {
             web_mcp: Arc::new(crate::web_mcp::WebMcpRuntime::disabled()),
             blacklist: Arc::new(crate::blacklist::BlacklistCache::empty()),
             permission_cache: RwLock::new(HashMap::new()),
+            group_paths_cache: RwLock::new(None),
             user_system_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         (state, dir)

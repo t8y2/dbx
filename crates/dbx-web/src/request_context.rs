@@ -24,6 +24,14 @@ pub struct RequestUser {
     pub session_token: String,
     /// 生效权限（管理员为 [`EffectivePermissions::admin`]）。
     pub permissions: EffectivePermissions,
+    /// 当前请求的 API 路径后缀（相对 public_base_path，如 `query/execute`）；
+    /// 非 API 请求（静态资源）为 `None`。供 [`crate::access_gate`] 在
+    /// 连接守卫内判定写动词端点（连接级写入授权）。
+    pub api_path_suffix: Option<String>,
+    /// 当前请求的 HTTP 方法（如 `GET`）；非 API 请求为 `None`。与
+    /// [`RequestUser::api_path_suffix`] 配套，用于 MQ 前缀的
+    /// "非 GET 即写"判定（与原中间件 NonGet 语义一致）。
+    pub api_method: Option<String>,
 }
 
 impl RequestUser {
@@ -61,6 +69,8 @@ mod tests {
             is_admin: false,
             session_token: "token-x".to_string(),
             permissions: EffectivePermissions::default(),
+            api_path_suffix: Some("query/execute".to_string()),
+            api_method: Some("POST".to_string()),
         }
     }
 
@@ -75,6 +85,8 @@ mod tests {
         assert_eq!(seen.user_id, 7);
         assert_eq!(seen.username, "alice");
         assert_eq!(seen.session_token, "token-x");
+        assert_eq!(seen.api_path_suffix.as_deref(), Some("query/execute"));
+        assert_eq!(seen.api_method.as_deref(), Some("POST"));
 
         assert!(current_request_user().is_none());
     }

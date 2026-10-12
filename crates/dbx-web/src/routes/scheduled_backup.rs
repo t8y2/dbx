@@ -20,7 +20,29 @@ pub async fn command(
     State(state): State<Arc<WebState>>,
     Json(command): Json<BackupCommand>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // 触达连接的备份命令（Run/Save/Preview/Migrate）按其 config.connection_id 做
+    // 连接可见范围校验；纯调度管理命令（Snapshot/Cancel/Rename/DeleteRuns/File）
+    // 不触达连接。Run 仅带 schedule_id（config=None）时连接藏在已存计划内，
+    // handler 层无法解析，依赖 backup.restore 权限门兑底（见 T4 交付报告遗留）。
+    for connection_id in backup_command_connection_ids(&command) {
+        crate::access_gate::ensure_web_connection_scope(&state, connection_id).await?;
+    }
     Ok(Json(service(&state)?.command(command).await?))
+}
+
+fn backup_command_connection_ids(command: &BackupCommand) -> Vec<&str> {
+    match command {
+        BackupCommand::Run { request } => {
+            request.config.as_ref().map(|config| vec![config.connection_id.as_str()]).unwrap_or_default()
+        }
+        BackupCommand::Save { schedule } | BackupCommand::Preview { schedule } => {
+            vec![schedule.config.connection_id.as_str()]
+        }
+        BackupCommand::Migrate { migration } => {
+            migration.schedules.iter().map(|schedule| schedule.config.connection_id.as_str()).collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 pub async fn download(

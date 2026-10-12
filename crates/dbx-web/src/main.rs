@@ -1,3 +1,4 @@
+mod access_gate;
 mod auth;
 mod blacklist;
 mod demo;
@@ -639,6 +640,7 @@ async fn serve() -> Result<(), String> {
         web_mcp,
         blacklist,
         permission_cache: RwLock::new(HashMap::new()),
+        group_paths_cache: RwLock::new(None),
         user_system_ready: Arc::new(AtomicBool::new(user_system_ready)),
     });
 
@@ -1543,6 +1545,7 @@ async fn serve() -> Result<(), String> {
         api.route("/query/build-duckdb-attach-database-sql", post(routes::query::build_duckdb_attach_database_sql));
 
     let api = add_mq_routes(api)
+        .layer(middleware::from_fn_with_state(web_state.clone(), access_gate::access_gate_middleware))
         .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate))
         .layer(middleware::from_fn_with_state(web_state.clone(), demo::demo_mode_gate))
         .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))

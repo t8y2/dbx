@@ -3400,7 +3400,7 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "snippets", label: t("settings.snippetsTab") },
   { value: "sync", label: t("settings.syncTab") },
   { value: "ai", label: t("settings.aiTab") },
-  { value: "mcp" as const, label: t("settings.mcpTab") },
+  ...(authStore.hasPermission("mcp") ? [{ value: "mcp" as const, label: t("settings.mcpTab") }] : []),
   { value: "updates" as const, label: t("settings.updatesTab") },
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
   ...(isWeb && authStore.isAdmin ? [{ value: "accessControl" as const, label: t("settings.accessControlTab") }] : []),

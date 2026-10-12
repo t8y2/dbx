@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/composables/useToast";
 import { formatError } from "@/lib/backend/errorUtils";
 import { getAdminScopeTree, type AdminScope, type ScopeTreeNode } from "@/lib/admin/adminApi";
-import { collectScopeGroupIds, filterScopeTree, flattenScopeTree, scopeNodeStateInTree, toggleScopeNode } from "@/lib/admin/scopeTree";
+import { collectScopeGroupIds, filterScopeTree, flattenScopeTree, queryWriteNodeStateInTree, scopeNodeStateInTree, toggleScopeNode, toggleWriteScopeNode } from "@/lib/admin/scopeTree";
 
 const props = defineProps<{
   modelValue: AdminScope;
@@ -56,6 +56,15 @@ function state(node: ScopeTreeNode) {
 
 function toggleNode(node: ScopeTreeNode) {
   emit("update:modelValue", toggleScopeNode(allNodes.value, props.modelValue, node.type, node.id));
+}
+
+// 写入授权列：与可见性同一套树语义，读 `query_write_*` 集合；仅对可见节点展示。
+function writeState(node: ScopeTreeNode) {
+  return queryWriteNodeStateInTree(allNodes.value, props.modelValue, node.type, node.id);
+}
+
+function toggleWrite(node: ScopeTreeNode) {
+  emit("update:modelValue", toggleWriteScopeNode(allNodes.value, props.modelValue, node.type, node.id));
 }
 
 function toggleExpanded(groupId: string) {
@@ -133,6 +142,21 @@ onMounted(loadTree);
               <Minus v-if="state(row.node) === 'indeterminate'" class="h-3 w-3" />
               <Check v-else-if="state(row.node) === 'checked'" class="h-3 w-3" />
             </button>
+            <button
+              v-if="state(row.node) !== 'unchecked'"
+              type="button"
+              role="checkbox"
+              :aria-checked="writeState(row.node) === 'indeterminate' ? 'mixed' : writeState(row.node) === 'checked'"
+              :title="t('accessControl.scope.writeToggle')"
+              :aria-label="t('accessControl.scope.writeToggle')"
+              class="ml-1.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors"
+              :class="writeState(row.node) === 'unchecked' ? 'border-border bg-background' : 'border-amber-500 bg-amber-500 text-white'"
+              @click.stop="toggleWrite(row.node)"
+            >
+              <Minus v-if="writeState(row.node) === 'indeterminate'" class="h-3 w-3" />
+              <Check v-else-if="writeState(row.node) === 'checked'" class="h-3 w-3" />
+            </button>
+            <span v-else class="ml-1.5 w-4 shrink-0" />
             <button type="button" class="ml-2 flex min-w-0 flex-1 items-center gap-2 text-left" @click="toggleNode(row.node)">
               <FolderTree v-if="row.node.type === 'group'" class="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
               <Database v-else class="h-3.5 w-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
@@ -152,6 +176,19 @@ onMounted(loadTree);
                 @click="toggleNode(node)"
               >
                 <Check v-if="state(node) === 'checked'" class="h-3 w-3" />
+              </button>
+              <button
+                v-if="state(node) !== 'unchecked'"
+                type="button"
+                role="checkbox"
+                :aria-checked="writeState(node) === 'checked'"
+                :title="t('accessControl.scope.writeToggle')"
+                :aria-label="t('accessControl.scope.writeToggle')"
+                class="flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors"
+                :class="writeState(node) === 'checked' ? 'border-amber-500 bg-amber-500 text-white' : 'border-border bg-background'"
+                @click.stop="toggleWrite(node)"
+              >
+                <Check v-if="writeState(node) === 'checked'" class="h-3 w-3" />
               </button>
               <button type="button" class="flex min-w-0 flex-1 items-center gap-2 text-left" @click="toggleNode(node)">
                 <Database class="h-3.5 w-3.5 shrink-0 text-sky-600 dark:text-sky-400" />

@@ -1049,7 +1049,11 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     if (groupFiles.length <= 1) return;
 
     const sortedGroup = sortFilesByCriteria(groupFiles, mode);
-    const reindexed = reindexFiles(sortedGroup, targetFolderId);
+    // Only reindex orderIndex, preserve existing folderId to maintain parent-child relationship
+    const reindexed = sortedGroup.map((file, index) => ({
+      ...file,
+      orderIndex: index,
+    }));
     const untouched = files.value.filter((file) => (file.folderId || undefined) !== targetFolderId);
     await persistFiles([...untouched, ...reindexed]);
   }
@@ -1083,7 +1087,12 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
         nextFiles.push(...groupFiles);
       } else {
         const sorted = sortFilesByCriteria(groupFiles, mode);
-        nextFiles.push(...reindexFiles(sorted, fId));
+        // Only reindex orderIndex, preserve existing folderId to maintain parent-child relationship
+        const reindexed = sorted.map((file, index) => ({
+          ...file,
+          orderIndex: index,
+        }));
+        nextFiles.push(...reindexed);
       }
     }
     await persistFiles(nextFiles);

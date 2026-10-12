@@ -574,6 +574,8 @@ pub async fn auth_middleware(
         is_admin: user.is_admin,
         session_token: token.clone(),
         permissions: effective,
+        api_path_suffix: Some(suffix.to_string()),
+        api_method: Some(req.method().to_string()),
     };
 
     // 在下游处理器及其 await 到的池创建路径上注入当前登录会话的 owner 作用域，

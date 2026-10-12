@@ -71,6 +71,10 @@ async function initialize() {
       const result = await checkStartupAuthentication(request.signal);
       if (request.signal.aborted) return;
       startupAuthentication.value = result;
+      // Refresh path: the login path reaches applyCheckResponse via LoginPage,
+      // but a plain reload never does, leaving the account UI and admin-only
+      // modules unpopulated even though the session cookie is still valid.
+      auth.applyCheckResponse(result);
       setupRequired.value = result.setup_required === true;
       loginRequired.value = setupRequired.value || (result.required && !result.authenticated);
       if (loginRequired.value) {

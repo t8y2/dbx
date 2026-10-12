@@ -32,6 +32,9 @@ export interface AdminDepartment {
 export interface AdminScope {
   allowed_group_ids: string[];
   allowed_connection_ids: string[];
+  /** 允许写入查询的分组 / 连接（可见集合的子集；缺省 = 全部只读）。 */
+  query_write_group_ids?: string[];
+  query_write_connection_ids?: string[];
 }
 
 export interface AdminRole {

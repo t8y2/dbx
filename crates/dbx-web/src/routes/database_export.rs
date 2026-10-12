@@ -36,6 +36,7 @@ pub async fn start_database_export(
     Json(body): Json<StartExportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut req = body.request;
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let export_id = req.export_id.clone();
 
     // Web mode: write to a server-side temp file instead of the client-supplied

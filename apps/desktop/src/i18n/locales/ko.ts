@@ -1,6 +1,7 @@
 import { sidebarMenuKo as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpKo as mongoDump } from "./mongodbDatabaseDump";
+import { damengDumpKo as damengDump } from "./damengDump";
 import { meilisearchManagementKo } from "./meilisearchManagement";
 import docs from "./docs/ko";
 import { dataDictionaryKo as dataDictionary } from "./dataDictionaryMessages";
@@ -110,6 +111,7 @@ export default withEnglishFallback({
     updateFailed: "속성을 업데이트하지 못했습니다.",
   },
   mongoDump,
+  damengDump,
   cellTransform: {
     title: "변환 미리보기",
     description: "현재 값을 변환하여 보거나 복사합니다. 원래 값과 편집 초안은 변경되지 않습니다.",
@@ -7930,6 +7932,11 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "설정되지 않음 (마지막 내보내기 경로 사용)",
     preferredExportPathChoose: "기본 내보내기 디렉터리 선택",
     preferredExportPathClear: "기본 내보내기 경로 지우기",
+    damengClientBinDir: "Dameng 클라이언트 bin 디렉터리",
+    damengClientBinDirDescription: "Dameng 클라이언트 도구 dexp/dimp가 있는 디렉터리. 네이티브 .dmp 내보내기/가져오기에 사용됩니다.",
+    damengClientBinDirPlaceholder: "예: C:\\dm8\\bin",
+    damengClientBinDirChoose: "Dameng 클라이언트 bin 디렉터리 선택",
+    damengClientBinDirClear: "Dameng 클라이언트 bin 디렉터리 지우기",
     autoOpenExportFolder: "내보내기 후 폴더 자동 열기",
     autoOpenExportFolderDescription: "데이터 내보내기가 완료된 후 파일 관리자에서 저장된 폴더를 자동으로 엽니다.",
     exportSection: "내보내기",

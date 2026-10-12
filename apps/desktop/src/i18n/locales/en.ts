@@ -6,6 +6,7 @@ import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 import { meilisearchManagementEn } from "./meilisearchManagement";
 import { mongodbDatabaseDumpEn as mongoDump } from "./mongodbDatabaseDump";
+import { damengDumpEn as damengDump } from "./damengDump";
 
 const consul = {
   ...consulUiMessages,
@@ -6591,6 +6592,7 @@ export default {
     },
   },
   mongoDump,
+  damengDump,
   mongo: {
     documents: "{count} documents",
     addField: "Add Field",
@@ -9068,6 +9070,11 @@ export default {
     preferredExportPathPlaceholder: "Not set (use last export path)",
     preferredExportPathChoose: "Choose preferred export directory",
     preferredExportPathClear: "Clear preferred export path",
+    damengClientBinDir: "Dameng client bin directory",
+    damengClientBinDirDescription: "Directory that contains the Dameng client tools dexp/dimp, used by the native .dmp export/import.",
+    damengClientBinDirPlaceholder: "e.g. C:\\dm8\\bin",
+    damengClientBinDirChoose: "Choose Dameng client bin directory",
+    damengClientBinDirClear: "Clear Dameng client bin directory",
     autoOpenExportFolder: "Auto-open folder after export",
     autoOpenExportFolderDescription: "Automatically reveal and open the containing folder in the file manager after data export succeeds.",
     exportSection: "Export",

@@ -1,6 +1,7 @@
 import { sidebarMenuEs as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpEs as mongoDump } from "./mongodbDatabaseDump";
+import { damengDumpEs as damengDump } from "./damengDump";
 import { meilisearchManagementEs } from "./meilisearchManagement";
 import { redisGroupingEs as redisGrouping } from "./redisGrouping";
 import docs from "./docs/es";
@@ -112,6 +113,7 @@ export default withEnglishFallback({
     updateFailed: "No se pudo actualizar la propiedad.",
   },
   mongoDump,
+  damengDump,
   cellTransform: {
     title: "Vista previa de conversión",
     description: "Convierte el valor actual para verlo o copiarlo. El valor original y el borrador no cambian.",
@@ -8305,6 +8307,11 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "No establecido (usar última ruta)",
     preferredExportPathChoose: "Elegir directorio de exportación preferido",
     preferredExportPathClear: "Borrar ruta de exportación preferida",
+    damengClientBinDir: "Directorio bin del cliente de Dameng",
+    damengClientBinDirDescription: "Directorio que contiene las herramientas del cliente de Dameng dexp/dimp, usado por la exportación/importación nativa .dmp.",
+    damengClientBinDirPlaceholder: "p. ej. C:\\dm8\\bin",
+    damengClientBinDirChoose: "Elegir directorio bin del cliente de Dameng",
+    damengClientBinDirClear: "Borrar directorio bin del cliente de Dameng",
     autoOpenExportFolder: "Abrir carpeta automáticamente después de exportar",
     autoOpenExportFolderDescription: "Abre y muestra automáticamente la carpeta que contiene el archivo exportado en el administrador de archivos tras completarse la exportación.",
     exportSection: "Exportar",

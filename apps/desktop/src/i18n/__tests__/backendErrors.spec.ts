@@ -215,6 +215,21 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     key: "auth.rateLimited",
     params: { seconds: "42" },
   },
+  {
+    name: "dameng native dump tool missing",
+    message: "[damengToolNotFound] Dameng client tool 'dexp' was not found in 'C:\\dm8\\bin'. Configure the Dameng client bin directory in Settings > Data.",
+    key: "damengDump.errors.toolNotFound",
+  },
+  {
+    name: "dameng native dump on a non-dameng connection",
+    message: "[damengConnectionRequired] Native dexp/dimp dump is only available for Dameng connections.",
+    key: "damengDump.errors.connectionRequired",
+  },
+  {
+    name: "dameng native dump without a stored password",
+    message: "[damengPasswordMissing] The connection has no password available; reconnect and enter the password first.",
+    key: "damengDump.errors.passwordMissing",
+  },
 ];
 
 function translatorFor(locale: LocaleKey): BackendErrorTranslate {

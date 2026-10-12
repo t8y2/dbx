@@ -1,6 +1,7 @@
 import { sidebarMenuPtBR as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpPtBR as mongoDump } from "./mongodbDatabaseDump";
+import { damengDumpPtBR as damengDump } from "./damengDump";
 import { meilisearchManagementPtBR } from "./meilisearchManagement";
 import docs from "./docs/pt-BR";
 import { dataDictionaryPtBR as dataDictionary } from "./dataDictionaryMessages";
@@ -111,6 +112,7 @@ export default withEnglishFallback({
     updateFailed: "Não foi possível atualizar a propriedade.",
   },
   mongoDump,
+  damengDump,
   cellTransform: {
     title: "Prévia da conversão",
     description: "Converte o valor atual para visualizar ou copiar. O valor original e o rascunho permanecem inalterados.",
@@ -8066,6 +8068,11 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "Não definido (usar último caminho)",
     preferredExportPathChoose: "Escolher diretório de exportação preferencial",
     preferredExportPathClear: "Limpar caminho de exportação preferencial",
+    damengClientBinDir: "Diretório bin do cliente Dameng",
+    damengClientBinDirDescription: "Diretório que contém as ferramentas do cliente Dameng dexp/dimp, usado pela exportação/importação nativa .dmp.",
+    damengClientBinDirPlaceholder: "ex.: C:\\dm8\\bin",
+    damengClientBinDirChoose: "Escolher diretório bin do cliente Dameng",
+    damengClientBinDirClear: "Limpar diretório bin do cliente Dameng",
     autoOpenExportFolder: "Abrir pasta automaticamente após exportar",
     autoOpenExportFolderDescription: "Abre e revela automaticamente a pasta que contém o arquivo exportado no gerenciador de arquivos após a conclusão da exportação.",
     exportSection: "Exportar",

@@ -2,6 +2,7 @@ import { sidebarMenuZhTW as sidebarMenu } from "./sidebarMenuMessages";
 import { redisGroupingZhTW as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpZhTW as mongoDump } from "./mongodbDatabaseDump";
+import { damengDumpZhTW as damengDump } from "./damengDump";
 import { meilisearchManagementZhTW } from "./meilisearchManagement";
 import docs from "./docs/zh-TW";
 import { dataDictionaryZhTW as dataDictionary } from "./dataDictionaryMessages";
@@ -112,6 +113,7 @@ export default withEnglishFallback({
     updateFailed: "屬性更新失敗。",
   },
   mongoDump,
+  damengDump,
   cellTransform: {
     title: "轉換預覽",
     description: "將目前內容轉換後檢視或複製，不改變原值和編輯草稿。",
@@ -7990,6 +7992,11 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "未設定（自動使用上次匯出路徑）",
     preferredExportPathChoose: "選擇首選匯出目錄",
     preferredExportPathClear: "清除首選匯出路徑",
+    damengClientBinDir: "達夢用戶端 bin 目錄",
+    damengClientBinDirDescription: "包含達夢用戶端工具 dexp/dimp 的目錄，用於原生 .dmp 匯出/匯入。",
+    damengClientBinDirPlaceholder: "如 C:\\dm8\\bin",
+    damengClientBinDirChoose: "選擇達夢用戶端 bin 目錄",
+    damengClientBinDirClear: "清除達夢用戶端 bin 目錄",
     autoOpenExportFolder: "匯出後自動開啟所在資料夾",
     autoOpenExportFolderDescription: "資料匯出成功後，自動在系統檔案管理器中開啟並定位匯出檔案所在的資料夾。",
     shortcutUppercaseSelection: "選取內容轉為大寫",

@@ -1,6 +1,7 @@
 import { sidebarMenuJa as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpJa as mongoDump } from "./mongodbDatabaseDump";
+import { damengDumpJa as damengDump } from "./damengDump";
 import docs from "./docs/ja";
 import { dataDictionaryJa as dataDictionary } from "./dataDictionaryMessages";
 import { consulJaMessages } from "./consulJa";
@@ -111,6 +112,7 @@ export default withEnglishFallback({
     updateFailed: "プロパティを更新できませんでした。",
   },
   mongoDump,
+  damengDump,
   cellTransform: {
     title: "変換プレビュー",
     description: "現在の値を変換して表示またはコピーします。元の値と編集中の内容は変更されません。",
@@ -8058,6 +8060,11 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "未設定（前回のパスを使用）",
     preferredExportPathChoose: "優先エクスポートディレクトリを選択",
     preferredExportPathClear: "優先エクスポートパスをクリア",
+    damengClientBinDir: "Dameng クライアント bin ディレクトリ",
+    damengClientBinDirDescription: "Dameng クライアントツール dexp/dimp を含むディレクトリ。ネイティブ .dmp エクスポート/インポートで使用されます。",
+    damengClientBinDirPlaceholder: "例: C:\\dm8\\bin",
+    damengClientBinDirChoose: "Dameng クライアント bin ディレクトリを選択",
+    damengClientBinDirClear: "Dameng クライアント bin ディレクトリをクリア",
     autoOpenExportFolder: "エクスポート後に保存先フォルダーを開く",
     autoOpenExportFolderDescription: "データエクスポート完了後、ファイルマネージャーで保存先フォルダーを自動的に開きます。",
     exportSection: "エクスポート",

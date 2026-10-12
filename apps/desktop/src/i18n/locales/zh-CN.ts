@@ -6,6 +6,7 @@ import { dataDictionaryZhCN as dataDictionary } from "./dataDictionaryMessages";
 import { consul } from "./consulZhCN";
 import { meilisearchManagementZhCN } from "./meilisearchManagement";
 import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
+import { damengDumpZhCN as damengDump } from "./damengDump";
 
 export default withEnglishFallback({
   sidebarMenu,
@@ -6581,6 +6582,7 @@ export default withEnglishFallback({
     },
   },
   mongoDump,
+  damengDump,
   mongo: {
     documents: "{count} 个文档",
     addField: "添加字段",
@@ -9049,6 +9051,11 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "未设置（自动使用上次导出路径）",
     preferredExportPathChoose: "选择首选导出目录",
     preferredExportPathClear: "清除首选导出路径",
+    damengClientBinDir: "达梦客户端 bin 目录",
+    damengClientBinDirDescription: "包含达梦客户端工具 dexp/dimp 的目录，用于原生 .dmp 导出/导入。",
+    damengClientBinDirPlaceholder: "如 C:\\dm8\\bin",
+    damengClientBinDirChoose: "选择达梦客户端 bin 目录",
+    damengClientBinDirClear: "清除达梦客户端 bin 目录",
     autoOpenExportFolder: "导出后自动打开所在文件夹",
     autoOpenExportFolderDescription: "数据导出成功后，自动在系统文件管理器中打开并定位导出文件所在的文件夹。",
     exportSection: "导出",

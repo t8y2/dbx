@@ -3081,6 +3081,7 @@ export default {
     layerPreviewCustomBasemapInvalid: "Enter a name and a valid HTTP(S) XYZ tile URL containing {z}, {x}, and {y}.",
     insertRowsNotSupported: "The current save target does not support adding rows.",
     rowIdDeleteConflict: "Deletion affected {actual} of {expected} selected rows. Some targets may already have been deleted by another session or no longer match. Pending deletes were cleared and the result was refreshed; check the current data.",
+    rowIdUpdateConflict: "The row no longer matches its ROWID. No changes were saved; your draft was kept. Refresh the result and verify the target before retrying.",
     zoomIn: "Zoom In",
     zoomOut: "Zoom Out",
     fitImage: "Fit to View",

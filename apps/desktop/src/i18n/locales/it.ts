@@ -2645,6 +2645,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapApply: "Applica",
     layerPreviewCustomBasemapInvalid: "Inserisci un nome e un URL tile XYZ HTTP(S) valido con i segnaposto {z}, {x} e {y}.",
     insertRowsNotSupported: "La destinazione di salvataggio corrente non supporta l'aggiunta di righe.",
+    rowIdUpdateConflict: "La riga non corrisponde più al suo ROWID. Nessuna modifica salvata; la bozza è stata mantenuta. Aggiorna il risultato e verifica la destinazione prima di riprovare.",
     rowIdDeleteConflict:
       "L'eliminazione ha interessato {actual} delle {expected} righe selezionate. Alcuni target potrebbero essere già stati eliminati da un'altra sessione o non corrispondere più. Le eliminazioni in sospeso sono state cancellate e il risultato è stato aggiornato; controllare i dati attuali.",
     zoomIn: "Ingrandisci",

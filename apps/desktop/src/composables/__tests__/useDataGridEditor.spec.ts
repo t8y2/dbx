@@ -1471,6 +1471,92 @@ describe("useDataGridEditor saveChanges reload", () => {
     message: "Cannot safely update or delete this row: more than one row matches.",
   };
 
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps a missed single ROWID update pending (%s)", async (databaseType) => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 0 });
+    const { editor, emit } = createSaveTestEditor({ databaseType, primaryKeys: ["__DBX_ROWID"] });
+    editor.dirtyRows.value = new Map([[1, new Map([[1, "shipped"]])]]);
+    await editor.saveChanges();
+    expect(editor.saveError.value).toContain("no longer matches");
+    expect(editor.dirtyRows.value.get(1)?.get(1)).toBe("shipped");
+    expect(editor.manualSaveRequired.value).toBe(true);
+    expect(mocks.addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: false, affected_rows: undefined }));
+    expect(emit).not.toHaveBeenCalled();
+    await editor.saveChanges({ autoSave: true });
+    expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([1, -1, undefined, NaN])("does not report a ROWID update conflict for successful or unknown counts: %s", async (affectedRows) => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: affectedRows });
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"] });
+    editor.dirtyRows.value.set(1, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+    expect(editor.saveError.value).toBe("");
+    expect(editor.dirtyRows.value.size).toBe(0);
+    expect(mocks.addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+  });
+
+  it.each([
+    [{ affected_rows: 0 }, true],
+    [{ affected_rows: -1 }, false],
+    [{}, false],
+  ] as const)("uses the manual transaction's single raw update count %j", async (result, conflict) => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';"], rollbackStatements: [] });
+    mocks.executeInManualTransaction.mockResolvedValue([result]);
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"], manualTransactionSessionId: "manual-1" });
+    editor.dirtyRows.value.set(1, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+    expect(Boolean(editor.saveError.value)).toBe(conflict);
+    expect(editor.dirtyRows.value.size).toBe(conflict ? 1 : 0);
+  });
+
+  it.each([
+    ["BEGIN UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22'; END;"],
+    ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';", "DELETE FROM orders_test WHERE ROWIDTOCHAR(ROWID)='ROW-21';"],
+    ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';", "UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-21';"],
+  ])("does not infer a single-update conflict from block or batch counts: %j", async (...statements) => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements, rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 0 });
+    mocks.executeInTransaction.mockResolvedValue({ affected_rows: 0 });
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"] });
+    editor.dirtyRows.value.set(1, new Map([[1, "shipped"]]));
+    if (statements[1]?.startsWith("DELETE")) editor.deletedRows.value.add(0);
+    else if (statements.length > 1) editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+    expect(editor.saveError.value).toBe("");
+  });
+
+  it("preserves physical-primary-key zero-update behavior", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE id=2;"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 0 });
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["id"] });
+    editor.dirtyRows.value.set(1, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+    expect(editor.saveError.value).toBe("");
+    expect(editor.dirtyRows.value.size).toBe(0);
+  });
+
+  it("does not interpret missing manual transaction results as zero matched rows", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';"], rollbackStatements: [] });
+    mocks.executeInManualTransaction.mockResolvedValue([]);
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"], manualTransactionSessionId: "manual-1" });
+    editor.dirtyRows.value = new Map([[1, new Map([[1, "shipped"]])]]);
+    await editor.saveChanges();
+    expect(editor.saveError.value).toBe("");
+  });
+
+  it("does not infer an update conflict from a mixed insert batch", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE ROWIDTOCHAR(ROWID)='ROW-22';", "INSERT INTO orders_test VALUES(3, 'new');"], rollbackStatements: [] });
+    mocks.executeInTransaction.mockResolvedValue({ affected_rows: 0 });
+    const { editor } = createSaveTestEditor({ databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"] });
+    editor.dirtyRows.value = new Map([[1, new Map([[1, "shipped"]])]]);
+    editor.newRows.value = [[3, "new"]];
+    await editor.saveChanges();
+    expect(editor.saveError.value).toBe("");
+    expect(mocks.executeInTransaction).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["oracle", "oceanbase-oracle"] as const)("reports a concurrently deleted ROWID target without keeping an impossible retry pending (%s)", async (databaseType) => {
     mocks.prepareDataGridSave.mockResolvedValue({ statements: ["DELETE FROM orders_test WHERE ROWID='ROW-22'"], rollbackStatements: ["restore ROW-22"] });
     mocks.executeBatch.mockResolvedValue({ affected_rows: 0 });

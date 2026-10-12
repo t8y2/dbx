@@ -2647,6 +2647,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapInvalid: "Informe um nome e uma URL XYZ HTTP(S) válida contendo os marcadores {z}, {x} e {y}.",
     insertRowsNotSupported: "O destino de salvamento atual não suporta a adição de linhas.",
     rowIdDeleteConflict: "A exclusão afetou {actual} de {expected} linhas selecionadas. Alguns destinos podem já ter sido excluídos por outra sessão ou não corresponder mais. As exclusões pendentes foram limpas e o resultado foi atualizado; verifique os dados atuais.",
+    rowIdUpdateConflict: "A linha não corresponde mais ao seu ROWID. Nenhuma alteração foi salva; seu rascunho foi mantido. Atualize o resultado e verifique o destino antes de tentar novamente.",
     zoomIn: "Aproximar",
     zoomOut: "Afastar",
     fitImage: "Ajustar à Visualização",

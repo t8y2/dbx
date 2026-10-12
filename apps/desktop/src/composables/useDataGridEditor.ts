@@ -2226,6 +2226,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
     const start = Date.now();
     let apiResult: { affected_rows?: number } | undefined;
+    let singleStatementAffectedRows: number | undefined;
     console.info("[DBX][dataGrid:save-statements]", {
       databaseType: databaseType.value,
       table: tableMeta.value ? [tableMeta.value.schema, tableMeta.value.tableName].filter(Boolean).join(".") : undefined,
@@ -2241,6 +2242,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         apiResult = {
           affected_rows: results.reduce((total, result) => total + (result.affected_rows ?? 0), 0),
         };
+        if (stmts.length === 1 && results.length === 1) singleStatementAffectedRows = results[0]?.affected_rows;
       } catch (e: any) {
         saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, snapshot, e);
         await finishInterruptedSaveChanges(snapshot);
@@ -2261,6 +2263,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         apiResult = preparedSave?.boundStatements?.length
           ? await api.executeBatch(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema, undefined, undefined, preparedSave.boundStatements)
           : await api.executeBatch(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
+        if (stmts.length === 1) singleStatementAffectedRows = apiResult?.affected_rows;
       } catch (e: any) {
         saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, snapshot, e);
         await finishInterruptedSaveChanges(snapshot);
@@ -2276,6 +2279,22 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         await finishInterruptedSaveChanges(snapshot);
         return;
       }
+    }
+    const missedSingleRowIdUpdate =
+      (resolvedDatabaseType.value === "oracle" || resolvedDatabaseType.value === "oceanbase-oracle") &&
+      usesSyntheticRowIdKey(resolvedDatabaseType.value, stmtOptions?.tableMeta.primaryKeys ?? []) &&
+      !joinedWriteTargets.value?.length &&
+      snapshot.dirtyRows.size === 1 &&
+      snapshot.newRows.length === 0 &&
+      snapshot.deletedRows.size === 0 &&
+      stmts.length === 1 &&
+      /^\s*UPDATE\b/i.test(stmts[0]!) &&
+      singleStatementAffectedRows === 0;
+    if (missedSingleRowIdUpdate) {
+      manualSaveRequired.value = true;
+      saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, snapshot, new Error(i18n.global.t("grid.rowIdUpdateConflict")));
+      await finishInterruptedSaveChanges(snapshot);
+      return;
     }
     // Anonymous PL/SQL reports zero for an unknown JDBC update count; its
     // SQL%ROWCOUNT guard owns concurrency checks. Only compare plain DELETEs.

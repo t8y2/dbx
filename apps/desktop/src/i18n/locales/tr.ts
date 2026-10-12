@@ -2392,6 +2392,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapInvalid: "Bir ad ve {z}, {x} ile {y} içeren geçerli bir HTTP(S) XYZ karo URL'si girin.",
     insertRowsNotSupported: "Geçerli kaydetme hedefi satır eklemeyi desteklemiyor.",
     rowIdDeleteConflict: "Silme işlemi seçilen {expected} satırdan {actual} satırı etkiledi. Bazı hedefler başka bir oturum tarafından zaten silinmiş veya artık eşleşmiyor olabilir. Bekleyen silmeler temizlendi ve sonuç yenilendi; güncel verileri kontrol edin.",
+    rowIdUpdateConflict: "Satır artık ROWID değeriyle eşleşmiyor. Değişiklikler kaydedilmedi; taslağınız korundu. Sonucu yenileyin ve yeniden denemeden önce hedefi doğrulayın.",
     zoomIn: "Yakınlaştır",
     zoomOut: "Uzaklaştır",
     fitImage: "Görünüme Sığdır",

@@ -3016,6 +3016,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapInvalid: "请输入名称和有效的 HTTP(S) XYZ 瓦片地址，并包含 {z}、{x}、{y} 占位符。",
     insertRowsNotSupported: "当前保存目标不支持新增行。",
     rowIdDeleteConflict: "本次删除影响 {actual}/{expected} 行。部分目标可能已被其他会话删除或不再匹配。已清理本次待删除标记并刷新，请核对当前数据。",
+    rowIdUpdateConflict: "该行已不再匹配原 ROWID。此次更新未写入，修改草稿已保留。请刷新结果并核对目标后重试。",
     zoomIn: "放大",
     zoomOut: "缩小",
     fitImage: "适合显示区域",

@@ -2691,6 +2691,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapInvalid: "이름과 {z}, {x}, {y}가 포함된 유효한 HTTP(S) XYZ 타일 URL을 입력하세요.",
     insertRowsNotSupported: "현재 저장 대상은 행 추가를 지원하지 않습니다.",
     rowIdDeleteConflict: "삭제가 선택한 {expected}행 중 {actual}행에만 적용되었습니다. 일부 대상은 다른 세션에서 이미 삭제되었거나 더 이상 일치하지 않을 수 있습니다. 보류 중인 삭제가 지워지고 결과가 새로 고쳐졌습니다. 현재 데이터를 확인하세요.",
+    rowIdUpdateConflict: "행이 더 이상 원래 ROWID와 일치하지 않습니다. 변경 사항은 저장되지 않았으며 초안은 유지됩니다. 결과를 새로 고치고 대상을 확인한 후 다시 시도하세요.",
     zoomIn: "확대",
     zoomOut: "축소",
     fitImage: "보기에 맞춤",

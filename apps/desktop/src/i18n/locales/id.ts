@@ -2704,6 +2704,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapInvalid: "Masukkan nama dan URL tile XYZ HTTP(S) yang valid berisi {z}, {x}, dan {y}.",
     insertRowsNotSupported: "Target penyimpanan saat ini tidak mendukung penambahan baris.",
     rowIdDeleteConflict: "Penghapusan memengaruhi {actual} dari {expected} baris yang dipilih. Beberapa target mungkin sudah dihapus oleh sesi lain atau tidak lagi cocok. Penghapusan tertunda telah dibersihkan dan hasilnya diperbarui; periksa data saat ini.",
+    rowIdUpdateConflict: "Baris tidak lagi cocok dengan ROWID-nya. Perubahan tidak disimpan; draf dipertahankan. Segarkan hasil dan periksa target sebelum mencoba lagi.",
     zoomIn: "Perbesar",
     zoomOut: "Perkecil",
     fitImage: "Sesuaikan ke Tampilan",

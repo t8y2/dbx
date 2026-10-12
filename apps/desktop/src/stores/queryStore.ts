@@ -42,6 +42,7 @@ import {
   analyzeSelectStructureForDisplay,
   foldUnquotedPostgresMetadataIdentifier,
   hasTopLevelKeyword,
+  hasUnparsedQuerySource,
   resolveMetadataColumnName,
   resolveSourceColumnsByOrdinal,
   sourceColumnsForResult,
@@ -952,7 +953,7 @@ function expandStarProjectionColumnsForSource(analysis: EditableQueryInfo, sourc
       if (column.sourceKey && column.sourceKey !== source.key) return [column];
       return tableColumns.map((tableColumn) => ({
         sourceName: tableColumn.name,
-        sourceNameQuoted: false,
+        sourceNameQuoted: true,
         ...(column.sourceQualifier ? { sourceQualifier: column.sourceQualifier } : {}),
         sourceKey: source.key,
         resultName: tableColumn.name,
@@ -6234,6 +6235,7 @@ export const useQueryStore = defineStore("query", () => {
   function canUseQueryKeylessRowPredicate(databaseType: DatabaseType, loaded: LoadedEditableSource): boolean {
     if (loaded.tableMeta.columns.some((column) => column.resolved_table) && loaded.tableMeta.tableType?.trim().toUpperCase() !== "TABLE") return false;
     if (!canUseKeylessRowPredicate(databaseType, loaded.tableMeta.primaryKeys)) return false;
+    if (databaseType === "oceanbase-oracle" && loaded.tableMeta.tableType?.trim().toUpperCase() !== "TABLE") return false;
     // An unknown Oracle object may be a view whose query shape rejects ROWID
     // and whose rows cannot be mapped safely for writes. Keep the result
     // read-only until the object tree or tab metadata confirms its type.
@@ -6528,10 +6530,10 @@ export const useQueryStore = defineStore("query", () => {
       const wholeSourceProjected = projectsAllColumnsForSource(analysis, source.key);
       const hasDirectSourceProjection = analysis.columns.some((column) => Boolean(column.sourceName) && (!column.sourceKey || column.sourceKey === source.key));
       if (!wholeSourceProjected && !hasDirectSourceProjection) return unchanged;
-      // Whole-source projections already include declared primary keys. Oracle
+      // Whole-source projections already include declared primary keys. Oracle, OceanBase Oracle
       // and Xugu may need a synthetic key, while DB2 needs column metadata to
       // decide whether LOB materialization can be deferred safely.
-      if (databaseType !== "oracle" && databaseType !== "xugu" && databaseType !== "db2" && wholeSourceProjected) return unchanged;
+      if (databaseType !== "oracle" && databaseType !== "oceanbase-oracle" && databaseType !== "xugu" && databaseType !== "db2" && wholeSourceProjected) return unchanged;
 
       const target = resolveEditableSourceMetadataTarget(tab, analysis, source, conn, databaseType, executionDatabase);
       const cached = getCachedTableMetadata(target.request);
@@ -6735,6 +6737,14 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     queryExecutionLog("info", "metadata:editability:start", { traceId, elapsed: elapsed?.() });
+    if (hasUnparsedQuerySource(sql)) {
+      return {
+        queryAnalysis: undefined,
+        querySourceColumns: undefined,
+        queryEditabilityReason: "complex-source",
+        tableMeta: undefined,
+      };
+    }
     const editability = await api.analyzeEditableQueryEditability(sql);
     queryExecutionLog("info", "metadata:editability:done", {
       traceId,

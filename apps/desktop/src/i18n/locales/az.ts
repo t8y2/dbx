@@ -2399,6 +2399,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapInvalid: "Ad və {z}, {x}, {y} ehtiva edən etibarlı HTTP(S) XYZ xəritə fraqmenti URL-i daxil edin.",
     insertRowsNotSupported: "Cari saxlama hədəfi sətir əlavə etməyi dəstəkləmir.",
     rowIdDeleteConflict: "Silinmə {expected} seçilmiş sətirdən {actual} sətirə təsir etdi. Bəzi hədəflər artıq başqa sessiya tərəfindən silinmiş və ya artıq uyğun gəlmir. Gözləyən silinmələr təmizləndi və nəticə yeniləndi; cari məlumatları yoxlayın.",
+    rowIdUpdateConflict: "Sətir artıq öz ROWID dəyərinə uyğun gəlmir. Dəyişikliklər saxlanmadı; qaralamanız qorundu. Nəticəni yeniləyin və yenidən cəhd etməzdən əvvəl hədəfi yoxlayın.",
     zoomIn: "Yaxınlaşdır",
     zoomOut: "Uzaqlaşdır",
     fitImage: "Görünüşə sığdır",

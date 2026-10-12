@@ -2652,6 +2652,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapInvalid: "名前と、{z}、{x}、{y} を含む有効な HTTP(S) XYZ タイル URL を入力してください。",
     insertRowsNotSupported: "現在の保存先は行の追加に対応していません。",
     rowIdDeleteConflict: "削除は選択した {expected} 行のうち {actual} 行にのみ反映されました。一部の対象は既に別のセッションで削除されたか、条件に一致しなくなった可能性があります。保留中の削除はクリアされ、結果は更新されました。最新のデータをご確認ください。",
+    rowIdUpdateConflict: "行が元の ROWID と一致しなくなりました。変更は保存されず、下書きは保持されています。結果を更新し、対象を確認してから再試行してください。",
     zoomIn: "拡大",
     zoomOut: "縮小",
     fitImage: "表示領域に合わせる",

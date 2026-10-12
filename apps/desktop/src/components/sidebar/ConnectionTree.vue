@@ -65,6 +65,9 @@ import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } fro
 import { createSidebarTableSearchDebouncer, invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex, scheduleExclusiveSidebarTableSearchDebounce } from "@/lib/sidebar/sidebarTableSearchIndex";
 import { runSidebarSearchTasks, type SidebarSearchTask } from "./sidebarSearchTaskRunner";
 import TreeItem from "./TreeItem.vue";
+import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { resolveSidebarStickyProductionNode } from "@/lib/sidebar/sidebarStickyProductionContext";
 import ActiveConnectionFilterButton from "./ActiveConnectionFilterButton.vue";
 import SidebarListOptionsIcon from "./SidebarListOptionsIcon.vue";
 import SidebarLocateButton from "./SidebarLocateButton.vue";
@@ -1248,6 +1251,13 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
   return {
     transform: `translateY(${Math.min(0, distanceToNext - stickyHeaderHeight.value)}px)`,
   };
+});
+
+// Keep the badge outside the translated header so production-to-production
+// handovers do not cover or remount it. Both tree renderers share this context.
+const stickyProductionContext = computed(() => {
+  const node = resolveSidebarStickyProductionNode(flatNodes.value, flatTreeIndex.value, stickyContainerIndex.value, stickyScrollTop.value, sidebarTreeRowHeight.value)?.node;
+  return !!node && productionContextForDatabase(node.connectionId ? store.getConfig(node.connectionId) : undefined, node.database).active;
 });
 
 // Clamp tracking when the tree rebuilds, preserving the search input in the
@@ -2801,9 +2811,13 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
             :reorder-disabled="true"
             :reference-drag-disabled="true"
             :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
+            :is-sticky-context="stickyProductionContext"
             @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
           />
           <TreeItem v-if="stickyTableSearchNode" :key="stickyTableSearchNode.renderKey" :node="stickyTableSearchNode.node" :depth="stickyTableSearchNode.depth" :reorder-disabled="true" :reference-drag-disabled="true" />
+        </div>
+        <div v-if="stickyProductionContext" class="sidebar-sticky-production" :style="{ height: `${sidebarTreeRowHeight}px` }">
+          <ProductionContextBadge compact />
         </div>
         <div
           v-if="hasSidebarVerticalOverflow"
@@ -2850,9 +2864,13 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
             :reorder-disabled="true"
             :reference-drag-disabled="true"
             :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
+            :is-sticky-context="stickyProductionContext"
             @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
           />
           <TreeItem v-if="stickyTableSearchNode" :key="stickyTableSearchNode.renderKey" :node="stickyTableSearchNode.node" :depth="stickyTableSearchNode.depth" :reorder-disabled="true" :reference-drag-disabled="true" />
+        </div>
+        <div v-if="stickyProductionContext" class="sidebar-sticky-production" :style="{ height: `${sidebarTreeRowHeight}px` }">
+          <ProductionContextBadge compact />
         </div>
         <div
           v-if="hasSidebarVerticalOverflow"
@@ -2993,6 +3011,16 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
 </template>
 
 <style scoped>
+.sidebar-sticky-production {
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  right: 8px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+}
+
 .sticky-database-header {
   background-color: var(--sidebar);
   container-type: inline-size;

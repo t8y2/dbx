@@ -203,6 +203,8 @@ const props = defineProps<{
   pendingRename?: boolean;
   highlighted?: boolean;
   commentLabelWidth?: number;
+  /** This row is rendered as the fixed database/schema context. */
+  isStickyContext?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -229,40 +231,10 @@ const activeNode = shallowRef<TreeNode>(props.node);
 
 const isDisabledTrigger = computed(() => activeNode.value.type === "trigger" && (activeNode.value.meta as TriggerInfo | undefined)?.enabled === false);
 
-// Marked rows answer "which environment am I looking at" for the connection and
-// database that carry the mark, plus the objects below them: a long tree scrolls
-// the boundary row out of sight, and that is exactly when the marker is needed.
-// Grouping rows (group-*), detail rows (column, index, …) and chrome rows stay
-// unmarked so the badge keeps pointing at write targets.
-const PRODUCTION_BADGE_NODE_TYPES: ReadonlySet<TreeNode["type"]> = new Set([
-  "connection",
-  "database",
-  "redis-db",
-  "mongo-db",
-  "table",
-  "table-vgroup",
-  "view",
-  "materialized_view",
-  "procedure",
-  "function",
-  "sequence",
-  "synonym",
-  "type",
-  "package",
-  "job",
-  "extension",
-  "event-trigger",
-  "oracle-db-link",
-  "mongo-collection",
-  "dynamodb-table",
-  "vector-collection",
-  "elasticsearch-index",
-]);
-
 const showProductionBadge = computed(() => {
-  const connectionId = activeNode.value.connectionId;
-  const context = productionContextForDatabase(connectionId ? connectionStore.getConfig(connectionId) : undefined, activeNode.value.database);
-  return context.active && PRODUCTION_BADGE_NODE_TYPES.has(activeNode.value.type);
+  const node = activeNode.value;
+  const context = productionContextForDatabase(node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined, node.database);
+  return node.type === "connection" && context.active;
 });
 
 function currentDatabaseType(): DatabaseType | undefined {
@@ -1057,7 +1029,7 @@ const rowStyle = computed(() => {
   const backgroundColor = hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08);
   return {
     paddingLeft: paddingLeft.value,
-    paddingRight: trailingComment.value ? "12px" : undefined,
+    paddingRight: props.isStickyContext ? "72px" : trailingComment.value ? "12px" : undefined,
     "--tree-connection-row-bg": backgroundColor,
     "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.2 : 0.16),
     "--tree-connection-active-bg": hexToRgba(color, 0.18),

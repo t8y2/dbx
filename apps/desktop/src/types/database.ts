@@ -182,7 +182,7 @@ export interface ConnectionConfig {
   is_production?: boolean;
   /** Database-level production markers for multi-database connections. */
   production_databases?: string[];
-  /** Sidebar presentation only; absent means database/schema sticky context. */
+  /** Sidebar presentation only; absent means database/schema rows plus sticky context. */
   production_badge_scope?: ProductionBadgeScope;
   /** Metadata captured from the latest successful connection test for the saved config. */
   database_info?: DatabaseConnectionInfo;

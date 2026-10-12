@@ -17,9 +17,9 @@ describe("production badge display scope", () => {
     expect(showSidebarRowProductionBadge(node("connection"), { ...connection, production_badge_scope: scope })).toBe(true);
   });
 
-  it.each(["database", "schema", "table", "view", "procedure", "mongo-collection", "nacos-namespace"] as const)("only repeats the marker on ordinary %s rows in table scope", (type) => {
+  it.each(["database", "schema", "table", "view", "procedure", "mongo-collection", "nacos-namespace"] as const)("respects the selected range on ordinary %s rows", (type) => {
     for (const scope of ["connection", "database", "table"] as const) {
-      expect(showSidebarRowProductionBadge(node(type), { ...connection, production_badge_scope: scope })).toBe(scope === "table");
+      expect(showSidebarRowProductionBadge(node(type), { ...connection, production_badge_scope: scope })).toBe(scope === "table" || (scope === "database" && ["database", "schema", "nacos-namespace"].includes(type)));
     }
   });
 
@@ -29,7 +29,7 @@ describe("production badge display scope", () => {
 
   it.each(["connection", "database", "table"] as const)("resolves the sticky badge in %s scope", (scope) => {
     const config = { ...connection, production_badge_scope: scope };
-    expect(showSidebarStickyProductionBadge(node("schema"), config)).toBe(scope !== "connection");
+    expect(showSidebarStickyProductionBadge(node("schema"), config)).toBe(true);
     expect(showSidebarRowProductionBadge(node("database"), config, true)).toBe(false);
     expect(showSidebarStickyProductionBadge(undefined, config)).toBe(false);
   });
@@ -40,6 +40,13 @@ describe("production badge display scope", () => {
     expect(showSidebarRowProductionBadge(node("schema"), config)).toBe(true);
     expect(showSidebarRowProductionBadge(node("table", "other"), config)).toBe(false);
     expect(showSidebarStickyProductionBadge(node("schema", "other"), config)).toBe(false);
+  });
+
+  it.each(["connection", "database", "table"] as const)("clears the fixed marker when entering a non-production database in %s scope", (scope) => {
+    const config = { ...connection, is_production: false, production_databases: ["app"], production_badge_scope: scope };
+    expect(showSidebarStickyProductionBadge(node("schema"), config)).toBe(true);
+    expect(showSidebarStickyProductionBadge(node("schema", "other"), config)).toBe(false);
+    expect(showSidebarStickyProductionBadge(node("schema"), { ...config, production_databases: [] })).toBe(false);
   });
 
   it("warns on the connection for selected production databases in connection-only mode", () => {

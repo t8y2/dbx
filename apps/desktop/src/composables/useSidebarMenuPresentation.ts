@@ -13,7 +13,6 @@ const SidebarMenuPreferencesDialog = defineAsyncComponent(() => import("@/compon
 export function useSidebarMenuPresentation() {
   const { t } = useI18n();
   const settings = useSettingsStore();
-  const auth = useAuthStore();
   const { toast } = useToast();
   const sidebarMenuPreferencesOpen = ref(false);
   const menuLayoutSaving = ref(false);
@@ -41,6 +40,16 @@ export function useSidebarMenuPresentation() {
   };
 
   function filterMenuPermissions(items: readonly ContextMenuItem[]): ContextMenuItem[] {
+    // 权限数据未加载（启动早期、桌面 bypass 初始化前）或无 Pinia 上下文
+    // （组件单测）时不做过滤、保持菜单原样，避免影响非 RBAC 环境；加载后
+    // 按功能权限隐藏未授权条目。惰性获取 store，勿在函数顶部 eager 调用。
+    let auth: ReturnType<typeof useAuthStore>;
+    try {
+      auth = useAuthStore();
+    } catch {
+      return [...items];
+    }
+    if (!auth.loaded) return [...items];
     return items.flatMap((item) => {
       if (item.separator || item.visible === false) return [item];
       const permission = item.sidebarActionId ? ACTION_PERMISSIONS[item.sidebarActionId] : undefined;

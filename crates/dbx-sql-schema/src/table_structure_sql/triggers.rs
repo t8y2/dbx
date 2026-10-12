@@ -53,7 +53,7 @@ fn build_trigger_sql_with_mode(
             if !has_trigger_change(trigger, original) {
                 continue;
             }
-            
+
             if has_trigger_body_change(trigger, original) {
                 needs_recreate = true;
                 // Oracle can replace a trigger in place; renames still require dropping the old object.
@@ -80,18 +80,18 @@ fn build_trigger_sql_with_mode(
                 // enabled; restore the catalog-reported disabled state explicitly.
                 // `table` is already qualified the same way the CREATE's ON clause is.
                 if dialect == StructureDialect::SqlServer {
-                    let enabled = trigger.enabled.unwrap_or_else(|| {
-                        trigger.original.as_ref().and_then(|o| o.enabled).unwrap_or(true)
-                    });
+                    let enabled = trigger
+                        .enabled
+                        .unwrap_or_else(|| trigger.original.as_ref().and_then(|o| o.enabled).unwrap_or(true));
                     if !enabled {
                         let schema = options.schema.as_deref();
                         let trigger_name = qualified_trigger_object_name(dialect, schema, &trigger.name);
                         statements.push(format!("DISABLE TRIGGER {trigger_name} ON {table};"));
                     }
                 } else if dialect == StructureDialect::Oracle {
-                    let enabled = trigger.enabled.unwrap_or_else(|| {
-                        trigger.original.as_ref().and_then(|o| o.enabled).unwrap_or(true)
-                    });
+                    let enabled = trigger
+                        .enabled
+                        .unwrap_or_else(|| trigger.original.as_ref().and_then(|o| o.enabled).unwrap_or(true));
                     if !enabled {
                         let schema = options.schema.as_deref();
                         let trigger_name = qualified_trigger_object_name(dialect, schema, &trigger.name);

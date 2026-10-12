@@ -211,7 +211,14 @@ impl AlterTableDialect for StarRocksAlter {
                 warnings.push("Save StarRocks sort-key changes separately from other table edits.".into());
             }
             validate_sort_columns(options, &self.0, sort_columns, &mut warnings);
-            changes.push(format!("ORDER BY ({})", sort_columns.iter().map(|name| quote_ident(StructureDialect::Mysql, name)).collect::<Vec<_>>().join(", ")));
+            changes.push(format!(
+                "ORDER BY ({})",
+                sort_columns
+                    .iter()
+                    .map(|name| quote_ident(StructureDialect::Mysql, name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
         // Submit one asynchronous schema-change job, after synchronous metadata changes.
         if !changes.is_empty() {
@@ -248,31 +255,51 @@ fn definition(column: &EditableStructureColumn, key: bool) -> String {
     parts.join(" ")
 }
 
-
 // Position clauses are unambiguous: never use ORDER BY to change column order.
-fn build_column_order(options: &TableStructureSqlOptions, context: &StarRocksAlterOptions, changes: &mut Vec<String>, warnings: &mut Vec<String>) {
+fn build_column_order(
+    options: &TableStructureSqlOptions,
+    context: &StarRocksAlterOptions,
+    changes: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
     if context.reorder_columns {
         warnings.push("The legacy StarRocks ORDER BY column-reorder path is disabled. Refresh the editor and backend before changing column order.".into());
         return;
     }
-    if !context.position_column_order { return; }
-    let existing: Vec<_> = options.columns.iter().filter(|column| column.original.is_some() && !column.marked_for_drop).collect();
+    if !context.position_column_order {
+        return;
+    }
+    let existing: Vec<_> =
+        options.columns.iter().filter(|column| column.original.is_some() && !column.marked_for_drop).collect();
     let mut original = existing.clone();
     original.sort_by_key(|column| column.original_position.unwrap_or(usize::MAX));
     original.extend(options.columns.iter().filter(|column| column.original.is_none() && !column.marked_for_drop));
     let desired: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
-    if desired.iter().map(|column| &column.id).eq(original.iter().map(|column| &column.id)) { return; }
+    if desired.iter().map(|column| &column.id).eq(original.iter().map(|column| &column.id)) {
+        return;
+    }
     if context.model.as_deref() != Some("duplicate") {
-        warnings.push("Physical column reordering is currently supported only for confirmed StarRocks DUPLICATE tables.".into());
+        warnings.push(
+            "Physical column reordering is currently supported only for confirmed StarRocks DUPLICATE tables.".into(),
+        );
     }
     if !changes.is_empty() || options.columns.iter().any(|column| column.original.is_none() || column.marked_for_drop) {
-        warnings.push("Save StarRocks column definition changes, additions and deletions separately from column reordering.".into());
+        warnings.push(
+            "Save StarRocks column definition changes, additions and deletions separately from column reordering."
+                .into(),
+        );
     }
     let source: std::collections::HashSet<_> = context.column_names.iter().map(|name| name.to_lowercase()).collect();
-    let supplied: std::collections::HashSet<_> = existing.iter().map(|column| column.original.as_ref().unwrap().name.to_lowercase()).collect();
-    let positions: std::collections::HashSet<_> = existing.iter().filter_map(|column| column.original_position).collect();
-    if source.is_empty() || source.len() != context.column_names.len() || source != supplied
-        || existing.len() != source.len() || positions.len() != existing.len() {
+    let supplied: std::collections::HashSet<_> =
+        existing.iter().map(|column| column.original.as_ref().unwrap().name.to_lowercase()).collect();
+    let positions: std::collections::HashSet<_> =
+        existing.iter().filter_map(|column| column.original_position).collect();
+    if source.is_empty()
+        || source.len() != context.column_names.len()
+        || source != supplied
+        || existing.len() != source.len()
+        || positions.len() != existing.len()
+    {
         warnings.push("StarRocks reordering requires all existing columns and their original positions; refresh table metadata first.".into());
     }
     let is_key = |column: &EditableStructureColumn| {
@@ -294,24 +321,43 @@ fn build_column_order(options: &TableStructureSqlOptions, context: &StarRocksAlt
         // Move other columns around expression sources: even a position-only MODIFY
         // can be rejected when the source backs a hidden generated partition column.
         context.partition_expression_columns.iter().any(|source| source.eq_ignore_ascii_case(name))
-            || (!is_key(column) && context.partition_columns.iter().chain(&context.distribution_columns).any(|key| key.eq_ignore_ascii_case(name)))
+            || (!is_key(column)
+                && context
+                    .partition_columns
+                    .iter()
+                    .chain(&context.distribution_columns)
+                    .any(|key| key.eq_ignore_ascii_case(name)))
             || column.original.as_ref().unwrap().extra.as_deref().is_some_and(|extra| {
-                let lower = extra.to_lowercase(); lower.contains("generated") || lower.contains("auto_increment")
+                let lower = extra.to_lowercase();
+                lower.contains("generated") || lower.contains("auto_increment")
             })
     };
-    if !original.iter().filter(|column| column.original.is_some()).filter(|column| protected(column)).map(|column| &column.id)
-        .eq(existing.iter().filter(|column| protected(column)).map(|column| &column.id)) {
+    if !original
+        .iter()
+        .filter(|column| column.original.is_some())
+        .filter(|column| protected(column))
+        .map(|column| &column.id)
+        .eq(existing.iter().filter(|column| protected(column)).map(|column| &column.id))
+    {
         warnings.push("Keep StarRocks partition-expression source columns, non-key partition/distribution columns and generated/auto-increment columns in their original relative order.".into());
     }
-    if !warnings.is_empty() { return; }
+    if !warnings.is_empty() {
+        return;
+    }
     let mut simulated: Vec<_> = original.iter().map(|column| column.id.clone()).collect();
     for (index, column) in existing.iter().enumerate() {
-        if protected(column) { continue; }
+        if protected(column) {
+            continue;
+        }
         let position = simulated.iter().position(|id| id == &column.id).unwrap();
         let predecessor = index.checked_sub(1).map(|previous| &existing[previous].id);
         let current_predecessor = position.checked_sub(1).map(|previous| &simulated[previous]);
-        if current_predecessor == predecessor { continue; }
-        let placement = if index == 0 { "FIRST".into() } else {
+        if current_predecessor == predecessor {
+            continue;
+        }
+        let placement = if index == 0 {
+            "FIRST".into()
+        } else {
             format!("AFTER {}", quote_ident(StructureDialect::Mysql, &existing[index - 1].name))
         };
         changes.push(format!("MODIFY COLUMN {} {placement}", definition(column, is_key(column))));
@@ -324,31 +370,91 @@ fn build_column_order(options: &TableStructureSqlOptions, context: &StarRocksAlt
     }
 }
 
-
-fn validate_sort_columns(options: &TableStructureSqlOptions, context: &StarRocksAlterOptions, names: &[String], warnings: &mut Vec<String>) {
+fn validate_sort_columns(
+    options: &TableStructureSqlOptions,
+    context: &StarRocksAlterOptions,
+    names: &[String],
+    warnings: &mut Vec<String>,
+) {
     let version = super::create_dialect::parse_version(context.server_version.as_deref());
     let primary = context.model.as_deref() == Some("primary");
     if !matches!(context.model.as_deref(), Some("primary" | "duplicate" | "aggregate" | "unique"))
-        || !version.is_some_and(|version| version >= if primary { (3, 0, 0) } else { (3, 3, 0) }) {
+        || !version.is_some_and(|version| version >= if primary { (3, 0, 0) } else { (3, 3, 0) })
+    {
         warnings.push("Changing StarRocks sort keys requires confirmed table metadata and version 3.0+ for PRIMARY or 3.3+ for other models.".into());
     }
-    if names.is_empty() { warnings.push("Select at least one StarRocks sort column.".into()); }
+    if names.is_empty() {
+        warnings.push("Select at least one StarRocks sort column.".into());
+    }
     let selected: std::collections::HashSet<_> = names.iter().map(|name| name.to_lowercase()).collect();
     let source: std::collections::HashSet<_> = context.column_names.iter().map(|name| name.to_lowercase()).collect();
-    if selected.len() != names.len() { warnings.push("StarRocks sort columns must not repeat.".into()); }
-    if source.is_empty() || !selected.is_subset(&source) { warnings.push("A sort column is missing. Refresh table metadata first.".into()); }
-    if selected == source { warnings.push("Selecting every column is ambiguous with StarRocks schema reordering. Choose fewer columns for a sort-key change.".into()); }
+    if selected.len() != names.len() {
+        warnings.push("StarRocks sort columns must not repeat.".into());
+    }
+    if source.is_empty() || !selected.is_subset(&source) {
+        warnings.push("A sort column is missing. Refresh table metadata first.".into());
+    }
+    if selected == source {
+        warnings.push("Selecting every column is ambiguous with StarRocks schema reordering. Choose fewer columns for a sort-key change.".into());
+    }
     if matches!(context.model.as_deref(), Some("aggregate" | "unique")) {
         let keys: std::collections::HashSet<_> = context.key_columns.iter().map(|name| name.to_lowercase()).collect();
-        if selected != keys { warnings.push("StarRocks AGGREGATE and UNIQUE sort keys must contain exactly all key columns.".into()); }
+        if selected != keys {
+            warnings.push("StarRocks AGGREGATE and UNIQUE sort keys must contain exactly all key columns.".into());
+        }
     }
     for name in names {
-        let Some(column) = options.columns.iter().find(|column| column.name == *name && column.original.is_some() && !column.marked_for_drop) else {
-            warnings.push(format!("Sort column '{name}' is missing or newly added. Save column changes first.")); continue;
+        let Some(column) = options
+            .columns
+            .iter()
+            .find(|column| column.name == *name && column.original.is_some() && !column.marked_for_drop)
+        else {
+            warnings.push(format!("Sort column '{name}' is missing or newly added. Save column changes first."));
+            continue;
         };
         let base = column.data_type.split('(').next().unwrap_or("").trim().to_lowercase();
-        let valid = if primary { matches!(base.as_str(), "boolean" | "tinyint" | "smallint" | "int" | "integer" | "bigint" | "largeint" | "varchar" | "string" | "date" | "datetime") }
-            else { matches!(base.as_str(), "boolean" | "tinyint" | "smallint" | "int" | "integer" | "bigint" | "largeint" | "float" | "double" | "decimal" | "decimalv2" | "decimal32" | "decimal64" | "decimal128" | "decimal256" | "char" | "varchar" | "string" | "date" | "datetime") };
-        if !valid { warnings.push(format!("Column '{name}' has an unsupported StarRocks sort-key type.")); }
+        let valid = if primary {
+            matches!(
+                base.as_str(),
+                "boolean"
+                    | "tinyint"
+                    | "smallint"
+                    | "int"
+                    | "integer"
+                    | "bigint"
+                    | "largeint"
+                    | "varchar"
+                    | "string"
+                    | "date"
+                    | "datetime"
+            )
+        } else {
+            matches!(
+                base.as_str(),
+                "boolean"
+                    | "tinyint"
+                    | "smallint"
+                    | "int"
+                    | "integer"
+                    | "bigint"
+                    | "largeint"
+                    | "float"
+                    | "double"
+                    | "decimal"
+                    | "decimalv2"
+                    | "decimal32"
+                    | "decimal64"
+                    | "decimal128"
+                    | "decimal256"
+                    | "char"
+                    | "varchar"
+                    | "string"
+                    | "date"
+                    | "datetime"
+            )
+        };
+        if !valid {
+            warnings.push(format!("Column '{name}' has an unsupported StarRocks sort-key type."));
+        }
     }
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
@@ -155,8 +155,40 @@ const weekdays = computed(() => [
   { value: 6, label: t("databaseBackup.weekdays.saturday") },
 ]);
 
+function handleHistoryScrollOutside(event: Event) {
+  if (!historyConnectionPickerOpen.value) return;
+  const target = event.target;
+  if (target instanceof HTMLElement && target.closest?.('[data-slot="popover-content"]')) return;
+  historyConnectionPickerOpen.value = false;
+}
+
 watch(historyConnectionPickerOpen, (open) => {
-  if (!open) historyConnectionSearch.value = "";
+  if (!open) {
+    window.removeEventListener("scroll", handleHistoryScrollOutside, { capture: true });
+    historyConnectionSearch.value = "";
+    return;
+  }
+  window.addEventListener("scroll", handleHistoryScrollOutside, { capture: true, passive: true });
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("scroll", handleHistoryScrollOutside, { capture: true });
+});
+
+watch(scheduleDialogOpen, async (open) => {
+  if (open) {
+    await nextTick();
+    const dialogs = document.querySelectorAll<HTMLElement>(".dbx-backup-dialog");
+    for (const dialog of dialogs) dialog.scrollTop = 0;
+  }
+});
+
+watch(oneShotDialogOpen, async (open) => {
+  if (open) {
+    await nextTick();
+    const dialogs = document.querySelectorAll<HTMLElement>(".dbx-backup-dialog");
+    for (const dialog of dialogs) dialog.scrollTop = 0;
+  }
 });
 
 /**
@@ -862,7 +894,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
                 <ChevronDown class="ml-2 h-4 w-4 shrink-0 opacity-50" />
               </Button>
             </PopoverTrigger>
-            <PopoverContent align="end" class="w-[var(--reka-popover-trigger-width)] p-1">
+            <PopoverContent align="end" :hide-when-detached="true" class="w-[var(--reka-popover-trigger-width)] p-1">
               <div class="relative">
                 <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input v-model="historyConnectionSearch" data-backup-history-connection-search class="h-9 pl-8" :aria-label="t('databaseBackup.searchHistoryConnections')" :placeholder="t('databaseBackup.searchHistoryConnections')" />

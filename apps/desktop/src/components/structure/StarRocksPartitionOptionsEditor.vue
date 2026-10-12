@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,7 +24,7 @@ function setKind(kind: StarRocksPartitionKind) {
   emit("update:modelValue", { ...props.modelValue, partitionKind: kind, timePartitionEnabled: kind === "time" });
 }
 function addRange() {
-  update("rangePartitions", [...props.modelValue.rangePartitions, { id: crypto.randomUUID(), name: `p${props.modelValue.rangePartitions.length + 1}`, lower: {}, upper: {} }]);
+  update("rangePartitions", [...props.modelValue.rangePartitions, { id: uuid(), name: `p${props.modelValue.rangePartitions.length + 1}`, lower: {}, upper: {} }]);
 }
 function rangeField(index: number, side: "lower" | "upper", id: string, value: string) {
   update(
@@ -32,7 +33,7 @@ function rangeField(index: number, side: "lower" | "upper", id: string, value: s
   );
 }
 function addList() {
-  update("listPartitions", [...props.modelValue.listPartitions, { id: crypto.randomUUID(), name: `p${props.modelValue.listPartitions.length + 1}`, values: [{ id: crypto.randomUUID(), fields: {} }] }]);
+  update("listPartitions", [...props.modelValue.listPartitions, { id: uuid(), name: `p${props.modelValue.listPartitions.length + 1}`, values: [{ id: uuid(), fields: {} }] }]);
 }
 function listField(index: number, tupleIndex: number, id: string, value: string) {
   update(
@@ -43,7 +44,7 @@ function listField(index: number, tupleIndex: number, id: string, value: string)
 function addTuple(index: number) {
   update(
     "listPartitions",
-    props.modelValue.listPartitions.map((row, i) => (i === index ? { ...row, values: [...row.values, { id: crypto.randomUUID(), fields: {} }] } : row)),
+    props.modelValue.listPartitions.map((row, i) => (i === index ? { ...row, values: [...row.values, { id: uuid(), fields: {} }] } : row)),
   );
 }
 function removeTuple(index: number, tupleIndex: number) {

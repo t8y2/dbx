@@ -1742,11 +1742,30 @@ export function buildSqlCompletionItemsFromContext(context: SqlCompletionContext
   return new SqlCompletionProvider(context, input).build();
 }
 
+function ensureReferencedTableColumns(columnsByTable: Map<string, SqlCompletionColumn[]>, referencedTables: readonly SqlCompletionReferencedTable[]): Map<string, SqlCompletionColumn[]> {
+  let map = columnsByTable;
+  for (const table of referencedTables) {
+    if (!table.columns || table.columns.length === 0) continue;
+    const key = table.name;
+    if (!map.has(key)) {
+      if (map === columnsByTable) {
+        map = new Map(columnsByTable);
+      }
+      map.set(
+        key,
+        table.columns.map((name) => ({ name, table: key, schema: table.schema })),
+      );
+    }
+  }
+  return map;
+}
+
 class SqlCompletionProvider {
   private readonly items: SqlCompletionItem[] = [];
   private readonly t?: SqlCompletionTranslations;
   private readonly dialect?: SqlCompletionApplyDialect;
   private readonly databaseType?: DatabaseType;
+  private readonly columnsByTable: Map<string, SqlCompletionColumn[]>;
 
   constructor(
     private readonly context: SqlCompletionContext,
@@ -1758,6 +1777,7 @@ class SqlCompletionProvider {
     // completions insert bare names instead of quoting mixed-case ones.
     this.dialect = input.quoteIdentifiers === false && (dialect === "oracle" || dialect === "upper") ? undefined : dialect;
     this.databaseType = input.databaseType;
+    this.columnsByTable = ensureReferencedTableColumns(input.columnsByTable, context.referencedTables);
   }
 
   build(): SqlCompletionItem[] {
@@ -1791,7 +1811,7 @@ class SqlCompletionProvider {
       return dedupeAndSort([...customSnippetItems, ...buildPreferredKeywordItems(context.prefix, context.preferredValueKeywords, this.input.keywordCase)]);
     }
 
-    const preferReferencedColumns = hasMatchingReferencedColumnPrefix(context, this.input.columnsByTable);
+    const preferReferencedColumns = hasMatchingReferencedColumnPrefix(context, this.columnsByTable);
     if (!context.dataTypeContext) {
       this.items.push(...customSnippetItems);
     }
@@ -1832,17 +1852,17 @@ class SqlCompletionProvider {
       const selectAliasItems = buildSelectAliasItems(context);
       this.items.push(...selectAliasItems);
       if (context.isEmptyGroupBy && !context.prefix) {
-        const allSelectAliasesItem = buildGroupByAllSelectAliasItem(context, selectAliasItems, this.input.columnsByTable, this.dialect);
+        const allSelectAliasesItem = buildGroupByAllSelectAliasItem(context, selectAliasItems, this.columnsByTable, this.dialect);
         if (allSelectAliasesItem) this.items.push(allSelectAliasesItem);
       }
     }
 
     if (!context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions && context.isGroupBy && context.nonAggregatedSelectColumns.length > 0) {
-      this.items.push(...buildNonAggregatedColumnItems(context, this.input.columnsByTable, this.dialect));
+      this.items.push(...buildNonAggregatedColumnItems(context, this.columnsByTable, this.dialect));
     }
 
     if (!context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions && context.suggestJoinConditions) {
-      this.items.push(...buildJoinConditionItems(context, this.input.columnsByTable, this.input.foreignKeysByTable, this.dialect, this.input.keywordCase));
+      this.items.push(...buildJoinConditionItems(context, this.columnsByTable, this.input.foreignKeysByTable, this.dialect, this.input.keywordCase));
     }
 
     if (context.suggestKeywords && !context.exclusiveRoutineSuggestions && !pendingJoinKeyword) {
@@ -1853,9 +1873,9 @@ class SqlCompletionProvider {
     }
 
     if (!context.exclusiveTableSuggestions && context.suggestColumns) {
-      this.items.push(...buildColumnItems(context, this.input.columnsByTable, this.dialect, this.databaseType, this.input.quoteIdentifiers));
-      this.items.push(...buildSelectAllColumnItems(context, this.input.columnsByTable, this.t, this.dialect, this.databaseType));
-      this.items.push(...buildInsertAllColumnItems(context, this.input.columnsByTable, this.t, this.dialect, this.input.keywordCase));
+      this.items.push(...buildColumnItems(context, this.columnsByTable, this.dialect, this.databaseType, this.input.quoteIdentifiers));
+      this.items.push(...buildSelectAllColumnItems(context, this.columnsByTable, this.t, this.dialect, this.databaseType));
+      this.items.push(...buildInsertAllColumnItems(context, this.columnsByTable, this.t, this.dialect, this.input.keywordCase));
       if (isOracleLikeDatabase(this.databaseType) && context.qualifier && !completionQualifierIsReferencedTable(context)) {
         const profileObjects = driverProfileCompletionObjects(this.input.driverProfile, context);
         const allObjects = [...(this.input.objects ?? []), ...profileObjects];
@@ -1894,11 +1914,11 @@ class SqlCompletionProvider {
     }
 
     if (context.comparisonLeftColumn && context.suggestKeywords) {
-      this.items.push(...buildComparisonValueItems(context, this.input.columnsByTable, this.t, this.input.keywordCase));
+      this.items.push(...buildComparisonValueItems(context, this.columnsByTable, this.t, this.input.keywordCase));
     }
 
     if (context.onStar) {
-      const starItem = buildStarExpansionItem(context, this.input.columnsByTable, this.t, this.dialect, this.databaseType);
+      const starItem = buildStarExpansionItem(context, this.columnsByTable, this.t, this.dialect, this.databaseType);
       if (starItem) this.items.push(starItem);
     }
 
@@ -2319,32 +2339,6 @@ function activeSqlCompletionStatementSpan(sql: string, cursor: number, options: 
   return { start: result.start + window.from, end: result.end + window.from };
 }
 
-function currentSqlLikeLineBlockSpan(sql: string, cursor: number, activeStatementSpan: SqlSemanticSpan): SqlSemanticSpan | null {
-  const safeCursor = Math.max(0, Math.min(cursor, sql.length));
-  const beforeCursor = sql.slice(activeStatementSpan.start, safeCursor);
-  const lines = beforeCursor.split(/\r?\n/);
-  let start: number | null = null;
-  let offset = activeStatementSpan.start;
-
-  for (const line of lines) {
-    const trimmed = line.trimStart();
-    if (trimmed) {
-      const indentation = line.length - trimmed.length;
-      if (/^(select|with)\b/i.test(trimmed)) start = offset + indentation;
-      if (/^(get|post|put|delete|patch|head)\s+\//i.test(trimmed)) start = null;
-    }
-    offset += line.length;
-    offset += sql[offset] === "\r" && sql[offset + 1] === "\n" ? 2 : 1;
-  }
-
-  if (start == null) return null;
-  if (activeStatementSpan.start > start) return null;
-
-  const statementSql = sql.slice(activeStatementSpan.start, activeStatementSpan.end);
-  const blockEnd = currentLineBlockEnd(statementSql, safeCursor - activeStatementSpan.start, start - activeStatementSpan.start);
-  return { start, end: blockEnd == null ? activeStatementSpan.end : Math.min(activeStatementSpan.end, activeStatementSpan.start + blockEnd) };
-}
-
 // Equal-length masking of string/comment characters, so parenthesis depth and
 // line-start keywords can be scanned on the masked copy while offsets stay
 // valid against the original text.
@@ -2401,15 +2395,93 @@ function maskSqlForStructureScan(sql: string): string {
 // these at top level begins a new statement block (t8y2/dbx#9370).
 const STATEMENT_START_LINE_PATTERN = /^(?:select|with|insert|update|delete|create|drop|alter)\b/i;
 
+function currentSqlLikeLineBlockSpan(sql: string, cursor: number, activeStatementSpan: SqlSemanticSpan): SqlSemanticSpan | null {
+  const safeCursor = Math.max(0, Math.min(cursor, sql.length));
+  const beforeCursor = sql.slice(activeStatementSpan.start, safeCursor);
+  const masked = maskSqlForStructureScan(beforeCursor);
+  const lines = beforeCursor.split(/\r?\n/);
+  let start: number | null = null;
+  let localOffset = 0;
+  let depth = 0;
+  let inWithStatement = false;
+  let seenWithMainQuery = false;
+
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    const offset = activeStatementSpan.start + localOffset;
+    if (trimmed && depth === 0) {
+      const indentation = line.length - trimmed.length;
+      if (/^(get|post|put|delete|patch|head)\s+\//i.test(trimmed)) {
+        start = null;
+        inWithStatement = false;
+        seenWithMainQuery = false;
+      } else if (/^with\b/i.test(trimmed)) {
+        start = offset + indentation;
+        inWithStatement = true;
+        seenWithMainQuery = false;
+      } else if (/^select\b/i.test(trimmed)) {
+        if (inWithStatement && !seenWithMainQuery) {
+          seenWithMainQuery = true;
+        } else {
+          start = offset + indentation;
+          inWithStatement = false;
+          seenWithMainQuery = false;
+        }
+      } else if (STATEMENT_START_LINE_PATTERN.test(trimmed)) {
+        if (inWithStatement && !seenWithMainQuery && /^(?:insert|update|delete)\b/i.test(trimmed)) {
+          seenWithMainQuery = true;
+        } else {
+          start = /^(?:insert|update|delete)\b/i.test(trimmed) ? offset + indentation : null;
+          inWithStatement = false;
+          seenWithMainQuery = false;
+        }
+      }
+    }
+    for (let i = localOffset; i < localOffset + line.length; i += 1) {
+      const ch = masked[i];
+      if (ch === "(") depth += 1;
+      else if (ch === ")") depth = Math.max(0, depth - 1);
+    }
+    localOffset += line.length;
+    if (localOffset < beforeCursor.length) {
+      const isCrLf = beforeCursor[localOffset] === "\r" && beforeCursor[localOffset + 1] === "\n";
+      localOffset += isCrLf ? 2 : 1;
+    }
+  }
+
+  if (start == null) return null;
+  if (activeStatementSpan.start > start) return null;
+
+  const statementSql = sql.slice(activeStatementSpan.start, activeStatementSpan.end);
+  const blockEnd = currentLineBlockEnd(statementSql, safeCursor - activeStatementSpan.start, start - activeStatementSpan.start);
+  return { start, end: blockEnd == null ? activeStatementSpan.end : Math.min(activeStatementSpan.end, activeStatementSpan.start + blockEnd) };
+}
+
 function currentLineBlockEnd(sql: string, cursor: number, start: number): number | null {
   const masked = maskSqlForStructureScan(sql);
+  const startTrimmed = sql.slice(start).trimStart();
+  const isWith = /^with\b/i.test(startTrimmed);
   let lineStart = sql.lastIndexOf("\n", cursor - 1) + 1;
   let depth = 0;
-  for (let i = start; i < lineStart; i += 1) {
-    const ch = masked[i];
-    if (ch === "(") depth += 1;
-    else if (ch === ")") depth = Math.max(0, depth - 1);
+  let seenWithMainQuery = !isWith;
+
+  let scanOffset = start;
+  while (scanOffset < lineStart) {
+    const nextNewline = sql.indexOf("\n", scanOffset);
+    const lineEnd = nextNewline >= 0 && nextNewline < lineStart ? nextNewline : lineStart;
+    const lineTrimmed = sql.slice(scanOffset, lineEnd).trimStart();
+    if (depth === 0 && isWith && !seenWithMainQuery && /^(?:select|insert|update|delete)\b/i.test(lineTrimmed)) {
+      seenWithMainQuery = true;
+    }
+    for (let i = scanOffset; i < lineEnd; i += 1) {
+      const ch = masked[i];
+      if (ch === "(") depth += 1;
+      else if (ch === ")") depth = Math.max(0, depth - 1);
+    }
+    if (nextNewline < 0 || nextNewline >= lineStart) break;
+    scanOffset = nextNewline + 1;
   }
+
   let atCursorLine = true;
   while (lineStart < sql.length) {
     const lineEnd = sql.indexOf("\n", lineStart);
@@ -2426,20 +2498,28 @@ function currentLineBlockEnd(sql: string, cursor: number, start: number): number
     // already handled by the statement-start rule below.
     if (lineStart > start && !originalTrimmed && depth === 0) {
       const nextContent = nextNonEmptyLineTrimmed(sql, boundedLineEnd);
-      if (nextContent === null || STATEMENT_START_LINE_PATTERN.test(nextContent) || /^(get|post|put|delete|patch|head)\s+\//i.test(nextContent)) {
+      const isNextWithMainQuery = isWith && !seenWithMainQuery && nextContent !== null && /^(?:select|insert|update|delete)\b/i.test(nextContent);
+      if (!isNextWithMainQuery && (nextContent === null || STATEMENT_START_LINE_PATTERN.test(nextContent) || /^(get|post|put|delete|patch|head)\s+\//i.test(nextContent))) {
         return lineStart;
       }
     }
     // The cursor's own line always belongs to the block; only a following
     // top-level statement line ends it.
     if (!atCursorLine && lineStart > start && depth === 0 && STATEMENT_START_LINE_PATTERN.test(trimmed)) {
-      return lineStart;
+      if (isWith && !seenWithMainQuery && /^(?:select|insert|update|delete)\b/i.test(trimmed)) {
+        seenWithMainQuery = true;
+      } else {
+        return lineStart;
+      }
     }
     if (lineEnd < 0) break;
     for (let i = lineStart; i < boundedLineEnd; i += 1) {
       const ch = masked[i];
       if (ch === "(") depth += 1;
       else if (ch === ")") depth = Math.max(0, depth - 1);
+    }
+    if (depth === 0 && isWith && !seenWithMainQuery && /^(?:select|insert|update|delete)\b/i.test(trimmed)) {
+      seenWithMainQuery = true;
     }
     lineStart = lineEnd + 1;
     atCursorLine = false;
@@ -2634,21 +2714,24 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
 
   // CTE bodies are their own scope: resolve them first so the outer query's
   // referenced tables are read from a statement with those bodies blanked out.
-  const cteDefs = scanCteDefinitions(fullStatement);
+  const cteDefs = scanCteDefinitions(fullStatement, options.databaseType);
   let referencedTables = extractReferencedTables(maskResolvedCteBodies(fullStatement, cursorInStatement, cteDefs), options.databaseType);
   for (const cte of cteDefs) {
-    if (!referencedTables.some((rt) => rt.name.toLowerCase() === cte.name.toLowerCase())) {
+    const matching = referencedTables.filter((rt) => rt.name.toLowerCase() === cte.name.toLowerCase());
+    if (matching.length === 0) {
       referencedTables.push({ name: cte.name, columns: cte.columns, kind: "cte" });
     } else {
-      const existing = referencedTables.find((rt) => rt.name.toLowerCase() === cte.name.toLowerCase());
-      if (existing && !existing.columns) {
-        existing.columns = cte.columns;
+      for (const existing of matching) {
+        existing.kind = "cte";
+        if (!existing.columns || existing.columns.length === 0) {
+          existing.columns = cte.columns;
+        }
       }
     }
   }
 
   // Merge subquery alias references
-  const subqueryRefs = extractSubqueryReferences(fullStatement);
+  const subqueryRefs = extractSubqueryReferences(fullStatement, cteDefs, options.databaseType);
   for (const sq of subqueryRefs) {
     if (!referencedTables.some((rt) => rt.name.toLowerCase() === sq.name.toLowerCase() && rt.alias === sq.alias)) {
       referencedTables.push(sq);
@@ -3288,14 +3371,8 @@ function extractNonAggregatedSelectColumns(sql: string): string[] {
     if (trimmed === "*") continue;
     if (AGGREGATE_FUNCTION_PATTERN.test(trimmed)) continue;
 
-    const alias = /\bas\s+([A-Za-z_][\w$]*)$/i.exec(trimmed)?.[1];
-    if (alias) {
-      columns.push(alias);
-      continue;
-    }
-
-    const lastId = /([A-Za-z_][\w$]*)$/.exec(trimmed)?.[1];
-    if (lastId) columns.push(lastId);
+    const colName = extractSelectColumnNameFromExpression(trimmed);
+    if (colName) columns.push(colName);
   }
 
   return columns;
@@ -3827,49 +3904,146 @@ function extractSelectAliases(sql: string): string[] {
   return aliases;
 }
 
-function extractSelectList(sql: string): string | null {
-  const lower = sql.toLowerCase();
-  const selectIndex = lower.search(/\bselect\b/);
-  if (selectIndex < 0) return null;
+function isIdentifierPart(ch: string | undefined): boolean {
+  return !!ch && (/[A-Za-z0-9_$]/.test(ch) || SQL_IDENTIFIER_CONTINUE_CHAR.test(ch));
+}
 
-  let depth = 0;
-  let inSingleQuote = false;
-  let inDoubleQuote = false;
-  for (let i = selectIndex + "select".length; i < sql.length; i++) {
-    const ch = sql[i];
-    if (ch === "'" && !inDoubleQuote) {
-      inSingleQuote = !inSingleQuote;
-      continue;
-    }
-    if (ch === '"' && !inSingleQuote) {
-      inDoubleQuote = !inDoubleQuote;
-      continue;
-    }
-    if (inSingleQuote || inDoubleQuote) continue;
-    if (ch === "(") depth++;
-    else if (ch === ")") depth = Math.max(0, depth - 1);
-    else if (depth === 0 && lower.slice(i, i + "from".length) === "from" && !isIdentifierPart(sql[i - 1]) && !isIdentifierPart(sql[i + "from".length])) {
-      return sql.slice(selectIndex + "select".length, i).trim();
-    }
+function isClauseKeywordAt(lower: string, index: number, keyword: string): boolean {
+  if (lower.slice(index, index + keyword.length) !== keyword) return false;
+  const prevChar = lower[index - 1];
+  const nextChar = lower[index + keyword.length];
+  if (prevChar === "." || isIdentifierPart(prevChar) || isIdentifierPart(nextChar)) return false;
+  if (keyword === "order" || keyword === "group") {
+    return /^\s+by\b/.test(lower.slice(index + keyword.length));
+  }
+  return true;
+}
+
+const SELECT_IDENTIFIER_PATTERN_SOURCE = `(?:"[^"]+"|\`[^\`]+\`|\\[[^\\]]+\\]|[_\u200c\u200d\\p{ID_Start}][$\u200c\u200d\\p{ID_Continue}]*)`;
+const SELECT_EXPLICIT_ALIAS_PATTERN = new RegExp(`\\bas\\s+(${SELECT_IDENTIFIER_PATTERN_SOURCE})$`, "iu");
+const SELECT_TRAILING_IDENTIFIER_PATTERN = new RegExp(`(?:^|[\\s)'"\`\\]])(${SELECT_IDENTIFIER_PATTERN_SOURCE})$`, "u");
+const SELECT_DOTTED_IDENTIFIER_PATTERN = new RegExp(`^(?:${SELECT_IDENTIFIER_PATTERN_SOURCE}\\s*\\.\\s*)*${SELECT_IDENTIFIER_PATTERN_SOURCE}$`, "u");
+const SELECT_WILDCARD_PATTERN = new RegExp(`^(?:(${SELECT_IDENTIFIER_PATTERN_SOURCE})\\s*\\.\\s*)?\\*$`, "u");
+const CTE_NAME_PATTERN = new RegExp(`^(${SELECT_IDENTIFIER_PATTERN_SOURCE})`, "u");
+
+function extractSelectAlias(expression: string): string | null {
+  const trimmed = expression.trim();
+  const explicitAlias = SELECT_EXPLICIT_ALIAS_PATTERN.exec(trimmed)?.[1];
+  if (explicitAlias) return unquoteIdentifier(explicitAlias);
+
+  const implicitMatch = SELECT_TRAILING_IDENTIFIER_PATTERN.exec(trimmed)?.[1];
+  if (!implicitMatch) return null;
+  const expressionWithoutAlias = trimmed.slice(0, trimmed.length - implicitMatch.length).trimEnd();
+  if (!expressionWithoutAlias || SELECT_DOTTED_IDENTIFIER_PATTERN.test(trimmed)) return null;
+  if (/[+\-*/%&|^!=<>~,]\s*$/.test(expressionWithoutAlias)) return null;
+  return unquoteIdentifier(implicitMatch);
+}
+
+function extractSelectColumnNameFromExpression(expression: string): string | null {
+  const trimmed = expression.trim();
+  const alias = extractSelectAlias(trimmed);
+  if (alias) return alias;
+
+  if (SELECT_DOTTED_IDENTIFIER_PATTERN.test(trimmed)) {
+    const parts = splitQualifiedNameParts(trimmed);
+    if (parts.length > 0) return parts[parts.length - 1];
+  }
+
+  const lastMatch = SELECT_TRAILING_IDENTIFIER_PATTERN.exec(trimmed)?.[1];
+  if (lastMatch && !/[+\-*/%&|^!=<>~,]\s*$/.test(trimmed.slice(0, trimmed.length - lastMatch.length))) {
+    return unquoteIdentifier(lastMatch);
   }
 
   return null;
 }
 
-function extractSelectAlias(expression: string): string | null {
-  const trimmed = expression.trim();
-  const explicitAlias = /\bas\s+([A-Za-z_][\w$]*)$/i.exec(trimmed)?.[1];
-  if (explicitAlias) return explicitAlias;
+function extractSelectList(sql: string): string | null {
+  const lower = sql.toLowerCase();
+  const selectIndex = lower.search(/\bselect\b/);
+  if (selectIndex < 0) return null;
 
-  const implicitAlias = /(?:^|[\s)])([A-Za-z_][\w$]*)$/.exec(trimmed)?.[1];
-  if (!implicitAlias) return null;
-  const expressionWithoutAlias = trimmed.slice(0, trimmed.length - implicitAlias.length).trimEnd();
-  if (!expressionWithoutAlias || /^[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?$/.test(trimmed)) return null;
-  return implicitAlias;
-}
+  let start = selectIndex + "select".length;
+  const afterSelect = sql.slice(start);
+  const modifierMatch = /^\s+(?:distinct|all)\b/i.exec(afterSelect);
+  if (modifierMatch) {
+    start += modifierMatch[0].length;
+  }
 
-function isIdentifierPart(ch: string | undefined): boolean {
-  return !!ch && /[A-Za-z0-9_$]/.test(ch);
+  let depth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let inBracket = false;
+
+  for (let i = start; i < sql.length; i++) {
+    const ch = sql[i];
+
+    if (!inSingleQuote && !inDoubleQuote && !inBacktick && !inBracket) {
+      if (ch === "-" && sql[i + 1] === "-") {
+        const nextNewline = sql.indexOf("\n", i + 2);
+        if (nextNewline === -1) {
+          return sql.slice(start, i).trim() || null;
+        }
+        i = nextNewline;
+        continue;
+      }
+      if (ch === "/" && sql[i + 1] === "*") {
+        const commentEnd = sql.indexOf("*/", i + 2);
+        if (commentEnd === -1) {
+          return sql.slice(start, i).trim() || null;
+        }
+        i = commentEnd + 1;
+        continue;
+      }
+    }
+
+    if (ch === "'" && !inDoubleQuote && !inBacktick && !inBracket) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (ch === '"' && !inSingleQuote && !inBacktick && !inBracket) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (ch === "`" && !inSingleQuote && !inDoubleQuote && !inBracket) {
+      inBacktick = !inBacktick;
+      continue;
+    }
+    if (ch === "[" && !inSingleQuote && !inDoubleQuote && !inBacktick) {
+      inBracket = true;
+      continue;
+    }
+    if (ch === "]" && inBracket) {
+      inBracket = false;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote || inBacktick || inBracket) continue;
+
+    if (ch === "(") depth++;
+    else if (ch === ")") depth = Math.max(0, depth - 1);
+    else if (depth === 0) {
+      if (ch === ";") {
+        return sql.slice(start, i).trim() || null;
+      }
+      if (
+        isClauseKeywordAt(lower, i, "from") ||
+        isClauseKeywordAt(lower, i, "where") ||
+        isClauseKeywordAt(lower, i, "group") ||
+        isClauseKeywordAt(lower, i, "having") ||
+        isClauseKeywordAt(lower, i, "order") ||
+        isClauseKeywordAt(lower, i, "limit") ||
+        isClauseKeywordAt(lower, i, "offset") ||
+        isClauseKeywordAt(lower, i, "union") ||
+        isClauseKeywordAt(lower, i, "intersect") ||
+        isClauseKeywordAt(lower, i, "except")
+      ) {
+        return sql.slice(start, i).trim() || null;
+      }
+    }
+  }
+
+  const remainder = sql.slice(start).trim();
+  return remainder || null;
 }
 
 function findMatchingParen(sql: string, openPos: number): number {
@@ -3877,17 +4051,31 @@ function findMatchingParen(sql: string, openPos: number): number {
   let depth = 1;
   let inSingleQuote = false;
   let inDoubleQuote = false;
+  let inBacktick = false;
+  let inBracket = false;
   for (let i = openPos + 1; i < sql.length; i++) {
     const ch = sql[i];
-    if (ch === "'" && !inDoubleQuote) {
+    if (ch === "'" && !inDoubleQuote && !inBacktick && !inBracket) {
       inSingleQuote = !inSingleQuote;
       continue;
     }
-    if (ch === '"' && !inSingleQuote) {
+    if (ch === '"' && !inSingleQuote && !inBacktick && !inBracket) {
       inDoubleQuote = !inDoubleQuote;
       continue;
     }
-    if (inSingleQuote || inDoubleQuote) continue;
+    if (ch === "`" && !inSingleQuote && !inDoubleQuote && !inBracket) {
+      inBacktick = !inBacktick;
+      continue;
+    }
+    if (ch === "[" && !inSingleQuote && !inDoubleQuote && !inBacktick) {
+      inBracket = true;
+      continue;
+    }
+    if (ch === "]" && inBracket) {
+      inBracket = false;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote || inBacktick || inBracket) continue;
     if (ch === "(") depth++;
     else if (ch === ")") {
       depth--;
@@ -3897,25 +4085,91 @@ function findMatchingParen(sql: string, openPos: number): number {
   return -1;
 }
 
-function extractSelectColumnNames(sql: string): string[] {
+function extractReferencedTablesInBody(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType): SqlCompletionReferencedTable[] {
+  const refs = extractReferencedTables(sql, databaseType);
+  if (knownCtes && knownCtes.length > 0) {
+    for (const cte of knownCtes) {
+      if (refs.some((r) => r.name.toLowerCase() === cte.name.toLowerCase())) continue;
+      const escaped = cte.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pattern = new RegExp(`\\b(?:from|join|straight_join)\\s+(?:${escaped}|"${escaped}"|\`${escaped}\`|\\[${escaped}\\])(?:\\s+(?:as\\s+)?(${SELECT_IDENTIFIER_PATTERN_SOURCE}))?`, "iu");
+      const match = pattern.exec(sql);
+      if (match) {
+        const alias = match[1] ? unquoteIdentifier(match[1]) : undefined;
+        refs.push({ name: cte.name, alias });
+      }
+    }
+  }
+  return refs;
+}
+
+function extractSelectColumnNames(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType): string[] {
   const selectList = extractSelectList(sql);
   if (!selectList) return [];
+
+  const cteColumnsByName = new Map<string, string[]>();
+  if (knownCtes) {
+    for (const cte of knownCtes) {
+      if (cte.columns.length > 0) {
+        cteColumnsByName.set(cte.name.toLowerCase(), cte.columns);
+      }
+    }
+  }
+
+  let referencedInBody: SqlCompletionReferencedTable[] | null = null;
+  function getReferencedInBody(): SqlCompletionReferencedTable[] {
+    if (!referencedInBody) {
+      referencedInBody = extractReferencedTablesInBody(sql, knownCtes, databaseType);
+      const subqueryRefs = extractSubqueryReferences(sql, knownCtes, databaseType);
+      for (const sq of subqueryRefs) {
+        if (sq.alias && sq.columns?.length) {
+          const sqAlias = sq.alias.toLowerCase();
+          cteColumnsByName.set(sqAlias, sq.columns);
+          if (!referencedInBody.some((r) => r.alias?.toLowerCase() === sqAlias)) {
+            referencedInBody.push(sq);
+          }
+        }
+      }
+    }
+    return referencedInBody;
+  }
+
   const names: string[] = [];
   for (const expression of splitTopLevel(selectList, ",")) {
     const trimmed = expression.trim();
-    if (trimmed === "*") continue;
-    if (/^[A-Za-z_][\w$]*$/.test(trimmed)) {
-      names.push(trimmed);
+    if (!trimmed) continue;
+
+    // Check wildcard: * or qualifier.*
+    const wildcardMatch = SELECT_WILDCARD_PATTERN.exec(trimmed);
+    if (wildcardMatch) {
+      const rawQualifier = wildcardMatch[1];
+      if (rawQualifier) {
+        const qualifier = unquoteIdentifier(rawQualifier).toLowerCase();
+        const refs = getReferencedInBody();
+        const matchedRef = refs.find((r) => r.alias?.toLowerCase() === qualifier || r.name.toLowerCase() === qualifier);
+        const targetName = matchedRef ? matchedRef.name.toLowerCase() : qualifier;
+        const targetCols = cteColumnsByName.get(targetName);
+        if (targetCols) {
+          names.push(...targetCols);
+        }
+      } else {
+        // Bare wildcard: expand columns from all referenced CTEs/sources
+        const refs = getReferencedInBody();
+        for (const r of refs) {
+          const targetCols = cteColumnsByName.get(r.name.toLowerCase());
+          if (targetCols) {
+            names.push(...targetCols);
+          }
+        }
+      }
       continue;
     }
-    const alias = /\bas\s+([A-Za-z_][\w$]*)$/i.exec(trimmed)?.[1];
-    if (alias) {
-      names.push(alias);
-      continue;
+
+    const colName = extractSelectColumnNameFromExpression(trimmed);
+    if (colName) {
+      names.push(colName);
     }
-    const lastId = /([A-Za-z_][\w$]*)$/.exec(trimmed)?.[1];
-    if (lastId) names.push(lastId);
   }
+
   return names;
 }
 
@@ -3932,7 +4186,7 @@ interface ScannedCteDefinition {
  * Scans `WITH` definitions, keeping each body's span so callers can tell which
  * part of the statement belongs to a CTE rather than to the outer query.
  */
-function scanCteDefinitions(sql: string): ScannedCteDefinition[] {
+function scanCteDefinitions(sql: string, databaseType?: DatabaseType): ScannedCteDefinition[] {
   const ctes: ScannedCteDefinition[] = [];
   let lower = sql.toLowerCase();
   const withMatch = /\bwith\b/.exec(lower);
@@ -3954,9 +4208,9 @@ function scanCteDefinitions(sql: string): ScannedCteDefinition[] {
     }
 
     const remaining = sql.slice(pos);
-    const nameMatch = /^([A-Za-z_][\w$]*)/.exec(remaining);
+    const nameMatch = CTE_NAME_PATTERN.exec(remaining);
     if (!nameMatch) break;
-    const cteName = nameMatch[1];
+    const cteName = unquoteIdentifier(nameMatch[1]);
     pos += nameMatch[0].length;
 
     while (pos < sql.length && /\s/.test(sql[pos])) pos++;
@@ -3967,9 +4221,8 @@ function scanCteDefinitions(sql: string): ScannedCteDefinition[] {
       if (colListEnd !== -1) {
         const colList = sql.slice(pos + 1, colListEnd).trim();
         if (!/\bselect\b/i.test(colList)) {
-          columns = colList
-            .split(",")
-            .map((c) => c.trim())
+          columns = splitTopLevel(colList, ",")
+            .map((c) => unquoteIdentifier(c.trim()))
             .filter(Boolean);
           pos = colListEnd + 1;
           while (pos < sql.length && /\s/.test(sql[pos])) pos++;
@@ -3989,7 +4242,7 @@ function scanCteDefinitions(sql: string): ScannedCteDefinition[] {
 
     if (columns.length === 0) {
       const body = sql.slice(pos + 1, bodyEnd);
-      columns = extractSelectColumnNames(body);
+      columns = extractSelectColumnNames(body, ctes, databaseType);
     }
 
     ctes.push({ name: cteName, columns, bodyStart: pos, bodyEnd });
@@ -3999,8 +4252,8 @@ function scanCteDefinitions(sql: string): ScannedCteDefinition[] {
   return ctes;
 }
 
-export function extractCteDefinitions(sql: string): Array<{ name: string; columns: string[] }> {
-  return scanCteDefinitions(sql).map(({ name, columns }) => ({ name, columns }));
+export function extractCteDefinitions(sql: string, databaseType?: DatabaseType): Array<{ name: string; columns: string[] }> {
+  return scanCteDefinitions(sql, databaseType).map(({ name, columns }) => ({ name, columns }));
 }
 
 /**
@@ -4027,7 +4280,7 @@ function maskResolvedCteBodies(statement: string, cursorOffset: number, ctes: re
   return masked;
 }
 
-function extractSubqueryReferences(sql: string): SqlCompletionReferencedTable[] {
+function extractSubqueryReferences(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType): SqlCompletionReferencedTable[] {
   const refs: SqlCompletionReferencedTable[] = [];
   const pattern = /\b(?:from|join)\s*\(/gi;
 
@@ -4043,14 +4296,14 @@ function extractSubqueryReferences(sql: string): SqlCompletionReferencedTable[] 
       pos += 2;
       while (pos < sql.length && /\s/.test(sql[pos])) pos++;
     }
-    const aliasMatch = /^([A-Za-z_][\w$]*)/.exec(sql.slice(pos));
+    const aliasMatch = CTE_NAME_PATTERN.exec(sql.slice(pos));
     if (!aliasMatch) continue;
-    const alias = aliasMatch[1];
+    const alias = unquoteIdentifier(aliasMatch[1]);
     if (ALIAS_BLACKLIST_FOR_REF.has(alias.toLowerCase())) continue;
 
     // Extract SELECT columns from subquery body
     const body = sql.slice(openParen + 1, closeParen);
-    const columns = extractSelectColumnNames(body);
+    const columns = extractSelectColumnNames(body, knownCtes, databaseType);
 
     refs.push({ name: alias, alias, columns });
   }
@@ -4066,18 +4319,32 @@ function splitTopLevel(text: string, separator: string): string[] {
   let depth = 0;
   let inSingleQuote = false;
   let inDoubleQuote = false;
+  let inBacktick = false;
+  let inBracket = false;
 
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
-    if (ch === "'" && !inDoubleQuote) {
+    if (ch === "'" && !inDoubleQuote && !inBacktick && !inBracket) {
       inSingleQuote = !inSingleQuote;
       continue;
     }
-    if (ch === '"' && !inSingleQuote) {
+    if (ch === '"' && !inSingleQuote && !inBacktick && !inBracket) {
       inDoubleQuote = !inDoubleQuote;
       continue;
     }
-    if (inSingleQuote || inDoubleQuote) continue;
+    if (ch === "`" && !inSingleQuote && !inDoubleQuote && !inBracket) {
+      inBacktick = !inBacktick;
+      continue;
+    }
+    if (ch === "[" && !inSingleQuote && !inDoubleQuote && !inBacktick) {
+      inBracket = true;
+      continue;
+    }
+    if (ch === "]" && inBracket) {
+      inBracket = false;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote || inBacktick || inBracket) continue;
     if (ch === "(") depth++;
     else if (ch === ")") depth = Math.max(0, depth - 1);
     else if (ch === separator && depth === 0) {

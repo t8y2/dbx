@@ -1,5 +1,5 @@
-import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { writeContributorSnapshot } from "./contributor-snapshot.mjs";
 
 const repository = process.env.DBX_GITHUB_REPOSITORY || "t8y2/dbx";
 const token = process.env.GITHUB_TOKEN;
@@ -108,6 +108,8 @@ const output = {
   contributors: rankedContributors,
 };
 
-await mkdir(resolve(outputPath, ".."), { recursive: true });
-await writeFile(outputPath, `${JSON.stringify(output, null, 2)}\n`);
-console.log(`Wrote ${rankedContributors.length} contributors to ${outputPath}`);
+if (await writeContributorSnapshot(outputPath, output)) {
+  console.log(`Wrote ${rankedContributors.length} contributors to ${outputPath}`);
+} else {
+  console.log("Contributor activity is unchanged");
+}

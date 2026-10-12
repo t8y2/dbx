@@ -548,6 +548,7 @@ export function alignDdlColumnDefinitions(sql: string, dialect: SqlFormatDialect
 
 export interface DdlDisplayFormatOptions {
   dialect: SqlFormatDialect;
+  /** Effective type from effectiveDatabaseTypeForConnection, including MySQL driver profiles. */
   databaseType?: DatabaseType;
   database?: string;
   catalog?: string;

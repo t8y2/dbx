@@ -30,7 +30,7 @@ const props = defineProps<{
   downloadBinaryValue: (detail: DataGridCellDetail | null, mode: BinaryCellDownloadMode) => void | Promise<void>;
   canImportBinaryValue: (detail: DataGridCellDetail | null) => boolean;
   importBinaryValue: (detail: DataGridCellDetail | null) => void | Promise<void>;
-  /** BLOB 文本预览与编辑写回一致，仅在 MySQL 连接开启。 */
+  /** BLOB 文本预览与编辑写回一致，在 MySQL / Oracle（含 OceanBase-Oracle）连接开启。 */
   databaseType?: DatabaseType;
 }>();
 

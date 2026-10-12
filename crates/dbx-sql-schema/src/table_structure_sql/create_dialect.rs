@@ -125,7 +125,20 @@ impl CreateTableDialect for StarRocksCreateTable {
                     None => warnings.push("A StarRocks sort column was removed. Select an existing column.".into()),
                     Some(column) if has_primary_key => {
                         let base = column.data_type.split('(').next().unwrap_or("").trim().to_ascii_lowercase();
-                        if !matches!(base.as_str(), "boolean" | "tinyint" | "smallint" | "int" | "integer" | "bigint" | "largeint" | "varchar" | "string" | "date" | "datetime") {
+                        if !matches!(
+                            base.as_str(),
+                            "boolean"
+                                | "tinyint"
+                                | "smallint"
+                                | "int"
+                                | "integer"
+                                | "bigint"
+                                | "largeint"
+                                | "varchar"
+                                | "string"
+                                | "date"
+                                | "datetime"
+                        ) {
                             warnings.push(format!("StarRocks primary key table sort column '{}' must use boolean, integer, varchar, date or datetime.", column.name));
                         }
                     }
@@ -235,11 +248,17 @@ impl CreateTableDialect for StarRocksCreateTable {
         super::starrocks_partition::render(&self.settings, columns)
     }
     fn sort_clause(&self, columns: &[&EditableStructureColumn]) -> String {
-        if self.settings.sort_column_ids.is_empty() { return String::new(); }
-        let keys = self.settings.sort_column_ids.iter()
+        if self.settings.sort_column_ids.is_empty() {
+            return String::new();
+        }
+        let keys = self
+            .settings
+            .sort_column_ids
+            .iter()
             .filter_map(|id| columns.iter().find(|column| &column.id == id))
             .map(|column| quote_ident(StructureDialect::Mysql, &column.name))
-            .collect::<Vec<_>>().join(", ");
+            .collect::<Vec<_>>()
+            .join(", ");
         format!(" ORDER BY ({keys})")
     }
     fn after_partition(&self, columns: &[&EditableStructureColumn], primary_key: &str) -> String {

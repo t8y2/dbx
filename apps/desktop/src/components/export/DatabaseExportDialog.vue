@@ -24,7 +24,7 @@ import { isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
 import type { SqlInsertDialect, SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { revealExportedPath } from "@/lib/export/exportPath";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { loadSavedDatabaseExportOptions, MAX_SPLIT_SQL_PART_MB, MIN_SPLIT_SQL_PART_MB, saveDatabaseExportOptions, sortDatabaseTableNames } from "@/lib/export/databaseExportOptions";
+import { databaseExportFileStem, loadSavedDatabaseExportOptions, MAX_SPLIT_SQL_PART_MB, MIN_SPLIT_SQL_PART_MB, saveDatabaseExportOptions, sortDatabaseTableNames } from "@/lib/export/databaseExportOptions";
 import { notifyExportComplete } from "@/lib/export/exportReveal";
 
 const { t } = useI18n();
@@ -403,7 +403,7 @@ async function startExport() {
 
   if (isTauriRuntime()) {
     try {
-      const safeName = sanitizeFileName(database.value || "database");
+      const safeName = sanitizeFileName(databaseExportFileStem(database.value || "database", selectedTables.value) || "database");
       const path = await promptExportSavePath({
         defaultFileName: `${safeName}.${splitSqlOutput.value ? "zip" : "sql"}`,
         filters: [{ name: splitSqlOutput.value ? "ZIP" : "SQL", extensions: [splitSqlOutput.value ? "zip" : "sql"] }],

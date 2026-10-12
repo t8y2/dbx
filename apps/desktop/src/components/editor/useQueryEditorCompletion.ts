@@ -18,6 +18,7 @@ import {
   extractCteDefinitions,
 } from "@/lib/sql/sqlCompletion";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { excludedCompletionLabelSet, filterExcludedCompletions } from "@/lib/editor/excludedCompletions";
 import { driverProfileHasCompletionCandidates } from "@/lib/database/driverProfileExtensions";
 import { buildElasticsearchCompletionItemsFromContext, elasticsearchCompletionNeedsFields, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionField } from "@/lib/elasticsearch/elasticsearchCompletion";
 import {
@@ -276,7 +277,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     return true;
   }
 
-  function buildCompletionResult(items: Array<QueryCompletionItem | BatchColumnSelectionActionItem>, from: number, validFor?: RegExp, prefix?: string) {
+  function buildCompletionResult(sourceItems: Array<QueryCompletionItem | BatchColumnSelectionActionItem>, from: number, validFor?: RegExp, prefix?: string) {
+    const items = filterExcludedCompletions(sourceItems, excludedCompletionLabelSet(settingsStore.editorSettings.excludedCompletionItems));
     if (items.length === 0) return null;
     const bypassFilter = !!prefix && shouldBypassCompletionFilter(prefix, items);
     const resultItems = bypassFilter && prefix ? completionItemsForBypassedFilter(prefix, items) : items;
@@ -1142,7 +1144,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       }
     }
 
-    const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc);
+    const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc, props.databaseType);
     for (const refTable of completionContext.referencedTables) {
       if (refTable.columns?.length) {
         columnsByTable.set(
@@ -1571,7 +1573,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     }
 
     // Populate CTE columns from parsed definitions
-    const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc);
+    const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc, props.databaseType);
     for (const refTable of refs) {
       if (refTable.columns) continue;
       const cteDef = cteDefs.find((c) => c.name.toLowerCase() === refTable.name.toLowerCase());

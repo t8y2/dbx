@@ -16,6 +16,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.Comparator;
 import java.util.List;
@@ -53,11 +54,20 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
 
     @Override
     public List<TriggerInfo> listTriggers(String schema, String table) {
+        if (table == null || table.isBlank()) {
+            return Collections.emptyList();
+        }
+        String normalizedTable = table.trim();
+        if (normalizedTable.startsWith("\"") && normalizedTable.endsWith("\"") && normalizedTable.length() > 1) {
+            normalizedTable = normalizedTable.substring(1, normalizedTable.length() - 1);
+        }
+        final String searchTable = normalizedTable;
         return unchecked(() -> {
             List<TriggerInfo> triggers = new ArrayList<>();
             try (PreparedStatement statement = requireConnection().prepareStatement(
-                "SELECT TRIM(RDB$TRIGGER_NAME), RDB$TRIGGER_TYPE FROM RDB$TRIGGERS WHERE RDB$RELATION_NAME = ? AND COALESCE(RDB$SYSTEM_FLAG,0)=0 ORDER BY RDB$TRIGGER_NAME")) {
-                statement.setString(1, table);
+                "SELECT TRIM(RDB$TRIGGER_NAME), RDB$TRIGGER_TYPE FROM RDB$TRIGGERS WHERE (TRIM(RDB$RELATION_NAME) = ? OR TRIM(RDB$RELATION_NAME) = UPPER(?)) AND COALESCE(RDB$SYSTEM_FLAG,0)=0 ORDER BY RDB$TRIGGER_NAME")) {
+                statement.setString(1, searchTable);
+                statement.setString(2, searchTable);
                 try (ResultSet result = statement.executeQuery()) {
                     while (result.next()) {
                         int type = result.getInt(2);
@@ -78,6 +88,11 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
             case 25, 26 -> "INSERT OR DELETE";
             case 27, 28 -> "UPDATE OR DELETE";
             case 113, 114 -> "INSERT OR UPDATE OR DELETE";
+            case 8192 -> "CONNECT";
+            case 8193 -> "DISCONNECT";
+            case 8194 -> "TRANSACTION START";
+            case 8195 -> "TRANSACTION COMMIT";
+            case 8196 -> "TRANSACTION ROLLBACK";
             default -> Integer.toString(type);
         };
     }

@@ -116,6 +116,11 @@ export interface BuildTableStructureChangeSqlOptions {
   /** When true, the connection is GaussDB M-mode which uses MySQL-compatible
    * SQL dialect with backtick quoting. */
   isGaussdbMMode?: boolean;
+  /** Optional constraint name for a newly created primary key. Empty or
+   * omitted keeps the anonymous `PRIMARY KEY (...)` form and lets the server
+   * auto-name the constraint. Ignored when the draft only replaces an
+   * existing primary key (renaming is out of scope). */
+  primaryKeyName?: string;
 }
 
 export interface TranswarpCreateTableOptions {

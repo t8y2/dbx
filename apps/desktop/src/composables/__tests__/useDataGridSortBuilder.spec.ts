@@ -1,6 +1,6 @@
 import { nextTick, ref } from "vue";
 import { beforeEach, describe, expect, it } from "vitest";
-import { buildDataGridStructuredOrderBy, clearDataGridSortBuilderMemoryCache, combineDataGridOrderByInputs, moveDataGridStructuredSortRule, useDataGridSortBuilder, type DataGridStructuredSortRule } from "@/composables/useDataGridSortBuilder";
+import { buildDataGridStructuredOrderBy, clearDataGridSortBuilderMemoryCache, combineDataGridOrderByInputs, copyDataGridSortBuilderStatesForTab, moveDataGridStructuredSortRule, useDataGridSortBuilder, type DataGridStructuredSortRule } from "@/composables/useDataGridSortBuilder";
 
 function idFactory() {
   let index = 0;
@@ -60,6 +60,32 @@ describe("structured data-grid ORDER BY", () => {
 });
 
 describe("useDataGridSortBuilder", () => {
+  it("copies each scope owned by a tab without copying another tab's rules", async () => {
+    const scopeKey = ref("scope-1");
+    const source = useDataGridSortBuilder({ columns: ["id", "name"], cacheKey: "tab-1", scopeKey, createId: idFactory() });
+    source.setOpen(true);
+    source.updateRule(source.rules.value[0].id, { columnName: "id", direction: "desc" });
+    source.markApplied('"id" DESC');
+    await nextTick();
+    scopeKey.value = "scope-2";
+    await nextTick();
+    source.updateRule(source.rules.value[0].id, { columnName: "name" });
+    source.markApplied('"name" ASC');
+    const other = useDataGridSortBuilder({ columns: ["id"], cacheKey: "tab-10", scopeKey: "scope-1" });
+    other.setOpen(true);
+    other.updateRule(other.rules.value[0].id, { columnName: "id" });
+    other.markApplied('"id" ASC');
+    await nextTick();
+
+    copyDataGridSortBuilderStatesForTab("tab-1", "copy");
+
+    const copy = useDataGridSortBuilder({ columns: ["id", "name"], cacheKey: "copy", scopeKey: "scope-1" });
+    const copyOtherScope = useDataGridSortBuilder({ columns: ["id", "name"], cacheKey: "copy", scopeKey: "scope-2" });
+    expect(copy.appliedOrderByInput.value).toBe('"id" DESC');
+    expect(copyOtherScope.appliedOrderByInput.value).toBe('"name" ASC');
+    expect(useDataGridSortBuilder({ columns: ["id"], cacheKey: "copy0", scopeKey: "scope-1" }).rules.value).toEqual([]);
+  });
+
   it("keeps disabled draft rules when the same tab is remounted", async () => {
     const columns = ref(["id", "name"]);
     const first = useDataGridSortBuilder({ columns, cacheKey: "tab-1", scopeKey: "scope-1", createId: idFactory() });

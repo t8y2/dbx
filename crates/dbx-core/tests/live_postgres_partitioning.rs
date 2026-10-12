@@ -320,6 +320,7 @@ async fn live_postgres_create_partitioned_table_executes() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     };
     let create = build_create_partitioned_table_sql(
         options,

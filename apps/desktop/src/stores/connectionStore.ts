@@ -126,7 +126,7 @@ import {
 import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, compareSidebarNames, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
 import { spannerDisplayDatabase, spannerSchemaDisplayName } from "@/lib/connection/spannerResourcePath";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
-import { collapseExpandedTreeNodes } from "@/lib/sidebar/sidebarTreeCollapse";
+import { collapseExpandedTreeNodes, collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
 import { findNodePathByIdentity, nodeMatchesRegexScopeIdentity, type SidebarRegexScopeIdentity } from "@/lib/sidebar/sidebarSearchTree";
 import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
 import { simpleModeEmptyShellNeedsConfirmedLoad, treeNodeLoadedChildrenContentPresent } from "@/lib/sidebar/treeLoadedChildrenMarker";
@@ -3142,7 +3142,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function sidebarTableSearchTreeCacheKey(parent: TreeNode): string | null {
-    if (!parent.connectionId || !parent.database) return null;
+    if (!parent.connectionId || !hasTreeNodeDatabaseContext(parent)) return null;
     if (parent.type === "group-tables") return objectGroupCacheKey(parent);
     if (parent.type !== "database" && parent.type !== "schema" && parent.type !== "linked-server-schema") return null;
     const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
@@ -3183,7 +3183,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const sidebarTableSearchIndexManifestCacheKey = "dbx:sidebar-table-search-index-manifest-v1";
 
   function sidebarTableSearchIndexManifestEntry(parent: TreeNode, cacheKey: string): TableSearchIndexManifestEntry | null {
-    if (!parent.connectionId || !parent.database || !parent.type) return null;
+    if (!parent.connectionId || !hasTreeNodeDatabaseContext(parent) || !parent.type) return null;
     const identity: SidebarRegexScopeIdentity = {
       connectionId: parent.connectionId,
       database: parent.database,
@@ -3278,7 +3278,7 @@ export const useConnectionStore = defineStore("connection", () => {
   };
 
   function sidebarTableSearchIndexScopeForNode(parent: TreeNode): SidebarTableSearchIndexScope | null {
-    if (!parent.connectionId || !parent.database) return null;
+    if (!parent.connectionId || !hasTreeNodeDatabaseContext(parent)) return null;
     const cacheKey = sidebarTableSearchIndexCacheKey(parent);
     if (!cacheKey) return null;
     return {
@@ -6929,7 +6929,7 @@ export const useConnectionStore = defineStore("connection", () => {
           load = reclaimTreeNodeLoad(load, node);
           if (parent.type === "database" || parent.type === "schema" || parent.type === "linked-server-schema") {
             const parentDatabase = parent.database;
-            if (!parentDatabase) return;
+            if (!hasTreeNodeDatabaseContext(parent)) return;
             const config = getConfig(parentConnectionId);
             const querySchema = connectionObjectTreeQuerySchema(config, parentDatabase, parent.schema);
             const effectiveSchema = connectionObjectTreeNodeSchema(config, parentDatabase, parent.schema);
@@ -6970,7 +6970,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
           const config = getConfig(parentConnectionId);
           const parentDatabase = parent.database;
-          if (!parentDatabase) return;
+          if (!hasTreeNodeDatabaseContext(parent)) return;
           const querySchema = connectionObjectTreeQuerySchema(config, parentDatabase, parent.schema);
           const effectiveSchema = connectionObjectTreeNodeSchema(config, parentDatabase, parent.schema);
           const wantsOnlyTablesOrViews = objectTypes.every((objectType) => objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW");
@@ -8225,6 +8225,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!connectionId || !database) return;
     if (node.isExpanded && !options?.force) {
       node.isExpanded = false;
+      collapseSubtreeDescendants(node);
       if (!sidebarSearchQuery.value && !options?.preserveCollapsedChildren) releaseCollapsedTreeNodeChildren(node.id);
       return;
     }
@@ -10599,6 +10600,10 @@ export const useConnectionStore = defineStore("connection", () => {
       return connectionIdsInGroupsOp(sidebarLayout.value, groupIds);
     },
     toggleConnectionGroupCollapsed(groupId: string) {
+      const groupNode = findNode(treeNodes.value, groupId);
+      if (groupNode) {
+        collapseSubtreeDescendants(groupNode);
+      }
       updateLayoutAndRebuild(toggleGroupCollapsedOp(sidebarLayout.value, groupId));
     },
     expandConnectionGroups(groupIds: Iterable<string>) {

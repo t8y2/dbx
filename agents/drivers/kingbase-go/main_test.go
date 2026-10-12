@@ -4966,3 +4966,58 @@ func TestNormalizeValueKingbaseTimezoneLessDateTime(t *testing.T) {
 		t.Fatalf("TIMESTAMPTZ column: got %#v, want RFC3339Nano-encoded UTC instant", tzAware)
 	}
 }
+
+func TestCatalogColumnsPreservesJsonAndJsonbTypes(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "WHEN t.typname = 'json' THEN 'json'") ||
+			!strings.Contains(query, "WHEN t.typname = '_json' THEN 'json[]'") {
+			return nil, fmt.Errorf("columns query must distinguish json from jsonb: %s", query)
+		}
+		return &valueRows{
+			columns: []string{"nspname", "attname", "data_type", "nullable", "default", "comment", "precision", "scale", "length", "identity"},
+			rows: [][]driver.Value{
+				{"public", "data_json", "json", true, nil, nil, nil, nil, nil, nil},
+				{"public", "data_jsonb", "jsonb", true, nil, nil, nil, nil, nil, nil},
+				{"public", "data_json_arr", "json[]", true, nil, nil, nil, nil, nil, nil},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	columns, err := server.getColumns("public", "test_json_table")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(columns) != 3 {
+		t.Fatalf("expected 3 columns, got %d", len(columns))
+	}
+	if columns[0].DataType != "json" {
+		t.Fatalf("expected DataType 'json', got %q", columns[0].DataType)
+	}
+	if columns[1].DataType != "jsonb" {
+		t.Fatalf("expected DataType 'jsonb', got %q", columns[1].DataType)
+	}
+	if columns[2].DataType != "json[]" {
+		t.Fatalf("expected DataType 'json[]', got %q", columns[2].DataType)
+	}
+
+	ddl := server.columnDDLDefinition(columns[0])
+	if ddl != `"data_json" json` {
+		t.Fatalf("expected column DDL '\"data_json\" json', got %q", ddl)
+	}
+	ddlB := server.columnDDLDefinition(columns[1])
+	if ddlB != `"data_jsonb" jsonb` {
+		t.Fatalf("expected column DDL '\"data_jsonb\" jsonb', got %q", ddlB)
+	}
+}
+
+func TestQualifiedCatalogTypeExpressionHandlesJsonTypes(t *testing.T) {
+	expr := qualifiedCatalogTypeExpression("t", "n", "elem", "elem_n", "t.oid", "t.typtypmod")
+	if !strings.Contains(expr, "WHEN t.typname = 'json'") ||
+		!strings.Contains(expr, "THEN 'json'") ||
+		!strings.Contains(expr, "WHEN t.typname = '_json'") ||
+		!strings.Contains(expr, "THEN 'json[]'") {
+		t.Fatalf("qualifiedCatalogTypeExpression missing json handling: %s", expr)
+	}
+}

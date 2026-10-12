@@ -29,6 +29,16 @@ const postgresConnection: ConnectionConfig = {
   password: "",
 };
 
+const oracleConnection: ConnectionConfig = {
+  id: "conn-oracle",
+  name: "Reporting",
+  db_type: "oracle",
+  host: "db.internal",
+  port: 1521,
+  username: "app",
+  password: "",
+};
+
 describe("SQL risk dialect lexer rules", () => {
   it("keeps the SQL Server DELETE after a #temp reference", () => {
     const sql = "SELECT * FROM #tmp; DELETE FROM #tmp;";
@@ -63,6 +73,84 @@ describe("SQL risk dialect lexer rules", () => {
       action: "confirm",
       category: "write",
     });
+  });
+
+  it("scans PostgreSQL escape strings by the dialect lexer rules", () => {
+    // Inside E'...' a backslash escapes the quote, so the DELETE stays literal
+    // data and must not raise the risk (matches the Rust scanner).
+    const inside = "SELECT E'it\\'s; DELETE FROM users;'";
+
+    expect(sqlSafetyText(inside, "postgres")).not.toContain("DELETE FROM users");
+    expect(classifySqlRisk(inside, { dialect: "postgres" }).risk).toBe("read");
+
+    // Outside the E-string the DELETE is real code and must be classified.
+    const after = "SELECT E'it\\'s'; DELETE FROM users;";
+
+    expect(sqlSafetyText(after, "postgres")).toContain("DELETE FROM users");
+    expect(splitSqlStatementsForSafety(after, "postgres")).toEqual(["SELECT E", "DELETE FROM users"]);
+    expect(classifySqlRisk(after, { dialect: "postgres" }).risk).toBe("write");
+    expect(classifySqlRisk(after, { dialect: "kingbase" }).risk).toBe("write");
+  });
+
+  it("does not auto-execute a PostgreSQL write hidden behind an escape string", () => {
+    const sql = "SELECT E'it\\'s'; DELETE FROM users;";
+
+    expect(classifyAiSqlExecution(sql, postgresConnection)).toMatchObject({
+      action: "confirm",
+      category: "write",
+    });
+  });
+
+  it("keeps an E that ends an identifier out of the escape-string rules", () => {
+    // `xE` is one identifier, so the following literal is ordinary (same as
+    // `ends_with_escape_string_prefix` in the Rust scanner).
+    const sql = "SELECT xE'it\\'s'; DELETE FROM users;";
+
+    expect(sqlSafetyText(sql, "postgres")).not.toContain("DELETE FROM users");
+  });
+
+  it("scans Oracle alternative-quoted strings by the dialect lexer rules", () => {
+    for (const literal of ["q'[O'Reilly]'", "nq'{O'Reilly}'", "Q'<O'Reilly>'", "q'!O'Reilly!'"]) {
+      const sql = `SELECT ${literal} FROM dual; DELETE FROM users;`;
+
+      // The quote inside q'...' is literal, so the DELETE after the literal is
+      // real code and must be classified.
+      expect(sqlSafetyText(sql, "oracle")).toContain("DELETE FROM users");
+      expect(classifySqlRisk(sql, { dialect: "oracle" }).risk).toBe("write");
+      expect(classifySqlRisk(sql, { dialect: "oceanbase-oracle" }).risk).toBe("write");
+    }
+
+    // SQL-looking text inside the literal stays literal data.
+    const inside = "SELECT q'[it's; DELETE FROM users;]' FROM dual;";
+
+    expect(sqlSafetyText(inside, "oracle")).not.toContain("DELETE FROM users");
+    expect(classifySqlRisk(inside, { dialect: "oracle" }).risk).toBe("read");
+  });
+
+  it("does not auto-execute an Oracle write hidden behind an alternative-quoted string", () => {
+    const sql = "SELECT q'[it's]' FROM dual; DELETE FROM users;";
+
+    expect(classifyAiSqlExecution(sql, oracleConnection)).toMatchObject({
+      action: "confirm",
+      category: "write",
+    });
+  });
+
+  it("keeps alternative quoting specific to the Oracle family", () => {
+    const sql = "SELECT q'[O' AS label FROM dual;";
+
+    // Oracle reads the whole `q'[O' AS label FROM dual;` as an unterminated
+    // alternative-quoted literal; PostgreSQL has no `q'...'` introducer.
+    expect(sqlSafetyText(sql, "oracle")).not.toContain("AS label");
+    expect(sqlSafetyText(sql, "postgres")).toContain("AS label");
+  });
+
+  it("keeps an identifier character before q out of the alternative-quote rules", () => {
+    const sql = "SELECT aq'[x]' FROM dual; DELETE FROM users;";
+
+    // `aq` is one identifier, so the following literal is ordinary.
+    expect(sqlSafetyText(sql, "oracle")).toContain("DELETE FROM users");
+    expect(classifySqlRisk(sql, { dialect: "oracle" }).risk).toBe("write");
   });
 
   it("still reads # as a line comment on MySQL", () => {

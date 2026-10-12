@@ -45,6 +45,9 @@ pub struct WebState {
     pub transfer_progress_channels: RwLock<HashMap<String, Arc<TransferProgressChannel>>>,
     pub table_import_channels: RwLock<HashMap<String, watch::Sender<String>>>,
     pub sql_file_executions: RwLock<HashMap<String, CancellationToken>>,
+    /// Failure logs of the executions this process ran, scoped to the session
+    /// that started them (dbx#11619).
+    pub sql_file_failure_logs: dbx_core::sql_file_import::SqlFileFailureLogRegistry,
     pub managed_sql_previews: crate::routes::sql_file::ManagedSqlPreviews,
     pub nacos_imports: RwLock<HashMap<String, NacosImportContext>>,
     pub login_rate_limit: Mutex<LoginRateLimit>,
@@ -75,6 +78,7 @@ impl WebState {
             sse_channels: RwLock::new(HashMap::new()),
             transfer_progress_channels: RwLock::new(HashMap::new()),
             table_import_channels: RwLock::new(HashMap::new()),
+            sql_file_failure_logs: Default::default(),
             sql_file_executions: RwLock::new(HashMap::new()),
             managed_sql_previews: Default::default(),
             nacos_imports: RwLock::new(HashMap::new()),

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useQueryEditorDiagnostics } from "../useQueryEditorDiagnostics";
 import type { SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
 import type { QueryEditorProps } from "../queryEditorTypes";
-import type { SqlReferenceAnalysis } from "@/types/database";
+import type { QueryResult, SqlReferenceAnalysis } from "@/types/database";
 
 const { analyze, buildDiagnostics } = vi.hoisted(() => ({ analyze: vi.fn(), buildDiagnostics: vi.fn() }));
 vi.mock("@/lib/backend/api", () => ({ analyzeSqlReferences: analyze }));
@@ -87,6 +87,67 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
 }
 
 describe("QueryEditor diagnostic scheduling ownership", () => {
+  it("maps a typed execution error onto a selected statement in a larger document", () => {
+    const statement = "SELECT missing;";
+    const modelValue = `SELECT 1;\n${statement}`;
+    const sourceFrom = modelValue.indexOf(statement);
+    const result: QueryResult = {
+      columns: ["Error"],
+      rows: [["unknown column"]],
+      affected_rows: 0,
+      execution_time_ms: 0,
+      execution_error: true,
+      sourceStatement: statement,
+      sourceFrom,
+      sourceTo: sourceFrom + statement.length,
+      error: { version: 1, code: "DBX-JDBC-4001", messageKey: "backendErrors.jdbc.sqlFailed", messageParams: {}, source: "jdbcAgent", operationOutcome: "unknown", errorPosition: { line: 1, column: 8, offset: 7 } },
+    };
+    const { diagnostics, currentView } = createHarness({ modelValue, executionError: "unknown column", executionErrorSql: statement, executionErrorResult: result });
+    expect(diagnostics.sqlErrorDecorationRange(currentView.state)).toEqual([{ from: sourceFrom + 7, to: sourceFrom + 8, message: "unknown column" }]);
+    currentView.dispatch({ changes: { from: sourceFrom + 7, to: sourceFrom + 14, insert: "present" } });
+    expect(diagnostics.sqlErrorDecorationRange(currentView.state)).toEqual([]);
+  });
+
+  it("retains legacy full-document textual diagnostics", () => {
+    const { diagnostics, currentView } = createHarness({ executionError: "syntax error at line 1, column 8", executionErrorSql: "SELECT missing;" });
+    expect(diagnostics.sqlErrorDecorationRange(currentView.state)).toEqual([{ from: 7, to: 8, message: "syntax error at line 1, column 8" }]);
+  });
+
+  it("retains textual diagnostics for older result envelopes without source metadata", () => {
+    const result: QueryResult = { columns: ["Error"], rows: [["syntax error at line 1, column 8"]], affected_rows: 0, execution_time_ms: 0, execution_error: true };
+    const { diagnostics, currentView } = createHarness({ executionError: "syntax error at line 1, column 8", executionErrorSql: "SELECT missing;", executionErrorResult: result });
+    expect(diagnostics.sqlErrorDecorationRange(currentView.state)).toEqual([{ from: 7, to: 8, message: "syntax error at line 1, column 8" }]);
+  });
+
+  it("maps rewritten execution and a Unicode scalar position back onto source text", () => {
+    const statement = "SELECT '😀', missing;";
+    const executedStatement = `SELECT * FROM (${statement}) wrapped LIMIT 10`;
+    const offset = executedStatement.indexOf("missing");
+    const message = "unknown column";
+    const result: QueryResult = {
+      columns: ["Error"],
+      rows: [[message]],
+      affected_rows: 0,
+      execution_time_ms: 0,
+      execution_error: true,
+      sourceStatement: statement,
+      sourceFrom: 0,
+      sourceTo: statement.length,
+      executedStatement,
+      error: { version: 1, code: "DBX-JDBC-4001", messageKey: "backendErrors.jdbc.sqlFailed", messageParams: {}, source: "jdbcAgent", operationOutcome: "unknown", errorPosition: { line: 1, column: Array.from(executedStatement.slice(0, offset)).length + 1, offset } },
+    };
+    const { diagnostics, currentView } = createHarness({ modelValue: statement, executionError: message, executionErrorResult: result });
+    expect(diagnostics.sqlErrorDecorationRange(currentView.state)).toEqual([{ from: statement.indexOf("missing"), to: statement.indexOf("missing") + 1, message }]);
+  });
+
+  it("uses the statement index when identical statements have no saved source offsets", () => {
+    const statement = "SELECT missing";
+    const modelValue = `${statement};\n${statement};`;
+    const message = "syntax error at line 1, column 8";
+    const result: QueryResult = { columns: ["Error"], rows: [[message]], affected_rows: 0, execution_time_ms: 0, execution_error: true, statement_index: 1, sourceStatement: statement };
+    const { diagnostics, currentView } = createHarness({ modelValue, executionError: message, executionErrorResult: result });
+    expect(diagnostics.sqlErrorDecorationRange(currentView.state)).toEqual([{ from: statement.length + 9, to: statement.length + 10, message }]);
+  });
   it("coalesces timers and shares the latest executable statement cache", async () => {
     const { diagnostics, currentView, runtime } = createHarness();
     diagnostics.scheduleSemanticDiagnostics(50);

@@ -8,7 +8,7 @@ export const rustGroups = {
     "dbx-driver-mysql", "dbx-driver-postgres", "dbx-driver-redis", "dbx-driver-sqlserver", "dbx-drivers",
     "dbx-sqlite-worker",
   ],
-  application: ["dbx", "dbx-core", "dbx-web", "dbx-cli", "dbx-mcp"],
+  application: ["dbx", "dbx-core", "dbx-web", "dbx-cli", "dbx-mcp", "dbx-tauri-consul", "dbx-tauri-schema"],
 };
 
 export const goAgents = [

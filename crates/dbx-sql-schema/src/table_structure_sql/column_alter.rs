@@ -7,7 +7,7 @@ use super::column_format::{
 use super::columns::{build_add_column_sql, build_drop_column_sql};
 use super::comments::build_sqlserver_column_comment_sql_for_profile;
 use super::dialect::{capabilities_for, database_label, StructureDialect};
-use super::types::{EditableStructureColumn, SingleColumnAlterSqlOptions, TableStructureSqlResult};
+use super::types::{ColumnIdentity, EditableStructureColumn, SingleColumnAlterSqlOptions, TableStructureSqlResult};
 use super::util::{
     clean, format_default_for_sql, is_protected_manticore_id_column, normalize_default, original_comment,
     original_default, qualified_table, quote_ident, quote_string,
@@ -189,10 +189,32 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
     TableStructureSqlResult { statements, warnings }
 }
 
+fn is_column_identity_empty(identity: &Option<ColumnIdentity>) -> bool {
+    let Some(id) = identity.as_ref() else { return true };
+    let generation_empty =
+        id.generation.as_deref().map(|g| g.trim().is_empty() || g.eq_ignore_ascii_case("none")).unwrap_or(true);
+    generation_empty && id.seed.is_none() && id.increment.is_none()
+}
+
+fn postgres_identity_from_column(column: &EditableStructureColumn) -> Option<&ColumnIdentity> {
+    let identity = column.extra.as_ref()?.identity.as_ref()?;
+    if let Some(generation) = &identity.generation {
+        let trimmed = generation.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+            return None;
+        }
+        return Some(identity);
+    }
+    if identity.seed.is_some() || identity.increment.is_some() {
+        return Some(identity);
+    }
+    None
+}
+
 fn is_column_extra_empty(extra: &ColumnExtra) -> bool {
     !extra.auto_increment.unwrap_or(false)
         && !extra.on_update_current_timestamp.unwrap_or(false)
-        && extra.identity.is_none()
+        && is_column_identity_empty(&extra.identity)
         && !extra.generated.as_ref().is_some_and(|generated| !generated.expression.trim().is_empty())
         && !extra.manticore_indexed.unwrap_or(false)
         && !extra.manticore_stored.unwrap_or(false)
@@ -271,9 +293,16 @@ fn postgres_identity_values(extra: &str) -> Option<(String, Option<i64>, Option<
     Some((generation, seed, increment))
 }
 
-fn identity_matches_original(identity: &super::types::ColumnIdentity, original_extra: &str) -> bool {
+fn identity_matches_original(identity: &ColumnIdentity, original_extra: &str) -> bool {
     if let Some((generation, original_seed, original_increment)) = postgres_identity_values(original_extra) {
-        return identity.generation.as_deref().unwrap_or("BY DEFAULT").eq_ignore_ascii_case(&generation)
+        if is_column_identity_empty(&Some(identity.clone())) {
+            return false;
+        }
+        let curr_generation = match identity.generation.as_deref() {
+            Some(g) if g.eq_ignore_ascii_case("always") => "ALWAYS",
+            _ => "BY DEFAULT",
+        };
+        return curr_generation.eq_ignore_ascii_case(&generation)
             && identity.seed.unwrap_or(1) == original_seed.unwrap_or(1)
             && identity.increment.unwrap_or(1) == original_increment.unwrap_or(1);
     }
@@ -389,9 +418,16 @@ pub(super) fn has_column_extra_change(dialect: StructureDialect, column: &Editab
             let orig_has_ai = original_has_auto_increment(orig) || (orig_has_identity && curr_has_ai);
             let curr_has_on_update = curr.on_update_current_timestamp.unwrap_or(false);
             let orig_has_on_update = orig_lower.contains("on update");
+            let curr_identity_empty = is_column_identity_empty(&curr.identity);
             let identity_changed = match (&curr.identity, orig_has_identity) {
-                (Some(identity), true) => !identity_matches_original(identity, orig),
-                (Some(_), false) => true,
+                (Some(identity), true) => {
+                    if curr_identity_empty {
+                        true
+                    } else {
+                        !identity_matches_original(identity, orig)
+                    }
+                }
+                (Some(_), false) => !curr_identity_empty,
                 (None, true) => !curr_has_ai,
                 (None, false) => false,
             };
@@ -555,6 +591,15 @@ fn build_postgres_like_existing_column_sql(
             statements.push(format!("ALTER TABLE {table} {};", alterations.join(", ")));
         }
     }
+    let orig_identity =
+        if !use_xugu_type_syntax { original.extra.as_deref().and_then(postgres_identity_values) } else { None };
+    let curr_identity = if !use_xugu_type_syntax { postgres_identity_from_column(column) } else { None };
+    if orig_identity.is_some() && curr_identity.is_none() {
+        statements.push(format!(
+            "ALTER TABLE {table} ALTER COLUMN {} DROP IDENTITY;",
+            quote_ident(StructureDialect::Postgres, current_name)
+        ));
+    }
     if column.is_nullable != original.is_nullable {
         let action = if column.is_nullable { "DROP NOT NULL" } else { "SET NOT NULL" };
         statements.push(format!(
@@ -578,6 +623,69 @@ fn build_postgres_like_existing_column_sql(
             "ALTER TABLE {table} ALTER COLUMN {} {action};",
             quote_ident(StructureDialect::Postgres, current_name)
         ));
+    }
+    if !use_xugu_type_syntax {
+        match (orig_identity, curr_identity) {
+            (None, Some(identity)) => {
+                if column.is_nullable {
+                    statements.push(format!(
+                        "ALTER TABLE {table} ALTER COLUMN {} SET NOT NULL;",
+                        quote_ident(StructureDialect::Postgres, current_name)
+                    ));
+                }
+                if !original_default(column).is_empty()
+                    && normalize_default(Some(&column.default_value)) == original_default(column)
+                {
+                    statements.push(format!(
+                        "ALTER TABLE {table} ALTER COLUMN {} DROP DEFAULT;",
+                        quote_ident(StructureDialect::Postgres, current_name)
+                    ));
+                }
+                let generation = match identity.generation.as_deref() {
+                    Some(g) if g.eq_ignore_ascii_case("always") => "ALWAYS",
+                    _ => "BY DEFAULT",
+                };
+                let mut clause = format!("ADD GENERATED {generation} AS IDENTITY");
+                if identity.seed.is_some() || identity.increment.is_some() {
+                    let start = identity.seed.unwrap_or(1);
+                    let inc = identity.increment.unwrap_or(1);
+                    clause.push_str(&format!(" (START WITH {start} INCREMENT BY {inc})"));
+                }
+                statements.push(format!(
+                    "ALTER TABLE {table} ALTER COLUMN {} {clause};",
+                    quote_ident(StructureDialect::Postgres, current_name)
+                ));
+            }
+            (Some((orig_generation, orig_seed, orig_increment)), Some(identity)) => {
+                let curr_generation = match identity.generation.as_deref() {
+                    Some(g) if g.eq_ignore_ascii_case("always") => "ALWAYS",
+                    _ => "BY DEFAULT",
+                };
+                if !curr_generation.eq_ignore_ascii_case(&orig_generation) {
+                    statements.push(format!(
+                        "ALTER TABLE {table} ALTER COLUMN {} SET GENERATED {curr_generation};",
+                        quote_ident(StructureDialect::Postgres, current_name)
+                    ));
+                }
+                if identity.seed.unwrap_or(1) != orig_seed.unwrap_or(1) {
+                    let new_seed = identity.seed.unwrap_or(1);
+                    statements.push(format!(
+                        "ALTER TABLE {table} ALTER COLUMN {} RESTART WITH {new_seed};",
+                        quote_ident(StructureDialect::Postgres, current_name)
+                    ));
+                }
+                if identity.increment.unwrap_or(1) != orig_increment.unwrap_or(1) {
+                    let new_increment = identity.increment.unwrap_or(1);
+                    if new_increment != 0 {
+                        statements.push(format!(
+                            "ALTER TABLE {table} ALTER COLUMN {} SET INCREMENT BY {new_increment};",
+                            quote_ident(StructureDialect::Postgres, current_name)
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     if clean(&column.comment) != original_comment(column) {
         let comment_value =

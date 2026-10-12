@@ -5,13 +5,11 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-    # ready_for_review is required: heavy jobs are skipped while a PR is a
-    # draft, so flipping to ready must re-trigger the full CI.
-    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.user.login != github.repository_owner && format('pr-author-{0}', github.event.pull_request.user.id) || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.login == github.repository_owner }}
+  queue: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login != github.repository_owner && 'max' || 'single' }}
 
 env:
   RUSTFLAGS: -C debuginfo=line-tables-only
@@ -95,7 +93,7 @@ jobs:
 
   frontend-test:
     needs: changes
-    if: needs.changes.outputs.frontend == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-24.04
     env:
       NPM_CONFIG_LOGLEVEL: error
@@ -159,7 +157,17 @@ jobs:
           node-version: 22.13.0
 
       - name: GitHub script tests
-        run: node --test .github/scripts/*.test.mjs
+        env:
+          FAST_CHECKS: ${{ needs.changes.outputs.fast }}
+        run: |
+          tests=()
+          for file in .github/scripts/*.test.mjs; do
+            if [[ "$FAST_CHECKS" == true && "${file##*/}" == ci-* ]]; then
+              continue
+            fi
+            tests+=("$file")
+          done
+          node --test "${tests[@]}"
 
       - name: Docker mirror config tests
         run: python3 .github/scripts/configure-docker-mirror.test.py
@@ -170,7 +178,7 @@ jobs:
 
   packages:
     needs: changes
-    if: needs.changes.outputs.packages == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-24.04
     env:
       # Unsupported-platform package warnings are expected while validating cross-platform package metadata.
@@ -293,7 +301,7 @@ jobs:
 
   windows-standard-check:
     needs: changes
-    if: needs.changes.outputs.windows_win7_bundle == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.windows_standard == 'true'
     runs-on: windows-2022
     timeout-minutes: 45
     env:
@@ -322,7 +330,7 @@ jobs:
 
   windows-win7-bundle:
     needs: changes
-    if: needs.changes.outputs.windows_win7_bundle == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.windows_win7_bundle == 'true'
     runs-on: windows-2022
     timeout-minutes: 120
     env:
@@ -712,7 +720,7 @@ jobs:
 
   duckdb-windows-driver:
     needs: changes
-    if: needs.changes.outputs.duckdb_windows == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.duckdb_windows == 'true'
     runs-on: windows-2022
     timeout-minutes: 60
     env:
@@ -861,7 +869,7 @@ jobs:
     needs:
       - changes
       - fast-checks
-    if: needs.changes.outputs.rust == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
@@ -1010,7 +1018,7 @@ jobs:
 
   jdbc:
     needs: changes
-    if: needs.changes.outputs.jdbc == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.jdbc == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -1038,7 +1046,7 @@ jobs:
 
   offline-jdbc-release:
     needs: changes
-    if: needs.changes.outputs.offline_jdbc == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.offline_jdbc == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -1078,7 +1086,7 @@ jobs:
 
   nix-packaging:
     needs: changes
-    if: needs.changes.outputs.nix == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.nix == 'true'
     runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
@@ -1093,7 +1101,7 @@ jobs:
   changes:
     runs-on: ubuntu-24.04
     outputs:
-      frontend: ${{ steps.filter.outputs.frontend }}
+      frontend: ${{ steps.filter.outputs.frontend == 'true' && steps.plan.outputs.contributor_snapshot_only != 'true' }}
       packages: ${{ steps.filter.outputs.packages }}
       rust: ${{ steps.plan.outputs.rust }}
       rust_full: ${{ steps.plan.outputs.rust_full }}
@@ -1102,7 +1110,8 @@ jobs:
       agents: ${{ steps.plan.outputs.agents }}
       duckdb_windows: ${{ steps.filter.outputs.duckdb_windows == 'true' || steps.plan.outputs.duckdb_windows == 'true' }}
       nix: ${{ steps.filter.outputs.nix }}
-      windows_win7_bundle: ${{ steps.filter.outputs.windows_win7_bundle }}
+      windows_standard: ${{ steps.plan.outputs.windows_standard }}
+      windows_win7_bundle: ${{ steps.plan.outputs.windows_win7_bundle }}
       windows_win7_candidate: ${{ steps.plan.outputs.windows_win7_candidate }}
       windows_win7_affected_packages: ${{ steps.plan.outputs.windows_win7_affected_packages }}
       windows_win7_reasons: ${{ steps.plan.outputs.windows_win7_reasons }}
@@ -1118,20 +1127,18 @@ jobs:
       agent_rust_changed: ${{ steps.plan.outputs.agent_rust_changed }}
       agent_integration_changed: ${{ steps.plan.outputs.agent_integration_changed }}
       plan: ${{ steps.plan.outputs.plan }}
-      # True only for pull_request events on draft PRs; heavy jobs skip and
-      # ci-gate.mjs must not demand them until ready_for_review re-triggers.
-      draft: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          fetch-depth: 2
 
       - name: Fetch change base
         id: change-base
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
-          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+          BASE_SHA="$(node .github/scripts/ci-change-base.mjs)"
+          if [[ -z "$BASE_SHA" ]]; then
             exit 0
           fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
@@ -1141,7 +1148,9 @@ jobs:
         uses: dorny/paths-filter@v4
         id: filter
         with:
+          token: ''
           base: ${{ steps.change-base.outputs.sha }}
+          ref: ${{ github.sha }}
           filters: |
             frontend:
               - 'apps/desktop/**'
@@ -1224,35 +1233,16 @@ jobs:
               - 'flake.lock'
               - '.github/workflows/ci.yml'
               - '.github/workflows/update-nix-pnpm-hash.yml'
-            windows_win7_bundle:
-              - '.github/scripts/assert-win7-pe-compat.ps1'
-              - '.github/scripts/assert-webview2-win7-loader.ps1'
-              - '.github/scripts/assert-win7-installer-content.ps1'
-              - '.github/scripts/assert-webview2-win7-runtime.ps1'
-              - '.github/scripts/prepare-webview2-win7-loader.ps1'
-              - '.github/scripts/prepare-webview2-win7-runtime.ps1'
-              - '.github/workflows/ci.yml'
-              - '.github/workflows/release.yml'
-              - 'src-tauri/tauri.webview2-win7-fixed.conf.json'
-              - 'src-tauri/build.rs'
-              - 'src-tauri/Cargo.toml'
-              - 'src-tauri/windows/nsis/**'
-              - 'src-tauri/src/commands/update.rs'
-              - 'crates/dbx-core/Cargo.toml'
-              - 'crates/dbx-drivers/**'
-              - 'crates/dbx-driver-*/**'
-              - 'crates/dbx-platform/**'
-              - 'crates/dbx-core/src/host/update.rs'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'vendor/ctor/**'
-              - 'vendor/dirs-sys/**'
-              - 'vendor/pageant/**'
-              - 'vendor/webview2-com-sys/**'
-              - 'vendor/wry/**'
             github_scripts:
               - '.github/scripts/**'
+              - 'docs/scripts/contributor-snapshot.mjs'
+              - 'docs/scripts/update-contributors.mjs'
               - 'docs/public/install-mcp*'
+              - '.github/workflows/contributors.yml'
+              - '.github/workflows/issue-claim.yml'
+              - '.github/workflows/notify.yml'
+              - '.github/workflows/plugin-dev-host.yml'
+              - '.github/workflows/spam-comment-guard.yml'
               - '.github/workflows/mcp-release.yml'
               - '.github/workflows/publish-packages.yml'
               - '.github/workflows/plugin-release-reusable.yml'
@@ -1265,7 +1255,6 @@ jobs:
           BASE_SHA: ${{ steps.change-base.outputs.sha }}
           RUST_CHANGED: ${{ steps.filter.outputs.rust }}
           AGENTS_CHANGED: ${{ steps.filter.outputs.agents }}
-          WIN7_CURRENT: ${{ steps.filter.outputs.windows_win7_bundle }}
         run: node .github/scripts/ci-plan.mjs
 
   agents:
@@ -1351,7 +1340,7 @@ jobs:
         run: python3 scripts/validate_agents.py
   agent-java:
     needs: [changes, fast-checks, agent-checks]
-    if: needs.changes.outputs.agent_java == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.agent_java == 'true'
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -1379,7 +1368,7 @@ jobs:
         run: python3 scripts/validate_agent_jars.py
   agent-rust:
     needs: [changes, fast-checks, agent-checks]
-    if: needs.changes.outputs.agent_rust_changed == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.agent_rust_changed == 'true'
     runs-on: ubuntu-24.04
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
@@ -1491,7 +1480,7 @@ jobs:
       matrix: ${{ fromJSON(needs.changes.outputs.agent_rust) }}
   agent-go:
     needs: [changes, fast-checks, agent-checks]
-    if: needs.changes.outputs.agent_go_changed == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.agent_go_changed == 'true'
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -1511,11 +1500,11 @@ jobs:
         run: bash ../.github/scripts/ci-agent-go.sh "$DRIVER" "$BINARY" "$RACE"
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 4
       matrix: ${{ fromJSON(needs.changes.outputs.agent_go) }}
   agent-integration:
     needs: [changes, fast-checks, agent-checks]
-    if: needs.changes.outputs.agent_integration_changed == 'true' && needs.changes.outputs.draft != 'true'
+    if: needs.changes.outputs.agent_integration_changed == 'true'
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -1569,7 +1558,7 @@ jobs:
     name: agent-integration (${{ matrix.scenario }}, ${{ matrix.version }})
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 4
       matrix: ${{ fromJSON(needs.changes.outputs.agent_integration) }}
   ci:
     needs:

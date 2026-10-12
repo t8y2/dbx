@@ -1335,6 +1335,16 @@ fn strip_sql_comments_and_literals_with_metadata(sql: &str, detect_mysql_executa
             in_block_comment = true;
             continue;
         }
+        if matches!(ch, 'q' | 'Q' | 'n' | 'N') && !previous_code_char.is_some_and(is_oracle_identifier_char) {
+            if let Some(length) = oracle_alternative_quote_len(ch, &chars) {
+                for _ in 0..length {
+                    chars.next();
+                }
+                output.push_str(&" ".repeat(length));
+                previous_code_char = Some(' ');
+                continue;
+            }
+        }
         if ch == '\'' {
             in_single_quote = true;
             output.push(' ');
@@ -1385,6 +1395,57 @@ fn is_mysql_executable_comment_start(chars: &std::iter::Peekable<std::str::Chars
 
 fn is_identifier_char(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '_' || character == '$'
+}
+
+/// Oracle identifiers may also contain `#` (and `$` above), so an introducer
+/// directly after one of those characters does not start its own token.
+fn is_oracle_identifier_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_' || character == '$' || character == '#'
+}
+
+/// Length of an Oracle alternative-quoted literal — `q'#...#'`, `q'[...]'`,
+/// `nq'{...}'` — where the delimiter may contain the quote character
+/// unchanged. The literal ends at the first `closer + '`; Oracle has no escape
+/// or nesting inside these literals. `ch` is the already-read `q`/`Q`/`n`/`N`
+/// introducer and the returned length includes it. An unterminated literal
+/// returns `None` so the text stays visible to the keyword scan and malformed
+/// input still fails closed, matching the dollar-quote policy here. Mirrors
+/// `readOracleAlternativeQuoteEnd` in `apps/desktop/src/lib/sql/sqlRisk.ts`.
+fn oracle_alternative_quote_len(ch: char, chars: &std::iter::Peekable<std::str::Chars<'_>>) -> Option<usize> {
+    let mut probe = chars.clone();
+    let mut length = 1usize;
+    if matches!(ch, 'n' | 'N') {
+        match probe.next() {
+            Some('q' | 'Q') => length += 1,
+            _ => return None,
+        }
+    }
+    match probe.next() {
+        Some('\'') => length += 1,
+        _ => return None,
+    }
+    let opener = probe.next()?;
+    length += 1;
+    // A whitespace opener means `q '...'` — an identifier then an ordinary
+    // string, not an alternative-quoted literal.
+    if opener.is_whitespace() {
+        return None;
+    }
+    let closer = match opener {
+        '[' => ']',
+        '{' => '}',
+        '(' => ')',
+        '<' => '>',
+        other => other,
+    };
+    loop {
+        let scan = probe.next()?;
+        length += 1;
+        if scan == closer && probe.peek() == Some(&'\'') {
+            probe.next();
+            return Some(length + 1);
+        }
+    }
 }
 
 /// Read a PostgreSQL dollar-quote delimiter — `$$` or `$tag$` — from the
@@ -2338,6 +2399,38 @@ mod tests {
         assert_eq!(strip_sql_comments_and_literals("-- comment\nSELECT 1"), " SELECT 1");
         assert_eq!(strip_sql_comments_and_literals("/* block */ SELECT 1"), "  SELECT 1");
         assert_eq!(strip_sql_comments_and_literals("# comment\nSELECT 1"), " SELECT 1");
+    }
+
+    #[test]
+    fn strip_sql_comments_and_literals_oracle_alternative_quoted() {
+        // The quote inside q'...' is literal data, so the rest of the statement
+        // stays visible to the keyword scan instead of being swallowed by the
+        // mis-paired ordinary string.
+        let visible = strip_sql_comments_and_literals("SELECT q'[O'Reilly]' FROM t; DELETE FROM users;");
+        assert!(visible.contains("DELETE FROM users"), "{visible}");
+        let visible = strip_sql_comments_and_literals("SELECT nq'{O'Reilly}' FROM t; DELETE FROM users;");
+        assert!(visible.contains("DELETE FROM users"), "{visible}");
+        // SQL-looking text inside the literal stays literal data.
+        let hidden = strip_sql_comments_and_literals("SELECT q'[it's; DELETE FROM users;]' FROM t;");
+        assert!(!hidden.contains("DELETE"), "{hidden}");
+        // The introducer must start its own token: `aq` is one identifier, so
+        // the following literal is ordinary.
+        let visible = strip_sql_comments_and_literals("SELECT aq'[x]' FROM t; DELETE FROM users;");
+        assert!(visible.contains("DELETE FROM users"), "{visible}");
+        // An unterminated q-literal is malformed input and stays visible, so
+        // the keyword scan fails closed.
+        let visible = strip_sql_comments_and_literals("SELECT q'[O'Reilly FROM t; DELETE FROM users;");
+        assert!(visible.contains("DELETE FROM users"), "{visible}");
+    }
+
+    #[test]
+    fn oracle_proven_read_only_statement_alternative_quoted() {
+        // The mis-paired quotes previously reduced this to `SELECT q`, proving
+        // the statement read-only even though real code follows the literal.
+        assert!(!is_oracle_proven_read_only_statement("SELECT q'[O'Reilly]' FROM users; DELETE FROM users;"));
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users WHERE name = q'[O''Reilly]'"));
+        // SQL-looking text inside the literal is data, not a forbidden keyword.
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users WHERE note = q'[drop table]'"));
     }
 
     #[test]

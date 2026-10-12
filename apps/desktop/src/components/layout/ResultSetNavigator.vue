@@ -17,9 +17,11 @@ const props = withDefaults(
     busy?: boolean;
     canExportXlsx?: boolean;
     displayMode?: "tabs" | "list";
+    hasSiblingRunTabs?: boolean;
   }>(),
   {
     displayMode: "tabs",
+    hasSiblingRunTabs: false,
   },
 );
 const emit = defineEmits<{
@@ -159,7 +161,7 @@ function onListKeydown(event: KeyboardEvent, index: number) {
 </script>
 
 <template>
-  <div data-result-set-tabs-region role="group" :aria-label="t('tabs.resultSets')" class="flex h-full min-w-0 flex-1 items-center gap-1 overflow-hidden">
+  <div data-result-set-tabs-region role="group" :aria-label="t('tabs.resultSets')" class="flex h-full min-w-0 items-center gap-1 overflow-hidden" :class="hasSiblingRunTabs ? 'shrink-0 max-w-[50%]' : 'flex-1'">
     <template v-if="displayMode === 'list'">
       <div v-if="items.length > 0" class="flex min-w-0 items-center gap-1">
         <Popover v-if="items.length > 1" v-model:open="open">

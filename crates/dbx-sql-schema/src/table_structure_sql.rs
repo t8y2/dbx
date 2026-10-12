@@ -6,8 +6,6 @@ mod columns;
 mod comments;
 mod create_dialect;
 mod create_options;
-mod starrocks_partition;
-mod starrocks_layout;
 mod create_table;
 mod dialect;
 mod foreign_keys;
@@ -15,6 +13,8 @@ mod indexes;
 mod mysql_engine;
 mod owner;
 mod partitions;
+mod starrocks_layout;
+mod starrocks_partition;
 mod transwarp;
 mod triggers;
 mod types;
@@ -26,7 +26,9 @@ mod tests;
 
 pub use column_alter::build_single_column_alter_sql;
 pub use create_options::*;
-pub use create_table::{build_create_table_sql, build_create_table_sql_for_version, build_create_table_sql_with_dialect_options};
+pub use create_table::{
+    build_create_table_sql, build_create_table_sql_for_version, build_create_table_sql_with_dialect_options,
+};
 pub use owner::build_table_owner_change_sql;
 pub use partitions::{build_create_partitioned_table_sql, build_table_partition_operation_sql};
 pub use types::*;
@@ -57,7 +59,9 @@ pub fn build_table_structure_change_sql_with_context(
     mut options: TableStructureSqlOptions,
     starrocks: Option<StarRocksAlterOptions>,
 ) -> TableStructureSqlResult {
-    if alter_dialect::is_starrocks(&options) { return alter_dialect::build(&options, starrocks); }
+    if alter_dialect::is_starrocks(&options) {
+        return alter_dialect::build(&options, starrocks);
+    }
 
     let mysql_engine_errors = validate_mysql_engine(&options);
     if !mysql_engine_errors.is_empty() {

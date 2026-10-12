@@ -2,19 +2,45 @@
 
 Paths in this guide are relative to `.github/`.
 
-`workflows/ci.yml` retains one workflow and one cancellation group. Splitting jobs
-does not change release workflows or branch-protection settings. The existing
+`workflows/ci.yml` retains one workflow. Splitting jobs does not change release
+workflows or branch-protection settings. The existing
 `rust` and `agents` aggregate check names remain; `ci` additionally summarizes all
 selected jobs. None of these gates accepts a failed, cancelled, missing, or
 unexpectedly skipped prerequisite. The gates are guarded by
-`if: always() && !cancelled()`: on a superseded commit a newer push cancels the
-run, and `always()` alone would still execute the gate and report those
-cancellations as a failure of the commit that no longer matters.
+`if: always() && !cancelled()`: on a cancelled run, `always()` alone would still
+execute the gate and report cancelled prerequisites as a failure.
+
+## Contributor concurrency
+
+PRs from anyone other than the repository owner share a main `CI` concurrency
+group keyed by the PR author's stable numeric user ID. Only one run in that
+author's group executes at a time; other authors have independent groups.
+The PR author, not the trigger actor or author association, determines this
+policy, so a maintainer retrigger cannot bypass contributor limits.
+`cancel-in-progress: false` preserves the executing PR, and `queue: max` retains
+up to 100 pending runs rather than replacing earlier pending PRs. Further runs
+beyond that limit are cancelled by GitHub. Updates to the same contributor PR
+also enqueue separate runs; this policy does not deduplicate superseded commits.
+
+The repository owner (`t8y2` here, compared with `github.repository_owner`) is
+exempt from author-level limits. Owner PRs retain one cancellation group per PR,
+so separate owner PRs run independently and a new commit cancels that PR's old
+run. Main pushes retain their independent ref-based cancellation group. These
+paths use `queue: single`, never `queue: max` with in-progress cancellation.
+
+This limits main CI workflow runs, not the runner count inside one selected PR.
+Other PR workflows and all release workflows remain unchanged. Existing runs
+retain their original workflow configuration until a new event uses this policy.
 
 ## Selection
 
-`scripts/ci-plan.mjs` reads Cargo workspace metadata and the exact event base/head
-diff. Renames include both paths and deleted paths remain visible. Rust package
+`scripts/ci-change-base.mjs` uses the first parent of the checked-out PR test merge
+as its base, not the potentially stale base SHA in the PR event. A depth-two
+checkout preserves both parents; a missing merge parent fails change detection.
+Pushes use the exact event `before` SHA. `paths-filter` uses Git, with an empty API
+token and explicit base/head, so its selection matches `scripts/ci-plan.mjs`
+rather than a mutable PR file list. An unavailable push diff keeps conservative
+planner coverage. Renames include both paths and deleted paths remain visible. Rust package
 selection follows reverse dependencies, including build and test dependencies.
 Connection-type descriptors belong to `dbx-types`; dialect descriptors belong to
 `dbx-sql`. A changed core dependency also selects the standalone DuckDB Agent tests,
@@ -22,7 +48,10 @@ whose development dependency is `dbx-core`.
 
 - Ordinary Rust PRs select foundation, driver, and application test groups from
   `scripts/ci-config.mjs`. Each group contains several packages, not one runner per
-  crate. At most three Rust test groups run concurrently.
+  crate. The application group includes `dbx-tauri-consul` and `dbx-tauri-schema`.
+  At most three Rust test groups run concurrently; a contract checks the groups
+  against actual workspace metadata so extracted crates cannot silently force
+  every PR into the full-workspace fallback.
 - Main pushes, shared Cargo manifests/locks, toolchain/config/vendor changes, CI
   infrastructure changes, an unknown workspace member, or an unavailable diff
   select the original full-workspace test lane instead of duplicating it with all
@@ -34,8 +63,33 @@ whose development dependency is `dbx-core`.
   cases. Shared Agent inputs conservatively select all existing Agent checks.
   Windows DuckDB packaging is selected by its own inputs or shared build/lock
   changes, not every change to its development dependency's source.
-- Existing frontend, package, Windows, JDBC, offline-payload and Nix jobs retain
-  their commands and path filters.
+- Standard Windows compilation follows desktop reverse dependencies, including
+  ordinary core/driver source changes. Full Win7 packaging runs for Cargo
+  manifests/locks, toolchain/config/vendor changes, platform/update/installer
+  code, Tauri configuration, Win7 fixtures/scripts and release/CI workflow inputs.
+  Unknown Rust paths, unassigned Rust workspace members and unavailable diffs
+  retain both Windows jobs. Other desktop source and test changes keep standard
+  Windows compilation without repeating the full Win7 installer build. The final
+  gate validates each Windows selection independently; release builds are unchanged.
+- Existing frontend, package, JDBC, offline-payload and Nix jobs retain their
+  commands and path filters, except for the snapshot-only routing below.
+
+Contributor snapshots refresh weekly, at 02:00 Monday in Asia/Shanghai, and can
+still be refreshed manually. An unchanged snapshot keeps its existing timestamp
+and creates no commit. A diff containing only `docs/data/contributors.json` skips
+desktop frontend validation, but the docs deployment still rebuilds the site.
+Mixed diffs and unavailable diffs keep the existing validation routing.
+
+When `fast-checks` is selected, it owns the CI planner and gate tests before
+expensive dependent jobs start. `github-scripts` omits that subset in these runs,
+but runs every GitHub script test when the fast-check lane is not selected.
+
+Issue command and spam jobs reject irrelevant comments before allocating a
+runner. Their existing command parser and malicious-link matcher remain the
+authoritative checks. PR notification triggers are commented out; release
+notifications in the publishing workflow are unchanged. Plugin development
+host lint and formatting run once on Linux before the Linux, macOS and Windows
+runtime, Rust and package checks; cross-platform coverage is unchanged.
 
 Changes to the planner itself select the broad checks. Missing/invalid planning
 data fails the aggregate gates rather than producing a successful skip.
@@ -70,7 +124,9 @@ incompatible SQLite backends.
 | `agent-integration` | Sixteen existing engine/version/authentication cases | 4 |
 
 Matrix jobs set `fail-fast: false`, so one failure does not conceal results from
-the other selected cases. Live test predicates, readiness checks, time limits,
+the other selected cases. Go and live matrix parallelism is bounded at four each
+to reduce bursts competing with other workflows; this is not a reservation or a
+priority guarantee for release jobs. Live test predicates, readiness checks, time limits,
 credentials for disposable fixtures, and failure cleanup are retained.
 Native, Java and live jobs wait for fast checks and Agent source validation before
 starting expensive builds or containers.

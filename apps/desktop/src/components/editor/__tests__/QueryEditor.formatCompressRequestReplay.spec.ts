@@ -46,6 +46,7 @@ function mountEditor(initial: { modelValue: string; tabId: string; databaseType?
     compressRequestId: initial.compressRequestId,
   });
   const emits: string[] = [];
+  const formatErrors: string[] = [];
   const root = defineComponent({
     setup: () => () =>
       h(QueryEditor, {
@@ -63,6 +64,9 @@ function mountEditor(initial: { modelValue: string; tabId: string; databaseType?
           // store, so the modelValue prop follows the editor document.
           state.modelValue = value;
         },
+        onFormatError: (message: string) => {
+          formatErrors.push(message);
+        },
       }),
   });
   const host = document.createElement("div");
@@ -75,7 +79,7 @@ function mountEditor(initial: { modelValue: string; tabId: string; databaseType?
     app.unmount();
     host.remove();
   });
-  return { state, emits, host, unmount: () => app.unmount() };
+  return { state, emits, formatErrors, host, unmount: () => app.unmount() };
 }
 
 async function waitForEditor(host: HTMLElement) {
@@ -180,19 +184,22 @@ describe("QueryEditor format/compress request replay", () => {
     expect(undo(editorView)).toBe(false);
   });
 
-  it("does not move the caret or dispatch a change when a parse failure returns the source", async () => {
+  it("reports the parse failure instead of silently formatting nothing", async () => {
     const source = "SELECT 1 .";
-    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "tab-a" });
+    const { state, emits, formatErrors, host } = mountEditor({ modelValue: source, tabId: "tab-a" });
     await waitForEditor(host);
     const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
     const caret = source.indexOf("1");
     editorView.dispatch({ selection: { anchor: caret } });
 
     state.formatRequestId = 5;
-    await settle();
-    await settle();
+    // The formatter cannot parse the statement, so the command must say so
+    // rather than return the source and leave the editor looking untouched.
+    await vi.waitFor(() => expect(formatErrors).toHaveLength(1), WAIT);
 
+    expect(formatErrors[0]).toContain("Parse error");
     expect(emits).toEqual([]);
+    expect(editorView.state.doc.toString()).toBe(source);
     expect(editorView.state.selection.main.head).toBe(caret);
   });
 

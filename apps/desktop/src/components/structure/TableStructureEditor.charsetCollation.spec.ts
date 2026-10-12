@@ -532,16 +532,16 @@ describe("TableStructureEditor MySQL creation counter", () => {
     expect(input.placeholder).toBe("1");
     expect(root.textContent).toContain("structureEditor.mysqlAutoIncrementStartHint");
     expect(root.textContent).not.toContain("contextMenu.mysqlAutoIncrementNonemptyHint");
-    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: undefined })));
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: undefined }), undefined, undefined));
     input.value = "66";
     input.dispatchEvent(new Event("input", { bubbles: true }));
-    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: "66" })));
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: "66" }), undefined, undefined));
     const label = Array.from(root.querySelectorAll("label")).find((label) => label.textContent?.includes("structureEditor.autoIncrement"))!;
     const checkbox = label.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
     checkbox.checked = false;
     checkbox.dispatchEvent(new Event("change", { bubbles: true }));
     await vi.waitFor(() => expect(root.querySelector("[data-mysql-auto-increment-editor-trigger]")).toBeNull());
-    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: undefined })));
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: undefined }), undefined, undefined));
     checkbox.checked = true;
     checkbox.dispatchEvent(new Event("change", { bubbles: true }));
     await nextTick();
@@ -549,7 +549,7 @@ describe("TableStructureEditor MySQL creation counter", () => {
     expect(restored.value).toBe("66");
     restored.value = "";
     restored.dispatchEvent(new Event("input", { bubbles: true }));
-    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: undefined })));
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: undefined }), undefined, undefined));
     expect(mocks.getMysqlTableAutoIncrement).not.toHaveBeenCalled();
     expect(mocks.buildMysqlAutoIncrementSql).not.toHaveBeenCalled();
   });
@@ -557,7 +557,7 @@ describe("TableStructureEditor MySQL creation counter", () => {
   it("restores a creation draft without losing integer precision", async () => {
     const value = "18446744073709551615";
     const root = await mountEditor(true, undefined, createDraft(value), true);
-    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: value })));
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenCalledWith(expect.objectContaining({ mysqlAutoIncrementValue: value }), undefined, undefined));
     expect(root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")?.value).toBe(value);
     expect(mocks.getMysqlTableAutoIncrement).not.toHaveBeenCalled();
   });

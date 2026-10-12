@@ -24,6 +24,7 @@ import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
 import { formatError } from "@/lib/backend/errorUtils";
 import { parseJsonPreservingLargeNumbers, stringifyJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import { tableMetaWithoutOptionalDatabaseQualifier } from "@/lib/table/tableSelectSql";
+import { isPartiallyLoadedCopy, partialLoadCopyHintKey, type PartialLoadCopyInfo } from "@/lib/dataGrid/copyPartialLoadHint";
 import type { DatabaseType } from "@/types/database";
 
 interface ExtractorRowItem {
@@ -73,6 +74,8 @@ interface UseDataGridExtractorOptions {
   contextSelectionIsSynthetic: ComputedRef<boolean> | Ref<boolean>;
   copyText: (text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }) => Promise<boolean>;
   externalCellValue?: (value: unknown, columnIndex: number) => unknown;
+  /** Present when the grid cannot guarantee the whole result set is loaded; drives the partial-copy hint. */
+  partialLoadInfo?: ComputedRef<PartialLoadCopyInfo | null>;
   canCopySqlInsert: (request: DataGridExtractRequest) => boolean;
   buildMongoInsert: (extractorOptions: DataGridExtractorOptions, rowLimit?: number) => Promise<string | undefined>;
   buildMongoUpdate?: (request: DataGridExtractRequest, rowLimit?: number) => Promise<string | undefined>;
@@ -433,6 +436,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       const copied = await options.copyText(result.text, gridCopy);
       if (!copied) return false;
       showWarnings(result.warnings, result.omittedColumns);
+      const partialLoadInfo = options.partialLoadInfo?.value;
+      if (partialLoadInfo && isPartiallyLoadedCopy(partialLoadInfo)) {
+        toast(t(partialLoadCopyHintKey(partialLoadInfo), { loaded: partialLoadInfo.loadedRows, total: partialLoadInfo.totalRows ?? undefined }), 5000);
+      }
       return true;
     } catch (error: unknown) {
       toast(t("grid.copyFailed", { message: formatError(error) }), 5000);

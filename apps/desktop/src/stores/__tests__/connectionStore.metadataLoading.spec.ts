@@ -4693,4 +4693,109 @@ describe("connectionStore metadata loading", () => {
     expect(typeNode.children?.map((child) => child.label)).toEqual(["published"]);
     expect(store.isTreeNodeChildrenLoaded(typeNode.id)).toBe(true);
   });
+
+  it("loads more object group children for catalogless databases with empty database string", async () => {
+    const firstPageTables = Array.from({ length: 201 }, (_, i) => ({
+      name: `t_${String(i + 1).padStart(4, "0")}`,
+      table_type: "BASE TABLE",
+      comment: null,
+    }));
+    const secondPageTables = [
+      {
+        name: "t_0201",
+        table_type: "BASE TABLE",
+        comment: null,
+      },
+    ];
+    const listTables = vi.fn(async (...args: unknown[]) => {
+      const offset = args[5] as number;
+      if (offset === 0) return firstPageTables;
+      return secondPageTables;
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    settingsStore.desktopSettings.sidebar_table_page_size = 200;
+
+    const connection: ConnectionConfig = {
+      id: "hana-1",
+      name: "SAP HANA",
+      db_type: "saphana",
+      host: "127.0.0.1",
+      port: 39015,
+      username: "SYSTEM",
+      password: "",
+      database: "",
+    } as ConnectionConfig;
+
+    const tablesGroup: TreeNode = {
+      id: "hana-1:::APP:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "",
+      schema: "APP",
+      isExpanded: false,
+      children: [],
+    };
+    const schemaNode: TreeNode = {
+      id: "hana-1:::APP",
+      label: "APP",
+      type: "schema",
+      connectionId: connection.id,
+      database: "",
+      schema: "APP",
+      isExpanded: true,
+      children: [tablesGroup],
+    };
+    const databaseNode: TreeNode = {
+      id: "hana-1::",
+      label: "tree.defaultDatabase",
+      type: "database",
+      connectionId: connection.id,
+      database: "",
+      isExpanded: true,
+      children: [schemaNode],
+    };
+
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [databaseNode],
+      },
+    ];
+
+    await store.loadObjectGroupChildren(tablesGroup);
+    const loadMoreNode = tablesGroup.children?.at(-1);
+    expect(loadMoreNode?.type).toBe("load-more");
+
+    await store.loadMoreObjectGroupChildren(loadMoreNode!);
+
+    expect(listTables).toHaveBeenCalledTimes(2);
+    expect(listTables.mock.calls[1][1]).toBe("");
+    expect(listTables.mock.calls[1][2]).toBe("APP");
+    expect(listTables.mock.calls[1][5]).toBe(200);
+    const labels = (tablesGroup.children ?? []).filter((child) => child.type === "table").map((child) => child.label);
+    expect(labels).toContain("t_0201");
+  });
 });

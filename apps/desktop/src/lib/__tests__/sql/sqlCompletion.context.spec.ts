@@ -1740,6 +1740,67 @@ describe("sqlCompletion scoped context classification", () => {
     expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["orders", "cte"]));
   });
 
+  it("expands nested CTE columns when selecting alias.* from preceding CTE (#11479)", () => {
+    const sql = `with test_a as (
+    select '1' as 字段
+)
+, test_b as (
+    select ta.*
+        , '2' as 追加字段
+    from test_a ta
+)
+select tb.
+from test_b tb`;
+    const cursor = sql.indexOf("select tb.") + "select tb.".length;
+    const context = getSqlCompletionContext(sql, cursor);
+    const tbRef = context.referencedTables.find((t) => t.alias === "tb" || t.name === "test_b");
+    expect(tbRef).toBeDefined();
+    expect(tbRef?.columns).toEqual(["字段", "追加字段"]);
+
+    // ta from inside test_b must not leak as a referenced table in outer query
+    expect(context.referencedTables.some((t) => t.alias === "ta")).toBe(false);
+
+    const items = buildSqlCompletionItems(sql, cursor, {
+      tables: [],
+      columnsByTable: new Map(),
+    });
+    const labels = items.map((item) => item.label);
+    expect(labels).toContain("字段");
+    expect(labels).toContain("追加字段");
+  });
+
+  it("expands multi-level chained CTEs with bare and qualified wildcards (#11479)", () => {
+    const sql = `with c1 as (
+    select 1 as id, 'alice' as name
+)
+, c2 as (
+    select *
+        , true as is_active
+    from c1
+)
+, c3 as (
+    select c2.*
+        , 99 as score
+    from c2
+)
+select c3.
+from c3`;
+    const cursor = sql.indexOf("select c3.") + "select c3.".length;
+    const context = getSqlCompletionContext(sql, cursor);
+    const c3Ref = context.referencedTables.find((t) => t.name === "c3");
+    expect(c3Ref?.columns).toEqual(["id", "name", "is_active", "score"]);
+
+    const items = buildSqlCompletionItems(sql, cursor, {
+      tables: [],
+      columnsByTable: new Map(),
+    });
+    const labels = items.map((item) => item.label);
+    expect(labels).toContain("id");
+    expect(labels).toContain("name");
+    expect(labels).toContain("is_active");
+    expect(labels).toContain("score");
+  });
+
   it("extracts subquery aliases and projected columns", () => {
     const sql = "SELECT * FROM (SELECT id, name AS user_name FROM users) sq WHERE sq.";
     const context = getSqlCompletionContext(sql, sql.length);
@@ -2248,6 +2309,24 @@ describe("line block statement boundary", () => {
     const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
 
     expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["users"]));
+  });
+
+  it("keeps WITH clause in scope when cursor is in the following top-level main query", () => {
+    const sql = "with cte as (\n  select id, name from users\n)\nselect c.\nfrom cte c\n\nselect * from other_table";
+    const cursor = sql.indexOf("select c.") + "select c.".length;
+    const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+    expect(context.referencedTables.some((t) => t.name === "cte" || t.alias === "c")).toBe(true);
+    expect(context.referencedTables.some((t) => t.name === "other_table")).toBe(false);
+  });
+
+  it("stops line block before following statement when completing in a separate query after WITH", () => {
+    const sql = "with cte as (\n  select id, name from users\n)\nselect * from cte c\n\nselect * from other_table ot where ot.";
+    const cursor = sql.length;
+    const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+    expect(context.referencedTables.some((t) => t.name === "other_table" || t.alias === "ot")).toBe(true);
+    expect(context.referencedTables.some((t) => t.name === "cte")).toBe(false);
   });
 });
 

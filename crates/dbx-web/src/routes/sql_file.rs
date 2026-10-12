@@ -3,13 +3,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use axum::extract::{Multipart, Path as AxumPath, State};
+use axum::body::Body;
+use axum::extract::{Multipart, Path as AxumPath, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
+use axum::response::Response;
 use axum::Json;
 use dbx_core::sql::{self, SqlFileProgress, SqlFileRequest, SqlFileStatus};
 use dbx_core::sql_file_import::{
-    execute_sql_file_paths, execute_sql_file_zip_package_paths, sql_file_error_progress,
-    sql_file_progress as build_sql_file_progress, SqlFileProgressEmitter,
+    execute_sql_file_paths, execute_sql_file_zip_package_paths, export_sql_file_failure_log as derive_failure_log_file,
+    prune_sql_file_failure_logs, sql_file_error_progress, sql_file_failure_log_text as derive_failure_log_text,
+    sql_file_progress as build_sql_file_progress, start_sql_file_failure_log, SqlFileFailureLogDeriveError,
+    SqlFileFailureLogFileInfo, SqlFileFailureLogFormat, SqlFileFailureLogKey, SqlFileFailureLogMeta,
+    SqlFileFailureLogRunCounters, SqlFileProgressEmitter, SQL_FILE_FAILURE_LOG_CLIPBOARD_MAX_BYTES,
+    SQL_FILE_FAILURE_LOG_DIR,
 };
 use futures::stream::Stream;
 use serde::Deserialize;
@@ -25,6 +32,10 @@ const SQL_FILE_UPLOAD_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 pub const SQL_FILE_UPLOAD_MAX_BYTES: usize = 200 * 1024 * 1024;
 const SQL_FILE_UPLOAD_MIN_BYTES: usize = 1024 * 1024;
 const SQL_FILE_UPLOAD_MAX_BYTES_LIMIT: usize = 4096 * 1024 * 1024;
+/// Derived exports are streamed to the client and then swept by age: the log
+/// itself stays in `sql-file-logs`, so these are disposable.
+const SQL_FILE_FAILURE_LOG_EXPORT_DIR: &str = "tmp/sql-file-failure-logs";
+const SQL_FILE_FAILURE_LOG_EXPORT_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 
 struct ManagedPreview {
     created: Instant,
@@ -92,6 +103,7 @@ pub fn start_sql_file_cleanup(state: &Arc<WebState>) {
         loop {
             let Some(state) = state.upgrade() else { break };
             state.managed_sql_previews.cleanup(&state.data_dir.join("tmp/sql_file"), SQL_FILE_UPLOAD_MAX_AGE, true);
+            sweep_failure_log_exports(&state.data_dir.join(SQL_FILE_FAILURE_LOG_EXPORT_DIR));
             drop(state);
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
@@ -267,9 +279,14 @@ async fn preview_uploaded_sql_file(
 
 pub async fn execute_sql_file(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(body): Json<SqlFileExecuteWrapper>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let req = body.request;
+    // The failure log of this run belongs to the session that started it: the
+    // export/copy routes look it up by this owner, never by path (dbx#11619).
+    let log_owner = crate::auth::session_token_from_headers(&headers)
+        .ok_or_else(|| AppError::from("Not authenticated".to_string()))?;
 
     let requested_paths = if body.file_paths.is_empty() { vec![req.file_path.clone()] } else { body.file_paths };
     let file_paths = requested_paths
@@ -311,7 +328,19 @@ pub async fn execute_sql_file(
     tokio::spawn(async move {
         let _managed_previews = managed_previews;
         let started_at = std::time::Instant::now();
+        let mut failure_log = start_web_failure_log(&state_clone, &req, &file_paths).await;
+        state_clone.sql_file_failure_logs.register(
+            &log_owner,
+            &req.execution_id,
+            failure_log.path().map(Path::to_path_buf),
+            failure_log.status_probe(),
+        );
+        let mut counters = SqlFileFailureLogRunCounters::default();
         let mut progress_emitter = SqlFileProgressEmitter::new(|progress| {
+            // The sink only queues; the writer task owns the disk, so a failing
+            // log can never break the import.
+            counters.observe(&progress);
+            failure_log.record(&progress);
             send_sql_file_progress(&tx, progress);
         });
         progress_emitter.emit(build_sql_file_progress(
@@ -361,6 +390,9 @@ pub async fn execute_sql_file(
             .await
         };
 
+        failure_log.finish(counters.summary(started_at.elapsed().as_millis() as u64)).await;
+        // Keep the log exportable, but let retention reclaim it once nothing writes.
+        state_clone.sql_file_failure_logs.mark_finished(&log_owner, &req.execution_id);
         cleanup_sql_file_package_paths(&file_paths);
         cleanup_sql_file_execution(&state_clone, &req.execution_id).await;
     });
@@ -392,6 +424,201 @@ fn cleanup_sql_file_package_paths(file_paths: &[PathBuf]) {
 async fn cleanup_sql_file_execution(state: &WebState, execution_id: &str) {
     state.remove_sse_channel(execution_id).await;
     state.sql_file_executions.write().await.remove(execution_id);
+}
+
+/// Owner-scoped lookup used by both failure-log routes. Kept as its own function
+/// (rather than inlined) so the cross-session rejection is directly testable.
+fn failure_log_path_for(
+    registry: &dbx_core::sql_file_import::SqlFileFailureLogRegistry,
+    owner: &str,
+    execution_id: &str,
+) -> Result<PathBuf, AppError> {
+    if let Some(path) = registry.path(owner, execution_id) {
+        return Ok(path);
+    }
+    // Say why: a log can be missing because it never existed, or because
+    // retention (or the user) removed the file after the run finished.
+    let reason = registry.info(owner, execution_id).and_then(|info| info.reason);
+    Err(AppError::from(match reason {
+        Some(reason) => format!("No failure log to export for this execution: {reason}"),
+        None => "No failure log to export for this execution".to_string(),
+    }))
+}
+
+/// Creates the failure log of one Web execution. Retention runs first, with every
+/// registered log protected so a parallel import cannot delete an in-progress one.
+async fn start_web_failure_log(
+    state: &WebState,
+    request: &SqlFileRequest,
+    file_paths: &[PathBuf],
+) -> dbx_core::sql_file_import::SqlFileFailureLogHandle {
+    if !request.failure_log_enabled {
+        return dbx_core::sql_file_import::SqlFileFailureLogHandle::unavailable(
+            "Failure log disabled for this execution".to_string(),
+        );
+    }
+    let log_dir = state.data_dir.join(SQL_FILE_FAILURE_LOG_DIR);
+    let protected = state.sql_file_failure_logs.active_paths();
+    if let Err(error) = prune_sql_file_failure_logs(&log_dir, &protected) {
+        log::warn!("Failed to prune SQL file failure logs: {error}");
+    }
+    let connection_name = state.app.configs.read().await.get(&request.connection_id).map(|config| config.name.clone());
+    let mut files = Vec::with_capacity(file_paths.len());
+    for (index, file_path) in file_paths.iter().enumerate() {
+        let size_bytes = tokio::fs::metadata(file_path).await.ok().map(|metadata| metadata.len());
+        let name = file_path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+        files.push(SqlFileFailureLogFileInfo {
+            index,
+            name,
+            path: file_path.to_string_lossy().to_string(),
+            size_bytes,
+        });
+    }
+    let meta = SqlFileFailureLogMeta {
+        execution_id: request.execution_id.clone(),
+        connection_id: request.connection_id.clone(),
+        connection_name,
+        database: request.database.clone(),
+        schema: request.schema.clone(),
+        files,
+        limits: Default::default(),
+    };
+    start_sql_file_failure_log(&log_dir, meta).await
+}
+
+/// Derived TXT/CSV files are served once and re-creatable, so they are swept by
+/// age instead of tracked.
+fn sweep_failure_log_exports(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let expired = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= SQL_FILE_FAILURE_LOG_EXPORT_MAX_AGE);
+        if expired {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Status of one execution's failure log, so the Web UI can show the same
+/// `degraded`/`unavailable` states as the desktop. The server-side path is
+/// deliberately omitted here: a browser has no use for it and it would leak the
+/// server's filesystem layout.
+pub async fn sql_file_failure_log_info(
+    State(state): State<Arc<WebState>>,
+    AxumPath(execution_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<Option<serde_json::Value>>, AppError> {
+    let owner = crate::auth::session_token_from_headers(&headers)
+        .ok_or_else(|| AppError::from("Not authenticated".to_string()))?;
+    let info = state.sql_file_failure_logs.info(&owner, &execution_id);
+    Ok(Json(info.map(|info| {
+        serde_json::json!({
+            "status": info.status.as_str(),
+            "reason": info.reason,
+        })
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlFileFailureLogDownloadQuery {
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+/// Streams the full failure log as an attachment. Owner-scoped: the execution id
+/// alone never grants access, and no path is accepted from the client.
+pub async fn sql_file_failure_log_download(
+    State(state): State<Arc<WebState>>,
+    AxumPath(execution_id): AxumPath<String>,
+    Query(query): Query<SqlFileFailureLogDownloadQuery>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let owner = crate::auth::session_token_from_headers(&headers)
+        .ok_or_else(|| AppError::from("Not authenticated".to_string()))?;
+    let format = match query.format.as_deref() {
+        Some(value) => SqlFileFailureLogFormat::parse(value)
+            .ok_or_else(|| AppError::from(format!("Unsupported log format: {value}")))?,
+        None => SqlFileFailureLogFormat::Txt,
+    };
+    let log_path = failure_log_path_for(&state.sql_file_failure_logs, &owner, &execution_id)?;
+
+    let export_dir = state.data_dir.join(SQL_FILE_FAILURE_LOG_EXPORT_DIR);
+    tokio::fs::create_dir_all(&export_dir).await.map_err(|error| AppError::from(error.to_string()))?;
+    let export_path = export_dir.join(format!("{}.{}", Uuid::new_v4(), format.extension()));
+    let destination = export_path.clone();
+    tokio::task::spawn_blocking(move || derive_failure_log_file(&log_path, &destination, format, None))
+        .await
+        .map_err(|error| AppError::from(error.to_string()))?
+        .map_err(|error| AppError::from(error.to_string()))?;
+
+    let file = tokio::fs::File::open(&export_path).await.map_err(|error| AppError::from(error.to_string()))?;
+    let content_type = match format {
+        SqlFileFailureLogFormat::Txt => "text/plain; charset=utf-8",
+        SqlFileFailureLogFormat::Csv => "text/csv; charset=utf-8",
+    };
+    let file_name = format!("sql-file-failures.{}", format.extension());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_DISPOSITION, super::export_download::attachment_content_disposition(&file_name))
+        .body(Body::from_stream(tokio_util::io::ReaderStream::new(file)))
+        .map_err(|error| AppError::from(error.to_string()))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlFileFailureLogTextRequest {
+    pub execution_id: String,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub keys: Option<Vec<SqlFileFailureLogKey>>,
+}
+
+/// Derived text for the clipboard, capped like the desktop command. Being over
+/// the cap is a normal outcome (the UI suggests the file export), not an error.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlFileFailureLogTextResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub too_large: bool,
+    pub limit_bytes: u64,
+}
+
+pub async fn sql_file_failure_log_text(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(body): Json<SqlFileFailureLogTextRequest>,
+) -> Result<Json<SqlFileFailureLogTextResponse>, AppError> {
+    let owner = crate::auth::session_token_from_headers(&headers)
+        .ok_or_else(|| AppError::from("Not authenticated".to_string()))?;
+    let format = match body.format.as_deref() {
+        Some(value) => SqlFileFailureLogFormat::parse(value)
+            .ok_or_else(|| AppError::from(format!("Unsupported log format: {value}")))?,
+        None => SqlFileFailureLogFormat::Txt,
+    };
+    let log_path = failure_log_path_for(&state.sql_file_failure_logs, &owner, &body.execution_id)?;
+    let selection = body.keys.filter(|keys| !keys.is_empty()).map(|keys| keys.into_iter().collect());
+    let limit = SQL_FILE_FAILURE_LOG_CLIPBOARD_MAX_BYTES;
+    let derived =
+        tokio::task::spawn_blocking(move || derive_failure_log_text(&log_path, format, selection.as_ref(), limit))
+            .await
+            .map_err(|error| AppError::from(error.to_string()))?;
+    match derived {
+        Ok(text) => Ok(Json(SqlFileFailureLogTextResponse { text: Some(text), too_large: false, limit_bytes: limit })),
+        Err(SqlFileFailureLogDeriveError::TooLarge { limit }) => {
+            Ok(Json(SqlFileFailureLogTextResponse { text: None, too_large: true, limit_bytes: limit }))
+        }
+        Err(error) => Err(AppError::from(error.to_string())),
+    }
 }
 
 fn safe_uploaded_sql_path(tmp_dir: &Path, file_name: &str) -> Result<PathBuf, AppError> {
@@ -527,6 +754,16 @@ mod tests {
 
     use super::*;
 
+    /// The execution route now takes the session that owns the failure log, so
+    /// these tests authenticate the same way the Web client does: a session that
+    /// exists in `WebState::sessions` plus its `dbx_session` cookie.
+    async fn authenticated_state(state: &WebState, token: &str) -> HeaderMap {
+        state.sessions.write().await.insert(token.to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, format!("dbx_session={token}").parse().unwrap());
+        headers
+    }
+
     async fn restore_state(directory: &Path) -> WebState {
         let storage = dbx_core::persistence::test_storage::open(&directory.join("dbx.db")).await.unwrap();
         WebState::for_tests(Arc::new(dbx_core::connection::AppState::new(storage)), directory.to_path_buf())
@@ -622,10 +859,14 @@ mod tests {
             "filePath": copy, "continueOnError": false
         }))
         .unwrap();
-        let response =
-            execute_sql_file(State(state.clone()), Json(SqlFileExecuteWrapper { request, file_paths: vec![] }))
-                .await
-                .unwrap();
+        let headers = authenticated_state(&state, "session-restore").await;
+        let response = execute_sql_file(
+            State(state.clone()),
+            headers,
+            Json(SqlFileExecuteWrapper { request, file_paths: vec![] }),
+        )
+        .await
+        .unwrap();
         assert_eq!(response.0["executionId"], "restore-error");
         tokio::time::timeout(Duration::from_secs(5), async {
             while copy.exists() {
@@ -653,9 +894,14 @@ mod tests {
             "filePath": copy, "continueOnError": false
         }))
         .unwrap();
-        assert!(execute_sql_file(State(state.clone()), Json(SqlFileExecuteWrapper { request, file_paths: vec![] }))
-            .await
-            .is_err());
+        let headers = authenticated_state(&state, "session-existing").await;
+        assert!(execute_sql_file(
+            State(state.clone()),
+            headers,
+            Json(SqlFileExecuteWrapper { request, file_paths: vec![] })
+        )
+        .await
+        .is_err());
         assert!(!copy.exists());
         assert!(source.exists());
         assert!(!token.is_cancelled());
@@ -749,5 +995,71 @@ mod tests {
 
         assert!(!upload.exists());
         let _ = std::fs::remove_dir_all(tmp_dir);
+    }
+}
+
+#[cfg(test)]
+mod failure_log_route_tests {
+    use super::*;
+    use dbx_core::sql_file_import::{SqlFileFailureLogHandle, SqlFileFailureLogRegistry};
+    use std::path::PathBuf;
+
+    /// The registry reports a log whose file is gone as unavailable, so these
+    /// fixtures must point at a file that really exists.
+    fn registry_with_log(dir: &Path, owner: &str, execution_id: &str) -> (SqlFileFailureLogRegistry, PathBuf) {
+        let path = dir.join(format!("{execution_id}.jsonl"));
+        std::fs::write(
+            &path, b"{}
+",
+        )
+        .unwrap();
+        let registry = SqlFileFailureLogRegistry::new();
+        let handle = SqlFileFailureLogHandle::unavailable("test".to_string());
+        registry.register(owner, execution_id, Some(path.clone()), handle.status_probe());
+        (registry, path)
+    }
+
+    #[test]
+    fn failure_log_lookup_serves_the_owning_session_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (registry, path) = registry_with_log(dir.path(), "session-a", "exec-1");
+
+        assert_eq!(failure_log_path_for(&registry, "session-a", "exec-1").unwrap(), path);
+        // A session that guesses another session's execution id gets nothing.
+        assert!(failure_log_path_for(&registry, "session-b", "exec-1").is_err());
+        // So does an unknown execution id for the owning session.
+        assert!(failure_log_path_for(&registry, "session-a", "exec-2").is_err());
+    }
+
+    #[test]
+    fn failure_log_lookup_explains_a_log_whose_file_disappeared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exec.jsonl");
+        std::fs::write(
+            &path, b"{}
+",
+        )
+        .unwrap();
+        let registry = SqlFileFailureLogRegistry::new();
+        let handle = SqlFileFailureLogHandle::unavailable("test".to_string());
+        registry.register("session-a", "exec-1", Some(path.clone()), handle.status_probe());
+        assert!(failure_log_path_for(&registry, "session-a", "exec-1").is_ok());
+
+        // Retention prunes a finished log: the route must say so instead of
+        // streaming a path that no longer resolves.
+        std::fs::remove_file(&path).unwrap();
+        let error = failure_log_path_for(&registry, "session-a", "exec-1").unwrap_err();
+        assert!(error.message.contains("no longer exists"), "got: {}", error.message);
+    }
+
+    #[test]
+    fn failure_log_lookup_rejects_a_log_without_a_file() {
+        let registry = SqlFileFailureLogRegistry::new();
+        let handle = SqlFileFailureLogHandle::unavailable("no file".to_string());
+        registry.register("session-a", "exec-1", None, handle.status_probe());
+
+        // An unavailable log has no path to export; the route must fail rather
+        // than stream something that does not exist.
+        assert!(failure_log_path_for(&registry, "session-a", "exec-1").is_err());
     }
 }

@@ -241,6 +241,8 @@ function save() {
           <template v-if="isJson">
             <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.json.pretty" @change="updateJson('pretty', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorPrettyJson") }}</label>
             <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.json.camelCaseFieldNames" @change="updateJson('camelCaseFieldNames', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorCamelCaseJsonFields") }}</label>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.json.valuesOnly" @change="updateJson('valuesOnly', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorValuesOnlyJsonArray") }}</label>
+            <p v-if="draftOptions.json.valuesOnly" class="text-xs text-muted-foreground">{{ t("grid.copyExtractorValuesOnlyJsonArrayHint") }}</p>
           </template>
         </div>
 

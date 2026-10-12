@@ -313,7 +313,9 @@ fn build_create_table_sql_impl(
         .collect::<Vec<_>>()
         .join(", ");
     if !pk_list.is_empty() && create_dialect.primary_key_in_column_list() {
-        column_definitions.push(format!("PRIMARY KEY ({pk_list})"));
+        // Optional user-supplied constraint name; empty keeps the anonymous form.
+        let constraint = super::columns::new_primary_key_constraint_clause(&options, dialect);
+        column_definitions.push(format!("{constraint}PRIMARY KEY ({pk_list})"));
     }
 
     if let Some((_, definition)) = &inline_auto_index {

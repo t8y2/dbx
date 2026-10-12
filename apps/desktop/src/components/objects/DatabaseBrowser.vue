@@ -20,6 +20,7 @@ import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSidebarMenuPresentation } from "@/composables/useSidebarMenuPresentation";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 import { copyToClipboard } from "@/lib/common/clipboard";
 
@@ -64,6 +65,7 @@ const { t } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
+const { presentMenu, SidebarMenuPreferencesDialog, sidebarMenuPreferencesOpen, sidebarMenuPreferences } = useSidebarMenuPresentation();
 const searchInput = ref<InstanceType<typeof Input>>();
 const search = ref(restoredUiState.search ?? "");
 const rows = ref<DatabaseRow[]>([]);
@@ -132,30 +134,34 @@ function openDatabase(database: string) {
 function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
   const node: TreeNode = { id: `${props.connection.id}:${row.name}`, label: row.name, type: "database", connectionId: props.connection.id, database: row.name };
   const runtimeItems = sidebarRuntimeHost.value?.buildContextMenu(node);
-  if (runtimeItems?.length) return removeUnsupportedDatabaseItems(runtimeItems);
+  if (runtimeItems?.length) return presentMenu(removeUnsupportedDatabaseItems(runtimeItems), "database");
   const isDefault = props.connection.database === row.name;
-  return [
-    { label: t("contextMenu.viewData"), action: () => openDatabase(row.name), icon: Database },
-    {
-      label: t("contextMenu.viewDdl"),
-      action: () => {
-        const dbType = props.connection.db_type;
-        const sql = dbType === "mysql" ? `SHOW CREATE DATABASE \`${row.name.replaceAll("`", "``")}\`;` : `-- ${row.name}\n-- Database DDL is not available for this driver.`;
-        queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.viewDdl")}`, "query", undefined, sql, undefined, { forceNew: true });
+  return presentMenu(
+    [
+      { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openDatabase(row.name), icon: Database },
+      {
+        sidebarActionId: "contextMenu.viewDdl",
+        label: t("contextMenu.viewDdl"),
+        action: () => {
+          const dbType = props.connection.db_type;
+          const sql = dbType === "mysql" ? `SHOW CREATE DATABASE \`${row.name.replaceAll("`", "``")}\`;` : `-- ${row.name}\n-- Database DDL is not available for this driver.`;
+          queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.viewDdl")}`, "query", undefined, sql, undefined, { forceNew: true });
+        },
+        icon: Copy,
       },
-      icon: Copy,
-    },
-    { label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.newQuery")}`, "query", undefined, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
-    { label: t("contextMenu.copyName"), action: () => copyToClipboard(row.name), icon: Copy },
-    { label: "", separator: true },
-    {
-      label: isDefault ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"),
-      action: () => (isDefault ? connectionStore.clearDefaultDatabase(props.connection.id) : connectionStore.setDefaultDatabase(props.connection.id, row.name)),
-      icon: Database,
-    },
-    { label: "", separator: true },
-    { label: t("contextMenu.refreshTab"), action: () => refresh(), icon: RefreshCw },
-  ];
+      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.newQuery")}`, "query", undefined, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
+      { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyToClipboard(row.name), icon: Copy },
+      { label: "", separator: true },
+      {
+        label: isDefault ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"),
+        action: () => (isDefault ? connectionStore.clearDefaultDatabase(props.connection.id) : connectionStore.setDefaultDatabase(props.connection.id, row.name)),
+        icon: Database,
+      },
+      { label: "", separator: true },
+      { sidebarActionId: "contextMenu.refreshTab", label: t("contextMenu.refreshTab"), action: () => refresh(), icon: RefreshCw },
+    ],
+    "database",
+  );
 }
 
 function removeUnsupportedDatabaseItems(items: ContextMenuItem[]): ContextMenuItem[] {
@@ -492,6 +498,7 @@ defineExpose({ focusSearch, refresh });
         </div>
       </div>
     </div>
+    <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
     <SidebarTreeRuntimeHost ref="sidebarRuntimeHost" :node="sidebarRuntimeNode" :depth="0" @open-danger-dialog="openSidebarDangerDialog" @open-data="openDatabaseFromSidebar" @open-ddl="openDatabaseFromSidebar" @open-dialog-controller="sidebarDialogController = $event" />
     <SidebarTreeItemDialogs v-if="sidebarDialogController" :controller="sidebarDialogController" @closed="sidebarDialogController = null" />
   </section>

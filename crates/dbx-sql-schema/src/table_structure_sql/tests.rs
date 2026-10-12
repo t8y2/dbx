@@ -68,6 +68,7 @@ fn structure_change_options(
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     }
 }
 
@@ -391,6 +392,7 @@ fn index_change_options(
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     }
 }
 
@@ -476,6 +478,7 @@ fn builds_mysql_column_and_index_changes() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -841,6 +844,7 @@ fn builds_xugu_type_change_with_native_syntax() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1110,6 +1114,7 @@ fn builds_mysql_unsigned_integer_column_with_length_before_attribute() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1150,6 +1155,7 @@ fn doris_table_editor_renames_column_without_mysql_change_syntax() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1215,6 +1221,7 @@ fn dameng_integer_column_omits_mysql_display_width() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1262,6 +1269,7 @@ fn builds_highgo_foreign_key_changes_with_postgres_syntax() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1340,6 +1348,7 @@ fn builds_informix_column_and_index_changes() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1401,6 +1410,7 @@ fn oracle_does_not_generate_drop_sql_for_all_columns() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -1478,6 +1488,7 @@ fn oracle_create_table_places_default_before_not_null() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1549,6 +1560,7 @@ fn oracle_create_table_preserves_character_length_units() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert!(result.statements[0].contains("BYTE_COL VARCHAR2(12 BYTE)"));
@@ -1589,6 +1601,7 @@ fn oracle_create_table_uses_unquoted_identifiers_for_new_objects() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1630,6 +1643,7 @@ fn oracle_create_table_leaves_uppercase_regular_identifier_unquoted() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1670,6 +1684,7 @@ fn oracle_create_table_quotes_special_and_reserved_identifiers() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1713,6 +1728,7 @@ fn oracle_create_table_distinguishes_new_and_referenced_foreign_key_identifiers(
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1757,6 +1773,7 @@ fn oracle_create_table_extracts_single_line_trigger_source_into_the_body() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1793,6 +1810,7 @@ fn oracle_create_table_warns_instead_of_emitting_an_unparsed_trigger_declaration
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.statements, vec!["CREATE TABLE \"APP\".dbx_copy (\n  \"id\" NUMBER\n);"]);
@@ -1833,6 +1851,7 @@ fn oracle_existing_quoted_identifiers_keep_exact_spelling() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1870,6 +1889,7 @@ fn oracle_new_identifier_formatting_does_not_change_other_dialects() {
             foreign_table: false,
             is_gaussdb_m_mode: false,
             table_collation: None,
+            primary_key_name: None,
         });
 
         assert_eq!(result.warnings, Vec::<String>::new(), "{database_type:?}");
@@ -1969,6 +1989,7 @@ fn iris_drop_index_includes_table_name() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2015,6 +2036,7 @@ fn iris_ignores_comment_changes_but_keeps_supported_column_alters() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(
@@ -2102,6 +2124,7 @@ fn oracle_compatible_databases_keep_comment_on_sql() {
             foreign_table: false,
             is_gaussdb_m_mode: false,
             table_collation: None,
+            primary_key_name: None,
         });
 
         assert_eq!(result.warnings, Vec::<String>::new(), "{database_type:?}");
@@ -2141,6 +2164,7 @@ fn mysql_create_index_with_comment() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2179,6 +2203,7 @@ fn manticoresearch_builds_create_table_sql_only() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2227,6 +2252,7 @@ fn manticoresearch_builds_add_and_drop_column_sql() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2300,6 +2326,7 @@ fn gbase8a_uses_limited_mysql_ddl() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(
@@ -2375,6 +2402,7 @@ fn gbase8a_allows_mysql_style_column_reorder() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2421,6 +2449,7 @@ fn gbase8s_uses_informix_ddl_not_mysql() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2459,6 +2488,7 @@ fn gbase_without_driver_profile_still_uses_mysql_ddl() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2499,6 +2529,7 @@ fn manticoresearch_does_not_drop_id_column() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -2572,6 +2603,7 @@ fn manticoresearch_warns_when_existing_column_properties_change() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -2612,6 +2644,7 @@ fn manticoresearch_ignores_mysql_column_options() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2655,6 +2688,7 @@ fn manticoresearch_builds_text_column_properties() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2690,6 +2724,7 @@ fn manticoresearch_builds_json_secondary_index_property() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2721,6 +2756,7 @@ fn mysql_create_unique_index_with_comment_and_btree() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2754,6 +2790,7 @@ fn mysql_create_functional_index_preserves_key_part_syntax() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2787,6 +2824,7 @@ fn mysql_add_timestamp_column_drops_invalid_precision() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2820,6 +2858,7 @@ fn mysql_add_timestamp_column_preserves_valid_precision() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2860,6 +2899,7 @@ fn builds_postgres_create_table_with_comments_and_index() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2897,6 +2937,7 @@ fn quotes_expression_like_new_index_columns_without_provenance() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2974,6 +3015,7 @@ fn create_table_trims_table_name_whitespace_for_all_statements() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3016,6 +3058,7 @@ fn warns_for_sqlite_unsafe_column_changes() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -3064,6 +3107,7 @@ fn qualifies_attached_sqlite_table_and_index_changes() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3138,6 +3182,7 @@ fn builds_rqlite_changes_with_sqlite_dialect() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3173,6 +3218,7 @@ fn builds_kingbase_add_column_without_column_keyword() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3243,6 +3289,7 @@ fn builds_mysql_column_reorder_statements() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3304,6 +3351,7 @@ fn mysql_add_column_before_existing_column_does_not_reorder_shifted_column() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3372,6 +3420,7 @@ fn mysql_existing_column_reorder_does_not_reorder_columns_shifted_by_prior_move(
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3452,6 +3501,7 @@ fn mysql_moving_first_column_to_end_uses_single_reorder_statement() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3482,6 +3532,7 @@ fn builds_sql_server_quoted_column_and_index_statements() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3518,6 +3569,7 @@ fn sqlserver_strips_mysql_display_width_from_fixed_integer_types() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3548,6 +3600,7 @@ fn sqlserver_strips_scale_from_float() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3578,6 +3631,7 @@ fn sqlserver_preserves_float_mantissa_bits() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3633,6 +3687,7 @@ fn sqlserver_default_changes_drop_old_constraints_with_isolated_batches() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3855,6 +3910,7 @@ fn sqlserver_unchanged_foreign_key_does_not_warn_when_saving_other_changes() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3890,6 +3946,7 @@ fn sqlserver_add_column_with_identity() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3926,6 +3983,7 @@ fn sqlserver_legacy_column_comment_change_uses_legacy_extended_properties() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3965,6 +4023,7 @@ fn dameng_add_column_with_identity() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3994,6 +4053,7 @@ fn dameng_uppercases_lowercase_column_type() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4030,6 +4090,7 @@ fn dameng_rejects_identity_on_incompatible_type() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -4068,6 +4129,7 @@ fn sqlserver_rejects_identity_on_incompatible_type() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -4109,6 +4171,7 @@ fn sqlserver_changed_foreign_key_still_warns_as_unsupported() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -4155,6 +4218,7 @@ fn sqlserver_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4201,6 +4265,7 @@ fn dameng_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4460,6 +4525,7 @@ fn dameng_rejects_adding_second_identity_column() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -4518,6 +4584,7 @@ fn sqlserver_existing_column_identity_change_warns_without_unchanged_foreign_key
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -4555,6 +4622,7 @@ fn builds_duckdb_create_table_statements() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4681,6 +4749,7 @@ fn builds_clickhouse_nullable_comment_and_reorder_statements() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4733,6 +4802,7 @@ fn builds_h2_schema_qualified_existing_column_statements() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4760,6 +4830,132 @@ fn builds_postgres_alter_table_add_primary_key() {
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements, vec!["ALTER TABLE \"public\".\"users\" ADD PRIMARY KEY (\"id\");"]);
+}
+
+#[test]
+fn postgres_adds_named_primary_key_when_requested() {
+    let mut options = structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "users",
+        vec![existing_pk_column("id", "integer", false, true)],
+    );
+    options.primary_key_name = Some("users_pkey".to_string());
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"public\".\"users\" ADD CONSTRAINT \"users_pkey\" PRIMARY KEY (\"id\");"]
+    );
+}
+
+#[test]
+fn mysql_adds_named_primary_key_when_requested() {
+    let mut options = structure_change_options(
+        DatabaseType::Mysql,
+        Some("dbx_test"),
+        "users",
+        vec![existing_pk_column("id", "int", false, true)],
+    );
+    options.primary_key_name = Some("users_pk".to_string());
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE `users` ADD CONSTRAINT `users_pk` PRIMARY KEY (`id`);"]);
+}
+
+#[test]
+fn mysql_primary_key_replacement_stays_anonymous_even_with_primary_key_name() {
+    let mut old_pk = existing_pk_column("old_id", "int", true, false);
+    old_pk.id = "old_id".to_string();
+    let mut new_pk = existing_pk_column("new_id", "int", false, true);
+    new_pk.id = "new_id".to_string();
+    let mut options = structure_change_options(DatabaseType::Mysql, Some("dbx_test"), "users", vec![old_pk, new_pk]);
+    options.primary_key_name = Some("users_pk".to_string());
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `users` DROP PRIMARY KEY;", "ALTER TABLE `users` ADD PRIMARY KEY (`new_id`);",]
+    );
+}
+
+#[test]
+fn postgres_primary_key_replacement_keeps_persisted_name_despite_primary_key_name() {
+    let mut old_pk = existing_pk_column("id", "integer", true, false);
+    old_pk.id = "old_id".to_string();
+    let mut new_pk = existing_pk_column("asdas", "integer", false, true);
+    new_pk.id = "new_asdas".to_string();
+    let mut options = structure_change_options(DatabaseType::Postgres, Some("public"), "test", vec![old_pk, new_pk]);
+    options.indexes = vec![existing_primary_index("test_pk", &["id"])];
+    options.primary_key_name = Some("should_be_ignored".to_string());
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"public\".\"test\" DROP CONSTRAINT \"test_pk\";",
+            "ALTER TABLE \"public\".\"test\" ADD CONSTRAINT \"test_pk\" PRIMARY KEY (\"asdas\");",
+        ]
+    );
+}
+
+#[test]
+fn blank_primary_key_name_keeps_anonymous_form() {
+    let mut options = structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "users",
+        vec![existing_pk_column("id", "integer", false, true)],
+    );
+    options.primary_key_name = Some("   ".to_string());
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.statements, vec!["ALTER TABLE \"public\".\"users\" ADD PRIMARY KEY (\"id\");"]);
+}
+
+#[test]
+fn create_table_includes_named_primary_key() {
+    let mut options = structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "users",
+        vec![existing_pk_column("id", "integer", false, true)],
+    );
+    options.primary_key_name = Some("users_pkey".to_string());
+
+    let result = build_create_table_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE TABLE \"public\".\"users\" (\n  \"id\" integer,\n  CONSTRAINT \"users_pkey\" PRIMARY KEY (\"id\")\n);"]
+    );
+}
+
+#[test]
+fn create_table_ignores_primary_key_name_for_sqlite() {
+    let mut options = structure_change_options(
+        DatabaseType::Sqlite,
+        None,
+        "users",
+        vec![existing_pk_column("id", "integer", false, true)],
+    );
+    options.primary_key_name = Some("users_pkey".to_string());
+
+    let result = build_create_table_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(!result.statements[0].contains("CONSTRAINT"), "{}", result.statements[0]);
+    assert!(result.statements[0].contains("PRIMARY KEY"), "{}", result.statements[0]);
 }
 
 #[test]
@@ -5789,6 +5985,7 @@ fn mysql_create_table_with_auto_increment() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5822,6 +6019,7 @@ fn mysql_create_table_keeps_column_charset_collation_and_comment() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5859,6 +6057,7 @@ fn mysql_compatible_databases_do_not_emit_mysql_column_charset_clauses() {
             foreign_table: false,
             is_gaussdb_m_mode: false,
             table_collation: None,
+            primary_key_name: None,
         });
 
         assert_eq!(result.warnings, Vec::<String>::new());
@@ -5893,6 +6092,7 @@ fn mysql_create_table_with_on_update_current_timestamp() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6059,10 +6259,209 @@ fn postgres_create_table_with_identity() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert!(result.statements[0].contains("GENERATED BY DEFAULT AS IDENTITY"));
+}
+
+#[test]
+fn postgres_alter_column_identity_generation_always_to_by_default() {
+    let mut id = existing_pk_column("id", "integer", true, true);
+    id.extra = Some(ColumnExtra {
+        identity: Some(ColumnIdentity { generation: Some("BY DEFAULT".to_string()), seed: None, increment: None }),
+        ..Default::default()
+    });
+    id.original.as_mut().unwrap().extra = Some(
+        "generated always as identity (start with 1 increment by 1 minvalue 1 maxvalue 2147483647 cache 1 no cycle)"
+            .to_string(),
+    );
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "users",
+        vec![id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"public\".\"users\" ALTER COLUMN \"id\" SET GENERATED BY DEFAULT;"]
+    );
+}
+
+#[test]
+fn postgres_alter_column_identity_generation_by_default_to_always() {
+    let mut id = existing_pk_column("id", "integer", true, true);
+    id.extra = Some(ColumnExtra {
+        identity: Some(ColumnIdentity { generation: Some("ALWAYS".to_string()), seed: None, increment: None }),
+        ..Default::default()
+    });
+    id.original.as_mut().unwrap().extra = Some("generated by default as identity".to_string());
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "users",
+        vec![id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"public\".\"users\" ALTER COLUMN \"id\" SET GENERATED ALWAYS;"]);
+}
+
+#[test]
+fn postgres_alter_column_identity_seed_and_increment() {
+    let mut id = existing_pk_column("id", "integer", true, true);
+    id.extra = Some(ColumnExtra {
+        identity: Some(ColumnIdentity {
+            generation: Some("BY DEFAULT".to_string()),
+            seed: Some(100),
+            increment: Some(5),
+        }),
+        ..Default::default()
+    });
+    id.original.as_mut().unwrap().extra = Some("generated by default as identity (start with 1 increment by 1 minvalue 1 maxvalue 2147483647 cache 1 no cycle)".to_string());
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "users",
+        vec![id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"public\".\"users\" ALTER COLUMN \"id\" RESTART WITH 100;",
+            "ALTER TABLE \"public\".\"users\" ALTER COLUMN \"id\" SET INCREMENT BY 5;",
+        ]
+    );
+}
+
+#[test]
+fn postgres_alter_column_identity_generation_and_sequence_options_together() {
+    let mut id = existing_pk_column("id", "integer", true, true);
+    id.extra = Some(ColumnExtra {
+        identity: Some(ColumnIdentity {
+            generation: Some("BY DEFAULT".to_string()),
+            seed: Some(100),
+            increment: Some(2),
+        }),
+        ..Default::default()
+    });
+    id.original.as_mut().unwrap().extra = Some(
+        "generated always as identity (start with 1 increment by 1 minvalue 1 maxvalue 2147483647 cache 1 no cycle)"
+            .to_string(),
+    );
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "users",
+        vec![id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"public\".\"users\" ALTER COLUMN \"id\" SET GENERATED BY DEFAULT;",
+            "ALTER TABLE \"public\".\"users\" ALTER COLUMN \"id\" RESTART WITH 100;",
+            "ALTER TABLE \"public\".\"users\" ALTER COLUMN \"id\" SET INCREMENT BY 2;",
+        ]
+    );
+}
+
+#[test]
+fn postgres_enable_identity_on_existing_column() {
+    let mut id = column("id");
+    id.data_type = "integer".to_string();
+    id.is_nullable = true;
+    id.extra = Some(ColumnExtra {
+        identity: Some(ColumnIdentity { generation: Some("ALWAYS".to_string()), seed: Some(10), increment: Some(2) }),
+        ..Default::default()
+    });
+    id.original = Some(ColumnInfo {
+        name: "id".to_string(),
+        data_type: "integer".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "users",
+        vec![id.clone()],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"public\".\"users\" ALTER COLUMN \"id\" SET NOT NULL;",
+            "ALTER TABLE \"public\".\"users\" ALTER COLUMN \"id\" ADD GENERATED ALWAYS AS IDENTITY (START WITH 10 INCREMENT BY 2);",
+        ]
+    );
+
+    let single = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        driver_profile: None,
+        schema: Some("public".to_string()),
+        table_name: "users".to_string(),
+        column: id,
+    });
+    assert_eq!(
+        single.statements,
+        vec![
+            "ALTER TABLE \"public\".\"users\" ALTER COLUMN \"id\" SET NOT NULL;",
+            "ALTER TABLE \"public\".\"users\" ALTER COLUMN \"id\" ADD GENERATED ALWAYS AS IDENTITY (START WITH 10 INCREMENT BY 2);",
+        ]
+    );
+}
+
+#[test]
+fn postgres_disable_identity_on_existing_column() {
+    let mut id = existing_pk_column("id", "integer", true, true);
+    id.extra = Some(ColumnExtra::default());
+    id.original.as_mut().unwrap().extra = Some("generated always as identity".to_string());
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "users",
+        vec![id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"public\".\"users\" ALTER COLUMN \"id\" DROP IDENTITY;"]);
+}
+
+#[test]
+fn postgres_unchanged_identity_emits_no_statements() {
+    let mut id = existing_pk_column("id", "integer", true, true);
+    id.extra = Some(ColumnExtra {
+        identity: Some(ColumnIdentity { generation: Some("ALWAYS".to_string()), seed: Some(1), increment: Some(1) }),
+        ..Default::default()
+    });
+    id.original.as_mut().unwrap().extra = Some(
+        "generated always as identity (start with 1 increment by 1 minvalue 1 maxvalue 2147483647 cache 1 no cycle)"
+            .to_string(),
+    );
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "users",
+        vec![id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, Vec::<String>::new());
 }
 
 #[test]
@@ -6095,6 +6494,7 @@ fn dameng_create_table_with_identity() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6127,6 +6527,7 @@ fn dameng_create_table_preserves_character_length_units() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6167,6 +6568,7 @@ fn dameng_alter_column_preserves_character_length_unit() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6208,6 +6610,7 @@ fn dameng_rejects_multiple_identity_columns() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert!(result.statements.is_empty());
@@ -6242,6 +6645,7 @@ fn dameng_rejects_zero_identity_increment() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert!(result.statements.is_empty());
@@ -6277,6 +6681,7 @@ fn sqlserver_create_table_with_identity() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6307,6 +6712,7 @@ fn mysql_quotes_datetime_literal_default() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6337,6 +6743,7 @@ fn mysql_does_not_quote_current_timestamp() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6368,6 +6775,7 @@ fn mysql_does_not_quote_temporal_function_with_parens() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6398,6 +6806,7 @@ fn mysql_date_literal_default_is_quoted() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6428,6 +6837,7 @@ fn mysql_time_literal_default_is_quoted() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6458,6 +6868,7 @@ fn non_temporal_types_are_not_quoted() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6592,6 +7003,7 @@ fn builds_mysql_foreign_key_changes() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6627,6 +7039,7 @@ fn builds_mysql_composite_foreign_key() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6665,6 +7078,7 @@ fn builds_oracle_foreign_key_with_supported_actions() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6707,6 +7121,7 @@ fn builds_oracle_foreign_key_replacement() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6748,6 +7163,7 @@ fn builds_mysql_trigger_changes() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6780,6 +7196,7 @@ fn builds_sqlserver_trigger_with_multiple_events() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6828,6 +7245,7 @@ fn rebuilds_changed_sqlserver_trigger_from_complete_metadata_source() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6870,6 +7288,7 @@ fn sqlserver_trigger_edit_restores_disabled_state() {
         transwarp_create: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(
@@ -6918,6 +7337,7 @@ fn unchanged_postgres_trigger_does_not_block_column_rename() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6953,6 +7373,7 @@ fn changed_postgres_trigger_remains_unsupported() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert!(result.statements.is_empty());
@@ -6993,6 +7414,7 @@ fn rejects_editing_existing_oracle_trigger_without_complete_source() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert!(result.statements.is_empty());
@@ -7022,6 +7444,7 @@ fn builds_oracle_statement_trigger_without_row_clause() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7063,6 +7486,7 @@ fn drops_existing_oracle_trigger_without_reconstructing_it() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7089,6 +7513,7 @@ fn rejects_unsupported_oracle_compound_trigger_shape() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert!(result.statements.is_empty());
@@ -7119,6 +7544,7 @@ fn mysql_varchar_default_is_quoted() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7150,6 +7576,7 @@ fn mysql_char_default_is_quoted() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7182,6 +7609,7 @@ fn mysql_text_default_is_quoted() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7212,6 +7640,7 @@ fn mysql_enum_default_is_quoted() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7242,6 +7671,7 @@ fn mysql_int_default_is_not_quoted() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7382,6 +7812,7 @@ fn mysql_character_column_add_with_charset_collation() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7502,6 +7933,7 @@ fn mysql_numeric_column_omits_charset_collation_in_column_definition() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7550,6 +7982,7 @@ fn mysql_numeric_column_ignores_charset_collation_in_change_detection() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     // No ALTER should be emitted — charset/collation changes on
@@ -7593,6 +8026,7 @@ fn mysql_character_column_detects_charset_collation_change() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7641,6 +8075,7 @@ fn mysql_character_column_preserves_charset_collation_on_other_change() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7722,6 +8157,7 @@ fn mysql_inherited_column_charset_is_omitted_from_generated_ddl() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7771,6 +8207,7 @@ fn mysql_explicit_column_charset_survives_the_table_default_comparison() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7821,6 +8258,7 @@ fn mysql_inherited_column_charset_does_not_register_as_a_change() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7864,6 +8302,7 @@ fn mysql_collation_switched_away_from_the_table_default_is_emitted() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7912,6 +8351,7 @@ fn mysql_column_charset_switched_to_the_table_default_drops_the_clause() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7957,6 +8397,7 @@ fn mysql_column_charset_is_kept_when_the_table_default_is_unknown() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7997,6 +8438,7 @@ fn mysql_create_table_omits_inherited_column_charset() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -8706,6 +9148,7 @@ fn mysql_create_table_with_generated_column() {
         partitioned: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
         foreign_table: false,
     });
 
@@ -8752,6 +9195,7 @@ fn oscar_create_table_with_primary_key_and_comments() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -8952,6 +9396,7 @@ fn oscar_drop_index_with_schema_qualifier() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -8978,6 +9423,7 @@ fn oscar_table_comment_uses_comment_on_table() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -9066,6 +9512,7 @@ fn postgres_partitioned_parent_concurrent_request_rejected() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     // Fail closed: PostgreSQL rejects CREATE INDEX CONCURRENTLY on a
@@ -9102,6 +9549,7 @@ fn postgres_partitioned_parent_plain_index_unchanged() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -9150,6 +9598,7 @@ fn postgres_create_table_partitioned_concurrent_request_rejected() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(
@@ -9282,6 +9731,7 @@ fn postgres_create_table_concurrent_index() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -9403,6 +9853,7 @@ fn gaussdb_m_options(columns: Vec<EditableStructureColumn>) -> TableStructureSql
         foreign_table: false,
         is_gaussdb_m_mode: true,
         table_collation: None,
+        primary_key_name: None,
     }
 }
 
@@ -9642,6 +10093,7 @@ fn gaussdb_m_rebuild_index_unchanged_type_does_not_rebuild() {
         foreign_table: false,
         is_gaussdb_m_mode: true,
         table_collation: None,
+        primary_key_name: None,
     };
     let result = build_table_structure_change_sql(options);
     assert!(result.warnings.is_empty());
@@ -9694,6 +10146,7 @@ fn mysql_create_table_nullable_timestamp_without_default_gets_explicit_null() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -9728,6 +10181,7 @@ fn mysql_create_table_nullable_timestamp_with_default_still_gets_explicit_null()
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -9760,6 +10214,7 @@ fn mysql_create_table_nullable_datetime_does_not_gain_null_keyword() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -9792,6 +10247,7 @@ fn mysql_add_column_nullable_timestamp_without_default_gets_explicit_null() {
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -10483,7 +10939,12 @@ fn starrocks_layout_options(granularity: StarRocksTimeGranularity) -> CreateTabl
     CreateTableDialectOptions {
         starrocks: Some(StarRocksCreateOptions {
             partition: None,
-            time_partition: Some(StarRocksTimePartition { column_id: "ts".into(), granularity, interval: None, additional_column_ids: vec![] }),
+            time_partition: Some(StarRocksTimePartition {
+                column_id: "ts".into(),
+                granularity,
+                interval: None,
+                additional_column_ids: vec![],
+            }),
             distribution: StarRocksDistribution::Hash,
             distribution_column_ids: vec!["id".into()],
             sort_column_ids: vec![],
@@ -10506,11 +10967,16 @@ fn starrocks_partitioned_table_options() -> TableStructureSqlOptions {
 
 #[test]
 fn starrocks_time_partition_preserves_clause_order_and_column_identity() {
-    for (granularity, unit) in [(StarRocksTimeGranularity::Year, "year"), (StarRocksTimeGranularity::Month, "month"), (StarRocksTimeGranularity::Day, "day")] {
+    for (granularity, unit) in [
+        (StarRocksTimeGranularity::Year, "year"),
+        (StarRocksTimeGranularity::Month, "month"),
+        (StarRocksTimeGranularity::Day, "day"),
+    ] {
         let mut options = starrocks_partitioned_table_options();
         // Column ID stays stable through a rename, including quoted identifiers.
         options.columns[1].name = "event`time".into();
-        let result = build_create_table_sql_with_dialect_options(options, Some("3.5.0"), starrocks_layout_options(granularity));
+        let result =
+            build_create_table_sql_with_dialect_options(options, Some("3.5.0"), starrocks_layout_options(granularity));
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
         assert_eq!(result.statements.len(), 1);
         assert!(result.statements[0].ends_with(&format!(") PRIMARY KEY (`id`, `event``time`) COMMENT 'events' PARTITION BY date_trunc('{unit}', `event``time`) DISTRIBUTED BY HASH (`id`) BUCKETS 8;")), "{}", result.statements[0]);
@@ -10521,7 +10987,11 @@ fn starrocks_time_partition_preserves_clause_order_and_column_identity() {
 fn starrocks_rejects_invalid_partition_columns_and_versions() {
     let settings = starrocks_layout_options(StarRocksTimeGranularity::Month);
     for version in [None, Some("5.1.0"), Some("3.0.0")] {
-        let result = build_create_table_sql_with_dialect_options(starrocks_partitioned_table_options(), version, settings.clone());
+        let result = build_create_table_sql_with_dialect_options(
+            starrocks_partitioned_table_options(),
+            version,
+            settings.clone(),
+        );
         assert!(result.statements.is_empty());
         assert!(result.warnings.iter().any(|warning| warning.contains("confirmed server version")));
     }
@@ -10550,7 +11020,10 @@ fn starrocks_validates_hash_keys_and_bucket_count() {
             "empty" => sr.distribution_column_ids.clear(),
             "duplicate" => sr.distribution_column_ids = vec!["id".into(), "id".into()],
             "type" => options.columns[0].data_type = "json".into(),
-            "primary" => { options.columns[1].is_primary_key = false; sr.distribution_column_ids = vec!["ts".into()]; },
+            "primary" => {
+                options.columns[1].is_primary_key = false;
+                sr.distribution_column_ids = vec!["ts".into()];
+            }
             "zero" => sr.bucket_count = Some(0),
             _ => sr.bucket_count = Some(u32::MAX),
         }
@@ -10562,11 +11035,19 @@ fn starrocks_validates_hash_keys_and_bucket_count() {
 
 #[test]
 fn starrocks_random_distribution_requires_duplicate_table_and_supported_version() {
-    let settings = CreateTableDialectOptions { starrocks: Some(StarRocksCreateOptions { distribution: StarRocksDistribution::Random, ..Default::default() }) };
+    let settings = CreateTableDialectOptions {
+        starrocks: Some(StarRocksCreateOptions { distribution: StarRocksDistribution::Random, ..Default::default() }),
+    };
     let mut options = starrocks_partitioned_table_options();
-    assert!(build_create_table_sql_with_dialect_options(options.clone(), Some("3.5.0"), settings.clone()).statements.is_empty());
-    for column in &mut options.columns { column.is_primary_key = false; }
-    assert!(build_create_table_sql_with_dialect_options(options.clone(), Some("3.0.0"), settings.clone()).statements.is_empty());
+    assert!(build_create_table_sql_with_dialect_options(options.clone(), Some("3.5.0"), settings.clone())
+        .statements
+        .is_empty());
+    for column in &mut options.columns {
+        column.is_primary_key = false;
+    }
+    assert!(build_create_table_sql_with_dialect_options(options.clone(), Some("3.0.0"), settings.clone())
+        .statements
+        .is_empty());
     let result = build_create_table_sql_with_dialect_options(options, Some("3.5.0"), settings);
     assert!(result.warnings.is_empty());
     assert!(result.statements[0].ends_with("DISTRIBUTED BY RANDOM;"));
@@ -10576,26 +11057,40 @@ fn starrocks_random_distribution_requires_duplicate_table_and_supported_version(
 fn starrocks_settings_cannot_leak_into_mysql() {
     let mut options = starrocks_partitioned_table_options();
     options.database_type = Some(DatabaseType::Mysql);
-    let result = build_create_table_sql_with_dialect_options(options, Some("8.0"), starrocks_layout_options(StarRocksTimeGranularity::Month));
+    let result = build_create_table_sql_with_dialect_options(
+        options,
+        Some("8.0"),
+        starrocks_layout_options(StarRocksTimeGranularity::Month),
+    );
     assert!(result.statements.is_empty());
     assert!(result.warnings.iter().any(|warning| warning.contains("require a StarRocks connection")));
 }
 
 #[test]
 fn starrocks_builds_multicolumn_value_and_list_partitions() {
-    let options = structure_change_options(DatabaseType::StarRocks, None, "events", vec![column("city"), column("channel")]);
-    let values = CreateTableDialectOptions { starrocks: Some(StarRocksCreateOptions {
-        partition: Some(StarRocksPartitionOptions::Values { column_ids: vec!["city".into(), "channel".into()] }), ..Default::default()
-    }) };
+    let options =
+        structure_change_options(DatabaseType::StarRocks, None, "events", vec![column("city"), column("channel")]);
+    let values = CreateTableDialectOptions {
+        starrocks: Some(StarRocksCreateOptions {
+            partition: Some(StarRocksPartitionOptions::Values { column_ids: vec!["city".into(), "channel".into()] }),
+            ..Default::default()
+        }),
+    };
     let result = build_create_table_sql_with_dialect_options(options.clone(), Some("3.5.0"), values);
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert!(result.statements[0].contains("PARTITION BY (`city`, `channel`) DISTRIBUTED BY RANDOM"));
-    let list = CreateTableDialectOptions { starrocks: Some(StarRocksCreateOptions {
-        partition: Some(StarRocksPartitionOptions::List {
-            column_ids: vec!["city".into(), "channel".into()],
-            partitions: vec![StarRocksListPartition { name: "p`east".into(), values: vec![vec!["Xi'an".into(), "web".into()], vec!["Shanghai".into(), "store".into()]] }],
-        }), ..Default::default()
-    }) };
+    let list = CreateTableDialectOptions {
+        starrocks: Some(StarRocksCreateOptions {
+            partition: Some(StarRocksPartitionOptions::List {
+                column_ids: vec!["city".into(), "channel".into()],
+                partitions: vec![StarRocksListPartition {
+                    name: "p`east".into(),
+                    values: vec![vec!["Xi'an".into(), "web".into()], vec!["Shanghai".into(), "store".into()]],
+                }],
+            }),
+            ..Default::default()
+        }),
+    };
     let result = build_create_table_sql_with_dialect_options(options, Some("3.5.0"), list);
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert!(result.statements[0].contains("PARTITION BY LIST (`city`, `channel`) (\n  PARTITION `p``east` VALUES IN (('Xi''an', 'web'), ('Shanghai', 'store'))\n)"));
@@ -10606,15 +11101,33 @@ fn starrocks_builds_range_bounds_and_validates_arity() {
     let mut options = starrocks_partitioned_table_options();
     // Intentionally interleaved primary and value columns: SQL reorders without changing membership.
     options.columns.insert(1, column("payload"));
-    let settings = CreateTableDialectOptions { starrocks: Some(StarRocksCreateOptions {
-        partition: Some(StarRocksPartitionOptions::Range { column_ids: vec!["ts".into(), "id".into()], partitions: vec![StarRocksRangePartition { name: "p2026".into(), lower: vec!["2026-01-01".into(), "0".into()], upper: vec!["2027-01-01".into(), "0".into()] }] }), ..Default::default()
-    }) };
+    let settings = CreateTableDialectOptions {
+        starrocks: Some(StarRocksCreateOptions {
+            partition: Some(StarRocksPartitionOptions::Range {
+                column_ids: vec!["ts".into(), "id".into()],
+                partitions: vec![StarRocksRangePartition {
+                    name: "p2026".into(),
+                    lower: vec!["2026-01-01".into(), "0".into()],
+                    upper: vec!["2027-01-01".into(), "0".into()],
+                }],
+            }),
+            ..Default::default()
+        }),
+    };
     let result = build_create_table_sql_with_dialect_options(options.clone(), Some("3.5.0"), settings.clone());
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
-    assert!(result.statements[0].contains("PARTITION BY RANGE (`ts`, `id`) (\n  PARTITION `p2026` VALUES [('2026-01-01', '0'), ('2027-01-01', '0'))\n)"));
-    assert!(result.statements[0].find("`ts` datetime").unwrap() < result.statements[0].find("`payload` varchar").unwrap());
+    assert!(result.statements[0].contains(
+        "PARTITION BY RANGE (`ts`, `id`) (\n  PARTITION `p2026` VALUES [('2026-01-01', '0'), ('2027-01-01', '0'))\n)"
+    ));
+    assert!(
+        result.statements[0].find("`ts` datetime").unwrap() < result.statements[0].find("`payload` varchar").unwrap()
+    );
     let mut invalid = settings;
-    if let Some(StarRocksPartitionOptions::Range { partitions, .. }) = invalid.starrocks.as_mut().unwrap().partition.as_mut() { partitions[0].upper.pop(); }
+    if let Some(StarRocksPartitionOptions::Range { partitions, .. }) =
+        invalid.starrocks.as_mut().unwrap().partition.as_mut()
+    {
+        partitions[0].upper.pop();
+    }
     assert!(build_create_table_sql_with_dialect_options(options, Some("3.5.0"), invalid).statements.is_empty());
 }
 
@@ -10628,7 +11141,9 @@ fn starrocks_time_slice_and_mixed_partitions_are_version_and_type_checked() {
     let result = build_create_table_sql_with_dialect_options(options.clone(), Some("3.5.0"), settings.clone());
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert!(result.statements[0].contains("PARTITION BY time_slice(`ts`, INTERVAL 7 day), `id` DISTRIBUTED"));
-    assert!(build_create_table_sql_with_dialect_options(options.clone(), Some("3.3.0"), settings.clone()).statements.is_empty());
+    assert!(build_create_table_sql_with_dialect_options(options.clone(), Some("3.3.0"), settings.clone())
+        .statements
+        .is_empty());
     let mut invalid = options;
     invalid.columns[1].data_type = "date".into();
     assert!(build_create_table_sql_with_dialect_options(invalid, Some("3.5.0"), settings).statements.is_empty());
@@ -10637,11 +11152,32 @@ fn starrocks_time_slice_and_mixed_partitions_are_version_and_type_checked() {
 #[test]
 fn starrocks_rejects_duplicate_list_values_and_incompatible_partition_types() {
     let options = structure_change_options(DatabaseType::StarRocks, None, "events", vec![column("city")]);
-    let list = CreateTableDialectOptions { starrocks: Some(StarRocksCreateOptions { partition: Some(StarRocksPartitionOptions::List {
-        column_ids: vec!["city".into()], partitions: vec![StarRocksListPartition { name: "p1".into(), values: vec![vec!["Beijing".into()], vec!["Beijing".into()]] }],
-    }), ..Default::default() }) };
+    let list = CreateTableDialectOptions {
+        starrocks: Some(StarRocksCreateOptions {
+            partition: Some(StarRocksPartitionOptions::List {
+                column_ids: vec!["city".into()],
+                partitions: vec![StarRocksListPartition {
+                    name: "p1".into(),
+                    values: vec![vec!["Beijing".into()], vec!["Beijing".into()]],
+                }],
+            }),
+            ..Default::default()
+        }),
+    };
     assert!(build_create_table_sql_with_dialect_options(options.clone(), Some("3.5.0"), list).statements.is_empty());
-    let range = CreateTableDialectOptions { starrocks: Some(StarRocksCreateOptions { partition: Some(StarRocksPartitionOptions::Range { column_ids: vec!["city".into()], partitions: vec![StarRocksRangePartition { name: "p1".into(), lower: vec!["a".into()], upper: vec!["z".into()] }] }), ..Default::default() }) };
+    let range = CreateTableDialectOptions {
+        starrocks: Some(StarRocksCreateOptions {
+            partition: Some(StarRocksPartitionOptions::Range {
+                column_ids: vec!["city".into()],
+                partitions: vec![StarRocksRangePartition {
+                    name: "p1".into(),
+                    lower: vec!["a".into()],
+                    upper: vec!["z".into()],
+                }],
+            }),
+            ..Default::default()
+        }),
+    };
     assert!(build_create_table_sql_with_dialect_options(options, Some("3.5.0"), range).statements.is_empty());
 }
 
@@ -10650,9 +11186,12 @@ fn starrocks_sort_columns_preserve_priority_and_allow_non_primary_columns() {
     let mut options = starrocks_partitioned_table_options();
     options.columns[1].is_primary_key = false;
     options.columns[1].name = "event`time".into();
-    let settings = CreateTableDialectOptions { starrocks: Some(StarRocksCreateOptions {
-        sort_column_ids: vec!["ts".into(), "id".into()], ..Default::default()
-    }) };
+    let settings = CreateTableDialectOptions {
+        starrocks: Some(StarRocksCreateOptions {
+            sort_column_ids: vec!["ts".into(), "id".into()],
+            ..Default::default()
+        }),
+    };
     let result = build_create_table_sql_with_dialect_options(options, Some("3.5.0"), settings);
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert!(result.statements[0].ends_with("DISTRIBUTED BY HASH (`id`) ORDER BY (`event``time`, `id`);"));
@@ -10663,15 +11202,24 @@ fn starrocks_sort_validates_version_identity_and_primary_table_types() {
     for case in ["old", "unknown", "missing", "duplicate", "type", "dropped"] {
         let mut options = starrocks_partitioned_table_options();
         let mut ids = vec!["ts".into()];
-        let version = match case { "old" => Some("2.5.0"), "unknown" => None, _ => Some("3.5.0") };
+        let version = match case {
+            "old" => Some("2.5.0"),
+            "unknown" => None,
+            _ => Some("3.5.0"),
+        };
         match case {
             "missing" => ids = vec!["missing".into()],
             "duplicate" => ids.push("ts".into()),
-            "type" => { options.columns[1].is_primary_key = false; options.columns[1].data_type = "decimal(10,2)".into(); },
+            "type" => {
+                options.columns[1].is_primary_key = false;
+                options.columns[1].data_type = "decimal(10,2)".into();
+            }
             "dropped" => options.columns[1].marked_for_drop = true,
             _ => {}
         }
-        let settings = CreateTableDialectOptions { starrocks: Some(StarRocksCreateOptions { sort_column_ids: ids, ..Default::default() }) };
+        let settings = CreateTableDialectOptions {
+            starrocks: Some(StarRocksCreateOptions { sort_column_ids: ids, ..Default::default() }),
+        };
         let result = build_create_table_sql_with_dialect_options(options, version, settings);
         assert!(result.statements.is_empty(), "{case}");
         assert!(!result.warnings.is_empty(), "{case}");
@@ -10681,9 +11229,13 @@ fn starrocks_sort_validates_version_identity_and_primary_table_types() {
 #[test]
 fn starrocks_duplicate_sort_requires_33_and_allows_decimal() {
     let mut options = starrocks_partitioned_table_options();
-    for column in &mut options.columns { column.is_primary_key = false; }
+    for column in &mut options.columns {
+        column.is_primary_key = false;
+    }
     options.columns[1].data_type = "decimal(10,2)".into();
-    let settings = CreateTableDialectOptions { starrocks: Some(StarRocksCreateOptions { sort_column_ids: vec!["ts".into()], ..Default::default() }) };
+    let settings = CreateTableDialectOptions {
+        starrocks: Some(StarRocksCreateOptions { sort_column_ids: vec!["ts".into()], ..Default::default() }),
+    };
     let old = build_create_table_sql_with_dialect_options(options.clone(), Some("3.2.0"), settings.clone());
     assert!(old.statements.is_empty());
     let result = build_create_table_sql_with_dialect_options(options, Some("3.5.0"), settings);
@@ -10694,9 +11246,13 @@ fn starrocks_duplicate_sort_requires_33_and_allows_decimal() {
 #[test]
 fn starrocks_default_presets_keep_literals_and_function_expressions() {
     for (data_type, default_value) in [
-        ("int", "'0'"), ("decimal(10,2)", "'1'"), ("boolean", "'false'"),
-        ("date", "1970-01-01"), ("datetime", "CURRENT_TIMESTAMP"),
-        ("varchar(36)", "(uuid())"), ("largeint", "(uuid_numeric())"),
+        ("int", "'0'"),
+        ("decimal(10,2)", "'1'"),
+        ("boolean", "'false'"),
+        ("date", "1970-01-01"),
+        ("datetime", "CURRENT_TIMESTAMP"),
+        ("varchar(36)", "(uuid())"),
+        ("largeint", "(uuid_numeric())"),
         ("varchar(20)", "''"),
     ] {
         let mut options = starrocks_partitioned_table_options();
@@ -10712,8 +11268,10 @@ fn starrocks_default_presets_keep_literals_and_function_expressions() {
 
 fn starrocks_alter_context() -> StarRocksAlterOptions {
     StarRocksAlterOptions {
-        server_version: Some("3.5.0".into()), model: Some("primary".into()),
-        key_columns: vec!["id".into()], distribution_columns: vec!["id".into()],
+        server_version: Some("3.5.0".into()),
+        model: Some("primary".into()),
+        key_columns: vec!["id".into()],
+        distribution_columns: vec!["id".into()],
         ..Default::default()
     }
 }
@@ -10755,7 +11313,11 @@ fn starrocks_alter_rejects_existing_default_changes_without_partial_sql() {
         options.table_comment = Some("must not partially execute".into());
         let result = build_table_structure_change_sql_with_context(options, Some(starrocks_alter_context()));
         assert!(result.statements.is_empty(), "{data_type}: {:?}", result.statements);
-        assert!(result.warnings.iter().any(|warning| warning.contains("cannot change the default value")), "{:?}", result.warnings);
+        assert!(
+            result.warnings.iter().any(|warning| warning.contains("cannot change the default value")),
+            "{:?}",
+            result.warnings
+        );
     }
 }
 
@@ -10777,27 +11339,42 @@ fn starrocks_alter_preserves_existing_defaults_during_other_changes() {
 fn starrocks_add_column_rejects_uuid_generators_without_partial_sql() {
     for default_value in ["(uuid())", "uuid()", " ( UUID ( ) ) ", "(uuid_numeric())", "((UUID_NUMERIC()))"] {
         let mut value = column("dad");
-        value.data_type = if default_value.to_ascii_lowercase().contains("numeric") { "largeint" } else { "varchar(255)" }.into();
+        value.data_type =
+            if default_value.to_ascii_lowercase().contains("numeric") { "largeint" } else { "varchar(255)" }.into();
         value.default_value = default_value.into();
         let mut options = structure_change_options(DatabaseType::StarRocks, None, "events", vec![value]);
         options.table_comment = Some("must not partially execute".into());
         let result = build_table_structure_change_sql_with_context(options, Some(starrocks_alter_context()));
         assert!(result.statements.is_empty(), "{default_value}: {:?}", result.statements);
-        assert!(result.warnings.iter().any(|warning| warning.contains("does not support uuid()")), "{:?}", result.warnings);
+        assert!(
+            result.warnings.iter().any(|warning| warning.contains("does not support uuid()")),
+            "{:?}",
+            result.warnings
+        );
     }
 }
 
 #[test]
 fn starrocks_add_column_keeps_type_specific_defaults() {
-    for (data_type, default_value) in [("decimal(7, 0)", "'0'"), ("datetime", "CURRENT_TIMESTAMP"), ("varchar(255)", "'uuid()'"), ("varchar(255)", "NULL")] {
+    for (data_type, default_value) in [
+        ("decimal(7, 0)", "'0'"),
+        ("datetime", "CURRENT_TIMESTAMP"),
+        ("varchar(255)", "'uuid()'"),
+        ("varchar(255)", "NULL"),
+    ] {
         let mut value = column("value");
         value.data_type = data_type.into();
         value.default_value = default_value.into();
         let options = structure_change_options(DatabaseType::StarRocks, None, "events", vec![value]);
         let result = build_table_structure_change_sql_with_context(options, Some(starrocks_alter_context()));
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
-        let expected_default = if default_value == "NULL" { String::new() } else { format!(" DEFAULT {default_value}") };
-        assert!(result.statements[0].contains(&format!("ADD COLUMN `value` {data_type} NULL{expected_default} COMMENT")), "{:?}", result.statements);
+        let expected_default =
+            if default_value == "NULL" { String::new() } else { format!(" DEFAULT {default_value}") };
+        assert!(
+            result.statements[0].contains(&format!("ADD COLUMN `value` {data_type} NULL{expected_default} COMMENT")),
+            "{:?}",
+            result.statements
+        );
     }
 }
 
@@ -10820,11 +11397,26 @@ fn starrocks_alter_rejects_unsupported_changes_without_partial_plan() {
         match case {
             "primary" => value.is_primary_key = true,
             "nullable" => value.original.as_mut().unwrap().is_nullable = true,
-            "missing" => { context.model = None; value.default_value = "0".into(); },
-            "aggregate" => { context.model = Some("aggregate".into()); value.data_type = "bigint".into(); },
-            "old_rename" => { context.server_version = Some("3.3.1".into()); value.name = "renamed".into(); },
-            "partition" => { context.partition_columns.push("value".into()); value.data_type = "bigint".into(); },
-            "drop" => { context.distribution_columns.push("value".into()); value.marked_for_drop = true; },
+            "missing" => {
+                context.model = None;
+                value.default_value = "0".into();
+            }
+            "aggregate" => {
+                context.model = Some("aggregate".into());
+                value.data_type = "bigint".into();
+            }
+            "old_rename" => {
+                context.server_version = Some("3.3.1".into());
+                value.name = "renamed".into();
+            }
+            "partition" => {
+                context.partition_columns.push("value".into());
+                value.data_type = "bigint".into();
+            }
+            "drop" => {
+                context.distribution_columns.push("value".into());
+                value.marked_for_drop = true;
+            }
             _ => {}
         }
         let mut options = structure_change_options(DatabaseType::StarRocks, None, "events", vec![value]);
@@ -10844,18 +11436,26 @@ fn starrocks_duplicate_key_alter_preserves_key_and_allows_not_null_to_null() {
     context.model = Some("duplicate".into());
     context.key_columns = vec!["key1".into()];
     let result = build_table_structure_change_sql_with_context(
-        structure_change_options(DatabaseType::StarRocks, None, "events", vec![value]), Some(context));
+        structure_change_options(DatabaseType::StarRocks, None, "events", vec![value]),
+        Some(context),
+    );
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(result.statements, vec!["ALTER TABLE `events` MODIFY COLUMN `key1` varchar(200) KEY NULL COMMENT '';"]);
 }
 
 #[test]
 fn starrocks_existing_layout_changes_use_native_sql_and_quote_values() {
-    let options = structure_change_options(DatabaseType::StarRocks, None, "events", vec![existing_pk_column("id", "bigint", true, true)]);
+    let options = structure_change_options(
+        DatabaseType::StarRocks,
+        None,
+        "events",
+        vec![existing_pk_column("id", "bigint", true, true)],
+    );
     let context: StarRocksAlterOptions = serde_json::from_value(serde_json::json!({
         "serverVersion": "3.5.0", "model": "duplicate", "keyColumns": ["id"],
         "layout": { "distribution": { "method": "hash", "columns": ["id"], "buckets": 12 } }
-    })).unwrap();
+    }))
+    .unwrap();
     let result = build_table_structure_change_sql_with_context(options, Some(context));
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(result.statements, vec!["ALTER TABLE `events` DISTRIBUTED BY HASH(`id`) BUCKETS 12;"]);
@@ -10866,10 +11466,13 @@ fn starrocks_existing_layout_changes_use_native_sql_and_quote_values() {
     })).unwrap();
     let result = build_table_structure_change_sql_with_context(options, Some(context));
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
-    assert_eq!(result.statements, vec![
-        "ALTER TABLE `events` ADD PARTITION `p``new` VALUES IN (('O''Brien', 'app'));",
-        "ALTER TABLE `events` MODIFY PARTITION (*) SET (\"replication_num\" = \"2\");"
-    ]);
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `events` ADD PARTITION `p``new` VALUES IN (('O''Brien', 'app'));",
+            "ALTER TABLE `events` MODIFY PARTITION (*) SET (\"replication_num\" = \"2\");"
+        ]
+    );
 }
 
 #[test]
@@ -10882,12 +11485,15 @@ fn starrocks_layout_blocks_conflicting_jobs_invalid_buckets_and_model() {
         ("3.5.0", "duplicate", 8, false, true),
     ] {
         let mut column = existing_pk_column("value", "varchar(20)", false, false);
-        if edited { column.name = "new_value".into(); }
+        if edited {
+            column.name = "new_value".into();
+        }
         let options = structure_change_options(DatabaseType::StarRocks, None, "events", vec![column]);
         let context: StarRocksAlterOptions = serde_json::from_value(serde_json::json!({
             "serverVersion": version, "model": model, "colocated": colocated,
             "layout": { "distribution": { "method": "random", "buckets": buckets } }
-        })).unwrap();
+        }))
+        .unwrap();
         let result = build_table_structure_change_sql_with_context(options, Some(context));
         assert!(!result.warnings.is_empty(), "{version} {model}");
         assert!(result.statements.is_empty());
@@ -10897,15 +11503,23 @@ fn starrocks_layout_blocks_conflicting_jobs_invalid_buckets_and_model() {
 #[test]
 fn starrocks_default_buckets_are_patch_version_gated() {
     for (version, supported) in [("3.5.7", false), ("3.5.8", true), ("4.0.0", false), ("4.0.1", true)] {
-        let options = structure_change_options(DatabaseType::StarRocks, None, "events", vec![existing_pk_column("id", "bigint", true, true)]);
+        let options = structure_change_options(
+            DatabaseType::StarRocks,
+            None,
+            "events",
+            vec![existing_pk_column("id", "bigint", true, true)],
+        );
         let context: StarRocksAlterOptions = serde_json::from_value(serde_json::json!({
             "serverVersion": version, "model": "primary", "keyColumns": ["id"],
             "distribution": { "method": "hash", "columns": ["id"], "buckets": 8 },
             "layout": { "distribution": { "method": "hash", "columns": ["id"], "buckets": 12, "defaultOnly": true } }
-        })).unwrap();
+        }))
+        .unwrap();
         let result = build_table_structure_change_sql_with_context(options, Some(context));
         assert_eq!(result.warnings.is_empty(), supported, "{version} {:?}", result.warnings);
-        if supported { assert_eq!(result.statements, vec!["ALTER TABLE `events` DISTRIBUTED BY HASH(`id`) DEFAULT BUCKETS 12;"]); }
+        if supported {
+            assert_eq!(result.statements, vec!["ALTER TABLE `events` DISTRIBUTED BY HASH(`id`) DEFAULT BUCKETS 12;"]);
+        }
     }
 }
 
@@ -10918,35 +11532,61 @@ fn starrocks_manual_range_and_partition_drop_sql() {
     })).unwrap();
     let result = build_table_structure_change_sql_with_context(options, Some(context));
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
-    assert_eq!(result.statements, vec![
-        "ALTER TABLE `events` ADD PARTITION `p2` VALUES [('2026-01-01'), ('2026-02-01'));",
-        "ALTER TABLE `events` DROP PARTITION `p1`;"
-    ]);
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `events` ADD PARTITION `p2` VALUES [('2026-01-01'), ('2026-02-01'));",
+            "ALTER TABLE `events` DROP PARTITION `p1`;"
+        ]
+    );
 }
 
 #[test]
 fn starrocks_automatic_bucket_scaling_blocks_distribution_but_not_partition_management() {
-    let options = structure_change_options(DatabaseType::StarRocks, None, "events", vec![existing_pk_column("id", "bigint", false, false)]);
+    let options = structure_change_options(
+        DatabaseType::StarRocks,
+        None,
+        "events",
+        vec![existing_pk_column("id", "bigint", false, false)],
+    );
     let mut context: StarRocksAlterOptions = serde_json::from_value(serde_json::json!({
         "serverVersion": "3.5.0", "model": "duplicate", "automaticBucketScaling": true,
         "layout": { "distribution": { "method": "hash", "columns": ["id"], "buckets": 16 } }
-    })).unwrap();
+    }))
+    .unwrap();
     let result = build_table_structure_change_sql_with_context(options.clone(), Some(context.clone()));
     assert!(result.statements.is_empty());
     assert!(result.warnings.iter().any(|warning| warning.contains("automatic bucket scaling")));
-    context.layout = Some(serde_json::from_value(serde_json::json!({ "partitions": [{ "kind": "replicas", "name": "*", "replicas": 2 }] })).unwrap());
+    context.layout = Some(
+        serde_json::from_value(
+            serde_json::json!({ "partitions": [{ "kind": "replicas", "name": "*", "replicas": 2 }] }),
+        )
+        .unwrap(),
+    );
     let result = build_table_structure_change_sql_with_context(options, Some(context));
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(result.statements, vec!["ALTER TABLE `events` MODIFY PARTITION (*) SET (\"replication_num\" = \"2\");"]);
 }
 
 fn starrocks_reorder_fixture() -> (TableStructureSqlOptions, StarRocksAlterOptions) {
-    let mut columns = vec![existing_pk_column("id", "bigint", false, false), existing_pk_column("price", "decimal(7, 0)", false, false), existing_pk_column("name", "varchar(500)", false, false)];
-    for (index, column) in columns.iter_mut().enumerate() { column.original_position = Some(index); }
+    let mut columns = vec![
+        existing_pk_column("id", "bigint", false, false),
+        existing_pk_column("price", "decimal(7, 0)", false, false),
+        existing_pk_column("name", "varchar(500)", false, false),
+    ];
+    for (index, column) in columns.iter_mut().enumerate() {
+        column.original_position = Some(index);
+    }
     columns.swap(1, 2);
     let options = structure_change_options(DatabaseType::StarRocks, None, "test4", columns);
-    let context = StarRocksAlterOptions { server_version: Some("3.5.0".into()), model: Some("duplicate".into()),
-        key_columns: vec!["id".into()], column_names: vec!["id".into(), "price".into(), "name".into()], position_column_order: true, ..Default::default() };
+    let context = StarRocksAlterOptions {
+        server_version: Some("3.5.0".into()),
+        model: Some("duplicate".into()),
+        key_columns: vec!["id".into()],
+        column_names: vec!["id".into(), "price".into(), "name".into()],
+        position_column_order: true,
+        ..Default::default()
+    };
     (options, context)
 }
 
@@ -10955,7 +11595,10 @@ fn starrocks_reorders_values_with_position_clauses_not_sort_keys() {
     let (options, context) = starrocks_reorder_fixture();
     let result = build_table_structure_change_sql_with_context(options, Some(context));
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
-    assert_eq!(result.statements, vec!["ALTER TABLE `test4` MODIFY COLUMN `name` varchar(500) NOT NULL COMMENT '' AFTER `id`;"]);
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `test4` MODIFY COLUMN `name` varchar(500) NOT NULL COMMENT '' AFTER `id`;"]
+    );
     assert!(result.statements.iter().all(|sql| !sql.contains("ORDER BY")));
 }
 
@@ -10971,7 +11614,9 @@ fn starrocks_reorder_guards_complete_schema_primary_keys_and_combined_add_drop()
         }
         match case {
             "primary" => context.model = Some("primary".into()),
-            "missing_column" => { options.columns.pop(); },
+            "missing_column" => {
+                options.columns.pop();
+            }
             "missing_position" => options.columns[1].original_position = None,
             "add" => options.columns.push(column("more")),
             "drop" => options.columns.last_mut().unwrap().marked_for_drop = true,
@@ -10997,21 +11642,36 @@ fn starrocks_reorders_partition_keys_preserving_key_identity_and_sort_keys() {
     name.original_position = Some(2);
     let columns = [day, id, name];
     let context = StarRocksAlterOptions {
-        server_version: Some("3.5.0".into()), model: Some("duplicate".into()),
+        server_version: Some("3.5.0".into()),
+        model: Some("duplicate".into()),
         key_columns: vec!["day".into(), "id".into()],
         partition_columns: vec!["day".into(), "id".into()],
         column_names: vec!["day".into(), "id".into(), "name".into()],
         sort_columns: Some(vec!["id".into(), "day".into()]),
-        position_column_order: true, ..Default::default()
+        position_column_order: true,
+        ..Default::default()
     };
     // Metadata's primary-key flag is false for Duplicate Key tables: use DDL key membership.
     // Keys may swap positions, but values cannot precede or split the key prefix.
-    let options = structure_change_options(DatabaseType::StarRocks, None, "test4", [1, 0, 2].map(|index| columns[index].clone()).to_vec());
+    let options = structure_change_options(
+        DatabaseType::StarRocks,
+        None,
+        "test4",
+        [1, 0, 2].map(|index| columns[index].clone()).to_vec(),
+    );
     let result = build_table_structure_change_sql_with_context(options, Some(context.clone()));
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
-    assert_eq!(result.statements, vec!["ALTER TABLE `test4` MODIFY COLUMN `id` varchar(255) KEY NOT NULL COMMENT '' FIRST;"]);
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `test4` MODIFY COLUMN `id` varchar(255) KEY NOT NULL COMMENT '' FIRST;"]
+    );
     for order in [[0, 2, 1], [2, 1, 0], [1, 2, 0]] {
-        let options = structure_change_options(DatabaseType::StarRocks, None, "test4", order.map(|index| columns[index].clone()).to_vec());
+        let options = structure_change_options(
+            DatabaseType::StarRocks,
+            None,
+            "test4",
+            order.map(|index| columns[index].clone()).to_vec(),
+        );
         let result = build_table_structure_change_sql_with_context(options, Some(context.clone()));
         assert!(result.statements.is_empty());
         assert!(result.warnings.iter().any(|warning| warning.contains("must precede all value columns")));
@@ -11026,22 +11686,35 @@ fn starrocks_reorders_around_generated_partition_sources_in_both_directions() {
     let id = existing_pk_column("id", "varchar(255)", false, false);
     let name = existing_pk_column("name", "varchar(500)", false, false);
     for day_first in [false, true] {
-        let mut columns = if day_first { vec![day.clone(), id.clone(), name.clone()] } else { vec![id.clone(), day.clone(), name.clone()] };
-        for (index, column) in columns.iter_mut().enumerate() { column.original_position = Some(index); }
+        let mut columns = if day_first {
+            vec![day.clone(), id.clone(), name.clone()]
+        } else {
+            vec![id.clone(), day.clone(), name.clone()]
+        };
+        for (index, column) in columns.iter_mut().enumerate() {
+            column.original_position = Some(index);
+        }
         let names: Vec<_> = columns.iter().map(|column| column.name.clone()).collect();
         let context = StarRocksAlterOptions {
-            server_version: Some("3.5.0".into()), model: Some("duplicate".into()),
-            key_columns: names[..2].to_vec(), partition_columns: vec!["day".into(), "id".into()],
+            server_version: Some("3.5.0".into()),
+            model: Some("duplicate".into()),
+            key_columns: names[..2].to_vec(),
+            partition_columns: vec!["day".into(), "id".into()],
             partition_expression_columns: vec!["DAY".into()],
-            column_names: names, sort_columns: Some(vec!["id".into(), "day".into()]),
-            position_column_order: true, ..Default::default()
+            column_names: names,
+            sort_columns: Some(vec!["id".into(), "day".into()]),
+            position_column_order: true,
+            ..Default::default()
         };
         columns.swap(0, 1);
         let options = structure_change_options(DatabaseType::StarRocks, None, "test4", columns);
         let result = build_table_structure_change_sql_with_context(options.clone(), Some(context.clone()));
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
         let placement = if day_first { "FIRST" } else { "AFTER `day`" };
-        assert_eq!(result.statements, vec![format!("ALTER TABLE `test4` MODIFY COLUMN `id` varchar(255) KEY NOT NULL COMMENT '' {placement};")]);
+        assert_eq!(
+            result.statements,
+            vec![format!("ALTER TABLE `test4` MODIFY COLUMN `id` varchar(255) KEY NOT NULL COMMENT '' {placement};")]
+        );
 
         let mut blocked = context;
         blocked.partition_expression_columns.push("id".into());
@@ -11057,10 +11730,13 @@ fn starrocks_reorder_preserves_renames_but_blocks_definition_changes() {
     options.columns[1].name = "new`name".into();
     let result = build_table_structure_change_sql_with_context(options.clone(), Some(context.clone()));
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
-    assert_eq!(result.statements, vec![
-        "ALTER TABLE `test4` RENAME COLUMN `name` TO `new``name`;",
-        "ALTER TABLE `test4` MODIFY COLUMN `new``name` varchar(500) NOT NULL COMMENT '' AFTER `id`;"
-    ]);
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `test4` RENAME COLUMN `name` TO `new``name`;",
+            "ALTER TABLE `test4` MODIFY COLUMN `new``name` varchar(500) NOT NULL COMMENT '' AFTER `id`;"
+        ]
+    );
     options.columns[1].data_type = "varchar(600)".into();
     let result = build_table_structure_change_sql_with_context(options, Some(context));
     assert!(result.statements.is_empty());
@@ -11082,31 +11758,44 @@ fn starrocks_reorder_is_opt_in_and_unchanged_order_is_clean() {
     assert!(result.warnings.is_empty());
 }
 
-
 #[test]
 fn starrocks_position_moves_preserve_protected_anchors_and_column_definitions() {
     let names = ["id", "x", "bucket", "y", "z"];
-    let mut columns: Vec<_> = names.iter().enumerate().map(|(index, name)| {
-        let mut column = existing_pk_column(name, "varchar(500)", false, false);
-        column.original_position = Some(index); column
-    }).collect();
+    let mut columns: Vec<_> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mut column = existing_pk_column(name, "varchar(500)", false, false);
+            column.original_position = Some(index);
+            column
+        })
+        .collect();
     let desired = [0, 4, 2, 3, 1].map(|index| columns[index].clone()).to_vec();
     let options = structure_change_options(DatabaseType::StarRocks, None, "t", desired);
-    let context = StarRocksAlterOptions { model: Some("duplicate".into()), key_columns: vec!["id".into()],
-        distribution_columns: vec!["bucket".into()], column_names: names.iter().map(|name| name.to_string()).collect(),
-        position_column_order: true, ..Default::default() };
+    let context = StarRocksAlterOptions {
+        model: Some("duplicate".into()),
+        key_columns: vec!["id".into()],
+        distribution_columns: vec!["bucket".into()],
+        column_names: names.iter().map(|name| name.to_string()).collect(),
+        position_column_order: true,
+        ..Default::default()
+    };
     let result = build_table_structure_change_sql_with_context(options, Some(context));
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(result.statements, vec!["ALTER TABLE `t` MODIFY COLUMN `z` varchar(500) NOT NULL COMMENT '' AFTER `id`, MODIFY COLUMN `x` varchar(500) NOT NULL COMMENT '' AFTER `y`;"]);
     columns.swap(0, 2);
     let options = structure_change_options(DatabaseType::StarRocks, None, "t", columns);
-    let context = StarRocksAlterOptions { model: Some("duplicate".into()), distribution_columns: vec!["id".into(), "bucket".into()],
-        column_names: names.iter().map(|name| name.to_string()).collect(), position_column_order: true, ..Default::default() };
+    let context = StarRocksAlterOptions {
+        model: Some("duplicate".into()),
+        distribution_columns: vec!["id".into(), "bucket".into()],
+        column_names: names.iter().map(|name| name.to_string()).collect(),
+        position_column_order: true,
+        ..Default::default()
+    };
     let result = build_table_structure_change_sql_with_context(options, Some(context));
     assert!(result.statements.is_empty());
     assert!(!result.warnings.is_empty());
 }
-
 
 #[test]
 fn starrocks_legacy_order_by_reordering_is_rejected() {
@@ -11144,7 +11833,10 @@ fn starrocks_sort_key_validation_guards_models_types_versions_and_full_schema() 
             "repeat" => context.sort_column_names = Some(vec!["id".into(), "id".into()]),
             "missing" => context.sort_column_names = Some(vec!["absent".into()]),
             "old" => context.server_version = Some("3.2.9".into()),
-            "primary_decimal" => { context.model = Some("primary".into()); context.sort_column_names = Some(vec!["price".into()]); },
+            "primary_decimal" => {
+                context.model = Some("primary".into());
+                context.sort_column_names = Some(vec!["price".into()]);
+            }
             "aggregate_nonkey" => context.model = Some("aggregate".into()),
             "unknown" => context.model = None,
             _ => unreachable!(),

@@ -3113,6 +3113,7 @@ mod tests {
                 foreign_table: false,
                 is_gaussdb_m_mode: false,
                 table_collation: None,
+                primary_key_name: None,
             });
         assert_eq!(create.warnings, Vec::<String>::new());
         assert_eq!(

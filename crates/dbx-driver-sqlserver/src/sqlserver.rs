@@ -2646,7 +2646,7 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
              CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, ep.value AS object_comment, {data_type} AS data_type \
              FROM sys.objects o \
              JOIN sys.schemas s ON s.schema_id = o.schema_id \
-             OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
+             OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
              WHERE o.type IN ({}) AND {object_visibility} {schema_filter} {object_like}",
             type_ids.join(",")
         ));
@@ -2762,7 +2762,7 @@ fn sqlserver_list_tables_sql_with_kind(
     let base_from = "FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep \
-           WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep";
+           WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep";
     let object_visibility = sqlserver_visible_object_predicate();
     let schema_filter = sqlserver_schema_name_predicate(schema, "s.name");
     let object_type_predicate = if table_objects_only { "o.type = 'U'" } else { "o.type IN ('U','V')" };
@@ -2897,7 +2897,7 @@ fn sqlserver_list_objects_sql(schema: &str) -> String {
          ep.value AS object_comment \
          FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
-         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
+         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
          WHERE s.name = '{s}' \
            AND o.type IN ('U','V','P','FN','IF','TF','FS','FT') \
            AND {object_visibility} \
@@ -3181,7 +3181,7 @@ fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
            JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
            WHERE i.is_primary_key = 1 \
          ) pk ON pk.object_id = c.object_id AND pk.column_id = c.column_id \
-         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep \
+         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep \
          WHERE {schema_filter} AND o.name = '{t}' AND o.type IN ('U','V') \
          ORDER BY c.column_id"
     )
@@ -3371,7 +3371,8 @@ pub fn sqlserver_table_comment_sql(schema: &str, table: &str) -> String {
     format!(
         "SELECT CAST(ep.value AS NVARCHAR(MAX)) \
          FROM sys.extended_properties ep \
-         WHERE ep.major_id = OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')) \
+         WHERE ep.class = 1 \
+           AND ep.major_id = OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')) \
            AND ep.minor_id = 0 \
            AND ep.name = N'MS_Description'"
     )
@@ -5172,7 +5173,7 @@ mod tests {
         assert!(sql.contains("FROM sys.objects o"));
         assert!(sql.contains("JOIN sys.columns c ON c.object_id = o.object_id"));
         assert!(sql.contains("sys.extended_properties ep"));
-        assert!(sql.contains("ep.major_id = c.object_id"));
+        assert!(sql.contains("ep.class = 1 AND ep.major_id = c.object_id"));
         assert!(sql.contains("ep.minor_id = c.column_id"));
         assert!(sql.contains("MS_Description"));
         assert!(sql.contains("c.is_computed = 1 THEN 'computed'"));
@@ -5221,6 +5222,7 @@ mod tests {
         let sql = sqlserver_table_comment_sql("dbo", "users");
 
         assert!(sql.contains("sys.extended_properties ep"));
+        assert!(sql.contains("ep.class = 1"));
         assert!(sql.contains("ep.minor_id = 0"));
         assert!(sql.contains("MS_Description"));
         assert!(sql.contains("QUOTENAME('dbo')"));

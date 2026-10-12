@@ -219,6 +219,70 @@ describe("EditorGroupTabBar group behavior", () => {
     host.remove();
   });
 
+  it.each(["left", "right"] as const)("applies the connection color to the active %s side tab", async (placement) => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    const connections = useConnectionStore();
+    connections.connections = [
+      { id: "pg-1", name: "Postgres", db_type: "postgres", color: "#22c55e" },
+      { id: "mysql-1", name: "MySQL", db_type: "mysql", color: "#3b82f6" },
+    ] as ConnectionConfig[];
+    settings.editorSettings.tabPlacement = placement;
+    settings.editorSettings.tabGroupMode = "none";
+    settings.editorSettings.colorizeConnectionTabs = true;
+    const inactiveTabId = store.createTab("mysql-1", "app", "Inactive", "query");
+    const tabId = store.createTab("pg-1", "app", "Active", "query");
+    const { app, host } = mountBar(store.focusedGroupId, store.tabs.slice(), tabId, pinia);
+
+    try {
+      await settle();
+      const tab = host.querySelector<HTMLElement>(`[data-tab-id="${tabId}"]`)!;
+      const inactiveTab = host.querySelector<HTMLElement>(`[data-tab-id="${inactiveTabId}"]`)!;
+      expect(tab.style.getPropertyValue("--app-tab-background")).toBe("rgba(34, 197, 94, 0.24)");
+      expect(tab.style.getPropertyValue("--app-tab-active-border")).toBe("rgba(34, 197, 94, 0.72)");
+      expect(tab.style.getPropertyValue("--app-tab-active-accent")).toBe("#22c55e");
+      expect(inactiveTab.style.getPropertyValue("--app-tab-background")).toBe("rgba(59, 130, 246, 0.09)");
+      expect(inactiveTab.style.getPropertyValue("--app-tab-hover-background")).toBe("rgba(59, 130, 246, 0.16)");
+      expect(inactiveTab.style.borderColor).toBe("rgba(59, 130, 246, 0.18)");
+
+      settings.editorSettings.colorizeConnectionTabs = false;
+      await settle();
+      expect(tab.style.getPropertyValue("--app-tab-background")).toBe("");
+      expect(tab.style.getPropertyValue("--app-tab-active-border")).toBe("");
+      expect(tab.style.getPropertyValue("--app-tab-active-accent")).toBe("");
+      expect(inactiveTab.style.getPropertyValue("--app-tab-background")).toBe("");
+      expect(inactiveTab.style.getPropertyValue("--app-tab-hover-background")).toBe("");
+      expect(inactiveTab.style.borderColor).toBe("");
+    } finally {
+      app.unmount();
+      host.remove();
+    }
+  });
+
+  it.each(["left", "right"] as const)("keeps the active %s special-page tab on the neutral active wash", async (placement) => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabPlacement = placement;
+    settings.editorSettings.tabGroupMode = "none";
+    settings.editorSettings.colorizeConnectionTabs = true;
+    store.createTab("pg-1", "app", "Query", "query");
+    const { app, host } = mountBar(store.focusedGroupId, store.tabs.slice(), store.activeTabId, pinia, {
+      specialPageTabs: { settingsOpen: true, settingsActive: true, driverStoreOpen: false, driverStoreActive: false, pluginCenterOpen: false, pluginCenterActive: false, driverUpdateCount: 0 },
+    });
+
+    try {
+      await settle();
+      const specialTab = host.querySelector<HTMLElement>("[data-settings-page-tab]")!;
+      expect(specialTab.getAttribute("data-active-tab")).toBe("true");
+      // Special pages have no connection color: the active vertical wash must
+      // come from the appTabBar.css fallback, not an inline solid override.
+      expect(specialTab.style.getPropertyValue("--app-tab-background")).toBe("");
+    } finally {
+      app.unmount();
+      host.remove();
+    }
+  });
+
   it("only reveals a right-edge group when expansion leaves every member offscreen", async () => {
     const store = useQueryStore();
     const settings = useSettingsStore();

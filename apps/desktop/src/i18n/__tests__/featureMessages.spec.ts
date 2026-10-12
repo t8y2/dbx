@@ -101,7 +101,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   {
     feature: "MQTT message direction filter (#11848)",
     keys: under("connection", ["mqttMessageDirectionFilterLabel", "mqttDirectionFilterAll", "mqttDirectionFilterReceived", "mqttDirectionFilterSent"]),
-    locales: ["en", "az", "es", "id", "it", "ja", "pt-BR", "ru", "tr", "zh-CN", "zh-TW"],
+    locales: ["en", "az", "es", "id", "it", "ja", "ko", "pt-BR", "ru", "tr", "zh-CN", "zh-TW"],
     translated: true,
   },
   { feature: "sidebar search skip hint", keys: ["sidebar.searchConnectionSkipped"] },

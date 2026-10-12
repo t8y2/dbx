@@ -744,6 +744,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 if (errorCode == -3325 || errorCode == -2207) {
                     return true;
                 }
+                if (isDamengPermissionError(candidate)) {
+                    return true;
+                }
                 String message = candidate.getMessage();
                 if (message == null) {
                     continue;
@@ -784,6 +787,27 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
         }
         return false;
+    }
+
+    /**
+     * 达梦中文环境在无权限时只返回「权限不足」（vendorCode -5669），消息里不带对象名，
+     * 无法通过 {@link #isDamengMetadataUnavailableError} 的对象名匹配识别。
+     * 这类错误同样应按「元数据不可用」处理：走字典视图降级，而不是让查看对象直接报错。
+     */
+    private static boolean isDamengPermissionError(SQLException error) {
+        if (error.getErrorCode() == -5669) {
+            return true;
+        }
+        String message = error.getMessage();
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("权限")
+            || normalized.contains("privilege")
+            || normalized.contains("permission")
+            || normalized.contains("access denied")
+            || normalized.contains("not authorized");
     }
 
     /** 连接类错误（断连/超时等）不属于元数据不可用，必须继续上抛。 */

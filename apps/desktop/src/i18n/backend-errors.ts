@@ -90,6 +90,8 @@ const exactMessageKeys: Record<string, string> = {
 
 const patterns: [RegExp, string][] = [
   [/^Plugin update blocked by active connections: ([\s\S]+)$/, "pluginPlatform.updateBlockedByConnections"],
+  // src-tauri/src/commands/plugins.rs and crates/dbx-web/src/routes/plugins.rs uninstall guard.
+  [/^Cannot uninstall plugin '(.+?)' while these connections still use it: ([\s\S]+)$/, "pluginPlatform.uninstallBlockedByConnections"],
   // crates/dbx-plugin-runtime provenance guard (installer.rs / marketplace.rs)
   [/^Plugin update source change requires confirmation:/, "pluginPlatform.updateSourceChangeRequired"],
   [/^Plugin downgrade to version .+ is not allowed/, "pluginPlatform.updateDowngradeRejected"],
@@ -171,6 +173,7 @@ const patterns: [RegExp, string][] = [
 // A bare string is shorthand for a single capture group.
 const paramNames: Record<string, string | string[]> = {
   "pluginPlatform.updateBlockedByConnections": "labels",
+  "pluginPlatform.uninstallBlockedByConnections": ["plugin", "labels"],
   "connection.driverNotInstalled": "driver",
   "connection.jreNotInstalled": "jre",
   "ai.configNameExists": "name",

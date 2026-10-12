@@ -71,6 +71,12 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     params: { labels: "Production S3, Local storage" },
   },
   {
+    name: "plugin uninstall blocked by saved plugin connections",
+    message: "Cannot uninstall plugin 'com.lwai.todo' while these connections still use it: 待办 Todo, Todo (Copy)",
+    key: "pluginPlatform.uninstallBlockedByConnections",
+    params: { plugin: "com.lwai.todo", labels: "待办 Todo, Todo (Copy)" },
+  },
+  {
     name: "plugin update waits for active operations",
     message: "Plugin update blocked by active operations. Please wait for them to finish.",
     key: "pluginPlatform.updateBlockedByOperations",

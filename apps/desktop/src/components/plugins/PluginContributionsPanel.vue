@@ -46,7 +46,7 @@ import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { InstalledPlugin, PluginInstallResult, PluginRepository, PluginRepositoryCatalogResult, PluginTrustedKey } from "@/types/database";
+import type { ConnectionConfig, InstalledPlugin, PluginInstallResult, PluginRepository, PluginRepositoryCatalogResult, PluginTrustedKey } from "@/types/database";
 import { useI18n } from "vue-i18n";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -554,6 +554,66 @@ function proceedUpdateSourceChange() {
 function cancelUpdateSourceChange() {
   pendingSourceChange.value = null;
 }
+// 卸载预检：后端守卫（src-tauri/src/commands/plugins.rs）会拒绝卸载仍被已保存连接引用的插件，
+// 这里先把依赖连接交给用户确认，避免撞到原始英文报错。
+const uninstallDependents = ref<{ pluginId: string; pluginName: string; connections: ConnectionConfig[] } | null>(null);
+
+function pluginDependentConnections(pluginId: string): ConnectionConfig[] {
+  return connectionStore.connections.filter((connection) => connection.db_type === "plugin" && connection.plugin_id === pluginId);
+}
+
+async function performUninstall(pluginId: string, pluginName: string) {
+  operating.value = true;
+  try {
+    applyInstalledPlugins(await api.uninstallPlugin(pluginId));
+    forgetGraphicsEngineGrant(pluginId);
+    retireBatchFailure(pluginId);
+    notifyComponentUpdatesChanged();
+    window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
+    clearPluginIconCache();
+    toast(t("pluginPlatform.uninstallSuccess", { name: pluginName }));
+    selectFirstProvider();
+  } catch (cause) {
+    toast(translateBackendError(t, cause), 5000);
+    // A failed uninstall can still have changed the store (the container is renamed out of the
+    // plugin store before its physical delete, for instance), so re-read the installed list
+    // instead of leaving the panel on state it may no longer describe.
+    await refreshAfterBatch();
+  } finally {
+    operating.value = false;
+  }
+}
+
+async function confirmUninstallWithDependents() {
+  const pending = uninstallDependents.value;
+  uninstallDependents.value = null;
+  // 整个级联过程（删连接 + 卸载）持有 operating 锁：removeConnections 期间
+  // mutationRunning 必须为真，否则并发的单个/批量卸载会与本次删除竞争。
+  if (!pending || mutationRunning.value) return;
+  operating.value = true;
+  try {
+    const dependentIds = pending.connections.map((connection) => connection.id);
+    await connectionStore.removeConnections(dependentIds);
+    for (const connectionId of dependentIds) {
+      // 与侧边栏删除流程相同的清理契约：页签已由 removeConnections 处理，
+      // 这里只做会话清理，且失败不能把已成功的删除变成失败。
+      connectionStore.disconnect(connectionId, { skipTabHandling: true, markClosedByUser: false }).catch((error) => {
+        console.warn("[DBX][plugin:uninstall:dependent-disconnect-failed]", { connectionId, error });
+      });
+    }
+  } catch (cause) {
+    toast(translateBackendError(t, cause), 5000);
+    await refreshAfterBatch();
+    return;
+  } finally {
+    operating.value = false;
+  }
+  await performUninstall(pending.pluginId, pending.pluginName);
+}
+
+function cancelUninstallDependents() {
+  uninstallDependents.value = null;
+}
 
 async function installListing(listing: MarketplacePluginListing, allowSourceChange = false): Promise<PluginInstallResult> {
   const result = await api.installMarketplacePlugin({
@@ -782,14 +842,20 @@ async function runBatchInstallUpdate() {
 async function runBatchUninstall() {
   const targets = batchSelectedInstalled.value;
   if (!targets.length || mutationRunning.value) return;
-  const names = targets.map((definition) => definition.plugin.manifest.name).join("、");
-  if (!window.confirm(t("pluginPlatform.batchUninstallConfirm", { count: targets.length, names }))) return;
+  // 有已保存依赖连接的插件会被后端守卫拒绝；批量里不做静默级联删除，
+  // 跳过并提示用户逐个卸载（走级联确认），与批量更新的 source-change 跳过模式一致。
+  const blocked = targets.filter((definition) => pluginDependentConnections(definition.plugin.manifest.id).length > 0);
+  const runnable = targets.filter((definition) => !blocked.includes(definition));
+  if (blocked.length) toast(t("pluginPlatform.batchUninstallDependentsSkipped", { names: blocked.map((definition) => definition.plugin.manifest.name).join("、") }), 8000);
+  if (!runnable.length) return;
+  const names = runnable.map((definition) => definition.plugin.manifest.name).join("、");
+  if (!window.confirm(t("pluginPlatform.batchUninstallConfirm", { count: runnable.length, names }))) return;
   batchRunning.value = true;
   loadError.value = "";
-  const descriptors: BatchFailureDescriptor[] = targets.map((definition) => ({ pluginId: definition.plugin.manifest.id, kind: "uninstall" }));
+  const descriptors: BatchFailureDescriptor[] = runnable.map((definition) => ({ pluginId: definition.plugin.manifest.id, kind: "uninstall" }));
   try {
     const outcome = await runBatch(
-      targets,
+      runnable,
       (definition) => definition.plugin.manifest.name,
       async (definition) => {
         await api.uninstallPlugin(definition.plugin.manifest.id);
@@ -1171,26 +1237,14 @@ async function rollbackSelectedPlugin() {
 
 async function uninstallSelectedPlugin() {
   const definition = selectedDefinition.value;
-  if (mutationRunning.value || !definition || !window.confirm(t("pluginPlatform.uninstallConfirm", { name: definition.plugin.manifest.name }))) return;
-  operating.value = true;
-  try {
-    applyInstalledPlugins(await api.uninstallPlugin(definition.plugin.manifest.id));
-    forgetGraphicsEngineGrant(definition.plugin.manifest.id);
-    retireBatchFailure(definition.plugin.manifest.id);
-    notifyComponentUpdatesChanged();
-    window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
-    clearPluginIconCache();
-    toast(t("pluginPlatform.uninstallSuccess", { name: definition.plugin.manifest.name }));
-    selectFirstProvider();
-  } catch (cause) {
-    toast(cause instanceof Error ? cause.message : String(cause), 5000);
-    // A failed uninstall can still have changed the store (the container is renamed out of the
-    // plugin store before its physical delete, for instance), so re-read the installed list
-    // instead of leaving the panel on state it may no longer describe.
-    await refreshAfterBatch();
-  } finally {
-    operating.value = false;
+  if (mutationRunning.value || !definition) return;
+  const dependents = pluginDependentConnections(definition.plugin.manifest.id);
+  if (dependents.length) {
+    uninstallDependents.value = { pluginId: definition.plugin.manifest.id, pluginName: definition.plugin.manifest.name, connections: dependents };
+    return;
   }
+  if (!window.confirm(t("pluginPlatform.uninstallConfirm", { name: definition.plugin.manifest.name }))) return;
+  await performUninstall(definition.plugin.manifest.id, definition.plugin.manifest.name);
 }
 
 watch(connectionProviders, (providers) => {
@@ -2147,6 +2201,29 @@ onBeforeUnmount(() => {
         <DialogFooter class="gap-2">
           <Button variant="outline" size="sm" @click="cancelUpdateSourceChange">{{ t("common.cancel") }}</Button>
           <Button size="sm" :disabled="mutationRunning" @click="proceedUpdateSourceChange">{{ t("pluginPlatform.updateSourceChangeConfirm") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog
+      :open="!!uninstallDependents"
+      @update:open="
+        (open: boolean) => {
+          if (!open) cancelUninstallDependents();
+        }
+      "
+    >
+      <DialogContent class="max-w-md gap-4">
+        <DialogHeader>
+          <DialogTitle class="text-sm">{{ t("pluginPlatform.uninstallDependentsTitle") }}</DialogTitle>
+          <DialogDescription class="text-xs leading-5">{{ t("pluginPlatform.uninstallDependentsBody", { name: uninstallDependents?.pluginName ?? "" }) }}</DialogDescription>
+        </DialogHeader>
+        <div v-if="uninstallDependents" class="max-h-40 overflow-y-auto rounded-md border p-2 text-xs">
+          <div v-for="connection in uninstallDependents.connections" :key="connection.id" class="truncate py-0.5">{{ connection.name }}</div>
+        </div>
+        <DialogFooter class="gap-2">
+          <Button variant="outline" size="sm" @click="cancelUninstallDependents">{{ t("common.cancel") }}</Button>
+          <Button variant="destructive" size="sm" :disabled="mutationRunning" @click="confirmUninstallWithDependents">{{ t("pluginPlatform.uninstallDependentsConfirm") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

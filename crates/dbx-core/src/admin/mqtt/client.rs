@@ -326,6 +326,8 @@ pub struct MqttClient {
     publish_send_lock: Mutex<()>,
     /// 最近接收的消息缓冲区（保留最近 N 条）
     message_buffer: RwLock<Vec<MqttMessage>>,
+    /// 串行化消息缓冲区与持久化历史之间的复合操作。
+    message_history_operation: Mutex<()>,
     /// 最大缓冲消息数
     max_buffer_size: usize,
     /// 当前订阅生命周期内已见过的保留消息指纹
@@ -419,6 +421,7 @@ impl MqttClient {
             publish_requests: Mutex::new(PublishRequestTracker::default()),
             publish_send_lock: Mutex::new(()),
             message_buffer: RwLock::new(Vec::new()),
+            message_history_operation: Mutex::new(()),
             max_buffer_size: 200,
             seen_retained: RwLock::new(RetainedDedup::new(RETAINED_DEDUP_CAPACITY)),
             event_loop_handle: RwLock::new(None),
@@ -1132,10 +1135,27 @@ impl MqttClient {
         filtered
     }
 
+    pub async fn lock_message_history(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.message_history_operation.lock().await
+    }
+
     /// 清空消息缓冲区
     pub async fn clear_messages(&self) {
         self.message_buffer.write().await.clear();
         self.seen_retained.write().await.clear();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn test_client_with_messages(messages: Vec<MqttMessage>) -> Arc<Self> {
+        let options = MqttOptionsV4::new("dbx-mqtt-test", "127.0.0.1", 1883);
+        let (backend, event_loop) = AsyncClientV4::new(options, 10);
+        drop(event_loop);
+        let shutdown_notify = Arc::new(Notify::new());
+        let client =
+            Self::new_with_backend(MqttConnectionConfig::default(), MqttBackendClient::V4(backend), shutdown_notify);
+        *client.message_buffer.write().await = messages;
+        client
     }
 
     /// 从 topic 列表构建 topic 树

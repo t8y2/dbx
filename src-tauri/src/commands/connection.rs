@@ -2403,8 +2403,6 @@ pub async fn disconnect_db(
         return Ok(());
     }
     state.running_queries.cancel_connection(&connection_id);
-    #[cfg(feature = "mq-admin")]
-    crate::commands::mqtt_cmd::persist_history_before_disconnect(state.inner(), &connection_id).await;
     state.remove_connection_pools_detached(&connection_id).await;
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
     drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;

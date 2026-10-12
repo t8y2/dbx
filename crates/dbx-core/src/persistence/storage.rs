@@ -7203,17 +7203,14 @@ impl Storage {
         self.append_mqtt_history_messages(connection_id, std::slice::from_ref(message), false).await
     }
 
-    /// Persist newly observed inbound messages without re-adding the same live
-    /// buffer entries on each console poll.
+    /// Reconcile live MQTT messages with persisted history without re-adding
+    /// entries already stored by an earlier publish or console poll.
     #[cfg(feature = "mq-admin")]
-    pub async fn append_mqtt_received_messages_if_new(
+    pub async fn reconcile_mqtt_message_history(
         &self,
         connection_id: &str,
         messages: &[MqttMessage],
     ) -> Result<(), String> {
-        if messages.iter().any(|message| message.direction != MqttMessageDirection::Received) {
-            return Err("MQTT received history accepts incoming messages only".to_string());
-        }
         self.append_mqtt_history_messages(connection_id, messages, true).await
     }
 
@@ -9780,6 +9777,52 @@ mod tests {
     use rusqlite::{Connection, TransactionBehavior};
     use std::collections::BTreeMap;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn mqtt_history_reconciliation_recovers_sent_message_after_initial_append_failure() {
+        use crate::mqtt::types::{MqttMessage, MqttMessageDirection};
+
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        storage
+            .with_conn(|connection| {
+                connection
+                    .execute_batch(
+                        "CREATE TRIGGER fail_mqtt_history_insert \
+                         BEFORE INSERT ON state_store \
+                         WHEN NEW.key = 'mqtt.sent_history.retry' \
+                         BEGIN SELECT RAISE(FAIL, 'injected mqtt history failure'); END;",
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        let message = MqttMessage {
+            topic: "devices/retry".to_string(),
+            payload_base64: "cmV0cnk=".to_string(),
+            payload_text: Some("retry".to_string()),
+            qos: 1,
+            retain: false,
+            received_at_ms: 42,
+            direction: MqttMessageDirection::Sent,
+        };
+
+        assert!(storage.append_mqtt_sent_message("retry", &message).await.is_err());
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch("DROP TRIGGER fail_mqtt_history_insert").map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+
+        storage.reconcile_mqtt_message_history("retry", std::slice::from_ref(&message)).await.unwrap();
+        storage.reconcile_mqtt_message_history("retry", std::slice::from_ref(&message)).await.unwrap();
+
+        let history = storage.load_mqtt_message_history("retry").await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(super::mqtt_history_message_identity(&history[0]), super::mqtt_history_message_identity(&message));
+    }
 
     #[tokio::test]
     async fn migration_scan_cache_recovers_legacy_success_with_stale_counts() {

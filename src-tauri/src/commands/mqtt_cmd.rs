@@ -1,5 +1,6 @@
 use serde_json::json;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use tauri::State;
 
@@ -59,22 +60,6 @@ async fn get_mqtt_client(
     match pool {
         PoolKind::Mqtt(client) => Ok(client),
         _ => Err(format!("连接 {} 不是 MQTT 类型", connection_id)),
-    }
-}
-
-/// 断开连接前归档客户端缓冲区中的接收消息，包含暂停显示期间到达的消息。
-pub async fn persist_history_before_disconnect(state: &AppState, connection_id: &str) {
-    let Ok(client) = get_mqtt_client(state, connection_id).await else {
-        return;
-    };
-    let received_messages = service::get_messages(&client, None, MQTT_LIVE_MESSAGE_LIMIT)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|message| message.direction == MqttMessageDirection::Received)
-        .collect::<Vec<_>>();
-    if let Err(error) = state.storage.append_mqtt_received_messages_if_new(connection_id, &received_messages).await {
-        log::warn!("断开 MQTT 连接前保存接收历史失败: {error}");
     }
 }
 
@@ -167,6 +152,7 @@ pub async fn mqtt_publish(
     request: MqttPublishRequest,
 ) -> Result<(), String> {
     let client = get_mqtt_client(&state, &connection_id).await?;
+    let _history_guard = client.lock_message_history().await;
     let published_message = service::publish(&client, &request).await?;
 
     if let Err(error) = state.storage.append_mqtt_sent_message(&connection_id, &published_message).await {
@@ -213,15 +199,35 @@ pub async fn mqtt_get_messages(
     topic_filter: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<MqttMessage>, String> {
-    let client = get_mqtt_client(&state, &connection_id).await?;
+    mqtt_get_messages_inner(&state, connection_id, topic_filter, limit).await
+}
+
+async fn mqtt_get_messages_inner(
+    state: &AppState,
+    connection_id: String,
+    topic_filter: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<MqttMessage>, String> {
+    mqtt_get_messages_inner_with_hook(state, connection_id, topic_filter, limit, || async {}).await
+}
+
+async fn mqtt_get_messages_inner_with_hook<F, Fut>(
+    state: &AppState,
+    connection_id: String,
+    topic_filter: Option<String>,
+    limit: Option<usize>,
+    after_snapshot: F,
+) -> Result<Vec<MqttMessage>, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let client = get_mqtt_client(state, &connection_id).await?;
+    let _history_guard = client.lock_message_history().await;
     let live_messages = service::get_messages(&client, None, MQTT_LIVE_MESSAGE_LIMIT).await?;
-    let received_messages = live_messages
-        .iter()
-        .filter(|message| message.direction == MqttMessageDirection::Received)
-        .cloned()
-        .collect::<Vec<_>>();
-    if let Err(error) = state.storage.append_mqtt_received_messages_if_new(&connection_id, &received_messages).await {
-        log::warn!("保存 MQTT 接收历史失败: {error}");
+    after_snapshot().await;
+    if let Err(error) = state.storage.reconcile_mqtt_message_history(&connection_id, &live_messages).await {
+        log::warn!("保存 MQTT 消息历史失败: {error}");
     }
     let history = match state.storage.load_mqtt_message_history(&connection_id).await {
         Ok(history) => history,
@@ -258,7 +264,84 @@ pub async fn mqtt_get_messages(
 /// 清空消息历史记录
 #[tauri::command]
 pub async fn mqtt_clear_messages(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
-    let client = get_mqtt_client(&state, &connection_id).await?;
+    mqtt_clear_messages_inner(&state, connection_id).await
+}
+
+async fn mqtt_clear_messages_inner(state: &AppState, connection_id: String) -> Result<(), String> {
+    mqtt_clear_messages_inner_with_hook(state, connection_id, || async {}).await
+}
+
+async fn mqtt_clear_messages_inner_with_hook<F, Fut>(
+    state: &AppState,
+    connection_id: String,
+    before_lock: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let client = get_mqtt_client(state, &connection_id).await?;
+    before_lock().await;
+    let _history_guard = client.lock_message_history().await;
     service::clear_messages(&client).await?;
     state.storage.clear_mqtt_message_history(&connection_id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dbx_core::mqtt::client::MqttClient;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn clear_waits_for_poll_reconciliation_and_prevents_snapshot_writeback() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let message = MqttMessage {
+            topic: "devices/race".to_string(),
+            payload_base64: "cmFjZQ==".to_string(),
+            payload_text: Some("race".to_string()),
+            qos: 1,
+            retain: false,
+            received_at_ms: 7,
+            direction: MqttMessageDirection::Received,
+        };
+        let client = MqttClient::test_client_with_messages(vec![message]).await;
+        state
+            .update_connection_pools(|connections| {
+                connections.insert("mqtt-race".to_string(), PoolKind::Mqtt(client.clone()));
+            })
+            .await;
+
+        let (snapshot_tx, snapshot_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let poll_state = Arc::clone(&state);
+        let poll = tokio::spawn(async move {
+            mqtt_get_messages_inner_with_hook(&poll_state, "mqtt-race".to_string(), None, None, || async move {
+                snapshot_tx.send(()).unwrap();
+                resume_rx.await.unwrap();
+            })
+            .await
+        });
+        snapshot_rx.await.unwrap();
+
+        let (clear_started_tx, clear_started_rx) = oneshot::channel();
+        let clear_state = Arc::clone(&state);
+        let clear = tokio::spawn(async move {
+            mqtt_clear_messages_inner_with_hook(&clear_state, "mqtt-race".to_string(), || async move {
+                clear_started_tx.send(()).unwrap();
+            })
+            .await
+        });
+        clear_started_rx.await.unwrap();
+        assert!(!clear.is_finished());
+
+        resume_tx.send(()).unwrap();
+        assert_eq!(poll.await.unwrap().unwrap().len(), 1);
+        clear.await.unwrap().unwrap();
+
+        assert!(client.get_messages(None, MQTT_LIVE_MESSAGE_LIMIT).await.is_empty());
+        assert!(state.storage.load_mqtt_message_history("mqtt-race").await.unwrap().is_empty());
+    }
 }

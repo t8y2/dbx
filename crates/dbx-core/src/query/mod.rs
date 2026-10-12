@@ -861,6 +861,22 @@ async fn connection_database_type(state: &AppState, connection_id: &str) -> Opti
     configs.get(connection_id).map(|config| config.db_type)
 }
 
+async fn connection_statement_split_database_type(state: &AppState, connection_id: &str) -> Option<DatabaseType> {
+    let configs = state.configs.read().await;
+    configs.get(connection_id).map(statement_split_database_type)
+}
+
+/// A generic JDBC connection to Oracle runs PL/SQL through the JDBC plugin, so its
+/// script is split with the Oracle rules. The plain `Jdbc` profile would cut every
+/// routine body at its first inner semicolon and replace the object with the fragment.
+fn statement_split_database_type(config: &ConnectionConfig) -> DatabaseType {
+    if crate::schema::is_oracle_external_driver_config(config) {
+        DatabaseType::Oracle
+    } else {
+        config.db_type
+    }
+}
+
 async fn connection_sql_compatibility_mode(
     state: &AppState,
     pool_key: &str,
@@ -3559,8 +3575,9 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
     let compatibility_mode = connection_sql_compatibility_mode(state, &pool_key, db_type).await;
     let complete_sqlserver_agent_batch =
         is_sqlserver_agent && sqlserver_agent_batch::requires_complete_results(sql, &options);
+    let split_db_type = connection_statement_split_database_type(state, connection_id).await;
     let execution_plan =
-        query_execution_plan_with_compatibility(sql, db_type, is_sqlserver_agent, compatibility_mode.as_deref());
+        query_execution_plan_with_compatibility(sql, split_db_type, is_sqlserver_agent, compatibility_mode.as_deref());
     let continue_on_error = options.continue_on_error && !execution_plan.stop_on_error;
     let statements = execution_plan.statements;
     if statements.is_empty() {
@@ -10360,6 +10377,22 @@ for line in sys.stdin:
         let plan = query_execution_plan(sql, Some(DatabaseType::SqlServer), true);
 
         assert_eq!(plan.statements, vec!["DECLARE @x TABLE (id INT);\nINSERT INTO @x VALUES (1);", "SELECT 2;"]);
+    }
+
+    #[test]
+    fn jdbc_oracle_execution_plan_keeps_plsql_units_whole() {
+        let mut oracle = test_connection_config(DatabaseType::Jdbc);
+        oracle.connection_string = Some("jdbc:oracle:thin:@//127.0.0.1:1521/FREEPDB1".to_string());
+        let function = "CREATE OR REPLACE EDITIONABLE FUNCTION \"APP\".\"F\" (p VARCHAR2) RETURN VARCHAR2 IS\n\
+                        l_ret VARCHAR2(200);\nBEGIN\n  SELECT p INTO l_ret FROM dual;\n  RETURN l_ret;\nEND;";
+
+        let plan = query_execution_plan(function, Some(statement_split_database_type(&oracle)), false);
+
+        assert_eq!(plan.statements, vec![function]);
+
+        let mut other = test_connection_config(DatabaseType::Jdbc);
+        other.connection_string = Some("jdbc:h2:mem:test".to_string());
+        assert_eq!(statement_split_database_type(&other), DatabaseType::Jdbc);
     }
 
     #[test]

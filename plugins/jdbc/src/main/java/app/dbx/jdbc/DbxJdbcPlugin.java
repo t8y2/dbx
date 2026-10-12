@@ -57,6 +57,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -74,6 +75,18 @@ public final class DbxJdbcPlugin {
     private static final String PHOENIX_VARBINARY_ENCODED_TYPE_NAME = "VARBINARY_ENCODED";
     private static final Pattern PHOENIX_SYSTEM_CATALOG_WILDCARD = Pattern.compile(
         "^SELECT\\s+\\*\\s+FROM\\s+(?:SYSTEM|\\\"SYSTEM\\\")\\s*\\.\\s*(?:CATALOG|\\\"CATALOG\\\")$",
+        Pattern.CASE_INSENSITIVE
+    );
+    // Mirrors `trimStatementSQL` in the native oracle-go agent: a PL/SQL unit must keep the
+    // `;` after its final END, while a plain Oracle SQL statement must not end with one.
+    private static final Pattern ORACLE_PLSQL_BLOCK_START = Pattern.compile(
+        "^\\s*(?:DECLARE|BEGIN|CREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:(?:EDITIONABLE|NONEDITIONABLE)\\s+)?"
+            + "(?:FUNCTION|PROCEDURE|TRIGGER|PACKAGE(?:\\s+BODY)?|TYPE(?:\\s+BODY)?))\\b",
+        Pattern.CASE_INSENSITIVE | Pattern.DOTALL
+    );
+    private static final Pattern ORACLE_PLSQL_BLOCK_END = Pattern.compile("\\bEND\\s*;\\s*$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern ORACLE_NAMED_PLSQL_BLOCK_END = Pattern.compile(
+        "\\bEND\\s+([A-Z0-9_$#]+)\\s*;\\s*$",
         Pattern.CASE_INSENSITIVE
     );
     private static final String[] DEFAULT_TABLE_TYPES = new String[] {
@@ -1413,7 +1426,7 @@ public final class DbxJdbcPlugin {
             trackActiveStatement(statement);
             if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
-            String trimmedSql = trimStatementSql(sql);
+            String trimmedSql = trimStatementSql(sql, isOracleUrl(jdbcUrl(connection)));
             String effectiveSql = rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
             ExecutedStatement executed = executeStatementForResultWithAdhocRetry(connection, statement, effectiveSql, quirks);
             ObjectNode result = MAPPER.createObjectNode();
@@ -1600,7 +1613,7 @@ public final class DbxJdbcPlugin {
         try {
             if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
-            String trimmedSql = trimStatementSql(sql);
+            String trimmedSql = trimStatementSql(sql, isOracleUrl(jdbcUrl(connection)));
             String effectiveSql = rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
             ExecutedStatement executed = executeStatementForResultWithAdhocRetry(connection, statement, effectiveSql, quirks);
             ResultSet rs = executed.resultSet();
@@ -2283,6 +2296,44 @@ public final class DbxJdbcPlugin {
 
     private static String trimStatementSql(String sql) {
         return sql == null ? "" : sql.trim().replaceFirst(";\\s*$", "");
+    }
+
+    static String trimStatementSql(String sql, boolean oracle) {
+        if (!oracle) {
+            return trimStatementSql(sql);
+        }
+        String trimmed = stripTrailingOracleSlashDelimiter(sql == null ? "" : sql.trim());
+        return isOraclePlSqlBlock(trimmed) ? trimmed : trimStatementSql(trimmed);
+    }
+
+    private static String stripTrailingOracleSlashDelimiter(String sql) {
+        if (!sql.endsWith("/")) {
+            return sql;
+        }
+        int slash = sql.length() - 1;
+        int lineStart = sql.lastIndexOf('\n', slash - 1) + 1;
+        if (!sql.substring(lineStart, slash).isBlank()) {
+            return sql;
+        }
+        String beforeSlash = sql.substring(0, lineStart).trim();
+        // A standalone `/` line is the SQL*Plus command that runs a PL/SQL unit; the
+        // driver needs only the unit itself.
+        return isOraclePlSqlBlock(beforeSlash) ? beforeSlash : sql;
+    }
+
+    private static boolean isOraclePlSqlBlock(String sql) {
+        if (!ORACLE_PLSQL_BLOCK_START.matcher(stripLeadingSqlComments(sql)).find()) {
+            return false;
+        }
+        if (ORACLE_PLSQL_BLOCK_END.matcher(sql).find()) {
+            return true;
+        }
+        Matcher named = ORACLE_NAMED_PLSQL_BLOCK_END.matcher(sql);
+        if (!named.find()) {
+            return false;
+        }
+        String label = named.group(1).toUpperCase(Locale.ROOT);
+        return !label.equals("IF") && !label.equals("LOOP") && !label.equals("CASE");
     }
 
     private static boolean isSafeAutotraceSql(String sql) {

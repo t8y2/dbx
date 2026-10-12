@@ -117,7 +117,8 @@ export interface PlDebugFrameSourceView {
 }
 
 /**
- * State of one live PL/SQL debugging session (OceanBase Oracle).
+ * State of one live PL/SQL debugging session (Oracle; the OceanBase Oracle
+ * agent lives on the feature/ob-oracle-pl-debug branch).
  *
  * The store is a thin coordinator over the Tauri APIs: it keeps the session
  * handle, mirrors the agent status snapshot and caches the debugger panels

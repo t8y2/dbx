@@ -39,7 +39,8 @@ pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
 pub const DEFAULT_BATCH_SIZE: usize = 500;
 pub const CREATE_TABLE_INFERENCE_ROWS: usize = 100;
 /// 分隔文本、`.sql` 脚本与 JSON 都已改为流式解析，不再受体积上限约束；
-/// 该上限只保留给仍然需要整份物化的 Excel（xlsx）。
+/// `.xlsx`/`.xlsm` 的预览与导入同样按增量方式读取工作表；
+/// 该上限只保留给仍然需要整份物化的旧版 `.xls`，以及被显式标记为 Excel 的其他文件。
 pub const MAX_NON_STREAMING_IMPORT_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_LEGACY_XLS_IMPORT_BYTES: u64 = 50 * 1024 * 1024;
 const IMPORT_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -3712,6 +3713,16 @@ fn is_legacy_xls_path(path: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("xls"))
 }
 
+/// `.xlsx`/`.xlsm` 由增量解析器处理：预览只读取需要的工作表行，导入按有界批次流式产出，
+/// 内存占用不随工作簿体积增长。calamine 的旧版 `.xls` 读取器会一次读入整个工作簿，
+/// 因此只有这两个扩展名可以跳过非流式体积上限。
+fn excel_path_streams_incrementally(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("xlsx") || extension.eq_ignore_ascii_case("xlsm"))
+}
+
 fn xlsx_style_selection_columns<T, Label>(range: &Range<T>, row_range: ImportRowRange, cell_label: Label) -> Vec<String>
 where
     T: CellType,
@@ -3762,9 +3773,8 @@ fn parse_xlsx_file_with_options_and_text_columns(
     } else {
         sheet_names.first().cloned().ok_or_else(|| "Workbook has no sheets".to_string())?
     };
-    let extension = Path::new(path).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
     let legacy_xls = is_legacy_xls_path(path);
-    if extension.eq_ignore_ascii_case("xlsx") || extension.eq_ignore_ascii_case("xlsm") {
+    if excel_path_streams_incrementally(path) {
         let range = workbook.worksheet_range_ref(&sheet_name).map_err(|e| e.to_string())?;
         let row_range = effective_import_row_range(options)?;
         let style_selection_columns =
@@ -4508,17 +4518,18 @@ pub fn parse_xlsx_file(path: &str, preview_limit: usize) -> Result<ParsedImportF
 }
 
 fn ensure_non_streaming_file_size(path: &str, format: TableImportSourceFormat) -> Result<(), String> {
-    // 分隔文本、SQL 脚本与 JSON 都是流式解析，内存占用不随文件体积增长，没有体积上限。
+    // 分隔文本、SQL 脚本、JSON、Parquet 与 `.xlsx`/`.xlsm` 都是流式解析，
+    // 内存占用不随文件体积增长，没有体积上限。
     if format.is_delimited()
         || format == TableImportSourceFormat::Sql
         || format == TableImportSourceFormat::Json
         || format == TableImportSourceFormat::Parquet
+        || (format == TableImportSourceFormat::Excel && excel_path_streams_incrementally(path))
     {
         return Ok(());
     }
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    let extension = Path::new(path).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
-    let max_bytes = if format == TableImportSourceFormat::Excel && extension.eq_ignore_ascii_case("xls") {
+    let max_bytes = if format == TableImportSourceFormat::Excel && is_legacy_xls_path(path) {
         MAX_LEGACY_XLS_IMPORT_BYTES
     } else {
         MAX_NON_STREAMING_IMPORT_BYTES
@@ -4604,10 +4615,7 @@ async fn parse_import_preview_file_with_options(
     }
 
     ensure_non_streaming_file_size(path, format)?;
-    let extension = Path::new(path).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
-    if format == TableImportSourceFormat::Excel
-        && (extension.eq_ignore_ascii_case("xlsx") || extension.eq_ignore_ascii_case("xlsm"))
-    {
+    if format == TableImportSourceFormat::Excel && excel_path_streams_incrementally(path) {
         let path = path.to_string();
         let options = options.clone();
         let (parsed, sheets) =
@@ -7703,11 +7711,7 @@ where
         return Ok(import_summary(&request.import_id, rows_imported, rows_imported, started_at));
     }
 
-    let extension =
-        Path::new(&request.file_path).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
-    if source_format == TableImportSourceFormat::Excel
-        && (extension.eq_ignore_ascii_case("xlsx") || extension.eq_ignore_ascii_case("xlsm"))
-    {
+    if source_format == TableImportSourceFormat::Excel && excel_path_streams_incrementally(&request.file_path) {
         let total_bytes = tokio::fs::metadata(&request.file_path).await.map(|metadata| metadata.len()).unwrap_or(0);
         progress_callback(import_progress_with_details(
             &request.import_id,
@@ -10782,9 +10786,9 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// `.sql` 与 JSON 都已经改成流式解析，不应再受 100 MB 非流式上限约束。
+    /// `.sql`、JSON 与 `.xlsx`/`.xlsm` 都已经改成流式解析，不应再受 100 MB 非流式上限约束。
     #[test]
-    fn sql_and_json_imports_are_not_size_capped() {
+    fn streaming_imports_are_not_size_capped() {
         let path = std::env::temp_dir().join(format!("dbx-table-import-limit-{}.sql", uuid::Uuid::new_v4()));
         let file = File::create(&path).unwrap();
         file.set_len(MAX_NON_STREAMING_IMPORT_BYTES + 1).unwrap();
@@ -10796,11 +10800,32 @@ mod tests {
         let xlsx_file = File::create(&xlsx_path).unwrap();
         xlsx_file.set_len(MAX_NON_STREAMING_IMPORT_BYTES + 1).unwrap();
         drop(xlsx_file);
-        let error =
-            ensure_non_streaming_file_size(&xlsx_path.to_string_lossy(), TableImportSourceFormat::Excel).unwrap_err();
-        assert!(error.contains("File too large for excel import"), "{error}");
+        ensure_non_streaming_file_size(&xlsx_path.to_string_lossy(), TableImportSourceFormat::Excel).unwrap();
+        ensure_non_streaming_file_size(&xlsx_path.to_string_lossy(), TableImportSourceFormat::Json).unwrap();
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(xlsx_path);
+    }
+
+    /// `.xlsm` 与 `.xlsx` 走同一条流式解析路径，因此同样不受非流式上限约束；
+    /// 其他被显式标记为 Excel 的路径仍然由 calamine 整份读入，必须保留上限。
+    #[test]
+    fn macro_enabled_workbooks_stream_but_materialized_excel_paths_stay_capped() {
+        let xlsm_path = std::env::temp_dir().join(format!("dbx-table-import-limit-{}.xlsm", uuid::Uuid::new_v4()));
+        let xlsm_file = File::create(&xlsm_path).unwrap();
+        xlsm_file.set_len(MAX_NON_STREAMING_IMPORT_BYTES + 1).unwrap();
+        drop(xlsm_file);
+        ensure_non_streaming_file_size(&xlsm_path.to_string_lossy(), TableImportSourceFormat::Excel).unwrap();
+
+        let mislabeled_path = std::env::temp_dir().join(format!("dbx-table-import-limit-{}.txt", uuid::Uuid::new_v4()));
+        let mislabeled_file = File::create(&mislabeled_path).unwrap();
+        mislabeled_file.set_len(MAX_NON_STREAMING_IMPORT_BYTES + 1).unwrap();
+        drop(mislabeled_file);
+        let error = ensure_non_streaming_file_size(&mislabeled_path.to_string_lossy(), TableImportSourceFormat::Excel)
+            .unwrap_err();
+        assert!(error.contains("File too large for excel import"), "{error}");
+
+        let _ = std::fs::remove_file(xlsm_path);
+        let _ = std::fs::remove_file(mislabeled_path);
     }
 
     /// 流式 `.sql` 在读完整份脚本之前，`total_rows` 只是已解析的部分行数。

@@ -7700,7 +7700,7 @@ mod tests {
                         column_types: Some(vec![Some(data_type.to_string())]),
                         source_columns: None,
                         rows: vec![vec![json!(value)], vec![Value::Null]],
-                        exclude_primary_keys: false,
+                        primary_key_mode: DataGridPrimaryKeyMode::Include,
                         include_computed_columns: false,
                         include_database_name: false,
                         insert_mode: DataGridCopyInsertMode::RowByRow,

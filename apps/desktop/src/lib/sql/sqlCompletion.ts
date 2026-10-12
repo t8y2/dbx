@@ -987,6 +987,16 @@ function getFunctionDescriptions(t?: SqlCompletionTranslations): Map<string, str
     ["JSON_VALUE", d.JSON_VALUE || "Extracts a scalar value from JSON"],
     ["JSON_OBJECT", d.JSON_OBJECT || "Creates a JSON object"],
     ["JSON_ARRAY", d.JSON_ARRAY || "Creates a JSON array"],
+    ["TIMESTAMPADD", d.TIMESTAMPADD || "Adds an interval to a datetime"],
+    ["DAYNAME", d.DAYNAME || "Returns the name of the weekday"],
+    ["WEEKOFYEAR", d.WEEKOFYEAR || "Returns the calendar week of the date"],
+    ["YEARWEEK", d.YEARWEEK || "Returns the year and week for a date"],
+    ["TIME_TO_SEC", d.TIME_TO_SEC || "Converts a time value to seconds"],
+    ["SEC_TO_TIME", d.SEC_TO_TIME || "Converts seconds to a time value"],
+    ["CONVERT_TZ", d.CONVERT_TZ || "Converts a datetime from one timezone to another"],
+    ["REGEXP_LIKE", d.REGEXP_LIKE || "Matches a string against a regular expression pattern"],
+    ["REGEXP_SUBSTR", d.REGEXP_SUBSTR || "Returns a substring matching a regular expression pattern"],
+    ["REGEXP_INSTR", d.REGEXP_INSTR || "Returns the starting index of a substring matching a pattern"],
   ]);
 }
 
@@ -1110,6 +1120,8 @@ const MYSQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["DATE_SUB", ["date", "INTERVAL expr unit"]],
   ["DATEDIFF", ["date1", "date2"]],
   ["TIMESTAMPDIFF", ["unit", "datetime_expr1", "datetime_expr2"]],
+  ["TIMESTAMPADD", ["unit", "interval", "datetime_expr"]],
+  ["EXTRACT", ["unit FROM date"]],
   ["YEAR", ["date"]],
   ["MONTH", ["date"]],
   ["DAY", ["date"]],
@@ -1134,6 +1146,15 @@ const MYSQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["TO_DAYS", ["date"]],
   ["MAKEDATE", ["year", "day_of_year"]],
   ["MAKETIME", ["hour", "minute", "second"]],
+  ["DAYNAME", ["date"]],
+  ["WEEKOFYEAR", ["date"]],
+  ["YEARWEEK", ["date"]],
+  ["TIME_TO_SEC", ["time"]],
+  ["SEC_TO_TIME", ["seconds"]],
+  ["CONVERT_TZ", ["dt", "from_tz", "to_tz"]],
+  ["PERIOD_ADD", ["period", "months"]],
+  ["PERIOD_DIFF", ["period1", "period2"]],
+  ["TO_SECONDS", ["expr"]],
   ["IFNULL", ["expression", "fallback"]],
   ["IF", ["condition", "true_value", "false_value"]],
   ["CONCAT_WS", ["separator", "...values"]],
@@ -1153,6 +1174,10 @@ const MYSQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["ELT", ["index", "string1", "...strings"]],
   ["FIELD", ["value", "value1", "...values"]],
   ["MAKE_SET", ["bits", "string1", "...strings"]],
+  ["REGEXP_LIKE", ["expr", "pattern"]],
+  ["REGEXP_REPLACE", ["expr", "pattern", "replacement"]],
+  ["REGEXP_SUBSTR", ["expr", "pattern"]],
+  ["REGEXP_INSTR", ["expr", "pattern"]],
   ["RAND", []],
   ["POW", ["base", "exponent"]],
   ["EXP", ["number"]],
@@ -1279,11 +1304,17 @@ const MANTICORESEARCH_FUNCTION_SIGNATURES = new Map<string, string[]>([
 ]);
 
 // 同一 SQL 方言族的兼容库共享一张函数表（以及函数插入模板），避免为每个兼容库重复维护同一份数据
-const MYSQL_COMPAT_FUNCTION_DATABASES = new Set<DatabaseType>(["mysql", "goldendb"]);
+const MYSQL_COMPAT_FUNCTION_DATABASES = new Set<DatabaseType>(["mysql", "goldendb", "gbase"]);
 const POSTGRES_COMPAT_FUNCTION_DATABASES = new Set<DatabaseType>(["postgres", "redshift", "kingbase", "highgo", "uxdb", "vastbase", "gaussdb", "opengauss", "sundb"]);
 const ORACLE_COMPAT_FUNCTION_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "dameng", "yashandb", "oscar", "xugu"]);
 const HIVE_SPARK_COMPAT_FUNCTION_DATABASES = new Set<DatabaseType>(["hive", "spark", "databricks", "impala", "transwarp", "kyuubi", "argo"]);
 const TRINO_COMPAT_FUNCTION_DATABASES = new Set<DatabaseType>(["trino", "prestosql"]);
+
+/**
+ * Apache Doris / StarRocks 有意兼容 MySQL 语法，因此以 MySQL 函数表作为基线，
+ * 再叠加 Doris / StarRocks 特有的分析/位图/HLL/数组函数（同名函数以 Doris 表为准）。
+ */
+const DORIS_COMPAT_FUNCTION_SIGNATURES = new Map<string, string[]>([...MYSQL_FUNCTION_SIGNATURES, ...DORIS_FUNCTION_SIGNATURES]);
 
 const DATABASE_FUNCTION_SIGNATURES: Partial<Record<DatabaseType, Map<string, string[]>>> = {
   sqlite: SQLITE_FUNCTION_SIGNATURES,
@@ -1292,8 +1323,8 @@ const DATABASE_FUNCTION_SIGNATURES: Partial<Record<DatabaseType, Map<string, str
   "cloudflare-d1": CLOUDFLARE_D1_FUNCTION_SIGNATURES,
   sqlserver: SQLSERVER_FUNCTION_SIGNATURES,
   manticoresearch: MANTICORESEARCH_FUNCTION_SIGNATURES,
-  doris: DORIS_FUNCTION_SIGNATURES,
-  starrocks: DORIS_FUNCTION_SIGNATURES,
+  doris: DORIS_COMPAT_FUNCTION_SIGNATURES,
+  starrocks: DORIS_COMPAT_FUNCTION_SIGNATURES,
   duckdb: DUCKDB_FUNCTION_SIGNATURES,
 };
 
@@ -1311,6 +1342,7 @@ for (const [databaseTypes, signatures] of [
 /**
  * 取当前方言的「函数插入模板」：EXTRACT / POSITION / LISTAGG / PERCENTILE_CONT 这类函数的参数
  * 不是逗号列表，必须按模板插入；模板与签名表同源于方言族。DuckDB 沿用 PG 风格语法，共用 PG 模板。
+ * Doris 和 StarRocks 沿用 MySQL 风格语法，共用 MySQL 模板。
  */
 function functionApplyTemplate(databaseType: DatabaseType | undefined, name: string): string | undefined {
   if (!databaseType) return undefined;
@@ -1318,14 +1350,17 @@ function functionApplyTemplate(databaseType: DatabaseType | undefined, name: str
   if (databaseType === "duckdb" || POSTGRES_COMPAT_FUNCTION_DATABASES.has(databaseType)) return POSTGRES_FUNCTION_APPLY_TEMPLATES.get(name);
   if (HIVE_SPARK_COMPAT_FUNCTION_DATABASES.has(databaseType)) return HIVE_SPARK_FUNCTION_APPLY_TEMPLATES.get(name);
   if (TRINO_COMPAT_FUNCTION_DATABASES.has(databaseType)) return TRINO_FUNCTION_APPLY_TEMPLATES.get(name);
-  if (MYSQL_COMPAT_FUNCTION_DATABASES.has(databaseType)) return MYSQL_FUNCTION_APPLY_TEMPLATES.get(name);
+  if (MYSQL_COMPAT_FUNCTION_DATABASES.has(databaseType) || databaseType === "doris" || databaseType === "starrocks") return MYSQL_FUNCTION_APPLY_TEMPLATES.get(name);
   return undefined;
 }
 
 const MYSQL_FUNCTION_APPLY_TEMPLATES = new Map<string, string>([
   ["DATE_ADD", "DATE_ADD(${date}, INTERVAL ${expr} ${unit})"],
   ["DATE_SUB", "DATE_SUB(${date}, INTERVAL ${expr} ${unit})"],
+  ["ADDDATE", "ADDDATE(${date}, INTERVAL ${expr} ${unit})"],
+  ["SUBDATE", "SUBDATE(${date}, INTERVAL ${expr} ${unit})"],
   ["POSITION", "POSITION(${substring} IN ${string})"],
+  ["EXTRACT", "EXTRACT(${unit} FROM ${date})"],
 ]);
 
 const COMMON_SQL_FUNCTION_NAMES = new Set([

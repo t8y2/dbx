@@ -222,7 +222,7 @@ import {
   type ShortcutScope,
 } from "@/lib/editor/shortcutRegistry";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
+import { formatShortcutDisplay, normalizeShortcutSearch } from "@/lib/editor/shortcutDisplay";
 import { COLUMN_NAME_COPY_SEPARATOR_LABELS, COLUMN_NAME_COPY_SEPARATOR_OPTIONS, isColumnNameCopySeparator, type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletions";
@@ -2227,10 +2227,14 @@ const formatterEditorShortcutDefinitions = computed(() => formatterEditorShortcu
 const filteredShortcutDefinitions = computed(() => {
   const query = shortcutSearchQuery.value.trim().toLowerCase();
   if (!query) return SHORTCUT_DEFINITIONS;
+  // #11632：组合键单独按“去空白”形式比较，用户写 Ctrl+T / Ctrl + T / ⌘T 都能命中。
+  // ID、功能名、作用域仍按原文匹配——把 query 整体去空白会让 "new query" 这类多词标签失配。
+  const shortcutQuery = normalizeShortcutSearch(shortcutSearchQuery.value);
   return SHORTCUT_DEFINITIONS.filter((definition) => {
     const scope = t(shortcutScopeLabelKey(definition.scope));
     const shortcut = formatShortcutPill(editShortcuts.value[definition.id]);
-    return [definition.id, t(definition.labelKey), scope, shortcut].some((value) => value.toLowerCase().includes(query));
+    if (normalizeShortcutSearch(shortcut).includes(shortcutQuery)) return true;
+    return [definition.id, t(definition.labelKey), scope].some((value) => value.toLowerCase().includes(query));
   });
 });
 

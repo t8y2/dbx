@@ -1019,6 +1019,12 @@ export interface EditorSettings {
    */
   oracleOciClientPath: string;
   /**
+   * Dameng client bin directory (the directory that contains dexp/dimp).
+   * Shared by every Dameng connection's native .dmp export/import; the tools
+   * ship with the DM client install and are not bundled with DBX.
+   */
+  damengClientBinDir: string;
+  /**
    * Client character set for OCI connections, injected as the NLS_LANG
    * environment variable when the OCI agent starts. Empty keeps the OCI
    * default; Chinese environments usually want AL32UTF8 (matching the
@@ -1363,6 +1369,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showColumnHeaderTooltips: true,
   showResultSourceDatabase: true,
   oracleOciClientPath: "",
+  damengClientBinDir: "",
   oracleOciNlsLang: "",
   oracleOciTnsAdmin: "",
   resultTabNamingMode: "source",
@@ -2012,6 +2019,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     oracleOciNlsLang: typeof settings.oracleOciNlsLang === "string" ? settings.oracleOciNlsLang.trim() : "",
     oracleOciTnsAdmin: typeof settings.oracleOciTnsAdmin === "string" ? settings.oracleOciTnsAdmin.trim() : "",
     oracleOciClientPath: typeof settings.oracleOciClientPath === "string" ? settings.oracleOciClientPath.trim() : "",
+    damengClientBinDir: typeof settings.damengClientBinDir === "string" ? settings.damengClientBinDir.trim() : "",
     resultTabNamingMode: normalizeResultTabNamingMode(settings.resultTabNamingMode),
     resultTabPreferComments: settings.resultTabPreferComments !== false,
     dataGridShowTransposeFieldMetadata: settings.dataGridShowTransposeFieldMetadata === true,
@@ -2893,6 +2901,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.oracleOciNlsLang !== undefined) editorSettings.value.oracleOciNlsLang = partial.oracleOciNlsLang.trim();
     if (partial.oracleOciTnsAdmin !== undefined) editorSettings.value.oracleOciTnsAdmin = partial.oracleOciTnsAdmin.trim();
     if (partial.oracleOciClientPath !== undefined) editorSettings.value.oracleOciClientPath = partial.oracleOciClientPath.trim();
+    if (partial.damengClientBinDir !== undefined) editorSettings.value.damengClientBinDir = partial.damengClientBinDir.trim();
     if (partial.resultTabNamingMode !== undefined) editorSettings.value.resultTabNamingMode = normalizeResultTabNamingMode(partial.resultTabNamingMode);
     if (partial.resultTabPreferComments !== undefined) editorSettings.value.resultTabPreferComments = partial.resultTabPreferComments !== false;
     if (partial.dataGridShowTransposeFieldMetadata !== undefined) editorSettings.value.dataGridShowTransposeFieldMetadata = partial.dataGridShowTransposeFieldMetadata === true;

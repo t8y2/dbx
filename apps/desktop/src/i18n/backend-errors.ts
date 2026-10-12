@@ -165,6 +165,11 @@ const patterns: [RegExp, string][] = [
 
   // Web auth rate limiting (crates/dbx-web/src/auth.rs)
   [/^Please try again in (\d+)s$/, "auth.rateLimited"],
+
+  // Dameng native dexp/dimp dump (crates/dbx-core/src/data/dameng_dump.rs)
+  [/^\[damengToolNotFound\]/, "damengDump.errors.toolNotFound"],
+  [/^\[damengConnectionRequired\]/, "damengDump.errors.connectionRequired"],
+  [/^\[damengPasswordMissing\]/, "damengDump.errors.passwordMissing"],
 ];
 
 // Named placeholders for each pattern's capture groups, in capture order.

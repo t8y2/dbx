@@ -589,6 +589,12 @@ export const cancelQueryResultExport = forward("cancelQueryResultExport");
 export const openQueryResultTempFile = forward("openQueryResultTempFile");
 export const createQueryResultTempFile = forward("createQueryResultTempFile");
 
+// Dameng native .dmp dump (dexp/dimp)
+export const startDamengDump = forward("startDamengDump");
+export const cancelDamengDump = forward("cancelDamengDump");
+export const resolveDamengDumpTool = forward("resolveDamengDumpTool");
+export type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
+
 // Redis
 export const redisListDatabases = forward("redisListDatabases");
 export const redisScanKeys = forward("redisScanKeys");

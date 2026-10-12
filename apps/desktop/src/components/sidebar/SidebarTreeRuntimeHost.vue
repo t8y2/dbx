@@ -33,6 +33,8 @@ import {
   Plug,
   Unplug,
   Pin,
+  Package,
+  PackageOpen,
   PlugZap,
   ArrowRightLeft,
   Download,
@@ -484,6 +486,7 @@ const { copyStructureAs, copyStructureDocText, copyStructurePreview, exportData,
 
 const {
   openAllDatabasesExport,
+  openDamengDump,
   openDataCompare,
   openDatabaseExport,
   openDatabaseSearch,
@@ -6294,6 +6297,12 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ sidebarActionId: "diff.title", label: t("diff.title"), action: openSchemaDiff, icon: ArrowRightLeft });
     items.push({ sidebarActionId: "dataCompare.title", label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
     items.push({ sidebarActionId: "contextMenu.exportDatabase", label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
+    // Native dexp/dimp (.dmp) shortcut — Dameng only; the dialog guides the user
+    // to the client bin-dir setting when the tools are not installed.
+    if (currentDatabaseType() === "dameng") {
+      items.push({ sidebarActionId: "damengDump.menuExport", label: t("damengDump.menuExport"), action: () => openDamengDump("export"), icon: Package });
+      items.push({ sidebarActionId: "damengDump.menuImport", label: t("damengDump.menuImport"), action: () => openDamengDump("import"), icon: PackageOpen });
+    }
     if (canOpenDataDictionary.value) {
       items.push({ sidebarActionId: "dataDictionary.title", label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
     }

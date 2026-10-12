@@ -1,5 +1,6 @@
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
+import type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
 import type { PluginUiStorageItemRef, SqlFileFailureLogExportPayload, SqlFileFailureLogInfo, SqlFileFailureLogKey, SqlFileFailureLogTextPayload, SyncCatalogItem, SyncSelection, SyncSnapshotCatalog } from "@/lib/backend/tauri";
@@ -3441,6 +3442,22 @@ function downloadTableExportFile(exportId: string): void {
   const a = document.createElement("a");
   a.href = apiUrl(`/api/export/table/download/${exportId}`);
   a.click();
+}
+
+// Native dexp/dimp tools only exist next to a local Dameng client install, so
+// the web deployment has no server-side implementation by design.
+const DAMENG_DUMP_WEB_UNSUPPORTED = "Dameng native .dmp export/import requires the desktop application.";
+
+export async function startDamengDump(_request: DamengDumpRequest, _onProgress: (progress: DamengDumpProgress) => void): Promise<DamengDumpProgress> {
+  throw new Error(DAMENG_DUMP_WEB_UNSUPPORTED);
+}
+
+export async function cancelDamengDump(_taskId: string): Promise<void> {
+  throw new Error(DAMENG_DUMP_WEB_UNSUPPORTED);
+}
+
+export async function resolveDamengDumpTool(_binDir: string, _kind: DamengDumpKind): Promise<string> {
+  throw new Error(DAMENG_DUMP_WEB_UNSUPPORTED);
 }
 
 export async function cancelTableExport(exportId: string): Promise<void> {

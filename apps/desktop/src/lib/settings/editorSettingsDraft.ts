@@ -144,6 +144,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "redisDatabaseDisplayLimit",
   "exportBatchSize",
   "preferredExportPath",
+  "damengClientBinDir",
   "autoOpenExportFolder",
   "csvQuoteMode",
   "csvNullMode",

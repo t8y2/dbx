@@ -22,6 +22,10 @@ const showMongoDatabaseDumpDialog = ref(false);
 const mongoDatabaseDumpPrefillConnectionId = ref("");
 const mongoDatabaseDumpPrefillDatabase = ref("");
 const mongoDatabaseDumpMode = ref<"dump" | "restore">("dump");
+const showDamengDumpDialog = ref(false);
+const damengDumpPrefillConnectionId = ref("");
+const damengDumpPrefillDatabase = ref("");
+const damengDumpMode = ref<"export" | "import">("export");
 const showTableDataGenerateDialog = ref(false);
 const tableDataGenerateSessionId = ref<string | null>(null);
 const showFieldLineageDialog = ref(false);
@@ -329,6 +333,18 @@ export function useDialogSources() {
     );
 
     watch(
+      () => connectionStore.damengDumpSource,
+      (source) => {
+        if (!source) return;
+        damengDumpPrefillConnectionId.value = source.connectionId;
+        damengDumpPrefillDatabase.value = source.database;
+        damengDumpMode.value = source.mode;
+        showDamengDumpDialog.value = true;
+        connectionStore.damengDumpSource = null;
+      },
+    );
+
+    watch(
       () => connectionStore.tableDataGenerateSource,
       (v) => {
         if (v) {
@@ -601,6 +617,10 @@ export function useDialogSources() {
     mongoDatabaseDumpPrefillConnectionId,
     mongoDatabaseDumpPrefillDatabase,
     mongoDatabaseDumpMode,
+    showDamengDumpDialog,
+    damengDumpPrefillConnectionId,
+    damengDumpPrefillDatabase,
+    damengDumpMode,
     showTableDataGenerateDialog,
     tableDataGenerateSessionId,
     showFieldLineageDialog,

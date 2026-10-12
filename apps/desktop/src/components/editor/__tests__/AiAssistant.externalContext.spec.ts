@@ -109,6 +109,16 @@ describe("external AI entries share one target rule (#10058)", () => {
     expect(source).toContain("openExternalContext,");
   });
 
+  // #11660: a table mention recorded without its namespace resolves against
+  // whatever database the run ends up with — and mid-retarget the binding still
+  // reads the previous one, so the target the gesture named is the only owner the
+  // panel may record.
+  it("keeps a table mention bound to the namespace the gesture named", () => {
+    const body = bodyOf("function openExternalContext(request: AiExternalContextRequest)");
+
+    expect(body).toContain("mention.database ?? plan.binding.database");
+  });
+
   it("routes every external entry in App.vue through the panel's single method", () => {
     expect(appBodyOf("function sendSelectionToAi(tabId: string, sql: string)")).toContain("handle.openExternalContext({");
     expect(appBodyOf("function fixWithAi(tabId: string, errorMessage: string)")).toContain("handle.openExternalContext({");

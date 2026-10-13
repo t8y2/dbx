@@ -2,7 +2,34 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, LogOut, CloudDownload, Package, PlugZap, FileDown, FolderTree, Pin, PinOff, CalendarClock, Waypoints, RefreshCw } from "@lucide/vue";
+import {
+  ChevronsRight,
+  DatabaseZap,
+  FilePlus2,
+  Moon,
+  Sun,
+  SunMoon,
+  History,
+  Bot,
+  ArrowLeftRight,
+  FileCode,
+  BookMarked,
+  GitCompareArrows,
+  TableProperties,
+  Settings,
+  LogOut,
+  CloudDownload,
+  Package,
+  PlugZap,
+  FileDown,
+  FolderTree,
+  Pin,
+  PinOff,
+  CalendarClock,
+  Waypoints,
+  RefreshCw,
+  User,
+} from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown, { type LightDropdownItem } from "@/components/ui/LightDropdown.vue";
@@ -14,6 +41,7 @@ import AppLogo from "@/components/icons/AppLogo.vue";
 import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useAuthStore } from "@/stores/authStore";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
 import { formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 
@@ -87,10 +115,17 @@ const { t } = useI18n();
 const { toast } = useToast();
 
 const settingsStore = useSettingsStore();
+const authStore = useAuthStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const webLogoPosition = computed(() => settingsStore.editorSettings.webLogoPosition ?? "left");
 const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop, close } = useWindowControls();
+
+// Current user display name
+const currentUserDisplay = computed(() => {
+  if (!authStore.user) return null;
+  return authStore.user.display_name || authStore.user.username;
+});
 // The always-on-top control is opt-in (外观 → 工具栏): the right side of the
 // toolbar is the most crowded strip in the app. It stays visible while the
 // window is actually pinned even with the setting off, so turning the setting
@@ -461,7 +496,10 @@ type ToolbarMenuItem = LightDropdownItem & { action: () => void };
 function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenuItem[] {
   const items: ToolbarMenuItem[] = [];
 
-  if (includeVisiblePrimaryItems || !toolbarItems.value.dataTransfer) {
+  // Web RBAC：功能入口按权限隐藏。桌面 bypass（isAdmin）恒为 true，
+  // 工具栏行为与桌面版原有表现完全一致。
+  const featureVisible = (permission: string) => authStore.hasPermission(permission);
+  if ((includeVisiblePrimaryItems || !toolbarItems.value.dataTransfer) && featureVisible("transfer")) {
     items.push({
       value: "transfer",
       label: t("transfer.dataTransfer"),
@@ -482,7 +520,7 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
   if (includeVisiblePrimaryItems || !toolbarItems.value.pluginCenter) {
     items.push({ value: "plugin-center", label: t("toolbar.pluginCenter"), icon: PlugZap, action: () => emit("open-plugin-center"), disabled: false });
   }
-  if (toolbarItems.value.sqlFile) {
+  if (toolbarItems.value.sqlFile && featureVisible("sqlfile.execute")) {
     items.push({
       value: "sql-file",
       label: t("sqlFile.title"),
@@ -491,7 +529,7 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
       disabled: !props.hasSqlFileConnections,
     });
   }
-  if (toolbarItems.value.schemaDiff) {
+  if (toolbarItems.value.schemaDiff && featureVisible("schema.compare")) {
     items.push({
       value: "schema-diff",
       label: t("diff.title"),
@@ -500,7 +538,7 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
       disabled: !props.hasConnections,
     });
   }
-  if (toolbarItems.value.dataCompare) {
+  if (toolbarItems.value.dataCompare && featureVisible("data.compare")) {
     items.push({
       value: "data-compare",
       label: t("dataCompare.title"),
@@ -509,20 +547,24 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
       disabled: !props.hasConnections,
     });
   }
-  items.push({
-    value: "database-backups",
-    label: t("databaseBackup.title"),
-    icon: CalendarClock,
-    action: () => emit("open-backups"),
-    disabled: false,
-  });
-  items.push({
-    value: "mcp-settings",
-    label: t("settings.openMcpSettings"),
-    icon: Waypoints,
-    action: () => emit("open-mcp-settings"),
-    disabled: false,
-  });
+  if (featureVisible("backup.restore")) {
+    items.push({
+      value: "database-backups",
+      label: t("databaseBackup.title"),
+      icon: CalendarClock,
+      action: () => emit("open-backups"),
+      disabled: false,
+    });
+  }
+  if (featureVisible("mcp")) {
+    items.push({
+      value: "mcp-settings",
+      label: t("settings.openMcpSettings"),
+      icon: Waypoints,
+      action: () => emit("open-mcp-settings"),
+      disabled: false,
+    });
+  }
 
   for (const item of overflowRightMenuItems.value) {
     items.push({
@@ -609,7 +651,7 @@ const toolbarStyle = computed(() => {
     </Tooltip>
 
     <template v-if="!toolbarCollapsed">
-      <Button v-if="toolbarItems.dataTransfer" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-transfer')" :disabled="!hasConnections">
+      <Button v-if="toolbarItems.dataTransfer && authStore.hasPermission('transfer')" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-transfer')" :disabled="!hasConnections">
         <ArrowLeftRight class="h-3.5 w-3.5" />
         <span :class="toolbarTextLabelClass">{{ t("transfer.dataTransfer") }}</span>
       </Button>
@@ -854,6 +896,12 @@ const toolbarStyle = computed(() => {
       </TooltipTrigger>
       <TooltipContent>{{ t("auth.logout") }}</TooltipContent>
     </Tooltip>
+
+    <!-- Current user display -->
+    <div v-if="currentUserDisplay" class="flex items-center gap-1.5 px-2 h-8 rounded-md bg-muted/50 shrink-0 select-none">
+      <User class="h-3.5 w-3.5 text-muted-foreground" />
+      <span class="text-xs font-medium text-foreground/90 truncate max-w-[120px]" :title="currentUserDisplay">{{ currentUserDisplay }}</span>
+    </div>
 
     <WindowControls v-if="showControls" :is-maximized="isMaximized" @minimize="minimize" @toggle-maximize="toggleMaximize" @close="close" />
   </div>

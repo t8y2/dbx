@@ -1,6 +1,6 @@
-export type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "backups" | "tunnels" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "updates" | "security" | "about";
+export type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "backups" | "tunnels" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "updates" | "security" | "accessControl" | "about";
 
-const SETTINGS_CATEGORIES: readonly SettingsCategory[] = ["editor", "formatter", "appearance", "navigation", "data", "backups", "tunnels", "shortcuts", "snippets", "sync", "ai", "mcp", "updates", "security", "about"];
+const SETTINGS_CATEGORIES: readonly SettingsCategory[] = ["editor", "formatter", "appearance", "navigation", "data", "backups", "tunnels", "shortcuts", "snippets", "sync", "ai", "mcp", "updates", "security", "accessControl", "about"];
 
 /**
  * Maps retired settings tabs to their current home so saved links and external

@@ -133,8 +133,9 @@ describe("WebDAV sync HTTP API", () => {
     await migrationStatus();
     await migrationStatus(true);
 
-    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/migration/status");
-    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/migration/status?retry=true");
+    // RBAC Web 会话：GET 封装携带 cookie（credentials: "include"）。
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/migration/status", { credentials: "include" });
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/migration/status?retry=true", { credentials: "include" });
   });
 });
 

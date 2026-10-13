@@ -1,6 +1,7 @@
 import { defineAsyncComponent, ref, shallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { Blocks, ListTree } from "@lucide/vue";
+import { useAuthStore } from "@/stores/authStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import type { ContextMenuItem } from "@/components/ui/customContextMenuRegistry";
@@ -17,11 +18,57 @@ export function useSidebarMenuPresentation() {
   const menuLayoutSaving = ref(false);
   const sidebarMenuPreferences = shallowRef<{ scope: SidebarMenuScope; items: ContextMenuItem[] } | null>(null);
 
+  // 侧边栏右键菜单的功能权限过滤（Web RBAC）：条目按 sidebarActionId 映射到
+  // 角色功能权限，未授权整项隐藏（children 被清空的父项一并移除）。桌面
+  // bypass（isAdmin）恒为 true，过滤为无操作；未映射的条目不参与过滤。
+  const ACTION_PERMISSIONS: Record<string, string> = {
+    "transfer.dataTransfer": "transfer",
+    "sqlFile.title": "sqlfile.execute",
+    "diff.title": "schema.compare",
+    "dataCompare.title": "data.compare",
+    "databaseBackup.title": "backup.restore",
+    "contextMenu.backupSqliteDatabase": "backup.restore",
+    "contextMenu.restoreSqliteDatabase": "backup.restore",
+    "contextMenu.importData": "import.data",
+    "contextMenu.exportData": "export.data",
+    "contextMenu.exportDatabase": "export.data",
+    "contextMenu.exportAllDatabases": "export.data",
+    "editor.contextMenu.export": "export.data",
+    "contextMenu.editConnection": "connection.manage",
+    "contextMenu.duplicateConnection": "connection.manage",
+    "contextMenu.deleteConnection": "connection.manage",
+  };
+
+  function filterMenuPermissions(items: readonly ContextMenuItem[]): ContextMenuItem[] {
+    // 权限数据未加载（启动早期、桌面 bypass 初始化前）或无 Pinia 上下文
+    // （组件单测）时不做过滤、保持菜单原样，避免影响非 RBAC 环境；加载后
+    // 按功能权限隐藏未授权条目。惰性获取 store，勿在函数顶部 eager 调用。
+    let auth: ReturnType<typeof useAuthStore>;
+    try {
+      auth = useAuthStore();
+    } catch {
+      return [...items];
+    }
+    if (!auth.loaded) return [...items];
+    return items.flatMap((item) => {
+      if (item.separator || item.visible === false) return [item];
+      const permission = item.sidebarActionId ? ACTION_PERMISSIONS[item.sidebarActionId] : undefined;
+      if (permission && !auth.hasPermission(permission)) return [];
+      if (item.children?.length) {
+        const children = filterMenuPermissions(item.children);
+        if (!children.length) return [];
+        return [{ ...item, children }];
+      }
+      return [item];
+    });
+  }
+
   function presentMenu(originalItems: ContextMenuItem[], type: SidebarMenuTargetType): ContextMenuItem[] {
+    const allowedItems = filterMenuPermissions(originalItems);
     const scope = sidebarMenuScope(type);
-    if (!scope) return originalItems;
+    if (!scope) return allowedItems;
     const full = settings.editorSettings.sidebarMenuLayout === "full";
-    const items = buildSidebarMenuLayout(originalItems, scope, settings.editorSettings.sidebarMenuLayout, settings.editorSettings.sidebarMenuPinnedActions?.[scope] ?? [], t, {
+    const items = buildSidebarMenuLayout(allowedItems, scope, settings.editorSettings.sidebarMenuLayout, settings.editorSettings.sidebarMenuPinnedActions?.[scope] ?? [], t, {
       hiddenPrimaryIds: settings.editorSettings.sidebarMenuHiddenPrimaryActions?.[scope],
       order: settings.editorSettings.sidebarMenuOrder?.[scope],
     });
@@ -31,7 +78,7 @@ export function useSidebarMenuPresentation() {
         label: t("sidebarMenu.customize"),
         icon: Blocks,
         action: () => {
-          sidebarMenuPreferences.value = { scope, items: originalItems };
+          sidebarMenuPreferences.value = { scope, items: allowedItems };
           sidebarMenuPreferencesOpen.value = true;
         },
       });
@@ -43,7 +90,7 @@ export function useSidebarMenuPresentation() {
       checkedStyle: "switch",
       disabled: () => menuLayoutSaving.value,
       closeOnSelect: false,
-      refreshItems: () => presentMenu(originalItems, type),
+      refreshItems: () => presentMenu(allowedItems, type),
       action: () => {
         if (menuLayoutSaving.value) return;
         menuLayoutSaving.value = true;

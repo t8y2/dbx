@@ -61,7 +61,9 @@ for (const file of files) {
   const fullPath = path.join(docsDir, file);
   const content = fs.readFileSync(fullPath, "utf8");
   const expectedLanguage = languageOfFile(file);
-  const frontmatter = content.match(/^---\n([\s\S]*?)\n---/);
+  // 容忍 CRLF 行尾：Windows 检出（core.autocrlf）会把 `---` 写成 `---\r\n`，
+  // 严格的 `^---\n` 会让全部页面误报 missing frontmatter。
+  const frontmatter = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
 
   if (!frontmatter) {
     errors.push(`${file}: missing frontmatter`);

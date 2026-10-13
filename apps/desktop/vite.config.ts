@@ -93,14 +93,14 @@ export default defineConfig(async () => ({
   server: {
     port: isTauri ? 1420 : undefined,
     strictPort: isTauri,
-    host: host || false,
+    host: host || "0.0.0.0",
     hmr: host
       ? {
           protocol: "ws",
           host,
           port: 1421,
         }
-      : undefined,
+      : true,
     proxy: {
       [apiProxyPath]: {
         target: backendUrl,

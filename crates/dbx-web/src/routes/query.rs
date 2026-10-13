@@ -439,6 +439,7 @@ pub async fn execute_query(
         allow_database_switch,
     )
     .await?;
+    crate::access_gate::ensure_query_script_permission(&state, &req.connection_id, &req.sql).await?;
     let requested_execution_id = req.execution_id.filter(|id| !id.trim().is_empty());
     let keep_timeout_reachable = requested_execution_id.is_some();
     let execution_id = requested_execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -499,6 +500,7 @@ pub async fn execute_conditional_update(
         allow_database_switch,
     )
     .await?;
+    crate::access_gate::ensure_query_script_permission(&state, &req.connection_id, &req.sql).await?;
 
     let execution_id = req.execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let registered = state.app.running_queries.register_task_for_terminal_confirmation(
@@ -583,6 +585,7 @@ pub async fn execute_multi(
         allow_database_switch,
     )
     .await?;
+    crate::access_gate::ensure_query_script_permission(&state, &req.connection_id, &req.sql).await?;
     let requested_execution_id = req.execution_id.filter(|id| !id.trim().is_empty());
     let keep_timeout_reachable = requested_execution_id.is_some();
     let execution_id = requested_execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -661,6 +664,7 @@ pub async fn execute_batch(
     for statement in &req.statements {
         super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &database, statement, false).await?;
     }
+    crate::access_gate::ensure_query_permission(&state, &req.connection_id, &req.statements).await?;
     if let Some(bound) = req.bound_statements.as_ref() {
         for statement in bound {
             super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &database, &statement.sql, false)
@@ -862,6 +866,7 @@ pub async fn execute_script(
     let statements = db_type
         .map(|db_type| dbx_core::sql::split_sql_statements_for_database(&req.sql, db_type))
         .unwrap_or_else(|| dbx_core::sql::split_sql_statements(&req.sql));
+    crate::access_gate::ensure_query_permission(&state, &req.connection_id, &statements).await?;
     let result = dbx_core::query::execute_statements(
         &state.app,
         &req.connection_id,
@@ -896,6 +901,7 @@ pub async fn execute_in_transaction(
         .map_err(AppError::from);
     }
     tracing::debug!(connection_id = %req.connection_id, "execute_in_transaction");
+    crate::access_gate::ensure_query_permission(&state, &req.connection_id, &req.statements).await?;
     let result = dbx_core::query::execute_statements_in_transaction(
         &state.app,
         &req.connection_id,
@@ -918,6 +924,7 @@ pub async fn execute_script_with_2pc(
         return Err(AppError::from("Bound BLOB saves must use a supported save execution endpoint.".to_string()));
     }
     tracing::debug!(connection_id = %req.connection_id, "execute_script_with_2pc");
+    crate::access_gate::ensure_query_permission(&state, &req.connection_id, &req.statements).await?;
     // Single-connection real transaction (not per-statement auto-commit 2PC).
     let result = dbx_core::query::execute_schema_diff_deploy(
         &state.app,
@@ -1003,6 +1010,7 @@ pub async fn get_explain_info(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GetExplainInfoRequest>,
 ) -> Result<Json<String>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let plan = dbx_core::agent_explain::get_agent_explain_info_core_with_execution_id(
         &state.app,
         &req.connection_id,
@@ -1024,6 +1032,7 @@ pub async fn get_plugin_plan_capabilities(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GetPluginPlanCapabilitiesRequest>,
 ) -> Result<Json<dbx_core::query::plugin_plan::PluginPlanCapabilities>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let capabilities = dbx_core::query::plugin_plan::plugin_plan_capabilities(&state.app, &req.connection_id)
         .await
         .map_err(AppError::from)?;
@@ -1036,6 +1045,7 @@ pub async fn get_plugin_estimated_plan(
     State(state): State<Arc<WebState>>,
     Json(request): Json<dbx_core::query::plugin_plan::PluginPlanRequest>,
 ) -> Result<Json<dbx_core::query::plugin_plan::PluginPlanResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &request.connection_id).await?;
     let result =
         dbx_core::query::plugin_plan::explain_estimated_plan(&state.app, request).await.map_err(AppError::from)?;
     Ok(Json(result))
@@ -1063,6 +1073,7 @@ pub async fn query_plugin_data(
     State(state): State<Arc<WebState>>,
     Json(body): Json<QueryPluginDataRequest>,
 ) -> Result<Json<dbx_core::query::plugin_data::PluginDataQueryResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &body.request.connection_id).await?;
     let result = dbx_core::query::plugin_data::query_plugin_data(&state.app, &body.plugin_id, body.request)
         .await
         .map_err(AppError::from)?;
@@ -1083,6 +1094,7 @@ pub async fn set_plugin_data_grant(
     State(state): State<Arc<WebState>>,
     Json(body): Json<PluginDataGrantRequest>,
 ) -> Result<Json<Vec<dbx_core::query::plugin_data::PluginDataGrant>>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &body.connection_id).await?;
     let grants = dbx_core::query::plugin_data::set_plugin_data_grant(
         &state.app,
         &body.plugin_id,
@@ -1302,6 +1314,8 @@ pub async fn apply_sqlite_table_structure_change(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ApplySqliteTableStructureChangeRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
+    // 结构变更是 DDL 应用：直接要求 query.write，并按写入范围做连接级判定。
+    crate::access_gate::ensure_query_write_permission(&state, &req.connection_id).await?;
     dbx_core::table_structure_sql::apply_sqlite_table_structure_change(
         &state.app,
         &req.connection_id,

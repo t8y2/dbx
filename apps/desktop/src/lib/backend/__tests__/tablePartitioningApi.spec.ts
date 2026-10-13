@@ -24,7 +24,8 @@ describe("PostgreSQL table partitioning web API", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(getTablePartitioning("connection 1", "sales/db", "public", "order items")).resolves.toEqual(payload);
-    expect(fetchMock).toHaveBeenCalledWith("/api/schema/table-partitioning?connection_id=connection+1&database=sales%2Fdb&schema=public&table=order+items");
+    // RBAC Web 会话：GET 封装携带 cookie（credentials: "include"）。
+    expect(fetchMock).toHaveBeenCalledWith("/api/schema/table-partitioning?connection_id=connection+1&database=sales%2Fdb&schema=public&table=order+items", { credentials: "include" });
   });
 
   it("builds partition maintenance SQL through the query endpoint", async () => {
@@ -57,10 +58,12 @@ describe("PostgreSQL table partitioning web API", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(buildTablePartitionOperationSql(options)).resolves.toEqual(payload);
+    // RBAC Web 会话：POST 封装携带 cookie（credentials: "include"）。
     expect(fetchMock).toHaveBeenCalledWith("/api/query/build-table-partition-operation-sql", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ options }),
+      credentials: "include",
     });
   });
 
@@ -76,10 +79,12 @@ describe("PostgreSQL table partitioning web API", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(buildCreatePartitionedTableSql({ options, partitioning })).resolves.toEqual(payload);
+    // RBAC Web 会话：POST 封装携带 cookie（credentials: "include"）。
     expect(fetchMock).toHaveBeenCalledWith("/api/query/build-create-partitioned-table-sql", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ options, partitioning }),
+      credentials: "include",
     });
   });
 });

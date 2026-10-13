@@ -5,7 +5,10 @@ pub use dbx_drivers::runtime_config::{
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::warn;
@@ -242,6 +245,10 @@ pub struct Storage {
     /// Without this, each consumer can prompt a locked Secret Service again.
     secret_key_error_cache: Arc<Mutex<Option<CachedSecretKeyError>>>,
     migration_failure: Arc<Mutex<Option<MigrationFailure>>>,
+    /// sidebar 布局修订号：每次 `save_sidebar_layout` 成功写入自增。Web 版
+    /// 权限范围判定缓存（连接→分组路径映射）按此版本失效，避免每请求重读
+    /// 布局。进程内单一 Storage 实例，所有写入路径天然覆盖。
+    layout_version: Arc<AtomicU64>,
 }
 
 /// Key material plus the digest of every key file it was resolved from.
@@ -1240,7 +1247,9 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         name TEXT NOT NULL DEFAULT '',
         order_index INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT '',
-        updated_at TEXT NOT NULL DEFAULT ''
+        updated_at TEXT NOT NULL DEFAULT '',
+        password_hash TEXT,
+        password_set_by TEXT
     )",
     "CREATE TABLE IF NOT EXISTS saved_sql_files (
         id TEXT PRIMARY KEY,
@@ -1278,6 +1287,48 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         content TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
+    )",
+    "CREATE TABLE IF NOT EXISTS departments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        sort INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        display_name TEXT,
+        department_id INTEGER,
+        is_admin INTEGER NOT NULL DEFAULT 0,
+        status INTEGER NOT NULL DEFAULT 1,
+        must_change_password INTEGER NOT NULL DEFAULT 0,
+        password_updated_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS roles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT,
+        permissions_json TEXT NOT NULL DEFAULT '[]',
+        scope_json TEXT NOT NULL DEFAULT '{\"allowed_group_ids\":[],\"allowed_connection_ids\":[]}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS user_roles (
+        user_id INTEGER NOT NULL,
+        role_id INTEGER NOT NULL,
+        PRIMARY KEY(user_id, role_id)
+    )",
+    "CREATE TABLE IF NOT EXISTS login_blacklist (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL,
+        value TEXT NOT NULL,
+        reason TEXT,
+        created_by TEXT,
+        created_at INTEGER NOT NULL,
+        UNIQUE(kind, value)
     )",
 ];
 
@@ -1414,6 +1465,7 @@ impl Storage {
             secret_codec_cache: Arc::new(Mutex::new(None)),
             secret_key_error_cache: Arc::new(Mutex::new(None)),
             migration_failure: Arc::new(Mutex::new(None)),
+            layout_version: Arc::new(AtomicU64::new(0)),
         };
         // Best-effort: switching journal mode is itself a lock-sensitive
         // operation, so a transient failure here (e.g. another process
@@ -2486,7 +2538,7 @@ impl Storage {
         .await
     }
 
-    async fn with_conn<T, F>(&self, f: F) -> Result<T, String>
+    pub(crate) async fn with_conn<T, F>(&self, f: F) -> Result<T, String>
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
@@ -3141,8 +3193,12 @@ fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
 }
 
 fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
-    const FOLDER_COLUMNS: &[(&str, &str)] =
-        &[("parent_folder_id", "TEXT"), ("order_index", "INTEGER NOT NULL DEFAULT 0")];
+    const FOLDER_COLUMNS: &[(&str, &str)] = &[
+        ("parent_folder_id", "TEXT"),
+        ("order_index", "INTEGER NOT NULL DEFAULT 0"),
+        ("password_hash", "TEXT"),
+        ("password_set_by", "TEXT"),
+    ];
     const FILE_COLUMNS: &[(&str, &str)] = &[
         ("catalog_name", "TEXT"),
         ("order_index", "INTEGER NOT NULL DEFAULT 0"),
@@ -7696,8 +7752,8 @@ impl Storage {
 
             for folder in &library.folders {
                 tx.execute(
-                    "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash, password_set_by) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         folder.id,
                         folder.connection_id,
@@ -7705,7 +7761,9 @@ impl Storage {
                         folder.name,
                         folder.order_index,
                         folder.created_at,
-                        folder.updated_at
+                        folder.updated_at,
+                        folder.password_hash,
+                        folder.password_set_by
                     ],
                 )
                 .map_err(|e| e.to_string())?;
@@ -7744,7 +7802,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut folder_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at \
+                    "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash, password_set_by \
                      FROM saved_sql_folders ORDER BY COALESCE(parent_folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7758,6 +7816,8 @@ impl Storage {
                         order_index: row.get(4)?,
                         created_at: row.get(5)?,
                         updated_at: row.get(6)?,
+                        password_hash: row.get(7)?,
+                        password_set_by: row.get(8)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -7837,7 +7897,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut folder_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at \
+                    "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash, password_set_by \
                      FROM saved_sql_folders ORDER BY COALESCE(parent_folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7851,6 +7911,8 @@ impl Storage {
                         order_index: row.get(4)?,
                         created_at: row.get(5)?,
                         updated_at: row.get(6)?,
+                        password_hash: row.get(7)?,
+                        password_set_by: row.get(8)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -7930,14 +7992,16 @@ impl Storage {
         let folder = folder.clone();
         self.with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash, password_set_by) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                  connection_id = excluded.connection_id, \
                  parent_folder_id = excluded.parent_folder_id, \
                  name = excluded.name, \
                  order_index = excluded.order_index, \
-                 updated_at = excluded.updated_at",
+                 updated_at = excluded.updated_at, \
+                 password_hash = excluded.password_hash, \
+                 password_set_by = excluded.password_set_by",
                 params![
                     folder.id,
                     folder.connection_id,
@@ -7945,7 +8009,9 @@ impl Storage {
                     folder.name,
                     folder.order_index,
                     folder.created_at,
-                    folder.updated_at
+                    folder.updated_at,
+                    folder.password_hash,
+                    folder.password_set_by
                 ],
             )
             .map(|_| ())
@@ -7980,6 +8046,73 @@ impl Storage {
                     .map_err(|e| e.to_string())?;
             }
             tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn clear_saved_sql_folder_password(&self, folder_id: &str) -> Result<(), String> {
+        let folder_id = folder_id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE saved_sql_folders SET password_hash = NULL, password_set_by = NULL WHERE id = ?1",
+                [folder_id.as_str()],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn get_saved_sql_folder(&self, folder_id: &str) -> Result<Option<SavedSqlFolder>, String> {
+        let folder_id = folder_id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash, password_set_by \
+                     FROM saved_sql_folders WHERE id = ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let folder = stmt
+                .query_row([folder_id.as_str()], |row| {
+                    Ok(SavedSqlFolder {
+                        id: row.get(0)?,
+                        connection_id: row.get(1)?,
+                        parent_folder_id: row.get(2)?,
+                        name: row.get(3)?,
+                        order_index: row.get(4)?,
+                        created_at: row.get(5)?,
+                        updated_at: row.get(6)?,
+                        password_hash: row.get(7)?,
+                        password_set_by: row.get(8)?,
+                    })
+                })
+                .optional()
+                .map_err(|e| e.to_string())?;
+            Ok(folder)
+        })
+        .await
+    }
+
+    pub async fn load_sidebar_layout_json(&self) -> Result<Option<String>, String> {
+        self.with_conn(|conn| {
+            use rusqlite::OptionalExtension;
+            conn.query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get::<_, String>(0))
+                .optional()
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn update_sidebar_layout_json(&self, json: &str) -> Result<(), String> {
+        let json = json.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO sidebar_layout (id, layout_json) VALUES (1, ?1) \
+                 ON CONFLICT(id) DO UPDATE SET layout_json = ?1",
+                [json.as_str()],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
         })
         .await
     }
@@ -8203,12 +8336,22 @@ impl Storage {
 impl Storage {
     pub async fn save_sidebar_layout(&self, layout: &serde_json::Value) -> Result<(), String> {
         let json = serde_json::to_string(layout).map_err(|e| e.to_string())?;
-        self.with_conn(move |conn| {
-            conn.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [json])
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        })
-        .await
+        let result = self
+            .with_conn(move |conn| {
+                conn.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [json])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .await;
+        if result.is_ok() {
+            self.layout_version.fetch_add(1, Ordering::Release);
+        }
+        result
+    }
+
+    /// 当前 sidebar 布局修订号（见字段 `layout_version`）。
+    pub fn layout_version(&self) -> u64 {
+        self.layout_version.load(Ordering::Acquire)
     }
 
     pub async fn load_sidebar_layout(&self) -> Result<Option<serde_json::Value>, String> {
@@ -9361,8 +9504,8 @@ fn apply_saved_sql_in_tx(tx: &Transaction<'_>, library: &SavedSqlLibrary, merge_
     }
     for folder in &library.folders {
         tx.execute(
-            "INSERT OR REPLACE INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![folder.id, folder.connection_id, folder.parent_folder_id, folder.name, folder.order_index, folder.created_at, folder.updated_at],
+            "INSERT OR REPLACE INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![folder.id, folder.connection_id, folder.parent_folder_id, folder.name, folder.order_index, folder.created_at, folder.updated_at, folder.password_hash],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -14913,6 +15056,8 @@ mod tests {
                         order_index: 0,
                         created_at: String::new(),
                         updated_at: String::new(),
+                        password_hash: None,
+                        password_set_by: None,
                     },
                     SavedSqlFolder {
                         id: "duplicate-folder".to_string(),
@@ -14922,6 +15067,8 @@ mod tests {
                         order_index: 1,
                         created_at: String::new(),
                         updated_at: String::new(),
+                        password_hash: None,
+                        password_set_by: None,
                     },
                 ],
                 files: Vec::new(),

@@ -320,6 +320,7 @@ pub async fn list_databases(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentListDatabasesRequest>,
 ) -> Result<Json<Vec<String>>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result =
         dbx_core::document_ops::list_databases_core(&state.app, &req.connection_id).await.map_err(AppError::from)?;
     Ok(Json(result))
@@ -329,6 +330,7 @@ pub async fn list_collections(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentListCollectionsRequest>,
 ) -> Result<Json<Vec<dbx_core::document_ops::CollectionInfo>>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::list_collections_core(&state.app, &req.connection_id, &req.database)
         .await
         .map_err(AppError::from)?;
@@ -339,6 +341,7 @@ pub async fn find_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentFindRequest>,
 ) -> Result<Json<dbx_core::db::document_result::DocumentQueryResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = run_cancellable(
         &state,
         req.execution_id,
@@ -365,6 +368,7 @@ pub async fn count_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentCountRequest>,
 ) -> Result<Json<u64>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = run_cancellable(
         &state,
         req.execution_id,
@@ -383,6 +387,7 @@ pub async fn describe_dynamodb_table(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DynamoDbDescribeTableRequest>,
 ) -> Result<Json<dbx_core::db::dynamodb_driver::DynamoDbTableDescription>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::describe_dynamodb_table_core(&state.app, &req.connection_id, &req.table)
         .await
         .map_err(AppError::from)?;
@@ -393,6 +398,7 @@ pub async fn elasticsearch_count_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ElasticsearchCountDocumentsRequest>,
 ) -> Result<Json<u64>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = run_cancellable(
         &state,
         req.execution_id,
@@ -411,6 +417,7 @@ pub async fn elasticsearch_get_index_metadata(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ElasticsearchIndexMetadataRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::elasticsearch_get_index_metadata_core(
         &state.app,
         &req.connection_id,
@@ -426,6 +433,7 @@ pub async fn elasticsearch_delete_all_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ElasticsearchIndexRequest>,
 ) -> Result<Json<dbx_core::db::elasticsearch_driver::ElasticsearchDeleteByQueryResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete all documents").await?;
     let result =
         dbx_core::document_ops::elasticsearch_delete_all_documents_core(&state.app, &req.connection_id, &req.index)
@@ -438,6 +446,7 @@ pub async fn insert_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentInsertRequest>,
 ) -> Result<Json<String>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Insert").await?;
     let result = if req.preserve_bson_types.unwrap_or(false) {
         dbx_core::document_ops::insert_document_preserving_bson_types_core(
@@ -468,6 +477,7 @@ pub async fn update_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentUpdateRequest>,
 ) -> Result<Json<u64>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Update").await?;
     let result = dbx_core::document_ops::update_document_core(
         &state.app,
@@ -487,6 +497,7 @@ pub async fn delete_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentDeleteRequest>,
 ) -> Result<Json<u64>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete").await?;
     let result = dbx_core::document_ops::delete_document_core_with_type(
         &state.app,
@@ -506,6 +517,7 @@ pub async fn save_meilisearch_batch(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchBatchSaveRequest>,
 ) -> Result<Json<u64>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Save").await?;
     let result = dbx_core::document_ops::save_meilisearch_document_batch_core(
         &state.app,
@@ -524,6 +536,7 @@ pub async fn meilisearch_search(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchSearchRequest>,
 ) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchSearchResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::meilisearch_search_documents_core(
         &state.app,
         &req.connection_id,
@@ -547,6 +560,7 @@ pub async fn meilisearch_fetch_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchDocumentPageRequest>,
 ) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchDocumentPage>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::meilisearch_fetch_document_page_core(
         &state.app,
         &req.connection_id,
@@ -565,6 +579,7 @@ pub async fn meilisearch_get_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchDocumentGetRequest>,
 ) -> Result<Json<String>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result =
         dbx_core::document_ops::meilisearch_get_document_core(&state.app, &req.connection_id, &req.index, &req.id)
             .await
@@ -576,6 +591,7 @@ pub async fn meilisearch_get_settings(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchIndexRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result =
         dbx_core::document_ops::meilisearch_get_index_settings_core(&state.app, &req.connection_id, &req.index)
             .await
@@ -587,6 +603,7 @@ pub async fn meilisearch_update_settings(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchSettingsUpdateRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Update settings").await?;
     dbx_core::document_ops::meilisearch_update_index_settings_core(
         &state.app,
@@ -603,6 +620,7 @@ pub async fn meilisearch_get_stats(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchIndexRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::meilisearch_get_index_stats_core(&state.app, &req.connection_id, &req.index)
         .await
         .map_err(AppError::from)?;
@@ -613,6 +631,7 @@ pub async fn meilisearch_get_overview(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchIndexRequest>,
 ) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchIndexOverview>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result =
         dbx_core::document_ops::meilisearch_get_index_overview_core(&state.app, &req.connection_id, &req.index)
             .await
@@ -624,6 +643,7 @@ pub async fn meilisearch_create_index(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchCreateIndexRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Create index").await?;
     dbx_core::document_ops::meilisearch_create_index_core(&state.app, &req.connection_id, &req.input)
         .await
@@ -635,6 +655,7 @@ pub async fn meilisearch_delete_index(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchIndexRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete index").await?;
     dbx_core::document_ops::meilisearch_delete_index_core(&state.app, &req.connection_id, &req.index)
         .await
@@ -646,6 +667,7 @@ pub async fn meilisearch_delete_all_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchIndexRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete all documents").await?;
     dbx_core::document_ops::meilisearch_delete_all_documents_core(&state.app, &req.connection_id, &req.index)
         .await
@@ -657,6 +679,7 @@ pub async fn meilisearch_get_system_overview(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchConnectionRequest>,
 ) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchSystemOverview>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::meilisearch_get_system_overview_core(&state.app, &req.connection_id)
         .await
         .map_err(AppError::from)?;
@@ -667,6 +690,7 @@ pub async fn meilisearch_list_keys(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchKeyListRequest>,
 ) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchKeyPage>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::meilisearch_list_keys_core(
         &state.app,
         &req.connection_id,
@@ -682,6 +706,7 @@ pub async fn meilisearch_get_key(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchKeyRequest>,
 ) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchKeyListItem>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::meilisearch_get_key_core(&state.app, &req.connection_id, &req.uid)
         .await
         .map_err(AppError::from)?;
@@ -692,6 +717,7 @@ pub async fn meilisearch_create_key(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchKeyCreateRequest>,
 ) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchCreatedKey>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Create API key").await?;
     let result = dbx_core::document_ops::meilisearch_create_key_core(&state.app, &req.connection_id, &req.input)
         .await
@@ -703,6 +729,7 @@ pub async fn meilisearch_update_key(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchKeyUpdateRequest>,
 ) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchKeyListItem>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Update API key").await?;
     let result =
         dbx_core::document_ops::meilisearch_update_key_core(&state.app, &req.connection_id, &req.uid, &req.input)
@@ -715,6 +742,7 @@ pub async fn meilisearch_delete_key(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchKeyRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete API key").await?;
     dbx_core::document_ops::meilisearch_delete_key_core(&state.app, &req.connection_id, &req.uid)
         .await
@@ -726,6 +754,7 @@ pub async fn meilisearch_get_tasks(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchTaskListRequest>,
 ) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchTaskPage>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::meilisearch_get_tasks_core(
         &state.app,
         &req.connection_id,
@@ -742,6 +771,7 @@ pub async fn meilisearch_get_task(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchTaskRequest>,
 ) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchTask>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::meilisearch_get_task_core(
         &state.app,
         &req.connection_id,
@@ -757,6 +787,7 @@ pub async fn meilisearch_cancel_tasks(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchTaskMutationRequest>,
 ) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchEnqueuedTaskSummary>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Cancel tasks").await?;
     let result = dbx_core::document_ops::meilisearch_cancel_tasks_core(&state.app, &req.connection_id, &req.selector)
         .await
@@ -768,6 +799,7 @@ pub async fn meilisearch_delete_tasks(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchTaskMutationRequest>,
 ) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchEnqueuedTaskSummary>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete tasks").await?;
     let result = dbx_core::document_ops::meilisearch_delete_tasks_core(&state.app, &req.connection_id, &req.selector)
         .await
@@ -779,6 +811,7 @@ pub async fn list_gridfs_files(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GridFsFileListRequest>,
 ) -> Result<Json<Vec<dbx_core::document_ops::MongoGridFsFileInfo>>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::list_gridfs_files_core(
         &state.app,
         &req.connection_id,
@@ -796,6 +829,7 @@ pub async fn list_gridfs_buckets(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GridFsBucketListRequest>,
 ) -> Result<Json<Vec<dbx_core::document_ops::MongoGridFsBucketInfo>>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::list_gridfs_buckets_core(
         &state.app,
         &req.connection_id,
@@ -812,6 +846,7 @@ pub async fn create_gridfs_bucket(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GridFsBucketRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Create GridFS bucket").await?;
     dbx_core::document_ops::create_gridfs_bucket_core(&state.app, &req.connection_id, &req.database, &req.bucket)
         .await
@@ -823,6 +858,7 @@ pub async fn delete_gridfs_bucket(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GridFsBucketRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete GridFS bucket").await?;
     dbx_core::document_ops::delete_gridfs_bucket_core(&state.app, &req.connection_id, &req.database, &req.bucket)
         .await
@@ -834,6 +870,7 @@ pub async fn download_gridfs_file(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GridFsDownloadRequest>,
 ) -> Result<Json<Vec<u8>>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::document_ops::download_gridfs_file_core(
         &state.app,
         &req.connection_id,
@@ -886,6 +923,7 @@ pub async fn upload_gridfs_file(
     let file_name = file_name.ok_or_else(|| AppError::from("Missing fileName".to_string()))?;
     let file_bytes = file_bytes.ok_or_else(|| AppError::from("No file uploaded".to_string()))?;
 
+    crate::access_gate::ensure_web_connection_scope(&state, &connection_id).await?;
     ensure_writable(&state.app, &connection_id, "Upload GridFS file").await?;
     let result = dbx_core::document_ops::upload_gridfs_file_core(
         &state.app,
@@ -905,6 +943,7 @@ pub async fn delete_gridfs_file(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GridFsFileDeleteRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete GridFS file").await?;
     dbx_core::document_ops::delete_gridfs_file_core(
         &state.app,

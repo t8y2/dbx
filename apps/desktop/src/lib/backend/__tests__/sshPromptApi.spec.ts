@@ -16,10 +16,12 @@ describe("web SSH prompt API", () => {
     const { resolveSshPrompt } = await import("@/lib/backend/http");
     await resolveSshPrompt({ id: "prompt-1", action: "accept", remember: true });
 
+    // RBAC Web 会话：POST 封装携带 cookie（credentials: "include"）。
     expect(fetchMock).toHaveBeenCalledWith("/api/ssh/prompts/resolve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: "prompt-1", action: "accept", remember: true }),
+      credentials: "include",
     });
   });
 });

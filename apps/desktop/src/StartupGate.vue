@@ -7,6 +7,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { webPath } from "@/lib/common/webPath";
 import { loadSavedLocale } from "@/i18n";
 import { checkStartupAuthentication, type StartupAuthentication } from "@/lib/startup/startupAuthentication";
+import { useAuthStore } from "@/stores/authStore";
 import { markStartupPhase } from "@/lib/startup/startupTiming";
 import { retryStartupAfterPreloadFailure } from "@/lib/startup/startupPreloadRecovery";
 import { initializePasswordViewerCapability } from "@/lib/security/passwordViewer";
@@ -30,6 +31,20 @@ const props = defineProps<{ localeReady?: Promise<void> }>();
 const { t } = useI18n();
 const migration = useMigrationStore();
 const { blocking } = migration;
+// RBAC 会话状态回填用 store。StartupGate 是应用根组件，可能被早于 pinia
+// 安装的场景直接挂载（单元测试、启动早期），此时 useAuthStore() 会抛
+// "no active Pinia"，需惰性容错获取：拿不到就跳过回填，不影响门控流程。
+let authStore: ReturnType<typeof useAuthStore> | undefined;
+function currentAuth(): ReturnType<typeof useAuthStore> | undefined {
+  if (authStore === undefined) {
+    try {
+      authStore = useAuthStore();
+    } catch {
+      authStore = undefined;
+    }
+  }
+  return authStore;
+}
 const checkingAuth = ref(true);
 const loginRequired = ref(false);
 const setupRequired = ref(false);
@@ -70,6 +85,10 @@ async function initialize() {
       const result = await checkStartupAuthentication(request.signal);
       if (request.signal.aborted) return;
       startupAuthentication.value = result;
+      // Refresh path: the login path reaches applyCheckResponse via LoginPage,
+      // but a plain reload never does, leaving the account UI and admin-only
+      // modules unpopulated even though the session cookie is still valid.
+      currentAuth()?.applyCheckResponse(result);
       setupRequired.value = result.setup_required === true;
       loginRequired.value = setupRequired.value || (result.required && !result.authenticated);
       if (loginRequired.value) {
@@ -88,8 +107,9 @@ async function initialize() {
     if (!request.signal.aborted) checkingAuth.value = false;
   }
 }
-async function authenticated() {
+async function authenticated(payload?: StartupAuthentication) {
   history.replaceState(null, "", webPath("/"));
+  if (payload) currentAuth()?.applyCheckResponse(payload);
   await initialize();
 }
 onMounted(() => {

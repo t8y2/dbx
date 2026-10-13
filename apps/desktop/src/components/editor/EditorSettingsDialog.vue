@@ -302,6 +302,7 @@ import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
 import SettingsTransferPanel from "@/components/settings/SettingsTransferPanel.vue";
+import AccessControlPage from "@/components/admin/AccessControlPage.vue";
 import McpResourceScopePicker from "@/components/settings/McpResourceScopePicker.vue";
 import McpDatabaseScopePicker from "@/components/settings/McpDatabaseScopePicker.vue";
 import McpAuthorizationStepper from "@/components/settings/McpAuthorizationStepper.vue";
@@ -323,6 +324,7 @@ import {
 import { applyEditorSettingsDraftToRefs, type EditorSettingsDraftRefMap } from "@/lib/settings/applyEditorSettingsDraft";
 import { serializeSettingsTransfer, sortTransferCategories, transferCategoryForKey, type SettingsTransferCategoryId } from "@/lib/settings/settingsTransfer";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useAuthStore } from "@/stores/authStore";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
@@ -385,6 +387,7 @@ import { buildConnectionGroupIdPathMap, connectionGroupDestinationRows, connecti
 const { t, locale } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
+const authStore = useAuthStore();
 const historyRetention = useHistoryRetentionSetting();
 const mcpHistoryRetention = useHistoryRetentionSetting(loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit);
 const { draft: editHistoryRetentionLimit, loaded: historyRetentionLoaded, loading: historyRetentionLoading, saving: historyRetentionSaving, loadError: historyRetentionLoadError } = historyRetention;
@@ -3425,9 +3428,10 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "snippets", label: t("settings.snippetsTab") },
   { value: "sync", label: t("settings.syncTab") },
   { value: "ai", label: t("settings.aiTab") },
-  { value: "mcp" as const, label: t("settings.mcpTab") },
+  ...(authStore.hasPermission("mcp") ? [{ value: "mcp" as const, label: t("settings.mcpTab") }] : []),
   { value: "updates" as const, label: t("settings.updatesTab") },
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
+  ...(isWeb && authStore.isAdmin ? [{ value: "accessControl" as const, label: t("settings.accessControlTab") }] : []),
   { value: "about", label: t("settings.aboutTab") },
 ]);
 const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets", "updates"]);
@@ -5091,6 +5095,76 @@ const confirmNewPassword = ref("");
 const passwordMessage = ref("");
 const passwordError = ref(false);
 const changingPassword = ref(false);
+
+// Clear protection password state
+const showClearPasswordConfirm = ref(false);
+const clearPasswordInput = ref("");
+const clearPasswordError = ref("");
+const clearPasswordSubmitting = ref(false);
+let clearPasswordTarget: { targetType: string; targetId: string } | null = null;
+
+interface ProtectedItem {
+  targetType: string;
+  targetId: string;
+  name: string;
+  typeLabel: string;
+}
+
+const protectedItems = computed<ProtectedItem[]>(() => {
+  const items: ProtectedItem[] = [];
+  for (const group of connectionStore.sidebarLayout.groups) {
+    if (group.passwordHash) {
+      items.push({ targetType: "connection-group", targetId: group.id, name: group.name, typeLabel: t("auth.connectionGroupLabel") });
+    }
+  }
+  for (const folder of savedSqlStore.folders) {
+    if (folder.passwordHash) {
+      items.push({ targetType: "saved-sql-folder", targetId: folder.id, name: folder.name, typeLabel: t("auth.savedSqlFolderLabel") });
+    }
+  }
+  return items;
+});
+
+function openClearPasswordDialog(item: ProtectedItem) {
+  clearPasswordTarget = { targetType: item.targetType, targetId: item.targetId };
+  clearPasswordInput.value = "";
+  clearPasswordError.value = "";
+  clearPasswordSubmitting.value = false;
+  showClearPasswordConfirm.value = true;
+}
+
+async function confirmClearPassword() {
+  if (!clearPasswordTarget || !clearPasswordInput.value) return;
+  clearPasswordSubmitting.value = true;
+  clearPasswordError.value = "";
+  try {
+    const res = await fetch("/api/admin/clear-protection-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        target_type: clearPasswordTarget.targetType,
+        target_id: clearPasswordTarget.targetId,
+        login_password: clearPasswordInput.value,
+      }),
+    });
+    if (res.ok) {
+      showClearPasswordConfirm.value = false;
+      window.location.reload();
+    } else {
+      const data = await res.json().catch(() => ({}));
+      if (data.error === "invalid_credentials") {
+        clearPasswordError.value = t("auth.oldPasswordWrong");
+      } else {
+        clearPasswordError.value = t("auth.clearProtectionPasswordFailed");
+      }
+    }
+  } catch {
+    clearPasswordError.value = t("auth.clearProtectionPasswordFailed");
+  } finally {
+    clearPasswordSubmitting.value = false;
+  }
+}
 
 async function scrollToInitialSettingsSection() {
   await nextTick();
@@ -11899,6 +11973,29 @@ LIMIT 100;</pre
                   </Button>
                 </div>
               </div>
+
+              <div class="border-t border-border/60 pt-5 space-y-3">
+                <Label class="text-base">{{ t("auth.clearProtectionPasswords") }}</Label>
+                <p class="text-sm text-muted-foreground">
+                  {{ t("auth.clearProtectionPasswordsDescription") }}
+                </p>
+                <div v-if="protectedItems.length" class="space-y-2">
+                  <div v-for="item in protectedItems" :key="item.targetType + ':' + item.targetId" class="flex items-center justify-between rounded-lg border px-3 py-2">
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs text-muted-foreground">{{ item.typeLabel }}</span>
+                      <span class="text-sm">{{ item.name }}</span>
+                    </div>
+                    <Button variant="outline" size="sm" class="text-destructive hover:text-destructive" @click="openClearPasswordDialog(item)">
+                      {{ t("auth.clearPassword") }}
+                    </Button>
+                  </div>
+                </div>
+                <p v-else class="text-sm text-muted-foreground">{{ t("auth.noProtectedItems") }}</p>
+              </div>
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'accessControl' && isWeb && authStore.isAdmin" class="h-full min-h-0 py-2">
+              <AccessControlPage />
             </section>
 
             <section v-else-if="activeSettingsTab === 'tunnels'" data-settings-search-id="tunnels" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('tunnels')]">
@@ -12405,6 +12502,23 @@ LIMIT 100;</pre
          advances and letter-spacing that char-count arithmetic cannot predict. -->
     <span ref="shortcutPlaceholderMirrorRef" aria-hidden="true" class="invisible pointer-events-none absolute top-0 left-0 h-0 max-w-64 overflow-hidden whitespace-pre rounded-[6px] border px-2.5 font-mono text-[13px] font-semibold">{{ shortcutPressShortcutLabel }}</span>
   </component>
+
+  <Dialog :open="showClearPasswordConfirm" @update:open="showClearPasswordConfirm = $event">
+    <DialogContent class="sm:max-w-md">
+      <DialogHeader>
+        <DialogTitle>{{ t("auth.clearProtectionPasswordConfirm") }}</DialogTitle>
+      </DialogHeader>
+      <p class="text-sm text-muted-foreground">{{ t("auth.clearProtectionPasswordConfirmDescription") }}</p>
+      <PasswordInput v-model="clearPasswordInput" :placeholder="t('auth.oldPassword')" inputClass="h-9" autocomplete="current-password" />
+      <p v-if="clearPasswordError" class="text-xs text-destructive">{{ clearPasswordError }}</p>
+      <DialogFooter>
+        <Button variant="outline" @click="showClearPasswordConfirm = false">{{ t("common.cancel") }}</Button>
+        <Button variant="destructive" :disabled="!clearPasswordInput || clearPasswordSubmitting" @click="confirmClearPassword">
+          {{ clearPasswordSubmitting ? t("auth.processing") : t("auth.confirmClearPassword") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
 </template>
 
 <style>

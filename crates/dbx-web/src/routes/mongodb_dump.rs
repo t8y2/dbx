@@ -35,6 +35,7 @@ pub async fn catalog(
     State(state): State<Arc<WebState>>,
     Json(request): Json<CatalogRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &request.connection_id).await?;
     let catalog = mongodb_dump::inspect_mongodb_database_dump(&state.app, &request.connection_id, &request.database)
         .await
         .map_err(AppError::from)?;
@@ -357,6 +358,7 @@ pub async fn start_dump(
     Json(body): Json<DumpWrapper>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut request = body.request;
+    crate::access_gate::ensure_web_connection_scope(&state, &request.connection_id).await?;
     if request.format != MongoDumpFormat::Archive {
         return Err(AppError::from("Web database exports use MongoDB archive format".to_string()));
     }
@@ -374,6 +376,7 @@ pub async fn start_restore(
     State(state): State<Arc<WebState>>,
     Json(body): Json<RestoreWrapper>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &body.request.connection_id).await?;
     start_task(state, Task::Restore(body.request)).await
 }
 

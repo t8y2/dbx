@@ -1,0 +1,78 @@
+---
+title: Access Control (RBAC)
+description: Multi-user accounts, roles, feature permissions, and per-connection "write updates" authorization in the DBX Web edition.
+---
+
+<Callout type="info">Access control is only available in the DBX Web edition (browser or Docker deployment). The desktop edition remains a single-user, full-control runtime and is not affected by any permission setting on this page.</Callout>
+
+## Overview
+
+DBX Web ships a multi-user RBAC (role-based access control) system. An administrator creates accounts and assigns each account one or more roles. A role decides two things:
+
+1. **Feature permissions** — which application capabilities the user may use (toolbar actions, context menus, and their backing APIs).
+2. **Data scope** — which connections and connection groups the user can see, and which of those connections allow writes.
+
+## Users and Administrators
+
+- The first account is created by the administrator during the initial setup wizard and automatically holds the administrator flag.
+- Administrators can create additional accounts, reset passwords, and disable or delete accounts from the management UI.
+- Administrators are unrestricted: they always see every connection and always pass every permission check. The permission system exists only for non-administrator accounts.
+
+## Roles and Feature Permissions
+
+A role carries a list of feature permission keys. The current set:
+
+| Permission | Controls |
+| --- | --- |
+| Manage connections | Creating, editing, and deleting database connections and connection groups |
+| Transfer data | Data transfer tasks across databases, schemas, and tables |
+| Execute SQL files | Uploading and batch-executing SQL script files |
+| Compare schemas | Structural diff between two databases or schemas |
+| Compare data | Row-level data diff between two tables |
+| Backup and restore | Database backup and restore jobs |
+| Import data | Importing CSV/Excel and other data files into tables |
+| Export data | Exporting query results or table data |
+| MCP | Exposing connections and querying to external AI tools via the MCP protocol |
+
+Notes:
+
+- Hovering a permission in the role editor shows a short description of what it controls.
+- When you create a role, **Manage connections** and **Execute SQL files** are checked by default.
+- Querying is **not** a feature permission: any visible connection is readable, and writes are governed per connection by the "write updates" option below.
+- Unchecking **Manage connections** requires confirmation, because without it the user cannot create connections, connect to databases, or execute scripts.
+
+## Data Scope (Visibility)
+
+The role editor shows the connection tree with two independent states per group and connection:
+
+- **Visible** — the group/connection appears in the sidebar and its data is readable.
+- **Write updates** — the connection accepts modifying operations.
+
+Rules:
+
+- Scope follows groups: checking a group grants its descendant connections (unless explicitly unchecked), and the "write updates" checkbox on a group applies to all connections under it.
+- Visibility is default-deny. A role with an empty data scope grants nothing: the user sees no connections at all, including ungrouped ones.
+- The desktop edition always shows everything and ignores scopes entirely.
+
+## Write Updates (Read-only by Default)
+
+Every connection is **read-only by default**, even when it is visible:
+
+- SQL write statements (`INSERT`/`UPDATE`/`DELETE`/`DDL`, classified per statement) are rejected with a `403` and a localized hint.
+- Write-style endpoints — for example Redis command execution, MongoDB document mutations, Elasticsearch/Meilisearch document and index writes, HBase row operations, and MQ administration — are blocked the same way.
+- Only connections whose **Write updates** checkbox is checked (directly, or via an ancestor group) accept modifying operations.
+
+This gives you a safe read-only account model: grant visibility without granting writes, and flip a single checkbox when a connection needs to be writable.
+
+## Enforcement Layers
+
+Permission checks live in two layers that work together:
+
+1. **UI layer** — toolbar buttons and context menu entries are hidden when the role lacks the matching permission, so unauthorized actions are not offered in the first place.
+2. **Backend layer** — every protected API is guarded server-side. A direct API call without the permission still receives `403` with a machine-readable error code such as `permission_denied`, `connection_forbidden`, or `query_write_forbidden`, and the UI renders these codes as localized Chinese/English messages.
+
+Hiding an entry is a convenience, not a security boundary — the backend guards are the authority.
+
+## Blacklist
+
+The management UI also provides an IP blacklist to block clients before authentication. It is an independent safety net and does not replace roles.

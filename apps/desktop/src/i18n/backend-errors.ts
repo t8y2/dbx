@@ -93,6 +93,32 @@ const exactMessageKeys: Record<string, string> = {
   "Plugin update blocked by active operations. Please wait for them to finish.": "pluginPlatform.updateBlockedByOperations",
   [PHOENIX_DRIVER_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
   [PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
+  invalid_credentials: "auth.error.invalidCredentials",
+  user_disabled: "auth.error.userDisabled",
+  blacklisted: "auth.error.blacklisted",
+  ip_blacklisted: "auth.error.ipBlacklisted",
+  password_change_required: "auth.error.passwordChangeRequired",
+  weak_password: "auth.error.weakPassword",
+  already_initialized: "auth.error.alreadyInitialized",
+  rate_limited: "auth.error.rateLimited",
+  setup_required: "auth.error.setupRequired",
+  user_system_disabled: "auth.error.userSystemDisabled",
+  admin_required: "auth.error.adminRequired",
+  self_forbidden: "auth.error.selfForbidden",
+  invalid_username: "auth.error.invalidUsername",
+  invalid_kind: "auth.error.invalidKind",
+  invalid_role: "auth.error.invalidRole",
+  invalid_status: "auth.error.invalidStatus",
+  invalid_target_type: "auth.error.invalidTargetType",
+  in_use: "auth.error.inUse",
+  already_exists: "auth.error.alreadyExists",
+  internal_error: "auth.error.internalError",
+  // Web RBAC gate error codes (crates/dbx-web/src/access_gate.rs):
+  // 403 {"error": ...} bodies surfaced by permission_denied_response /
+  // connection_forbidden_app_error / query_write_forbidden_app_error.
+  permission_denied: "accessControl.errors.permission_denied",
+  connection_forbidden: "accessControl.errors.connectionForbidden",
+  query_write_forbidden: "accessControl.errors.queryWriteForbidden",
 };
 
 const patterns: [RegExp, string][] = [

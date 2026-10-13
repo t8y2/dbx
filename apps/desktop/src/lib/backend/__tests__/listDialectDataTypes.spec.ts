@@ -35,6 +35,7 @@ describe("listDialectDataTypes backend adapters", () => {
     const { listDialectDataTypes } = await import("@/lib/backend/http");
 
     await expect(listDialectDataTypes("PostgreSQL")).resolves.toEqual(["INTEGER", "TEXT"]);
-    expect(fetchMock).toHaveBeenCalledWith("/api/dialect/data-types?dialect_name=PostgreSQL");
+    // RBAC Web 会话：GET 封装携带 cookie（credentials: "include"）。
+    expect(fetchMock).toHaveBeenCalledWith("/api/dialect/data-types?dialect_name=PostgreSQL", { credentials: "include" });
   });
 });

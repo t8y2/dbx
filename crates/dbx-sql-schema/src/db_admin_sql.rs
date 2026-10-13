@@ -804,10 +804,14 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
     let structure_sql = if matches!(
         options.database_type,
-        Some(DatabaseType::Mysql | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
+        Some(
+            DatabaseType::Mysql
+                | DatabaseType::Kyuubi
+                | DatabaseType::Impala
+                | DatabaseType::Argo
+                | DatabaseType::SapHana
+        )
     ) {
-        format!("CREATE TABLE {target} LIKE {source};")
-    } else if options.database_type == Some(DatabaseType::SapHana) {
         format!("CREATE TABLE {target} LIKE {source};")
     } else if options.database_type == Some(DatabaseType::Questdb) {
         format!("CREATE TABLE {target} (LIKE {source});")

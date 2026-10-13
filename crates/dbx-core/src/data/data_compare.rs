@@ -2964,7 +2964,7 @@ mod tests {
                 25,
                 50,
             ),
-            "SELECT * FROM (SELECT TOP 75 ID, NAME FROM APP.USERS ORDER BY ID ASC) WHERE %VID > 50"
+            "SELECT * FROM (SELECT TOP 75 \"ID\", \"NAME\" FROM \"APP\".\"USERS\" ORDER BY \"ID\" ASC) WHERE %VID > 50"
         );
     }
 

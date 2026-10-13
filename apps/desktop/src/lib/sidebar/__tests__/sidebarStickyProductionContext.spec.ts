@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createFlatTreeIndex, flattenTree } from "@/composables/useFlatTree";
-import { resolveSidebarStickyProductionNode } from "@/lib/sidebar/sidebarStickyProductionContext";
+import { resolvePlainStickyContainerIndex, resolveSidebarStickyProductionNode } from "@/lib/sidebar/sidebarStickyProductionContext";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import type { ConnectionConfig, TreeNode, TreeNodeType } from "@/types/database";
 
@@ -22,6 +22,23 @@ function fixture(roots: TreeNode[]) {
 const production: ConnectionConfig = { id: "connection", name: "Reporting", db_type: "postgres", host: "localhost", port: 5432, username: "", password: "", production_databases: ["production"] };
 
 describe("sidebar sticky production context", () => {
+  it("uses real plain-row positions instead of switching by the estimated row height", () => {
+    const scope = fixture([node("connection", "connection", [node("first", "database", [node("query", "saved-sql-root")]), node("second", "database")])]);
+    const rows = scope.nodes.map((item, index) => ({ nodeId: item.id, top: 100 + index * 29 }));
+    const firstTop = scope.nodes.findIndex((item) => item.id === "first");
+    const secondTop = scope.nodes.findIndex((item) => item.id === "second");
+    expect(
+      resolvePlainStickyContainerIndex(
+        scope.nodes,
+        scope.index,
+        rows.map((row) => ({ ...row, top: row.top - 29 })),
+        100,
+      ),
+    ).toBe(firstTop);
+    expect(resolvePlainStickyContainerIndex(scope.nodes, scope.index, rows, 100)).toBe(-1);
+    expect(secondTop).toBeGreaterThan(firstTop);
+  });
+
   it("has no marker before a container becomes fixed", () => {
     expect(fixture([node("connection", "connection")]).resolve(-1, 0)).toBeNull();
   });

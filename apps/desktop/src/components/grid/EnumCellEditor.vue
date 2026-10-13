@@ -76,18 +76,15 @@ function onPopoverInteractOutside(event: PointerDownOutsideEvent | FocusOutsideE
   }
   finishCommit();
 }
+
+function onOpenChange(value: boolean) {
+  open.value = value;
+  if (!value && !closeHandled) finishCommit();
+}
 </script>
 
 <template>
-  <Popover
-    :open="open"
-    @update:open="
-      (v) => {
-        open = v;
-        if (!v && !closeHandled) finishCommit();
-      }
-    "
-  >
+  <Popover :open="open" @update:open="onOpenChange">
     <PopoverTrigger as-child>
       <button ref="triggerRef" type="button" :class="triggerClass" @keydown.stop="onKeydown" @click.stop>
         <span class="min-w-0 flex-1 truncate">{{ displayValue }}</span>

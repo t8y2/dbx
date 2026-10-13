@@ -11,6 +11,26 @@ Use a standard `mongodb://` or `mongodb+srv://` connection string and include re
 
 DBX prefers the native MongoDB path. When a server or authentication protocol requires the older driver, you can select or automatically fall back to the `mongodb-legacy` Agent. The legacy path may expose fewer administration and mutation capabilities.
 
+## Compare, Transform, and Automate
+
+The toolbar and MongoDB database/collection context menus provide tools for:
+
+- Comparing collections across saved connections, saving comparison settings, and summarizing multiple collection pairs. Synchronization requires a fresh comparison, a command preview, and explicit write confirmation.
+- Building aggregation pipelines by stage, previewing intermediate results, and generating mongosh, Node.js, Python, Java, or C# code.
+- Analyzing a bounded document sample, masking fields, and reshaping documents before appending them to another collection.
+- Running a bounded JavaScript sandbox or translating the supported SELECT/JOIN/GROUP BY SQL subset into read-only aggregation.
+- Previewing mapped SQL ↔ MongoDB append migrations, and scheduling sequential read-only MongoDB tasks while DBX remains running.
+
+These tools preserve Extended JSON types and the existing read-only/production guards. Partial or ambiguous comparisons cannot synchronize. Migrations append to existing targets and do not provide schema creation, overwrite, transactions, or CDC. Scheduled tasks do not perform unattended writes.
+
+## Import Studio 3T Connections
+
+In Studio 3T's Connection Manager, export selected connections with **Export → Export to File** as standard `.uri` files. In DBX, choose **Import Studio 3T (.uri)** from the sidebar import/export menu or the welcome screen, then select the connections to save. Importing does not connect automatically.
+
+Standard MongoDB/SRV URIs preserve authentication database, replica set, TLS, and other URI options. Studio 3T URI v3 preserves exported connection names and supports SSH private-key tunnels without passphrases; verify key paths before connecting. Private/encrypted backups, other tunnels, and unknown extensions are rejected. Folders and colors use DBX defaults.
+
+An invalid default database with a valid explicit authentication database produces a preview warning: the default is cleared, authentication is retained, and the original database is recorded in the connection note for review.
+
 ## Databases and Collections
 
 The object tree can:

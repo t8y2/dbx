@@ -11,6 +11,26 @@ MongoDB 工作台围绕数据库、Collection、文档、索引和 GridFS 组织
 
 DBX 优先使用原生 MongoDB 路径。当服务端或认证协议需要旧驱动时，可以选择或自动回退到 `mongodb-legacy` Agent。旧驱动的管理和修改能力可能少于原生驱动。
 
+## 对比、重塑与任务
+
+工具栏以及 MongoDB 数据库/Collection 右键菜单提供：
+
+- 跨连接集合对比、保存配置和多集合汇总。同步需要重新读取、预览命令并人工确认。
+- 按阶段编辑和预览聚合管道，生成 mongosh、Node.js、Python、Java 和 C# 查询代码。
+- 分析有上限的文档样本，脱敏或重塑字段，再追加到另一个集合。
+- 运行有资源限制的 JavaScript 沙箱，或将支持的 SELECT/JOIN/GROUP BY SQL 子集转换为只读聚合。
+- 预览字段映射后的 SQL ↔ MongoDB 追加迁移，以及在 DBX 持续运行时定时执行顺序只读任务。
+
+这些工具保留 Extended JSON 类型并沿用只读和生产保护。部分结果或匹配不唯一时不能同步。迁移写入已有目标，不提供建表、覆盖、跨库事务或 CDC。定时任务不会无人值守写库。
+
+## 导入 Studio 3T 连接
+
+在 Studio 3T Connection Manager 中选择连接，通过 **Export → Export to File** 导出标准 `.uri` 文件。在 DBX 侧栏导入/导出菜单或欢迎页选择 **导入 Studio 3T（.uri）**，勾选要保存的连接后确认；导入不会自动连接。
+
+标准 MongoDB/SRV URI 保留认证库、副本集、TLS 和其他 URI 参数。Studio 3T URI v3 保留导出的连接名称，并支持无口令 SSH 私钥隧道；连接前需核对私钥路径。私有/加密备份、其他隧道和未知扩展会被拒绝。文件夹和配色使用 DBX 默认设置。
+
+默认数据库名无效但显式认证库有效时，导入预览会显示警告：清空默认库，保留认证库，并在连接备注中记录原数据库名供核对。
+
 ## 数据库与 Collection
 
 对象树可以：

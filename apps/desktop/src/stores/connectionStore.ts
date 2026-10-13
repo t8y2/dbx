@@ -315,7 +315,7 @@ function isFlatMqConnection(config: ConnectionConfig | undefined): boolean {
   return kind === "kafka" || kind === "rocketmq" || kind === "rabbitmq";
 }
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "studio3t";
 
 interface LocateTableTarget {
   catalog?: string;
@@ -615,6 +615,7 @@ export const useConnectionStore = defineStore("connection", () => {
     schema?: string;
     tableName?: string;
   } | null>(null);
+  const mongoCompareSource = ref<{ connectionId: string; database: string; collection: string } | null>(null);
   const sqlFileSource = ref<{ connectionId: string; database: string; schema?: string; filePath?: string; preview?: SqlFilePreview } | null>(null);
   const diagramSource = ref<{
     connectionId: string;
@@ -10201,7 +10202,50 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  async function readStudio3tImportFiles(): Promise<{ content: string; encrypted: boolean } | null> {
+    const { STUDIO3T_IMPORT_MAX_BYTES } = await import("@/lib/imports/studio3tImport");
+    const { decodeImportFileText } = await import("@/lib/common/decodeText");
+    const files: { name: string; content: string }[] = [];
+    let totalBytes = 0;
+    if (isTauriRuntime()) {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { readFile, stat } = await import("@tauri-apps/plugin-fs");
+      const paths = await open({
+        filters: [{ name: "Studio 3T MongoDB URI", extensions: ["uri"] }],
+        multiple: true,
+        title: i18n.global.t("configExport.importStudio3tDialogTitle"),
+      });
+      if (!paths || (Array.isArray(paths) && !paths.length)) return null;
+      for (const path of Array.isArray(paths) ? paths : [paths]) {
+        const info = await stat(path);
+        if (totalBytes + info.size > STUDIO3T_IMPORT_MAX_BYTES) throw new Error(i18n.global.t("configExport.importStudio3tTooLarge"));
+        const bytes = await readFile(path);
+        totalBytes += bytes.byteLength;
+        if (totalBytes > STUDIO3T_IMPORT_MAX_BYTES) throw new Error(i18n.global.t("configExport.importStudio3tTooLarge"));
+        files.push({ name: path.split(/[\\/]/).pop() || "MongoDB.uri", content: decodeImportFileText(bytes) });
+      }
+    } else {
+      const picked = await new Promise<File[]>((resolve) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".uri";
+        input.multiple = true;
+        input.onchange = () => resolve(Array.from(input.files ?? []));
+        input.oncancel = () => resolve([]);
+        input.click();
+      });
+      if (!picked.length) return null;
+      for (const file of picked) {
+        totalBytes += file.size;
+        if (totalBytes > STUDIO3T_IMPORT_MAX_BYTES) throw new Error(i18n.global.t("configExport.importStudio3tTooLarge"));
+        files.push({ name: file.name, content: decodeImportFileText(await file.arrayBuffer()) });
+      }
+    }
+    return { content: JSON.stringify({ format: "studio3t-uri-import", files }), encrypted: false };
+  }
+
   async function readImportFile(source: ImportSource = "dbx"): Promise<{ content: string; encrypted: boolean } | null> {
+    if (source === "studio3t") return readStudio3tImportFiles();
     if (source === "dbeaver") return readDbeaverImportFile();
     if (source === "datagrip") return readDataGripImportFile();
 
@@ -10250,6 +10294,26 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function parseConnectionsImport(content: string, passphrase: string | null): Promise<ConnectionConfigBundle> {
+    if (!passphrase && content.trimStart().startsWith("{")) {
+      const payload = JSON.parse(content);
+      if (payload?.format === "studio3t-uri-import") {
+        const { parseStudio3tUriFiles, Studio3tImportError } = await import("@/lib/imports/studio3tImport");
+        try {
+          if (!Array.isArray(payload.files)) throw new Studio3tImportError("invalid");
+          const preview = parseStudio3tUriFiles(payload.files);
+          return {
+            connections: preview.connections,
+            ...(preview.invalidDatabaseCount ? { importWarnings: [i18n.global.t("configExport.importStudio3tDatabaseWarning", { count: preview.invalidDatabaseCount })] } : {}),
+          };
+        } catch (error) {
+          if (error instanceof Studio3tImportError) {
+            const key = error.code === "tooLarge" ? "importStudio3tTooLarge" : error.code === "unsupported" ? "importStudio3tUnsupported" : "importStudio3tInvalid";
+            throw new Error(i18n.global.t(`configExport.${key}`));
+          }
+          throw error;
+        }
+      }
+    }
     if (!passphrase && content.trimStart().startsWith("<")) {
       const { parseNavicatConnections } = await import("@/lib/imports/navicatImport");
       return { connections: await parseNavicatConnections(content) };
@@ -10634,6 +10698,7 @@ export const useConnectionStore = defineStore("connection", () => {
     transferSource,
     schemaDiffSource,
     dataCompareSource,
+    mongoCompareSource,
     sqlFileSource,
     diagramSource,
     docsSource,

@@ -1594,13 +1594,7 @@ pub async fn aggregate_documents(
     max_rows: Option<usize>,
     options_json: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
-    let json: serde_json::Value =
-        serde_json::from_str(pipeline_json).map_err(|e| format!("Invalid pipeline JSON: {e}"))?;
-    let pipeline_values = json.as_array().ok_or_else(|| "Aggregate pipeline must be a JSON array".to_string())?;
-    let pipeline_docs = pipeline_values
-        .iter()
-        .map(|value| json_object_to_document(value).map_err(|e| format!("Invalid pipeline stage: {e}")))
-        .collect::<Result<Vec<Document>, String>>()?;
+    let pipeline_docs = parse_aggregate_pipeline(pipeline_json)?;
 
     let options = parse_aggregate_options_document(options_json)?;
     let (command, explain) = build_aggregate_command(collection, pipeline_docs, options)?;
@@ -1608,8 +1602,7 @@ pub async fn aggregate_documents(
 
     if explain {
         let result = db.run_command(command).await.map_err(|e| e.to_string())?;
-        let document = bson_to_json(&Bson::Document(result.clone()));
-        let extended = Bson::Document(result).into_relaxed_extjson();
+        let (document, extended) = document_json_views(result);
         return Ok(MongoDocumentResult {
             documents: vec![document],
             raw_documents: None,
@@ -1623,6 +1616,19 @@ pub async fn aggregate_documents(
     // Driver cursor owns the implicit session across aggregate + getMore + killCursors.
     let mut cursor = db.run_cursor_command(command).await.map_err(|e| e.to_string())?;
     drain_document_cursor(&mut cursor, max_rows).await
+}
+
+fn parse_aggregate_pipeline(pipeline_json: &str) -> Result<Vec<Document>, String> {
+    let json: serde_json::Value =
+        serde_json::from_str(pipeline_json).map_err(|e| format!("Invalid pipeline JSON: {e}"))?;
+    let values = json.as_array().ok_or_else(|| "Aggregate pipeline must be a JSON array".to_string())?;
+    // The shell parsers already encode BSON constructors as Extended JSON. Do
+    // not reinterpret quoted ISODate(...) text: SQL $literal, pipeline previews
+    // and runCommand writes must all see the same value and BSON type.
+    values
+        .iter()
+        .map(|value| json_object_to_document_extended_json(value).map_err(|e| format!("Invalid pipeline stage: {e}")))
+        .collect()
 }
 
 /// Build the server aggregate command document, preserving free-form options.
@@ -1660,8 +1666,9 @@ async fn drain_document_cursor(
     let mut extended_documents = Vec::new();
     while documents.len() < fetch_limit && cursor.advance().await.map_err(|e| e.to_string())? {
         let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        documents.push(bson_to_json(&Bson::Document(doc.clone())));
-        extended_documents.push(Bson::Document(doc).into_relaxed_extjson());
+        let (document, extended_document) = document_json_views(doc);
+        documents.push(document);
+        extended_documents.push(extended_document);
     }
     let total = documents.len() as u64;
     if documents.len() > max_rows {
@@ -1689,7 +1696,7 @@ fn parse_aggregate_options_document(options_json: Option<&str>) -> Result<Docume
     }
     // Free-form object conversion keeps every official aggregate option (nested
     // docs, hint strings, maxTimeMS numbers, comments, let vars, …) intact.
-    json_object_to_document(&value).map_err(|e| format!("Invalid aggregate options: {e}"))
+    json_object_to_document_extended_json(&value).map_err(|e| format!("Invalid aggregate options: {e}"))
 }
 
 fn aggregate_options_explain(options: &Document) -> Result<bool, String> {
@@ -3095,7 +3102,7 @@ fn json_object_to_document_for_update(
 }
 
 pub fn json_filter_to_document(value: &serde_json::Value) -> Result<Document, String> {
-    match json_filter_value_to_bson(value, None) {
+    match json_filter_value_to_bson(value, None)? {
         Bson::Document(doc) => Ok(doc),
         other => Err(format!("Expected a JSON object, got {other:?}")),
     }
@@ -3240,17 +3247,25 @@ fn parse_extended_json_int64(obj: &serde_json::Map<String, serde_json::Value>) -
     }
 }
 
-fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>) -> Bson {
+fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>) -> Result<Bson, String> {
+    // Expressions use BSON values, not the document browser's display-value
+    // conveniences. In particular, never rewrite $literal strings or embedded
+    // _id fields in the exact-match filters used by compare/synchronization.
+    if field_name == Some("$expr") {
+        return Bson::try_from(value.clone()).map_err(|error| format!("Invalid filter expression: {error}"));
+    }
     if field_name == Some("_id") {
         if let Some(id) = value.as_str() {
-            return id_equality_bson(id);
+            return Ok(id_equality_bson(id));
         }
     }
 
     match value {
-        serde_json::Value::Array(arr) => {
-            Bson::Array(arr.iter().map(|item| json_filter_value_to_bson(item, None)).collect())
-        }
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .map(|item| json_filter_value_to_bson(item, None))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Bson::Array),
         serde_json::Value::Object(obj) => {
             if obj.len() == 1 {
                 // Shell constructor wrappers (UUID/BinData/Timestamp/MinKey/MaxKey),
@@ -3272,23 +3287,23 @@ fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>
                     )
                 }) {
                     if let Ok(Some(value)) = parse_extended_json_value(obj) {
-                        return value;
+                        return Ok(value);
                     }
                 }
                 if let Some(serde_json::Value::String(hex)) = obj.get("$oid") {
                     if let Ok(oid) = ObjectId::parse_str(hex) {
-                        return Bson::ObjectId(oid);
+                        return Ok(Bson::ObjectId(oid));
                     }
                 }
                 if let Some(value) = parse_extended_json_int64(obj) {
-                    return Bson::Int64(value);
+                    return Ok(Bson::Int64(value));
                 }
                 // Extended JSON dates must be decoded in filters too, otherwise
                 // {"$date": ...} reaches the server as a raw document: a bare
                 // { field: {"$date": ...} } fails with "unknown operator: $date"
                 // and { field: {"$gte": {"$date": ...}} } silently matches nothing.
                 if let Some(date) = parse_extended_json_date(obj) {
-                    return Bson::DateTime(date);
+                    return Ok(Bson::DateTime(date));
                 }
             }
 
@@ -3300,35 +3315,37 @@ fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>
                             if let Some(id) = item.as_str() {
                                 doc.insert("$in", object_id_string_variants(id));
                             } else {
-                                doc.insert(key, json_filter_value_to_bson(item, None));
+                                doc.insert(key, json_filter_value_to_bson(item, None)?);
                             }
                         }
                         "$ne" => {
                             if let Some(id) = item.as_str() {
                                 doc.insert("$nin", object_id_string_variants(id));
                             } else {
-                                doc.insert(key, json_filter_value_to_bson(item, None));
+                                doc.insert(key, json_filter_value_to_bson(item, None)?);
                             }
                         }
                         "$in" | "$nin" => {
                             if let Some(items) = item.as_array() {
-                                doc.insert(key, expand_object_id_string_array(items));
+                                doc.insert(key, expand_object_id_string_array(items)?);
                             } else {
-                                doc.insert(key, json_filter_value_to_bson(item, None));
+                                doc.insert(key, json_filter_value_to_bson(item, None)?);
                             }
                         }
                         _ => {
-                            doc.insert(key, json_filter_value_to_bson(item, None));
+                            doc.insert(key, json_filter_value_to_bson(item, None)?);
                         }
                     }
                 }
-                return Bson::Document(doc);
+                return Ok(Bson::Document(doc));
             }
 
-            let doc: Document = obj.iter().map(|(k, v)| (k.clone(), json_filter_value_to_bson(v, Some(k)))).collect();
-            Bson::Document(doc)
+            obj.iter()
+                .map(|(key, value)| json_filter_value_to_bson(value, Some(key)).map(|value| (key.clone(), value)))
+                .collect::<Result<Document, _>>()
+                .map(Bson::Document)
         }
-        _ => json_value_to_bson(value),
+        _ => Ok(json_value_to_bson(value)),
     }
 }
 
@@ -3348,16 +3365,16 @@ fn object_id_string_variants(id: &str) -> Vec<Bson> {
     }
 }
 
-fn expand_object_id_string_array(items: &[serde_json::Value]) -> Bson {
+fn expand_object_id_string_array(items: &[serde_json::Value]) -> Result<Bson, String> {
     let mut values = Vec::new();
     for item in items {
         if let Some(id) = item.as_str() {
             values.extend(object_id_string_variants(id));
         } else {
-            values.push(json_filter_value_to_bson(item, None));
+            values.push(json_filter_value_to_bson(item, None)?);
         }
     }
-    Bson::Array(values)
+    Ok(Bson::Array(values))
 }
 
 #[cfg(test)]
@@ -3526,6 +3543,77 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_pipeline_keeps_literal_strings_and_bson_types() {
+        let pipeline = parse_aggregate_pipeline(
+            r#"[{"$match":{"$expr":{"$eq":["$text",{"$literal":"ISODate(\"2026-08-10T00:00:00Z\")"}]}}},
+              {"$set":{"small":{"$numberInt":"7"},"long":{"$numberLong":"9007199254740993"},
+                        "double":{"$numberDouble":"7.0"},"date":{"$date":"2026-08-10T00:00:00Z"}}}]"#,
+        )
+        .unwrap();
+        let operands = pipeline[0].get_document("$match").unwrap().get_document("$expr").unwrap().get_array("$eq").unwrap();
+        assert_eq!(
+            operands[1].as_document().unwrap().get_str("$literal").unwrap(),
+            "ISODate(\"2026-08-10T00:00:00Z\")"
+        );
+        let fields = pipeline[1].get_document("$set").unwrap();
+        assert!(matches!(fields.get("small"), Some(Bson::Int32(7))));
+        assert!(matches!(fields.get("long"), Some(Bson::Int64(9_007_199_254_740_993))));
+        assert!(matches!(fields.get("double"), Some(Bson::Double(value)) if *value == 7.0));
+        assert!(matches!(fields.get("date"), Some(Bson::DateTime(_))));
+        let options = parse_aggregate_options_document(Some(
+            r#"{"comment":"ISODate(\"2026-08-10T00:00:00Z\")","let":{"id":{"$numberLong":"9007199254740993"}}}"#,
+        ))
+        .unwrap();
+        assert!(matches!(options.get("comment"), Some(Bson::String(_))));
+        assert_eq!(options.get_document("let").unwrap().get_i64("id").unwrap(), 9_007_199_254_740_993);
+    }
+
+    #[test]
+    fn aggregate_pipeline_rejects_invalid_extended_json_instead_of_falling_back() {
+        for pipeline in [
+            r#"{}"#,
+            r#"[1]"#,
+            r#"[{"$match":{"id":{"$oid":"invalid"}}}]"#,
+            r#"[{"$set":{"n":{"$numberLong":"not-a-number"}}}]"#,
+        ] {
+            assert!(parse_aggregate_pipeline(pipeline).is_err(), "{pipeline}");
+        }
+    }
+
+    #[test]
+    fn aggregate_shell_constructors_still_decode_after_strict_parsing() {
+        let command = crate::mongo_shell::parse(
+            r#"db.items.aggregate([{$match: {at: ISODate("2026-08-10T00:00:00Z"), id: ObjectId("507f1f77bcf86cd799439011"), n: NumberLong("9007199254740993")}}])"#,
+        )
+        .unwrap();
+        let crate::mongo_shell::MongoCommand::Aggregate { pipeline, .. } = command else {
+            panic!("expected aggregate command");
+        };
+        let pipeline = parse_aggregate_pipeline(&pipeline).unwrap();
+        let fields = pipeline[0].get_document("$match").unwrap();
+        assert!(matches!(fields.get("at"), Some(Bson::DateTime(_))));
+        assert!(matches!(fields.get("id"), Some(Bson::ObjectId(_))));
+        assert_eq!(fields.get_i64("n").unwrap(), 9_007_199_254_740_993);
+    }
+
+    #[test]
+    fn aggregate_document_views_are_lossless_for_copy_and_write_back() {
+        let document = doc! {
+            "i32": Bson::Int32(7),
+            "i64": Bson::Int64(7),
+            "large": Bson::Int64(9_007_199_254_740_993),
+            "double": Bson::Double(7.0),
+            "text": "ISODate(\"2026-08-10T00:00:00Z\")",
+        };
+        let (_, extended) = document_json_views(document.clone());
+        assert_eq!(extended["i32"], serde_json::json!({ "$numberInt": "7" }));
+        assert_eq!(extended["i64"], serde_json::json!({ "$numberLong": "7" }));
+        assert_eq!(extended["large"], serde_json::json!({ "$numberLong": "9007199254740993" }));
+        assert!(extended["double"].get("$numberDouble").is_some());
+        assert_eq!(json_object_to_document_extended_json(&extended).unwrap(), document);
+    }
+
+    #[test]
     fn parse_aggregate_options_document_keeps_official_fields() {
         let doc = parse_aggregate_options_document(Some(
             r#"{
@@ -3544,12 +3632,12 @@ mod tests {
         .unwrap();
         assert_eq!(doc.get_bool("explain").ok(), Some(true));
         assert_eq!(doc.get_bool("allowDiskUse").ok(), Some(true));
-        assert_eq!(doc.get_i64("maxTimeMS").ok(), Some(1000));
+        assert!(matches!(doc.get("maxTimeMS"), Some(Bson::Int32(1000) | Bson::Int64(1000))));
         assert_eq!(doc.get_str("hint").ok(), Some("status_1"));
         assert_eq!(doc.get_str("comment").ok(), Some("agg-test"));
-        assert_eq!(doc.get_document("cursor").ok().and_then(|c| c.get_i64("batchSize").ok()), Some(25));
+        assert!(matches!(doc.get_document("cursor").unwrap().get("batchSize"), Some(Bson::Int32(25) | Bson::Int64(25))));
         assert_eq!(doc.get_document("collation").ok().and_then(|c| c.get_str("locale").ok()), Some("en"));
-        assert_eq!(doc.get_document("let").ok().and_then(|c| c.get_i64("year").ok()), Some(2024));
+        assert!(matches!(doc.get_document("let").unwrap().get("year"), Some(Bson::Int32(2024) | Bson::Int64(2024))));
         assert!(aggregate_options_explain(&doc).unwrap());
 
         let no_explain = parse_aggregate_options_document(Some(r#"{"allowDiskUse":false}"#)).unwrap();
@@ -3574,7 +3662,7 @@ mod tests {
         assert!(!explain_flag);
         assert_eq!(with_cursor.get_str("aggregate").ok(), Some("products"));
         assert_eq!(with_cursor.get_bool("allowDiskUse").ok(), Some(true));
-        assert_eq!(with_cursor.get_document("cursor").ok().and_then(|c| c.get_i64("batchSize").ok()), Some(1));
+        assert!(matches!(with_cursor.get_document("cursor").unwrap().get("batchSize"), Some(Bson::Int32(1) | Bson::Int64(1))));
 
         let (default_cursor, _) = build_aggregate_command(
             "products",
@@ -3845,6 +3933,34 @@ mod tests {
         assert_eq!(filters.len(), 2);
         assert!(matches!(filters[0].get("_id"), Some(Bson::Int64(42))));
         assert!(matches!(filters[1].get("_id"), Some(Bson::String(value)) if value == "42"));
+    }
+
+    #[test]
+    fn filter_expressions_preserve_exact_literal_documents() {
+        let id = "507f1f77bcf86cd799439011";
+        let literal = serde_json::json!({
+            "_id": id,
+            "nested": { "_id": id },
+            "text": "ISODate(\"2026-08-10T00:00:00Z\")",
+            "large": { "$numberLong": "9007199254740993" },
+        });
+        let filter = serde_json::json!({
+            "$and": [{ "$expr": { "$eq": ["$$ROOT", { "$literal": literal.clone() }] } }],
+        });
+        let converted = json_filter_to_document(&filter).unwrap();
+        let expression = converted.get_array("$and").unwrap()[0].as_document().unwrap().get_document("$expr").unwrap();
+        let actual = expression.get_array("$eq").unwrap()[1].as_document().unwrap().get_document("$literal").unwrap();
+        assert_eq!(actual, &json_object_to_document_extended_json(&literal).unwrap());
+        assert_eq!(actual.get_str("_id").unwrap(), id);
+        assert_eq!(actual.get_document("nested").unwrap().get_str("_id").unwrap(), id);
+        assert!(matches!(actual.get("text"), Some(Bson::String(_))));
+        assert_eq!(actual.get_i64("large").unwrap(), 9_007_199_254_740_993);
+    }
+
+    #[test]
+    fn filter_expressions_reject_invalid_extended_json() {
+        let filter = serde_json::json!({ "$expr": { "$eq": ["$id", { "$literal": { "$oid": "invalid" } }] } });
+        assert!(json_filter_to_document(&filter).unwrap_err().contains("Invalid filter expression"));
     }
 
     #[test]

@@ -1833,6 +1833,9 @@ pub fn run() {
             }));
             let state = Arc::new(state);
             app.manage(state.clone());
+            app.manage(tauri::async_runtime::block_on(async {
+                commands::mongo_tasks::MongoTasksState::new(state.clone(), &data_dir)
+            }));
             commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
             commands::connection::install_connection_liveness_bridge(app.handle(), state.clone());
             let app_identifier = app.config().identifier.clone();
@@ -2468,6 +2471,7 @@ pub fn run() {
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,
             background_backup::database_backup_command,
+            commands::mongo_tasks::mongo_task_command,
             background_backup::database_backup_background,
             commands::sqlite_backup::backup_sqlite_database,
             commands::sqlite_backup::restore_sqlite_database,
@@ -2847,6 +2851,9 @@ pub fn run() {
                         }
                     }
                     tauri::async_runtime::block_on(async {
+                        if let Some(tasks) = app_handle.try_state::<commands::mongo_tasks::MongoTasksState>() {
+                            tasks.shutdown().await;
+                        }
                         if let Some(backups) = app_handle.try_state::<background_backup::BackgroundBackup>() {
                             backups.shutdown().await;
                         }

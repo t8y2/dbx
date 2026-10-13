@@ -1,6 +1,7 @@
 import { sidebarMenuZhTW as sidebarMenu } from "./sidebarMenuMessages";
 import { redisGroupingZhTW as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
+import { mongoTasksZhTW as mongoTasks } from "./mongoTasks";
 import { mongodbDatabaseDumpZhTW as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpZhTW as damengDump } from "./damengDump";
 import { meilisearchManagementZhTW } from "./meilisearchManagement";
@@ -65,6 +66,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  mongoTasks,
   sidebarMenu,
   modelGeneration: {
     title: "產生模型",
@@ -744,6 +746,7 @@ export default withEnglishFallback({
     importNavicat: "匯入 Navicat NCX",
     importDbeaver: "匯入 DBeaver",
     importDatagrip: "匯入 DataGrip",
+    importStudio3t: "匯入 Studio 3T（.uri）",
     export: "匯出連線",
     collapseAll: "一鍵收合",
     collapse: "收合側邊欄",
@@ -3269,6 +3272,13 @@ export default withEnglishFallback({
     importSuccess: "已匯入 {count} 個連線",
     importNavicatSuccess: "已匯入 {count} 個 Navicat 連線，若個別連線密碼為空請補填後測試連線",
     importDatagripSuccess: "已匯入 {count} 個 DataGrip 連線，已自動讀取 {filled} 個密碼（來自 macOS 鑰匙圈）",
+    importStudio3tSuccess: "已匯入 {count} 個 Studio 3T 連線。",
+    importStudio3tDialogTitle: "選擇 Studio 3T 匯出的 .uri 檔案",
+    importStudio3tNotice: "優先保留 Studio 3T 匯出的連線名稱。連線前請核對憑據、憑證與 SSH 私鑰路徑；未匯出的密碼需要重新填寫。確認後僅儲存勾選的連線，不會自動連線。",
+    importStudio3tDatabaseWarning: "有 {count} 個連線的預設資料庫名稱不符合 MongoDB 規則，已清空預設庫並保留明確的認證庫；原資料庫名稱記錄在連線備註中。請在連線前核對預設資料庫。",
+    importStudio3tInvalid: "Studio 3T URI 檔案無效。請在 Connection Manager 選擇 Export → Export to File（.uri）。此入口接受標準 MongoDB URI；私有或加密匯出格式需要轉換。",
+    importStudio3tTooLarge: "Studio 3T 匯入檔案總大小不能超過 10 MiB。",
+    importStudio3tUnsupported: "此檔案包含暫不支援的 Studio 3T 版本或連線擴充，未儲存任何連線。已支援 URI v3 中繼資料與無需密碼的 SSH 私鑰隧道；其他隧道或擴充需要轉換。",
     importDatagripSelectFiles: "請選擇 dataSources.xml（必需），可同時選擇 dataSources.local.xml 和 db-forest-config.xml",
     importDatagripDialogTitle: "選擇 DataGrip 設定檔",
     importDatagripUsernamesFallbackWarning: "部分 DataGrip 連線未找到使用者名稱，已使用資料庫預設使用者名稱，請核對並更新連線憑證。",

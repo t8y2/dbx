@@ -7,6 +7,8 @@ export interface ConnectionConfigBundle {
   connections: ConnectionConfig[];
   layout?: SidebarLayout;
   tunnelProfiles?: TunnelProfile[];
+  /** Preview-only notices. Never persisted as connection credentials/config. */
+  importWarnings?: string[];
 }
 
 export interface ConnectionConfigSnapshotOptions {

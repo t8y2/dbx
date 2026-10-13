@@ -227,4 +227,33 @@ describe("useDialogSources", () => {
     await dialogs.onExportConfirm("passphrase");
     expect(getRememberedExportPassphrase()).toBe("passphrase");
   });
+
+  it("previews Studio 3T connections and persists only after selection confirmation", async () => {
+    mocks.store.readImportFile.mockResolvedValue({ content: "URI payload", encrypted: false });
+    const preview = { connections: [conn("one"), conn("two")], importWarnings: ["Review the default database before connecting."] };
+    mocks.store.parseConnectionsImport.mockResolvedValue(preview);
+    mocks.store.applyConnectionsImport.mockResolvedValue({ count: 1 });
+    const dialogs = await mountDialogs();
+
+    await dialogs.onImportClick("studio3t");
+    expect(dialogs.showConfigConnectionSelectDialog.value).toBe(true);
+    expect(dialogs.configConnectionSelectNotice.value).toContain("Studio 3T exported connection names");
+    expect(dialogs.configConnectionSelectNotice.value).toContain("Review the default database before connecting.");
+    expect(mocks.store.applyConnectionsImport).not.toHaveBeenCalled();
+
+    dialogs.onConfigConnectionSelectConfirm(["two"]);
+    await nextTick();
+    expect(mocks.store.applyConnectionsImport).toHaveBeenCalledWith(preview, ["two"]);
+  });
+
+  it("cancels a Studio 3T preview without saving any connections", async () => {
+    mocks.store.readImportFile.mockResolvedValue({ content: "URI payload", encrypted: false });
+    mocks.store.parseConnectionsImport.mockResolvedValue({ connections: [conn("one")] });
+    const dialogs = await mountDialogs();
+    await dialogs.onImportClick("studio3t");
+    dialogs.onConfigConnectionSelectOpenChange(false);
+    expect(mocks.store.applyConnectionsImport).not.toHaveBeenCalled();
+    expect(dialogs.configConnectionSelectList.value).toEqual([]);
+    expect(dialogs.configConnectionSelectNotice.value).toBe("");
+  });
 });

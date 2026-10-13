@@ -88,6 +88,18 @@ async function mountDialog(props: Record<string, unknown>, onConfirm = vi.fn()) 
 }
 
 describe("ConfigConnectionSelectDialog", () => {
+  it("shows import guidance without rendering URI credentials", async () => {
+    await mountDialog({
+      open: true,
+      mode: "import",
+      notice: "Verify credentials before connecting",
+      connections: [conn("a", "Mongo", { db_type: "mongodb", connection_string: "mongodb://user:hidden-password@host/?authSource=admin", password: "hidden-password" })],
+    });
+    expect(document.querySelector('[role="note"]')?.textContent).toBe("Verify credentials before connecting");
+    expect(document.body.textContent).not.toContain("hidden-password");
+    expect(document.body.textContent).not.toContain("mongodb://");
+  });
+
   it("defaults to all selected and confirms the current selection", async () => {
     i18n.global.locale.value = "en";
     const { onConfirm } = await mountDialog({

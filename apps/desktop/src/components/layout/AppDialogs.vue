@@ -10,6 +10,14 @@ const SqlParameterDialog = defineAsyncComponent(() => import("@/components/edito
 const DataTransferDialog = defineAsyncComponent(() => import("@/components/transfer/DataTransferDialog.vue"));
 const SchemaDiffDialog = defineAsyncComponent(() => import("@/components/diff/SchemaDiffDialog.vue"));
 const DataCompareDialog = defineAsyncComponent(() => import("@/components/diff/DataCompareDialog.vue"));
+const MongoCompareDialog = defineAsyncComponent(() => import("@/components/diff/MongoCompareDialog.vue"));
+const MongoAggregationDialog = defineAsyncComponent(() => import("@/components/mongo/MongoAggregationDialog.vue"));
+const MongoSchemaAnalysisDialog = defineAsyncComponent(() => import("@/components/mongo/MongoSchemaAnalysisDialog.vue"));
+const MongoTransformDialog = defineAsyncComponent(() => import("@/components/mongo/MongoTransformDialog.vue"));
+const MongoSqlDialog = defineAsyncComponent(() => import("@/components/mongo/MongoSqlDialog.vue"));
+const MongoScriptDialog = defineAsyncComponent(() => import("@/components/mongo/MongoScriptDialog.vue"));
+const MongoTasksDialog = defineAsyncComponent(() => import("@/components/mongo/MongoTasksDialog.vue"));
+const MongoMigrationDialog = defineAsyncComponent(() => import("@/components/mongo/MongoMigrationDialog.vue"));
 const SqlFileExecutionDialog = defineAsyncComponent(() => import("@/components/sql-file/SqlFileExecutionDialog.vue"));
 const SchemaDiagramDialog = defineAsyncComponent(() => import("@/components/diagram/SchemaDiagramDialog.vue"));
 const DatabaseDocsDialog = defineAsyncComponent(() => import("@/components/docs/DatabaseDocsDialog.vue"));
@@ -31,6 +39,7 @@ import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { useReadOnlyUnlockStore, WRITE_UNLOCK_FIVE_MINUTES_SECS, WRITE_UNLOCK_ONE_MINUTE_SECS, type WriteUnlockDurationSecs } from "@/stores/readOnlyUnlockStore";
 import { useDialogSources } from "@/composables/useDialogSources";
+import { useMongoWorkbenchSources } from "@/composables/useMongoWorkbenchSources";
 import type { ConnectionDeepLinkDraft, ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import type { SqlParameterDescriptor, SqlParameterSyntax } from "@/lib/sql/sqlParameters";
@@ -106,6 +115,7 @@ const readOnlyUnlockStore = useReadOnlyUnlockStore();
 const unlockDuration = ref<WriteUnlockDurationSecs>(WRITE_UNLOCK_ONE_MINUTE_SECS);
 const sqlExecutionDangerStore = useSqlExecutionDangerStore();
 const dialogs = useDialogSources();
+const mongoWorkbench = useMongoWorkbenchSources();
 const productionConfirmationDetails = computed(() => {
   const request = productionSafetyStore.pending;
   if (!request) return "";
@@ -265,6 +275,97 @@ watch(
     :prefill-table="dialogs.dataComparePrefillTable.value"
     :session-id="dialogs.dataCompareSessionId.value"
   />
+  <MongoCompareDialog
+    v-if="dialogs.showMongoCompareDialog.value"
+    v-model:open="dialogs.showMongoCompareDialog.value"
+    :prefill-connection-id="dialogs.mongoComparePrefillConnectionId.value"
+    :prefill-database="dialogs.mongoComparePrefillDatabase.value"
+    :prefill-collection="dialogs.mongoComparePrefillCollection.value"
+  />
+  <MongoAggregationDialog
+    v-if="mongoWorkbench.aggregationSource.value"
+    :open="mongoWorkbench.aggregationSource.value.open"
+    @update:open="
+      (value) => {
+        if (!value) mongoWorkbench.aggregationSource.value = null;
+      }
+    "
+    :prefill-connection-id="mongoWorkbench.aggregationSource.value.connectionId"
+    :prefill-database="mongoWorkbench.aggregationSource.value.database"
+    :prefill-collection="mongoWorkbench.aggregationSource.value.collection"
+  />
+  <MongoSchemaAnalysisDialog
+    v-if="mongoWorkbench.schemaSource.value"
+    :open="mongoWorkbench.schemaSource.value.open"
+    @update:open="
+      (value) => {
+        if (!value) mongoWorkbench.schemaSource.value = null;
+      }
+    "
+    :prefill-connection-id="mongoWorkbench.schemaSource.value.connectionId"
+    :prefill-database="mongoWorkbench.schemaSource.value.database"
+    :prefill-collection="mongoWorkbench.schemaSource.value.collection"
+  />
+  <MongoTransformDialog
+    v-if="mongoWorkbench.transformSource.value"
+    :open="mongoWorkbench.transformSource.value.open"
+    :prefill-connection-id="mongoWorkbench.transformSource.value.connectionId"
+    :prefill-database="mongoWorkbench.transformSource.value.database"
+    :prefill-collection="mongoWorkbench.transformSource.value.collection"
+    @update:open="
+      (value) => {
+        if (!value) mongoWorkbench.transformSource.value = null;
+      }
+    "
+  />
+  <MongoSqlDialog
+    v-if="mongoWorkbench.sqlSource.value"
+    :open="mongoWorkbench.sqlSource.value.open"
+    :prefill-connection-id="mongoWorkbench.sqlSource.value.connectionId"
+    :prefill-database="mongoWorkbench.sqlSource.value.database"
+    :prefill-collection="mongoWorkbench.sqlSource.value.collection"
+    @update:open="
+      (value) => {
+        if (!value) mongoWorkbench.sqlSource.value = null;
+      }
+    "
+  />
+  <MongoScriptDialog
+    v-if="mongoWorkbench.scriptSource.value"
+    :open="mongoWorkbench.scriptSource.value.open"
+    :prefill-connection-id="mongoWorkbench.scriptSource.value.connectionId"
+    :prefill-database="mongoWorkbench.scriptSource.value.database"
+    :prefill-collection="mongoWorkbench.scriptSource.value.collection"
+    @update:open="
+      (value) => {
+        if (!value) mongoWorkbench.scriptSource.value = null;
+      }
+    "
+  />
+  <MongoTasksDialog
+    v-if="mongoWorkbench.tasksSource.value"
+    :open="mongoWorkbench.tasksSource.value.open"
+    :prefill-connection-id="mongoWorkbench.tasksSource.value.connectionId"
+    :prefill-database="mongoWorkbench.tasksSource.value.database"
+    :prefill-collection="mongoWorkbench.tasksSource.value.collection"
+    @update:open="
+      (value) => {
+        if (!value) mongoWorkbench.tasksSource.value = null;
+      }
+    "
+  />
+  <MongoMigrationDialog
+    v-if="mongoWorkbench.migrationSource.value"
+    :open="mongoWorkbench.migrationSource.value.open"
+    :prefill-connection-id="mongoWorkbench.migrationSource.value.connectionId"
+    :prefill-database="mongoWorkbench.migrationSource.value.database"
+    :prefill-collection="mongoWorkbench.migrationSource.value.collection"
+    @update:open="
+      (value) => {
+        if (!value) mongoWorkbench.migrationSource.value = null;
+      }
+    "
+  />
   <SqlFileExecutionDialog
     v-model:open="dialogs.showSqlFileDialog.value"
     :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value"
@@ -353,6 +454,7 @@ watch(
     :open="dialogs.showConfigConnectionSelectDialog.value"
     :mode="dialogs.configConnectionSelectMode.value"
     :busy="dialogs.applyingImportSelection.value"
+    :notice="dialogs.configConnectionSelectNotice.value"
     :connections="dialogs.configConnectionSelectList.value"
     :layout="dialogs.configConnectionSelectLayout.value"
     @update:open="dialogs.onConfigConnectionSelectOpenChange"

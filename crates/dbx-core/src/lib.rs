@@ -89,6 +89,7 @@ pub use query::query_cancel;
 pub use query::redis_ops;
 pub use safety::risk_metrics;
 pub mod scheduled_backup;
+pub mod mongo_tasks;
 pub mod schema;
 pub mod skills;
 pub use connection::session_credentials;

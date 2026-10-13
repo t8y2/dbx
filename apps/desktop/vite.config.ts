@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
-import { publicBasePathRedirectPlugin } from "./vitePublicBasePathRedirect";
+import { publicBasePathRedirectPlugin } from "./vitePublicBasePathRedirect.ts";
 import { connectionTypesPlugin } from "./viteConnectionTypesPlugin.ts";
 
 const host = process.env.TAURI_DEV_HOST;

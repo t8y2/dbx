@@ -57,6 +57,12 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     };
   }
 
+  function openMongoCompare() {
+    const node = activeNode.value;
+    if (!node.connectionId || (node.type !== "mongo-collection" && node.type !== "mongo-db")) return;
+    connectionStore.mongoCompareSource = { connectionId: node.connectionId, database: node.database ?? "", collection: node.type === "mongo-collection" ? node.tableName || node.label : "" };
+  }
+
   function openSqlFileExecution() {
     if (!activeNode.value.connectionId) return;
     connectionStore.sqlFileSource = {
@@ -221,6 +227,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     openAllDatabasesExport,
     openDamengDump,
     openDataCompare,
+    openMongoCompare,
     openDatabaseExport,
     openDatabaseSearch,
     openDataDictionary,

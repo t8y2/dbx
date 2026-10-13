@@ -7,6 +7,7 @@ import i18n from "@/i18n";
 const store = reactive({
   connections: [],
   mongoImportSource: null as { connectionId: string; database: string; collection: string } | null,
+  mongoCompareSource: null as { connectionId: string; database: string; collection: string } | null,
   transferSource: null,
   schemaDiffSource: null,
   dataCompareSource: null,
@@ -23,7 +24,7 @@ const store = reactive({
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => store }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
-import { useDialogSources } from "@/composables/useDialogSources";
+import { openMongoCompare, useDialogSources } from "@/composables/useDialogSources";
 
 const mountedApps: App[] = [];
 let dialogs: ReturnType<typeof useDialogSources>;
@@ -60,5 +61,20 @@ describe("useDialogSources mongo import/export", () => {
     expect(dialogs.showMongoImportDialog.value).toBe(true);
     expect(dialogs.mongoImportPrefillCollection.value).toBe("orders");
     expect(store.mongoImportSource).toBeNull();
+  });
+
+  it("opens Mongo Compare with the selected namespace and clears the prefill from the toolbar", async () => {
+    store.mongoCompareSource = { connectionId: "c1", database: "shop", collection: "orders" };
+    await nextTick();
+    expect(dialogs.showMongoCompareDialog.value).toBe(true);
+    expect(dialogs.mongoComparePrefillConnectionId.value).toBe("c1");
+    expect(dialogs.mongoComparePrefillDatabase.value).toBe("shop");
+    expect(dialogs.mongoComparePrefillCollection.value).toBe("orders");
+    expect(store.mongoCompareSource).toBeNull();
+    dialogs.showMongoCompareDialog.value = false;
+    openMongoCompare();
+    expect(dialogs.mongoComparePrefillConnectionId.value).toBe("");
+    expect(dialogs.mongoComparePrefillCollection.value).toBe("");
+    dialogs.showMongoCompareDialog.value = false;
   });
 });

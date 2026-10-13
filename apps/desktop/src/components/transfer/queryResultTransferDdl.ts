@@ -204,7 +204,7 @@ function sqlServerDescriptionParameters(tokens: SqlSemanticToken[]): Map<string,
   const procedure = readName(tokens, 1);
   if (procedure.length !== 2 || identifier(procedure[0])?.toLowerCase() !== "sys" || identifier(procedure[1])?.toLowerCase() !== "sp_addextendedproperty") return undefined;
   const parameters = new Map<string, { value: string; tokens: SqlSemanticToken[] }>();
-  for (let index = 4; index < tokens.length; ) {
+  for (let index = 4; index < tokens.length;) {
     const name = tokens[index++];
     if (name?.kind !== "word" || !name.normalized.startsWith("@") || tokens[index++]?.text !== "=" || parameters.has(name.normalized)) return undefined;
     const valueTokens: SqlSemanticToken[] = [];

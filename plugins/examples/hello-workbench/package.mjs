@@ -33,22 +33,7 @@ try {
   await cp(path.join(root, "assets"), path.join(stage, "assets"), { recursive: true });
   await cp(path.join(root, "ui"), path.join(stage, "ui"), { recursive: true });
 
-  const packagerArgs = [
-    "run",
-    "--locked",
-    "--release",
-    "--manifest-path",
-    path.join(root, "..", "..", "sdk", "packager", "Cargo.toml"),
-    "--",
-    stage,
-    output,
-    "--artifact-metadata",
-    artifactMetadata,
-    "--target",
-    target,
-    "--artifact-url",
-    path.basename(output),
-  ];
+  const packagerArgs = ["run", "--locked", "--release", "--manifest-path", path.join(root, "..", "..", "sdk", "packager", "Cargo.toml"), "--", stage, output, "--artifact-metadata", artifactMetadata, "--target", target, "--artifact-url", path.basename(output)];
   run("cargo", packagerArgs, { CARGO_TARGET_DIR: packagerTarget });
   console.log(`Built unsigned candidate ${output}`);
 } finally {

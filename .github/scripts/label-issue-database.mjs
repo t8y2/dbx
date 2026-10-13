@@ -17,52 +17,14 @@ const USER_PRIORITY_LABELS = {
   P3: { color: "bfd4f2", description: "User-reported priority: low" },
 };
 
-const LABEL_PALETTE = [
-  "0e8a16",
-  "1d76db",
-  "5319e7",
-  "c2e0c6",
-  "bfd4f2",
-  "d4c5f9",
-  "fef2c0",
-  "fbca04",
-  "f9d0c4",
-  "e99695",
-  "f29513",
-  "c5def5",
-];
+const LABEL_PALETTE = ["0e8a16", "1d76db", "5319e7", "c2e0c6", "bfd4f2", "d4c5f9", "fef2c0", "fbca04", "f9d0c4", "e99695", "f29513", "c5def5"];
 
-const globallyAmbiguousAliases = new Set([
-  "access",
-  "ch",
-  "h2",
-  "iris",
-  "jdbc",
-  "mq",
-  "pg",
-  "spark",
-]);
+const globallyAmbiguousAliases = new Set(["access", "ch", "h2", "iris", "jdbc", "mq", "pg", "spark"]);
 
-const genericDatabaseValues = [
-  "general",
-  "generic",
-  "global",
-  "all",
-  "any",
-  "none",
-  "n/a",
-  "na",
-  "通用",
-  "全部",
-  "所有",
-  "无",
-  "不适用",
-];
+const genericDatabaseValues = ["general", "generic", "global", "all", "any", "none", "n/a", "na", "通用", "全部", "所有", "无", "不适用"];
 
 const drivers = databaseIssueDrivers;
-const exactAsciiAliases = new Set(
-  drivers.flatMap((driver) => driver.aliases.map((alias) => compactAscii(alias)).filter((alias) => alias.length >= 5)),
-);
+const exactAsciiAliases = new Set(drivers.flatMap((driver) => driver.aliases.map((alias) => compactAscii(alias)).filter((alias) => alias.length >= 5)));
 
 function loadIssue() {
   if (process.env.GITHUB_EVENT_PATH && fs.existsSync(process.env.GITHUB_EVENT_PATH)) {
@@ -113,20 +75,12 @@ function extractInlineField(body, predicate) {
 }
 
 function extractDatabaseField(body) {
-  const matchesDatabaseHeading = (heading) => (
-    heading.includes("数据库类型") ||
-    heading.toLowerCase().includes("database type") ||
-    /^database$/i.test(heading)
-  );
-  return extractIssueFormSection(body, matchesDatabaseHeading)
-    || extractInlineField(body, matchesDatabaseHeading);
+  const matchesDatabaseHeading = (heading) => heading.includes("数据库类型") || heading.toLowerCase().includes("database type") || /^database$/i.test(heading);
+  return extractIssueFormSection(body, matchesDatabaseHeading) || extractInlineField(body, matchesDatabaseHeading);
 }
 
 function extractPriorityField(body) {
-  return extractIssueFormSection(body, (heading) => (
-    heading.includes("优先级") ||
-    heading.toLowerCase().includes("priority")
-  ));
+  return extractIssueFormSection(body, (heading) => heading.includes("优先级") || heading.toLowerCase().includes("priority"));
 }
 
 function extractTitleSummaryField(body) {
@@ -146,21 +100,24 @@ function extractTitleSummaryField(body) {
 }
 
 function matchPriorityLabel(value) {
-  const match = String(value || "").normalize("NFKC").match(/\bP([0-3])\b/i);
+  const match = String(value || "")
+    .normalize("NFKC")
+    .match(/\bP([0-3])\b/i);
   return match ? `P${match[1]}` : null;
 }
 
 function genericIssueTitlePrefix(title) {
-  const normalized = String(title || "").normalize("NFKC").trim().replace(/\s+/g, " ");
+  const normalized = String(title || "")
+    .normalize("NFKC")
+    .trim()
+    .replace(/\s+/g, " ");
   const bracketMatch = normalized.match(/^([\[【][^\]】]*(?:bug|feature|feat|compatibility|question)[^\]】]*[\]】])$/i);
   if (bracketMatch) return bracketMatch[1];
 
   const bareMatch = normalized.match(/^(bug|feature|feat|compatibility|question):?$/i);
   if (!bareMatch) return null;
 
-  const normalizedPrefix = bareMatch[1].toLowerCase() === "feat" ? "Feat" : (
-    bareMatch[1].charAt(0).toUpperCase() + bareMatch[1].slice(1).toLowerCase()
-  );
+  const normalizedPrefix = bareMatch[1].toLowerCase() === "feat" ? "Feat" : bareMatch[1].charAt(0).toUpperCase() + bareMatch[1].slice(1).toLowerCase();
   return `[${normalizedPrefix}]`;
 }
 
@@ -179,14 +136,7 @@ function cleanTitleSummaryLine(line) {
 }
 
 function isSkippableTitleSummaryLine(line) {
-  return (
-    /^DBX debug log$/i.test(line) ||
-    /^(Exported|User agent|Platform|Timezone):/i.test(line) ||
-    /^(Native|Tauri) log dir:/i.test(line) ||
-    /^=+.*logs?.*=+$/i.test(line) ||
-    /^\[\d{4}-\d{2}-\d{2}(?:T|\])/.test(line) ||
-    /^\[(DEBUG|INFO|WARN|ERROR|LOG|STARTUP)\]/i.test(line)
-  );
+  return /^DBX debug log$/i.test(line) || /^(Exported|User agent|Platform|Timezone):/i.test(line) || /^(Native|Tauri) log dir:/i.test(line) || /^=+.*logs?.*=+$/i.test(line) || /^\[\d{4}-\d{2}-\d{2}(?:T|\])/.test(line) || /^\[(DEBUG|INFO|WARN|ERROR|LOG|STARTUP)\]/i.test(line);
 }
 
 function firstSentence(value) {
@@ -199,9 +149,7 @@ function firstSentence(value) {
 
   for (const line of lines) {
     const sentenceMatch = line.match(/^(.{4,120}?[。！？!?]|.{12,120}?\.(?=\s|$))/u);
-    const sentence = (sentenceMatch ? sentenceMatch[1] : line)
-      .replace(/[。！？!?.]+$/u, "")
-      .trim();
+    const sentence = (sentenceMatch ? sentenceMatch[1] : line).replace(/[。！？!?.]+$/u, "").trim();
     if (sentence.length >= 4) {
       return sentence.length > 90 ? `${sentence.slice(0, 89)}…` : sentence;
     }
@@ -251,11 +199,7 @@ function levenshteinDistance(left, right) {
     const current = [leftIndex + 1];
     for (let rightIndex = 0; rightIndex < right.length; rightIndex += 1) {
       const substitutionCost = left[leftIndex] === right[rightIndex] ? 0 : 1;
-      current[rightIndex + 1] = Math.min(
-        current[rightIndex] + 1,
-        previous[rightIndex + 1] + 1,
-        previous[rightIndex] + substitutionCost,
-      );
+      current[rightIndex + 1] = Math.min(current[rightIndex] + 1, previous[rightIndex + 1] + 1, previous[rightIndex] + substitutionCost);
     }
     previous = current;
   }
@@ -318,9 +262,7 @@ function aliasMatches(text, alias) {
     .filter(Boolean)
     .map(escapeRegExp)
     .join("[\\s._/-]*");
-  const trailingBoundary = /[0-9]$/.test(normalizedAlias)
-    ? "(?:[^a-z0-9]|$)"
-    : "(?:[^a-z0-9]|$|(?=v?\\d))";
+  const trailingBoundary = /[0-9]$/.test(normalizedAlias) ? "(?:[^a-z0-9]|$)" : "(?:[^a-z0-9]|$|(?=v?\\d))";
   const pattern = new RegExp(`(^|[^a-z0-9])${flexibleAlias}${trailingBoundary}`, "i");
   return pattern.test(normalizedText);
 }
@@ -332,10 +274,7 @@ function isGenericDatabaseValue(value) {
     .map((part) => part.trim())
     .filter(Boolean);
 
-  return (
-    parts.length > 0 &&
-    parts.every((part) => genericDatabaseValues.some((generic) => aliasMatches(part, generic)))
-  );
+  return parts.length > 0 && parts.every((part) => genericDatabaseValues.some((generic) => aliasMatches(part, generic)));
 }
 
 function matchDrivers(text, { allowAmbiguous }) {
@@ -456,24 +395,18 @@ export function triageIssue(issue) {
   const hasDatabaseField = databaseField.length > 0;
   const fieldIsGeneric = hasDatabaseField && isGenericDatabaseValue(databaseField);
   const sourceText = hasDatabaseField ? databaseField : issue.title || "";
-  const matchedDrivers = isGenericDatabaseValue(sourceText)
-    ? []
-    : uniqueByDbType(matchDrivers(sourceText, { allowAmbiguous: hasDatabaseField }));
+  const matchedDrivers = isGenericDatabaseValue(sourceText) ? [] : uniqueByDbType(matchDrivers(sourceText, { allowAmbiguous: hasDatabaseField }));
   const titleMatchedDrivers = uniqueByDbType(matchDrivers(issue.title || "", { allowAmbiguous: false }));
   if (hasDatabaseField && titleMatchedDrivers.length > 0) {
     matchedDrivers.push(...titleMatchedDrivers);
   }
   if (hasDatabaseField && matchedDrivers.length === 0 && !fieldIsGeneric) {
-    matchedDrivers.push(
-      ...uniqueByDbType(matchDrivers(`${issue.title || ""}\n${databaseField}`, { allowAmbiguous: false })),
-    );
+    matchedDrivers.push(...uniqueByDbType(matchDrivers(`${issue.title || ""}\n${databaseField}`, { allowAmbiguous: false })));
   }
 
   const uniqueMatchedDrivers = uniqueByDbType(matchedDrivers);
   const targetLabels = uniqueMatchedDrivers.map((driver) => `${LABEL_PREFIX}${driver.dbType}`);
-  const targetLabelColors = Object.fromEntries(
-    uniqueMatchedDrivers.map((driver) => [`${LABEL_PREFIX}${driver.dbType}`, stablePaletteColor(driver.dbType)]),
-  );
+  const targetLabelColors = Object.fromEntries(uniqueMatchedDrivers.map((driver) => [`${LABEL_PREFIX}${driver.dbType}`, stablePaletteColor(driver.dbType)]));
   const priorityField = extractPriorityField(issue.body || "");
   const targetPriorityValue = matchPriorityLabel(priorityField);
   const targetPriorityLabel = targetPriorityValue ? `${USER_PRIORITY_PREFIX}${targetPriorityValue}` : null;
@@ -484,22 +417,11 @@ export function triageIssue(issue) {
   const existingLabels = labelNames(issue.labels);
   const titleToUpdate = inferIssueTitle(issue.title || "", issue.body || "");
   const existingDatabaseLabels = existingLabels.filter((name) => name.startsWith(LABEL_PREFIX));
-  const staleDatabaseLabels = hasDatabaseField
-    ? existingDatabaseLabels.filter((name) => !targetLabels.includes(name))
-    : [];
+  const staleDatabaseLabels = hasDatabaseField ? existingDatabaseLabels.filter((name) => !targetLabels.includes(name)) : [];
   const existingPriorityLabels = existingLabels.filter((name) => name.startsWith(USER_PRIORITY_PREFIX));
-  const stalePriorityLabels = targetPriorityLabel
-    ? existingPriorityLabels.filter((name) => name !== targetPriorityLabel)
-    : [];
-  const labelsToAdd = [...targetLabels, targetPriorityLabel]
-    .filter(Boolean)
-    .filter((name) => !existingLabels.includes(name));
-  const labelSpecs = [
-    ...uniqueMatchedDrivers.map(databaseLabelSpec),
-    ...(targetPriorityValue
-      ? [{ name: targetPriorityLabel, ...USER_PRIORITY_LABELS[targetPriorityValue] }]
-      : []),
-  ];
+  const stalePriorityLabels = targetPriorityLabel ? existingPriorityLabels.filter((name) => name !== targetPriorityLabel) : [];
+  const labelsToAdd = [...targetLabels, targetPriorityLabel].filter(Boolean).filter((name) => !existingLabels.includes(name));
+  const labelSpecs = [...uniqueMatchedDrivers.map(databaseLabelSpec), ...(targetPriorityValue ? [{ name: targetPriorityLabel, ...USER_PRIORITY_LABELS[targetPriorityValue] }] : [])];
   const summary = {
     issue: issue.number,
     databaseField: hasDatabaseField ? databaseField : null,

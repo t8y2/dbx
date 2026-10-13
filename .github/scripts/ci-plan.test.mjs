@@ -12,11 +12,16 @@ import { assertCoverage, parseCoverage } from "./ci-rust-coverage.mjs";
 
 const root = "/fixture";
 const graph = {
-  "dbx-types": [], "dbx-platform": [], "dbx-formats": [], "dbx-sql-core": ["dbx-types"],
-  "dbx-sql-dialect": ["dbx-types"], "dbx-sql-data": ["dbx-sql-core", "dbx-sql-dialect", "dbx-types"],
+  "dbx-types": [],
+  "dbx-platform": [],
+  "dbx-formats": [],
+  "dbx-sql-core": ["dbx-types"],
+  "dbx-sql-dialect": ["dbx-types"],
+  "dbx-sql-data": ["dbx-sql-core", "dbx-sql-dialect", "dbx-types"],
   "dbx-sql-schema": ["dbx-sql-core", "dbx-sql-dialect", "dbx-types"],
   "dbx-sql": ["dbx-sql-core", "dbx-sql-data", "dbx-sql-dialect", "dbx-sql-schema", "dbx-types"],
-  "dbx-ai-provider": ["dbx-platform"], "dbx-plugin-runtime": ["dbx-platform", "dbx-types"],
+  "dbx-ai-provider": ["dbx-platform"],
+  "dbx-plugin-runtime": ["dbx-platform", "dbx-types"],
   "dbx-driver-support": ["dbx-platform", "dbx-types"],
   "dbx-driver-agent": ["dbx-platform", "dbx-sql-core", "dbx-types"],
   "dbx-driver-elasticsearch": ["dbx-driver-support", "dbx-types"],
@@ -25,17 +30,22 @@ const graph = {
   "dbx-driver-postgres": ["dbx-driver-support", "dbx-sql-core", "dbx-types"],
   "dbx-driver-redis": ["dbx-driver-support", "dbx-types"],
   "dbx-driver-sqlserver": ["dbx-driver-support", "dbx-sql-core", "dbx-sql-data", "dbx-types"],
-  "dbx-sqlite-worker": [], "dbx-drivers": ["dbx-driver-agent", "dbx-driver-elasticsearch", "dbx-driver-mongodb",
-    "dbx-driver-mysql", "dbx-driver-postgres", "dbx-driver-redis", "dbx-driver-sqlserver", "dbx-driver-support",
-    "dbx-platform", "dbx-sql-core", "dbx-sql-data", "dbx-sql-dialect", "dbx-types", "dbx-sqlite-worker"],
+  "dbx-sqlite-worker": [],
+  "dbx-drivers": ["dbx-driver-agent", "dbx-driver-elasticsearch", "dbx-driver-mongodb", "dbx-driver-mysql", "dbx-driver-postgres", "dbx-driver-redis", "dbx-driver-sqlserver", "dbx-driver-support", "dbx-platform", "dbx-sql-core", "dbx-sql-data", "dbx-sql-dialect", "dbx-types", "dbx-sqlite-worker"],
   "dbx-core": ["dbx-drivers", "dbx-sql", "dbx-types", "dbx-platform", "dbx-ai-provider", "dbx-plugin-runtime", "dbx-formats"],
-  "dbx-mcp": ["dbx-core"], "dbx-cli": ["dbx-core", "dbx-mcp"], "dbx-web": ["dbx-core", "dbx-mcp"], "dbx": ["dbx-core", "dbx-mcp", "dbx-tauri-consul", "dbx-tauri-schema"],
-  "dbx-tauri-consul": ["dbx-core"], "dbx-tauri-schema": ["dbx-core"],
+  "dbx-mcp": ["dbx-core"],
+  "dbx-cli": ["dbx-core", "dbx-mcp"],
+  "dbx-web": ["dbx-core", "dbx-mcp"],
+  dbx: ["dbx-core", "dbx-mcp", "dbx-tauri-consul", "dbx-tauri-schema"],
+  "dbx-tauri-consul": ["dbx-core"],
+  "dbx-tauri-schema": ["dbx-core"],
 };
 const metadata = {
   workspace_members: Object.keys(graph),
   packages: Object.entries(graph).map(([name, dependencies]) => ({
-    id: name, name, manifest_path: `${root}/${name === "dbx" ? "src-tauri" : `crates/${name}`}/Cargo.toml`,
+    id: name,
+    name,
+    manifest_path: `${root}/${name === "dbx" ? "src-tauri" : `crates/${name}`}/Cargo.toml`,
     dependencies: dependencies.map((dependency) => ({ name: dependency })),
   })),
 };
@@ -53,17 +63,22 @@ test("the planner uses the runner stable Cargo only for metadata", () => {
   assert.deepEqual(invocation.args, ["+stable", "metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"]);
   assert.equal(invocation.options.cwd, "/workspace");
 });
-const routedJobs = { frontend: "frontend", packages: "packages", "github-scripts": "github_scripts",
-  "windows-standard-check": "windows_standard", "windows-win7-bundle": "windows_win7_bundle",
-  "duckdb-windows-driver": "duckdb_windows", jdbc: "jdbc", "offline-jdbc-release": "offline_jdbc", "nix-packaging": "nix" };
+const routedJobs = {
+  frontend: "frontend",
+  packages: "packages",
+  "github-scripts": "github_scripts",
+  "windows-standard-check": "windows_standard",
+  "windows-win7-bundle": "windows_win7_bundle",
+  "duckdb-windows-driver": "duckdb_windows",
+  jdbc: "jdbc",
+  "offline-jdbc-release": "offline_jdbc",
+  "nix-packaging": "nix",
+};
 
 test("only an exact contributor snapshot diff skips desktop frontend validation", () => {
   for (const eventName of ["pull_request", "push"]) {
     assert.equal(plan(["docs/data/contributors.json"], { eventName }).contributor_snapshot_only, true);
-    for (const files of [null, [], ["docs/lib/contributorActivity.test.ts"],
-      ["docs/data/contributors.json", "apps/desktop/src/main.ts"],
-      ["docs/data/contributors.json", "docs/lib/contributorActivity.ts"],
-      ["docs/data/contributors.json", "Cargo.lock"]]) {
+    for (const files of [null, [], ["docs/lib/contributorActivity.test.ts"], ["docs/data/contributors.json", "apps/desktop/src/main.ts"], ["docs/data/contributors.json", "docs/lib/contributorActivity.ts"], ["docs/data/contributors.json", "Cargo.lock"]]) {
       assert.equal(plan(files, { eventName }).contributor_snapshot_only, false);
     }
   }
@@ -97,9 +112,16 @@ test("Win7 candidate follows the desktop package dependency graph", () => {
 });
 
 test("ordinary desktop Rust changes keep Windows compilation without full Win7 packaging", () => {
-  for (const file of ["crates/dbx-core/src/query/mod.rs", "crates/dbx-core/tests/runtime_diagnostic_history.rs",
-    "crates/dbx-drivers/src/lib.rs", "crates/dbx-driver-postgres/src/postgres.rs", "crates/dbx-driver-mysql/tests/query.rs",
-    "src-tauri/src/commands/query.rs", "crates/dbx-tauri-consul/src/lib.rs", "crates/dbx-tauri-schema/src/lib.rs"]) {
+  for (const file of [
+    "crates/dbx-core/src/query/mod.rs",
+    "crates/dbx-core/tests/runtime_diagnostic_history.rs",
+    "crates/dbx-drivers/src/lib.rs",
+    "crates/dbx-driver-postgres/src/postgres.rs",
+    "crates/dbx-driver-mysql/tests/query.rs",
+    "src-tauri/src/commands/query.rs",
+    "crates/dbx-tauri-consul/src/lib.rs",
+    "crates/dbx-tauri-schema/src/lib.rs",
+  ]) {
     const result = plan([file]);
     assert.equal(result.windows_standard, true, file);
     assert.equal(result.windows_win7_bundle, false, file);
@@ -112,12 +134,7 @@ test("ordinary desktop Rust changes keep Windows compilation without full Win7 p
 });
 
 test("old Win7 Rust paths remain candidates through the dependency graph", () => {
-  for (const file of [
-    "src-tauri/src/commands/update.rs",
-    "crates/dbx-core/src/host/update.rs",
-    "crates/dbx-driver-postgres/src/postgres.rs",
-    "crates/dbx-platform/src/lib.rs",
-  ]) {
+  for (const file of ["src-tauri/src/commands/update.rs", "crates/dbx-core/src/host/update.rs", "crates/dbx-driver-postgres/src/postgres.rs", "crates/dbx-platform/src/lib.rs"]) {
     assert.equal(plan([file]).windows_win7_candidate, true, file);
   }
 });
@@ -215,8 +232,7 @@ test("code generation and test-only dependencies participate in impact analysis"
   assert.ok(plan(["crates/dbx-formats/src/lib.rs"], { metadata: fixture }).affected_packages.includes("dbx-types"));
 });
 
-for (const file of ["Cargo.toml", "Cargo.lock", ".cargo/config.toml", "rust-toolchain.toml", "vendor/wry/src/lib.rs",
-  "crates/dbx-sql/Cargo.toml", ".github/workflows/ci.yml", ".github/scripts/ci-plan.mjs", ".github/scripts/ci-gate.test.mjs"]) {
+for (const file of ["Cargo.toml", "Cargo.lock", ".cargo/config.toml", "rust-toolchain.toml", "vendor/wry/src/lib.rs", "crates/dbx-sql/Cargo.toml", ".github/workflows/ci.yml", ".github/scripts/ci-plan.mjs", ".github/scripts/ci-gate.test.mjs"]) {
   test(`shared input ${file} retains full workspace and Agent coverage`, () => {
     const result = plan([file]);
     assert.deepEqual(groups(result), ["workspace"]);
@@ -275,8 +291,7 @@ test("known JDBC driver changes only select Java agent tests", () => {
 });
 
 test("shared Agent inputs and unknown native modules never silently lose coverage", () => {
-  for (const file of ["agents/common/src/main/java/Protocol.java", "agents/scripts/validate_agents.py", "agents/build.gradle",
-    "agents/drivers/new-driver/main.go", "crates/dbx-driver-agent/assets/agent-protocol-v2.json", ".github/workflows/agents-release.yml"]) {
+  for (const file of ["agents/common/src/main/java/Protocol.java", "agents/scripts/validate_agents.py", "agents/build.gradle", "agents/drivers/new-driver/main.go", "crates/dbx-driver-agent/assets/agent-protocol-v2.json", ".github/workflows/agents-release.yml"]) {
     const result = plan([file]);
     assert.equal(result.agent_go.include.length, goAgents.length, file);
     assert.equal(result.agent_integration.include.length, 16, file);
@@ -289,13 +304,32 @@ test("shared Agent inputs and unknown native modules never silently lose coverag
 });
 
 test("the independent live matrix preserves every old version and authentication case", () => {
-  assert.deepEqual(integrationCases.map((entry) => `${entry.scenario}:${entry.version}`), [
-    "zookeeper:3.4.14", "zookeeper:3.5.5", "zookeeper:3.7.0", "zookeeper:3.9.5", "zookeeper-sasl:3.7.0",
-    "rocketmq:4.9.8", "rocketmq:5.3.1", "tdengine:2.4.0.14", "tdengine:2.6.0.34", "tdengine:3.0.7.1",
-    "tdengine:3.3.6.13", "tdengine:3.4.2.2", "cassandra:3.11.19", "cassandra:5.0.6", "rabbitmq:3.13", "rabbitmq:4.3",
-  ]);
+  assert.deepEqual(
+    integrationCases.map((entry) => `${entry.scenario}:${entry.version}`),
+    [
+      "zookeeper:3.4.14",
+      "zookeeper:3.5.5",
+      "zookeeper:3.7.0",
+      "zookeeper:3.9.5",
+      "zookeeper-sasl:3.7.0",
+      "rocketmq:4.9.8",
+      "rocketmq:5.3.1",
+      "tdengine:2.4.0.14",
+      "tdengine:2.6.0.34",
+      "tdengine:3.0.7.1",
+      "tdengine:3.3.6.13",
+      "tdengine:3.4.2.2",
+      "cassandra:3.11.19",
+      "cassandra:5.0.6",
+      "rabbitmq:3.13",
+      "rabbitmq:4.3",
+    ],
+  );
   assert.equal(integrationCases.find((entry) => entry.version === "3.4.2.2").image, "tdengine/tsdb:3.4.2.2");
-  assert.deepEqual(goAgents.filter((entry) => entry.race).map((entry) => entry.driver), ["rocketmq", "zookeeper"]);
+  assert.deepEqual(
+    goAgents.filter((entry) => entry.race).map((entry) => entry.driver),
+    ["rocketmq", "zookeeper"],
+  );
 });
 
 test("test groups partition every current workspace package exactly once", () => {
@@ -309,8 +343,7 @@ test("Rust groups cover the actual workspace metadata, including extracted Tauri
   const actual = cargoMetadata(repository);
   const members = actual.packages.filter((pkg) => actual.workspace_members.includes(pkg.id)).map((pkg) => pkg.name);
   assert.deepEqual(Object.values(rustGroups).flat().toSorted(), members.toSorted());
-  const result = planCi({ files: ["crates/dbx-core/tests/runtime_diagnostic_history.rs", "crates/dbx-web/src/routes/transfer.rs"],
-    metadata: actual, root: repository });
+  const result = planCi({ files: ["crates/dbx-core/tests/runtime_diagnostic_history.rs", "crates/dbx-web/src/routes/transfer.rs"], metadata: actual, root: repository });
   assert.equal(result.rust_groups_known, true);
   assert.equal(result.rust_full, false);
   assert.deepEqual(groups(result), ["application"]);
@@ -361,13 +394,17 @@ test("nextest, doctests and coverage select identical packages and features in e
 
 function results(files) {
   const selected = plan(files);
-  return { changes: { result: "success", outputs: { plan: JSON.stringify(selected) } },
+  return {
+    changes: { result: "success", outputs: { plan: JSON.stringify(selected) } },
     "fast-checks": { result: selected.fast ? "success" : "skipped" },
-    "rust-fmt-clippy": { result: selected.rust ? "success" : "skipped" }, "rust-test": { result: selected.rust ? "success" : "skipped" },
-    "agent-checks": { result: selected.agents ? "success" : "skipped" }, "agent-java": { result: selected.agent_java ? "success" : "skipped" },
+    "rust-fmt-clippy": { result: selected.rust ? "success" : "skipped" },
+    "rust-test": { result: selected.rust ? "success" : "skipped" },
+    "agent-checks": { result: selected.agents ? "success" : "skipped" },
+    "agent-java": { result: selected.agent_java ? "success" : "skipped" },
     "agent-go": { result: selected.agent_go_changed ? "success" : "skipped" },
     "agent-rust": { result: selected.agent_rust_changed ? "success" : "skipped" },
-    "agent-integration": { result: selected.agent_integration_changed ? "success" : "skipped" } };
+    "agent-integration": { result: selected.agent_integration_changed ? "success" : "skipped" },
+  };
 }
 
 test("gates accept only successful selected jobs and intentionally skipped unselected jobs", () => {
@@ -410,17 +447,23 @@ test("git diff routing includes both sides of renames, deleted files, and unusua
   const directory = mkdtempSync(path.join(tmpdir(), "dbx-ci-plan-"));
   const git = (...args) => execFileSync("git", args, { cwd: directory, encoding: "utf8", stdio: "pipe" }).trim();
   try {
-    git("init"); git("config", "user.email", "fixture@example.invalid"); git("config", "user.name", "CI Fixture");
+    git("init");
+    git("config", "user.email", "fixture@example.invalid");
+    git("config", "user.name", "CI Fixture");
     writeFileSync(path.join(directory, "old.rs"), "unchanged source\n");
     writeFileSync(path.join(directory, "deleted.rs"), "gone\n");
-    git("add", "."); git("-c", "core.hooksPath=/dev/null", "commit", "-m", "fixture baseline");
+    git("add", ".");
+    git("-c", "core.hooksPath=/dev/null", "commit", "-m", "fixture baseline");
     const base = git("rev-parse", "HEAD");
-    git("mv", "old.rs", "renamed\nfile.rs"); git("rm", "deleted.rs");
+    git("mv", "old.rs", "renamed\nfile.rs");
+    git("rm", "deleted.rs");
     git("-c", "core.hooksPath=/dev/null", "commit", "-m", "fixture change");
     assert.deepEqual(changedPaths(base, directory).toSorted(), ["old.rs", "deleted.rs", "renamed\nfile.rs"].toSorted());
     assert.equal(changedPaths("0".repeat(40), directory), null);
     assert.throws(() => changedPaths("not-a-ref", directory));
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("the final gate rejects absent routing outputs and skipped selected jobs", () => {
@@ -483,8 +526,7 @@ test("the final gate independently requires standard Windows compilation without
 });
 
 test("coverage audit rejects lost features, omitted packages, and overlapping group selection", () => {
-  const coverage = { workspace: Object.fromEntries(Object.keys(graph).map((name) => [name, ["fixture"]])),
-    ...Object.fromEntries(Object.entries(rustGroups).map(([group, packages]) => [group, Object.fromEntries(packages.map((name) => [name, ["fixture"]]))])) };
+  const coverage = { workspace: Object.fromEntries(Object.keys(graph).map((name) => [name, ["fixture"]])), ...Object.fromEntries(Object.entries(rustGroups).map(([group, packages]) => [group, Object.fromEntries(packages.map((name) => [name, ["fixture"]]))])) };
   assertCoverage(coverage);
   const lost = structuredClone(coverage);
   lost.foundation["dbx-types"] = [];

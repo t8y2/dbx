@@ -5,8 +5,12 @@ import { pathToFileURL } from "node:url";
 export function changeBase({ eventName, before, root = process.cwd() }) {
   if (eventName === "pull_request") {
     const commits = execFileSync("git", ["rev-list", "--parents", "-n", "1", "HEAD"], {
-      cwd: root, encoding: "utf8", stdio: "pipe",
-    }).trim().split(/\s+/);
+      cwd: root,
+      encoding: "utf8",
+      stdio: "pipe",
+    })
+      .trim()
+      .split(/\s+/);
     if (commits.length !== 3) throw new Error("PR change detection requires the checked-out merge commit and both parents");
     return commits[1];
   }

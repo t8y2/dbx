@@ -7,11 +7,13 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const read = (name) => readFileSync(path.join(root, name), "utf8");
-const metadata = JSON.parse(execFileSync("cargo", ["metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"], {
-  cwd: root,
-  encoding: "utf8",
-  maxBuffer: 8 * 1024 * 1024,
-}));
+const metadata = JSON.parse(
+  execFileSync("cargo", ["metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"], {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
+  }),
+);
 const members = new Map(metadata.packages.filter((pkg) => metadata.workspace_members.includes(pkg.id)).map((pkg) => [pkg.name, pkg]));
 const allowedDependencies = {
   "dbx-types": [],
@@ -32,11 +34,7 @@ const allowedDependencies = {
   "dbx-driver-postgres": ["dbx-types", "dbx-sql-core", "dbx-driver-support"],
   "dbx-driver-redis": ["dbx-types", "dbx-driver-support"],
   "dbx-driver-sqlserver": ["dbx-types", "dbx-sql-core", "dbx-sql-data", "dbx-driver-support"],
-  "dbx-drivers": [
-    "dbx-types", "dbx-sql-core", "dbx-sql-data", "dbx-sql-dialect", "dbx-platform", "dbx-sqlite-worker",
-    "dbx-driver-support", "dbx-driver-agent", "dbx-driver-elasticsearch", "dbx-driver-mongodb",
-    "dbx-driver-mysql", "dbx-driver-postgres", "dbx-driver-redis", "dbx-driver-sqlserver",
-  ],
+  "dbx-drivers": ["dbx-types", "dbx-sql-core", "dbx-sql-data", "dbx-sql-dialect", "dbx-platform", "dbx-sqlite-worker", "dbx-driver-support", "dbx-driver-agent", "dbx-driver-elasticsearch", "dbx-driver-mongodb", "dbx-driver-mysql", "dbx-driver-postgres", "dbx-driver-redis", "dbx-driver-sqlserver"],
 };
 const core = members.get("dbx-core");
 
@@ -58,12 +56,27 @@ for (const [name, allowed] of Object.entries(allowedDependencies)) {
 
 test("core owns application orchestration in real business directories", () => {
   const ownedFiles = [
-    "connection/mod.rs", "connection/connection_secrets.rs", "connection/driver_runtime.rs",
-    "query/mod.rs", "query/query_cancel.rs", "query/document_ops.rs",
-    "schema/mod.rs", "schema/table_structure_sql/sqlite_rebuild.rs",
-    "data/transfer.rs", "data/table_import.rs", "data/docs/export.rs", "data/cloudflare_d1/import.rs",
-    "ai/agent_loop.rs", "ai/agent_tools.rs", "admin/consul/mod.rs", "admin/mq/mod.rs", "admin/mqtt/mod.rs",
-    "persistence/storage.rs", "persistence/config/mod.rs", "safety/production_safety.rs", "host/update.rs",
+    "connection/mod.rs",
+    "connection/connection_secrets.rs",
+    "connection/driver_runtime.rs",
+    "query/mod.rs",
+    "query/query_cancel.rs",
+    "query/document_ops.rs",
+    "schema/mod.rs",
+    "schema/table_structure_sql/sqlite_rebuild.rs",
+    "data/transfer.rs",
+    "data/table_import.rs",
+    "data/docs/export.rs",
+    "data/cloudflare_d1/import.rs",
+    "ai/agent_loop.rs",
+    "ai/agent_tools.rs",
+    "admin/consul/mod.rs",
+    "admin/mq/mod.rs",
+    "admin/mqtt/mod.rs",
+    "persistence/storage.rs",
+    "persistence/config/mod.rs",
+    "safety/production_safety.rs",
+    "host/update.rs",
   ];
   for (const name of ownedFiles) {
     assert.ok(existsSync(path.join(root, "crates/dbx-core/src", name)), `missing owned business source: ${name}`);
@@ -97,10 +110,7 @@ test("code generators and runtime assets belong to their implementation crates",
   assert.match(read("crates/dbx-sql-dialect/build.rs"), /plugins\/dialects/);
   assert.match(read("crates/dbx-ai-provider/src/ai_pi_agent_cli.rs"), /assets\/pi-mcp-bridge\.mjs/);
   assert.ok(existsSync(path.join(root, "crates/dbx-ai-provider/assets/pi-mcp-bridge.mjs")));
-  assert.deepEqual(
-    JSON.parse(read("crates/dbx-driver-agent/assets/agent-protocol-v2.json")),
-    JSON.parse(read("agents/common/src/main/resources/agent-protocol-v2.json")),
-  );
+  assert.deepEqual(JSON.parse(read("crates/dbx-driver-agent/assets/agent-protocol-v2.json")), JSON.parse(read("agents/common/src/main/resources/agent-protocol-v2.json")));
   assert.match(read("crates/dbx-platform/src/lib.rs"), /#\[cfg\(all\(target_os = "windows", target_env = "gnu"\)\)\]\s*mod nanosleep_stub/);
 });
 
@@ -131,9 +141,12 @@ test("CI and release tracking follow the new source owners", () => {
 });
 
 test("the standalone DuckDB lockfile includes core's internal dependency closure", () => {
-  const lockedPackages = new Map(read("agents/drivers/duckdb/Cargo.lock")
-    .split("\n[[package]]\n").slice(1)
-    .map((block) => [block.match(/^name = "([^"]+)"$/m)[1], block]));
+  const lockedPackages = new Map(
+    read("agents/drivers/duckdb/Cargo.lock")
+      .split("\n[[package]]\n")
+      .slice(1)
+      .map((block) => [block.match(/^name = "([^"]+)"$/m)[1], block]),
+  );
   const visited = new Set();
   function inspect(name) {
     if (visited.has(name)) return;

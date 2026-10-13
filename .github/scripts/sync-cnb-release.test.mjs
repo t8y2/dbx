@@ -103,11 +103,7 @@ test("ensureRelease explicitly marks a promoted release as latest", async (t) =>
     token: "test-token",
   });
 
-  await client.ensureRelease(
-    "v1.2.3",
-    { name: "DBX v1.2.3", body: "Stable", isPrerelease: false },
-    { makeLatest: true },
-  );
+  await client.ensureRelease("v1.2.3", { name: "DBX v1.2.3", body: "Stable", isPrerelease: false }, { makeLatest: true });
 
   assert.deepEqual(requests, [
     { method: "GET", url: "/dbxio.com/dbx/-/releases/tags/v1.2.3", body: null },
@@ -157,26 +153,19 @@ test("metadata-only sync can mark the release as latest without reading an asset
   const tempDir = await mkdtemp(join(tmpdir(), "sync-cnb-release-"));
   t.after(() => rm(tempDir, { recursive: true, force: true }));
   const releasePath = join(tempDir, "release.json");
-  await writeFile(
-    releasePath,
-    JSON.stringify({ tagName: "v1.2.3", name: "DBX v1.2.3", body: "Stable", isPrerelease: false }),
-  );
+  await writeFile(releasePath, JSON.stringify({ tagName: "v1.2.3", name: "DBX v1.2.3", body: "Stable", isPrerelease: false }));
 
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   const result = await new Promise((resolve) => {
-    const child = spawn(
-      process.execPath,
-      [scriptPath, "--github-release", releasePath, "--metadata-only", "--make-latest"],
-      {
-        env: {
-          ...process.env,
-          CNB_API_BASE: `http://127.0.0.1:${address.port}`,
-          CNB_REPOSITORY: "dbxio.com/dbx",
-          CNB_TOKEN: "test-token",
-        },
+    const child = spawn(process.execPath, [scriptPath, "--github-release", releasePath, "--metadata-only", "--make-latest"], {
+      env: {
+        ...process.env,
+        CNB_API_BASE: `http://127.0.0.1:${address.port}`,
+        CNB_REPOSITORY: "dbxio.com/dbx",
+        CNB_TOKEN: "test-token",
       },
-    );
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));

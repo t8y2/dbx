@@ -547,7 +547,6 @@ const emit = defineEmits<{
   "open-update-center": [];
   "ai-config-deep-link-handled": [];
   logout: [];
-  "open-cc-switch-plugin-center": [];
 }>();
 
 const hasAnyUpdate = computed(() => Boolean(props.appUpdateAvailable || (props.driverUpdateCount || 0) > 0 || props.jdbcUpdateAvailable || props.mcpUpdateAvailable || (props.pluginUpdateCount || 0) > 0));

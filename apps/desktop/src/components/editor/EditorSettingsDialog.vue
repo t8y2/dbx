@@ -475,13 +475,12 @@ function onLocaleOpenChange(open: boolean) {
   if (!open) restoreLocaleOptionPreview();
 }
 
-const appThemePaletteOptions = computed(
-  (): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
-    APP_THEME_PALETTES.map((palette) => ({
-      value: palette.value,
-      label: t(palette.labelKey),
-      previewColor: palette.previewColor,
-    })),
+const appThemePaletteOptions = computed((): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
+  APP_THEME_PALETTES.map((palette) => ({
+    value: palette.value,
+    label: t(palette.labelKey),
+    previewColor: palette.previewColor,
+  })),
 );
 const selectedThemePaletteOption = computed(() => appThemePaletteOptions.value.find((option) => option.value === themePalette.value) ?? appThemePaletteOptions.value[0]);
 const selectedLocaleOption = computed(() => LOCALE_OPTIONS.find((locale) => locale.value === currentLocale()) ?? LOCALE_OPTIONS[0]);
@@ -10029,8 +10028,7 @@ onUnmounted(() => {
 SELECT t.*
 FROM ${1:table} t
 WHERE t.del_flag = 0
-LIMIT 100;</pre
-                >
+LIMIT 100;</pre>
               </div>
 
               <div class="overflow-x-auto rounded-md border">

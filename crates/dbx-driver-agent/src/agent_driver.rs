@@ -1368,6 +1368,9 @@ pub enum AgentMethod {
     PlDebugStepOut,
     PlDebugAbort,
     PlDebugGetVariables,
+    // Runs one statement in the DEBUGGEE's context (DBMS_DEBUG.EXECUTE): the only way
+    // to see the debuggee's uncommitted work from a debug session.
+    PlDebugExecute,
     PlDebugGetStack,
     PlDebugGetLog,
     PlDebugClose,
@@ -1482,6 +1485,7 @@ impl AgentMethod {
             Self::PlDebugStepOut => "pl_debug_step_out",
             Self::PlDebugAbort => "pl_debug_abort",
             Self::PlDebugGetVariables => "pl_debug_get_variables",
+            Self::PlDebugExecute => "pl_debug_execute",
             Self::PlDebugGetStack => "pl_debug_get_stack",
             Self::PlDebugGetLog => "pl_debug_get_log",
             Self::PlDebugClose => "pl_debug_close",
@@ -2849,6 +2853,26 @@ impl AgentDriverClient {
             "value": value,
         });
         self.call_method_with_timeout(AgentMethod::PlDebugSetValue, params, timeout_duration).await
+    }
+
+    /// Runs `sql` in the DEBUGGEE's own context (DBMS_DEBUG.EXECUTE) so a debug
+    /// session can read what only that session sees -- its uncommitted rows and its
+    /// package state. The statement always runs in the current frame (the server's
+    /// `frame#` only accepts -1) and `max_rows` bounds the answer. The agent's response
+    /// body carries `ok` / `rows` / `count` / `error` and is forwarded as-is.
+    pub async fn pl_debug_execute<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        sql: &str,
+        max_rows: i64,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let params = serde_json::json!({
+            "debugId": debug_id,
+            "sql": sql,
+            "maxRows": max_rows,
+        });
+        self.call_method_with_timeout(AgentMethod::PlDebugExecute, params, timeout_duration).await
     }
 
     /// Enables or disables breaking on exceptions for the debug session. The

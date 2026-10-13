@@ -25,6 +25,19 @@ use crate::models::connection::{ConnectionConfig, DatabaseType};
 
 /// Mirrors `PlDebugSession.DEFAULT_TIMEOUT_MILLIS` on the agent side.
 pub const PL_DEBUG_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Budget of the *interactive* continuations (step / resume / abort / exception resume).
+///
+/// The agent bounds every helper call of its own at 30s and abandons the connection when
+/// one overruns, so a wedged continuation answers within ~35s; 120s leaves headroom for a
+/// slow server without ever leaving the toolbar "busy" for minutes. The old flat 10-minute
+/// budget made a stuck call look like a frozen window (reported from use, 2026-10-13: "跑完
+/// 后依然卡死").
+pub const PL_DEBUG_CONTINUE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Budget of `resume_ignore_breakpoints`: the agent drives the program to its end itself,
+/// so this one legitimately scales with the program's length.
+pub const PL_DEBUG_RUN_TO_END_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Non-blocking calls (probe, breakpoint management) use a short budget.
 const PL_DEBUG_QUICK_TIMEOUT: Duration = Duration::from_secs(60);
 /// Upper bound for the graceful close of one session while its connection is
@@ -183,7 +196,7 @@ pub async fn pl_debug_set_breakpoint_enabled_core(
 pub async fn pl_debug_resume_core(state: &AppState, debug_id: &str) -> Result<Value, String> {
     let client = pl_debug_client(state, debug_id).await?;
     let mut guard = client.lock().await;
-    guard.pl_debug_resume::<Value>(debug_id, Some(PL_DEBUG_TIMEOUT)).await
+    guard.pl_debug_resume::<Value>(debug_id, Some(PL_DEBUG_CONTINUE_TIMEOUT)).await
 }
 
 /// Runs the debuggee to completion while ignoring every remaining breakpoint
@@ -199,7 +212,26 @@ pub async fn pl_debug_resume_core(state: &AppState, debug_id: &str) -> Result<Va
 pub async fn pl_debug_resume_ignore_breakpoints_core(state: &AppState, debug_id: &str) -> Result<Value, String> {
     let client = pl_debug_client(state, debug_id).await?;
     let mut guard = client.lock().await;
-    guard.pl_debug_resume_ignore_breakpoints::<Value>(debug_id, Some(PL_DEBUG_TIMEOUT)).await
+    guard.pl_debug_resume_ignore_breakpoints::<Value>(debug_id, Some(PL_DEBUG_RUN_TO_END_TIMEOUT)).await
+}
+
+/// Runs one statement in the DEBUGGEE's own context (DBMS_DEBUG.EXECUTE), so the
+/// debug session can read what no other connection can: the debuggee's uncommitted
+/// rows and its package state. The statement always runs in the current frame (the
+/// server's `frame#` accepts -1 only). Only valid while the debuggee is parked -- the server
+/// rejects it otherwise, and that rejection is forwarded as the agent's answer.
+///
+/// Served by the oracle-go agent with the `pl_debug_execute` request branch backed by
+/// `AgentProtocol.METHOD_PL_DEBUG_EXECUTE`.
+pub async fn pl_debug_execute_core(
+    state: &AppState,
+    debug_id: &str,
+    sql: &str,
+    max_rows: i64,
+) -> Result<Value, String> {
+    let client = pl_debug_client(state, debug_id).await?;
+    let mut guard = client.lock().await;
+    guard.pl_debug_execute::<Value>(debug_id, sql, max_rows, Some(PL_DEBUG_QUICK_TIMEOUT)).await
 }
 
 /// Assigns a new value to the variable `name` in the given frame/slot. The
@@ -233,25 +265,25 @@ pub async fn pl_debug_set_exception_breakpoint_core(
 pub async fn pl_debug_step_over_core(state: &AppState, debug_id: &str) -> Result<Value, String> {
     let client = pl_debug_client(state, debug_id).await?;
     let mut guard = client.lock().await;
-    guard.pl_debug_step_over::<Value>(debug_id, Some(PL_DEBUG_TIMEOUT)).await
+    guard.pl_debug_step_over::<Value>(debug_id, Some(PL_DEBUG_CONTINUE_TIMEOUT)).await
 }
 
 pub async fn pl_debug_step_in_core(state: &AppState, debug_id: &str) -> Result<Value, String> {
     let client = pl_debug_client(state, debug_id).await?;
     let mut guard = client.lock().await;
-    guard.pl_debug_step_in::<Value>(debug_id, Some(PL_DEBUG_TIMEOUT)).await
+    guard.pl_debug_step_in::<Value>(debug_id, Some(PL_DEBUG_CONTINUE_TIMEOUT)).await
 }
 
 pub async fn pl_debug_step_out_core(state: &AppState, debug_id: &str) -> Result<Value, String> {
     let client = pl_debug_client(state, debug_id).await?;
     let mut guard = client.lock().await;
-    guard.pl_debug_step_out::<Value>(debug_id, Some(PL_DEBUG_TIMEOUT)).await
+    guard.pl_debug_step_out::<Value>(debug_id, Some(PL_DEBUG_CONTINUE_TIMEOUT)).await
 }
 
 pub async fn pl_debug_abort_core(state: &AppState, debug_id: &str) -> Result<Value, String> {
     let client = pl_debug_client(state, debug_id).await?;
     let mut guard = client.lock().await;
-    guard.pl_debug_abort::<Value>(debug_id, Some(PL_DEBUG_TIMEOUT)).await
+    guard.pl_debug_abort::<Value>(debug_id, Some(PL_DEBUG_CONTINUE_TIMEOUT)).await
 }
 
 /// `frame` selects the stack frame to read variables from; `None` lets the
@@ -264,14 +296,33 @@ pub async fn pl_debug_get_variables_core(
     let client = pl_debug_client(state, debug_id).await?;
     let mut guard = client.lock().await;
     let result = guard.pl_debug_get_variables::<Value>(debug_id, frame, Some(PL_DEBUG_QUICK_TIMEOUT)).await?;
-    // A JSON-shaped payload is flattened as well as the legacy
-    // `*name*type*value` delimited text the Oracle agent returns, so the
-    // frontend always receives a flat variables array.
-    let scalar_values = result.get("scalarValues").and_then(Value::as_str).unwrap_or("");
-    let variables = parse_scalar_values(scalar_values);
+    // Two shapes arrive here:
+    //   * the agent's own `variables` array, which the GET_VALUE fallback builds for a
+    //     server without GET_VALUES (stock Oracle) -- it wins, because the legacy text
+    //     below cannot escape a `*` inside a value;
+    //   * the legacy `*name*type*value` delimited text (or a JSON payload), which is
+    //     flattened into the same array so the frontend always gets one shape.
     let mut response = result;
-    response["variables"] = json!(variables);
+    normalize_variables(&mut response);
     Ok(response)
+}
+
+/// Fills in the `variables` array of a `pl_debug_get_variables` response.
+///
+/// The agent may have built it already (the GET_VALUE fallback for a server without
+/// GET_VALUES, one call per name from the source's declarations): that array wins, because
+/// the legacy text below cannot escape a `*` inside a value. Otherwise the raw payload the
+/// Oracle agent returned is flattened, so the frontend always sees one shape.
+pub(crate) fn normalize_variables(response: &mut Value) {
+    let agent_variables = response.get("variables").cloned().unwrap_or(Value::Null);
+    let variables = match agent_variables {
+        Value::Array(entries) if !entries.is_empty() => Value::Array(entries),
+        _ => {
+            let scalar_values = response.get("scalarValues").and_then(Value::as_str).unwrap_or("");
+            parse_scalar_values(scalar_values)
+        }
+    };
+    response["variables"] = variables;
 }
 
 /// Normalizes both `DBMS_DEBUG.GET_VALUES` shapes into `{name, value}` pairs.
@@ -377,7 +428,7 @@ pub async fn pl_debug_close_core(state: &AppState, debug_id: &str) -> Result<(),
 /// Closes every open session, e.g. when a connection is removed.
 ///
 /// Each close is bounded: a session whose agent client is busy inside a blocked
-/// continuation (resume/step wait up to [`PL_DEBUG_TIMEOUT`]) must not hold up
+/// continuation (resume/step wait up to [`PL_DEBUG_CONTINUE_TIMEOUT`]) must not hold up
 /// the removal, because the pool drain that follows ends the agent process
 /// anyway. The graceful close is what lets the agent release the debuggee
 /// without the client-side timeout, not a precondition for removal.
@@ -460,6 +511,32 @@ mod tests {
     fn parse_scalar_values_empty_payload_is_no_variable() {
         assert_eq!(parse_scalar_values(""), json!([]));
         assert_eq!(parse_scalar_values("   \n "), json!([]));
+    }
+
+    /// The agent's own array is what the GET_VALUE fallback produces; the legacy text
+    /// cannot express a value containing `*`, so the array must not be re-parsed.
+    #[test]
+    fn normalize_variables_prefers_the_agent_array() {
+        let mut response = json!({
+            "scalarValues": "*LEGACY*NUMBER*1*",
+            "variables": [{ "name": "V_N", "type": "", "value": "a*b" }],
+            "variablesSource": "get_value",
+        });
+        normalize_variables(&mut response);
+        assert_eq!(response["variables"], json!([{ "name": "V_N", "type": "", "value": "a*b" }]));
+    }
+
+    /// An empty (or absent) array means the agent did not enumerate anything, so the
+    /// legacy payload is flattened as before -- this is the OceanBase-Oracle shape.
+    #[test]
+    fn normalize_variables_falls_back_to_the_payload() {
+        let mut response = json!({ "scalarValues": "*V_N*NUMBER*7*" });
+        normalize_variables(&mut response);
+        assert_eq!(response["variables"], json!([{ "name": "V_N", "type": "NUMBER", "value": "7" }]));
+
+        let mut empty = json!({ "variables": [], "scalarValues": "" });
+        normalize_variables(&mut empty);
+        assert_eq!(empty["variables"], json!([]));
     }
 
     #[test]

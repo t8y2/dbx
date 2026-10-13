@@ -2783,6 +2783,7 @@ pub fn run() {
             commands::pl_debug::pl_debug_list_breakpoints,
             commands::pl_debug::pl_debug_resume,
             commands::pl_debug::pl_debug_resume_ignore_breakpoints,
+            commands::pl_debug::pl_debug_execute,
             commands::pl_debug::pl_debug_set_value,
             commands::pl_debug::pl_debug_set_exception_breakpoint,
             commands::pl_debug::pl_debug_step_over,

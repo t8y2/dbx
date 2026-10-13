@@ -88,6 +88,18 @@ pub async fn pl_debug_resume_ignore_breakpoints(
     pl_debug::pl_debug_resume_ignore_breakpoints_core(&state, &debug_id).await
 }
 
+/// Runs one statement in the debuggee's own context (DBMS_DEBUG.EXECUTE): the debug
+/// session sees the state only that session has (uncommitted rows, package state).
+#[tauri::command]
+pub async fn pl_debug_execute(
+    state: State<'_, Arc<AppState>>,
+    debug_id: String,
+    sql: String,
+    max_rows: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    pl_debug::pl_debug_execute_core(&state, &debug_id, &sql, max_rows.unwrap_or(0)).await
+}
+
 #[tauri::command]
 pub async fn pl_debug_set_value(
     state: State<'_, Arc<AppState>>,

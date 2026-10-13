@@ -1,9 +1,19 @@
 import type { SyncSelection, WebDavConfig } from "@/lib/backend/api";
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 export const WEB_DAV_BACKUP_SELECTION_STORAGE_KEY = "dbx-webdav-backup-selection";
 export const SYNC_METHOD_STORAGE_KEY = "dbx-sync-method";
-export const WEB_DAV_AUTO_UPLOAD_STORAGE_KEYS = ["dbx-webdav-endpoint", "dbx-webdav-username", "dbx-webdav-user-agent", "dbx-webdav-remote-path", "dbx-webdav-auto-upload-enabled", "dbx-webdav-auto-upload-interval-minutes", WEB_DAV_BACKUP_SELECTION_STORAGE_KEY] as const;
+export const WEB_DAV_LAST_UPLOAD_AT_STORAGE_KEY = "dbx-webdav-last-upload-at";
+export const WEB_DAV_AUTO_UPLOAD_STORAGE_KEYS = [
+  "dbx-webdav-endpoint",
+  "dbx-webdav-username",
+  "dbx-webdav-user-agent",
+  "dbx-webdav-remote-path",
+  "dbx-webdav-auto-upload-enabled",
+  "dbx-webdav-auto-upload-interval-minutes",
+  WEB_DAV_BACKUP_SELECTION_STORAGE_KEY,
+  WEB_DAV_LAST_UPLOAD_AT_STORAGE_KEY,
+] as const;
 
 export const DEFAULT_WEB_DAV_REMOTE_PATH = "DBX/sync/snapshot.json";
 export const DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES = 30;
@@ -93,11 +103,42 @@ export function readWebDavAutoUploadConfig(): WebDavAutoUploadConfig {
   };
 }
 
+export function readWebDavLastUploadAt(): number | null {
+  const value = safeLocalStorageGet(WEB_DAV_LAST_UPLOAD_AT_STORAGE_KEY);
+  if (!value) return null;
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
+  return timestamp;
+}
+
+export function writeWebDavLastUploadAt(timestamp: number, notify = true) {
+  safeLocalStorageSet(WEB_DAV_LAST_UPLOAD_AT_STORAGE_KEY, String(Math.round(timestamp)));
+  if (notify && typeof window !== "undefined") {
+    window.dispatchEvent(new Event("dbx:webdav-auto-upload-config-changed"));
+  }
+}
+
+export function clearWebDavLastUploadAt(notify = false) {
+  safeLocalStorageRemove(WEB_DAV_LAST_UPLOAD_AT_STORAGE_KEY);
+  if (notify && typeof window !== "undefined") {
+    window.dispatchEvent(new Event("dbx:webdav-auto-upload-config-changed"));
+  }
+}
+
 export function writeWebDavAutoUploadFields(config: WebDavConfig, autoUpload: { enabled: boolean; intervalMinutes: unknown }) {
-  safeLocalStorageSet("dbx-webdav-endpoint", config.endpoint.trim());
+  const previousEndpoint = safeLocalStorageGet("dbx-webdav-endpoint")?.trim() || "";
+  const previousRemotePath = safeLocalStorageGet("dbx-webdav-remote-path")?.trim() || DEFAULT_WEB_DAV_REMOTE_PATH;
+  const nextEndpoint = config.endpoint.trim();
+  const nextRemotePath = config.remotePath?.trim() || DEFAULT_WEB_DAV_REMOTE_PATH;
+
+  if (previousEndpoint !== nextEndpoint || previousRemotePath !== nextRemotePath) {
+    clearWebDavLastUploadAt(false);
+  }
+
+  safeLocalStorageSet("dbx-webdav-endpoint", nextEndpoint);
   safeLocalStorageSet("dbx-webdav-username", config.username?.trim() || "");
   safeLocalStorageSet("dbx-webdav-user-agent", config.userAgent?.trim() || "");
-  safeLocalStorageSet("dbx-webdav-remote-path", config.remotePath?.trim() || DEFAULT_WEB_DAV_REMOTE_PATH);
+  safeLocalStorageSet("dbx-webdav-remote-path", nextRemotePath);
   safeLocalStorageSet("dbx-webdav-auto-upload-enabled", String(autoUpload.enabled));
   safeLocalStorageSet("dbx-webdav-auto-upload-interval-minutes", String(normalizedWebDavAutoUploadInterval(autoUpload.intervalMinutes)));
 }

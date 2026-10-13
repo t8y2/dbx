@@ -365,6 +365,7 @@ import {
   readSyncMethod,
   writeWebDavAutoUploadFields,
   writeWebDavBackupSelection,
+  writeWebDavLastUploadAt,
   writeSyncMethod,
   type SyncMethod,
 } from "@/lib/webdav/webdavAutoUploadConfig";
@@ -5173,6 +5174,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
     await runWebDavAction("upload", async () => {
       const summary = await webdavSyncUpload(currentWebDavConfig(), settingsStore.editorSettings, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
       writeWebDavBackupSelection(selection);
+      writeWebDavLastUploadAt(Date.now());
       return t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.remotePath });
     });
     return;

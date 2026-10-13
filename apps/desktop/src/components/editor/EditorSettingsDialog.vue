@@ -10954,8 +10954,8 @@ LIMIT 100;</pre>
                       <SelectTrigger inputClass="h-8 text-xs">
                         <SelectValue>
                           <span class="flex items-center gap-2">
-                            <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" :icon-path="selectedAiProviderPreset.iconPath" />
-                            <span>{{ selectedAiProviderPreset.label }}</span>
+                            <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="aiIsCcSwitchProvider ? t('ai.ccSwitchProvider') : selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" :icon-path="selectedAiProviderPreset.iconPath" />
+                            <span>{{ aiIsCcSwitchProvider ? t("ai.ccSwitchProvider") : selectedAiProviderPreset.label }}</span>
                           </span>
                         </SelectValue>
                       </SelectTrigger>
@@ -10971,8 +10971,8 @@ LIMIT 100;</pre>
                             </SelectItem>
                             <SelectItem v-if="!isWeb && aiCcSwitchPluginAvailable" :value="CC_SWITCH_PROVIDER_ID">
                               <span class="flex w-full min-w-0 items-center gap-2">
-                                <AiProviderLogo :provider="CC_SWITCH_PROVIDER_PRESET.provider" :label="CC_SWITCH_PROVIDER_PRESET.label" />
-                                <span class="truncate">{{ CC_SWITCH_PROVIDER_PRESET.label }}</span>
+                                <AiProviderLogo :provider="CC_SWITCH_PROVIDER_PRESET.provider" :label="t('ai.ccSwitchProvider')" />
+                                <span class="truncate">{{ t("ai.ccSwitchProvider") }}</span>
                               </span>
                             </SelectItem>
                           </SelectGroup>

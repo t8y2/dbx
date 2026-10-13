@@ -3404,8 +3404,8 @@ export default withEnglishFallback({
     hiapiSponsored: "200 Credits в подарок",
     hiapiDescription:
       "HiAPI — платформа API для разработчиков: модели изображений, видео, аудио и текста. Текстовые модели используют OpenAI-совместимые эндпоинты, а Remote MCP и Agent Skills подключают аккаунт к Claude Code, Cursor и другим агентам.\n🎁 Новым пользователям — 200 Credits при регистрации и 10% дополнительных Credits при пополнении.",
-    ccSwitchProvider: "CC-SWITCH",
-    ccSwitchProviderDescription: "Импортируйте конфигурации ИИ из установленного плагина CC-SWITCH.",
+    ccSwitchProvider: "Импорт конфигураций ИИ",
+    ccSwitchProviderDescription: "Импортируйте конфигурации ИИ из CC-SWITCH в DBX.",
     ccSwitchImport: "Импортировать из CC-SWITCH",
     ccSwitchImporting: "Импортирование...",
     ccSwitchPluginChecking: "Проверка состояния плагина CC-SWITCH...",

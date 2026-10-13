@@ -1392,7 +1392,7 @@ describe("settingsStore AI API key normalization", () => {
     expect(preset).toBe(CC_SWITCH_PROVIDER_PRESET);
     expect(preset).toMatchObject({
       id: CC_SWITCH_PROVIDER_ID,
-      label: "CC-SWITCH",
+      label: "AI Config Importer",
       provider: "custom",
       group: "builtin",
       requiresApiKey: false,

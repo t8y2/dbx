@@ -510,7 +510,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
 export const CC_SWITCH_PROVIDER_ID = "cc-switch";
 export const CC_SWITCH_PROVIDER_PRESET: AiBuiltinProviderPreset = {
   id: CC_SWITCH_PROVIDER_ID,
-  label: "CC-SWITCH",
+  label: "AI Config Importer",
   provider: "custom",
   endpoint: "",
   model: "",

@@ -6,7 +6,7 @@ function plugin(overrides: Partial<InstalledPlugin> = {}): InstalledPlugin {
   return {
     manifest: {
       id: "cc-switch",
-      name: "CC-SWITCH Config Import",
+      name: "AI Config Importer",
       drivers: [],
       capabilities: [{ id: "ai-config-import", label: "AI configuration import" }],
       ...overrides.manifest,

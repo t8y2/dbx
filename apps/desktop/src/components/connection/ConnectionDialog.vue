@@ -10315,7 +10315,9 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.readOnly") }}</Label>
+                  <Label :class="connectionLabelSmallClass">
+                    <span class="inline-flex items-center gap-1">{{ t("connection.readOnly") }} <HelpTooltip :label="t('connection.readOnlyExplanation')" /></span>
+                  </Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="form.read_only" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.readOnlyHint") }}</span>
@@ -10358,7 +10360,7 @@ function openExternalUrl(url: string) {
                 </div>
                 <div v-if="!isPluginConnection" class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">
                   <Label :class="[connectionLabelSmallClass, 'pt-0.5 text-red-700 dark:text-red-300']">
-                    <span class="inline-flex items-center justify-end gap-1"><ShieldAlert class="h-3.5 w-3.5" />PROD</span>
+                    <span class="inline-flex items-center justify-end gap-1"><ShieldAlert class="h-3.5 w-3.5" />PROD <HelpTooltip :label="t('production.explanation')" trigger-class="text-red-700/70 dark:text-red-300/70" /></span>
                   </Label>
                   <div class="col-span-3 grid gap-2">
                     <div class="flex items-center justify-between gap-3">

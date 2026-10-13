@@ -78,6 +78,8 @@ The Shortcuts-tab search box also supports **key recording**: click the keyboard
 
 **Combinations the system claims cannot be recorded**: keys such as `Alt+F4`, `Win`, `Ctrl+Alt+Del`, or macOS `⌘Tab` are handled by the operating system or window manager before DBX sees them, so recording yields nothing — that is not a recording failure. Such a combination also never fires even if it is configured by hand; use the text search instead when you need to inspect it.
 
+The web build has one more layer: keys the browser reserves (`Ctrl+W` / `Ctrl+Shift+W` / `Ctrl+T` / `Ctrl+N`, or `⌘W` on macOS) are handled by the browser itself and never reach the page. The desktop build has no such restriction — `Ctrl+Shift+W` is the default for Close Window and `Ctrl+W` for Close Tab, and both can be recorded normally.
+
 On Windows/Linux, `Ctrl+Alt` may represent AltGr, so DBX matches those combinations conservatively. On macOS, Option+letter can produce transformed characters, and DBX uses physical-key fallback only where safe.
 
 ## Related Pages

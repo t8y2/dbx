@@ -8721,6 +8721,13 @@ export default withEnglishFallback({
     routineSourceOpenModeDialogDescription: "Apre il codice sorgente in una finestra di dialogo a comparsa per una rapida visualizzazione e modifica.",
     syncSnippetPassphrase: "Password di crittografia dello snippet",
     syncSnippetPassphraseDescription: "Crittografa l'intero snapshot GitHub/Gitee. Non viene salvata ed è separata dalla password per le credenziali sincronizzate.",
+    syncSnippetRememberPassphrase: "Salva in modo sicuro la password di crittografia su questo dispositivo",
+    syncSnippetRememberPassphraseDescription: "Viene crittografata con la chiave di questo dispositivo e non viene mai aggiunta agli snapshot. Il caricamento automatico richiede un token salvato e questa password.",
+    syncSnippetAutoUpload: "Carica automaticamente gli snapshot",
+    syncSnippetAutoUploadInterval: "Intervallo",
+    syncSnippetAutoUploadDescription:
+      "Funziona mentre DBX è aperto; i download restano manuali. Gli snapshot invariati vengono saltati e il caricamento automatico si sospende se lo snippet remoto cambia. Le credenziali crittografate non vengono incluse. Attivare su un solo dispositivo per snippet.",
+    syncSnippetAutoUploadNeedsSetup: "Salva il token e la password di crittografia, quindi carica o scarica una volta manualmente prima di attivare il caricamento automatico.",
     syncSnippetIncludeSecrets: "Includi credenziali crittografate durante il caricamento",
     syncSnippetRestoreSecrets: "Ripristina credenziali crittografate durante il download",
     syncSnippetMigrateLegacy: "Migra snippet legacy",

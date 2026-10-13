@@ -73,6 +73,7 @@ import { disposeAllSqlServerActivityTraces } from "@/lib/sqlserver/sqlServerActi
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import { useExternalSqlFileChanges } from "@/composables/useExternalSqlFileChanges";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
+import { useSnippetAutoUpload } from "@/composables/useSnippetAutoUpload";
 import { readSyncMethod, readWebDavAutoUploadConfig, readWebDavBackupSelection } from "@/lib/webdav/webdavAutoUploadConfig";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import { shouldDrawDesktopWindowFrame, shouldDrawLinuxFloatingFrame, useWindowControls } from "@/composables/useWindowControls";
@@ -1248,6 +1249,7 @@ const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
 const { showCloseActionPrompt, chooseQuit, chooseMinimize, cancelCloseActionPrompt, performCloseAction, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt({ requestClose: requestAppClose });
 useVisibilityChange();
 useWebDavAutoUpload();
+useSnippetAutoUpload();
 useScheduledDatabaseBackups({ scheduler: true });
 
 const appVersion = ref("");

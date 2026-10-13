@@ -8218,6 +8218,8 @@ export default withEnglishFallback({
     shortcutModifierDoubleTapHint: "Pressione uma combinação de teclas ou pressione e solte rapidamente o mesmo modificador duas vezes (Shift, Cmd, Ctrl, Alt).",
     shortcutSearchPlaceholder: "Pesquisar atalhos",
     shortcutSearchNoResults: "Nenhum atalho corresponde à pesquisa.",
+    shortcutRecordKeys: "Gravar teclas",
+    shortcutRecordKeysRecordingHint: "Pressione uma combinação de teclas (Esc para sair, Backspace para limpar)",
     shortcutConflict: "Este atalho conflita com outra ação no mesmo escopo.",
     shortcutReserved: "Este atalho é reservado pelo sistema.",
     shortcutPlatformDefault: "Esta combinação é o atalho padrão de outra plataforma e não pode ser atribuída aqui. Escolha outra.",

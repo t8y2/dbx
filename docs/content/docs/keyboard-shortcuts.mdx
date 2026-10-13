@@ -74,6 +74,8 @@ Press `Mod+P` to search connections, databases, schemas, tables, views, and save
 
 DBX detects conflicts within a scope. Editor, grid, search, sidebar, and global actions have separate scopes, but the browser, operating system, input method, or accessibility software may still reserve a key first.
 
+The Shortcuts-tab search box also supports **key recording**: click the keyboard icon next to it and press a combination to filter down to the actions bound to it. Actions that share the same chord in another scope are listed as well, so you can hunt conflicts without knowing how the combination is spelled. Keys pressed while recording never run their command; `Esc` exits recording and `Backspace` clears the recorded combination. You can also type the combination as text — both `Ctrl+T` and `Ctrl + T` match.
+
 On Windows/Linux, `Ctrl+Alt` may represent AltGr, so DBX matches those combinations conservatively. On macOS, Option+letter can produce transformed characters, and DBX uses physical-key fallback only where safe.
 
 ## Related Pages

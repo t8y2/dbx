@@ -25,6 +25,7 @@ import {
   Globe,
   GripVertical,
   HardDrive,
+  Keyboard,
   Loader2,
   LogOut,
   Moon,
@@ -208,6 +209,7 @@ import {
 } from "@/lib/backend/api";
 import { createModifierDoubleTapShortcutController } from "@/lib/editor/modifierDoubleTapShortcut";
 import { eventToModifierOnlyShortcut, eventToShortcut } from "@/lib/editor/keyboardShortcuts";
+import { shortcutRecorderAction } from "@/lib/editor/shortcutRecorder";
 import {
   SHORTCUT_DEFINITIONS,
   countShortcutConflictPairs,
@@ -2199,6 +2201,13 @@ const shortcutConflictPairCount = computed(() => countShortcutConflictPairs(shor
 const sqlShortcutConflicts = computed(() => findSqlShortcutConflicts(editSqlShortcuts.value, editShortcuts.value));
 const hasSqlShortcutConflicts = computed(() => sqlShortcutConflicts.value.length > 0);
 const shortcutSearchQuery = ref("");
+// #11787：快捷键页签的「键盘录入」态。录入结果写进上面同一个搜索框，因此过滤、
+// 冲突徽章、作用域分组、空态全部沿用既有管线，不新增第二套过滤口径。
+const shortcutRecording = ref(false);
+// 录入态靠「焦点元素带 data-shortcut-recorder」让 App.vue 的两个 capture 阶段
+// 全局快捷键处理器让路（见 App.vue 的 handleGlobalSearchKeydownCapture）。属性只在
+// 录入态渲染：非录入时焦点停在这个按钮上的行为与普通按钮完全一致。
+const SHORTCUT_RECORDER_SELECTOR = '[data-settings-search-id="shortcuts"] [data-shortcut-recorder]';
 const collapsedShortcutScopes = ref<Set<ShortcutScope>>(new Set());
 const formatterEditorShortcutIds: ShortcutActionId[] = [
   "formatSql",
@@ -3296,6 +3305,54 @@ function clearShortcut(actionId: ShortcutActionId) {
   editShortcuts.value = { ...editShortcuts.value, [actionId]: "" };
 }
 
+/**
+ * #11787：进入/退出「键盘录入」态。焦点必须显式落到录入按钮上——录入期间
+ * App.vue 的两个 capture 阶段全局处理器只看**焦点元素**是否带
+ * `data-shortcut-recorder` 才让路，而 macOS 的 WKWebView（沿用 Safari 规则）
+ * 点击按钮不会给按钮焦点，光靠 click 会在 mac 上留下一条「录入态吞不掉全局
+ * 快捷键」的路径。
+ */
+async function toggleShortcutRecording() {
+  if (shortcutRecording.value) {
+    shortcutRecording.value = false;
+    return;
+  }
+  shortcutRecording.value = true;
+  await nextTick();
+  const button = document.querySelector<HTMLElement>(SHORTCUT_RECORDER_SELECTOR);
+  if (!button) {
+    // 没有焦点就没有让路依据：宁可退回未录入态，也不要留下一个「显示正在录入、
+    // 实际吞不掉任何按键」的空转状态。
+    shortcutRecording.value = false;
+    return;
+  }
+  button.focus();
+}
+
+function stopShortcutRecording() {
+  shortcutRecording.value = false;
+}
+
+function onShortcutRecorderKeydown(event: KeyboardEvent) {
+  if (!shortcutRecording.value) return;
+  // 录入态必须吞掉这次按键：既不执行真实快捷键命令（App.vue 的 window keydown
+  // 以 defaultPrevented 让路），也不让 Space/Enter 再去触发按钮自身的 click
+  // 把录入态点掉。
+  event.preventDefault();
+  event.stopPropagation();
+  const action = shortcutRecorderAction(event);
+  if (!action) return;
+  if (action.type === "exit") {
+    stopShortcutRecording();
+    return;
+  }
+  if (action.type === "clear") {
+    shortcutSearchQuery.value = "";
+    return;
+  }
+  shortcutSearchQuery.value = action.query;
+}
+
 function setAppLayout(value: InterfaceLayout) {
   editAppLayout.value = value;
 }
@@ -3495,6 +3552,7 @@ function resetSettingsSearchState() {
   settingsSearchActiveIndex.value = 0;
   pendingSettingsSearchResult = null;
   shortcutSearchQuery.value = "";
+  shortcutRecording.value = false;
   mcpPermissionPreviewSearchQuery.value = "";
   clearSettingsSearchHighlight();
 }
@@ -5233,6 +5291,9 @@ watch(snippetProvider, (provider) => {
 });
 
 watch(activeSettingsTab, async (tab) => {
+  // 离开快捷键页签会卸载录入按钮，而被移除的焦点元素不会再收到 blur：不在这里
+  // 复位的话，录入态会残留到下次回到该页签（届时按钮已不在焦点上，吞不掉快捷键）。
+  if (tab !== "shortcuts") shortcutRecording.value = false;
   void resetSettingsContentScroll();
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
   if (tab === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
@@ -9597,6 +9658,26 @@ onUnmounted(() => {
                   <Search class="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input v-model="shortcutSearchQuery" autocomplete="off" :placeholder="t('settings.shortcutSearchPlaceholder')" class="h-9 pl-9 text-sm" />
                 </div>
+                <!-- #11787：VS Code 式键盘录入。data-shortcut-recorder 只在录入态渲染：
+                     App.vue 的两个 capture 阶段全局快捷键处理器按「焦点元素是否带该属性」
+                     决定让路，非录入态焦点停在这个按钮上的行为与普通按钮一致。 -->
+                <LightTooltip :text="shortcutRecording ? t('settings.shortcutRecordKeysRecordingHint') : t('settings.shortcutRecordKeys')" :open-on-focus="false">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    class="h-9 w-9 shrink-0"
+                    :class="shortcutRecording ? 'bg-primary/10 text-primary ring-2 ring-primary/40' : ''"
+                    :aria-pressed="shortcutRecording"
+                    :aria-label="t('settings.shortcutRecordKeys')"
+                    :data-shortcut-recorder="shortcutRecording ? 'active' : undefined"
+                    @click="toggleShortcutRecording"
+                    @keydown="onShortcutRecorderKeydown"
+                    @blur="stopShortcutRecording"
+                  >
+                    <Keyboard class="h-4 w-4" />
+                  </Button>
+                </LightTooltip>
                 <!-- 冲突摘要只需计数，明细进浮层：不再用整条横幅占掉列表高度。
                      计数随搜索同口径（见 visibleShortcutConflict* computeds）；
                      页脚的应用门禁保持全局，不受搜索影响。 -->
@@ -9614,6 +9695,12 @@ onUnmounted(() => {
                   </span>
                 </LightTooltip>
               </div>
+
+              <!-- 录入态的操作提示常驻一条：此时焦点在录入按钮上，tooltip 不可用，
+                   Esc/Backspace 这两个控制键必须让用户看得见。 -->
+              <p v-if="shortcutRecording" class="rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs text-muted-foreground" aria-live="polite">
+                {{ t("settings.shortcutRecordKeysRecordingHint") }}
+              </p>
 
               <div v-if="filteredShortcutDefinitions.length === 0" class="rounded-md border border-border/70 px-3 py-8 text-center text-sm text-muted-foreground">
                 {{ t("settings.shortcutSearchNoResults") }}

@@ -8110,6 +8110,8 @@ export default withEnglishFallback({
     shortcutModifierDoubleTapHint: "Düymə kombinasiyasını basın və ya eyni dəyişdirici düyməni sürətlə iki dəfə basıb buraxın (Shift, Cmd, Ctrl, Alt).",
     shortcutSearchPlaceholder: "Qısayolları axtar",
     shortcutSearchNoResults: "Axtarışınıza uyğun qısayol yoxdur.",
+    shortcutRecordKeys: "Qısayol düymələrini yaz",
+    shortcutRecordKeysRecordingHint: "Düymə kombinasiyasını basın (Esc — çıxış, Backspace — təmizlə)",
     shortcutConflict: "Bu qısayol eyni əhatə dairəsində başqa əməliyyatla ziddiyyət təşkil edir.",
     shortcutReserved: "Bu qısayol sistem tərəfindən qorunur.",
     shortcutPlatformDefault: "Bu kombinasiya digər platformanın standart qısayoludur və burada təyin edilə bilməz. Başqa kombinasiya seçin.",

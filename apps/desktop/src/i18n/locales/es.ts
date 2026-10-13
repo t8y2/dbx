@@ -8457,6 +8457,8 @@ export default withEnglishFallback({
     shortcutModifierDoubleTapHint: "Pulsa una combinación de teclas o pulsa y suelta rápidamente el mismo modificador dos veces (Shift, Cmd, Ctrl, Alt).",
     shortcutSearchPlaceholder: "Buscar atajos",
     shortcutSearchNoResults: "Ningún atajo coincide con la búsqueda.",
+    shortcutRecordKeys: "Grabar teclas",
+    shortcutRecordKeysRecordingHint: "Pulsa una combinación de teclas (Esc para salir, Retroceso para borrar)",
     shortcutConflict: "Este atajo entra en conflicto con otra acción del mismo ámbito.",
     shortcutReserved: "Este atajo está reservado por el sistema.",
     shortcutPlatformDefault: "Esta combinación es el atajo predeterminado de otra plataforma y no se puede asignar aquí. Elige otra.",

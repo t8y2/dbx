@@ -9241,6 +9241,8 @@ export default {
     shortcutModifierDoubleTapHint: "Press a key combination, or quickly press and release the same modifier twice (e.g. Shift, Cmd, Ctrl, Alt).",
     shortcutSearchPlaceholder: "Search shortcuts",
     shortcutSearchNoResults: "No shortcuts match your search.",
+    shortcutRecordKeys: "Record keys",
+    shortcutRecordKeysRecordingHint: "Press a key combination to search (Esc to exit, Backspace to clear)",
     shortcutConflict: "This shortcut conflicts with another action in the same scope.",
     shortcutReserved: "This shortcut is reserved by the system.",
     shortcutPlatformDefault: "This combination is another platform's default shortcut and cannot be bound here. Please use a different one.",

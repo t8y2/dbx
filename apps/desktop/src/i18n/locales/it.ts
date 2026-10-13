@@ -8220,6 +8220,8 @@ export default withEnglishFallback({
     shortcutModifierDoubleTapHint: "Premi una combinazione di tasti oppure premi e rilascia rapidamente lo stesso modificatore due volte (Shift, Cmd, Ctrl, Alt).",
     shortcutSearchPlaceholder: "Cerca scorciatoie",
     shortcutSearchNoResults: "Nessuna scorciatoia corrisponde alla ricerca.",
+    shortcutRecordKeys: "Registra tasti",
+    shortcutRecordKeysRecordingHint: "Premi una combinazione di tasti (Esc per uscire, Backspace per cancellare)",
     shortcutConflict: "Questa scorciatoia è in conflitto con un'altra azione nello stesso ambito.",
     shortcutReserved: "Questa scorciatoia è riservata dal sistema.",
     shortcutPlatformDefault: "Questa combinazione è la scorciatoia predefinita di un'altra piattaforma e non può essere assegnata qui. Scegline un'altra.",

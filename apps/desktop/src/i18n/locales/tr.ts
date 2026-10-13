@@ -8011,6 +8011,8 @@ export default withEnglishFallback({
     shortcutModifierDoubleTapHint: "Bir tuş birleşimine basın veya aynı değiştirici tuşa hızla iki kez basıp bırakın (Shift, Cmd, Ctrl, Alt).",
     shortcutSearchPlaceholder: "Kısayollarda ara",
     shortcutSearchNoResults: "Aramanızla eşleşen kısayol yok.",
+    shortcutRecordKeys: "Tuşları kaydet",
+    shortcutRecordKeysRecordingHint: "Bir tuş kombinasyonuna basın (Çıkmak için Esc, temizlemek için Backspace)",
     shortcutConflict: "Bu kısayol aynı kapsamdaki başka bir eylemle çakışıyor.",
     shortcutReserved: "Bu kısayol sistem tarafından ayrılmıştır.",
     shortcutPlatformDefault: "Bu kombinasyon diğer platformun varsayılan kısayoludur ve burada atanamaz. Başka bir kombinasyon seçin.",

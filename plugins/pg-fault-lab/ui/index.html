@@ -19,7 +19,7 @@
 <script>
 (() => {
   const $ = id => document.getElementById(id)
-  let bridge, connectionId = '', writable = false, busy = false, revision = 0
+  let bridge, unsubscribe, connectionId = '', writable = false, busy = false, disposed = false, revision = 0
   const showError = error => { $('error').textContent = error?.message || String(error || '') }
   async function invoke(method, params = {}) {
     if (!bridge || !connectionId) throw new Error('Open a saved fault-lab connection in DBX first')
@@ -30,7 +30,7 @@
   }
   function button(container, text, action) {
     const b = document.createElement('button'); b.textContent = text; b.disabled = !writable
-    b.onclick = () => task(async () => { await action(); await refresh() }); container.appendChild(b)
+    b.onclick = () => task(async current => { await action(); await refresh(current) }); container.appendChild(b)
   }
   function render(snapshot) {
     writable = snapshot.allowInjection === true
@@ -57,20 +57,23 @@
       if (e.sqlHash) line(row, `SQL fingerprint ${e.sqlHash.slice(0, 16)}…`, 'muted')
     })
   }
-  async function refresh() { const current = revision; const r = await invoke('snapshot'); if (current === revision) render(r.snapshot) }
+  async function refresh(current = revision) {
+    if (current !== revision) return
+    const r = await invoke('snapshot'); if (current === revision) render(r.snapshot)
+  }
   async function task(fn) {
-    if (busy) return
+    if (busy || disposed) return
     const current = revision
     busy = true; $('arm').disabled = true; showError('')
-    try { await fn() } catch (error) { if (current === revision) showError(error) }
-    finally { busy = false; $('arm').disabled = !writable }
+    try { await fn(current) } catch (error) { if (current === revision) showError(error) }
+    finally { if (current === revision) { busy = false; $('arm').disabled = !writable } }
   }
   $('refresh').onclick = () => task(refresh)
-  $('arm').onclick = () => task(async () => {
+  $('arm').onclick = () => task(async current => {
     const application = $('application').value.trim(); if (!application) throw new Error('An exact application name is required')
     const rule = { selector: { application }, phase: $('phase').value, action: $('action').value, hits: Number($('hits').value), ttlMs: Number($('ttl').value) * 1000 }
     const command = $('command').value.trim().toUpperCase(); if (command) rule.selector.command = command
-    await invoke('add_rule', { rule }); await refresh()
+    await invoke('add_rule', { rule }); await refresh(current)
   })
   $('phase').onchange = () => {
     if ($('phase').value === 'commit') $('command').value = 'COMMIT'
@@ -78,18 +81,31 @@
   }
   $('show-cli').onclick = () => task(async () => { const current = revision; const result = await invoke('cli_endpoints'); if (current === revision) $('capabilities').textContent = JSON.stringify(result, null, 2) })
   function contextChanged(context) {
-    revision++; connectionId = context?.connectionId || ''; writable = false; $('capabilities').textContent = ''; $('arm').disabled = true
-    $('mode').textContent = 'Loading'; $('pauses').replaceChildren(); $('rules').replaceChildren(); $('events').replaceChildren()
+    if (disposed) return
+    // Old requests may still finish, but they no longer own this context's UI or busy state.
+    revision++; connectionId = context?.connectionId || ''; writable = false; busy = false; $('capabilities').textContent = ''; $('arm').disabled = true
+    showError(''); $('address').textContent = 'Open a saved fault-lab connection in DBX'
+    $('mode').textContent = connectionId ? 'Loading' : 'Disconnected'; $('pauses').replaceChildren(); $('rules').replaceChildren(); $('events').replaceChildren()
+    if (!connectionId) return
     const current = revision; refresh().catch(error => { if (current === revision) showError(error) })
   }
   async function init() {
+    const current = revision
     bridge = window.dbxPlugin
     if (!bridge) { showError('This workbench runs inside the DBX plugin host'); return }
     await bridge.ready
+    if (disposed || current !== revision) return
     contextChanged(bridge.context)
-    bridge.onContext(contextChanged)
+    unsubscribe = bridge.onContext(contextChanged)
   }
-  init().catch(showError)
+  const start = () => init().catch(error => { if (!disposed) showError(error) })
+  window.addEventListener('pagehide', () => {
+    contextChanged(null); disposed = true; unsubscribe?.(); unsubscribe = undefined
+  })
+  window.addEventListener('pageshow', event => {
+    if (event.persisted && disposed) { disposed = false; start() }
+  })
+  start()
 })()
 
 </script></body></html>

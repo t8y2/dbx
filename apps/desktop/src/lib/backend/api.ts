@@ -397,6 +397,7 @@ export const loadMaxRetries = forward("loadMaxRetries");
 export const saveMaxRetries = forward("saveMaxRetries");
 export const completeAppClose = forward("completeAppClose");
 export const requestAppClose = forward("requestAppClose");
+export const setShortcutRecording = forward("setShortcutRecording");
 export const setDriverStoreDir = forward("setDriverStoreDir");
 export const setPluginStoreDir = forward("setPluginStoreDir");
 export const setAgentStoreDir = forward("setAgentStoreDir");

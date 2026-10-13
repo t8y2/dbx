@@ -272,6 +272,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "data-export-preferred-path", category: "data", titleKey: "settings.preferredExportPath", descriptionKey: "settings.preferredExportPathDescription", targetId: "data" },
   { id: "data-dameng-client-bin-dir", category: "data", titleKey: "settings.damengClientBinDir", descriptionKey: "settings.damengClientBinDirDescription", targetId: "data" },
   { id: "data-export-auto-open-folder", category: "data", titleKey: "settings.autoOpenExportFolder", descriptionKey: "settings.autoOpenExportFolderDescription", targetId: "data", visible: desktopOnly },
+  { id: "data-export-apply-column-formatters", category: "data", titleKey: "settings.applyColumnFormattersOnExport", descriptionKey: "settings.applyColumnFormattersOnExportDescription", targetId: "data" },
   { id: "data-export-batch", category: "data", titleKey: "settings.exportBatchSize", descriptionKey: "settings.exportBatchSizeDescription", targetId: "data" },
   { id: "data-export-row-limit-enabled", category: "data", titleKey: "settings.exportRowLimitEnabled", descriptionKey: "settings.exportRowLimitEnabledDescription", targetId: "data" },
   { id: "data-export-row-limit", category: "data", titleKey: "settings.exportRowLimit", descriptionKey: "settings.exportRowLimitDescription", targetId: "data" },

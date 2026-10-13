@@ -43,7 +43,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
 
       - uses: dtolnay/rust-toolchain@stable
@@ -329,7 +329,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
 
       - name: Publish platform package
@@ -357,7 +357,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
 
       - name: Prepare development runtime build dependencies
@@ -412,7 +412,7 @@ jobs:
     steps:
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
 
       - uses: dtolnay/rust-toolchain@stable

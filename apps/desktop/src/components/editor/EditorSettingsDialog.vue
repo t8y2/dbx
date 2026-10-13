@@ -25,6 +25,7 @@ import {
   Globe,
   GripVertical,
   HardDrive,
+  Keyboard,
   Loader2,
   LogOut,
   Moon,
@@ -172,6 +173,7 @@ import {
   saveBackgroundImage,
   loadMaxAgentTurns,
   saveMaxAgentTurns,
+  setShortcutRecording,
   loadMaxRetries,
   saveMaxRetries,
   loadSqlFileUploadMaxBytes,
@@ -208,6 +210,7 @@ import {
 } from "@/lib/backend/api";
 import { createModifierDoubleTapShortcutController } from "@/lib/editor/modifierDoubleTapShortcut";
 import { eventToModifierOnlyShortcut, eventToShortcut } from "@/lib/editor/keyboardShortcuts";
+import { shortcutRecorderAction } from "@/lib/editor/shortcutRecorder";
 import {
   SHORTCUT_DEFINITIONS,
   countShortcutConflictPairs,
@@ -947,6 +950,7 @@ const editExportBatchSize = ref(settingsStore.editorSettings.exportBatchSize);
 const editPreferredExportPath = ref(settingsStore.editorSettings.preferredExportPath);
 const editDamengClientBinDir = ref(settingsStore.editorSettings.damengClientBinDir);
 const editAutoOpenExportFolder = ref(settingsStore.editorSettings.autoOpenExportFolder);
+const editApplyColumnFormattersOnExport = ref(settingsStore.editorSettings.applyColumnFormattersOnExport);
 const editCsvQuoteMode = ref<CsvQuoteMode>(settingsStore.editorSettings.csvQuoteMode);
 const editCsvNullMode = ref<CsvNullMode>(settingsStore.editorSettings.csvNullMode);
 const editGlobalDateTimeDisplayFormat = ref(settingsStore.editorSettings.globalDateTimeDisplayFormat);
@@ -1238,6 +1242,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     preferredExportPath: editPreferredExportPath.value,
     damengClientBinDir: editDamengClientBinDir.value,
     autoOpenExportFolder: editAutoOpenExportFolder.value,
+    applyColumnFormattersOnExport: editApplyColumnFormattersOnExport.value,
     csvQuoteMode: editCsvQuoteMode.value,
     csvNullMode: editCsvNullMode.value,
     globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat.value,
@@ -1928,6 +1933,7 @@ function syncEditorSettingsDraftFromStore() {
   editPreferredExportPath.value = settingsStore.editorSettings.preferredExportPath;
   editDamengClientBinDir.value = settingsStore.editorSettings.damengClientBinDir;
   editAutoOpenExportFolder.value = settingsStore.editorSettings.autoOpenExportFolder;
+  editApplyColumnFormattersOnExport.value = settingsStore.editorSettings.applyColumnFormattersOnExport;
   editCsvQuoteMode.value = settingsStore.editorSettings.csvQuoteMode;
   editCsvNullMode.value = settingsStore.editorSettings.csvNullMode;
   editGlobalDateTimeDisplayFormat.value = settingsStore.editorSettings.globalDateTimeDisplayFormat;
@@ -2090,6 +2096,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   preferredExportPath: editPreferredExportPath,
   damengClientBinDir: editDamengClientBinDir,
   autoOpenExportFolder: editAutoOpenExportFolder,
+  applyColumnFormattersOnExport: editApplyColumnFormattersOnExport,
   csvQuoteMode: editCsvQuoteMode,
   csvNullMode: editCsvNullMode,
   exportRowLimitEnabled: editExportRowLimitEnabled,
@@ -2203,6 +2210,16 @@ const shortcutConflictPairCount = computed(() => countShortcutConflictPairs(shor
 const sqlShortcutConflicts = computed(() => findSqlShortcutConflicts(editSqlShortcuts.value, editShortcuts.value));
 const hasSqlShortcutConflicts = computed(() => sqlShortcutConflicts.value.length > 0);
 const shortcutSearchQuery = ref("");
+// #11787：快捷键页签的「键盘录入」态。录入结果写进上面同一个搜索框，因此过滤、
+// 冲突徽章、作用域分组、空态全部沿用既有管线，不新增第二套过滤口径。
+const shortcutRecording = ref(false);
+// 录入态下窗口是否处于激活状态。窗口不在前台时按下的键会被其它应用（或系统）先拿走，
+// DBX 收不到任何事件——提示行必须把这件事说出来，否则「静默待命」看起来就是功能失灵。
+const shortcutRecordingWindowActive = ref(true);
+// 录入态靠「焦点元素带 data-shortcut-recorder」让 App.vue 的两个 capture 阶段
+// 全局快捷键处理器让路（见 App.vue 的 handleGlobalSearchKeydownCapture）。属性只在
+// 录入态渲染：非录入时焦点停在这个按钮上的行为与普通按钮完全一致。
+const SHORTCUT_RECORDER_SELECTOR = '[data-settings-search-id="shortcuts"] [data-shortcut-recorder]';
 const collapsedShortcutScopes = ref<Set<ShortcutScope>>(new Set());
 const formatterEditorShortcutIds: ShortcutActionId[] = [
   "formatSql",
@@ -2682,6 +2699,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editPreferredExportPath.value = DEFAULT_EDITOR_SETTINGS.preferredExportPath;
     editDamengClientBinDir.value = DEFAULT_EDITOR_SETTINGS.damengClientBinDir;
     editAutoOpenExportFolder.value = DEFAULT_EDITOR_SETTINGS.autoOpenExportFolder;
+    editApplyColumnFormattersOnExport.value = DEFAULT_EDITOR_SETTINGS.applyColumnFormattersOnExport;
     editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
     editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
     editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
@@ -2849,6 +2867,7 @@ function resetAllDefaults() {
   editPreferredExportPath.value = DEFAULT_EDITOR_SETTINGS.preferredExportPath;
   editDamengClientBinDir.value = DEFAULT_EDITOR_SETTINGS.damengClientBinDir;
   editAutoOpenExportFolder.value = DEFAULT_EDITOR_SETTINGS.autoOpenExportFolder;
+  editApplyColumnFormattersOnExport.value = DEFAULT_EDITOR_SETTINGS.applyColumnFormattersOnExport;
   editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
   editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
   editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
@@ -3302,6 +3321,100 @@ function clearShortcut(actionId: ShortcutActionId) {
   editShortcuts.value = { ...editShortcuts.value, [actionId]: "" };
 }
 
+/**
+ * #11787：把焦点交给录入按钮并返回是否成功。录入期间 App.vue 的三条 capture 阶段
+ * 分支只看**焦点元素**是否带 `data-shortcut-recorder` 才让路，而 macOS 的 WKWebView
+ * （沿用 Safari 规则）点击按钮不会给按钮焦点，所以进入录入态必须显式 focus，不能只
+ * 靠点击。
+ */
+async function focusShortcutRecorderButton(): Promise<boolean> {
+  await nextTick();
+  const button = document.querySelector<HTMLElement>(SHORTCUT_RECORDER_SELECTOR);
+  if (!button) return false;
+  button.focus();
+  return true;
+}
+
+/**
+ * 录入态的唯一写入口：本地状态与宿主侧开关一起变。桌面端要让宿主在录入期间放下 WebView2
+ * 的浏览器加速键（`F5`/`Ctrl+R`、`Ctrl+F`、`Ctrl+P`、`F12`……），否则那批键在页面之前就被
+ * 消费掉——既录不进搜索框，按下 `F5` 还会重载整个 webview 丢掉录入现场。幂等过滤避免重复 IPC。
+ */
+function applyShortcutRecording(recording: boolean) {
+  if (shortcutRecording.value === recording) return;
+  shortcutRecording.value = recording;
+  // 宿主侧是尽力而为的增强：失败只降级成「那批浏览器加速键仍录不进来」，错误由 api 层记录，
+  // 不再额外打扰用户。
+  void setShortcutRecording(recording).catch(() => undefined);
+}
+
+async function toggleShortcutRecording() {
+  if (shortcutRecording.value) {
+    applyShortcutRecording(false);
+    return;
+  }
+  applyShortcutRecording(true);
+  // 没有焦点就没有让路依据：宁可退回未录入态，也不要留下一个「显示正在录入、实际
+  // 吞不掉任何按键」的空转状态。
+  if (!(await focusShortcutRecorderButton())) applyShortcutRecording(false);
+}
+
+function stopShortcutRecording() {
+  applyShortcutRecording(false);
+}
+
+function onShortcutRecorderBlur() {
+  // 窗口失焦不算放弃录入：被系统抢占的组合（Win+*、Alt+Tab、系统保留热键）本来就
+  // 到不了页面，但按下它们会把焦点带走（#11787 的实测反馈），此时把录入态一起丢掉，
+  // 用户回到 DBX 后按的键就会被当普通快捷键执行。窗口重新获得焦点时再把焦点还给
+  // 录入按钮（见 onShortcutRecordingWindowFocus）。
+  if (!document.hasFocus()) return;
+  // 焦点转移到应用内的其它元素（点了搜索框、某一行……）才是真的放弃录入。
+  stopShortcutRecording();
+}
+
+function onShortcutRecordingWindowBlur() {
+  shortcutRecordingWindowActive.value = false;
+}
+
+function onShortcutRecordingWindowFocus() {
+  shortcutRecordingWindowActive.value = true;
+  if (!shortcutRecording.value) return;
+  void nextTick().then(() => {
+    if (!shortcutRecording.value) return;
+    // 别抢用户“一回来就点”的那个控件：窗口激活后焦点可能已经落到搜索框/某一行上，
+    // 此时把焦点抢回录入按钮会让这次点击白点一下（那种情况 blur 已经按应用内规则
+    // 结束录入）。只有焦点没有归属（body）或本来就还在录入按钮上时才恢复。
+    const active = document.activeElement;
+    const activeIsControl = active instanceof HTMLElement && active !== document.body && active !== document.documentElement && !active.closest(SHORTCUT_RECORDER_SELECTOR);
+    if (activeIsControl) return;
+    void focusShortcutRecorderButton().then((focused) => {
+      // 录入表面已不存在（换了页签、设置被关掉）时不保留空转的录入态。
+      if (!focused) applyShortcutRecording(false);
+    });
+  });
+}
+
+function onShortcutRecorderKeydown(event: KeyboardEvent) {
+  if (!shortcutRecording.value) return;
+  // 录入态必须吞掉这次按键：既不执行真实快捷键命令（App.vue 的 window keydown
+  // 以 defaultPrevented 让路），也不让 Space/Enter 再去触发按钮自身的 click
+  // 把录入态点掉。
+  event.preventDefault();
+  event.stopPropagation();
+  const action = shortcutRecorderAction(event);
+  if (!action) return;
+  if (action.type === "exit") {
+    stopShortcutRecording();
+    return;
+  }
+  if (action.type === "clear") {
+    shortcutSearchQuery.value = "";
+    return;
+  }
+  shortcutSearchQuery.value = action.query;
+}
+
 function setAppLayout(value: InterfaceLayout) {
   editAppLayout.value = value;
 }
@@ -3501,6 +3614,7 @@ function resetSettingsSearchState() {
   settingsSearchActiveIndex.value = 0;
   pendingSettingsSearchResult = null;
   shortcutSearchQuery.value = "";
+  applyShortcutRecording(false);
   mcpPermissionPreviewSearchQuery.value = "";
   clearSettingsSearchHighlight();
 }
@@ -5239,6 +5353,9 @@ watch(snippetProvider, (provider) => {
 });
 
 watch(activeSettingsTab, async (tab) => {
+  // 离开快捷键页签会卸载录入按钮，而被移除的焦点元素不会再收到 blur：不在这里
+  // 复位的话，录入态会残留到下次回到该页签（届时按钮已不在焦点上，吞不掉快捷键）。
+  if (tab !== "shortcuts") applyShortcutRecording(false);
   void resetSettingsContentScroll();
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
   if (tab === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
@@ -5284,6 +5401,10 @@ onMounted(() => {
   document.addEventListener("visibilitychange", modifierDoubleTapRecorder.reset);
   window.addEventListener("pointerdown", modifierDoubleTapRecorder.cancel, true);
   window.addEventListener("compositionstart", modifierDoubleTapRecorder.cancel, true);
+  // #11787：系统快捷键（Win+*、Alt+Tab、系统保留热键）把窗口焦点带走后，录入态要
+  // 留着，回到 DBX 时再把焦点还给录入按钮；同时把「窗口不在前台」这件事显示出来。
+  window.addEventListener("focus", onShortcutRecordingWindowFocus);
+  window.addEventListener("blur", onShortcutRecordingWindowBlur);
   void refreshWebDavPasswordStatus();
   checkLayoutDescTruncation();
   initTruncationObservers();
@@ -5295,6 +5416,8 @@ onUnmounted(() => {
   document.removeEventListener("visibilitychange", modifierDoubleTapRecorder.reset);
   window.removeEventListener("pointerdown", modifierDoubleTapRecorder.cancel, true);
   window.removeEventListener("compositionstart", modifierDoubleTapRecorder.cancel, true);
+  window.removeEventListener("focus", onShortcutRecordingWindowFocus);
+  window.removeEventListener("blur", onShortcutRecordingWindowBlur);
   modifierDoubleTapRecorder.reset();
   clearThemePaletteOptionPreview();
   clearUiFontOptionPreview();
@@ -9401,6 +9524,15 @@ onUnmounted(() => {
                   </div>
                   <Switch id="export-auto-open-folder" v-model="editAutoOpenExportFolder" class="mt-0.5" />
                 </div>
+                <div data-settings-search-id="data-export-apply-column-formatters" :class="['flex items-start justify-between gap-3', settingsSearchTargetClass('data-export-apply-column-formatters')]">
+                  <div class="space-y-0.5">
+                    <Label for="export-apply-column-formatters">{{ t("settings.applyColumnFormattersOnExport") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.applyColumnFormattersOnExportDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="export-apply-column-formatters" v-model="editApplyColumnFormattersOnExport" class="mt-0.5" />
+                </div>
                 <div class="space-y-2">
                   <Label>{{ t("settings.exportBatchSize") }}</Label>
                   <div class="flex items-center gap-3">
@@ -9613,6 +9745,26 @@ onUnmounted(() => {
                   <Search class="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input v-model="shortcutSearchQuery" autocomplete="off" :placeholder="t('settings.shortcutSearchPlaceholder')" class="h-9 pl-9 text-sm" />
                 </div>
+                <!-- #11787：VS Code 式键盘录入。data-shortcut-recorder 只在录入态渲染：
+                     App.vue 的两个 capture 阶段全局快捷键处理器按「焦点元素是否带该属性」
+                     决定让路，非录入态焦点停在这个按钮上的行为与普通按钮一致。 -->
+                <LightTooltip :text="shortcutRecording ? t('settings.shortcutRecordKeysRecordingHint') : t('settings.shortcutRecordKeys')" :open-on-focus="false">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    class="h-9 w-9 shrink-0"
+                    :class="shortcutRecording ? 'bg-primary/10 text-primary ring-2 ring-primary/40' : ''"
+                    :aria-pressed="shortcutRecording"
+                    :aria-label="t('settings.shortcutRecordKeys')"
+                    :data-shortcut-recorder="shortcutRecording ? 'active' : undefined"
+                    @click="toggleShortcutRecording"
+                    @keydown="onShortcutRecorderKeydown"
+                    @blur="onShortcutRecorderBlur"
+                  >
+                    <Keyboard class="h-4 w-4" />
+                  </Button>
+                </LightTooltip>
                 <!-- 冲突摘要只需计数，明细进浮层：不再用整条横幅占掉列表高度。
                      计数随搜索同口径（见 visibleShortcutConflict* computeds）；
                      页脚的应用门禁保持全局，不受搜索影响。 -->
@@ -9630,6 +9782,13 @@ onUnmounted(() => {
                   </span>
                 </LightTooltip>
               </div>
+
+              <!-- 录入态的操作提示常驻一条：此时焦点在录入按钮上，tooltip 不可用，
+                   Esc/Backspace 这两个控制键必须让用户看得见；窗口不在前台时提示要换
+                   成「按键会被别的应用先抢走」，否则静默待命看起来就是功能失灵。 -->
+              <p v-if="shortcutRecording" class="rounded-md border px-3 py-1.5 text-xs" :class="shortcutRecordingWindowActive ? 'border-primary/30 bg-primary/5 text-muted-foreground' : 'border-warning/40 bg-warning/10 text-warning'" aria-live="polite">
+                {{ shortcutRecordingWindowActive ? t("settings.shortcutRecordKeysRecordingHint") : t("settings.shortcutRecordKeysWindowInactive") }}
+              </p>
 
               <div v-if="filteredShortcutDefinitions.length === 0" class="rounded-md border border-border/70 px-3 py-8 text-center text-sm text-muted-foreground">
                 {{ t("settings.shortcutSearchNoResults") }}

@@ -1,7 +1,9 @@
 import { computed, type ComputedRef, type Ref } from "vue";
+import { getActivePinia } from "pinia";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
 import { useToast } from "@/composables/useToast";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { dedupeColumnIndexes, type CellSelectionMatrix, type SelectionData } from "@/lib/dataGrid/gridSelection";
 import {
   DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS,
@@ -77,6 +79,8 @@ interface UseDataGridExtractorOptions {
   contextSelectionIsSynthetic: ComputedRef<boolean> | Ref<boolean>;
   copyText: (text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }) => Promise<boolean>;
   displayValue?: (value: CellValue, columnIndex: number) => string;
+  hasColumnFormatter?: (columnIndex: number) => boolean;
+  applyColumnFormattersOnExport?: ComputedRef<boolean>;
   externalCellValue?: (value: unknown, columnIndex: number) => unknown;
   /** Present when the grid cannot guarantee the whole result set is loaded; drives the partial-copy hint. */
   partialLoadInfo?: ComputedRef<PartialLoadCopyInfo | null>;
@@ -109,8 +113,16 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return (dbType === "oracle" || dbType === "oceanbase-oracle") && isTemporalColumnType(columnType);
   }
 
+  function shouldApplyColumnFormatter(columnIndex: number): boolean {
+    if (!options.hasColumnFormatter?.(columnIndex)) return false;
+    if (options.applyColumnFormattersOnExport?.value !== undefined) {
+      return options.applyColumnFormattersOnExport.value;
+    }
+    return getActivePinia() ? useSettingsStore().editorSettings.applyColumnFormattersOnExport : true;
+  }
+
   // 除 SQL 外的剪贴板展示格式都可把文本型 MySQL VARBINARY 从 `0x<hex>` 还原为原始字符串，
-  // 并把 Oracle temporal 单元格渲染为与网格一致的显示文本；SQL 必须继续持有 hex / 原始时间值
+  // 并把 Oracle temporal 单元格及配置了列格式化的单元格渲染为与网格一致的显示文本；SQL 必须继续持有 hex / 原始时间值
   // （display 格式化会丢时区与高精度小数秒）才能保证 round-trip；rawRows 则始终保存原值，供 DBX 内部网格回粘使用。
   function extractorCellValue(value: unknown, columnType: string | undefined, normalizeValues: boolean, keepUnsafeJsonText: boolean, presentBinaryText: boolean, columnIndex: number, sourceIndex?: number): unknown {
     if (presentBinaryText) {
@@ -120,8 +132,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const normalized = normalizeValues ? normalizeCellValue(value, columnType, keepUnsafeJsonText) : value;
     const externalValue = options.externalCellValue?.(normalized, columnIndex);
     const resolvedValue = externalValue === undefined ? normalized : externalValue;
-    if (presentBinaryText && resolvedValue !== null && resolvedValue !== undefined && options.displayValue && isOracleTemporal(columnType)) {
-      return options.displayValue(resolvedValue as CellValue, sourceIndex ?? columnIndex);
+    const resolvedSourceIndex = sourceIndex ?? columnIndex;
+    const shouldFormat = isOracleTemporal(columnType) || shouldApplyColumnFormatter(resolvedSourceIndex);
+    if (presentBinaryText && resolvedValue !== null && resolvedValue !== undefined && options.displayValue && shouldFormat) {
+      return options.displayValue(resolvedValue as CellValue, resolvedSourceIndex);
     }
     return resolvedValue;
   }

@@ -415,22 +415,19 @@ function parseSqlServerExplain(result: QueryResult): ParsedExplainPlan {
   if (typeof DOMParser === "undefined") throw new Error("XML parser is unavailable");
 
   const parserIssues: string[] = [];
-  type XmlParserConstructor = new (options?: {
-    errorHandler?: {
-      warning: (message: string) => void;
-      error: (message: string) => void;
-      fatalError: (message: string) => void;
-    };
-  }) => DOMParser;
+  type XmlParserConstructor = new (options?: { onError?: (level: string, message: string) => void }) => DOMParser;
   const Parser = DOMParser as unknown as XmlParserConstructor;
-  const recordParserIssue = (message: string) => parserIssues.push(message);
-  const document = new Parser({
-    errorHandler: {
-      warning: recordParserIssue,
-      error: recordParserIssue,
-      fatalError: recordParserIssue,
-    },
-  }).parseFromString(raw, "application/xml");
+  const recordParserIssue = (_level: string, message: string) => parserIssues.push(message);
+  let document: Document;
+  try {
+    document = new Parser({
+      onError: recordParserIssue,
+    }).parseFromString(raw, "application/xml");
+  } catch {
+    // xmldom 0.9 throws ParseError on fatal issues even with onError set; the
+    // recorded issues are non-fatal warnings at this point.
+    throw new Error("Invalid SQL Server ShowPlan XML");
+  }
   if (parserIssues.length > 0 || xmlElements(document, "parsererror").length > 0 || !document.documentElement) {
     throw new Error("Invalid SQL Server ShowPlan XML");
   }

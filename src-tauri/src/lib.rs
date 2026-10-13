@@ -20,6 +20,7 @@ mod webview2_recovery;
 mod window_state_guard;
 
 use commands::connection::AppState;
+use dbx_core::persistence::secret_codec::SecretKeyPolicy;
 use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
 use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::{maybe_import_user_data_db, DesktopIconTheme, DesktopSettings, Storage};
@@ -1700,6 +1701,7 @@ pub fn run() {
                 app.path().app_data_dir().map_err(|e| e.to_string()).expect("Failed to resolve app data dir");
             let data_dir_resolution = data_dir::resolve_data_dir_with_mode(default_data_dir);
             let data_dir = data_dir_resolution.data_dir.clone();
+            let portable_mode = data_dir_resolution.is_portable_mode();
             std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
             let data_dir_mode = startup_data_dir_mode(&data_dir_resolution.mode);
             append_startup_probe(format!("data dir ready mode={data_dir_mode}"));
@@ -1718,7 +1720,18 @@ pub fn run() {
             let t = Instant::now();
             append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
-                let s = Storage::open_unmigrated(&db_path).await.expect("Failed to open storage");
+                let mut s = Storage::open_unmigrated(&db_path).await.expect("Failed to open storage");
+                if portable_mode {
+                    s = s.with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+                    match s.prepare_portable_secret_key().await {
+                        Ok(true) => append_startup_probe("portable key copied from the platform credential store"),
+                        Ok(false) => {}
+                        Err(error) => {
+                            log::warn!("[STARTUP] portable key preparation failed: {error}");
+                            append_startup_probe(format!("portable key preparation failed: {error}"));
+                        }
+                    }
+                }
                 eprintln!("[STARTUP]   Storage::open in {:?}", t.elapsed());
                 append_startup_probe(format!("storage opened in {:?}", t.elapsed()));
                 let t2 = Instant::now();
@@ -2450,6 +2463,7 @@ pub fn run() {
             commands::saved_sql::saved_sql_storage_dir,
             commands::saved_sql::open_saved_sql_storage_dir,
             commands::saved_sql::sync_saved_sql_directory,
+            commands::shortcut_recording::set_shortcut_recording,
             commands::fs_open::reveal_path_in_file_manager,
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,

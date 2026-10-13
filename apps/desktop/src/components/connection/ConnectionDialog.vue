@@ -10637,15 +10637,15 @@ function openExternalUrl(url: string) {
                   <template v-else-if="selectedHttpTunnelLayer && !selectedLayerProfileId">
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.httpTunnelUrl") }}</Label>
-                      <Input v-model="selectedHttpTunnelLayer.url" class="col-span-3" placeholder="https://dbx.example.com/dbx_tunnel.php" :disabled="selectedHttpTunnelLayer.enabled === false" />
+                      <Input v-model="selectedHttpTunnelLayer!.url" class="col-span-3" placeholder="https://dbx.example.com/dbx_tunnel.php" :disabled="selectedHttpTunnelLayer!.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.httpTunnelToken") }}</Label>
-                      <PasswordInput v-model="selectedHttpTunnelLayer.token" class="col-span-3" :placeholder="t('connection.httpTunnelTokenPlaceholder')" :disabled="selectedHttpTunnelLayer.enabled === false" />
+                      <PasswordInput v-model="selectedHttpTunnelLayer!.token" class="col-span-3" :placeholder="t('connection.httpTunnelTokenPlaceholder')" :disabled="selectedHttpTunnelLayer!.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.httpTunnelConnectTimeout") }}</Label>
-                      <Input v-model.number="selectedHttpTunnelLayer.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" :disabled="selectedHttpTunnelLayer.enabled === false" />
+                      <Input v-model.number="selectedHttpTunnelLayer!.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" :disabled="selectedHttpTunnelLayer!.enabled === false" />
                     </div>
                   </template>
                 </template>

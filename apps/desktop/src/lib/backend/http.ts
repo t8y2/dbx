@@ -2541,6 +2541,11 @@ export async function requestAppClose(): Promise<void> {
   return undefined;
 }
 
+/** #11787：Web 形态没有宿主层可配合（浏览器自行处理 Ctrl+W/Ctrl+T 等保留键），空实现。 */
+export async function setShortcutRecording(_recording: boolean): Promise<void> {
+  return undefined;
+}
+
 export interface DriverStoreMigrationResult {
   driver_store_dir: string | null;
   plugin_store_dir: string | null;

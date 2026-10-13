@@ -83,6 +83,7 @@ issue-assets/
 outputs/
 target-ai-write-confirmation/
 .serena/
+.mimosa/
 
 # Code review tool artifacts
 review_diff.json

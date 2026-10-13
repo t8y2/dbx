@@ -35,7 +35,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
@@ -440,7 +440,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
 
       - name: Publish platform package
@@ -486,7 +486,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
@@ -689,7 +689,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
 
       - name: Sign macOS MCP binary
@@ -791,7 +791,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
@@ -845,7 +845,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
 
       - name: Build native release archives from npm packages
@@ -953,7 +953,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
 
       - name: Build native CLI release archives from npm packages

@@ -1173,6 +1173,23 @@ describe("normalizeEditorSettings - autoOpenExportFolder", () => {
   });
 });
 
+describe("normalizeEditorSettings - applyColumnFormattersOnExport", () => {
+  it("defaults applyColumnFormattersOnExport to true", () => {
+    expect(normalizeEditorSettings({}).applyColumnFormattersOnExport).toBe(true);
+  });
+
+  it("preserves boolean values", () => {
+    expect(normalizeEditorSettings({ applyColumnFormattersOnExport: true }).applyColumnFormattersOnExport).toBe(true);
+    expect(normalizeEditorSettings({ applyColumnFormattersOnExport: false }).applyColumnFormattersOnExport).toBe(false);
+  });
+
+  it("falls back to default for non-boolean values", () => {
+    expect(normalizeEditorSettings({ applyColumnFormattersOnExport: "false" } as any).applyColumnFormattersOnExport).toBe(true);
+    expect(normalizeEditorSettings({ applyColumnFormattersOnExport: null } as any).applyColumnFormattersOnExport).toBe(true);
+    expect(normalizeEditorSettings({ applyColumnFormattersOnExport: 0 } as any).applyColumnFormattersOnExport).toBe(true);
+  });
+});
+
 // --- Helpers for Pinia store tests ---
 
 function makeTestConfig(overrides: Partial<AiConfigItem> & { id: string }): AiConfigItem {

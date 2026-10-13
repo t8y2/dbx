@@ -337,15 +337,15 @@ async function testSelected() {
       <template v-else-if="selectedHttp">
         <div class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.httpTunnelUrl") }}</Label>
-          <Input v-model="selectedHttp.url" class="col-span-3" placeholder="https://dbx.example.com/dbx_tunnel.php" />
+          <Input v-model="selectedHttp!.url" class="col-span-3" placeholder="https://dbx.example.com/dbx_tunnel.php" />
         </div>
         <div class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.httpTunnelToken") }}</Label>
-          <PasswordInput v-model="selectedHttp.token" class="col-span-3" :placeholder="t('connection.httpTunnelTokenPlaceholder')" />
+          <PasswordInput v-model="selectedHttp!.token" class="col-span-3" :placeholder="t('connection.httpTunnelTokenPlaceholder')" />
         </div>
         <div class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.httpTunnelConnectTimeout") }}</Label>
-          <Input v-model.number="selectedHttp.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" />
+          <Input v-model.number="selectedHttp!.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" />
         </div>
       </template>
     </template>

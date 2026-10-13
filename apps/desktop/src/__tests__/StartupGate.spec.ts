@@ -28,7 +28,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-const readyStatus = { state: "not_required", needsMigration: false };
+const readyStatus = { state: "not_required", needsMigration: false, keyRecoveryRequired: false };
 let businessReady: ReturnType<typeof deferred<void>>;
 let mountedApp: App | undefined;
 let root: HTMLDivElement;
@@ -149,7 +149,7 @@ describe("startup boundary", () => {
   });
 
   it("does not load the business app until a required migration is completed and entered", async () => {
-    mocks.migrationStatus.mockResolvedValueOnce({ state: "pending", needsMigration: true }).mockResolvedValue(readyStatus);
+    mocks.migrationStatus.mockResolvedValueOnce({ state: "pending", needsMigration: true, keyRecoveryRequired: false }).mockResolvedValue(readyStatus);
     mocks.migrationStart.mockResolvedValue({ state: "succeeded" });
     businessReady.resolve();
     await mountGate();

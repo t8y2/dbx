@@ -2,7 +2,16 @@ import { onMounted, onUnmounted } from "vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { appendDebugLog } from "@/lib/backend/debugLog";
 import { snippetPassphraseStatus, snippetSyncSettings, snippetSyncUpload, snippetTokenStatus } from "@/lib/backend/api";
-import { readSnippetAutoUploadConfig, readSnippetAutoUploadSelection, readSnippetRemoteContentHash, SNIPPET_AUTO_UPLOAD_CONFIG_CHANGED_EVENT, withSnippetSyncLock, writeSnippetAutoUploadFields, writeSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
+import {
+  readSnippetAutoUploadConfig,
+  readSnippetAutoUploadSelection,
+  readSnippetRemoteContentHash,
+  SNIPPET_AUTO_UPLOAD_CONFIG_CHANGED_EVENT,
+  withSnippetSyncLock,
+  writeSnippetAutoUploadFields,
+  writeSnippetLastSuccessfulUpload,
+  writeSnippetRemoteContentHash,
+} from "@/lib/cloudSync/snippetAutoUploadConfig";
 
 export function useSnippetAutoUpload() {
   const settingsStore = useSettingsStore();
@@ -60,6 +69,7 @@ export function useSnippetAutoUpload() {
           return;
         }
         writeSnippetRemoteContentHash(config.provider, config.instanceUrl, summary.snippetId, summary.remoteContentHash);
+        if (!summary.unchanged) writeSnippetLastSuccessfulUpload(config.provider, config.instanceUrl, summary.snippetId);
         appendDebugLog("info", "[DBX][snippet:auto-upload:success]", {
           provider: config.provider,
           snippetId: summary.snippetId,

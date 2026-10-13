@@ -219,10 +219,13 @@ import {
   MAX_SNIPPET_AUTO_UPLOAD_INTERVAL_MINUTES,
   normalizedSnippetAutoUploadInterval,
   readSnippetAutoUploadConfig,
+  readSnippetLastSuccessfulUpload,
   readSnippetRemoteContentHash,
   snippetRemoteContentHashKey,
   SNIPPET_AUTO_UPLOAD_CONFIG_CHANGED_EVENT,
+  SNIPPET_LAST_UPLOAD_CHANGED_EVENT,
   writeSnippetAutoUploadFields,
+  writeSnippetLastSuccessfulUpload,
   writeSnippetAutoUploadSelection,
   writeSnippetRemoteContentHash,
   withSnippetSyncLock,
@@ -495,12 +498,13 @@ function onLocaleOpenChange(open: boolean) {
   if (!open) restoreLocaleOptionPreview();
 }
 
-const appThemePaletteOptions = computed((): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
-  APP_THEME_PALETTES.map((palette) => ({
-    value: palette.value,
-    label: t(palette.labelKey),
-    previewColor: palette.previewColor,
-  })),
+const appThemePaletteOptions = computed(
+  (): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
+    APP_THEME_PALETTES.map((palette) => ({
+      value: palette.value,
+      label: t(palette.labelKey),
+      previewColor: palette.previewColor,
+    })),
 );
 const selectedThemePaletteOption = computed(() => appThemePaletteOptions.value.find((option) => option.value === themePalette.value) ?? appThemePaletteOptions.value[0]);
 const selectedLocaleOption = computed(() => LOCALE_OPTIONS.find((locale) => locale.value === currentLocale()) ?? LOCALE_OPTIONS[0]);
@@ -4742,23 +4746,72 @@ const snippetRestoreSecrets = ref(false);
 const snippetBusy = ref<"" | "test" | "upload" | "download" | "migrate" | "cleanup">("");
 const snippetMessage = ref("");
 const snippetError = ref(false);
+function currentSnippetLastSuccessfulUpload(): string | undefined {
+  const instanceUrl = snippetProvider.value === "gitlab" ? activeSnippetInstanceUrl.value : undefined;
+  return readSnippetLastSuccessfulUpload(snippetProvider.value, instanceUrl, snippetId.value);
+}
+const snippetLastUploadAt = ref(currentSnippetLastSuccessfulUpload());
+const snippetLastUploadDisplay = computed(() => {
+  if (!snippetLastUploadAt.value) return "";
+  const date = new Date(snippetLastUploadAt.value);
+  if (Number.isNaN(date.getTime())) return "";
+  const time = new Intl.DateTimeFormat(locale.value, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).format(date);
+  return t("settings.syncSnippetLastSuccessfulUpload", { time });
+});
 const legacySnippetId = ref("");
 const pendingLegacyCleanupId = ref("");
 const snippetSyncSettingsLoading = ref(true);
 
 watch(syncMethodTab, (value) => writeSyncMethod(value), { immediate: true });
 
+function refreshSnippetLastUploadTime() {
+  snippetLastUploadAt.value = currentSnippetLastSuccessfulUpload();
+}
+
+watch([snippetProvider, activeSnippetInstanceUrl, snippetId], refreshSnippetLastUploadTime);
+onMounted(() => window.addEventListener(SNIPPET_LAST_UPLOAD_CHANGED_EVENT, refreshSnippetLastUploadTime));
+onUnmounted(() => window.removeEventListener(SNIPPET_LAST_UPLOAD_CHANGED_EVENT, refreshSnippetLastUploadTime));
+
 const webdavReady = computed(() => !!webdavEndpoint.value.trim() && !webdavBusy.value);
 const localBackupCanIncludeSecrets = computed(() => !!localBackupSecretsPassphrase.value.trim());
 const snippetReady = computed(() => !snippetSyncSettingsLoading.value && !snippetBusy.value && (snippetProvider.value !== "gitlab" || (!snippetInstanceError.value && snippetInstanceUrl.value === activeSnippetInstanceUrl.value)) && (!!snippetToken.value.trim() || snippetHasSavedToken.value));
 const snippetUploadReady = computed(() => snippetReady.value && (!!snippetPassphrase.value.trim() || snippetHasSavedPassphrase.value));
-const snippetAutoUploadReady = computed(() => {
+const snippetAutoUploadRequirements = computed(() => {
+  if (snippetSyncSettingsLoading.value) return [];
+
+  const requirements: string[] = [];
+  if (snippetProvider.value === "gitlab" && (snippetInstanceError.value || snippetInstanceUrl.value !== activeSnippetInstanceUrl.value)) {
+    requirements.push(t("settings.syncSnippetAutoUploadInvalidGitLabInstance"));
+  }
+  if (!snippetHasSavedToken.value) requirements.push(t("settings.syncSnippetAutoUploadMissingToken"));
+  if (!snippetHasSavedPassphrase.value) requirements.push(t("settings.syncSnippetAutoUploadMissingPassphrase"));
+
   const id = snippetId.value.trim();
-  const instanceUrl = snippetProvider.value === "gitlab" ? activeSnippetInstanceUrl.value : undefined;
-  const hashKey = snippetRemoteContentHashKey(snippetProvider.value, instanceUrl, id);
-  const hashCache = snippetRemoteContentHashCache.value;
-  const remoteContentHash = hashCache.has(hashKey) ? hashCache.get(hashKey) : readSnippetRemoteContentHash(snippetProvider.value, instanceUrl, id);
-  return !snippetSyncSettingsLoading.value && !!id && snippetHasSavedToken.value && snippetHasSavedPassphrase.value && !!remoteContentHash;
+  if (!id) {
+    requirements.push(t("settings.syncSnippetAutoUploadMissingSnippet"));
+  } else {
+    const instanceUrl = snippetProvider.value === "gitlab" ? activeSnippetInstanceUrl.value : undefined;
+    const hashKey = snippetRemoteContentHashKey(snippetProvider.value, instanceUrl, id);
+    const hashCache = snippetRemoteContentHashCache.value;
+    const remoteContentHash = hashCache.has(hashKey) ? hashCache.get(hashKey) : readSnippetRemoteContentHash(snippetProvider.value, instanceUrl, id);
+    if (!remoteContentHash) requirements.push(t("settings.syncSnippetAutoUploadMissingBaseline"));
+  }
+  return requirements;
+});
+const snippetAutoUploadReady = computed(() => !snippetSyncSettingsLoading.value && snippetAutoUploadRequirements.value.length === 0);
+const snippetAutoUploadSetupHint = computed(() => {
+  if (snippetSyncSettingsLoading.value) return t("settings.syncSnippetAutoUploadChecking");
+  return t("settings.syncSnippetAutoUploadNeedsSetup", {
+    requirements: snippetAutoUploadRequirements.value.join(t("settings.syncSnippetAutoUploadRequirementSeparator")),
+  });
 });
 // Legacy plaintext snippets have no outer encryption password. Let the
 // backend require one only after it detects an encrypted envelope so those
@@ -5006,6 +5059,8 @@ async function migrateLegacySnippet() {
       snippetId.value = summary.snippetId;
       await persistSnippetSyncId();
       persistSnippetRemoteContentHash(summary.snippetId, summary.remoteContentHash);
+      const instanceUrl = snippetProvider.value === "gitlab" ? activeSnippetInstanceUrl.value : undefined;
+      writeSnippetLastSuccessfulUpload(snippetProvider.value, instanceUrl, summary.snippetId);
       legacySnippetId.value = "";
       pendingLegacyCleanupId.value = summary.legacyCleanupRequiredId || "";
       if (!summary.legacyCleanupRequiredId) {
@@ -5293,6 +5348,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
         const instanceUrl = snippetProvider.value === "gitlab" ? activeSnippetInstanceUrl.value : undefined;
         writeSnippetAutoUploadSelection(snippetProvider.value, instanceUrl, selection);
         persistSnippetRemoteContentHash(summary.snippetId, summary.remoteContentHash);
+        writeSnippetLastSuccessfulUpload(snippetProvider.value, instanceUrl, summary.snippetId);
         return t("settings.syncSnippetUploadSuccess", { bytes: summary.bytes, id: summary.snippetId });
       });
       return;
@@ -10294,7 +10350,8 @@ onUnmounted(() => {
 SELECT t.*
 FROM ${1:table} t
 WHERE t.del_flag = 0
-LIMIT 100;</pre>
+LIMIT 100;</pre
+                >
               </div>
 
               <div class="overflow-x-auto rounded-md border">
@@ -10569,8 +10626,8 @@ LIMIT 100;</pre>
                       <p class="text-xs text-muted-foreground">
                         {{ t("settings.syncSnippetAutoUploadDescription") }}
                       </p>
-                      <p v-if="!snippetAutoUploadReady" class="text-xs text-muted-foreground">
-                        {{ t("settings.syncSnippetAutoUploadNeedsSetup") }}
+                      <p v-if="!snippetAutoUploadReady" role="status" aria-live="polite" class="border-l-2 border-amber-500 pl-2 text-xs text-amber-700 dark:text-amber-300">
+                        {{ snippetAutoUploadSetupHint }}
                       </p>
                     </div>
                     <div class="space-y-2 md:col-span-2">
@@ -10584,10 +10641,10 @@ LIMIT 100;</pre>
                       </label>
                     </div>
                     <div v-if="snippetIncludeSecrets || snippetRestoreSecrets || legacySnippetId" class="space-y-2 md:col-span-2">
-                      <Label for="snippet-sync-secrets-passphrase">{{ t("settings.syncSecretsPassphrase") }}</Label>
+                      <Label for="snippet-sync-secrets-passphrase">{{ t("settings.syncSnippetSecretsPassphrase") }}</Label>
                       <PasswordInput id="snippet-sync-secrets-passphrase" v-model="snippetSecretsPassphrase" autocomplete="new-password" />
                       <p class="text-xs text-muted-foreground">
-                        {{ t("settings.syncSecretsPassphraseDescription") }}
+                        {{ t("settings.syncSnippetSecretsPassphraseDescription") }}
                       </p>
                     </div>
                     <div v-if="pendingLegacyCleanupId" class="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive md:col-span-2">
@@ -10598,8 +10655,9 @@ LIMIT 100;</pre>
                       </Button>
                     </div>
                     <div class="flex flex-wrap items-center justify-between gap-3 md:col-span-2">
-                      <div v-if="snippetMessage" class="min-w-0 flex-1 text-xs" :class="snippetError ? 'text-destructive' : 'text-green-600 dark:text-green-400'">
-                        {{ snippetMessage }}
+                      <div v-if="snippetMessage || snippetLastUploadDisplay" class="min-w-0 flex-1 space-y-1 text-xs">
+                        <p v-if="snippetMessage" :class="snippetError ? 'text-destructive' : 'text-green-600 dark:text-green-400'">{{ snippetMessage }}</p>
+                        <p v-if="snippetLastUploadDisplay" class="text-muted-foreground" aria-live="polite">{{ snippetLastUploadDisplay }}</p>
                       </div>
                       <div v-else class="flex-1" />
                       <div class="flex shrink-0 flex-wrap justify-end gap-2">

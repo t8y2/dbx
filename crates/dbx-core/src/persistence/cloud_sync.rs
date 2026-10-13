@@ -1694,7 +1694,7 @@ pub async fn save_snippet_passphrase(
     config: &SnippetSyncConfig,
     passphrase: &str,
 ) -> Result<(), String> {
-    let passphrase = normalized_passphrase(passphrase)
+    let passphrase = normalized_passphrase(Some(passphrase))
         .ok_or_else(|| "A snippet encryption password is required to save it.".to_string())?;
     let secret = storage.load_or_create_local_device_secret().await?;
     let blob = encrypt_text_with_secret(passphrase, &secret)?;
@@ -2123,6 +2123,7 @@ impl SnippetSyncClient {
         let encrypted = encrypt_snippet_snapshot(snapshot_to_upload, passphrase)?;
         let bytes = serde_json::to_vec_pretty(&encrypted).map_err(|e| e.to_string())?;
         let content = String::from_utf8(bytes.clone()).map_err(|e| e.to_string())?;
+        let remote_content_hash = content_hash(&content);
         // A migration must create a separate snippet. Updating the legacy
         // snippet would retain its plaintext revision history on the provider.
         let update_id = if legacy_snapshot.is_some() { None } else { existing_id };
@@ -2176,7 +2177,7 @@ impl SnippetSyncClient {
             bytes: bytes.len(),
             exported_at,
             app_version,
-            remote_content_hash: Some(content_hash(&content)),
+            remote_content_hash: Some(remote_content_hash),
             unchanged: false,
             legacy_cleanup_required_id,
             legacy_cleanup_expected_content_hash: legacy_snapshot.map(|(_, _, hash)| hash),

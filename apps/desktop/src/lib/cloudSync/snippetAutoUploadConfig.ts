@@ -2,7 +2,9 @@ import type { SnippetProvider, SyncSelection } from "@/lib/backend/api";
 import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 export const SNIPPET_AUTO_UPLOAD_CONFIG_CHANGED_EVENT = "dbx:snippet-auto-upload-config-changed";
+export const SNIPPET_LAST_UPLOAD_CHANGED_EVENT = "dbx:snippet-last-upload-changed";
 export const SNIPPET_AUTO_UPLOAD_SELECTION_STORAGE_KEY_PREFIX = "dbx-snippet-auto-upload-selection-";
+const SNIPPET_LAST_UPLOAD_STORAGE_KEY_PREFIX = "dbx-snippet-last-upload-";
 export const DEFAULT_SNIPPET_AUTO_UPLOAD_INTERVAL_MINUTES = 30;
 export const MAX_SNIPPET_AUTO_UPLOAD_INTERVAL_MINUTES = 1440;
 
@@ -100,4 +102,19 @@ export function writeSnippetRemoteContentHash(provider: SnippetProvider, instanc
   const key = snippetRemoteContentHashKey(provider, instanceUrl, snippetId);
   if (remoteContentHash) safeLocalStorageSet(key, remoteContentHash);
   else safeLocalStorageRemove(key);
+}
+
+function snippetLastUploadKey(provider: SnippetProvider, instanceUrl: string | undefined, snippetId: string): string {
+  return `${SNIPPET_LAST_UPLOAD_STORAGE_KEY_PREFIX}${snippetScope(provider, instanceUrl)}-${encodeURIComponent(snippetId.trim())}`;
+}
+
+export function readSnippetLastSuccessfulUpload(provider: SnippetProvider, instanceUrl: string | undefined, snippetId: string): string | undefined {
+  if (!snippetId.trim()) return undefined;
+  return safeLocalStorageGet(snippetLastUploadKey(provider, instanceUrl, snippetId)) || undefined;
+}
+
+export function writeSnippetLastSuccessfulUpload(provider: SnippetProvider, instanceUrl: string | undefined, snippetId: string, uploadedAt = new Date().toISOString()) {
+  if (!snippetId.trim()) return;
+  safeLocalStorageSet(snippetLastUploadKey(provider, instanceUrl, snippetId), uploadedAt);
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(SNIPPET_LAST_UPLOAD_CHANGED_EVENT));
 }

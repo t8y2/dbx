@@ -115,8 +115,6 @@ const BLACK_APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/ico
 const MACOS_DEFAULT_APP_ICON: &[u8] = include_bytes!("../icons/icon.icns");
 #[cfg(target_os = "macos")]
 const MACOS_DARK_APP_ICON: &[u8] = include_bytes!("../icons/icon-macos-dark.icns");
-#[cfg(target_os = "macos")]
-static MACOS_APP_APPEARANCE_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn apply_debug_log_level(debug_logging_enabled: bool) {
     log::set_max_level(if debug_logging_enabled { log::LevelFilter::Debug } else { log::LevelFilter::Off });
@@ -1040,21 +1038,6 @@ pub(crate) fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: Deskt
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn apply_macos_app_appearance_icon(
-    app: &tauri::AppHandle,
-    is_dark: bool,
-    selected_icon_theme: DesktopIconTheme,
-) -> tauri::Result<()> {
-    MACOS_APP_APPEARANCE_DARK.store(is_dark, std::sync::atomic::Ordering::Release);
-    let icon_theme = if is_dark || selected_icon_theme == DesktopIconTheme::Black {
-        DesktopIconTheme::Black
-    } else {
-        DesktopIconTheme::Default
-    };
-    apply_macos_app_icon_theme(app, icon_theme, true)
-}
-
 fn apply_desktop_tray_icon_theme(app: &tauri::AppHandle, _icon_theme: DesktopIconTheme) -> tauri::Result<()> {
     if let Some(_tray) = app.tray_by_id(DESKTOP_TRAY_ID) {
         #[cfg(target_os = "windows")]
@@ -1083,15 +1066,7 @@ fn apply_desktop_tray_icon_theme(app: &tauri::AppHandle, _icon_theme: DesktopIco
 
 pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &DesktopSettings) -> tauri::Result<()> {
     apply_debug_log_level(desktop_settings.debug_logging_enabled);
-    #[cfg(target_os = "macos")]
-    let icon_theme = if MACOS_APP_APPEARANCE_DARK.load(std::sync::atomic::Ordering::Acquire) {
-        DesktopIconTheme::Black
-    } else {
-        desktop_settings.icon_theme
-    };
-    #[cfg(not(target_os = "macos"))]
-    let icon_theme = desktop_settings.icon_theme;
-    apply_desktop_icon_theme(app, icon_theme)?;
+    apply_desktop_icon_theme(app, desktop_settings.icon_theme)?;
     if should_setup_desktop_tray(std::env::consts::OS, desktop_settings.show_tray_icon, linux_appindicator_available())
     {
         if let Some(tray) = app.tray_by_id(DESKTOP_TRAY_ID) {
@@ -1747,9 +1722,6 @@ pub fn run() {
             let migration_gate = Arc::new(migration_gate::MigrationGate::new(migration_ready));
             app.manage(migration_gate.clone());
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
-            #[cfg(target_os = "macos")]
-            let app_appearance =
-                tauri::async_runtime::block_on(storage.load_app_appearance_settings()).unwrap_or_default();
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
@@ -1901,20 +1873,6 @@ pub fn run() {
             ) {
                 setup_desktop_tray(app, desktop_settings.icon_theme)?;
             }
-            #[cfg(target_os = "macos")]
-            match app_appearance.theme_mode.as_deref() {
-                Some("dark" | "soft-dark") => {
-                    apply_macos_app_appearance_icon(app.handle(), true, desktop_settings.icon_theme)?;
-                }
-                Some("light" | "soft-light") => {
-                    apply_macos_app_appearance_icon(app.handle(), false, desktop_settings.icon_theme)?;
-                }
-                // System mode is resolved by the renderer's matchMedia listener
-                // as soon as startup hydration finishes. Leave the persisted
-                // bundle icon intact until then to avoid briefly forcing light.
-                _ => {}
-            }
-            #[cfg(not(target_os = "macos"))]
             apply_desktop_icon_theme(app.handle(), desktop_settings.icon_theme)?;
             #[cfg(target_os = "macos")]
             apply_macos_development_dock_badge(app.handle())?;
@@ -2044,7 +2002,6 @@ pub fn run() {
             commands::app_settings::save_max_retries,
             commands::app_settings::load_app_appearance_settings,
             commands::app_settings::update_app_appearance_settings,
-            commands::app_settings::set_macos_app_icon_appearance,
             commands::app_settings::set_app_locale,
             commands::app_settings::complete_app_close,
             commands::app_settings::mark_frontend_ready,

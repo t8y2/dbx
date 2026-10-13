@@ -55,6 +55,15 @@ fn build_trigger_sql_with_mode(
             }
 
             if has_trigger_body_change(trigger, original) {
+                if dialect == StructureDialect::Oracle && !is_structured_oracle_trigger_source(original) {
+                    // The stored source carries clauses (WHEN, REFERENCING, FOLLOWS, ...) that the
+                    // timing/event/body form cannot represent, so CREATE OR REPLACE would drop them.
+                    warnings.push(format!(
+                        "Editing existing Oracle trigger \"{}\" requires its complete source definition.",
+                        original.name
+                    ));
+                    continue;
+                }
                 needs_recreate = true;
                 // Oracle can replace a trigger in place; renames still require dropping the old object.
                 if dialect != StructureDialect::Oracle || clean(&trigger.name) != clean(&original.name) {
@@ -360,6 +369,13 @@ fn create_oracle_trigger_sql(
     Some(format!(
         "CREATE OR REPLACE TRIGGER {trigger_name} {timing_clause} {event} ON {table}{row_clause}\n{statement};"
     ))
+}
+
+/// The driver strips the dictionary declaration only when the trigger is fully described by its
+/// timing, event and body; otherwise the source still starts with `TRIGGER ...`.
+fn is_structured_oracle_trigger_source(original: &TriggerInfo) -> bool {
+    let statement = original.statement.as_deref().unwrap_or("").trim();
+    !statement.is_empty() && !starts_with_trigger_declaration(statement)
 }
 
 /// Oracle triggers come back from the driver as `ALL_SOURCE` text. When the dictionary declaration

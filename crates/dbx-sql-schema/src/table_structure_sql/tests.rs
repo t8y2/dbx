@@ -7349,6 +7349,138 @@ fn changed_postgres_trigger_remains_unsupported() {
     assert_eq!(result.warnings, vec!["Editing triggers is not supported for postgres from this editor."]);
 }
 
+fn trigger_change_sql(
+    database_type: DatabaseType,
+    schema: &str,
+    table_name: &str,
+    triggers: Vec<EditableStructureTrigger>,
+) -> TableStructureSqlResult {
+    build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(database_type),
+        driver_profile: None,
+        schema: Some(schema.to_string()),
+        table_name: table_name.to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers,
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        mysql_auto_increment_value: None,
+        transwarp_create: None,
+        partitioned: false,
+        foreign_table: false,
+        is_gaussdb_m_mode: false,
+        table_collation: None,
+        primary_key_name: None,
+    })
+}
+
+fn existing_trigger(
+    name: &str,
+    timing: &str,
+    event: &str,
+    statement: &str,
+    enabled: Option<bool>,
+) -> EditableStructureTrigger {
+    let mut existing = trigger(name, timing, event, statement);
+    existing.enabled = enabled;
+    existing.original = Some(TriggerInfo {
+        name: name.to_string(),
+        event: event.to_string(),
+        timing: timing.to_string(),
+        statement: Some(statement.to_string()),
+        enabled,
+    });
+    existing
+}
+
+#[test]
+fn oracle_trigger_enabled_toggle_emits_alter_trigger() {
+    let mut disable = existing_trigger("ORDERS_AUDIT", "AFTER EACH ROW", "INSERT", "BEGIN NULL; END;", Some(true));
+    disable.enabled = Some(false);
+    let mut enable = existing_trigger("ORDERS_CHECK", "BEFORE EACH ROW", "UPDATE", "BEGIN NULL; END;", Some(false));
+    enable.enabled = Some(true);
+
+    let result = trigger_change_sql(DatabaseType::Oracle, "APP", "ORDERS", vec![disable, enable]);
+
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TRIGGER \"APP\".\"ORDERS_AUDIT\" DISABLE;", "ALTER TRIGGER \"APP\".\"ORDERS_CHECK\" ENABLE;",]
+    );
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
+fn oracle_trigger_body_edit_restores_disabled_state() {
+    let mut existing = existing_trigger("ORDERS_AUDIT", "AFTER EACH ROW", "INSERT", "BEGIN NULL; END;", Some(false));
+    existing.statement = "BEGIN\n  DBMS_OUTPUT.PUT_LINE('x');\nEND;".to_string();
+
+    let result = trigger_change_sql(DatabaseType::Oracle, "APP", "ORDERS", vec![existing]);
+
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE OR REPLACE TRIGGER \"APP\".\"ORDERS_AUDIT\" AFTER INSERT ON \"APP\".\"ORDERS\"\nFOR EACH ROW\nBEGIN\n  DBMS_OUTPUT.PUT_LINE('x');\nEND;",
+            "ALTER TRIGGER \"APP\".\"ORDERS_AUDIT\" DISABLE;",
+        ]
+    );
+}
+
+#[test]
+fn rejects_editing_oracle_trigger_with_unstructured_source() {
+    let source =
+        "TRIGGER ORDERS_AUDIT\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\nWHEN (NEW.STATUS = 'OPEN')\nBEGIN NULL; END;";
+    let mut edited = existing_trigger("ORDERS_AUDIT", "BEFORE EACH ROW", "INSERT", source, Some(true));
+    edited.event = "INSERT OR UPDATE".to_string();
+    let mut renamed = existing_trigger("ORDERS_CHECK", "BEFORE EACH ROW", "INSERT", source, Some(true));
+    renamed.name = "ORDERS_CHECK_V2".to_string();
+
+    let result = trigger_change_sql(DatabaseType::Oracle, "APP", "ORDERS", vec![edited, renamed]);
+
+    assert!(result.statements.is_empty(), "unexpected statements: {:?}", result.statements);
+    assert_eq!(
+        result.warnings,
+        vec![
+            "Editing existing Oracle trigger \"ORDERS_AUDIT\" requires its complete source definition.",
+            "Editing existing Oracle trigger \"ORDERS_CHECK\" requires its complete source definition.",
+        ]
+    );
+}
+
+#[test]
+fn oracle_trigger_with_unstructured_source_can_still_toggle_enabled() {
+    let source =
+        "TRIGGER ORDERS_AUDIT\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\nWHEN (NEW.STATUS = 'OPEN')\nBEGIN NULL; END;";
+    let mut existing = existing_trigger("ORDERS_AUDIT", "BEFORE EACH ROW", "INSERT", source, Some(true));
+    existing.enabled = Some(false);
+
+    let result = trigger_change_sql(DatabaseType::Oracle, "APP", "ORDERS", vec![existing]);
+
+    assert_eq!(result.statements, vec!["ALTER TRIGGER \"APP\".\"ORDERS_AUDIT\" DISABLE;"]);
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
+fn sqlserver_trigger_enabled_toggle_emits_enable_disable_trigger() {
+    let mut disable = existing_trigger("orders_audit", "AFTER", "INSERT", "BEGIN SET NOCOUNT ON; END", Some(true));
+    disable.enabled = Some(false);
+    let mut enable = existing_trigger("orders_check", "AFTER", "UPDATE", "BEGIN SET NOCOUNT ON; END", Some(false));
+    enable.enabled = Some(true);
+
+    let result = trigger_change_sql(DatabaseType::SqlServer, "dbo", "orders", vec![disable, enable]);
+
+    assert_eq!(
+        result.statements,
+        vec![
+            "DISABLE TRIGGER [dbo].[orders_audit] ON [dbo].[orders];",
+            "ENABLE TRIGGER [dbo].[orders_check] ON [dbo].[orders];",
+        ]
+    );
+    assert!(result.warnings.is_empty());
+}
+
 #[test]
 fn allows_editing_existing_oracle_trigger() {
     let mut existing = trigger(

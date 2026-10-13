@@ -8728,6 +8728,17 @@ export default withEnglishFallback({
     syncSnippetAutoUploadDescription:
       "Funziona mentre DBX è aperto; i download restano manuali. Gli snapshot invariati vengono saltati e il caricamento automatico si sospende se lo snippet remoto cambia. Le credenziali crittografate non vengono incluse. Attivare su un solo dispositivo per snippet.",
     syncSnippetAutoUploadNeedsSetup: "Salva il token e la password di crittografia, quindi carica o scarica una volta manualmente prima di attivare il caricamento automatico.",
+    syncSnippetSecretsPassphrase: "Password delle credenziali sincronizzate",
+    syncSnippetSecretsPassphraseDescription:
+      "Necessaria solo quando includi o ripristini credenziali crittografate. Protegge dati sensibili come le credenziali del database. È distinta dalla password dello snapshot; puoi usare la stessa password, ma DBX non la riutilizza automaticamente. I caricamenti automatici non includono credenziali.",
+    syncSnippetAutoUploadChecking: "Controllo dei requisiti di caricamento automatico...",
+    syncSnippetAutoUploadRequirementSeparator: "; ",
+    syncSnippetAutoUploadInvalidGitLabInstance: "correggi l'URL dell'istanza GitLab",
+    syncSnippetAutoUploadMissingToken: "inserisci il token di accesso, seleziona l'opzione di salvataggio e fai clic su Test per salvarlo su questo dispositivo",
+    syncSnippetAutoUploadMissingPassphrase: "inserisci la password di crittografia dello snippet, seleziona l'opzione di salvataggio e fai clic su Test per salvarla su questo dispositivo",
+    syncSnippetAutoUploadMissingSnippet: "carica manualmente una volta per creare uno snippet e stabilire la versione remota di riferimento",
+    syncSnippetAutoUploadMissingBaseline: "carica o scarica manualmente questo snippet con successo una volta; Test controlla solo l'accesso e non stabilisce una versione di riferimento",
+    syncSnippetLastSuccessfulUpload: "Ultimo caricamento riuscito: {time}",
     syncSnippetIncludeSecrets: "Includi credenziali crittografate durante il caricamento",
     syncSnippetRestoreSecrets: "Ripristina credenziali crittografate durante il download",
     syncSnippetMigrateLegacy: "Migra snippet legacy",

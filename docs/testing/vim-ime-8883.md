@@ -17,11 +17,17 @@ multiline clipboard paste, Escape, gg, yy, p and u worked as expected.
 
 ![Local desktop build: SQL remains intact in NORMAL](assets/vim-ime-8883/after.png)
 
+On 2026-10-13, the user manually tested the final source in the **DBX Vim Source
+Check** desktop app and confirmed that h/j/k/l in NORMAL move the cursor rather
+than insert text. This manual check supplements the automated desktop input
+below. The user did not specify the input method used in that check.
+
 The control tool's printable keys in the new desktop process arrived as ordinary
-English keydown events, without composition events. These checks therefore do
-not establish that real Pinyin candidate submission is fixed. Baidu and Doubao
-input methods were not enabled on this machine. A human follow-up should verify
-normal/visual navigation with those IMEs and Chinese composition in INSERT.
+English keydown events, without composition events. Those automated desktop
+checks alone do not establish that real Pinyin candidate submission is fixed.
+Baidu and Doubao input methods were not enabled on this machine; their behavior,
+visual navigation and Chinese composition in INSERT have not been manually
+verified in this run.
 
 ## Regression coverage
 

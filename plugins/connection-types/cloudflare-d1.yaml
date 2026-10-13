@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 60
 dbType: cloudflare-d1
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: CloudflareD1
 label: Cloudflare D1
 dialect: SQLite

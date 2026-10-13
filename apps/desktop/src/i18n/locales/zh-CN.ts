@@ -1,4 +1,5 @@
 import { sidebarMenuZhCN as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogZhCN as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { redisGroupingZhCN as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-CN";
@@ -9,6 +10,7 @@ import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpZhCN as damengDump } from "./damengDump";
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "生成模型",
@@ -1921,6 +1923,7 @@ export default withEnglishFallback({
       find: "查找",
       replace: "替换",
       replaceAll: "全部替换",
+      searchFailed: "搜索失败或超时，请简化表达式后重试。",
       caseSensitive: "区分大小写",
       regex: "正则表达式",
       collapseReplace: "收起替换",
@@ -2659,6 +2662,9 @@ export default withEnglishFallback({
     sortSqlCopied: "SQL 排序已复制",
     resizeSortPanel: "调整排序面板高度",
     sortTextView: "排序文本视图",
+    freezeFirstColumnGlobally: "全局冻结首列",
+    freezeFirstColumnGloballyHint: "在所有数据表格中冻结第一个可见数据列。",
+    globalFirstColumnRemainsFrozen: "首列仍由全局设置冻结",
     freezeToColumn: "冻结到此列",
     freezeSelectedColumns: "冻结选中列（{count} 列）",
     freezeCurrentColumn: "冻结当前列",
@@ -3546,6 +3552,25 @@ export default withEnglishFallback({
     deepLinkClipboardEmpty: "剪贴板中没有可用的 API Key，请手动填写。",
     deepLinkClipboardInvalid: "剪贴板内容不是有效的单行 API Key，请手动填写。",
     deepLinkClipboardReadFailed: "读取剪贴板失败：{message}",
+    ccSwitchProvider: "AI 配置导入",
+    ccSwitchProviderDescription: "通过 CC-SWITCH 插件将 AI 配置导入 DBX。",
+    ccSwitchImport: "从 CC-SWITCH 导入",
+    ccSwitchImporting: "导入中...",
+    ccSwitchPluginChecking: "正在检查 CC-SWITCH 插件状态...",
+    ccSwitchPluginReady: "CC-SWITCH 插件已就绪，可以导入配置。",
+    ccSwitchPluginNotInstalledStatus: "尚未安装 CC-SWITCH 插件。",
+    ccSwitchPluginIncompatible: "已检测到插件，但当前版本与 DBX 不兼容。",
+    ccSwitchPluginRefresh: "刷新状态",
+    ccSwitchPluginNotInstalled: "请先安装 CC-SWITCH 插件",
+    ccSwitchImportSuccess: "已从 CC-SWITCH 导入 {count} 个 AI 配置",
+    ccSwitchImportPartial: "已从 CC-SWITCH 导入 {count} 个 AI 配置，跳过 {skipped} 个",
+    ccSwitchNoNewConfigs: "没有找到可导入的新 CC-SWITCH AI 配置",
+    ccSwitchNotInstalled: "本机未找到 CC-SWITCH 配置",
+    ccSwitchInvalidDatabase: "CC-SWITCH 配置数据库格式不受支持",
+    ccSwitchHomeDirectoryFailed: "无法定位 CC-SWITCH 所在的用户主目录",
+    ccSwitchOpenFailed: "无法打开 CC-SWITCH 配置数据库",
+    ccSwitchReadFailed: "无法读取 CC-SWITCH AI 配置",
+    ccSwitchImportDesktopOnly: "CC-SWITCH 导入仅支持桌面版",
 
     configList: "AI 配置列表",
     addConfig: "新增配置",
@@ -8224,9 +8249,9 @@ export default withEnglishFallback({
     noDifferences: "数据完全一致，无需生成同步 SQL",
     syncSuccess: "数据同步执行成功",
     truncatedTitle: "部分表未完整比较",
-    truncatedHint: "行数超过单次比较上限的表只比较了前若干行，超出部分的新增、修改和删除不会被发现。建议加上过滤条件缩小范围后分批比较。",
+    truncatedHint: "行数超过单次比较上限的表只检查了部分数据，未检查范围内的新增、修改和删除不会被发现，因此不会生成或执行同步 SQL。建议缩小范围后分批完整比较。",
     truncatedTable: "{table}：源 {source} 行、目标 {target} 行，仅比较前 {budget} 行",
-    truncatedBadge: "仅比较前 {budget} 行",
+    truncatedBadge: "仅检查部分数据（单侧上限 {budget} 行），同步已禁用",
   },
   settings: {
     historyRetentionLimit: "查询历史保留条数",
@@ -9257,6 +9282,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "断开侧边栏连接",
     shortcutOpenDataInNewTab: "在新数据标签页中打开（鼠标点击）",
     shortcutViewTableDdl: "查看表 DDL",
+    shortcutEditSidebarTableStructure: "编辑表结构",
     shortcutSendSelectionToAi: "发送选中代码到 AI",
     shortcutToggleAiPanel: "切换 AI 面板",
     shortcutSqlIntentionActions: "SQL 意图操作（展开 * / 限定标识符）",

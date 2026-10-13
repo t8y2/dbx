@@ -1,4 +1,5 @@
 import { sidebarMenuRu as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogRu as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/ru";
 import { dataDictionaryRu as dataDictionary } from "./dataDictionaryMessages";
@@ -6,6 +7,7 @@ import { meilisearchManagementRu } from "./meilisearchManagement";
 
 // Russian locale. Entries omitted here fall back to English at runtime.
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "Создать модель",
@@ -1871,6 +1873,7 @@ export default withEnglishFallback({
       find: "Найти",
       replace: "Заменить",
       replaceAll: "Заменить всё",
+      searchFailed: "Поиск не выполнен или превышено время ожидания. Упростите выражение и повторите попытку.",
       caseSensitive: "Учитывать регистр",
       regex: "Регулярное выражение",
       collapseReplace: "Свернуть замену",
@@ -2596,6 +2599,9 @@ export default withEnglishFallback({
     sortSqlCopied: "Сортировка SQL скопирована",
     resizeSortPanel: "Изменить размер панели сортировки",
     sortTextView: "Текстовый вид сортировки",
+    freezeFirstColumnGlobally: "Закреплять первый столбец во всех таблицах",
+    freezeFirstColumnGloballyHint: "Закреплять первый видимый столбец данных во всех таблицах.",
+    globalFirstColumnRemainsFrozen: "первый столбец остаётся закреплён глобально",
     freezeToColumn: "Закрепить до этого столбца",
     freezeSelectedColumns: "Закрепить выбранные столбцы ({count})",
     freezeCurrentColumn: "Закрепить текущий столбец",
@@ -3408,6 +3414,25 @@ export default withEnglishFallback({
     hiapiSponsored: "200 Credits в подарок",
     hiapiDescription:
       "HiAPI — платформа API для разработчиков: модели изображений, видео, аудио и текста. Текстовые модели используют OpenAI-совместимые эндпоинты, а Remote MCP и Agent Skills подключают аккаунт к Claude Code, Cursor и другим агентам.\n🎁 Новым пользователям — 200 Credits при регистрации и 10% дополнительных Credits при пополнении.",
+    ccSwitchProvider: "Импорт конфигураций ИИ",
+    ccSwitchProviderDescription: "Импортируйте конфигурации ИИ из CC-SWITCH в DBX.",
+    ccSwitchImport: "Импортировать из CC-SWITCH",
+    ccSwitchImporting: "Импортирование...",
+    ccSwitchPluginChecking: "Проверка состояния плагина CC-SWITCH...",
+    ccSwitchPluginReady: "Плагин CC-SWITCH готов. Можно импортировать конфигурации.",
+    ccSwitchPluginNotInstalledStatus: "Плагин CC-SWITCH не установлен.",
+    ccSwitchPluginIncompatible: "Плагин CC-SWITCH найден, но несовместим с этой версией DBX.",
+    ccSwitchPluginRefresh: "Обновить состояние",
+    ccSwitchPluginNotInstalled: "Сначала установите плагин CC-SWITCH",
+    ccSwitchImportSuccess: "Импортировано конфигураций ИИ из CC-SWITCH: {count}",
+    ccSwitchImportPartial: "Импортировано конфигураций ИИ из CC-SWITCH: {count}; пропущено: {skipped}",
+    ccSwitchNoNewConfigs: "Новых подходящих конфигураций ИИ CC-SWITCH не найдено",
+    ccSwitchNotInstalled: "Конфигурация CC-SWITCH на этом компьютере не найдена",
+    ccSwitchInvalidDatabase: "Формат базы конфигураций CC-SWITCH не поддерживается",
+    ccSwitchHomeDirectoryFailed: "Не удалось определить домашний каталог пользователя для CC-SWITCH",
+    ccSwitchOpenFailed: "Не удалось открыть базу конфигураций CC-SWITCH",
+    ccSwitchReadFailed: "Не удалось прочитать конфигурации ИИ CC-SWITCH",
+    ccSwitchImportDesktopOnly: "Импорт из CC-SWITCH доступен только в настольном приложении",
     visitPartner: "Посетить сайт партнёра",
     getApiKey: "Получить ключ API",
     defaultModel: "Модель по умолчанию",
@@ -9570,6 +9595,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "Отключить подключение в боковой панели",
     shortcutOpenDataInNewTab: "Открыть данные в новой вкладке (клик мышью)",
     shortcutViewTableDdl: "Просмотреть DDL таблицы",
+    shortcutEditSidebarTableStructure: "Изменить структуру таблицы",
     shortcutSendSelectionToAi: "Отправить выделенное в AI",
     shortcutToggleAiPanel: "Переключить панель AI",
     shortcutSqlIntentionActions: "SQL-действия по намерению (развернуть * / уточнить идентификатор)",

@@ -1,4 +1,5 @@
 import { sidebarMenuZhTW as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogZhTW as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { redisGroupingZhTW as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpZhTW as mongoDump } from "./mongodbDatabaseDump";
@@ -65,6 +66,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "產生模型",
@@ -1847,6 +1849,7 @@ export default withEnglishFallback({
       find: "尋找",
       replace: "取代",
       replaceAll: "全部取代",
+      searchFailed: "搜尋失敗或逾時，請簡化運算式後重試。",
       caseSensitive: "區分大小寫",
       regex: "正規表示式",
       collapseReplace: "收起取代",
@@ -2434,6 +2437,9 @@ export default withEnglishFallback({
     sortSqlCopied: "SQL 排序已複製",
     resizeSortPanel: "調整排序面板高度",
     sortTextView: "排序文字檢視",
+    freezeFirstColumnGlobally: "全域凍結首欄",
+    freezeFirstColumnGloballyHint: "在所有資料表格中凍結第一個可見資料欄。",
+    globalFirstColumnRemainsFrozen: "首欄仍由全域設定凍結",
     freezeToColumn: "凍結到此欄",
     freezeSelectedColumns: "凍結選取欄（{count} 欄）",
     freezeCurrentColumn: "凍結目前欄",
@@ -3330,6 +3336,25 @@ export default withEnglishFallback({
     effortUnsupported: "此模型不支援設定推理強度",
     configNameEmpty: "設定名稱不能為空",
     configNameExists: "設定名稱 '{name}' 已存在",
+    ccSwitchProvider: "AI 設定匯入",
+    ccSwitchProviderDescription: "透過 CC-SWITCH 外掛將 AI 設定匯入 DBX。",
+    ccSwitchImport: "從 CC-SWITCH 匯入",
+    ccSwitchImporting: "匯入中……",
+    ccSwitchPluginChecking: "正在檢查 CC-SWITCH 外掛狀態……",
+    ccSwitchPluginReady: "CC-SWITCH 外掛已就緒，可以匯入設定。",
+    ccSwitchPluginNotInstalledStatus: "尚未安裝 CC-SWITCH 外掛。",
+    ccSwitchPluginIncompatible: "已找到 CC-SWITCH 外掛，但與目前的 DBX 版本不相容。",
+    ccSwitchPluginRefresh: "重新整理狀態",
+    ccSwitchPluginNotInstalled: "請先安裝 CC-SWITCH 外掛",
+    ccSwitchImportSuccess: "已從 CC-SWITCH 匯入 {count} 個 AI 設定",
+    ccSwitchImportPartial: "已從 CC-SWITCH 匯入 {count} 個 AI 設定，略過 {skipped} 個",
+    ccSwitchNoNewConfigs: "找不到可匯入的新 CC-SWITCH AI 設定",
+    ccSwitchNotInstalled: "在此電腦上找不到 CC-SWITCH 設定",
+    ccSwitchInvalidDatabase: "不支援此 CC-SWITCH 設定資料庫",
+    ccSwitchHomeDirectoryFailed: "無法找到 CC-SWITCH 的家目錄",
+    ccSwitchOpenFailed: "無法開啟 CC-SWITCH 設定資料庫",
+    ccSwitchReadFailed: "無法讀取 CC-SWITCH AI 設定",
+    ccSwitchImportDesktopOnly: "CC-SWITCH 匯入功能僅適用於桌面應用程式",
 
     configList: "AI 配置列表",
     addConfig: "新增配置",
@@ -7513,6 +7538,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "中斷側邊欄連線",
     shortcutOpenDataInNewTab: "在新資料分頁中開啟（滑鼠點擊）",
     shortcutViewTableDdl: "檢視資料表 DDL",
+    shortcutEditSidebarTableStructure: "編輯資料表結構",
     shortcutSendSelectionToAi: "傳送選取程式碼至 AI",
     shortcutToggleAiPanel: "切換 AI 面板",
     shortcutSqlIntentionActions: "SQL 意圖操作（展開 * / 限定識別碼）",

@@ -1,4 +1,5 @@
 import { sidebarMenuJa as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogJa as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpJa as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpJa as damengDump } from "./damengDump";
@@ -64,6 +65,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "モデルを生成",
@@ -1863,6 +1865,7 @@ export default withEnglishFallback({
       find: "検索",
       replace: "置換",
       replaceAll: "すべて置換",
+      searchFailed: "検索に失敗したかタイムアウトしました。式を簡略化して再試行してください。",
       caseSensitive: "大文字/小文字を区別",
       regex: "正規表現",
       collapseReplace: "置換を折りたたむ",
@@ -2439,6 +2442,9 @@ export default withEnglishFallback({
     sortSqlCopied: "SQL 並べ替えをコピーしました",
     resizeSortPanel: "並べ替えパネルのサイズを変更",
     sortTextView: "並べ替えテキストビュー",
+    freezeFirstColumnGlobally: "すべての表で先頭列を固定",
+    freezeFirstColumnGloballyHint: "すべてのデータ表で最初の表示データ列を固定します。",
+    globalFirstColumnRemainsFrozen: "先頭列は全体設定により固定されたままです",
     freezeToColumn: "この列まで固定",
     freezeSelectedColumns: "選択列を固定 ({count})",
     freezeCurrentColumn: "現在の列を固定",
@@ -3351,6 +3357,25 @@ export default withEnglishFallback({
     effortUnsupported: "このモデルでは推論強度を設定できません",
     configNameEmpty: "設定名を入力してください",
     configNameExists: "設定名 '{name}' は既に存在します",
+    ccSwitchProvider: "AI 設定のインポート",
+    ccSwitchProviderDescription: "CC-SWITCH プラグインから DBX に AI 設定をインポートします。",
+    ccSwitchImport: "CC-SWITCH からインポート",
+    ccSwitchImporting: "インポート中...",
+    ccSwitchPluginChecking: "CC-SWITCH プラグインの状態を確認中...",
+    ccSwitchPluginReady: "CC-SWITCH プラグインの準備ができました。設定をインポートできます。",
+    ccSwitchPluginNotInstalledStatus: "CC-SWITCH プラグインはインストールされていません。",
+    ccSwitchPluginIncompatible: "CC-SWITCH プラグインが見つかりましたが、この DBX バージョンには対応していません。",
+    ccSwitchPluginRefresh: "状態を更新",
+    ccSwitchPluginNotInstalled: "先に CC-SWITCH プラグインをインストールしてください",
+    ccSwitchImportSuccess: "CC-SWITCH から {count} 件の AI 設定をインポートしました",
+    ccSwitchImportPartial: "CC-SWITCH から {count} 件の AI 設定をインポートし、{skipped} 件をスキップしました",
+    ccSwitchNoNewConfigs: "インポート可能な新しい CC-SWITCH AI 設定が見つかりませんでした",
+    ccSwitchNotInstalled: "このコンピューターに CC-SWITCH の設定が見つかりません",
+    ccSwitchInvalidDatabase: "CC-SWITCH 設定データベースには対応していません",
+    ccSwitchHomeDirectoryFailed: "CC-SWITCH のホームディレクトリを特定できません",
+    ccSwitchOpenFailed: "CC-SWITCH 設定データベースを開けません",
+    ccSwitchReadFailed: "CC-SWITCH AI 設定を読み込めません",
+    ccSwitchImportDesktopOnly: "CC-SWITCH のインポートはデスクトップアプリでのみ利用できます",
 
     configList: "AI設定リスト",
     addConfig: "設定を追加",
@@ -8193,6 +8218,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "サイドバー接続を切断",
     shortcutOpenDataInNewTab: "新しいデータタブで開く（マウスクリック）",
     shortcutViewTableDdl: "テーブルDDLを表示",
+    shortcutEditSidebarTableStructure: "テーブル構造を編集",
     shortcutSendSelectionToAi: "選択範囲をAIに送信",
     shortcutToggleAiPanel: "AIパネルを切り替え",
     shortcutSqlIntentionActions: "SQL インテント操作（* の展開 / 識別子の修飾）",

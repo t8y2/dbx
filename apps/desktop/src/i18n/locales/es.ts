@@ -1,4 +1,5 @@
 import { sidebarMenuEs as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogEs as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpEs as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpEs as damengDump } from "./damengDump";
@@ -65,6 +66,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "Generar modelo",
@@ -1934,6 +1936,7 @@ export default withEnglishFallback({
       find: "Buscar",
       replace: "Reemplazar",
       replaceAll: "Reemplazar todo",
+      searchFailed: "La búsqueda falló o agotó el tiempo. Simplifica la expresión e inténtalo de nuevo.",
       caseSensitive: "Distinguir mayúsculas",
       regex: "Expresión regular",
       collapseReplace: "Contraer reemplazo",
@@ -2539,6 +2542,9 @@ export default withEnglishFallback({
     sortSqlCopied: "Ordenación SQL copiada",
     resizeSortPanel: "Cambiar el tamaño del panel de ordenación",
     sortTextView: "Vista de texto de ordenación",
+    freezeFirstColumnGlobally: "Inmovilizar primera columna globalmente",
+    freezeFirstColumnGloballyHint: "Mantener fija la primera columna de datos visible en todas las tablas.",
+    globalFirstColumnRemainsFrozen: "la primera columna sigue fija globalmente",
     freezeToColumn: "Inmovilizar hasta esta columna",
     freezeSelectedColumns: "Inmovilizar columnas seleccionadas ({count})",
     freezeCurrentColumn: "Inmovilizar columna actual",
@@ -3482,6 +3488,25 @@ export default withEnglishFallback({
     deepLinkClipboardEmpty: "El portapapeles no contiene una API key. Ingrésela manualmente.",
     deepLinkClipboardInvalid: "El portapapeles no contiene una API key válida de una sola línea. Ingrésela manualmente.",
     deepLinkClipboardReadFailed: "No se pudo leer el portapapeles: {message}",
+    ccSwitchProvider: "Importador de configuración de IA",
+    ccSwitchProviderDescription: "Importa configuraciones de IA desde CC-SWITCH a DBX.",
+    ccSwitchImport: "Importar desde CC-SWITCH",
+    ccSwitchImporting: "Importando...",
+    ccSwitchPluginChecking: "Comprobando el estado del plugin de CC-SWITCH...",
+    ccSwitchPluginReady: "El plugin de CC-SWITCH está listo. Puedes importar configuraciones.",
+    ccSwitchPluginNotInstalledStatus: "El plugin de CC-SWITCH no está instalado.",
+    ccSwitchPluginIncompatible: "Se encontró un plugin de CC-SWITCH, pero es incompatible con esta versión de DBX.",
+    ccSwitchPluginRefresh: "Actualizar estado",
+    ccSwitchPluginNotInstalled: "Instala primero el plugin de CC-SWITCH",
+    ccSwitchImportSuccess: "Se importaron {count} configuraciones de IA desde CC-SWITCH",
+    ccSwitchImportPartial: "Se importaron {count} configuraciones de IA desde CC-SWITCH; se omitieron {skipped}",
+    ccSwitchNoNewConfigs: "No se encontraron nuevas configuraciones de IA utilizables de CC-SWITCH",
+    ccSwitchNotInstalled: "No se encontró la configuración de CC-SWITCH en este equipo",
+    ccSwitchInvalidDatabase: "La base de datos de configuración de CC-SWITCH no es compatible",
+    ccSwitchHomeDirectoryFailed: "No se pudo localizar el directorio de inicio de CC-SWITCH",
+    ccSwitchOpenFailed: "No se pudo abrir la base de datos de configuración de CC-SWITCH",
+    ccSwitchReadFailed: "No se pudieron leer las configuraciones de IA de CC-SWITCH",
+    ccSwitchImportDesktopOnly: "La importación de CC-SWITCH solo está disponible en la aplicación de escritorio",
 
     configList: "Lista de configuraciones AI",
     addConfig: "Agregar configuración",
@@ -8441,6 +8466,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "Desconectar conexión de la barra lateral",
     shortcutOpenDataInNewTab: "Abrir datos en una pestaña nueva (clic del ratón)",
     shortcutViewTableDdl: "Ver DDL de la tabla",
+    shortcutEditSidebarTableStructure: "Editar estructura de tabla",
     shortcutSendSelectionToAi: "Enviar selección a IA",
     shortcutToggleAiPanel: "Alternar panel de IA",
     shortcutSqlIntentionActions: "Acciones de intención SQL (Expandir * / Calificar identificador)",

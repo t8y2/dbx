@@ -20,6 +20,7 @@ import type { EditorTheme } from "@/stores/settingsStore";
 import type { AppThemeAppearance, AppThemePalette } from "@/lib/app/appTheme";
 import { selectAllCellDetailText } from "@/lib/dataGrid/cellDetailSelection";
 import { selectLineEnds } from "@/lib/editor/selectLineEnds";
+import { preserveSourceHistory, rawSourceField, restoreRawSource } from "@/lib/editor/preserveTextLineEndings";
 
 export interface UseCellDetailEditorOptions {
   onChange?: (value: string) => void;
@@ -27,7 +28,9 @@ export interface UseCellDetailEditorOptions {
   onBlur?: () => void;
   /** Return true after handling a save shortcut so CodeMirror consumes it. */
   onSaveShortcut?: (event: KeyboardEvent) => boolean;
-  language?: "auto" | "json";
+  language?: "auto" | "json" | "text";
+  /** Keep source line endings and suppress change events during external text synchronization. */
+  preserveLineEndings?: boolean;
   readOnly?: boolean | (() => boolean);
   /** Keep cell detail editors gutter-free unless a caller explicitly opts in. */
   lineNumbers?: boolean;
@@ -87,6 +90,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
   const shortcutComp = new Compartment();
 
   let destroyed = false;
+  let synchronizingValue = false;
   let currentIsJson = false;
   let liveFontSize = clampEditorFontSize(options.fontSize());
   let gestureStartFontSize = liveFontSize;
@@ -213,7 +217,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     if (destroyed) return;
 
     const doc = initialValue ?? "";
-    currentIsJson = options.language === "json" || shouldUseJsonMode(columnType, doc);
+    currentIsJson = options.language !== "text" && (options.language === "json" || shouldUseJsonMode(columnType, doc));
 
     const theme = await loadEditorTheme(options.editorTheme(), options.appAppearance(), undefined, options.appPalette());
     if (destroyed) return;
@@ -236,6 +240,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
         ...(options.folding ? [createConsistentFoldGutter()] : []),
         highlightSpecialChars(),
         history(),
+        ...(options.preserveLineEndings ? preserveSourceHistory(doc) : []),
         drawSelection(),
         editorClipboardLineEndingsExtension(EditorView),
         trimmedSelectionLayer(),
@@ -290,7 +295,12 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
         ]),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
-            options.onChange?.(update.state.doc.toString());
+            if (options.preserveLineEndings) {
+              if (synchronizingValue) return;
+              options.onChange?.(update.state.field(rawSourceField));
+            } else {
+              options.onChange?.(update.state.doc.toString());
+            }
           }
         }),
         EditorView.domEventHandlers({
@@ -351,7 +361,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     if (!editor || destroyed) return;
 
     const text = value ?? "";
-    const newIsJson = options.language === "json" || shouldUseJsonMode(columnType, text);
+    const newIsJson = options.language !== "text" && (options.language === "json" || shouldUseJsonMode(columnType, text));
     const effects: ReturnType<typeof Compartment.prototype.reconfigure>[] = [];
 
     if (newIsJson !== currentIsJson) {
@@ -359,13 +369,19 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
       currentIsJson = newIsJson;
     }
 
-    editor.dispatch({
-      changes: { from: 0, to: editor.state.doc.length, insert: text },
-      effects,
-    });
+    synchronizingValue = true;
+    try {
+      editor.dispatch({
+        changes: { from: 0, to: editor.state.doc.length, insert: text },
+        effects: options.preserveLineEndings ? [...effects, restoreRawSource.of(text)] : effects,
+      });
+    } finally {
+      synchronizingValue = false;
+    }
   }
 
   function getValue(): string {
+    if (options.preserveLineEndings && view.value) return view.value.state.field(rawSourceField);
     return view.value?.state.doc.toString() ?? "";
   }
 

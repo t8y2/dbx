@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 490
 dbType: trino
+compareModes: [schema, data]
 rustVariant: Trino
 label: Trino
 runtimeMode: agent

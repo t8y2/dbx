@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 460
 dbType: access
+compareModes: [schema, data]
 rustVariant: Access
 label: Microsoft Access
 dialect: Access

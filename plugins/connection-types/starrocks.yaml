@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 230
 dbType: starrocks
+compareModes: [schema, data]
 rustVariant: StarRocks
 label: StarRocks
 dialect: StarRocks

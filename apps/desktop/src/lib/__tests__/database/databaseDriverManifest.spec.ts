@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { databaseConnectionFormKind, databaseDefaultPort, databaseManifestEntry, databaseProductCapabilities, databaseRuntimeMode, supportsDatabaseFeature, usesAgentCursorForQuery, usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
+import {
+  databaseConnectionFormKind,
+  databaseDefaultPort,
+  databaseManifestEntry,
+  databaseProductCapabilities,
+  databaseRuntimeMode,
+  databaseTransferSupportLevel,
+  supportsDatabaseCompareMode,
+  supportsDatabaseFeature,
+  usesAgentCursorForQuery,
+  usesAgentCursorForTableData,
+} from "@/lib/database/databaseDriverManifest";
 
 describe("databaseDriverManifest", () => {
   it("advertises implemented Xugu capabilities without enabling unsupported features", () => {
@@ -59,6 +70,20 @@ describe("databaseDriverManifest", () => {
       skipTcpProbe: true,
       localFile: true,
     });
+  });
+
+  it("exposes transfer compatibility evidence from the shared manifest", () => {
+    expect(databaseTransferSupportLevel("mysql")).toBe("verified");
+    expect(databaseTransferSupportLevel("kingbase")).toBe("family-compatible");
+    expect(databaseTransferSupportLevel("db2")).toBe("best-effort");
+    expect(databaseTransferSupportLevel("gbase")).toBeUndefined();
+  });
+
+  it("exposes schema and data comparison support from the shared manifest", () => {
+    expect(supportsDatabaseCompareMode("mysql", "schema")).toBe(true);
+    expect(supportsDatabaseCompareMode("kingbase", "data")).toBe(true);
+    expect(supportsDatabaseCompareMode("mongodb", "data")).toBe(false);
+    expect(supportsDatabaseCompareMode("redis", "schema")).toBe(false);
   });
 
   it("offers only the supported NebulaGraph 3.x profile", () => {

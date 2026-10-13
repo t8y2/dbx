@@ -2259,7 +2259,16 @@ function skipOraclePlSqlCreateModifiers(words: readonly string[], startIndex: nu
 }
 
 function startsWithSapHanaScriptBlock(sql: string): boolean {
-  return oraclePlSqlWords(sql)[0] === "DO";
+  const words = oraclePlSqlWords(sql);
+  if (words[0] === "DO") return true;
+  let index = 1;
+  if (words[0] === "CREATE" && words[index] === "OR" && words[index + 1] === "REPLACE") index += 2;
+  if (words[0] !== "CREATE" && words[0] !== "ALTER") return false;
+  if (!(["PROCEDURE", "FUNCTION", "TRIGGER"] as const).includes(words[index] as "PROCEDURE" | "FUNCTION" | "TRIGGER")) return false;
+  // HANA also accepts ALTER PROCEDURE ... RECOMPILE. Require a SQLScript body
+  // before treating it as a block so ordinary metadata ALTER statements still
+  // terminate at their first semicolon.
+  return words.includes("BEGIN");
 }
 
 function sapHanaScriptBlockIsComplete(sql: string): boolean {

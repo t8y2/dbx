@@ -1,4 +1,5 @@
 import { sidebarMenuKo as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogKo as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpKo as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpKo as damengDump } from "./damengDump";
@@ -63,6 +64,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "모델 생성",
@@ -1790,6 +1792,7 @@ export default withEnglishFallback({
       find: "찾기",
       replace: "바꾸기",
       replaceAll: "모두 바꾸기",
+      searchFailed: "검색에 실패했거나 시간이 초과되었습니다. 표현식을 간단히 하고 다시 시도하세요.",
       caseSensitive: "대소문자 구분",
       regex: "정규 표현식",
       collapseReplace: "바꾸기 접기",
@@ -2480,6 +2483,9 @@ export default withEnglishFallback({
     sortSqlCopied: "SQL 정렬이 복사되었습니다",
     resizeSortPanel: "정렬 패널 크기 조정",
     sortTextView: "정렬 텍스트 보기",
+    freezeFirstColumnGlobally: "모든 표의 첫 번째 열 고정",
+    freezeFirstColumnGloballyHint: "모든 데이터 표에서 첫 번째 표시 데이터 열을 고정합니다.",
+    globalFirstColumnRemainsFrozen: "첫 번째 열은 전역 설정으로 계속 고정됩니다",
     freezeToColumn: "이 컬럼까지 고정",
     freezeSelectedColumns: "선택한 컬럼 고정 ({count})",
     freezeCurrentColumn: "현재 열 고정",
@@ -3278,6 +3284,25 @@ export default withEnglishFallback({
     effortUnsupported: "이 모델은 노력도 설정을 지원하지 않습니다",
     configNameEmpty: "구성 이름은 비워둘 수 없습니다",
     configNameExists: "구성 이름 '{name}'이(가) 이미 존재합니다",
+    ccSwitchProvider: "AI 구성 가져오기",
+    ccSwitchProviderDescription: "CC-SWITCH 플러그인에서 DBX로 AI 구성을 가져옵니다.",
+    ccSwitchImport: "CC-SWITCH에서 가져오기",
+    ccSwitchImporting: "가져오는 중...",
+    ccSwitchPluginChecking: "CC-SWITCH 플러그인 상태 확인 중...",
+    ccSwitchPluginReady: "CC-SWITCH 플러그인을 사용할 준비가 되었습니다. 구성을 가져올 수 있습니다.",
+    ccSwitchPluginNotInstalledStatus: "CC-SWITCH 플러그인이 설치되지 않았습니다.",
+    ccSwitchPluginIncompatible: "CC-SWITCH 플러그인을 찾았지만 현재 DBX 버전과 호환되지 않습니다.",
+    ccSwitchPluginRefresh: "상태 새로고침",
+    ccSwitchPluginNotInstalled: "먼저 CC-SWITCH 플러그인을 설치하세요",
+    ccSwitchImportSuccess: "CC-SWITCH에서 AI 구성 {count}개를 가져왔습니다",
+    ccSwitchImportPartial: "CC-SWITCH에서 AI 구성 {count}개를 가져왔고 {skipped}개를 건너뛰었습니다",
+    ccSwitchNoNewConfigs: "가져올 수 있는 새로운 CC-SWITCH AI 구성이 없습니다",
+    ccSwitchNotInstalled: "이 컴퓨터에서 CC-SWITCH 구성을 찾을 수 없습니다",
+    ccSwitchInvalidDatabase: "CC-SWITCH 구성 데이터베이스를 지원하지 않습니다",
+    ccSwitchHomeDirectoryFailed: "CC-SWITCH 홈 디렉터리를 찾을 수 없습니다",
+    ccSwitchOpenFailed: "CC-SWITCH 구성 데이터베이스를 열 수 없습니다",
+    ccSwitchReadFailed: "CC-SWITCH AI 구성을 읽을 수 없습니다",
+    ccSwitchImportDesktopOnly: "CC-SWITCH 가져오기는 데스크톱 앱에서만 사용할 수 있습니다",
     configList: "AI 구성 목록",
     addConfig: "구성 추가",
     noAiConfigs: "AI 구성이 없습니다",
@@ -8086,6 +8111,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "사이드바 연결 끊기",
     shortcutOpenDataInNewTab: "새 탭에서 데이터 열기 (마우스 클릭)",
     shortcutViewTableDdl: "테이블 DDL 보기",
+    shortcutEditSidebarTableStructure: "테이블 구조 편집",
     shortcutSendSelectionToAi: "선택 영역을 AI로 보내기",
     shortcutToggleAiPanel: "AI 패널 전환",
     shortcutSqlIntentionActions: "SQL 인텐트 동작 (* 펼치기 / 식별자 한정)",

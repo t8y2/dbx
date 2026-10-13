@@ -1,4 +1,5 @@
 import { sidebarMenuIt as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogIt as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpIt as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpIt as damengDump } from "./damengDump";
@@ -63,6 +64,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "Genera modello",
@@ -1843,6 +1845,7 @@ export default withEnglishFallback({
       find: "Trova",
       replace: "Sostituisci",
       replaceAll: "Sostituisci Tutto",
+      searchFailed: "Ricerca non riuscita o scaduta. Semplifica l’espressione e riprova.",
       caseSensitive: "Maiuscole/Minuscole",
       regex: "Espressione regolare",
       collapseReplace: "Comprimi sostituzione",
@@ -2433,6 +2436,9 @@ export default withEnglishFallback({
     sortSqlCopied: "Ordinamento SQL copiato",
     resizeSortPanel: "Ridimensiona pannello di ordinamento",
     sortTextView: "Vista testuale dell'ordinamento",
+    freezeFirstColumnGlobally: "Blocca prima colonna globalmente",
+    freezeFirstColumnGloballyHint: "Mantieni bloccata la prima colonna di dati visibile in tutte le tabelle.",
+    globalFirstColumnRemainsFrozen: "la prima colonna resta bloccata globalmente",
     freezeToColumn: "Blocca fino a questa colonna",
     freezeSelectedColumns: "Blocca colonne selezionate ({count})",
     freezeCurrentColumn: "Blocca colonna corrente",
@@ -3328,6 +3334,25 @@ export default withEnglishFallback({
     effortUnsupported: "Questo modello non supporta un'intensità configurabile",
     configNameEmpty: "Il nome della configurazione non può essere vuoto",
     configNameExists: "Il nome della configurazione '{name}' esiste già",
+    ccSwitchProvider: "Importazione configurazioni AI",
+    ccSwitchProviderDescription: "Importa le configurazioni AI da CC-SWITCH in DBX.",
+    ccSwitchImport: "Importa da CC-SWITCH",
+    ccSwitchImporting: "Importazione...",
+    ccSwitchPluginChecking: "Verifica dello stato del plugin CC-SWITCH...",
+    ccSwitchPluginReady: "Il plugin CC-SWITCH è pronto. Puoi importare le configurazioni.",
+    ccSwitchPluginNotInstalledStatus: "Il plugin CC-SWITCH non è installato.",
+    ccSwitchPluginIncompatible: "È stato trovato un plugin CC-SWITCH, ma non è compatibile con questa versione di DBX.",
+    ccSwitchPluginRefresh: "Aggiorna stato",
+    ccSwitchPluginNotInstalled: "Installa prima il plugin CC-SWITCH",
+    ccSwitchImportSuccess: "Importate {count} configurazioni AI da CC-SWITCH",
+    ccSwitchImportPartial: "Importate {count} configurazioni AI da CC-SWITCH; ignorate {skipped}",
+    ccSwitchNoNewConfigs: "Non sono state trovate nuove configurazioni AI utilizzabili di CC-SWITCH",
+    ccSwitchNotInstalled: "Configurazione CC-SWITCH non trovata su questo computer",
+    ccSwitchInvalidDatabase: "Il database di configurazione CC-SWITCH non è supportato",
+    ccSwitchHomeDirectoryFailed: "Impossibile trovare la directory home di CC-SWITCH",
+    ccSwitchOpenFailed: "Impossibile aprire il database di configurazione CC-SWITCH",
+    ccSwitchReadFailed: "Impossibile leggere le configurazioni AI di CC-SWITCH",
+    ccSwitchImportDesktopOnly: "L'importazione di CC-SWITCH è disponibile solo nell'app desktop",
 
     configList: "Lista configurazioni AI",
     addConfig: "Aggiungi configurazione",
@@ -8204,6 +8229,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "Disconnetti connessione barra laterale",
     shortcutOpenDataInNewTab: "Apri dati in una nuova scheda (clic del mouse)",
     shortcutViewTableDdl: "Visualizza DDL tabella",
+    shortcutEditSidebarTableStructure: "Modifica struttura tabella",
     shortcutSendSelectionToAi: "Invia selezione ad AI",
     shortcutToggleAiPanel: "Attiva/disattiva pannello AI",
     shortcutSqlIntentionActions: "Azioni di intento SQL (Espandi * / Qualifica identificatore)",

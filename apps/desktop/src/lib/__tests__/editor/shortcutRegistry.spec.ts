@@ -51,7 +51,7 @@ describe("shortcutRegistry editor actions", () => {
     "foldAll",
     "unfoldAll",
   ];
-  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl"];
+  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl", "editSidebarTableStructure"];
 
   it("registers pagination navigation as unassigned grid shortcuts", () => {
     const paginationActions = [
@@ -459,6 +459,13 @@ describe("shortcutRegistry editor actions", () => {
       expect(definition?.scope).toBe("sidebar");
       expect(DEFAULT_SHORTCUT_SETTINGS[actionId]).toBe(definition?.defaultShortcut);
     }
+  });
+
+  it("registers editSidebarTableStructure F4 as a conflict-free sidebar default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "editSidebarTableStructure");
+    expect(definition).toMatchObject({ scope: "sidebar", defaultShortcut: "F4", labelKey: "settings.shortcutEditSidebarTableStructure" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.editSidebarTableStructure).toBe("F4");
+    expect(findShortcutConflict("editSidebarTableStructure", DEFAULT_SHORTCUT_SETTINGS.editSidebarTableStructure, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
   it("detects conflicts only within sidebar shortcuts", () => {

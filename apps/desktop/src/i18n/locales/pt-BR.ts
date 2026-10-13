@@ -1,4 +1,5 @@
 import { sidebarMenuPtBR as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogPtBR as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpPtBR as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpPtBR as damengDump } from "./damengDump";
@@ -64,6 +65,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "Gerar modelo",
@@ -1844,6 +1846,7 @@ export default withEnglishFallback({
       find: "Localizar",
       replace: "Substituir",
       replaceAll: "Substituir Tudo",
+      searchFailed: "A busca falhou ou excedeu o tempo. Simplifique a expressão e tente novamente.",
       caseSensitive: "Diferenciar maiúsculas/minúsculas",
       regex: "Expressão regular",
       collapseReplace: "Recolher substituição",
@@ -2434,6 +2437,9 @@ export default withEnglishFallback({
     sortSqlCopied: "Ordenação SQL copiada",
     resizeSortPanel: "Redimensionar painel de ordenação",
     sortTextView: "Visualização textual da ordenação",
+    freezeFirstColumnGlobally: "Congelar primeira coluna globalmente",
+    freezeFirstColumnGloballyHint: "Manter congelada a primeira coluna de dados visível em todas as tabelas.",
+    globalFirstColumnRemainsFrozen: "a primeira coluna permanece congelada globalmente",
     freezeToColumn: "Congelar até esta coluna",
     freezeSelectedColumns: "Congelar colunas selecionadas ({count})",
     freezeCurrentColumn: "Congelar coluna atual",
@@ -3328,6 +3334,25 @@ export default withEnglishFallback({
     effortUnsupported: "Este modelo não permite configurar esforço",
     configNameEmpty: "O nome da configuração não pode estar vazio",
     configNameExists: "O nome da configuração '{name}' já existe",
+    ccSwitchProvider: "Importador de configurações de IA",
+    ccSwitchProviderDescription: "Importe configurações de IA do CC-SWITCH para o DBX.",
+    ccSwitchImport: "Importar do CC-SWITCH",
+    ccSwitchImporting: "Importando...",
+    ccSwitchPluginChecking: "Verificando o status do plugin CC-SWITCH...",
+    ccSwitchPluginReady: "O plugin CC-SWITCH está pronto. Você pode importar configurações.",
+    ccSwitchPluginNotInstalledStatus: "O plugin CC-SWITCH não está instalado.",
+    ccSwitchPluginIncompatible: "Um plugin CC-SWITCH foi encontrado, mas é incompatível com esta versão do DBX.",
+    ccSwitchPluginRefresh: "Atualizar status",
+    ccSwitchPluginNotInstalled: "Instale primeiro o plugin CC-SWITCH",
+    ccSwitchImportSuccess: "{count} configuração(ões) de AI importada(s) do CC-SWITCH",
+    ccSwitchImportPartial: "{count} configuração(ões) de AI importada(s) do CC-SWITCH; {skipped} ignorada(s)",
+    ccSwitchNoNewConfigs: "Nenhuma configuração de AI nova e utilizável do CC-SWITCH foi encontrada",
+    ccSwitchNotInstalled: "A configuração do CC-SWITCH não foi encontrada neste computador",
+    ccSwitchInvalidDatabase: "O banco de dados de configuração do CC-SWITCH não é compatível",
+    ccSwitchHomeDirectoryFailed: "Não foi possível localizar o diretório inicial do CC-SWITCH",
+    ccSwitchOpenFailed: "Não foi possível abrir o banco de dados de configuração do CC-SWITCH",
+    ccSwitchReadFailed: "Não foi possível ler as configurações de AI do CC-SWITCH",
+    ccSwitchImportDesktopOnly: "A importação do CC-SWITCH só está disponível no aplicativo desktop",
 
     configList: "Lista de configurações AI",
     addConfig: "Adicionar configuração",
@@ -8202,6 +8227,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "Desconectar conexão da barra lateral",
     shortcutOpenDataInNewTab: "Abrir dados em nova aba (clique do mouse)",
     shortcutViewTableDdl: "Ver DDL da tabela",
+    shortcutEditSidebarTableStructure: "Editar estrutura da tabela",
     shortcutSendSelectionToAi: "Enviar seleção para IA",
     shortcutToggleAiPanel: "Alternar painel de IA",
     shortcutSqlIntentionActions: "Ações de intenção SQL (Expandir * / Qualificar identificador)",

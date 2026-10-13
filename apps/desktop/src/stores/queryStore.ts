@@ -5565,6 +5565,8 @@ export const useQueryStore = defineStore("query", () => {
     clearAutoCommitOpenTransaction(tab);
   }
 
+  const pendingManualTransactionCommits = new WeakMap<QueryTab, { sessionId: string; promise: Promise<void> }>();
+
   async function commitTransaction(id: string) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
@@ -5605,12 +5607,26 @@ export const useQueryStore = defineStore("query", () => {
       return ending;
     }
     const sessionId = tab.txnSessionId;
-    try {
-      await api.commitManualTransaction(sessionId);
-    } finally {
-      // A mode or target switch may have started a replacement transaction.
-      if (tab.txnSessionId === sessionId) clearManualTransactionSession(tab);
-    }
+    const pending = pendingManualTransactionCommits.get(tab);
+    if (pending?.sessionId === sessionId) return pending.promise;
+    let resolveCommit!: () => void;
+    let rejectCommit!: (error: unknown) => void;
+    const committing = new Promise<void>((resolve, reject) => {
+      resolveCommit = resolve;
+      rejectCommit = reject;
+    });
+    const entry = { sessionId, promise: committing };
+    pendingManualTransactionCommits.set(tab, entry);
+    void (async () => {
+      try {
+        await api.commitManualTransaction(sessionId);
+      } finally {
+        // A mode or target switch may have started a replacement transaction.
+        if (tab.txnSessionId === sessionId) clearManualTransactionSession(tab);
+        if (pendingManualTransactionCommits.get(tab) === entry) pendingManualTransactionCommits.delete(tab);
+      }
+    })().then(resolveCommit, rejectCommit);
+    return committing;
   }
 
   async function rollbackTransaction(id: string) {

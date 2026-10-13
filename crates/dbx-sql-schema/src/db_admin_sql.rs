@@ -804,7 +804,13 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
     let structure_sql = if matches!(
         options.database_type,
-        Some(DatabaseType::Mysql | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
+        Some(
+            DatabaseType::Mysql
+                | DatabaseType::Kyuubi
+                | DatabaseType::Impala
+                | DatabaseType::Argo
+                | DatabaseType::SapHana
+        )
     ) {
         format!("CREATE TABLE {target} LIKE {source};")
     } else if options.database_type == Some(DatabaseType::Questdb) {
@@ -979,6 +985,9 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     if matches!(database_type, DatabaseType::Transwarp | DatabaseType::StarRocks) {
         return object_type == DatabaseObjectType::Table;
     }
+    if database_type == DatabaseType::SapHana {
+        return object_type == DatabaseObjectType::Table;
+    }
     if matches!(object_type, DatabaseObjectType::Procedure | DatabaseObjectType::Function) {
         return false;
     }
@@ -1027,6 +1036,14 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
             "ALTER TABLE {} RENAME {};",
             qualified_name(database_type, options.schema.as_deref(), &options.old_name),
             quote_rename_identifier(database_type, &options.new_name)
+        ));
+    }
+
+    if database_type == Some(DatabaseType::SapHana) {
+        return Ok(format!(
+            "RENAME TABLE {} TO {};",
+            qualified_name(database_type, options.schema.as_deref(), &options.old_name),
+            qualified_name(database_type, options.schema.as_deref(), &options.new_name)
         ));
     }
 
@@ -2573,6 +2590,24 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_table_structure_saphana_uses_like_instead_of_ctas() {
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::SapHana),
+                schema: Some("APP".to_string()),
+                source_name: "orders".to_string(),
+                target_name: "orders_copy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+                primary_key_columns: vec![],
+                primary_key_constraint_name: None,
+                identifier_quote: None,
+            }),
+            "CREATE TABLE \"APP\".\"orders_copy\" LIKE \"APP\".\"orders\";"
+        );
+    }
+
+    #[test]
     fn copy_table_data_vastbase_keeps_insert_and_target_quoting() {
         for normalize_new_target_name in [false, true] {
             for columns in [None, Some(vec![]), Some(vec!["编\"号".to_string(), "备注".to_string()])] {
@@ -3176,6 +3211,22 @@ mod tests {
             })
             .is_err());
         }
+    }
+
+    #[test]
+    fn builds_saphana_table_rename_sql() {
+        let options = RenameObjectSqlOptions {
+            database_type: Some(DatabaseType::SapHana),
+            object_type: DatabaseObjectType::Table,
+            schema: Some("APP".to_string()),
+            old_name: "orders".to_string(),
+            new_name: "orders_copy".to_string(),
+        };
+        assert!(supports_object_rename(options.database_type, options.object_type));
+        assert_eq!(
+            build_rename_object_sql(options).unwrap(),
+            "RENAME TABLE \"APP\".\"orders\" TO \"APP\".\"orders_copy\";"
+        );
     }
 
     #[test]

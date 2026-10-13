@@ -43,12 +43,12 @@ pub use marketplace::{
 
 pub use manifest::{
     current_plugin_target, resolve_safe_plugin_path, PluginBackendEntrypoint, PluginBackendTransport,
-    PluginCompatibility, PluginConnectionActionContribution, PluginConnectionActionVariant, PluginConnectionActionWhen,
-    PluginConnectionCapability, PluginConnectionProviderContribution, PluginContribution, PluginDriverManifest,
-    PluginEngines, PluginEntrypoints, PluginFieldCondition, PluginFieldConditionClause, PluginFieldConditionLiteral,
-    PluginFilesystemCapability, PluginFilesystemProviderContribution, PluginFormFieldBinding,
-    PluginFormFieldDefinition, PluginFormFieldOption, PluginFormFieldPicker, PluginFormFieldPickerKind,
-    PluginFormFieldType, PluginManifest, PluginUiEntrypoint, PluginWorkbenchContribution,
+    PluginCapabilityManifest, PluginCompatibility, PluginConnectionActionContribution, PluginConnectionActionVariant,
+    PluginConnectionActionWhen, PluginConnectionCapability, PluginConnectionProviderContribution, PluginContribution,
+    PluginDriverManifest, PluginEngines, PluginEntrypoints, PluginFieldCondition, PluginFieldConditionClause,
+    PluginFieldConditionLiteral, PluginFilesystemCapability, PluginFilesystemProviderContribution,
+    PluginFormFieldBinding, PluginFormFieldDefinition, PluginFormFieldOption, PluginFormFieldPicker,
+    PluginFormFieldPickerKind, PluginFormFieldType, PluginManifest, PluginUiEntrypoint, PluginWorkbenchContribution,
     PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD, PLUGIN_CONNECTION_DISCONNECT_METHOD,
     PLUGIN_CONNECTION_TEST_METHOD, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_HOST_FEATURES,
     SUPPORTED_PLUGIN_MANIFEST_VERSION, SUPPORTED_PLUGIN_PERMISSIONS, SUPPORTED_PLUGIN_PROTOCOL_VERSION,
@@ -268,6 +268,82 @@ impl PluginRegistry {
 
     pub fn find_plugin(&self, plugin_id: &str) -> Result<Option<InstalledPlugin>, String> {
         Ok(self.list_installed()?.into_iter().find(|plugin| plugin.manifest.id == plugin_id))
+    }
+
+    pub fn find_capability(&self, capability_id: &str) -> Result<Option<InstalledPlugin>, String> {
+        Ok(self.list_installed()?.into_iter().find(|plugin| {
+            plugin.compatibility.compatible
+                && plugin.manifest.capabilities.iter().any(|capability| capability.id == capability_id)
+        }))
+    }
+
+    pub fn find_capability_for_plugin(
+        &self,
+        plugin_id: &str,
+        capability_id: &str,
+    ) -> Result<Option<InstalledPlugin>, String> {
+        Ok(self.find_plugin(plugin_id)?.filter(|plugin| {
+            plugin.compatibility.compatible
+                && plugin.manifest.capabilities.iter().any(|capability| capability.id == capability_id)
+        }))
+    }
+
+    pub async fn invoke_capability<T>(
+        &self,
+        capability_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        let plugin = self
+            .find_capability(capability_id)?
+            .ok_or_else(|| format!("Plugin capability '{capability_id}' is not installed"))?;
+        self.invoke_capability_on_plugin(plugin, capability_id, method, params).await
+    }
+
+    pub async fn invoke_capability_for_plugin<T>(
+        &self,
+        plugin_id: &str,
+        capability_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        let plugin = self
+            .find_capability_for_plugin(plugin_id, capability_id)?
+            .ok_or_else(|| format!("Plugin '{plugin_id}' capability '{capability_id}' is not installed"))?;
+        self.invoke_capability_on_plugin(plugin, capability_id, method, params).await
+    }
+
+    async fn invoke_capability_on_plugin<T>(
+        &self,
+        plugin: InstalledPlugin,
+        capability_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        ensure_plugin_compatible(&plugin)?;
+        let env = PluginRuntimeEnv::default().with_plugin_data_dir(&self.plugin_data_dir(&plugin.manifest.id));
+        let session = PluginSidecarSession::start(plugin, self.app_version.clone(), env).await?;
+        let result =
+            session.invoke_with_timeout(method, params, Some(capability_id), Some(PLUGIN_REQUEST_TIMEOUT)).await;
+        match (result, session.shutdown().await) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(invoke_error), Ok(())) => Err(invoke_error),
+            (Ok(_), Err(shutdown_error)) => {
+                Err(format!("Plugin capability invocation completed but shutdown failed: {shutdown_error}"))
+            }
+            (Err(invoke_error), Err(shutdown_error)) => {
+                Err(format!("{invoke_error}; additionally failed to stop plugin: {shutdown_error}"))
+            }
+        }
     }
 
     pub async fn invoke_driver<T>(&self, driver_id: &str, method: &str, params: serde_json::Value) -> Result<T, String>
@@ -714,12 +790,14 @@ for line in sys.stdin:
     request = json.loads(line)
     params = request.get('params', {})
     if request['method'] == 'cancelStatement':
-        with open(os.path.join(root, 'cancelled'), 'w') as out:
+        with open(os.path.join(root, 'cancelled.tmp'), 'w') as out:
             out.write(params.get('cancelToken', ''))
+        os.replace(os.path.join(root, 'cancelled.tmp'), os.path.join(root, 'cancelled'))
         print(json.dumps({'id': request['id'], 'result': {'cancelled': True}}), flush=True)
     elif request['method'] == 'executeQuery' and params.get('sql') == 'slow':
-        with open(os.path.join(root, 'running'), 'w') as out:
+        with open(os.path.join(root, 'running.tmp'), 'w') as out:
             out.write(params.get('cancelToken', ''))
+        os.replace(os.path.join(root, 'running.tmp'), os.path.join(root, 'running'))
     else:
         print(json.dumps({'id': request['id'], 'result': {'token': params.get('cancelToken')}}), flush=True)
 "#,

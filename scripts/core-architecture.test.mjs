@@ -65,6 +65,7 @@ test("core owns application orchestration in real business directories", () => {
     "schema/mod.rs",
     "schema/table_structure_sql/sqlite_rebuild.rs",
     "data/transfer.rs",
+    "data/transfer_runner.rs",
     "data/table_import.rs",
     "data/docs/export.rs",
     "data/cloudflare_d1/import.rs",
@@ -82,10 +83,41 @@ test("core owns application orchestration in real business directories", () => {
     assert.ok(existsSync(path.join(root, "crates/dbx-core/src", name)), `missing owned business source: ${name}`);
   }
   const rootSources = readdirSync(path.join(root, "crates/dbx-core/src")).filter((name) => name.endsWith(".rs"));
-  assert.deepEqual(rootSources, ["lib.rs"]);
+  assert.deepEqual(rootSources, ["cc_switch.rs", "lib.rs"]);
   assert.match(read("crates/dbx-core/src/ai/mod.rs"), /pub use dbx_ai_provider::ai::\*/);
   assert.match(read("crates/dbx-core/src/db/mod.rs"), /pub use crate::data::cloudflare_d1/);
   assert.ok(!existsSync(path.join(root, "crates/dbx-core/build.rs")));
+});
+
+test("transfer entrypoints delegate orchestration to the core runner", () => {
+  const entrypoints = [
+    "src-tauri/src/commands/transfer.rs",
+    "crates/dbx-web/src/routes/transfer.rs",
+  ];
+  const orchestrationCalls = [
+    "rename_tables_to_backup",
+    "transfer_postgres_schema_dependencies",
+    "clear_foreign_key_linked_overwrite_targets",
+    "transfer_table_with_result",
+    "transfer_schema_objects",
+    "drop_backup_tables",
+  ];
+
+  for (const entrypoint of entrypoints) {
+    const source = read(entrypoint);
+    assert.match(source, /transfer_runner::run_transfer\(/, `${entrypoint} must use the shared transfer runner`);
+    for (const call of orchestrationCalls) {
+      const directCall = new RegExp(`(?:dbx_core::)?transfer::${call}\\(`);
+      assert.doesNotMatch(source, directCall, `${entrypoint} must not own ${call} orchestration`);
+    }
+  }
+});
+
+test("database comparison admission comes from the shared driver manifest", () => {
+  const source = read("apps/desktop/src/lib/database/databaseCompareCapabilities.ts");
+  assert.match(source, /supportsDatabaseCompareMode\(type, mode\)/);
+  assert.doesNotMatch(source, /new Set<DatabaseType>/);
+  assert.doesNotMatch(source, /SQL_COMPARE_TYPES/);
 });
 
 test("core forwards capability flags without enabling driver defaults or test hooks", () => {

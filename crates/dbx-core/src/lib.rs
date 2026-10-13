@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod ai;
+pub mod cc_switch;
 pub mod data;
 pub mod host;
 pub mod persistence;
@@ -100,6 +101,7 @@ pub use data::table_export;
 pub use data::table_import;
 pub use data::transfer;
 pub use data::transfer_rebuild;
+pub use data::transfer_runner;
 pub use dbx_drivers::ssh_config;
 pub use dbx_formats::sql_file_zip_package;
 pub use dbx_formats::temporal_format;

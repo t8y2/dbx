@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 300
 dbType: vastbase
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Vastbase
 label: 海量 Vastbase
 dialect: Vastbase

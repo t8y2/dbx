@@ -1,4 +1,5 @@
 import { sidebarMenuEn as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogEn as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { redisGroupingEn as redisGrouping } from "./redisGrouping";
 import docs from "./docs/en";
 import { dataDictionaryEn as dataDictionary } from "./dataDictionaryMessages";
@@ -63,6 +64,7 @@ const consul = {
 };
 
 export default {
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "Generate model",
@@ -1985,6 +1987,7 @@ export default {
       find: "Find",
       replace: "Replace",
       replaceAll: "Replace All",
+      searchFailed: "Search failed or timed out. Simplify the expression and try again.",
       caseSensitive: "Case sensitive",
       regex: "Regular expression",
       collapseReplace: "Collapse replace",
@@ -2724,6 +2727,9 @@ export default {
     sortSqlCopied: "SQL sort copied",
     resizeSortPanel: "Resize sort panel",
     sortTextView: "Sort text view",
+    freezeFirstColumnGlobally: "Freeze First Column Globally",
+    freezeFirstColumnGloballyHint: "Keep the first visible data column frozen in all data grids.",
+    globalFirstColumnRemainsFrozen: "first column remains globally frozen",
     freezeToColumn: "Freeze to This Column",
     freezeSelectedColumns: "Freeze Selected Columns ({count})",
     freezeCurrentColumn: "Freeze Current Column",
@@ -3615,6 +3621,25 @@ export default {
     deepLinkClipboardEmpty: "The clipboard does not contain an API key. Enter it manually.",
     deepLinkClipboardInvalid: "The clipboard does not contain a valid single-line API key. Enter it manually.",
     deepLinkClipboardReadFailed: "Failed to read the clipboard: {message}",
+    ccSwitchProvider: "AI Config Importer",
+    ccSwitchProviderDescription: "Import AI configurations from CC-SWITCH into DBX.",
+    ccSwitchImport: "Import from CC-SWITCH",
+    ccSwitchImporting: "Importing...",
+    ccSwitchPluginChecking: "Checking CC-SWITCH plugin status...",
+    ccSwitchPluginReady: "CC-SWITCH plugin is ready. You can import configurations.",
+    ccSwitchPluginNotInstalledStatus: "CC-SWITCH plugin is not installed.",
+    ccSwitchPluginIncompatible: "A CC-SWITCH plugin was found, but it is incompatible with this DBX version.",
+    ccSwitchPluginRefresh: "Refresh status",
+    ccSwitchPluginNotInstalled: "Install the CC-SWITCH plugin first",
+    ccSwitchImportSuccess: "Imported {count} AI config(s) from CC-SWITCH",
+    ccSwitchImportPartial: "Imported {count} AI config(s) from CC-SWITCH; skipped {skipped}",
+    ccSwitchNoNewConfigs: "No new usable CC-SWITCH AI configs were found",
+    ccSwitchNotInstalled: "CC-SWITCH configuration was not found on this computer",
+    ccSwitchInvalidDatabase: "The CC-SWITCH configuration database is not supported",
+    ccSwitchHomeDirectoryFailed: "Unable to locate the home directory for CC-SWITCH",
+    ccSwitchOpenFailed: "Unable to open the CC-SWITCH configuration database",
+    ccSwitchReadFailed: "Unable to read CC-SWITCH AI configurations",
+    ccSwitchImportDesktopOnly: "CC-SWITCH import is only available in the desktop app",
 
     configList: "AI Config List",
     addConfig: "Add Config",
@@ -8241,9 +8266,9 @@ export default {
     noDifferences: "Data is identical, no sync SQL needed",
     syncSuccess: "Data sync executed successfully",
     truncatedTitle: "Some tables were not compared in full",
-    truncatedHint: "Tables with more rows than a single compare can read were compared only over their first rows, so added, modified, or deleted rows beyond that point are not reported. Narrow the range with a filter and compare in batches.",
+    truncatedHint: "Tables above the single-compare limit were inspected only over a subset, so changes outside it are not reported. Synchronization SQL is disabled for these results; narrow the range and run complete comparisons in batches.",
     truncatedTable: "{table}: {source} source rows, {target} target rows, compared the first {budget} rows only",
-    truncatedBadge: "Compared the first {budget} rows only",
+    truncatedBadge: "Inspected a subset (up to {budget} rows per side); synchronization disabled",
   },
   settings: {
     historyRetentionLimit: "Query history retention",
@@ -9273,6 +9298,7 @@ export default {
     shortcutDisconnectSidebarConnection: "Disconnect sidebar connection",
     shortcutOpenDataInNewTab: "Open data in new tab (mouse click)",
     shortcutViewTableDdl: "View table DDL",
+    shortcutEditSidebarTableStructure: "Edit table structure",
     shortcutSendSelectionToAi: "Send selection to AI",
     shortcutToggleAiPanel: "Toggle AI panel",
     shortcutSqlIntentionActions: "SQL Intention Actions (Expand * / Qualify Identifier)",

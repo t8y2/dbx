@@ -193,16 +193,33 @@ function encodeCredential(value: string): string {
   return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-function buildUserInfo(config: ConnectionUrlCopyConfig, includePassword: boolean): string {
+/**
+ * Characters an Oracle `oracle://` credential keeps verbatim: the RFC 3986
+ * unreserved and sub-delim sets, plus `^`.
+ *
+ * Oracle has no URL client, so this string is a DBX interchange format and
+ * Oracle never percent-decodes credentials (the same reason the Oracle JDBC
+ * item below keeps them literal, issue #11612). Emitting `%5E` for `^` made
+ * users read a password that differs from the one they typed (issue #10057
+ * follow-up), while `%`, the userinfo/path delimiters and whitespace must stay
+ * escaped for the copy to import as the same credential.
+ */
+const ORACLE_URL_CREDENTIAL_LITERAL_CHARACTERS = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;=^");
+
+function encodeOracleUrlCredential(value: string): string {
+  return Array.from(value, (character) => (ORACLE_URL_CREDENTIAL_LITERAL_CHARACTERS.has(character) ? character : encodeURIComponent(character))).join("");
+}
+
+function buildUserInfo(config: ConnectionUrlCopyConfig, includePassword: boolean, encode: (value: string) => string = encodeCredential): string {
   const user = effectiveUsername(config);
   const password = config.password ?? "";
   if (includePassword) {
-    if (user && password) return `${encodeCredential(user)}:${encodeCredential(password)}@`;
-    if (user) return `${encodeCredential(user)}@`;
-    if (password) return `:${encodeCredential(password)}@`;
+    if (user && password) return `${encode(user)}:${encode(password)}@`;
+    if (user) return `${encode(user)}@`;
+    if (password) return `:${encode(password)}@`;
     return "";
   }
-  return user ? `${encodeCredential(user)}@` : "";
+  return user ? `${encode(user)}@` : "";
 }
 
 function standardUrlScheme(config: ConnectionUrlCopyConfig): string | null {
@@ -255,7 +272,7 @@ function buildStandardUrl(config: ConnectionUrlCopyConfig, options: ConnectionUr
   if (!host) return null;
 
   const database = effectiveDatabase(config, options);
-  const userInfo = buildUserInfo(config, options.includePassword);
+  const userInfo = buildUserInfo(config, options.includePassword, config.db_type === "oracle" ? encodeOracleUrlCredential : encodeCredential);
   const hostPart = formatHostForUrl(host);
   const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
   const path = database ? `/${encodeURIComponent(database)}` : "";

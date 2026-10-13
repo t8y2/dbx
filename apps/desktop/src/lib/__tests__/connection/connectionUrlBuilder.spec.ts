@@ -86,6 +86,24 @@ describe("buildConnectionUrlCopy standard URL", () => {
     expect(parseConnectionUrl(text ?? "").password).toBe(ASCII_SYMBOLS);
   });
 
+  it("keeps Oracle URL credentials readable instead of escaping `^` as `%5E`", () => {
+    const oracle = config({ db_type: "oracle", host: "10.89.67.210", port: 1521, username: "GSU_ZXQ", password: "W^j.U.ZUm5Th", database: "optpdb" });
+    const text = buildConnectionUrlCopy(oracle, "urlWithPassword");
+    expect(text).toBe("oracle://GSU_ZXQ:W^j.U.ZUm5Th@10.89.67.210:1521/optpdb");
+    expect(parseConnectionUrl(text ?? "").password).toBe("W^j.U.ZUm5Th");
+  });
+
+  it("still escapes the Oracle URL credentials that would change how the URL is read", () => {
+    const oracle = config({ db_type: "oracle", host: "ora.example.com", port: 1521, username: "app_user", password: "p^ss%40#y@x", database: "ORCLPDB1" });
+    const text = buildConnectionUrlCopy(oracle, "urlWithPassword");
+    expect(text).toBe("oracle://app_user:p^ss%2540%23y%40x@ora.example.com:1521/ORCLPDB1");
+    expect(parseConnectionUrl(text ?? "").password).toBe("p^ss%40#y@x");
+  });
+
+  it("keeps the full percent-encoding for dialects whose URL a driver consumes", () => {
+    expect(buildConnectionUrlCopy(config({ password: "W^j.U" }), "urlWithPassword")).toBe("postgresql://app_user:W%5Ej.U@db.example.com:5432/appdb");
+  });
+
   it("preserves credentials that already look percent-encoded", () => {
     const password = "%25%40%5E";
     const text = buildConnectionUrlCopy(config({ password }), "urlWithPassword");

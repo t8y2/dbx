@@ -147,6 +147,8 @@ function flattenMenuItem(item: ContextMenuItem, prefix = ""): ContextMenuItem[] 
     flattenMenuItem(
       {
         ...child,
+        icon: child.icon ?? item.icon,
+        iconClass: child.iconClass ?? (child.icon ? undefined : item.iconClass),
         variant: child.variant ?? item.variant,
         disabled: () => (typeof item.disabled === "function" ? item.disabled() : !!item.disabled) || (typeof child.disabled === "function" ? child.disabled() : !!child.disabled),
       },

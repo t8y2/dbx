@@ -22,5 +22,6 @@ describe("shortcut record-keys locale parity", () => {
 
     expect(declaredString(source, "shortcutRecordKeys"), `${name}: settings.shortcutRecordKeys is missing`).toBeTruthy();
     expect(declaredString(source, "shortcutRecordKeysRecordingHint"), `${name}: settings.shortcutRecordKeysRecordingHint is missing`).toBeTruthy();
+    expect(declaredString(source, "shortcutRecordKeysWindowInactive"), `${name}: settings.shortcutRecordKeysWindowInactive is missing`).toBeTruthy();
   });
 });

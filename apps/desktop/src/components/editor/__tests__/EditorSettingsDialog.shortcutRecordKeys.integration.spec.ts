@@ -325,8 +325,12 @@ describe("EditorSettingsDialog shortcut key recording (behaviour)", () => {
       button.blur();
       await flushAsyncUpdates();
       expect(button.getAttribute("aria-pressed")).toBe("true");
+      // 窗口不在前台时按键会被别的应用先抢走：提示行必须换文案，否则静默待命看起来
+      // 就像功能失灵（#11787 的实测反馈）。
+      expect(shortcutsPane(host).textContent).toContain("settings.shortcutRecordKeysWindowInactive");
+      expect(shortcutsPane(host).textContent).not.toContain("settings.shortcutRecordKeysRecordingHint");
 
-      // 回到 DBX：焦点自动还给录入按钮，接着录。
+      // 回到 DBX：焦点自动还给录入按钮，提示回到正常文案，接着录。
       window.dispatchEvent(new Event("focus"));
       await flushAsyncUpdates();
     } finally {
@@ -335,6 +339,7 @@ describe("EditorSettingsDialog shortcut key recording (behaviour)", () => {
 
     expect(button.getAttribute("aria-pressed")).toBe("true");
     expect(document.activeElement).toBe(button);
+    expect(shortcutsPane(host).textContent).toContain("settings.shortcutRecordKeysRecordingHint");
 
     pressKeys(button, { key: "k", ctrlKey: true, shiftKey: true });
     await flushAsyncUpdates();

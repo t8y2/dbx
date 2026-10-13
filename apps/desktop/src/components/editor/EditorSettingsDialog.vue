@@ -2204,6 +2204,9 @@ const shortcutSearchQuery = ref("");
 // #11787：快捷键页签的「键盘录入」态。录入结果写进上面同一个搜索框，因此过滤、
 // 冲突徽章、作用域分组、空态全部沿用既有管线，不新增第二套过滤口径。
 const shortcutRecording = ref(false);
+// 录入态下窗口是否处于激活状态。窗口不在前台时按下的键会被其它应用（或系统）先拿走，
+// DBX 收不到任何事件——提示行必须把这件事说出来，否则「静默待命」看起来就是功能失灵。
+const shortcutRecordingWindowActive = ref(true);
 // 录入态靠「焦点元素带 data-shortcut-recorder」让 App.vue 的两个 capture 阶段
 // 全局快捷键处理器让路（见 App.vue 的 handleGlobalSearchKeydownCapture）。属性只在
 // 录入态渲染：非录入时焦点停在这个按钮上的行为与普通按钮完全一致。
@@ -3344,7 +3347,12 @@ function onShortcutRecorderBlur() {
   stopShortcutRecording();
 }
 
+function onShortcutRecordingWindowBlur() {
+  shortcutRecordingWindowActive.value = false;
+}
+
 function onShortcutRecordingWindowFocus() {
+  shortcutRecordingWindowActive.value = true;
   if (!shortcutRecording.value) return;
   void nextTick().then(() => {
     if (!shortcutRecording.value) return;
@@ -5368,8 +5376,9 @@ onMounted(() => {
   window.addEventListener("pointerdown", modifierDoubleTapRecorder.cancel, true);
   window.addEventListener("compositionstart", modifierDoubleTapRecorder.cancel, true);
   // #11787：系统快捷键（Win+*、Alt+Tab、系统保留热键）把窗口焦点带走后，录入态要
-  // 留着，回到 DBX 时再把焦点还给录入按钮。
+  // 留着，回到 DBX 时再把焦点还给录入按钮；同时把「窗口不在前台」这件事显示出来。
   window.addEventListener("focus", onShortcutRecordingWindowFocus);
+  window.addEventListener("blur", onShortcutRecordingWindowBlur);
   void refreshWebDavPasswordStatus();
   checkLayoutDescTruncation();
   initTruncationObservers();
@@ -5382,6 +5391,7 @@ onUnmounted(() => {
   window.removeEventListener("pointerdown", modifierDoubleTapRecorder.cancel, true);
   window.removeEventListener("compositionstart", modifierDoubleTapRecorder.cancel, true);
   window.removeEventListener("focus", onShortcutRecordingWindowFocus);
+  window.removeEventListener("blur", onShortcutRecordingWindowBlur);
   modifierDoubleTapRecorder.reset();
   clearThemePaletteOptionPreview();
   clearUiFontOptionPreview();
@@ -9729,9 +9739,10 @@ onUnmounted(() => {
               </div>
 
               <!-- 录入态的操作提示常驻一条：此时焦点在录入按钮上，tooltip 不可用，
-                   Esc/Backspace 这两个控制键必须让用户看得见。 -->
-              <p v-if="shortcutRecording" class="rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs text-muted-foreground" aria-live="polite">
-                {{ t("settings.shortcutRecordKeysRecordingHint") }}
+                   Esc/Backspace 这两个控制键必须让用户看得见；窗口不在前台时提示要换
+                   成「按键会被别的应用先抢走」，否则静默待命看起来就是功能失灵。 -->
+              <p v-if="shortcutRecording" class="rounded-md border px-3 py-1.5 text-xs" :class="shortcutRecordingWindowActive ? 'border-primary/30 bg-primary/5 text-muted-foreground' : 'border-warning/40 bg-warning/10 text-warning'" aria-live="polite">
+                {{ shortcutRecordingWindowActive ? t("settings.shortcutRecordKeysRecordingHint") : t("settings.shortcutRecordKeysWindowInactive") }}
               </p>
 
               <div v-if="filteredShortcutDefinitions.length === 0" class="rounded-md border border-border/70 px-3 py-8 text-center text-sm text-muted-foreground">

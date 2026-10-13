@@ -176,7 +176,7 @@ struct SqlDialectProfile {
     supports_mysql_routine_blocks: bool,
     supports_dollar_quoted_strings: bool,
     supports_postgres_dollar_quoted_routines: bool,
-    supports_hana_do_blocks: bool,
+    supports_hana_script_blocks: bool,
     supports_go_batch_separator: bool,
     keeps_sqlserver_module_batch_at_cursor: bool,
     preserves_tdsql_leading_directives: bool,
@@ -199,7 +199,7 @@ impl Default for SqlDialectProfile {
             supports_mysql_routine_blocks: false,
             supports_dollar_quoted_strings: true,
             supports_postgres_dollar_quoted_routines: false,
-            supports_hana_do_blocks: false,
+            supports_hana_script_blocks: false,
             supports_go_batch_separator: false,
             keeps_sqlserver_module_batch_at_cursor: false,
             preserves_tdsql_leading_directives: false,
@@ -351,7 +351,7 @@ impl SqlDialectProfile {
     }
 
     fn sap_hana() -> Self {
-        Self { supports_hana_do_blocks: true, ..Self::default() }
+        Self { supports_hana_script_blocks: true, ..Self::default() }
     }
 
     fn is_mysql_compatible_database(db_type: DatabaseType) -> bool {
@@ -882,9 +882,11 @@ impl SqlStatementSplitter {
                         if oracle_plsql_block_is_complete(&self.buffer) {
                             self.push_current_statement(&mut statements);
                         }
-                    } else if self.options.profile.supports_hana_do_blocks && starts_with_hana_do_block(&self.buffer) {
+                    } else if self.options.profile.supports_hana_script_blocks
+                        && starts_with_hana_script_block(&self.buffer)
+                    {
                         self.buffer.push(ch);
-                        if hana_do_block_is_complete(&self.buffer) {
+                        if hana_script_block_is_complete(&self.buffer) {
                             self.push_current_statement(&mut statements);
                         }
                     } else {
@@ -1258,7 +1260,7 @@ fn split_statement_range_at_blank_lines(
     if keeps_oracle_style_block_together(options, &statement.text) {
         return vec![statement.clone()];
     }
-    if options.profile.supports_hana_do_blocks && starts_with_hana_do_block(&statement.text) {
+    if options.profile.supports_hana_script_blocks && starts_with_hana_script_block(&statement.text) {
         return vec![statement.clone()];
     }
 
@@ -1308,7 +1310,8 @@ fn split_statement_range_at_blank_lines(
 }
 
 fn starts_with_soft_statement_keyword(sql: &str, options: SqlParsingOptions) -> bool {
-    if options.profile.supports_hana_do_blocks && starts_with_executable_sql_keyword_with_options(sql, &["DO"], options)
+    if options.profile.supports_hana_script_blocks
+        && starts_with_executable_sql_keyword_with_options(sql, &["DO"], options)
     {
         return true;
     }
@@ -1513,8 +1516,10 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                             continue;
                         }
                         push_statement_range(&mut ranges, sql, start, i + ch.len_utf8(), options);
-                    } else if options.profile.supports_hana_do_blocks && starts_with_hana_do_block(&sql[start..i]) {
-                        if !hana_do_block_is_complete(&sql[start..i + ch.len_utf8()]) {
+                    } else if options.profile.supports_hana_script_blocks
+                        && starts_with_hana_script_block(&sql[start..i])
+                    {
+                        if !hana_script_block_is_complete(&sql[start..i + ch.len_utf8()]) {
                             i += ch.len_utf8();
                             continue;
                         }
@@ -2945,25 +2950,49 @@ fn oracle_plsql_block_is_complete(sql: &str) -> bool {
     OraclePlSqlBlock::parse(sql).is_complete()
 }
 
-fn starts_with_hana_do_block(sql: &str) -> bool {
-    HanaDoBlock::parse(sql).starts_block()
+fn starts_with_hana_script_block(sql: &str) -> bool {
+    HanaScriptBlock::parse(sql).starts_block()
 }
 
-fn hana_do_block_is_complete(sql: &str) -> bool {
-    HanaDoBlock::parse(sql).is_complete()
+fn hana_script_block_is_complete(sql: &str) -> bool {
+    HanaScriptBlock::parse(sql).is_complete()
 }
 
-struct HanaDoBlock {
+struct HanaScriptBlock {
     tokens: Vec<OraclePlSqlToken>,
 }
 
-impl HanaDoBlock {
+impl HanaScriptBlock {
     fn parse(sql: &str) -> Self {
         Self { tokens: oracle_plsql_tokens(sql) }
     }
 
     fn starts_block(&self) -> bool {
-        self.tokens.first().is_some_and(|token| token.is_word("DO"))
+        let Some(first) = self.tokens.first().and_then(OraclePlSqlToken::as_word) else {
+            return false;
+        };
+        if first == "DO" {
+            return true;
+        }
+        let mut index = 1;
+        if first == "CREATE" && self.tokens.get(index).is_some_and(|token| token.is_word("OR")) {
+            if self.tokens.get(index + 1).is_some_and(|token| token.is_word("REPLACE")) {
+                index += 2;
+            }
+        }
+        let Some(object_type) = self.tokens.get(index).and_then(OraclePlSqlToken::as_word) else {
+            return false;
+        };
+        if first != "CREATE" && first != "ALTER" {
+            return false;
+        }
+        if !matches!(object_type, "PROCEDURE" | "FUNCTION" | "TRIGGER") {
+            return false;
+        }
+        // HANA also accepts ALTER PROCEDURE ... RECOMPILE. Only hold a statement
+        // as a script block once its SQLScript body is present, otherwise a plain
+        // metadata/compilation ALTER would never flush at its semicolon.
+        self.tokens.iter().any(|token| token.is_word("BEGIN"))
     }
 
     fn is_complete(&self) -> bool {
@@ -4679,7 +4708,7 @@ SELECT 2;";
         assert!(!default.supports_mysql_routine_blocks);
         assert!(!default.supports_oracle_plsql_blocks);
         assert!(!default.supports_oracle_style_routine_bodies);
-        assert!(!default.supports_hana_do_blocks);
+        assert!(!default.supports_hana_script_blocks);
         assert!(!default.supports_slash_line_block_delimiter);
         assert!(!default.supports_go_batch_separator);
         assert!(!default.keeps_sqlserver_module_batch_at_cursor);
@@ -4755,7 +4784,7 @@ SELECT 2;";
 
         let sap_hana = SqlDialectProfile::for_database_type(DatabaseType::SapHana);
         assert_eq!(sap_hana, SqlDialectProfile::sap_hana());
-        assert!(sap_hana.supports_hana_do_blocks);
+        assert!(sap_hana.supports_hana_script_blocks);
     }
 
     #[test]
@@ -4770,6 +4799,30 @@ SELECT 2 FROM DUMMY;";
         assert_eq!(
             split_sql_statements_for_database(sql, DatabaseType::SapHana),
             vec!["DO\nBEGIN\n  SELECT 1 AS \"Result\" FROM DUMMY;\nEND;", "SELECT 2 FROM DUMMY"]
+        );
+    }
+
+    #[test]
+    fn sap_hana_split_keeps_alter_procedure_body_together() {
+        let sql = "ALTER PROCEDURE PUBLIC.P\nLANGUAGE SQLSCRIPT\nSQL SECURITY INVOKER\nAS\nBEGIN\n  DECLARE v INT;\n  SELECT 1 INTO v FROM DUMMY;\nEND;\nSELECT 2 FROM DUMMY;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SapHana),
+            vec![
+                "ALTER PROCEDURE PUBLIC.P\nLANGUAGE SQLSCRIPT\nSQL SECURITY INVOKER\nAS\nBEGIN\n  DECLARE v INT;\n  SELECT 1 INTO v FROM DUMMY;\nEND;",
+                "SELECT 2 FROM DUMMY"
+            ]
+        );
+    }
+
+    #[test]
+    fn sap_hana_plain_alter_procedure_still_flushes_at_semicolon() {
+        assert_eq!(
+            split_sql_statements_for_database(
+                "ALTER PROCEDURE PUBLIC.P RECOMPILE; SELECT 1 FROM DUMMY;",
+                DatabaseType::SapHana
+            ),
+            vec!["ALTER PROCEDURE PUBLIC.P RECOMPILE", "SELECT 1 FROM DUMMY"]
         );
     }
 

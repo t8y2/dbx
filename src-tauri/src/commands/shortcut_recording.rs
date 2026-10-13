@@ -12,6 +12,7 @@
 //! 非 Windows 平台没有这层拦截（WKWebView / WebKitGTK 不消费这些键），命令是空实现。
 
 /// 录入态与「浏览器加速键是否开启」是互斥的：录入时关掉，其余时间保持 WebView2 默认。
+#[cfg(any(target_os = "windows", test))]
 fn browser_accelerator_keys_enabled(recording: bool) -> bool {
     !recording
 }

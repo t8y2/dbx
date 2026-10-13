@@ -91,6 +91,7 @@
     "@vue-flow/core": "^1.48.2",
     "@vue-flow/minimap": "^1.5.4",
     "@vueuse/core": "^14.2.1",
+    "acorn": "^8.17.0",
     "cbor-x": "^1.6.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

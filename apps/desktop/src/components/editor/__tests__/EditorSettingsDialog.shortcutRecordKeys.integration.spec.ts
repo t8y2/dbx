@@ -326,6 +326,34 @@ describe("EditorSettingsDialog shortcut key recording (behaviour)", () => {
     expect(searchInput(host).value).toBe("↵");
   });
 
+  it("holds focus on the recorder for combinations other surfaces would act on", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+    const button = recorderButton(host);
+
+    button.click();
+    await flushAsyncUpdates();
+    // 进入录入态要把焦点显式放到按钮上（macOS 点击按钮不给焦点，而录入的让路判定
+    // 只看焦点元素）。
+    expect(document.activeElement).toBe(button);
+
+    // Ctrl+P（快速打开）、Ctrl+F（焦点搜索）、Ctrl+W（关闭标签页）都是默认全局绑定：
+    // 录入它们时组合键必须被吞掉、焦点留在录入按钮上、文本照常进搜索框，录入态继续。
+    for (const [init, expected] of [
+      [{ key: "p", ctrlKey: true }, "Ctrl + P"],
+      [{ key: "f", ctrlKey: true }, "Ctrl + F"],
+      [{ key: "w", ctrlKey: true }, "Ctrl + W"],
+    ] as const) {
+      const event = pressKeys(button, init);
+      await flushAsyncUpdates();
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(button);
+      expect(button.getAttribute("aria-pressed")).toBe("true");
+      expect(searchInput(host).value).toBe(expected);
+    }
+  });
+
   it("leaves plain text search untouched after recording", async () => {
     hoisted.shortcuts = defaults();
     const host = await mountShortcutsTab();

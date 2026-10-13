@@ -23,6 +23,16 @@ export function isShortcutEditingTarget(target: EventTarget | null): boolean {
   return target instanceof Element && !!target.closest(SHORTCUT_EDITING_TARGET_SELECTOR);
 }
 
+/**
+ * 按键事件是否发生在快捷键录入表面上。capture 阶段的全局快捷键处理器拿到的就是事件
+ * 本身，焦点元素没在事件里时退回 `document.activeElement`——与它们原先各自解析 target
+ * 的口径一致。
+ */
+export function isShortcutEditingKeydown(event: KeyboardEvent): boolean {
+  const target = event.target instanceof Element ? event.target : document.activeElement;
+  return isShortcutEditingTarget(target);
+}
+
 export function shortcutRecorderAction(event: ShortcutLikeEvent, platform = globalThis.navigator?.platform || ""): ShortcutRecorderAction | null {
   // Esc / Backspace 在录入态是控制键，不参与录入（与 VS Code 一致）：否则「退出录入」
   // 「清空已录入」就没有键位可用。代价是**裸 Esc / Backspace 绑定无法被录入到**——

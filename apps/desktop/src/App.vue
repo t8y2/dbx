@@ -155,7 +155,7 @@ import { initialTabSwitcherSelection, moveTabSwitcherSelection, tabSwitcherOrder
 import { createModifierDoubleTapShortcutController, isModifierDoubleTapShortcut, matchesModifierDoubleTapShortcut } from "@/lib/editor/modifierDoubleTapShortcut";
 import { createTabSwitcherKeyboardController } from "@/lib/tabs/tabSwitcherKeyboard";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
-import { isShortcutEditingTarget } from "@/lib/editor/shortcutRecorder";
+import { isShortcutEditingKeydown, isShortcutEditingTarget } from "@/lib/editor/shortcutRecorder";
 import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
 import { buildAppendedEditorSql, buildDeduplicatedAppendedEditorSql } from "@/lib/ai/aiSqlAppend";
@@ -4066,12 +4066,11 @@ watch(
 );
 
 function canCaptureModifierDoubleTapSearch(e: KeyboardEvent): boolean {
-  const target = e.target instanceof Element ? e.target : document.activeElement;
   const shortcuts = settingsStore.editorSettings.shortcuts;
   const enabled = isModifierDoubleTapShortcut(shortcuts.quickOpen) || isModifierDoubleTapShortcut(shortcuts.globalSearch);
   // Capture runs before the settings input can stop propagation, so it can only tell
-  // by the focused element; see isShortcutEditingTarget (#11787 added the recorder).
-  if (e.defaultPrevented || showTabSwitcher.value || !enabled || isShortcutEditingTarget(target)) {
+  // by the focused element; see isShortcutEditingKeydown (#11787 added the recorder).
+  if (e.defaultPrevented || showTabSwitcher.value || !enabled || isShortcutEditingKeydown(e)) {
     modifierDoubleTapSearch.reset();
     return false;
   }
@@ -4097,8 +4096,7 @@ function handleTabSwitcherKeydownCapture(e: KeyboardEvent) {
 
 function handleGlobalSearchKeydownCapture(e: KeyboardEvent) {
   if (canCaptureModifierDoubleTapSearch(e)) modifierDoubleTapSearch.handleKeydown(e);
-  const target = e.target instanceof Element ? e.target : document.activeElement;
-  if (isShortcutEditingTarget(target)) return;
+  if (isShortcutEditingKeydown(e)) return;
   if (e.defaultPrevented || !isGlobalSearchShortcut(e, settingsStore.editorSettings.shortcuts)) return;
   e.preventDefault();
   e.stopPropagation();

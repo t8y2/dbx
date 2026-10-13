@@ -17,7 +17,7 @@ export function resolveSidebarStickyProductionNode(nodes: readonly FlatTreeNode[
  * This avoids switching early when rendered rows are taller than the virtual
  * row-height estimate (for example after a query node or font-size change).
  */
-export function resolvePlainStickyContainerIndex(nodes: readonly FlatTreeNode[], index: FlatTreeIndex, rows: readonly { nodeId: string; top: number }[], scrollerTop: number): number {
+export function resolvePlainStickyContainerIndex(_nodes: readonly FlatTreeNode[], index: FlatTreeIndex, rows: readonly { nodeId: string; top: number }[], scrollerTop: number): number {
   let pinnedIndex = -1;
   for (const row of rows) {
     const flatIndex = index.flatNodeIndexById.get(row.nodeId);

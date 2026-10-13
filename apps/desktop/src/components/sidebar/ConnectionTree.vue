@@ -67,7 +67,7 @@ import { runSidebarSearchTasks, type SidebarSearchTask } from "./sidebarSearchTa
 import TreeItem from "./TreeItem.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { showSidebarStickyProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
-import { resolvePlainStickyContainerIndex, resolveSidebarStickyProductionNode } from "@/lib/sidebar/sidebarStickyProductionContext";
+import { resolvePlainStickyContainerIndex } from "@/lib/sidebar/sidebarStickyProductionContext";
 import ActiveConnectionFilterButton from "./ActiveConnectionFilterButton.vue";
 import SidebarListOptionsIcon from "./SidebarListOptionsIcon.vue";
 import SidebarLocateButton from "./SidebarLocateButton.vue";

@@ -1240,7 +1240,9 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         name TEXT NOT NULL DEFAULT '',
         order_index INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT '',
-        updated_at TEXT NOT NULL DEFAULT ''
+        updated_at TEXT NOT NULL DEFAULT '',
+        password_hash TEXT,
+        password_set_by TEXT
     )",
     "CREATE TABLE IF NOT EXISTS saved_sql_files (
         id TEXT PRIMARY KEY,
@@ -3180,8 +3182,12 @@ fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
 }
 
 fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
-    const FOLDER_COLUMNS: &[(&str, &str)] =
-        &[("parent_folder_id", "TEXT"), ("order_index", "INTEGER NOT NULL DEFAULT 0")];
+    const FOLDER_COLUMNS: &[(&str, &str)] = &[
+        ("parent_folder_id", "TEXT"),
+        ("order_index", "INTEGER NOT NULL DEFAULT 0"),
+        ("password_hash", "TEXT"),
+        ("password_set_by", "TEXT"),
+    ];
     const FILE_COLUMNS: &[(&str, &str)] = &[
         ("catalog_name", "TEXT"),
         ("order_index", "INTEGER NOT NULL DEFAULT 0"),
@@ -7776,8 +7782,8 @@ impl Storage {
 
             for folder in &library.folders {
                 tx.execute(
-                    "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash, password_set_by) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         folder.id,
                         folder.connection_id,
@@ -7785,7 +7791,9 @@ impl Storage {
                         folder.name,
                         folder.order_index,
                         folder.created_at,
-                        folder.updated_at
+                        folder.updated_at,
+                        folder.password_hash,
+                        folder.password_set_by
                     ],
                 )
                 .map_err(|e| e.to_string())?;
@@ -7824,7 +7832,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut folder_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at \
+                    "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash, password_set_by \
                      FROM saved_sql_folders ORDER BY COALESCE(parent_folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7838,6 +7846,8 @@ impl Storage {
                         order_index: row.get(4)?,
                         created_at: row.get(5)?,
                         updated_at: row.get(6)?,
+                        password_hash: row.get(7)?,
+                        password_set_by: row.get(8)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -7917,7 +7927,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut folder_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at \
+                    "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash, password_set_by \
                      FROM saved_sql_folders ORDER BY COALESCE(parent_folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7931,6 +7941,8 @@ impl Storage {
                         order_index: row.get(4)?,
                         created_at: row.get(5)?,
                         updated_at: row.get(6)?,
+                        password_hash: row.get(7)?,
+                        password_set_by: row.get(8)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -8010,14 +8022,16 @@ impl Storage {
         let folder = folder.clone();
         self.with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash, password_set_by) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                  connection_id = excluded.connection_id, \
                  parent_folder_id = excluded.parent_folder_id, \
                  name = excluded.name, \
                  order_index = excluded.order_index, \
-                 updated_at = excluded.updated_at",
+                 updated_at = excluded.updated_at, \
+                 password_hash = excluded.password_hash, \
+                 password_set_by = excluded.password_set_by",
                 params![
                     folder.id,
                     folder.connection_id,
@@ -8025,7 +8039,9 @@ impl Storage {
                     folder.name,
                     folder.order_index,
                     folder.created_at,
-                    folder.updated_at
+                    folder.updated_at,
+                    folder.password_hash,
+                    folder.password_set_by
                 ],
             )
             .map(|_| ())
@@ -8060,6 +8076,49 @@ impl Storage {
                     .map_err(|e| e.to_string())?;
             }
             tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn clear_saved_sql_folder_password(&self, folder_id: &str) -> Result<(), String> {
+        let folder_id = folder_id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE saved_sql_folders SET password_hash = NULL, password_set_by = NULL WHERE id = ?1",
+                [folder_id.as_str()],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn get_saved_sql_folder(&self, folder_id: &str) -> Result<Option<SavedSqlFolder>, String> {
+        let folder_id = folder_id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash, password_set_by \
+                     FROM saved_sql_folders WHERE id = ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let folder = stmt
+                .query_row([folder_id.as_str()], |row| {
+                    Ok(SavedSqlFolder {
+                        id: row.get(0)?,
+                        connection_id: row.get(1)?,
+                        parent_folder_id: row.get(2)?,
+                        name: row.get(3)?,
+                        order_index: row.get(4)?,
+                        created_at: row.get(5)?,
+                        updated_at: row.get(6)?,
+                        password_hash: row.get(7)?,
+                        password_set_by: row.get(8)?,
+                    })
+                })
+                .optional()
+                .map_err(|e| e.to_string())?;
+            Ok(folder)
         })
         .await
     }
@@ -9441,8 +9500,8 @@ fn apply_saved_sql_in_tx(tx: &Transaction<'_>, library: &SavedSqlLibrary, merge_
     }
     for folder in &library.folders {
         tx.execute(
-            "INSERT OR REPLACE INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![folder.id, folder.connection_id, folder.parent_folder_id, folder.name, folder.order_index, folder.created_at, folder.updated_at],
+            "INSERT OR REPLACE INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![folder.id, folder.connection_id, folder.parent_folder_id, folder.name, folder.order_index, folder.created_at, folder.updated_at, folder.password_hash],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -15050,6 +15109,8 @@ mod tests {
                         order_index: 0,
                         created_at: String::new(),
                         updated_at: String::new(),
+                        password_hash: None,
+                        password_set_by: None,
                     },
                     SavedSqlFolder {
                         id: "duplicate-folder".to_string(),
@@ -15059,6 +15120,8 @@ mod tests {
                         order_index: 1,
                         created_at: String::new(),
                         updated_at: String::new(),
+                        password_hash: None,
+                        password_set_by: None,
                     },
                 ],
                 files: Vec::new(),

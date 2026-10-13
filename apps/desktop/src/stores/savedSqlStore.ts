@@ -218,6 +218,7 @@ function loadLegacyState(): SavedSqlState {
 export const useSavedSqlStore = defineStore("savedSql", () => {
   const folders = ref<SavedSqlFolder[]>([]);
   const files = ref<SavedSqlFile[]>([]);
+  const unlockedSavedSqlFolderIds = ref<ReadonlySet<string>>(new Set());
   const isLoaded = ref(false);
   const loadState = ref<"idle" | "loading" | "loaded" | "failed">("idle");
   let pendingSync: Promise<void> | null = null;
@@ -363,7 +364,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     return hydrated;
   }
 
-  async function createFolder(connectionId: string, name: string, parentFolderId?: string) {
+  async function createFolder(connectionId: string, name: string, parentFolderId?: string, passwordHash?: string) {
     const key = folderCreateKey(connectionId, name, parentFolderId);
     const pending = pendingFolderCreates.get(key);
     if (pending) return pending;
@@ -378,6 +379,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
         orderIndex: maxOrderIndex(folders.value.filter((item) => item.connectionId === connectionId && (item.parentFolderId || "") === (parentFolderId || ""))) + 1,
         createdAt: timestamp,
         updatedAt: timestamp,
+        ...(passwordHash ? { passwordHash } : {}),
       };
       const saved = await api.saveSavedSqlFolder(folder);
       folders.value = [...folders.value.filter((item) => item.id !== saved.id), saved];
@@ -411,7 +413,44 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     await api.deleteSavedSqlFolder(id);
     folders.value = folders.value.filter((folder) => !removedIds.has(folder.id));
     files.value = files.value.filter((file) => !file.folderId || !removedIds.has(file.folderId));
+    // Clean up unlock state for removed folders
+    const remainingUnlocked = new Set([...unlockedSavedSqlFolderIds.value].filter((fid) => !removedIds.has(fid)));
+    unlockedSavedSqlFolderIds.value = remainingUnlocked;
     bumpVersion({ tree: removesFiles });
+    await syncToLocalDirectory();
+  }
+
+  function isSavedSqlFolderUnlocked(folderId: string) {
+    return unlockedSavedSqlFolderIds.value.has(folderId);
+  }
+
+  function unlockSavedSqlFolder(folderId: string) {
+    const next = new Set(unlockedSavedSqlFolderIds.value);
+    next.add(folderId);
+    unlockedSavedSqlFolderIds.value = next;
+  }
+
+  function lockSavedSqlFolder(folderId: string) {
+    if (!unlockedSavedSqlFolderIds.value.has(folderId)) return;
+    const next = new Set(unlockedSavedSqlFolderIds.value);
+    next.delete(folderId);
+    unlockedSavedSqlFolderIds.value = next;
+  }
+
+  async function setSavedSqlFolderPassword(folderId: string, passwordHash: string | null) {
+    const existing = folders.value.find((folder) => folder.id === folderId);
+    if (!existing) return;
+    // Invalidate unlock state when password changes
+    if (unlockedSavedSqlFolderIds.value.has(folderId)) {
+      const next = new Set(unlockedSavedSqlFolderIds.value);
+      next.delete(folderId);
+      unlockedSavedSqlFolderIds.value = next;
+    }
+    // 无多用户体系：passwordSetBy 不填充（保留字段以兼容已持久化的数据）。
+    const updated: SavedSqlFolder = passwordHash ? { ...existing, passwordHash, updatedAt: nowIso() } : { ...existing, passwordHash: undefined, passwordSetBy: undefined, updatedAt: nowIso() };
+    await api.saveSavedSqlFolder(updated);
+    folders.value = folders.value.map((folder) => (folder.id === folderId ? updated : folder));
+    bumpVersion();
     await syncToLocalDirectory();
   }
 
@@ -1058,6 +1097,10 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     createFolder,
     renameFolder,
     deleteFolder,
+    isSavedSqlFolderUnlocked,
+    unlockSavedSqlFolder,
+    lockSavedSqlFolder,
+    setSavedSqlFolderPassword,
     saveFile,
     updateFileExecutionTarget,
     updateFilesExecutionTarget,

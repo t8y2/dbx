@@ -21,10 +21,13 @@ import {
   FolderClosed,
   FolderOpen,
   FolderPlus,
+  KeyRound,
   Layers,
   Library,
   Loader2,
   LocateFixed,
+  Lock,
+  LockOpen,
   Pencil,
   Play,
   Search,
@@ -47,6 +50,9 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import * as api from "@/lib/backend/api";
 import { externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
 import { useSavedSqlStore, type SavedSqlFileSortMode, type SavedSqlFolderSortMode } from "@/stores/savedSqlStore";
+import { useSavedSqlFolderPasswordPromptStore } from "@/stores/savedSqlFolderPasswordPromptStore";
+import { verifyConnectionGroupPassword } from "@/lib/sidebar/connectionGroupPassword";
+import SetSavedSqlFolderPasswordDialog from "@/components/connection/SetSavedSqlFolderPasswordDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -466,10 +472,88 @@ function toggleFolder(folderId: string) {
     const folder = savedSqlStore.allFolders.find((candidate) => candidate.id === folderId);
     if (folder && folderBranchMatchesQuery(folder)) return;
   }
+  // Password check: if folder is locked and not unlocked, prompt for password
+  const folder = savedSqlStore.allFolders.find((f) => f.id === folderId);
+  if (folder?.passwordHash && !savedSqlStore.isSavedSqlFolderUnlocked(folderId)) {
+    void promptSavedSqlFolderUnlock(folder);
+    return;
+  }
   const next = new Set(collapsedFolders.value);
   if (next.has(folderId)) next.delete(folderId);
   else next.add(folderId);
   collapsedFolders.value = next;
+}
+
+const folderPasswordPromptStore = useSavedSqlFolderPasswordPromptStore();
+
+async function promptSavedSqlFolderUnlock(folder: SavedSqlFolder): Promise<boolean> {
+  const unlocked = await folderPasswordPromptStore.requestPassword({
+    folderId: folder.id,
+    folderName: folder.name,
+    verify: (password) => verifyConnectionGroupPassword(password, folder.passwordHash!),
+  });
+  if (unlocked) {
+    savedSqlStore.unlockSavedSqlFolder(folder.id);
+    // Auto-expand after unlock
+    const next = new Set(collapsedFolders.value);
+    next.delete(folder.id);
+    collapsedFolders.value = next;
+  }
+  return unlocked;
+}
+
+const showSetFolderPasswordDialog = ref(false);
+const setPasswordDialogFolder = ref<SavedSqlFolder | null>(null);
+
+function openSetFolderPasswordDialog(folder: SavedSqlFolder) {
+  setPasswordDialogFolder.value = folder;
+  showSetFolderPasswordDialog.value = true;
+}
+
+async function applySetFolderPassword(folderId: string, passwordHash: string | null) {
+  await savedSqlStore.setSavedSqlFolderPassword(folderId, passwordHash);
+  if (passwordHash) {
+    // Lock takes effect immediately: collapse the folder so its contents stay hidden until unlocked.
+    const next = new Set(collapsedFolders.value);
+    next.add(folderId);
+    collapsedFolders.value = next;
+  }
+}
+
+function handleFolderPasswordChanged(hadPassword: boolean, removed: boolean) {
+  if (removed) {
+    toast(t("savedSql.passwordRemoved"), 3000);
+  } else {
+    toast(hadPassword ? t("savedSql.passwordChanged") : t("savedSql.passwordSet"), 3000);
+  }
+}
+
+function isFolderPasswordLockable(folder: SavedSqlFolder): boolean {
+  return !!folder.passwordHash && !savedSqlStore.isSavedSqlFolderUnlocked(folder.id);
+}
+
+function isFolderPasswordUnlocked(folder: SavedSqlFolder): boolean {
+  return !!folder.passwordHash && savedSqlStore.isSavedSqlFolderUnlocked(folder.id);
+}
+
+function lockFolderFromMenu(folder: SavedSqlFolder) {
+  savedSqlStore.lockSavedSqlFolder(folder.id);
+  // Hide contents immediately after locking so the lock state is visible.
+  const next = new Set(collapsedFolders.value);
+  next.add(folder.id);
+  collapsedFolders.value = next;
+}
+
+// Walk up the parent chain to find the nearest locked folder containing the file.
+function lockedAncestorForFile(file: SavedSqlFile): SavedSqlFolder | null {
+  let folderId = file.folderId;
+  while (folderId) {
+    const folder = savedSqlStore.allFolders.find((candidate) => candidate.id === folderId);
+    if (!folder) return null;
+    if (isFolderPasswordLockable(folder)) return folder;
+    folderId = folder.parentFolderId;
+  }
+  return null;
 }
 
 function isFolderExpanded(folder: SavedSqlFolder) {
@@ -482,7 +566,10 @@ async function openNewFolderInput(parentFolderId?: string) {
   const parent = parentFolderId ? savedSqlStore.allFolders.find((folder) => folder.id === parentFolderId) : undefined;
   if (parentFolderId && !parent) return;
   const connectionId = parent?.connectionId || connectionStore.connections[0]?.id;
-  if (!connectionId) return;
+  if (!connectionId) {
+    toast(t("sqlLibrary.needConnectionFirst"), 4000);
+    return;
+  }
   if (parent?.id) {
     collapsedFolders.value = new Set([...collapsedFolders.value].filter((id) => id !== parent.id));
   }
@@ -497,7 +584,10 @@ async function openNewFolderInput(parentFolderId?: string) {
 
 async function openNewQueryInFolder(folder?: SavedSqlFolder) {
   const connectionId = folder?.connectionId || connectionStore.activeConnectionId || connectionStore.connections[0]?.id;
-  if (!connectionId) return;
+  if (!connectionId) {
+    toast(t("sqlLibrary.needConnectionFirst"), 4000);
+    return;
+  }
   if (folder?.id) {
     collapsedFolders.value = new Set([...collapsedFolders.value].filter((id) => id !== folder.id));
   }
@@ -954,6 +1044,13 @@ async function executeBatchDelete() {
 async function moveFilesToFolder(fileIds: string[], folderId?: string) {
   const movableIds = [...new Set(fileIds)].filter((id) => savedSqlStore.getFile(id));
   if (movableIds.length === 0) return;
+  if (folderId) {
+    const target = savedSqlStore.allFolders.find((folder) => folder.id === folderId);
+    if (target && isFolderPasswordLockable(target)) {
+      const unlocked = await promptSavedSqlFolderUnlock(target);
+      if (!unlocked) return;
+    }
+  }
   try {
     await savedSqlStore.moveFilesToFolder(movableIds, folderId);
     clearSelection();
@@ -965,6 +1062,12 @@ async function moveFilesToFolder(fileIds: string[], folderId?: string) {
 
 async function openFile(file: SavedSqlFile, targetMode?: SavedSqlOpenTargetMode, reveal?: { line: number; column?: number }) {
   if (suppressNextRowClick.value) return;
+  // Password gate: opening a file inside a locked folder requires unlocking first.
+  const lockedFolder = lockedAncestorForFile(file);
+  if (lockedFolder) {
+    const unlocked = await promptSavedSqlFolderUnlock(lockedFolder);
+    if (!unlocked) return;
+  }
   const loadedFile = await savedSqlStore.ensureFileContent(file.id);
   if (!loadedFile) return;
   const tabId = queryStore.openSavedSql(loadedFile, { targetMode, reveal });
@@ -1313,28 +1416,29 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
   const folderFiles = allFilesInFolderBranch(target.id);
   const directFiles = savedSqlStore.filesInFolder(target.id);
   const directFolders = childFolders(target.id);
+  const folderLocked = isFolderPasswordLockable(target);
   return [
-    { label: t("savedSql.newSubfolder"), action: () => openNewFolderInput(target.id), icon: FolderPlus },
-    { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(target), icon: FilePlus },
+    { label: t("savedSql.newSubfolder"), action: () => openNewFolderInput(target.id), icon: FolderPlus, disabled: folderLocked },
+    { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(target), icon: FilePlus, disabled: folderLocked },
     {
       label: t("savedSql.pasteFile"),
       action: () => pasteLibraryFiles(target),
       icon: Clipboard,
-      disabled: connectionStore.treeClipboard?.kind !== "saved-sql-copy",
+      disabled: connectionStore.treeClipboard?.kind !== "saved-sql-copy" || folderLocked,
     },
     {
       label: t("sqlLibrary.changeTarget", { count: folderFiles.length }),
       action: () => openChangeTarget(folderFiles.map((f) => f.id)),
       icon: ArrowRightLeft,
-      disabled: folderFiles.length === 0,
+      disabled: folderFiles.length === 0 || folderLocked,
     },
-    { label: t("sqlLibrary.importIntoFolder"), action: () => importDirectoryIntoLibrary(target), icon: Download },
-    { label: t("sqlLibrary.exportFolder"), action: () => exportFolderContents(target), icon: Upload },
+    { label: t("sqlLibrary.importIntoFolder"), action: () => importDirectoryIntoLibrary(target), icon: Download, disabled: folderLocked },
+    { label: t("sqlLibrary.exportFolder"), action: () => exportFolderContents(target), icon: Upload, disabled: folderLocked },
     { label: "", separator: true },
     {
       label: t("sqlLibrary.sortFiles"),
       icon: ArrowDownAZ,
-      disabled: directFiles.length <= 1,
+      disabled: directFiles.length <= 1 || folderLocked,
       children: [
         { label: t("sqlLibrary.sortNameAsc"), action: () => handleSortFolderFiles(target.id, "name-asc"), icon: ArrowDownAZ },
         { label: t("sqlLibrary.sortNameDesc"), action: () => handleSortFolderFiles(target.id, "name-desc"), icon: ArrowUpAZ },
@@ -1346,20 +1450,29 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
       label: t("sqlLibrary.sortSubfolders"),
       icon: FolderClosed,
       visible: directFolders.length > 1,
+      disabled: folderLocked,
       children: [
         { label: t("sqlLibrary.sortNameAsc"), action: () => handleSortFolderChildren(target.id, "name-asc"), icon: ArrowDownAZ },
         { label: t("sqlLibrary.sortNameDesc"), action: () => handleSortFolderChildren(target.id, "name-desc"), icon: ArrowUpAZ },
       ],
     },
     { label: "", separator: true },
-    { label: t("savedSql.renameFolder"), action: () => startRenameFolder(target), icon: Pencil },
+    { label: t("savedSql.renameFolder"), action: () => startRenameFolder(target), icon: Pencil, disabled: folderLocked },
+    // Locked folders cannot have password changed or removed — unlock first.
+    ...(isFolderPasswordLockable(target) ? [] : [{ label: target.passwordHash ? t("savedSql.changePassword") : t("savedSql.setPassword"), action: () => openSetFolderPasswordDialog(target), icon: KeyRound }]),
+    ...(isFolderPasswordLockable(target) ? [{ label: t("savedSql.unlockFolder"), action: () => void promptSavedSqlFolderUnlock(target), icon: LockOpen }] : isFolderPasswordUnlocked(target) ? [{ label: t("savedSql.lockFolder"), action: () => lockFolderFromMenu(target), icon: Lock }] : []),
     { label: "", separator: true },
-    {
-      label: t("savedSql.deleteFolder"),
-      action: () => confirmDeleteFolder(target),
-      icon: Trash2,
-      variant: "destructive",
-    },
+    // Locked folders cannot be deleted — unlock first.
+    ...(isFolderPasswordLockable(target)
+      ? []
+      : [
+          {
+            label: t("savedSql.deleteFolder"),
+            action: () => confirmDeleteFolder(target),
+            icon: Trash2,
+            variant: "destructive" as const,
+          },
+        ]),
   ];
 });
 
@@ -1793,6 +1906,9 @@ function showDropInside(targetId: string) {
                     {{ row.folder.name }}
                     <span class="ml-1 text-muted-foreground">({{ folderFileCount(row.folder.id) }})</span>
                   </span>
+                  <LightTooltip v-if="!isRenamingFolder(row.folder.id) && isFolderPasswordLockable(row.folder)" :text="t('savedSql.lockedTooltip')" side="left" :delay="0" :close-delay="0" nowrap>
+                    <Lock class="h-3 w-3 shrink-0 text-muted-foreground" />
+                  </LightTooltip>
                   <LightTooltip v-if="!isRenamingFolder(row.folder.id)" :text="t('savedSql.newSubfolder')" side="left" :delay="0" :close-delay="0" nowrap>
                     <button
                       type="button"
@@ -2023,6 +2139,7 @@ function showDropInside(targetId: string) {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    <SetSavedSqlFolderPasswordDialog v-model:open="showSetFolderPasswordDialog" :folder="setPasswordDialogFolder" :set-password="applySetFolderPassword" @changed="handleFolderPasswordChanged" />
   </div>
 </template>
 

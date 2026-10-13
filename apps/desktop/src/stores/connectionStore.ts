@@ -13,6 +13,7 @@ import type {
   CompletionAssistantObjectKind,
   CompletionAssistantRequest,
   ConnectionConfig,
+  ConnectionGroup,
   ConnectionLivenessMessage,
   DatabaseType,
   DatabaseConnectionInfo,
@@ -682,6 +683,7 @@ export const useConnectionStore = defineStore("connection", () => {
     allDatabases?: boolean;
   } | null>(null);
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
+  const unlockedConnectionGroupIds = ref<ReadonlySet<string>>(new Set());
   const tableVGroupLayouts = ref<Record<string, TableVGroupLayout>>({});
   const lastDataGripFallbackUsernamesCount = ref(0);
   const dirtyTableVGroupScopeKeys = new Set<string>();
@@ -10660,10 +10662,51 @@ export const useConnectionStore = defineStore("connection", () => {
     loadSidebarTableSearchIndex,
     loadSidebarTableSearchIndexScopes,
     refreshSidebarTableSearchIndex,
-    createConnectionGroup(name: string, parentGroupId?: string | null) {
-      const result = createGroupOp(sidebarLayout.value, name, parentGroupId);
+    createConnectionGroup(name: string, parentGroupId?: string | null, passwordHash?: string) {
+      const result = createGroupOp(sidebarLayout.value, name, parentGroupId, passwordHash);
       updateLayoutAndRebuild(result.layout);
       return result.groupId;
+    },
+    isConnectionGroupUnlocked(groupId: string) {
+      return unlockedConnectionGroupIds.value.has(groupId);
+    },
+    unlockConnectionGroup(groupId: string) {
+      const next = new Set(unlockedConnectionGroupIds.value);
+      next.add(groupId);
+      unlockedConnectionGroupIds.value = next;
+      rebuildTreeNodes();
+    },
+    lockConnectionGroup(groupId: string) {
+      if (!unlockedConnectionGroupIds.value.has(groupId)) return;
+      const next = new Set(unlockedConnectionGroupIds.value);
+      next.delete(groupId);
+      unlockedConnectionGroupIds.value = next;
+      // Hide contents immediately after locking so the lock state is visible.
+      const group = sidebarLayout.value.groups.find((g) => g.id === groupId);
+      if (group && !group.collapsed) {
+        updateLayoutAndRebuild({
+          ...sidebarLayout.value,
+          groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? { ...g, collapsed: true } : g)),
+        });
+      } else {
+        rebuildTreeNodes();
+      }
+    },
+    setConnectionGroupPassword(groupId: string, passwordHash: string | null) {
+      const group = sidebarLayout.value.groups.find((g) => g.id === groupId);
+      if (!group) return;
+      // Invalidate unlock state when password changes
+      if (unlockedConnectionGroupIds.value.has(groupId)) {
+        const next = new Set(unlockedConnectionGroupIds.value);
+        next.delete(groupId);
+        unlockedConnectionGroupIds.value = next;
+      }
+      // 无多用户体系：passwordSetBy 不填充（保留字段以兼容已持久化的数据）。
+      const nextGroup: ConnectionGroup = passwordHash ? { ...group, passwordHash, collapsed: true } : { id: group.id, name: group.name, collapsed: group.collapsed };
+      updateLayoutAndRebuild({
+        ...sidebarLayout.value,
+        groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? nextGroup : g)),
+      });
     },
     renameConnectionGroup(groupId: string, name: string) {
       updateLayoutAndRebuild(renameGroupOp(sidebarLayout.value, groupId, name));

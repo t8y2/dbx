@@ -97,6 +97,7 @@ async function submit() {
           <Loader2 v-if="loading" class="w-4 h-4 animate-spin mr-2" />
           {{ loading ? t("auth.processing") : setupMode ? t("auth.setPassword") : t("auth.login") }}
         </Button>
+        <p v-if="!setupMode" class="text-center text-xs text-muted-foreground">{{ t("auth.forgotPasswordHint") }}</p>
       </form>
 
       <p class="text-center text-xs text-muted-foreground/50">Powered by DBX</p>

@@ -10367,19 +10367,6 @@ function openExternalUrl(url: string) {
                     </div>
                     <p v-if="!productionProtectionEnabled" class="text-xs leading-5 text-muted-foreground">{{ t(productionDisabledDescriptionKey) }}</p>
                     <template v-else>
-                      <div class="grid gap-1.5">
-                        <Label for="production-badge-scope" class="text-xs font-medium">{{ t("production.badgeScope") }}</Label>
-                        <Select :model-value="form.production_badge_scope || 'database'" @update:model-value="form.production_badge_scope = $event as ProductionBadgeScope">
-                          <SelectTrigger id="production-badge-scope" class="h-8" :aria-label="t('production.badgeScope')"><SelectValue /></SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="connection">{{ t("production.badgeScopeConnection") }}</SelectItem>
-                            <SelectItem value="database">{{ t("production.badgeScopeDatabase") }}</SelectItem>
-                            <SelectItem value="table">{{ t("production.badgeScopeTable") }}</SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <p class="text-xs leading-5 text-muted-foreground">{{ t(`production.badgeScopeHint${form.production_badge_scope === "connection" ? "Connection" : form.production_badge_scope === "table" ? "Table" : "Database"}`) }}</p>
-                        <p class="text-xs leading-5 text-muted-foreground">{{ t("production.badgeScopeSafetyHint") }}</p>
-                      </div>
                       <Label class="text-xs font-medium">{{ t("production.scope") }}</Label>
                       <Tabs v-model="productionScope" class="w-full">
                         <TabsList class="grid h-8 w-full grid-cols-2">
@@ -10398,6 +10385,19 @@ function openExternalUrl(url: string) {
                           <ListFilter v-else class="mr-1.5 h-4 w-4" />
                           {{ t(productionScopePickerLabelKey) }}
                         </Button>
+                      </div>
+                      <div class="grid gap-1.5 pt-1">
+                        <Label for="production-badge-scope" class="text-xs font-medium">{{ t("production.badgeScope") }}</Label>
+                        <Select :model-value="form.production_badge_scope || 'database'" @update:model-value="form.production_badge_scope = $event as ProductionBadgeScope">
+                          <SelectTrigger id="production-badge-scope" class="h-8" :aria-label="t('production.badgeScope')"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="connection">{{ t("production.badgeScopeConnection") }}</SelectItem>
+                            <SelectItem value="database">{{ t("production.badgeScopeDatabase") }}</SelectItem>
+                            <SelectItem value="table">{{ t("production.badgeScopeTable") }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t(`production.badgeScopeHint${form.production_badge_scope === "connection" ? "Connection" : form.production_badge_scope === "table" ? "Table" : "Database"}`) }}</p>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("production.badgeScopeSafetyHint") }}</p>
                       </div>
                     </template>
                   </div>

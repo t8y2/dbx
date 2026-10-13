@@ -11,15 +11,13 @@ const { mqttGetMessagesMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/backend/api", () => ({
-  mqttGetBrokerInfo: vi.fn(
-    async (): Promise<MqttBrokerInfo> => ({
-      brokerUrl: "mqtt://localhost:1883",
-      clientId: "dbx-test",
-      connected: true,
-      protocolVersion: "5.0",
-      subscriptionCount: 1,
-    }),
-  ),
+  mqttGetBrokerInfo: vi.fn(async (): Promise<MqttBrokerInfo> => ({
+    brokerUrl: "mqtt://localhost:1883",
+    clientId: "dbx-test",
+    connected: true,
+    protocolVersion: "5.0",
+    subscriptionCount: 1,
+  })),
   mqttListTopics: vi.fn(async () => [["device/status", "atmostonce"]]),
   mqttListSavedTopicConfigs: vi.fn(async () => [{ topic: "device/status", qos: "atmostonce", enabled: true, noLocal: false }]),
   mqttGetMessages: mqttGetMessagesMock,

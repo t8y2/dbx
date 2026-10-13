@@ -3291,7 +3291,7 @@ async function prepareLegacyGroupingView() {
   let anchor = groupedKeyListRef.value?.getViewportAnchor();
   let rowIndex = Math.min(anchor?.rowIndex ?? 0, Math.max(0, snapshot.visibleRows.length - 1));
   if (anchor?.keyRaw) {
-    for (let offset = 0; offset < snapshot.visibleRows.length; ) {
+    for (let offset = 0; offset < snapshot.visibleRows.length;) {
       if (!current()) return;
       const end = Math.min(offset + 512, snapshot.visibleRows.length);
       let found = false;

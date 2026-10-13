@@ -9242,7 +9242,7 @@ export default {
     shortcutSearchPlaceholder: "Search shortcuts",
     shortcutSearchNoResults: "No shortcuts match your search.",
     shortcutRecordKeys: "Record keys",
-    shortcutRecordKeysRecordingHint: "Press a key combination to search (Esc to exit, Backspace to clear)",
+    shortcutRecordKeysRecordingHint: "Press a key combination to search (Esc to exit, Backspace to clear). Combinations the system takes over (Alt+F4, Win, ⌘Tab) cannot be recorded.",
     shortcutConflict: "This shortcut conflicts with another action in the same scope.",
     shortcutReserved: "This shortcut is reserved by the system.",
     shortcutPlatformDefault: "This combination is another platform's default shortcut and cannot be bound here. Please use a different one.",

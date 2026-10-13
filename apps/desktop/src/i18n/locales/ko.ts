@@ -8089,7 +8089,7 @@ export default withEnglishFallback({
     shortcutSearchPlaceholder: "단축키 검색",
     shortcutSearchNoResults: "검색과 일치하는 단축키가 없습니다.",
     shortcutRecordKeys: "키 기록",
-    shortcutRecordKeysRecordingHint: "키 조합을 누르세요(Esc: 종료, Backspace: 지우기)",
+    shortcutRecordKeysRecordingHint: "키 조합을 누르세요(Esc: 종료, Backspace: 지우기). 시스템이 가로채는 조합(Alt+F4, Win, ⌘Tab)은 기록할 수 없습니다.",
     shortcutConflict: "이 단축키는 같은 범위의 다른 작업과 충돌합니다.",
     shortcutReserved: "이 단축키는 시스템에서 예약되었습니다.",
     shortcutPlatformDefault: "이 조합은 다른 플랫폼의 기본 단축키라 여기에서는 지정할 수 없습니다. 다른 조합을 사용하세요.",

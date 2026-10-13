@@ -8221,7 +8221,7 @@ export default withEnglishFallback({
     shortcutSearchPlaceholder: "Cerca scorciatoie",
     shortcutSearchNoResults: "Nessuna scorciatoia corrisponde alla ricerca.",
     shortcutRecordKeys: "Registra tasti",
-    shortcutRecordKeysRecordingHint: "Premi una combinazione di tasti (Esc per uscire, Backspace per cancellare)",
+    shortcutRecordKeysRecordingHint: "Premi una combinazione di tasti (Esc per uscire, Backspace per cancellare). Le combinazioni catturate dal sistema (Alt+F4, Win, ⌘Tab) non possono essere registrate.",
     shortcutConflict: "Questa scorciatoia è in conflitto con un'altra azione nello stesso ambito.",
     shortcutReserved: "Questa scorciatoia è riservata dal sistema.",
     shortcutPlatformDefault: "Questa combinazione è la scorciatoia predefinita di un'altra piattaforma e non può essere assegnata qui. Scegline un'altra.",

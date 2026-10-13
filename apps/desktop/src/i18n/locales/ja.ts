@@ -8210,7 +8210,7 @@ export default withEnglishFallback({
     shortcutSearchPlaceholder: "ショートカットを検索",
     shortcutSearchNoResults: "一致するショートカットはありません。",
     shortcutRecordKeys: "キーを記録",
-    shortcutRecordKeysRecordingHint: "キーの組み合わせを押してください（Esc で終了、Backspace でクリア）",
+    shortcutRecordKeysRecordingHint: "キーの組み合わせを押してください（Esc で終了、Backspace でクリア）。システムが横取りする組み合わせ（Alt+F4、Win、⌘Tab）は記録できません。",
     shortcutConflict: "このショートカットは同じスコープ内の別のアクションと競合しています。",
     shortcutReserved: "このショートカットはシステムで予約されています。",
     shortcutPlatformDefault: "この組み合わせは他プラットフォームの既定キーです。ここでは割り当てできないため、別の組み合わせを選んでください。",

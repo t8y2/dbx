@@ -8921,7 +8921,7 @@ export default withEnglishFallback({
     shortcutSearchPlaceholder: "Cari pintasan",
     shortcutSearchNoResults: "Tidak ada pintasan yang cocok dengan pencarian Anda.",
     shortcutRecordKeys: "Rekam tombol",
-    shortcutRecordKeysRecordingHint: "Tekan kombinasi tombol (Esc untuk keluar, Backspace untuk menghapus)",
+    shortcutRecordKeysRecordingHint: "Tekan kombinasi tombol (Esc untuk keluar, Backspace untuk menghapus). Kombinasi yang diambil alih sistem (Alt+F4, Win, ⌘Tab) tidak dapat direkam.",
     shortcutConflict: "Pintasan ini berkonflik dengan aksi lain pada cakupan yang sama.",
     shortcutReserved: "Pintasan ini dicadangkan oleh sistem.",
     shortcutPlatformDefault: "Kombinasi ini adalah pintasan default pada platform lain dan tidak dapat diikat di sini. Silakan gunakan kombinasi lain.",

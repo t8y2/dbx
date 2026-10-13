@@ -9576,7 +9576,7 @@ export default withEnglishFallback({
     shortcutSearchPlaceholder: "Поиск сочетаний клавиш",
     shortcutSearchNoResults: "Нет сочетаний клавиш, соответствующих запросу.",
     shortcutRecordKeys: "Записать клавиши",
-    shortcutRecordKeysRecordingHint: "Нажмите сочетание клавиш (Esc — выход, Backspace — очистить)",
+    shortcutRecordKeysRecordingHint: "Нажмите сочетание клавиш (Esc — выход, Backspace — очистить). Сочетания, перехватываемые системой (Alt+F4, Win, ⌘Tab), записать нельзя.",
     shortcutConflict: "Это сочетание клавиш конфликтует с другим действием в той же области.",
     shortcutReserved: "Это сочетание клавиш зарезервировано системой.",
     shortcutPlatformDefault: "Эта комбинация является сочетанием клавиш по умолчанию для другой платформы и не может быть назначена здесь. Используйте другую.",

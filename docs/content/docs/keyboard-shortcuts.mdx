@@ -76,6 +76,8 @@ DBX detects conflicts within a scope. Editor, grid, search, sidebar, and global 
 
 The Shortcuts-tab search box also supports **key recording**: click the keyboard icon next to it and press a combination to filter down to the actions bound to it. Actions that share the same chord in another scope are listed as well, so you can hunt conflicts without knowing how the combination is spelled. Keys pressed while recording never run their command; `Esc` exits recording and `Backspace` clears the recorded combination. You can also type the combination as text — both `Ctrl+T` and `Ctrl + T` match.
 
+**Combinations the system claims cannot be recorded**: keys such as `Alt+F4`, `Win`, `Ctrl+Alt+Del`, or macOS `⌘Tab` are handled by the operating system or window manager before DBX sees them, so recording yields nothing — that is not a recording failure. Such a combination also never fires even if it is configured by hand; use the text search instead when you need to inspect it.
+
 On Windows/Linux, `Ctrl+Alt` may represent AltGr, so DBX matches those combinations conservatively. On macOS, Option+letter can produce transformed characters, and DBX uses physical-key fallback only where safe.
 
 ## Related Pages

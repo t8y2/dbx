@@ -8458,7 +8458,7 @@ export default withEnglishFallback({
     shortcutSearchPlaceholder: "Buscar atajos",
     shortcutSearchNoResults: "Ningún atajo coincide con la búsqueda.",
     shortcutRecordKeys: "Grabar teclas",
-    shortcutRecordKeysRecordingHint: "Pulsa una combinación de teclas (Esc para salir, Retroceso para borrar)",
+    shortcutRecordKeysRecordingHint: "Pulsa una combinación de teclas (Esc para salir, Retroceso para borrar). Las combinaciones que captura el sistema (Alt+F4, Win, ⌘Tab) no se pueden grabar.",
     shortcutConflict: "Este atajo entra en conflicto con otra acción del mismo ámbito.",
     shortcutReserved: "Este atajo está reservado por el sistema.",
     shortcutPlatformDefault: "Esta combinación es el atajo predeterminado de otra plataforma y no se puede asignar aquí. Elige otra.",

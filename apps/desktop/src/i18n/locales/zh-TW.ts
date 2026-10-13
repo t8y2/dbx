@@ -7530,7 +7530,7 @@ export default withEnglishFallback({
     shortcutSearchPlaceholder: "搜尋快速鍵",
     shortcutSearchNoResults: "沒有符合的快速鍵。",
     shortcutRecordKeys: "錄製組合鍵",
-    shortcutRecordKeysRecordingHint: "請按下組合鍵搜尋（Esc 退出，Backspace 清除）",
+    shortcutRecordKeysRecordingHint: "請按下組合鍵搜尋（Esc 退出，Backspace 清除）。被系統搶占的組合（Alt+F4、Win 鍵、⌘Tab）無法錄製。",
     shortcutConflict: "這個快速鍵與同一作用域內的其他操作衝突。",
     shortcutReserved: "此快速鍵由系統保留，請改用其他組合。",
     shortcutPlatformDefault: "該組合是其它平台的預設鍵，本平台無法綁定，請換一個組合。",

@@ -3306,31 +3306,59 @@ function clearShortcut(actionId: ShortcutActionId) {
 }
 
 /**
- * #11787：进入/退出「键盘录入」态。焦点必须显式落到录入按钮上——录入期间
- * App.vue 的两个 capture 阶段全局处理器只看**焦点元素**是否带
- * `data-shortcut-recorder` 才让路，而 macOS 的 WKWebView（沿用 Safari 规则）
- * 点击按钮不会给按钮焦点，光靠 click 会在 mac 上留下一条「录入态吞不掉全局
- * 快捷键」的路径。
+ * #11787：把焦点交给录入按钮并返回是否成功。录入期间 App.vue 的三条 capture 阶段
+ * 分支只看**焦点元素**是否带 `data-shortcut-recorder` 才让路，而 macOS 的 WKWebView
+ * （沿用 Safari 规则）点击按钮不会给按钮焦点，所以进入录入态必须显式 focus，不能只
+ * 靠点击。
  */
+async function focusShortcutRecorderButton(): Promise<boolean> {
+  await nextTick();
+  const button = document.querySelector<HTMLElement>(SHORTCUT_RECORDER_SELECTOR);
+  if (!button) return false;
+  button.focus();
+  return true;
+}
+
 async function toggleShortcutRecording() {
   if (shortcutRecording.value) {
     shortcutRecording.value = false;
     return;
   }
   shortcutRecording.value = true;
-  await nextTick();
-  const button = document.querySelector<HTMLElement>(SHORTCUT_RECORDER_SELECTOR);
-  if (!button) {
-    // 没有焦点就没有让路依据：宁可退回未录入态，也不要留下一个「显示正在录入、
-    // 实际吞不掉任何按键」的空转状态。
-    shortcutRecording.value = false;
-    return;
-  }
-  button.focus();
+  // 没有焦点就没有让路依据：宁可退回未录入态，也不要留下一个「显示正在录入、实际
+  // 吞不掉任何按键」的空转状态。
+  if (!(await focusShortcutRecorderButton())) shortcutRecording.value = false;
 }
 
 function stopShortcutRecording() {
   shortcutRecording.value = false;
+}
+
+function onShortcutRecorderBlur() {
+  // 窗口失焦不算放弃录入：被系统抢占的组合（Win+*、Alt+Tab、系统保留热键）本来就
+  // 到不了页面，但按下它们会把焦点带走（#11787 的实测反馈），此时把录入态一起丢掉，
+  // 用户回到 DBX 后按的键就会被当普通快捷键执行。窗口重新获得焦点时再把焦点还给
+  // 录入按钮（见 onShortcutRecordingWindowFocus）。
+  if (!document.hasFocus()) return;
+  // 焦点转移到应用内的其它元素（点了搜索框、某一行……）才是真的放弃录入。
+  stopShortcutRecording();
+}
+
+function onShortcutRecordingWindowFocus() {
+  if (!shortcutRecording.value) return;
+  void nextTick().then(() => {
+    if (!shortcutRecording.value) return;
+    // 别抢用户“一回来就点”的那个控件：窗口激活后焦点可能已经落到搜索框/某一行上，
+    // 此时把焦点抢回录入按钮会让这次点击白点一下（那种情况 blur 已经按应用内规则
+    // 结束录入）。只有焦点没有归属（body）或本来就还在录入按钮上时才恢复。
+    const active = document.activeElement;
+    const activeIsControl = active instanceof HTMLElement && active !== document.body && active !== document.documentElement && !active.closest(SHORTCUT_RECORDER_SELECTOR);
+    if (activeIsControl) return;
+    void focusShortcutRecorderButton().then((focused) => {
+      // 录入表面已不存在（换了页签、设置被关掉）时不保留空转的录入态。
+      if (!focused) shortcutRecording.value = false;
+    });
+  });
 }
 
 function onShortcutRecorderKeydown(event: KeyboardEvent) {
@@ -5339,6 +5367,9 @@ onMounted(() => {
   document.addEventListener("visibilitychange", modifierDoubleTapRecorder.reset);
   window.addEventListener("pointerdown", modifierDoubleTapRecorder.cancel, true);
   window.addEventListener("compositionstart", modifierDoubleTapRecorder.cancel, true);
+  // #11787：系统快捷键（Win+*、Alt+Tab、系统保留热键）把窗口焦点带走后，录入态要
+  // 留着，回到 DBX 时再把焦点还给录入按钮。
+  window.addEventListener("focus", onShortcutRecordingWindowFocus);
   void refreshWebDavPasswordStatus();
   checkLayoutDescTruncation();
   initTruncationObservers();
@@ -5350,6 +5381,7 @@ onUnmounted(() => {
   document.removeEventListener("visibilitychange", modifierDoubleTapRecorder.reset);
   window.removeEventListener("pointerdown", modifierDoubleTapRecorder.cancel, true);
   window.removeEventListener("compositionstart", modifierDoubleTapRecorder.cancel, true);
+  window.removeEventListener("focus", onShortcutRecordingWindowFocus);
   modifierDoubleTapRecorder.reset();
   clearThemePaletteOptionPreview();
   clearUiFontOptionPreview();
@@ -9673,7 +9705,7 @@ onUnmounted(() => {
                     :data-shortcut-recorder="shortcutRecording ? 'active' : undefined"
                     @click="toggleShortcutRecording"
                     @keydown="onShortcutRecorderKeydown"
-                    @blur="stopShortcutRecording"
+                    @blur="onShortcutRecorderBlur"
                   >
                     <Keyboard class="h-4 w-4" />
                   </Button>

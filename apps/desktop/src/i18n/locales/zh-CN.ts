@@ -9226,7 +9226,7 @@ export default withEnglishFallback({
     shortcutSearchPlaceholder: "搜索快捷键",
     shortcutSearchNoResults: "没有匹配的快捷键。",
     shortcutRecordKeys: "录制组合键",
-    shortcutRecordKeysRecordingHint: "请按下组合键搜索（Esc 退出，Backspace 清空）",
+    shortcutRecordKeysRecordingHint: "请按下组合键搜索（Esc 退出，Backspace 清空）。被系统抢占的组合（Alt+F4、Win 键、⌘Tab）无法录入。",
     shortcutConflict: "这个快捷键与同一作用域内的其他操作冲突。",
     shortcutReserved: "该快捷键由系统保留，请换一个组合。",
     shortcutPlatformDefault: "该组合是其它平台的默认键，本平台无法绑定，请换一个组合。",

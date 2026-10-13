@@ -287,7 +287,7 @@ describe("EditorSettingsDialog shortcut key recording (behaviour)", () => {
     expect(shortcutsPane(host).textContent).toContain("settings.shortcutSearchNoResults");
   });
 
-  it("leaves recording when focus leaves the recorder button", async () => {
+  it("leaves recording when focus moves inside the app", async () => {
     hoisted.shortcuts = defaults();
     const host = await mountShortcutsTab();
     const button = recorderButton(host);
@@ -295,14 +295,50 @@ describe("EditorSettingsDialog shortcut key recording (behaviour)", () => {
     await flushAsyncUpdates();
     expect(button.getAttribute("aria-pressed")).toBe("true");
 
-    // 焦点离开（用户去点了搜索框/某一行）后 keydown 不再到达按钮：必须退出录入态，
-    // 否则会留下一个看不见的空转状态。
-    button.dispatchEvent(new FocusEvent("blur"));
-    await flushAsyncUpdates();
+    // 应用内把焦点挪到别处（点了搜索框、某一行）才是真的放弃录入。
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    try {
+      searchInput(host).focus();
+      await flushAsyncUpdates();
+    } finally {
+      hasFocus.mockRestore();
+    }
 
     expect(button.getAttribute("aria-pressed")).toBe("false");
     expect(button.hasAttribute("data-shortcut-recorder")).toBe(false);
     expect(shortcutsPane(host).textContent).not.toContain("settings.shortcutRecordKeysRecordingHint");
+  });
+
+  it("survives losing the window and re-arms the recorder when the window comes back", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+    const button = recorderButton(host);
+    button.click();
+    await flushAsyncUpdates();
+
+    // 被系统抢占的组合（Win+*、Alt+Tab、系统热键）把窗口焦点带走：键到不了页面，
+    // 但录入态必须留着，否则用户回到 DBX 后按的键会被当普通快捷键执行。
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    try {
+      window.dispatchEvent(new Event("blur"));
+      // 真实失焦：窗口失焦时浏览器把焦点交回 body。
+      button.blur();
+      await flushAsyncUpdates();
+      expect(button.getAttribute("aria-pressed")).toBe("true");
+
+      // 回到 DBX：焦点自动还给录入按钮，接着录。
+      window.dispatchEvent(new Event("focus"));
+      await flushAsyncUpdates();
+    } finally {
+      hasFocus.mockRestore();
+    }
+
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    expect(document.activeElement).toBe(button);
+
+    pressKeys(button, { key: "k", ctrlKey: true, shiftKey: true });
+    await flushAsyncUpdates();
+    expect(searchInput(host).value).toBe("Ctrl + Shift + K");
   });
 
   it("records keys that would otherwise activate the button itself", async () => {

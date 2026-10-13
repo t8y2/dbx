@@ -8,13 +8,15 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { resolveWindowContext } from "@/lib/app/windowContext";
 import { acquireUpdateBarrier, assertUpdateSafe, beginUpdateSensitiveOperation } from "@/lib/app/updatePreparation";
 import { uuid } from "@/lib/common/utils";
-import { acceptWorkspaceTransfer, isWorkspaceTabWindowLabel, lockWorkspaceTransferInput, waitForWorkspaceTransfer, type TransferStatus, type WorkspaceTabHandoff } from "@/lib/tabs/workspaceTabTransfer";
+import { acceptWorkspaceTransfer, isWorkspaceTabWindowLabel, lockWorkspaceTransferInput, reportWorkspaceStartupError, waitForWorkspaceTransfer, type TransferStatus, type WorkspaceTabHandoff, type WorkspaceTransferInfo } from "@/lib/tabs/workspaceTabTransfer";
 import { showTabDragPreviewWebview, hideTabDragPreviewWebview } from "@/lib/tabs/tabWindowPreviewHost";
 import type { TabDragAppearance } from "@/lib/tabs/tabDragAppearance";
 import type { QueryTab } from "@/types/database";
 
 const TRANSFER_EVENT = "dbx:workspace-tab-transfer";
 const PREVIEW_EVENT = "dbx:workspace-tab-preview";
+const DROP_HIT_TEST_EVENT = "dbx:workspace-tab-drop-hit-test";
+const DROP_HIT_TEST_RESULT_EVENT = "dbx:workspace-tab-drop-hit-test-result";
 const CLOSE_PREPARE_EVENT = "dbx:workspace-close-prepare";
 const CLOSE_READY_EVENT = "dbx:workspace-close-ready";
 const CLOSE_RELEASE_EVENT = "dbx:workspace-close-release";
@@ -119,6 +121,36 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
     return candidates.filter((item): item is { label: string; focused: boolean } => !!item).sort((a, b) => Number(b.focused) - Number(a.focused))[0]?.label;
   }
 
+  async function requestDropTarget(target: string, point: Point): Promise<DropTarget | null> {
+    const { emitTo, listen } = await import("@tauri-apps/api/event");
+    const id = uuid();
+    return new Promise<DropTarget | null>((resolve, reject) => {
+      let finished = false;
+      let unlisten: (() => void) | undefined;
+      const finish = (callback: () => void) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        unlisten?.();
+        callback();
+      };
+      const timer = setTimeout(() => finish(() => reject(new Error(t("tabs.workspaceDropTargetUnavailable")))), 1200);
+      void listen<{ id: string; target: string; ready: boolean; drop: DropTarget | null; error?: boolean }>(DROP_HIT_TEST_RESULT_EVENT, ({ payload }) => {
+        if (payload.id !== id || payload.target !== target) return;
+        finish(() => (payload.ready && !payload.error ? resolve(payload.drop) : reject(new Error(t("tabs.workspaceDropTargetUnavailable")))));
+      })
+        .then((dispose) => {
+          if (finished) {
+            dispose();
+            return;
+          }
+          unlisten = dispose;
+          return emitTo({ kind: "WebviewWindow", label: target }, DROP_HIT_TEST_EVENT, { id, source: label, target, point });
+        })
+        .catch((error) => finish(() => reject(error)));
+    });
+  }
+
   async function createWindow(id: string, point?: Point) {
     const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
     const url = new URL(window.location.href);
@@ -130,7 +162,8 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
       const scale = (await monitorFromPoint(point.x, point.y))?.scaleFactor ?? 1;
       placement = { x: point.x / scale - 120, y: point.y / scale - 18 };
     }
-    const child = new WebviewWindow(`dbx-tab-${id}`, { url: url.toString(), title: "DBX", width: 1200, height: 800, minWidth: 900, minHeight: 600, visible: false, decorations: false, ...placement });
+    // 立即展示启动预览；窗口可见不代表交接成功，源标签仍等 committed 后才移除。
+    const child = new WebviewWindow(`dbx-tab-${id}`, { url: url.toString(), title: "DBX", width: 1200, height: 800, minWidth: 900, minHeight: 600, visible: true, decorations: false, ...placement });
     await new Promise<void>((resolve, reject) => {
       let expired = false;
       const timer = setTimeout(() => {
@@ -231,9 +264,12 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
       return accepted;
     } catch (error) {
       await transferCommand("reject", id).catch(() => {});
+      reportWorkspaceStartupError(error);
       errorToast(error);
       return false;
     } finally {
+      // 回滚和持久化结束后才允许错误页重试，避免销毁仍在撤回副本的目标窗口。
+      await transferCommand("release", id).catch(() => {});
       incoming.delete(id);
       unlock?.();
       release?.();
@@ -244,10 +280,21 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
     const target = await windowAt(point);
     if (target === label) {
       const drop = await dropTarget(point);
-      if (drop) queryStore.moveTabToGroup(tab.id, drop.groupId, drop.index);
+      if (drop) {
+        queryStore.moveTabToGroup(tab.id, drop.groupId, drop.index);
+        return;
+      }
+      // 在本窗口释放但没有命中标签栏，也按“拖出标签”处理，不能静默无操作。
+      await moveTab(tab, undefined, point);
       return;
     }
-    await moveTab(tab, target, point);
+    if (target && (await requestDropTarget(target, point))) {
+      await moveTab(tab, target, point);
+      return;
+    }
+    // 只有目标明确回复“未命中标签栏”才把松手解释为新建窗口。
+    // 不响应/尚未就绪走上面的超时错误，避免通信故障被误判成创建意图。
+    await moveTab(tab, undefined, point);
   }
 
   function stopPreview() {
@@ -300,9 +347,9 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
     return true;
   }
 
-  function finishPointerDrag(tab: QueryTab, event: PointerEvent): boolean {
+  function finishPointerDrag(tab: QueryTab, _event: PointerEvent): boolean {
     if (drag?.tab.id === tab.id) return true;
-    if (!enabled.value || !ready || (event.clientX >= 0 && event.clientY >= 0 && event.clientX <= window.innerWidth && event.clientY <= window.innerHeight)) return false;
+    if (!enabled.value || !ready) return false;
     void import("@tauri-apps/api/window").then(async ({ cursorPosition }) => finishDrop(tab, await cursorPosition())).catch(errorToast);
     return true;
   }
@@ -333,6 +380,24 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
     await listen<{ id: string; target: string }>(TRANSFER_EVENT, (payload) => {
       if (payload.target === label) void accept(payload.id);
     });
+    await listen<{ id: string }>("dbx:workspace-tab-retry", (payload) => {
+      void (async () => {
+        const info = await transferCommand<WorkspaceTransferInfo>("inspect", payload.id);
+        if (info.source !== label || info.status !== "cancelled") return;
+        try {
+          const tab = queryStore.tabs.find((tab) => tab.id === info.tabId);
+          if (!tab || !enabled.value || !ready || closing || busyTabs.has(info.tabId)) throw new Error(t("tabs.workspaceRetryUnavailable"));
+          // 重试创建新的交接，重新读取源标签；绝不复活已取消的旧快照。
+          const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+          const previous = await WebviewWindow.getByLabel(info.target);
+          const retry = moveTab(tab);
+          await previous?.destroy();
+          await retry;
+        } catch (error) {
+          await emitTo(info.target, "dbx:workspace-retry-error", String(error));
+        }
+      })().catch(errorToast);
+    });
     await listen<NativeRelease>("dbx:tab-drag-preview-release", (payload) => {
       if (payload.sourceWindowLabel !== label || payload.transferId !== drag?.id) return;
       const current = drag;
@@ -351,6 +416,28 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
           remoteDrop.value = null;
         }, 150);
       });
+    });
+    await listen<{ id: string; source: string; target: string; point: Point }>(DROP_HIT_TEST_EVENT, (payload) => {
+      if (payload.target !== label || payload.source === label) return;
+      void (async () => {
+        let drop: DropTarget | null = null;
+        let hitTestFailed = false;
+        const targetReady = enabled.value && ready && !closing;
+        if (targetReady) {
+          try {
+            drop = await dropTarget(payload.point);
+          } catch {
+            hitTestFailed = true;
+          }
+        }
+        await emitTo({ kind: "WebviewWindow", label: payload.source }, DROP_HIT_TEST_RESULT_EVENT, {
+          id: payload.id,
+          target: label,
+          ready: targetReady,
+          drop,
+          error: hitTestFailed,
+        });
+      })().catch(errorToast);
     });
     await listen<string>("dbx-workspace-close-requested", (target) => {
       if (target !== label || context.kind !== "workspace") return;
@@ -392,11 +479,12 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
     const token = new URLSearchParams(window.location.search).get("dbxWorkspaceTransfer");
     if (context.kind === "workspace" && token) {
       const accepted = await accept(token);
-      const url = new URL(window.location.href);
-      url.searchParams.delete("dbxWorkspaceTransfer");
-      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-      if (!accepted && !queryStore.tabs.length) await invoke("complete_workspace_window_close");
-      else await current.show();
+      // 失败窗口保留可见的错误预览供重试/关闭，不再静默销毁。
+      if (accepted) {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("dbxWorkspaceTransfer");
+        window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+      }
     }
   }
 

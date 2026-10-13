@@ -22,6 +22,7 @@ struct Transfer {
     target: String,
     payload: Value,
     status: &'static str,
+    receiving: bool,
     started: Instant,
 }
 
@@ -38,12 +39,14 @@ impl Transfer {
 #[derive(Default)]
 pub struct WorkspaceTabsState {
     transfers: Mutex<HashMap<String, Transfer>>,
+    initializing: Mutex<HashSet<String>>,
     // 同时串行化子窗口快照的读改写与主窗口恢复后的清理。
     recovered: tokio::sync::Mutex<HashSet<String>>,
 }
 
 #[tauri::command]
 pub fn workspace_tab_transfer(
+    app: AppHandle,
     window: Window,
     state: State<'_, WorkspaceTabsState>,
     operation: String,
@@ -66,9 +69,19 @@ pub fn workspace_tab_transfer(
         let payload = payload
             .filter(|value| value.get("tabId").and_then(Value::as_str).is_some())
             .ok_or("Invalid tab handoff")?;
+        if target == format!("dbx-tab-{id}") {
+            state.initializing.lock().map_err(|_| "Workspace startup state unavailable")?.insert(target.clone());
+        }
         transfers.insert(
             id,
-            Transfer { source: caller.into(), target, payload, status: "pending", started: Instant::now() },
+            Transfer {
+                source: caller.into(),
+                target,
+                payload,
+                status: "pending",
+                receiving: false,
+                started: Instant::now(),
+            },
         );
         return Ok(json!("pending"));
     }
@@ -80,13 +93,39 @@ pub fn workspace_tab_transfer(
         transfer.settle(false);
     }
     match operation.as_str() {
+        "inspect" => Ok(json!({
+            "source": transfer.source, "target": transfer.target, "status": transfer.status,
+            "tabId": transfer.payload.get("tabId"),
+            "title": transfer.payload.get("tab").and_then(|tab| tab.get("title")),
+        })),
+        "retry" if caller == transfer.target && transfer.status == "cancelled" && !transfer.receiving => {
+            if app.get_webview_window(&transfer.source).is_none() {
+                return Err("The source window is no longer available".into());
+            }
+            app.emit_to(transfer.source.as_str(), "dbx:workspace-tab-retry", json!({ "id": id }))
+                .map_err(|error| error.to_string())?;
+            Ok(Value::Null)
+        }
         "read" if caller == transfer.target => {
             if transfer.status != "pending" {
                 return Ok(Value::Null);
             }
+            // 开始接收后由已注册的前端关闭流程负责，禁止在落盘/回滚中途销毁窗口。
+            state.initializing.lock().map_err(|_| "Workspace startup state unavailable")?.remove(caller);
+            transfer.receiving = true;
             Ok(transfer.payload.clone())
         }
-        "commit" if caller == transfer.target => Ok(json!(transfer.settle(true))),
+        "release" if caller == transfer.target => {
+            transfer.receiving = false;
+            Ok(Value::Null)
+        }
+        "commit" if caller == transfer.target => {
+            let status = transfer.settle(true);
+            if status == "committed" {
+                state.initializing.lock().map_err(|_| "Workspace startup state unavailable")?.remove(caller);
+            }
+            Ok(json!(status))
+        }
         "reject" if caller == transfer.target => Ok(json!(transfer.settle(false))),
         "cancel" if caller == transfer.source => Ok(json!(transfer.settle(false))),
         "status" => Ok(json!(transfer.status)),
@@ -95,7 +134,44 @@ pub fn workspace_tab_transfer(
 }
 
 pub(crate) fn request_workspace_close(window: &Window) {
+    // 初始化尚未接收标签时也必须能关闭；不能依赖尚未注册的前端监听器。
+    if cancel_initial_transfer(window) {
+        let _ = window.destroy();
+        return;
+    }
     let _ = window.emit_to(window.label(), "dbx-workspace-close-requested", window.label());
+}
+
+fn cancel_initial_transfer(window: &Window) -> bool {
+    cancel_initial_transfer_in_state(&window.state::<WorkspaceTabsState>(), window.label())
+}
+
+fn cancel_initial_transfer_in_state(state: &WorkspaceTabsState, label: &str) -> bool {
+    let Some(id) = label.strip_prefix("dbx-tab-") else { return false };
+    let Ok(mut transfers) = state.transfers.lock() else { return false };
+    let Ok(mut initializing) = state.initializing.lock() else { return false };
+    if !initializing.remove(label) {
+        return false;
+    }
+    if let Some(transfer) = transfers.get_mut(id) {
+        transfer.settle(false);
+    }
+    true
+}
+
+pub(crate) fn forget_workspace_window(window: &Window) {
+    if let Ok(mut initializing) = window.state::<WorkspaceTabsState>().initializing.lock() {
+        initializing.remove(window.label());
+    }
+}
+
+#[tauri::command]
+pub fn close_workspace_startup(window: Window) -> Result<(), String> {
+    if !is_workspace_window(window.label()) {
+        return Err("Only a workspace child window can be closed here".into());
+    }
+    request_workspace_close(&window);
+    Ok(())
 }
 
 #[tauri::command]
@@ -118,6 +194,41 @@ async fn load_snapshots(state: &AppState, base_key: &str) -> Result<Map<String, 
         .await?
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default())
+}
+
+pub(crate) fn collect_result_cache_keys(value: &Value, keys: &mut HashSet<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(key) = object.get("resultCacheKey").and_then(Value::as_str) {
+                keys.insert(key.to_owned());
+            }
+            for nested in object.values() {
+                collect_result_cache_keys(nested, keys);
+            }
+        }
+        Value::Array(values) => {
+            for nested in values {
+                collect_result_cache_keys(nested, keys);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) async fn protected_result_cache_keys(app: &AppHandle, state: &AppState) -> Result<HashSet<String>, String> {
+    let workspace = app.state::<WorkspaceTabsState>();
+    let _guard = workspace.recovered.lock().await;
+    let mut keys = HashSet::new();
+    // 关闭但尚未回收的子窗口快照，也仍然是可恢复结果的有效引用。
+    let snapshots = load_snapshots(state, super::app_settings::open_tabs_state_key(cfg!(debug_assertions))).await?;
+    collect_result_cache_keys(&Value::Object(snapshots), &mut keys);
+    let detached = super::app_settings::load_detached_tabs_map(state).await?;
+    collect_result_cache_keys(&Value::Object(detached), &mut keys);
+    let transfers = workspace.transfers.lock().map_err(|_| "Tab transfer state unavailable")?;
+    for transfer in transfers.values().filter(|transfer| transfer.status != "cancelled") {
+        collect_result_cache_keys(&transfer.payload, &mut keys);
+    }
+    Ok(keys)
 }
 
 fn merge_recovered_tabs(main: &mut Value, child: &Value) {
@@ -208,6 +319,7 @@ mod tests {
             target: "dbx-tab-test".into(),
             payload: Value::Null,
             status: "pending",
+            receiving: false,
             started: Instant::now(),
         }
     }
@@ -220,6 +332,27 @@ mod tests {
         let mut committed = pending();
         assert_eq!(committed.settle(true), "committed");
         assert_eq!(committed.settle(false), "committed");
+    }
+
+    #[test]
+    fn loading_window_can_cancel_before_frontend_listeners_exist() {
+        let state = WorkspaceTabsState::default();
+        state.transfers.lock().unwrap().insert("test".into(), pending());
+        state.initializing.lock().unwrap().insert("dbx-tab-test".into());
+        assert!(cancel_initial_transfer_in_state(&state, "dbx-tab-test"));
+        assert_eq!(state.transfers.lock().unwrap().get("test").unwrap().status, "cancelled");
+        assert!(!cancel_initial_transfer_in_state(&state, "dbx-tab-test"));
+    }
+
+    #[test]
+    fn expired_startup_still_closes_but_receiving_window_uses_normal_close() {
+        let state = WorkspaceTabsState::default();
+        state.initializing.lock().unwrap().insert("dbx-tab-expired".into());
+        assert!(cancel_initial_transfer_in_state(&state, "dbx-tab-expired"));
+        state.transfers.lock().unwrap().insert("test".into(), pending());
+        assert!(!cancel_initial_transfer_in_state(&state, "dbx-tab-test"));
+        assert_eq!(state.transfers.lock().unwrap().get("test").unwrap().status, "pending");
+        assert!(!cancel_initial_transfer_in_state(&state, "main"));
     }
 
     #[test]
@@ -245,5 +378,20 @@ mod tests {
         assert_eq!(main["tabs"].as_array().unwrap().len(), 2);
         assert_eq!(main["tabs"][0]["sql"], "new");
         assert_eq!(main["groups"][0]["id"], "main");
+    }
+
+    #[test]
+    fn cache_references_include_child_tabs_result_runs_and_inflight_handoffs() {
+        let mut keys = HashSet::new();
+        collect_result_cache_keys(
+            &json!({
+                "dbx-tab-one": { "tabs": [{ "resultCacheKey": "tab-result", "resultRuns": [
+                    { "resultCacheKey": "run-result" }, { "resultCacheKey": null }
+                ] }] },
+                "handoff": { "resultCacheKey": "transfer-result", "tab": { "resultCacheKey": "tab-result" } }
+            }),
+            &mut keys,
+        );
+        assert_eq!(keys, HashSet::from(["tab-result".into(), "run-result".into(), "transfer-result".into()]));
     }
 }

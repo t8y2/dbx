@@ -70,6 +70,7 @@ import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { useTauriEvents } from "@/composables/useTauriEvents";
 import { useCloseActionPrompt, type AppCloseAction, type AppCloseRequestOptions } from "@/composables/useCloseActionPrompt";
 import { useWorkspaceTabWindows } from "@/composables/useWorkspaceTabWindows";
+import { reportWorkspaceStartupError } from "@/lib/tabs/workspaceTabTransfer";
 import { disposeAllSqlServerActivityTraces } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import { useExternalSqlFileChanges } from "@/composables/useExternalSqlFileChanges";
@@ -4559,6 +4560,7 @@ async function initApp() {
 
     restoreActiveConnectionContext();
   } catch (e: any) {
+    reportWorkspaceStartupError(e);
     toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
   }
 }

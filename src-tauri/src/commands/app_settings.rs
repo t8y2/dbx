@@ -32,7 +32,7 @@ pub(crate) fn take_approved_detached_window_close(label: &str) -> bool {
     approved_detached_closes().lock().map(|mut labels| labels.remove(label)).unwrap_or(false)
 }
 
-async fn load_detached_tabs_map(state: &AppState) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+pub(crate) async fn load_detached_tabs_map(state: &AppState) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     Ok(state
         .storage
         .load_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY)
@@ -41,7 +41,7 @@ async fn load_detached_tabs_map(state: &AppState) -> Result<serde_json::Map<Stri
         .unwrap_or_default())
 }
 
-fn open_tabs_state_key(debug_build: bool) -> &'static str {
+pub(crate) fn open_tabs_state_key(debug_build: bool) -> &'static str {
     if debug_build {
         DEVELOPMENT_OPEN_TABS_STATE_KEY
     } else {

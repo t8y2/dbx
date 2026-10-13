@@ -1,6 +1,19 @@
 import type { DetachedTabHandoff } from "@/lib/app/detachedTabHandoff";
 
 export type TransferStatus = "pending" | "committed" | "cancelled";
+export interface WorkspaceTransferInfo {
+  source: string;
+  target: string;
+  status: TransferStatus;
+  tabId: string;
+  title?: string;
+}
+export const WORKSPACE_STARTUP_ERROR_EVENT = "dbx:workspace-startup-error";
+
+export function reportWorkspaceStartupError(error: unknown) {
+  if (!new URLSearchParams(window.location.search).has("dbxWorkspaceTransfer")) return;
+  window.dispatchEvent(new CustomEvent(WORKSPACE_STARTUP_ERROR_EVENT, { detail: error instanceof Error ? error.message : String(error) }));
+}
 export interface WorkspaceTabHandoff extends DetachedTabHandoff {
   dropCursorPhysical?: { x: number; y: number };
 }

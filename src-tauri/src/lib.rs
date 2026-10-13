@@ -1591,6 +1591,7 @@ pub fn run() {
     builder
         .manage(CloseBehaviorState::new())
         .manage(commands::workspace_tabs::WorkspaceTabsState::default())
+        .manage(commands::tab_runtime_cache::WindowResultCacheReferences::default())
         .manage(commands::tab_drag_preview::TabDragPreviewState::default())
         .manage(commands::plugin_file::PluginFileState::new())
         .manage(commands::plugin_media::PluginMediaState::new())
@@ -1839,6 +1840,7 @@ pub fn run() {
                 return;
             }
             if let tauri::WindowEvent::Destroyed = event {
+                commands::workspace_tabs::forget_workspace_window(window);
                 // A webview that no longer exists must not leave drop grants
                 // behind for a future renderer to claim.
                 if let Some(state) = window.try_state::<commands::plugin_file::PluginFileState>() {
@@ -1938,6 +1940,7 @@ pub fn run() {
             commands::app_settings::set_app_locale,
             commands::app_settings::complete_app_close,
             commands::workspace_tabs::workspace_tab_transfer,
+            commands::workspace_tabs::close_workspace_startup,
             commands::workspace_tabs::complete_workspace_window_close,
             commands::tab_drag_preview::start_tab_drag_preview,
             commands::tab_drag_preview::stop_tab_drag_preview,

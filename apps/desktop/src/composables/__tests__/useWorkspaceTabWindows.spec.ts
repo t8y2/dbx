@@ -12,10 +12,15 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
   persist: vi.fn(),
   emitTo: vi.fn(),
+  eventListen: vi.fn(),
+  dropHit: null as { groupId: string; index?: number; tabId?: string } | null,
+  cursor: { x: 950, y: 300 },
   show: vi.fn(),
   focus: vi.fn(),
   release: vi.fn(),
   unlock: vi.fn(),
+  create: vi.fn(),
+  destroy: vi.fn(),
 }));
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
@@ -55,11 +60,29 @@ vi.mock("@/lib/app/updatePreparation", () => ({
 }));
 vi.mock("@/lib/tabs/tabWindowPreviewHost", () => ({ showTabDragPreviewWebview: vi.fn(), hideTabDragPreviewWebview: vi.fn(async () => {}) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
-vi.mock("@tauri-apps/api/event", () => ({ emitTo: mocks.emitTo, emit: vi.fn(async () => {}) }));
+vi.mock("@tauri-apps/api/event", () => ({ emitTo: mocks.emitTo, emit: vi.fn(async () => {}), listen: mocks.eventListen }));
+vi.mock("@tauri-apps/api/window", () => ({
+  cursorPosition: async () => mocks.cursor,
+  getCurrentWindow: () => ({ innerPosition: async () => (mocks.context.windowLabel === "main" ? { x: 0, y: 0 } : { x: 800, y: 0 }), scaleFactor: async () => 1 }),
+  monitorFromPoint: async () => ({ scaleFactor: 1 }),
+}));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  WebviewWindow: class {
+    constructor(label: string, options: unknown) {
+      mocks.create(label, options);
+    }
+    async once(name: string, handler: () => void) {
+      if (name === "tauri://created") handler();
+      return () => {};
+    }
+    destroy = mocks.destroy;
+    static async getByLabel() {
+      return { destroy: mocks.destroy };
+    }
+  },
   getAllWebviewWindows: async () => [
-    { label: "main", title: async () => "DBX" },
-    { label: "dbx-tab-child", title: async () => "child" },
+    { label: "main", title: async () => "DBX", outerPosition: async () => ({ x: 0, y: 0 }), outerSize: async () => ({ width: 800, height: 600 }), isVisible: async () => true, isMinimized: async () => false, isFocused: async () => false },
+    { label: "dbx-tab-child", title: async () => "child", outerPosition: async () => ({ x: 800, y: 0 }), outerSize: async () => ({ width: 800, height: 600 }), isVisible: async () => true, isMinimized: async () => false, isFocused: async () => true },
     { label: "dbx-tab-drag-preview", title: async () => "preview" },
     { label: "plugin-floating-one", title: async () => "plugin" },
     { label: "detached-tab-one", title: async () => "detached" },
@@ -91,6 +114,18 @@ describe("useWorkspaceTabWindows", () => {
     mocks.tabs.length = 0;
     mocks.calls.length = 0;
     mocks.listeners.clear();
+    mocks.dropHit = null;
+    mocks.cursor = { x: 950, y: 300 };
+    mocks.eventListen.mockImplementation(async (name: string, handler: (message: { payload: any }) => void) => {
+      mocks.listeners.set(name, handler);
+      return () => mocks.listeners.delete(name);
+    });
+    mocks.emitTo.mockImplementation(async (_destination: unknown, event: string, payload: any) => {
+      if (event === "dbx:workspace-tab-drop-hit-test") {
+        mocks.listeners.get("dbx:workspace-tab-drop-hit-test-result")?.({ payload: { id: payload.id, target: payload.target, ready: true, drop: mocks.dropHit } });
+      }
+    });
+    window.history.replaceState(null, "", "/");
     mocks.persist.mockImplementation(async () => {
       mocks.calls.push("persist");
     });
@@ -151,6 +186,86 @@ describe("useWorkspaceTabWindows", () => {
     expect(mocks.calls).not.toContain("remove");
     expect(mocks.toast).toHaveBeenCalled();
     expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it("shows new windows immediately without removing the source before confirmation", async () => {
+    const service = await mount();
+    const tab = { id: "source", title: "SQL" };
+    mocks.tabs.push(tab);
+    mocks.invoke.mockImplementation(async (_command, args) => (args.operation === "offer" ? "pending" : "cancelled"));
+    await service.moveTab(tab as any);
+    expect(mocks.create).toHaveBeenCalledWith("dbx-tab-transfer-1", expect.objectContaining({ visible: true }));
+    expect(mocks.tabs).toEqual([tab]);
+    expect(mocks.destroy).not.toHaveBeenCalled();
+  });
+
+  it("creates a new window when released over an existing window outside its tab bar", async () => {
+    const service = await mount();
+    const tab = { id: "source", title: "SQL" };
+    mocks.tabs.push(tab);
+    expect(service.finishPointerDrag(tab as any, { clientX: -1, clientY: 300 } as PointerEvent)).toBe(true);
+    await vi.waitFor(() => expect(mocks.create).toHaveBeenCalledWith("dbx-tab-transfer-1", expect.objectContaining({ visible: true })));
+    expect(mocks.invoke).toHaveBeenCalledWith("workspace_tab_transfer", expect.objectContaining({ operation: "offer", target: "dbx-tab-transfer-1" }));
+    expect(mocks.tabs).toHaveLength(0);
+  });
+
+  it("creates a new window when released in the source window outside its tab bar", async () => {
+    const service = await mount();
+    const tab = { id: "source", title: "SQL" };
+    mocks.tabs.push(tab);
+    mocks.cursor = { x: 600, y: 300 };
+    expect(service.finishPointerDrag(tab as any, { clientX: 600, clientY: 300 } as PointerEvent)).toBe(true);
+    await vi.waitFor(() => expect(mocks.create).toHaveBeenCalledWith("dbx-tab-transfer-1", expect.objectContaining({ visible: true })));
+    expect(mocks.invoke).toHaveBeenCalledWith("workspace_tab_transfer", expect.objectContaining({ operation: "offer", target: "dbx-tab-transfer-1" }));
+  });
+
+  it("transfers into the existing window only when its tab bar confirms a hit", async () => {
+    const service = await mount();
+    const tab = { id: "source", title: "SQL" };
+    mocks.tabs.push(tab);
+    mocks.dropHit = { groupId: "main", index: 0 };
+    expect(service.finishPointerDrag(tab as any, { clientX: -1, clientY: 300 } as PointerEvent)).toBe(true);
+    await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("workspace_tab_transfer", expect.objectContaining({ operation: "offer", target: "dbx-tab-child" })));
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it("does not create a window when the existing target cannot confirm the drop", async () => {
+    const service = await mount();
+    const tab = { id: "source", title: "SQL" };
+    mocks.tabs.push(tab);
+    mocks.emitTo.mockImplementation(async (_destination: unknown, event: string) => {
+      if (event === "dbx:workspace-tab-drop-hit-test") {
+        mocks.listeners.get("dbx:workspace-tab-drop-hit-test-result")?.({ payload: { id: "transfer-1", target: "dbx-tab-child", ready: false, drop: null } });
+      }
+    });
+    expect(service.finishPointerDrag(tab as any, { clientX: -1, clientY: 300 } as PointerEvent)).toBe(true);
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("workspaceDropTargetUnavailable"), 7000));
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("workspace_tab_transfer", expect.objectContaining({ operation: "offer" }));
+    expect(mocks.tabs).toEqual([tab]);
+  });
+
+  it("keeps a cancelled startup window available for retry or close", async () => {
+    mocks.context = { kind: "workspace", windowLabel: "dbx-tab-transfer-1" };
+    window.history.replaceState(null, "", "/?dbxWorkspace=transfer-1&dbxWorkspaceTransfer=transfer-1");
+    mocks.invoke.mockResolvedValue(null);
+    await mount();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("complete_workspace_window_close");
+    expect(window.location.search).toContain("dbxWorkspaceTransfer");
+  });
+
+  it("retries from the current source tab using a fresh offer rather than the old payload", async () => {
+    await mount();
+    mocks.tabs.push({ id: "source", title: "edited SQL" });
+    mocks.invoke.mockImplementation(async (_command, args) => {
+      if (args.operation === "inspect") return { source: "main", target: "dbx-tab-failed", tabId: "source", status: "cancelled" };
+      return args.operation === "offer" ? "pending" : "committed";
+    });
+    mocks.listeners.get("dbx:workspace-tab-retry")!({ payload: { id: "old-transfer" } });
+    await vi.waitFor(() => expect(mocks.create).toHaveBeenCalled());
+    expect(mocks.calls).toContain("prepare");
+    expect(mocks.destroy).toHaveBeenCalledOnce();
+    expect(mocks.invoke).toHaveBeenCalledWith("workspace_tab_transfer", expect.objectContaining({ operation: "offer", id: "transfer-1" }));
   });
 
   it("does not transfer when the preview setting is disabled", async () => {

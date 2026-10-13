@@ -1348,7 +1348,9 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       disabled: !workspaceWindows?.targets.value.length,
       children: workspaceWindows?.targets.value.map((target, index) => ({
         label: target.label === "main" ? t("contextMenu.mainWindow") : `${t("contextMenu.detachedWindow", { number: index + 1 })} — ${target.title}`,
-        action: () => { void workspaceWindows.moveTab(tab, target.label); },
+        action: () => {
+          void workspaceWindows.moveTab(tab, target.label);
+        },
       })),
     },
     createLocateTabMenuItem({
@@ -1560,7 +1562,10 @@ function handleTabPointerUp(event: PointerEvent) {
     return;
   }
   const targetGroupId = drag.targetGroupId;
-  if (!targetGroupId) {
+  const dropElement = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+  const droppedOnTabBar = !!dropElement?.closest<HTMLElement>("[data-main-tab-bar][data-group-id]");
+  // 源组内容区不是有效标签落点：沿用跨窗口拖出语义创建子窗口；其他分组仍保留上游的组间移动。
+  if (!targetGroupId || (targetGroupId === payload.sourceGroupId && !droppedOnTabBar)) {
     const tab = queryStore.tabs.find((tab) => tab.id === payload.tabId);
     if (tab) workspaceWindows?.finishPointerDrag(tab, event);
     return;
@@ -1853,7 +1858,17 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             @dblclick="handleTabDoubleClick(entry.tab, $event)"
                             @mousedown.middle.prevent="closeTab(entry.tab)"
                           >
-                            <TabLabelContent :title="tabTitleText(entry.tab)" :dirty="isDirtyTab(entry.tab)" :collapsed="isTabBarCollapsed" :pinned="entry.tab.pinned" :title-style="tabTitleStyle(entry.tab)" :close-label="t('contextMenu.closeTab')" :unpin-label="t('contextMenu.unpinTab')" @close="closeTab(entry.tab)" @unpin="queryStore.togglePinnedTab(entry.tab.id)">
+                            <TabLabelContent
+                              :title="tabTitleText(entry.tab)"
+                              :dirty="isDirtyTab(entry.tab)"
+                              :collapsed="isTabBarCollapsed"
+                              :pinned="entry.tab.pinned"
+                              :title-style="tabTitleStyle(entry.tab)"
+                              :close-label="t('contextMenu.closeTab')"
+                              :unpin-label="t('contextMenu.unpinTab')"
+                              @close="closeTab(entry.tab)"
+                              @unpin="queryStore.togglePinnedTab(entry.tab.id)"
+                            >
                               <template #icon>
                                 <TabExecutionStatus :tab="entry.tab">
                                   <span data-tab-label-part="icon" class="shrink-0" :class="tabIconClass(entry.tab)">

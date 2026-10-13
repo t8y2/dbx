@@ -117,7 +117,8 @@ async function bootstrap() {
     void localeReady.catch(() => {});
     return;
   }
-  const [{ default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("./i18n"), import("./StartupGate.vue")]);
+  const startup = new URLSearchParams(window.location.search).has("dbxWorkspaceTransfer") ? import("./components/layout/WorkspaceWindowStartup.vue") : import("./StartupGate.vue");
+  const [{ default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("./i18n"), startup]);
   console.log("[STARTUP] frontend modules loaded");
   const localeReady = loadSavedLocale();
   const app = createApp(App, { localeReady });

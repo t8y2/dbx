@@ -982,7 +982,17 @@ fn format_oracle_export_temporal_literal(
         "timestamptz_dty" => ExportTemporalKind::DateTimeWithTimeZone,
         _ => export_temporal_column_kind(database_type, column_type)?,
     };
-    let parts = parse_export_date_parts(value.as_str()?)?;
+    let text = value.as_str()?;
+    let Some(parts) = parse_export_date_parts(text) else {
+        let (datetime, _) = text.rsplit_once(' ')?;
+        parse_export_local_temporal_parts(datetime)?;
+        let normalized_type = match base {
+            "timestampdty" => "TIMESTAMP",
+            "timestamptz_dty" => "TIMESTAMP WITH TIME ZONE",
+            _ => column_type,
+        };
+        return crate::data_grid_sql::format_oracle_temporal_literal(text, Some(normalized_type));
+    };
     if base == "date" {
         return Some(format_oracle_export_date_parts_literal(&parts));
     }
@@ -1605,6 +1615,11 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
             insert_sql.push(if *row_count > 1 { '\n' } else { ' ' });
             insert_sql.push_str(values);
             insert_sql.push(';');
+            if output_database_type == Some(DatabaseType::OceanbaseOracle) {
+                if let Some(statement) = crate::data_grid_sql::oceanbase_blob_statement(&insert_sql, false) {
+                    insert_sql = statement;
+                }
+            }
             if needs_identity_insert_wrapper {
                 statements.push(wrap_dameng_identity_insert_sql_for_table(&insert_sql, &table));
             } else {
@@ -1645,6 +1660,10 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
             };
             let literal = if insert_dialect == SqlInsertDialect::Standard {
                 format_standard_sql_literal(value)
+            } else if let Some(literal) =
+                crate::data_grid_sql::format_oracle_lob_export_literal(value, options.database_type, column_type)?
+            {
+                literal
             } else {
                 format_export_sql_literal_typed_with_spatial(
                     value,
@@ -5892,7 +5911,9 @@ mod tests {
 
         assert_eq!(
             statements,
-            vec!["INSERT INTO `places` (`location`, `shape`) VALUES (ST_GeomFromWKB(0x0101000000AE47E17A14AE5C4052B81E85EBF34240, 4326), ST_GeomFromWKB(0x0101000000000000000000F03F0000000000000040));"]
+            vec![
+                "INSERT INTO `places` (`location`, `shape`) VALUES (ST_GeomFromWKB(0x0101000000AE47E17A14AE5C4052B81E85EBF34240, 4326), ST_GeomFromWKB(0x0101000000000000000000F03F0000000000000040));"
+            ]
         );
     }
 
@@ -7003,6 +7024,108 @@ mod tests {
                 )]
             );
         }
+    }
+
+    #[test]
+    fn oracle_character_lob_exports_distinguish_empty_from_null() {
+        for database_type in ["oracle", "oceanbase-oracle"] {
+            let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+                "databaseType": database_type, "tableName": "LOB_VALUES",
+                "columns": ["C", "N", "TXT"], "columnTypes": ["CLOB", "NCLOB", "VARCHAR2"],
+                "rows": [["", "", ""], [null, null, null], [" ", " ", " "]]
+            }))
+            .unwrap();
+            let sql = build_export_sql_insert(options.clone()).unwrap();
+            assert!(sql.contains("VALUES (EMPTY_CLOB(), EMPTY_CLOB(), '')"), "{database_type}: {sql}");
+            assert!(sql.contains("VALUES (NULL, NULL, NULL)"), "{database_type}: {sql}");
+            assert!(sql.contains("VALUES (' ', ' ', ' ')"), "{database_type}: {sql}");
+            let mut standard = options;
+            standard.insert_dialect = SqlInsertDialect::Standard;
+            let sql = build_export_sql_insert(standard).unwrap();
+            assert!(sql.contains("('', '', '')"), "{database_type}: {sql}");
+            assert!(!sql.contains("EMPTY_CLOB"), "{database_type}: {sql}");
+        }
+    }
+
+    #[test]
+    fn oceanbase_result_export_preserves_lobs_and_driver_timezone() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("LOB_VALUES".to_string()),
+            qualified_table_name: None,
+            columns: vec!["C".into(), "B".into(), "TZ".into()],
+            column_types: vec![Some("CLOB".into()), Some("BLOB".into()), Some("TIMESTAMP(9) WITH TIME ZONE".into())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![
+                vec![json!("text'完整"), json!("0x00ff0102"), json!("2026-10-13 12:34:56.123456789 +8:00")],
+                vec![json!(""), json!("0x"), json!("2026-10-13 00:00:00.000000001 -5:30")],
+                vec![Value::Null, Value::Null, Value::Null],
+            ],
+            batch_size: Some(1),
+            preserve_original_language: false,
+        })
+        .unwrap();
+        assert!(statements[0].contains("TO_BLOB(HEXTORAW('00ff0102'))"), "{}", statements[0]);
+        assert!(statements[0].contains("TO_TIMESTAMP_TZ('2026-10-13 12:34:56.123456789 +08:00'"), "{}", statements[0]);
+        assert!(statements[1].contains("EMPTY_CLOB()"), "{}", statements[1]);
+        assert!(statements[1].contains("EMPTY_BLOB()"), "{}", statements[1]);
+        assert!(statements[1].contains("TO_TIMESTAMP_TZ('2026-10-13 00:00:00.000000001 -05:30'"), "{}", statements[1]);
+        assert!(statements[2].contains("VALUES (NULL, NULL, NULL)"));
+    }
+
+    #[test]
+    fn oceanbase_large_lob_export_uses_existing_chunked_statements() {
+        let text = format!("{}尾部", "中文'".repeat(2000));
+        let hex = "00ff0102".repeat(1024);
+        let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "oceanbase-oracle", "tableName": "LOB_VALUES",
+            "columns": ["C", "B", "TXT"], "columnTypes": ["CLOB", "BLOB", "VARCHAR2"],
+            "rows": [[text, format!("0x{hex}"), "TO_BLOB(HEXTORAW('fake'))"],
+                     ["", format!("0x{hex}"), "0x00ff"], [null, null, null]]
+        }))
+        .unwrap();
+        let sql = build_export_sql_insert(options).unwrap();
+        let statements = crate::sql::split_sql_statements_for_database(&sql, DatabaseType::OceanbaseOracle);
+        assert_eq!(statements.len(), 3);
+        for statement in &statements[..2] {
+            assert!(statement.starts_with("DECLARE"));
+            assert!(statement.contains("EXECUTE IMMEDIATE dbx_sql USING dbx_lob_0"));
+            assert_eq!(statement.matches("FREETEMPORARY(dbx_lob_0)").count(), 2);
+            let chunks = statement
+                .lines()
+                .filter_map(|line| {
+                    line.strip_prefix("DBMS_LOB.WRITEAPPEND(dbx_lob_0, ")?
+                        .split_once("HEXTORAW('")
+                        .map(|(_, hex)| hex.trim_end_matches("'));").to_string())
+                })
+                .collect::<String>();
+            assert_eq!(chunks, hex);
+        }
+        assert!(statements[0].contains("尾部"));
+        assert!(statements[0].contains("TO_BLOB(HEXTORAW(''''fake''''))"));
+        assert!(statements[1].contains("EMPTY_CLOB()"));
+        assert!(statements[2].contains("VALUES (NULL, NULL, NULL)"));
+    }
+
+    #[test]
+    fn oceanbase_lob_export_validates_only_source_exported_columns() {
+        let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "oceanbase-oracle", "tableName": "LOB_VALUES",
+            "columns": ["B", "TXT"], "columnTypes": ["BLOB", "VARCHAR2"],
+            "rows": [["0xnot-hex", "0xnot-hex"]]
+        }))
+        .unwrap();
+        assert!(build_export_sql_insert(options.clone()).unwrap_err().contains("hexadecimal byte pairs"));
+        let mut excluded = options.clone();
+        excluded.exclude_columns = vec!["B".into()];
+        assert!(build_export_sql_insert(excluded).unwrap().contains("(\"TXT\") VALUES ('0xnot-hex')"));
+        let mut standard = options;
+        standard.insert_dialect = SqlInsertDialect::Standard;
+        assert!(build_export_sql_insert(standard).unwrap().contains("'0xnot-hex', '0xnot-hex'"));
     }
 
     #[test]
@@ -8263,7 +8386,9 @@ mod tests {
         assert!(!ddl.contains("OWNED BY"));
         assert_eq!(
             generate_postgres_sequence_setval_sql(&sequence, "public").as_deref(),
-            Some("SELECT setval(pg_get_serial_sequence('\"public\".\"permissions\"', 'id'), GREATEST(COALESCE(MAX(\"id\"), 42), 42), true) FROM \"public\".\"permissions\"")
+            Some(
+                "SELECT setval(pg_get_serial_sequence('\"public\".\"permissions\"', 'id'), GREATEST(COALESCE(MAX(\"id\"), 42), 42), true) FROM \"public\".\"permissions\""
+            )
         );
     }
 

@@ -7302,6 +7302,8 @@ export default withEnglishFallback({
     syncDownload: "下載",
     syncTestSuccess: "WebDAV 目標可存取。",
     syncUploadSuccess: "已上傳 {bytes} 位元組到 {path}。",
+    syncLastSuccessful: "最近一次成功同步：{time}",
+    syncNeverSuccessful: "尚無成功同步記錄",
     syncAutoUpload: "自動上傳快照",
     syncAutoUploadInterval: "每",
     syncAutoUploadMinutes: "分鐘",

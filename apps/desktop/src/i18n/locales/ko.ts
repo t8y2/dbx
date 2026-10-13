@@ -7825,6 +7825,8 @@ export default withEnglishFallback({
     syncDownload: "다운로드",
     syncTestSuccess: "WebDAV 대상에 연결할 수 있습니다.",
     syncUploadSuccess: "{path}에 {bytes}바이트를 업로드했습니다.",
+    syncLastSuccessful: "마지막 동기화 성공: {time}",
+    syncNeverSuccessful: "성공한 동기화 기록이 없습니다",
     syncAutoUpload: "자동으로 스냅샷 업로드",
     syncAutoUploadInterval: "매",
     syncAutoUploadMinutes: "분",

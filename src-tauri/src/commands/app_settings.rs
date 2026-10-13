@@ -99,25 +99,6 @@ pub async fn update_app_appearance_settings(
 }
 
 #[tauri::command]
-pub async fn set_macos_app_icon_appearance(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-    is_dark: bool,
-) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let desktop_settings = state.storage.load_desktop_settings().await?;
-        crate::apply_macos_app_appearance_icon(&app, is_dark, desktop_settings.icon_theme)
-            .map_err(|error| error.to_string())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (app, state, is_dark);
-        Ok(())
-    }
-}
-
-#[tauri::command]
 pub async fn set_app_locale(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,

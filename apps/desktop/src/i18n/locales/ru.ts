@@ -9283,6 +9283,8 @@ export default withEnglishFallback({
     syncDownload: "Скачать",
     syncTestSuccess: "Цель WebDAV доступна.",
     syncUploadSuccess: "Загружено {bytes} байт в {path}.",
+    syncLastSuccessful: "Последняя успешная синхронизация: {time}",
+    syncNeverSuccessful: "Успешных синхронизаций пока не было",
     syncAutoUpload: "Автоматически загружать снимки",
     syncAutoUploadInterval: "Каждые",
     syncAutoUploadMinutes: "мин.",

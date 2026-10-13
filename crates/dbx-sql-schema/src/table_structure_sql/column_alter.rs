@@ -811,7 +811,7 @@ pub(super) fn build_saphana_existing_column_sql(table: &str, column: &EditableSt
     if type_changed || nullable_changed || default_changed {
         let mut parts = vec![
             quote_ident(StructureDialect::SapHana, &current_name),
-            column_data_type(StructureDialect::SapHana, column),
+            column_data_type(StructureDialect::SapHana, column, None),
         ];
         let default_value = normalize_default(Some(&column.default_value));
         if !default_value.is_empty() {

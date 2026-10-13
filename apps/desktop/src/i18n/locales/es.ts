@@ -8180,6 +8180,8 @@ export default withEnglishFallback({
     syncDownload: "Descargar",
     syncTestSuccess: "El destino WebDAV está disponible.",
     syncUploadSuccess: "Se subieron {bytes} bytes a {path}.",
+    syncLastSuccessful: "Última sincronización correcta: {time}",
+    syncNeverSuccessful: "Aún no hay sincronizaciones correctas",
     syncAutoUpload: "Subir instantáneas automáticamente",
     syncAutoUploadInterval: "Cada",
     syncAutoUploadMinutes: "minutos",

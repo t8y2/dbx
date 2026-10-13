@@ -8925,6 +8925,8 @@ export default withEnglishFallback({
     syncDownload: "下载",
     syncTestSuccess: "WebDAV 目标可访问。",
     syncUploadSuccess: "已上传 {bytes} 字节到 {path}。",
+    syncLastSuccessful: "最近一次成功同步：{time}",
+    syncNeverSuccessful: "暂无成功同步记录",
     syncAutoUpload: "自动上传快照",
     syncAutoUploadInterval: "每",
     syncAutoUploadMinutes: "分钟",

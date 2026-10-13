@@ -190,7 +190,7 @@ describe("original LOB result exports", () => {
     setActivePinia(createPinia());
     vi.mocked(exportSnapshotResult).mockResolvedValue(undefined);
   });
-  function snapshotState() {
+  function snapshotState(overrides: Partial<UseDataGridExportOptions> = {}) {
     const original = {
       columns: ["id", "name"],
       rows: [[1, "preview"]],
@@ -204,6 +204,8 @@ describe("original LOB result exports", () => {
         snapshotResult: computed(() => original),
         hasCompleteLocalResult: computed(() => true),
         completeLocalResult: computed(() => original),
+        displayItems: computed(() => original.rows.map((data, sourceIndex) => ({ ...row(data), id: sourceIndex + 1, sourceIndex }))),
+        ...overrides,
       }),
     };
   }
@@ -222,6 +224,127 @@ describe("original LOB result exports", () => {
     expect(readLargeValueChunk).not.toHaveBeenCalled();
     expect(exportQueryResultCsv).not.toHaveBeenCalled();
     expect(exportQueryResultJson).not.toHaveBeenCalled();
+  });
+  it.each(["csv", "json"] as const)("formats the complete LOB before exporting %s", async (format) => {
+    const displayValue = vi.fn((value: CellValue) => `formatted:${value}`);
+    const { state } = snapshotState({
+      displayValue,
+      hasColumnFormatter: (index) => index === 1,
+      applyColumnFormattersOnExport: computed(() => true),
+    });
+    vi.mocked(readLargeValueChunk).mockResolvedValue({ status: "ok", data: "complete original text", next_offset: 22, eof: true, value_kind: "text" });
+    await (format === "csv" ? state.exportCsv() : state.exportJson());
+    expect(displayValue).toHaveBeenCalledWith("complete original text", 1);
+    expect(exportSnapshotResult).toHaveBeenCalledWith(expect.objectContaining({ format, rows: [[1, "formatted:complete original text"]], cells: [] }), expect.any(String), expect.any(AbortSignal));
+  });
+  it.each([
+    ["csv", "all"],
+    ["csv", "selected"],
+    ["csv", "page"],
+    ["json", "all"],
+    ["json", "selected"],
+    ["json", "page"],
+  ] as const)("preserves mixed formatted and streaming LOBs in %s %s export", async (format, scope) => {
+    const { original, state } = snapshotState({
+      columns: computed(() => ["id", "name", "binary"]),
+      columnTypes: computed(() => ["NUMBER", "CLOB", "BLOB"]),
+      displayValue: (value) => `formatted:${value}`,
+      hasColumnFormatter: (index) => index === 1,
+      applyColumnFormattersOnExport: computed(() => true),
+    });
+    original.columns.push("binary");
+    original.rows = [
+      [1, "preview", "0x00"],
+      [2, null, null],
+      [3, "", "0x"],
+    ];
+    original.large_value_cells!.push({ row_index: 0, column_index: 2, original_bytes: 1000, value_ref: "binary-locator" });
+    vi.mocked(readLargeValueChunk).mockResolvedValue({ status: "ok", data: "complete original text", next_offset: 22, eof: true, value_kind: "text" });
+    if (scope === "page") await (format === "csv" ? state.exportCurrentPageCsv() : state.exportCurrentPageJson());
+    else await (format === "csv" ? state.exportCsv(scope === "selected" ? [1, 2, 3] : undefined) : state.exportJson(scope === "selected" ? [1, 2, 3] : undefined));
+    expect(readLargeValueChunk).toHaveBeenCalledOnce();
+    expect(readLargeValueChunk).toHaveBeenCalledWith(expect.objectContaining({ valueRef: "original-locator" }));
+    expect(exportSnapshotResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rows: [
+          [1, "formatted:complete original text", "0x00"],
+          [2, null, null],
+          [3, "formatted:", "0x"],
+        ],
+        cells: [{ rowIndex: 0, columnIndex: 2, valueRef: "binary-locator" }],
+      }),
+      expect.any(String),
+      expect.any(AbortSignal),
+    );
+  });
+  it.each([false, true])("keeps unformatted snapshot LOBs streaming when formatter enabled=%s", async (enabled) => {
+    const { state } = snapshotState({
+      displayValue: (value) => `formatted:${value}`,
+      hasColumnFormatter: (index) => index === (enabled ? 9 : 1),
+      applyColumnFormattersOnExport: computed(() => enabled),
+    });
+    await state.exportJson();
+    expect(readLargeValueChunk).not.toHaveBeenCalled();
+    expect(exportSnapshotResult).toHaveBeenCalledWith(expect.objectContaining({ rows: [[1, "preview"]], cells: [{ rowIndex: 0, columnIndex: 1, valueRef: "original-locator" }] }), expect.any(String), expect.any(AbortSignal));
+  });
+  it("formats complete binary values using source indexes after column projection", async () => {
+    const displayValue = vi.fn((value: CellValue, index: number) => `${index}:${value}`);
+    const { original, state } = snapshotState({
+      columns: computed(() => ["binary", "id"]),
+      columnTypes: computed(() => ["BLOB", "NUMBER"]),
+      visibleColumnIndexes: computed(() => [2, 0]),
+      displayValue,
+      hasColumnFormatter: (index) => index === 2,
+      applyColumnFormattersOnExport: computed(() => true),
+    });
+    original.columns = ["id", "__DBX_PK_0", "binary"];
+    original.rows = [[1, "hidden", "0x00"]];
+    original.hidden_column_indexes = [1];
+    original.large_value_cells = [{ row_index: 0, column_index: 2, original_bytes: 4, value_ref: "binary-locator" }];
+    vi.mocked(readLargeValueChunk).mockResolvedValue({ status: "ok", data: "00ff0102", next_offset: 4, eof: true, value_kind: "binary" });
+    await state.exportCsv({ columnIndexes: [0] });
+    expect(displayValue).toHaveBeenCalledWith("0x00ff0102", 2);
+    expect(exportSnapshotResult).toHaveBeenCalledWith(expect.objectContaining({ columns: ["binary"], rows: [["2:0x00ff0102"]], cells: [] }), expect.any(String), expect.any(AbortSignal));
+  });
+  it.each(["cancel", "replacement", "disposal"] as const)("blocks formatted snapshot output after %s while a chunk is pending", async (change) => {
+    const scope = effectScope();
+    const cancelHandler = ref<(() => Promise<void>) | null>(null);
+    const current = ref<QueryResult>();
+    const { original, state } = scope.run(() =>
+      snapshotState({
+        snapshotResult: computed(() => current.value!),
+        displayValue: (value) => `formatted:${value}`,
+        hasColumnFormatter: (index) => index === 1,
+        applyColumnFormattersOnExport: computed(() => true),
+        exportCancelHandler: cancelHandler,
+      }),
+    )!;
+    current.value = original;
+    let deliver!: (chunk: Awaited<ReturnType<typeof readLargeValueChunk>>) => void;
+    vi.mocked(readLargeValueChunk).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          deliver = resolve;
+        }),
+    );
+    vi.mocked(cancelQuery).mockRejectedValue(new Error("cancel unavailable"));
+    let settled = false;
+    const pending = state.exportJson().finally(() => {
+      settled = true;
+    });
+    try {
+      await vi.waitFor(() => expect(readLargeValueChunk).toHaveBeenCalledOnce());
+      if (change === "cancel") await cancelHandler.value!().catch(() => undefined);
+      else if (change === "replacement") current.value = { ...original, rows: [[2, "new result"]] };
+      else scope.stop();
+      await vi.waitFor(() => expect(settled).toBe(true));
+      deliver({ status: "ok", data: "late", next_offset: 4, eof: true, value_kind: "text" });
+      await pending;
+      expect(exportSnapshotResult).not.toHaveBeenCalled();
+      expect(original.rows).toEqual([[1, "preview"]]);
+    } finally {
+      scope.stop();
+    }
   });
   it.each(["csv", "json"] as const)("preserves hidden-key filtering and the row limit for snapshot %s", async (format) => {
     const { state, original } = snapshotState();

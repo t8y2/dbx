@@ -1,3 +1,4 @@
+import { mongoTasksEn as mongoTasks } from "./mongoTasks";
 import { sidebarMenuEn as sidebarMenu } from "./sidebarMenuMessages";
 import { redisGroupingEn as redisGrouping } from "./redisGrouping";
 import docs from "./docs/en";
@@ -6,6 +7,8 @@ import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 import { meilisearchManagementEn } from "./meilisearchManagement";
 import { mongodbDatabaseDumpEn as mongoDump } from "./mongodbDatabaseDump";
+import { mongoCompareEn as mongoCompare } from "./mongoCompare";
+import { mongoWorkbenchEn as mongoWorkbench } from "./mongoCompare";
 import { damengDumpEn as damengDump } from "./damengDump";
 
 const consul = {
@@ -754,6 +757,7 @@ export default {
     importNavicat: "Import Navicat NCX",
     importDbeaver: "Import DBeaver",
     importDatagrip: "Import DataGrip",
+    importStudio3t: "Import Studio 3T (.uri)",
     export: "Export Connections",
     collapseAll: "Collapse all",
     collapse: "Collapse sidebar",
@@ -3512,6 +3516,13 @@ export default {
     importSuccess: "Imported {count} connection(s)",
     importNavicatSuccess: "Imported {count} Navicat connection(s). Fill in any connection whose password is still empty before testing.",
     importDatagripSuccess: "Imported {count} DataGrip connection(s), filled {filled} password(s) from macOS Keychain.",
+    importStudio3tSuccess: "Imported {count} Studio 3T connection(s).",
+    importStudio3tDialogTitle: "Select Studio 3T exported .uri files",
+    importStudio3tNotice: "Studio 3T exported connection names are retained when available. Verify credentials, certificate and SSH key paths before connecting; omitted passwords must be entered again. Import saves only selected connections and does not connect automatically.",
+    importStudio3tDatabaseWarning: "{count} connection(s) had an invalid default MongoDB database name. The default was cleared while retaining the explicit authentication database; the original name is in the connection note. Review the default database before connecting.",
+    importStudio3tInvalid: "Invalid Studio 3T URI file. In Connection Manager, choose Export → Export to File (.uri). This import accepts standard MongoDB URIs; private or encrypted export formats require conversion.",
+    importStudio3tTooLarge: "Studio 3T import files must total no more than 10 MiB.",
+    importStudio3tUnsupported: "This file contains an unsupported Studio 3T version or connection extension. No connections were saved. URI v3 metadata and SSH private-key tunnels without passphrases are supported; other tunnels or extensions need conversion.",
     importDatagripSelectFiles: "Please select dataSources.xml (required), and optionally dataSources.local.xml / db-forest-config.xml",
     importDatagripDialogTitle: "Select DataGrip configuration files",
     importDatagripUsernamesFallbackWarning: "Some DataGrip connections could not determine usernames and used default database usernames. Please verify and update connection credentials.",
@@ -6627,6 +6638,9 @@ export default {
     },
   },
   mongoDump,
+  mongoCompare,
+  mongoTasks,
+  ...mongoWorkbench,
   damengDump,
   mongo: {
     documents: "{count} documents",

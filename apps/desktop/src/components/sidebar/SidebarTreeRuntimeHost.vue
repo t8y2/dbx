@@ -37,6 +37,7 @@ import {
   PackageOpen,
   PlugZap,
   ArrowRightLeft,
+  ArrowLeftRight,
   Download,
   Eye,
   Upload,
@@ -70,11 +71,13 @@ import {
   X,
   Settings2,
   GitBranch,
+  GitCompareArrows,
   Sparkles,
   Link2,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
+import { openMongoAggregation, openMongoSchemaAnalysis, openMongoTransform, openMongoSql, openMongoScript, openMongoTasks, openMongoMigration } from "@/composables/useMongoWorkbenchSources";
 import { getTableMutationHistoryStoreOrNull, recordTableMutationHistory } from "@/lib/history/tableMutationHistory";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -489,6 +492,7 @@ const {
   openAllDatabasesExport,
   openDamengDump,
   openDataCompare,
+  openMongoCompare,
   openDatabaseExport,
   openDatabaseSearch,
   openDataDictionary,
@@ -6469,6 +6473,14 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (node.type === "mongo-db") {
       items.push({ label: "", separator: true });
+      items.push({ label: t("mongoCompare.title"), action: openMongoCompare, icon: ArrowLeftRight });
+      items.push({ label: t("mongoAggregation.title"), action: () => openMongoAggregation({ connectionId: node.connectionId!, database: node.database!, collection: "" }), icon: GitCompareArrows });
+      items.push({ label: t("mongoSchema.title"), action: () => openMongoSchemaAnalysis({ connectionId: node.connectionId!, database: node.database!, collection: "" }), icon: TableProperties });
+      items.push({ label: t("mongoTasks.title"), action: () => openMongoTasks({ connectionId: node.connectionId!, database: node.database!, collection: node.type === "mongo-collection" ? node.tableName || node.label : "" }), icon: CalendarClock });
+      items.push({ label: t("mongoMigration.title"), action: () => openMongoMigration({ connectionId: node.connectionId!, database: node.database!, collection: node.type === "mongo-collection" ? node.tableName || node.label : "" }), icon: ArrowLeftRight });
+      items.push({ label: t("mongoScript.title"), action: () => openMongoScript({ connectionId: node.connectionId!, database: node.database!, collection: node.type === "mongo-collection" ? node.tableName || node.label : "" }), icon: FileCode });
+      items.push({ label: t("mongoSql.title"), action: () => openMongoSql({ connectionId: node.connectionId!, database: node.database!, collection: node.type === "mongo-collection" ? node.tableName || node.label : "" }), icon: FileCode });
+      items.push({ label: t("mongoTransform.title"), action: () => openMongoTransform({ connectionId: node.connectionId!, database: node.database!, collection: "" }), icon: FileCode });
       items.push({ label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
       items.push({ label: t("mongoDump.menuDump"), action: () => openMongoDatabaseDump("dump"), icon: Upload });
       items.push({ label: t("mongoDump.menuRestore"), action: () => openMongoDatabaseDump("restore"), icon: Download });
@@ -6528,6 +6540,14 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: () => openMongoTreeData(node), icon: TableProperties });
+    items.push({ label: t("mongoCompare.title"), action: openMongoCompare, icon: ArrowLeftRight });
+    items.push({ label: t("mongoAggregation.title"), action: () => openMongoAggregation({ connectionId: node.connectionId!, database: node.database!, collection: node.tableName || node.label }), icon: GitCompareArrows });
+    items.push({ label: t("mongoSchema.title"), action: () => openMongoSchemaAnalysis({ connectionId: node.connectionId!, database: node.database!, collection: node.tableName || node.label }), icon: TableProperties });
+    items.push({ label: t("mongoTasks.title"), action: () => openMongoTasks({ connectionId: node.connectionId!, database: node.database!, collection: node.type === "mongo-collection" ? node.tableName || node.label : "" }), icon: CalendarClock });
+    items.push({ label: t("mongoMigration.title"), action: () => openMongoMigration({ connectionId: node.connectionId!, database: node.database!, collection: node.type === "mongo-collection" ? node.tableName || node.label : "" }), icon: ArrowLeftRight });
+    items.push({ label: t("mongoScript.title"), action: () => openMongoScript({ connectionId: node.connectionId!, database: node.database!, collection: node.type === "mongo-collection" ? node.tableName || node.label : "" }), icon: FileCode });
+    items.push({ label: t("mongoSql.title"), action: () => openMongoSql({ connectionId: node.connectionId!, database: node.database!, collection: node.type === "mongo-collection" ? node.tableName || node.label : "" }), icon: FileCode });
+    items.push({ label: t("mongoTransform.title"), action: () => openMongoTransform({ connectionId: node.connectionId!, database: node.database!, collection: node.tableName || node.label }), icon: FileCode });
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
     // Creating and dropping indexes stay on the Indexes group node; the collection
     // only opens the manager panel, which offers creation from inside itself.

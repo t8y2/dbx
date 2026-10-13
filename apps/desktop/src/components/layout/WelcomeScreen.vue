@@ -41,7 +41,7 @@ const emit = defineEmits<{
   "open-settings": [];
 }>();
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "studio3t";
 
 const { t } = useI18n();
 
@@ -50,6 +50,7 @@ const importSourceItems = computed(() => [
   { value: "navicat", label: t("sidebar.importNavicat") },
   { value: "dbeaver", label: t("sidebar.importDbeaver") },
   { value: "datagrip", label: t("sidebar.importDatagrip") },
+  { value: "studio3t", label: t("sidebar.importStudio3t") },
 ]);
 
 function selectImportSource(source: string) {

@@ -13,6 +13,7 @@ function setup(node: Partial<TreeNode>, options: { treeNodes?: TreeNode[]; selec
     databaseExportSource: null as unknown,
     mongoImportSource: undefined as unknown,
     mongoDatabaseDumpSource: null as unknown,
+    mongoCompareSource: null as unknown,
     schemaDiffSource: null as unknown,
     treeNodes: options.treeNodes ?? [],
     selectedTreeNodeIds: options.selectedTreeNodeIds ?? [],
@@ -27,6 +28,19 @@ function setup(node: Partial<TreeNode>, options: { treeNodes?: TreeNode[]; selec
   });
   return { connectionStore, runtime };
 }
+
+describe("useSidebarTreeToolRuntime Mongo Compare", () => {
+  it("prefills database and actual collection names, including aliased labels", () => {
+    const { runtime, connectionStore } = setup({ type: "mongo-collection", label: "Orders alias", tableName: "orders", database: "shop", connectionId: "mongo" });
+    runtime.openMongoCompare();
+    expect(connectionStore.mongoCompareSource).toEqual({ connectionId: "mongo", database: "shop", collection: "orders" });
+  });
+  it("supports database nodes without preselecting a collection", () => {
+    const { runtime, connectionStore } = setup({ type: "mongo-db", label: "shop", database: "shop", connectionId: "mongo" });
+    runtime.openMongoCompare();
+    expect(connectionStore.mongoCompareSource).toEqual({ connectionId: "mongo", database: "shop", collection: "" });
+  });
+});
 
 describe("useSidebarTreeToolRuntime openDataDictionary", () => {
   it("documents every schema when invoked on a database node", () => {

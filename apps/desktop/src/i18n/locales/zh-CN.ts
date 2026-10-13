@@ -1,3 +1,4 @@
+import { mongoTasksZhCN as mongoTasks } from "./mongoTasks";
 import { sidebarMenuZhCN as sidebarMenu } from "./sidebarMenuMessages";
 import { redisGroupingZhCN as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
@@ -7,6 +8,9 @@ import { consul } from "./consulZhCN";
 import { meilisearchManagementZhCN } from "./meilisearchManagement";
 import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpZhCN as damengDump } from "./damengDump";
+
+import { mongoCompareZhCN as mongoCompare } from "./mongoCompare";
+import { mongoWorkbenchZhCN as mongoWorkbench } from "./mongoCompare";
 
 export default withEnglishFallback({
   sidebarMenu,
@@ -691,6 +695,7 @@ export default withEnglishFallback({
     importNavicat: "导入 Navicat NCX",
     importDbeaver: "导入 DBeaver",
     importDatagrip: "导入 DataGrip",
+    importStudio3t: "导入 Studio 3T（.uri）",
     export: "导出连接",
     collapseAll: "一键折叠",
     collapse: "收起侧边栏",
@@ -3445,6 +3450,13 @@ export default withEnglishFallback({
     importSuccess: "已导入 {count} 个连接",
     importNavicatSuccess: "已导入 {count} 个 Navicat 连接，若个别连接密码为空请补填后测试连接",
     importDatagripSuccess: "已导入 {count} 个 DataGrip 连接，已自动读取 {filled} 个密码（来自 macOS 钥匙串）",
+    importStudio3tSuccess: "已导入 {count} 个 Studio 3T 连接。",
+    importStudio3tDialogTitle: "选择 Studio 3T 导出的 .uri 文件",
+    importStudio3tNotice: "优先保留 Studio 3T 导出的连接名称。连接前请核对凭据、证书和 SSH 私钥路径；未导出的密码需要重新填写。确认后仅保存勾选的连接，不会自动连接。",
+    importStudio3tDatabaseWarning: "有 {count} 个连接的默认数据库名不符合 MongoDB 规则，已清空默认库并保留显式认证库；原数据库名记录在连接备注中。请在连接前核对这些连接的默认数据库。",
+    importStudio3tInvalid: "Studio 3T URI 文件无效。请在 Connection Manager 中选择 Export → Export to File（.uri）。此入口接受标准 MongoDB URI；私有或加密导出格式需要转换。",
+    importStudio3tTooLarge: "Studio 3T 导入文件总大小不能超过 10 MiB。",
+    importStudio3tUnsupported: "此文件包含暂不支持的 Studio 3T 版本或连接扩展，未保存任何连接。已支持 URI v3 元数据和无需口令的 SSH 私钥隧道；其他隧道或扩展需要转换。",
     importDatagripSelectFiles: "请选择 dataSources.xml（必需），可同时选择 dataSources.local.xml 和 db-forest-config.xml",
     importDatagripDialogTitle: "选择 DataGrip 配置文件",
     importDatagripUsernamesFallbackWarning: "部分 DataGrip 连接未找到用户名，已使用数据库默认用户名，请核对并更新连接凭据。",
@@ -6616,6 +6628,9 @@ export default withEnglishFallback({
     },
   },
   mongoDump,
+  mongoCompare,
+  mongoTasks,
+  ...mongoWorkbench,
   damengDump,
   mongo: {
     documents: "{count} 个文档",

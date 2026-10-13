@@ -14,6 +14,7 @@ import AppLogo from "@/components/icons/AppLogo.vue";
 import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { openMongoAggregation, openMongoSchemaAnalysis, openMongoTransform, openMongoSql, openMongoScript, openMongoTasks, openMongoMigration } from "@/composables/useMongoWorkbenchSources";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
 import { formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 
@@ -508,6 +509,22 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
       action: () => emit("open-data-compare"),
       disabled: !props.hasConnections,
     });
+    items.push({
+      value: "mongo-compare",
+      label: t("mongoCompare.title"),
+      icon: ArrowLeftRight,
+      action: () => {
+        void import("@/composables/useDialogSources").then(({ openMongoCompare }) => openMongoCompare());
+      },
+      disabled: !props.hasConnections,
+    });
+    items.push({ value: "mongo-aggregation", label: t("mongoAggregation.title"), icon: GitCompareArrows, action: () => openMongoAggregation(), disabled: !props.hasConnections });
+    items.push({ value: "mongo-schema", label: t("mongoSchema.title"), icon: TableProperties, action: () => openMongoSchemaAnalysis(), disabled: !props.hasConnections });
+    items.push({ value: "mongo-tasks", label: t("mongoTasks.title"), icon: CalendarClock, action: () => openMongoTasks(), disabled: !props.hasConnections });
+    items.push({ value: "mongo-migration", label: t("mongoMigration.title"), icon: ArrowLeftRight, action: () => openMongoMigration(), disabled: !props.hasConnections });
+    items.push({ value: "mongo-script", label: t("mongoScript.title"), icon: FileCode, action: () => openMongoScript(), disabled: !props.hasConnections });
+    items.push({ value: "mongo-sql", label: t("mongoSql.title"), icon: FileCode, action: () => openMongoSql(), disabled: !props.hasConnections });
+    items.push({ value: "mongo-transform", label: t("mongoTransform.title"), icon: FileCode, action: () => openMongoTransform(), disabled: !props.hasConnections });
   }
   items.push({
     value: "database-backups",

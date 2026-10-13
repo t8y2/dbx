@@ -23,7 +23,7 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip"];
+  import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "studio3t"];
   export: [];
   startResize: [event: PointerEvent];
   collapse: [];
@@ -31,7 +31,7 @@ const emit = defineEmits<{
   "add-to-ai": [nodes: TreeNode | TreeNode[]];
 }>();
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "studio3t";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -47,6 +47,7 @@ const importSourceItems = computed(() => [
   { value: "navicat", label: t("sidebar.importNavicat") },
   { value: "dbeaver", label: t("sidebar.importDbeaver") },
   { value: "datagrip", label: t("sidebar.importDatagrip") },
+  { value: "studio3t", label: t("sidebar.importStudio3t") },
 ]);
 const connectionTransferItems = computed(() => [
   ...importSourceItems.value.map((item) => ({

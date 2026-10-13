@@ -12,6 +12,7 @@ const showTransferDialog = ref(false);
 const transferTaskId = ref<string | null>(null);
 const showSchemaDiffDialog = ref(false);
 const showDataCompareDialog = ref(false);
+const showMongoCompareDialog = ref(false);
 const showSqlFileDialog = ref(false);
 const showDiagramDialog = ref(false);
 const showDocsDialog = ref(false);
@@ -45,7 +46,8 @@ const configConnectionSelectList = ref<ConnectionConfig[]>([]);
 const configConnectionSelectLayout = ref<SidebarLayout | null>(null);
 const pendingExportConnectionIds = ref<string[]>([]);
 const pendingImportPreview = ref<ConnectionConfigBundle | null>(null);
-const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip">("dbx");
+const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip" | "studio3t">("dbx");
+const configConnectionSelectNotice = ref("");
 const applyingImportSelection = ref(false);
 
 const transferPrefillConnectionId = ref("");
@@ -67,6 +69,9 @@ const dataComparePrefillDatabase = ref("");
 const dataComparePrefillSchema = ref("");
 const dataComparePrefillTable = ref("");
 const dataCompareSessionId = ref<string | null>(null);
+const mongoComparePrefillConnectionId = ref("");
+const mongoComparePrefillDatabase = ref("");
+const mongoComparePrefillCollection = ref("");
 const sqlFilePrefillConnectionId = ref("");
 const sqlFilePrefillDatabase = ref("");
 const sqlFilePrefillSchema = ref<string>();
@@ -134,6 +139,13 @@ export function openDataCompareSession(sessionId: string): void {
   showDataCompareDialog.value = true;
 }
 
+export function openMongoCompare(connectionId = "", database = "", collection = ""): void {
+  mongoComparePrefillConnectionId.value = connectionId;
+  mongoComparePrefillDatabase.value = database;
+  mongoComparePrefillCollection.value = collection;
+  showMongoCompareDialog.value = true;
+}
+
 export function openDataTransferTask(taskId: string): void {
   transferTaskId.value = taskId;
   showTransferDialog.value = true;
@@ -156,6 +168,15 @@ export function useDialogSources() {
   // Watchers for store source triggers (register only once)
   if (!watchersRegistered) {
     watchersRegistered = true;
+
+    watch(
+      () => connectionStore.mongoCompareSource,
+      (source) => {
+        if (!source) return;
+        openMongoCompare(source.connectionId, source.database, source.collection);
+        connectionStore.mongoCompareSource = null;
+      },
+    );
 
     watch(
       () => connectionStore.transferSource,
@@ -414,12 +435,14 @@ export function useDialogSources() {
     pendingImportContent.value = "";
     pendingImportPreview.value = null;
     pendingImportSource.value = "dbx";
+    configConnectionSelectNotice.value = "";
     configConnectionSelectList.value = [];
     configConnectionSelectLayout.value = null;
     configPassphraseError.value = "";
   }
 
   function clearPendingExportState() {
+    configConnectionSelectNotice.value = "";
     pendingExportConnectionIds.value = [];
     configConnectionSelectList.value = [];
     configConnectionSelectLayout.value = null;
@@ -433,15 +456,16 @@ export function useDialogSources() {
     showConfigConnectionSelectDialog.value = true;
   }
 
-  function importSuccessMessage(source: "dbx" | "navicat" | "dbeaver" | "datagrip", count: number, keychainFilled = 0) {
+  function importSuccessMessage(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "studio3t", count: number, keychainFilled = 0) {
     if (count <= 0) return t("configExport.importNone");
     if (source === "navicat") return t("configExport.importNavicatSuccess", { count });
     if (source === "dbeaver") return t("configExport.importDbeaverSuccess", { count });
     if (source === "datagrip") return t("configExport.importDatagripSuccess", { count, filled: keychainFilled });
+    if (source === "studio3t") return t("configExport.importStudio3tSuccess", { count });
     return t("configExport.importSuccess", { count });
   }
 
-  async function finishImport(source: "dbx" | "navicat" | "dbeaver" | "datagrip", count: number, layout?: SidebarLayout) {
+  async function finishImport(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "studio3t", count: number, layout?: SidebarLayout) {
     let keychainFilled = 0;
     if (source === "datagrip" && count > 0) {
       keychainFilled = await connectionStore.applyDataGripKeychainPasswords();
@@ -525,7 +549,7 @@ export function useDialogSources() {
     if (!open) showConfigPassphraseDialog.value = true;
   }
 
-  async function onImportClick(source: "dbx" | "navicat" | "dbeaver" | "datagrip" = "dbx") {
+  async function onImportClick(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "studio3t" = "dbx") {
     try {
       const result = await connectionStore.readImportFile(source);
       if (!result) return;
@@ -540,7 +564,8 @@ export function useDialogSources() {
       }
       const preview = await connectionStore.parseConnectionsImport(result.content, null);
       pendingImportPreview.value = preview;
-      if (source === "dbx") {
+      if (source === "dbx" || source === "studio3t") {
+        configConnectionSelectNotice.value = source === "studio3t" ? [t("configExport.importStudio3tNotice"), ...(preview.importWarnings ?? [])].join("\n\n") : "";
         openConnectionSelect("import", preview.connections, preview.layout);
         return;
       }
@@ -605,10 +630,12 @@ export function useDialogSources() {
   }
 
   return {
+    configConnectionSelectNotice,
     showTransferDialog,
     transferTaskId,
     showSchemaDiffDialog,
     showDataCompareDialog,
+    showMongoCompareDialog,
     showSqlFileDialog,
     showDiagramDialog,
     showDocsDialog,
@@ -660,6 +687,9 @@ export function useDialogSources() {
     dataComparePrefillSchema,
     dataComparePrefillTable,
     dataCompareSessionId,
+    mongoComparePrefillConnectionId,
+    mongoComparePrefillDatabase,
+    mongoComparePrefillCollection,
     sqlFilePrefillConnectionId,
     sqlFilePrefillDatabase,
     sqlFilePrefillSchema,

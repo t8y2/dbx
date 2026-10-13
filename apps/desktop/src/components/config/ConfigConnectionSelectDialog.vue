@@ -13,6 +13,7 @@ const props = defineProps<{
   open: boolean;
   mode: "export" | "import";
   busy?: boolean;
+  notice?: string;
   connections: ConnectionConfig[];
   layout?: SidebarLayout | null;
 }>();
@@ -167,6 +168,7 @@ function connectionMeta(connection: ConnectionConfig) {
       </DialogHeader>
 
       <div class="grid gap-3 py-2">
+        <p v-if="notice" class="text-sm text-muted-foreground" role="note">{{ notice }}</p>
         <div class="flex items-center gap-2">
           <Button type="button" variant="outline" size="sm" :disabled="busy" @click="selectAll">{{ t("configExport.selectAll") }}</Button>
           <Button type="button" variant="outline" size="sm" :disabled="busy" @click="deselectAll">{{ t("configExport.deselectAll") }}</Button>

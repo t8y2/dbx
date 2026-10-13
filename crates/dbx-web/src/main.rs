@@ -598,6 +598,9 @@ async fn serve() -> Result<(), String> {
     let backup_service = routes::scheduled_backup::service(&web_state).expect("Failed to resolve server backup root");
     let backup_stop = tokio_util::sync::CancellationToken::new();
     let backup_worker = backup_service.start(backup_stop.clone());
+    let mongo_task_stop = tokio_util::sync::CancellationToken::new();
+    let mongo_task_worker = routes::mongo_tasks::service(&web_state).start(mongo_task_stop.clone());
+    let mongo_task_shutdown = mongo_task_stop.clone();
 
     // API routes
     let api = Router::new()
@@ -606,6 +609,7 @@ async fn serve() -> Result<(), String> {
         .route("/migration/retry", post(routes::migration::retry))
         .route("/migration/cleanup-backups", post(routes::migration::cleanup_backups))
         .route("/database-backups", post(routes::scheduled_backup::command))
+        .route("/mongo-tasks", post(routes::mongo_tasks::command).layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)))
         .route("/database-backups/{id}/files/{index}", get(routes::scheduled_backup::download))
         .route("/database-backups/{id}/files/{index}/restore", post(routes::scheduled_backup::prepare_restore))
         // Auth
@@ -1595,6 +1599,7 @@ async fn serve() -> Result<(), String> {
             }
         }
         backup_stop.cancel();
+        mongo_task_stop.cancel();
         server_shutdown_trigger.cancel();
     });
 
@@ -1620,6 +1625,11 @@ async fn serve() -> Result<(), String> {
         } => {
             tracing::warn!("Graceful HTTP shutdown timed out after 5s; proceeding with teardown");
         }
+    }
+    mongo_task_shutdown.cancel();
+    if tokio::time::timeout(std::time::Duration::from_secs(5), mongo_task_worker).await.is_err() {
+        tracing::warn!("Mongo task worker did not stop within 5s");
+        exit_code = 1;
     }
     if tokio::time::timeout(std::time::Duration::from_secs(5), backup_worker).await.is_err() {
         tracing::warn!("Scheduled backup worker did not drain within 5s; exiting with failure status");

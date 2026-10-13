@@ -189,6 +189,7 @@ export const openSavedSqlStorageDir = forward("openSavedSqlStorageDir");
 export const revealPathInFileManager = forward("revealPathInFileManager");
 export const deleteDatabaseBackupFiles = forward("deleteDatabaseBackupFiles");
 export const databaseBackupCommand = forward("databaseBackupCommand");
+export const mongoTaskCommand = forward("mongoTaskCommand");
 export const databaseBackupBackground = forward("databaseBackupBackground");
 export const downloadDatabaseBackupFile = forward("downloadDatabaseBackupFile");
 export const prepareDatabaseBackupRestore = forward("prepareDatabaseBackupRestore");

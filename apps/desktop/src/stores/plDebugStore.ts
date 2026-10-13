@@ -15,12 +15,14 @@ import {
   plDebugSetBreakpointEnabled,
   plDebugSetBreakpoints,
   plDebugSetExceptionBreakpoint,
+  plDebugExecute,
   plDebugSetValue,
   plDebugStart,
   plDebugStepIn,
   plDebugStepOut,
   plDebugStepOver,
   type PlDebugBreakpoint,
+  type PlDebugExecuteResult,
   type PlDebugParam,
   type PlDebugProbeResult,
   type PlDebugStartRequest,
@@ -55,10 +57,10 @@ export interface PlDebugHistoryEntry {
 /**
  * Frontend-only properties of one breakpoint line.
  *
- * DBMS_DEBUG knows only program and line, so enablement, the ignore count and
- * the stop condition live in the store, keyed by line, and are merged back onto
- * the server's breakpoint list on every refresh. They must never be sent to the
- * agent as breakpoint fields.
+ * DBMS_DEBUG knows only program and line, so enablement, the ignore count, the
+ * stop condition and the breakpoint's own message live in the store, keyed by
+ * line, and are merged back onto the server's breakpoint list on every refresh.
+ * They must never be sent to the agent as breakpoint fields.
  */
 export interface PlDebugBreakpointLocals {
   /** false while the breakpoint was temporarily removed server-side. */
@@ -69,6 +71,12 @@ export interface PlDebugBreakpointLocals {
   condition: string;
   /** Hits counted so far, driving the ignore-count rule. */
   hits: number;
+  /**
+   * Note the user attached to the line (PL/SQL Developer's breakpoint message).
+   * Recorded in the debug console whenever a resume stops on this line, so a
+   * breakpoint can say why it is there without a comment in the source.
+   */
+  message: string;
 }
 
 /** A server breakpoint carrying the optional frontend-only properties. */
@@ -77,6 +85,7 @@ export interface PlDebugLocalBreakpoint extends PlDebugBreakpoint {
   ignoreCount?: number;
   condition?: string;
   hits?: number;
+  message?: string;
 }
 
 /** One row of the watch window: a name resolved against the current frame. */
@@ -116,6 +125,24 @@ export interface PlDebugFrameSourceView {
   error: string | null;
 }
 
+/** One line of a collected trace run: the source line and how often it ran. */
+export interface PlDebugTraceLine {
+  line: number;
+  hits: number;
+}
+
+/** Result of one trace run (the debugger's own answer to "which lines ran"). */
+export interface PlDebugTraceResult {
+  /** Distinct lines, ordered by line number. */
+  lines: PlDebugTraceLine[];
+  /** Continuation calls the run made. */
+  steps: number;
+  /** Wall-clock milliseconds the run took. */
+  durationMs: number;
+  /** True when the step cap ended the run before the program finished. */
+  truncated: boolean;
+}
+
 /**
  * State of one live PL/SQL debugging session (Oracle; the OceanBase Oracle
  * agent lives on the feature/ob-oracle-pl-debug branch).
@@ -137,6 +164,18 @@ export const usePlDebugStore = defineStore("plDebug", () => {
   const busy = ref(false);
   const terminated = ref(false);
   const status = ref<PlDebugStatus | null>(null);
+  /**
+   * Monotonic stop counter: bumped once every time the debuggee lands somewhere new
+   * (entry, breakpoint, step, exception) and read by the panels.
+   *
+   * Panels must not watch the `status` object itself: reading a panel (refreshVariables
+   * / refreshStack) rewrites `status` with a fresh locator snapshot, so a watcher on the
+   * object re-armed itself from inside its own response and turned every stop into an
+   * endless refresh loop — measured in the running app on 2026-10-13 as 177
+   * variable+stack round trips in a few seconds after a single step. Only the stop
+   * paths bump this counter, so a panel can be edge-triggered on it.
+   */
+  const stopSeq = ref(0);
   const breakpoints = ref<PlDebugLocalBreakpoint[]>([]);
   /**
    * Local (frontend-only) breakpoint properties, keyed by line. The server
@@ -168,6 +207,10 @@ export const usePlDebugStore = defineStore("plDebug", () => {
    * target (`reset` clears it), and it never outlives the stack it came from.
    */
   const frameSourceView = ref<PlDebugFrameSourceView | null>(null);
+  const traceResult = ref<PlDebugTraceResult | null>(null);
+  const traceRunning = ref(false);
+  /** Set by stopTrace; the run checks it between steps, so it can never wedge the UI. */
+  let traceStopRequested = false;
   /** Session history (start / continue / step / breakpoints / failures), oldest first. */
   const history = ref<PlDebugHistoryEntry[]>([]);
 
@@ -236,6 +279,7 @@ export const usePlDebugStore = defineStore("plDebug", () => {
       ignoreCount: normalizeIgnoreCount(stored.ignoreCount),
       condition: typeof stored.condition === "string" ? stored.condition : "",
       hits: Number.isFinite(stored.hits) ? stored.hits : 0,
+      message: typeof stored.message === "string" ? stored.message : "",
     };
   }
 
@@ -281,6 +325,11 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     if (history.value.length > HISTORY_LIMIT) {
       history.value.splice(0, history.value.length - HISTORY_LIMIT);
     }
+  }
+
+  /** Banks one stop for the panels; every path that lands the debuggee calls this. */
+  function noteStop() {
+    stopSeq.value += 1;
   }
 
   /**
@@ -350,6 +399,7 @@ export const usePlDebugStore = defineStore("plDebug", () => {
       output.value = "";
       currentFrame.value = 0;
       pushHistory("INFO", `start ${describeTarget(request)}`);
+      noteStop();
       return result;
     } catch (caught) {
       error.value = String(caught);
@@ -379,6 +429,16 @@ export const usePlDebugStore = defineStore("plDebug", () => {
           else breakpoints.value.push(merged);
         }
         pushHistory("INFO", `breakpoints +${describeBreakpoints(toAdd)}`);
+        // A breakpoint the server did not create never stops the debuggee, while
+        // the editor gutter still shows its marker: the request is reported as a
+        // success without this warning and the user sees nothing happen. The
+        // measured typical case is an anonymous block on Oracle 19c, where no
+        // breakpoint can be armed at all (the block can only be run, have its
+        // output collected, or stop on an exception breakpoint).
+        if (created.length < toAdd.length) {
+          const refused = toAdd.length - created.length;
+          pushHistory("WARN", `${refused} of ${toAdd.length} breakpoints were not accepted by the server and are not in effect (typical case: Oracle 19c cannot set breakpoints in an anonymous block; run the block, collect its output, or stop on an exception breakpoint instead)`);
+        }
       }
       if (toRemove.length > 0) {
         await plDebugDeleteBreakpoints(debugId.value, toRemove);
@@ -401,7 +461,14 @@ export const usePlDebugStore = defineStore("plDebug", () => {
    */
   async function toggleBreakpoint(lineNum: number) {
     const current = target.value;
-    if (!current || !hasSession.value) return;
+    if (!current) return;
+    if (!hasSession.value) {
+      // The gutter stays clickable after the program finishes, so a click here used to
+      // do nothing at all (reported from use, 2026-10-13). Say what is wrong and what to
+      // do instead: the toolbar's Restart re-opens the launch dialog for this routine.
+      pushHistory("WARN", `breakpoint line ${lineNum}: no live debug session (${terminated.value ? "the program has finished" : "the session is gone"}) — restart the debugger and set it again`);
+      return;
+    }
     const isSet = breakpoints.value.some((breakpoint) => breakpointBelongsToTarget(breakpoint, current) && breakpointLine(breakpoint) === lineNum);
     if (!isSet) {
       await applyBreakpoints([...breakpoints.value, breakpointForLine(current, lineNum)]);
@@ -430,7 +497,11 @@ export const usePlDebugStore = defineStore("plDebug", () => {
    */
   async function setBreakpointEnabled(lineNum: number, enabled: boolean) {
     const current = target.value;
-    if (!current || !hasSession.value) return;
+    if (!current) return;
+    if (!hasSession.value) {
+      pushHistory("WARN", `breakpoint line ${lineNum}: no live debug session — restart the debugger and change it again`);
+      return;
+    }
     const locals = ensureLocals(lineNum);
     const wasEnabled = locals.enabled !== false;
     locals.enabled = enabled;
@@ -487,6 +558,17 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     pushHistory("INFO", `breakpoint line ${lineNum} condition: ${condition ? condition : "(none)"}`);
   }
 
+  /**
+   * Sets the note the breakpoint on `lineNum` carries (frontend-only). It is shown in
+   * the debug console whenever a resume stops there -- PL/SQL Developer's breakpoint
+   * message, which is what makes a breakpoint self-explanatory without editing the
+   * source.
+   */
+  function setBreakpointMessage(lineNum: number, message: string) {
+    ensureLocals(lineNum).message = typeof message === "string" ? message : "";
+    pushHistory("INFO", `breakpoint line ${lineNum} message: ${message ? message : "(none)"}`);
+  }
+
   /** Sets how many hits the breakpoint on `lineNum` ignores before stopping (frontend-only). */
   function setBreakpointIgnoreCount(lineNum: number, ignoreCount: number) {
     const locals = ensureLocals(lineNum);
@@ -515,9 +597,41 @@ export const usePlDebugStore = defineStore("plDebug", () => {
       if (result.exceptionResumeTruncated === true) {
         pushHistory("WARN", `exception breakpoint: ${result.message ?? "resume stopped without an exception"}`);
       }
+      // The agent explains a `step_in` that did not actually enter a subprogram:
+      // the line may simply have no call to step into (a normal outcome) or the
+      // callee may lack debug information. The stop position alone cannot tell
+      // the two apart, so the backend authors the text and it is recorded as-is.
+      if (typeof result.stepHint === "string" && result.stepHint !== "") {
+        pushHistory("WARN", result.stepHint);
+      }
+      // `resumeIgnoreBreakpoints` could not run the program to completion (a
+      // breakpoint refused to be disabled, or the continuation cap was hit):
+      // the debuggee is stopped, not finished, and `message` says why.
+      if (result.runToEndIncomplete === true) {
+        pushHistory("WARN", `run to end: ${result.message ?? "stopped before the program finished"}`);
+      }
+      if (result.terminated === true) {
+        // DBMS_OUTPUT is only readable once the debuggee's program is done (while it is
+        // parked the buffer is held by the interpreter: measured 0-1 ms when finished,
+        // always empty while parked). Reading it here is what makes the output tab fill
+        // by itself instead of waiting for a manual refresh that users miss.
+        try {
+          await refreshLog();
+        } catch (caught) {
+          pushHistory("WARN", `DBMS_OUTPUT could not be read after the program finished: ${String(caught)}`);
+        }
+      }
       if (applyStopRules && result.terminated !== true) {
         result = await skipAccordingToRules(label, action, result);
+      } else if (result.terminated !== true) {
+        // A step can land on a line whose breakpoint carries a message too; a resume
+        // that ran the stop rules reports it from inside the rule engine instead, so
+        // an auto-resumed hit does not print the message of a line it did not stop on.
+        notifyBreakpointMessage(result);
       }
+      // Banked only after the stop rules settled, so the panels refresh once for the
+      // stop the user finally sees rather than for every auto-resumed hit.
+      noteStop();
       return result;
     } catch (caught) {
       error.value = String(caught);
@@ -594,6 +708,10 @@ export const usePlDebugStore = defineStore("plDebug", () => {
       }
       break;
     }
+    // The loop left with a stop rather than a resume: this is the hit the user sees,
+    // so it is also where the breakpoint's own message is printed (not on the hits the
+    // ignore count or a false condition resumed past).
+    notifyBreakpointMessage(result);
     return result;
   }
 
@@ -605,6 +723,90 @@ export const usePlDebugStore = defineStore("plDebug", () => {
       return { kind: "unparseable", reason: `variables unavailable: ${String(caught)}` };
     }
     return evaluateCondition(expression, variables.value);
+  }
+
+  /**
+   * Prints the breakpoint's own message when a stop landed on its line.
+   *
+   * Only breakpoint stops qualify (`reason` 3): a step that happens to pass the line
+   * is not a breakpoint hit, and a stop on a line without a breakpoint has no locals.
+   * The check runs on the stop the user finally sees, so an auto-resumed hit (ignore
+   * count, false condition) does not print the message of a line it did not stop on.
+   */
+  function notifyBreakpointMessage(result: PlDebugStatus) {
+    if (Number(result.reason) !== REASON_BREAKPOINT) return;
+    const line = statusLine(result);
+    if (line === null) return;
+    const message = readLocals(line)?.message?.trim();
+    if (!message) return;
+    pushHistory("INFO", `breakpoint line ${line}: ${message}`);
+  }
+
+  /**
+   * Runs the parked program to its end with bounded single stepping and records which
+   * lines ran, how often. This is the debugger's own answer to "which lines ran" --
+   * PL/SQL Developer's trace window reaches the same ground through DBMS_TRACE, which
+   * this server cannot serve: on 19c EE `DBMS_TRACE` exposes only SET_PLSQL_TRACE
+   * (events go to server trace files, not to tables) and `DBMS_PROFILER` fails with
+   * ORA-06528 because its tables are absent (ledger §2 #35, evidence
+   * e2e-verify/probe_execute_trace*.out). Stepping costs about one round trip per
+   * line, so the run is capped and can be stopped between steps.
+   */
+  async function startTrace(stepLimit = TRACE_STEP_LIMIT) {
+    if (!debugId.value) throw new Error("no debug session");
+    if (terminated.value) throw new Error("debuggee has finished");
+    const limit = Number.isFinite(stepLimit) && stepLimit > 0 ? Math.trunc(stepLimit) : TRACE_STEP_LIMIT;
+    traceRunning.value = true;
+    traceStopRequested = false;
+    const hits = new Map<number, number>();
+    const began = Date.now();
+    let steps = 0;
+    let truncated = false;
+    try {
+      pushHistory("INFO", `trace: stepping up to ${limit} lines from line ${currentLine.value ?? "?"}`);
+      // The step count is incremented as soon as a step returns, so a run that ends by
+      // breaking out of the loop (finished program, stop request) still reports the
+      // step it just made.
+      while (steps < limit && debugId.value !== null) {
+        const result = await plDebugStepOver(debugId.value);
+        steps += 1;
+        status.value = result;
+        terminated.value = result.terminated === true;
+        const line = statusLine(result);
+        if (line !== null) hits.set(line, (hits.get(line) ?? 0) + 1);
+        if (result.terminated === true || traceStopRequested) break;
+      }
+      truncated = steps >= limit && terminated.value !== true;
+      traceResult.value = {
+        lines: [...hits.entries()].map(([line, count]) => ({ line, hits: count })).sort((left, right) => left.line - right.line),
+        steps,
+        durationMs: Date.now() - began,
+        truncated,
+      };
+      pushHistory(truncated ? "WARN" : "INFO", `trace: ${steps} step(s) over ${traceResult.value.lines.length} line(s) in ${traceResult.value.durationMs}ms` + (truncated ? ` (stopped at the ${limit}-step cap; the program has not finished)` : ""));
+      // The trace moved the debuggee's stop position; the panels follow like after any
+      // other stop (the trace itself updated `status` per step without banking stops).
+      noteStop();
+      return traceResult.value;
+    } catch (caught) {
+      error.value = String(caught);
+      pushHistory("ERROR", `trace failed: ${String(caught)}`);
+      throw caught;
+    } finally {
+      traceRunning.value = false;
+    }
+  }
+
+  /** Asks the running trace to stop after the current step. */
+  function stopTrace() {
+    if (!traceRunning.value) return;
+    traceStopRequested = true;
+    pushHistory("INFO", "trace: stop requested (finishes the current step)");
+  }
+
+  /** Forgets the last trace run (a new session or a restart starts clean). */
+  function clearTrace() {
+    traceResult.value = null;
   }
 
   const resume = () => continueWith(plDebugResume, "resume", true);
@@ -695,6 +897,34 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     await refreshVariables(currentFrame.value);
   }
 
+  /**
+   * Runs one statement in the DEBUGGEE's session (DBMS_DEBUG.EXECUTE) and records the
+   * answer. This is the debug console PL/SQL Developer has: the statement sees the
+   * debuggee's uncommitted rows and its package state, which no other connection can
+   * see while the program is parked. The server rejects the call when the debuggee is
+   * not parked -- that answer is recorded as a warning, not thrown away.
+   */
+  async function executeInDebuggee(sql: string, maxRows = 0): Promise<PlDebugExecuteResult> {
+    if (!debugId.value) throw new Error("no debug session");
+    const statement = sql.trim();
+    if (!statement) throw new Error("the statement is empty");
+    busy.value = true;
+    error.value = null;
+    try {
+      const result = await plDebugExecute(debugId.value, statement, maxRows);
+      const rows = result.rows ?? [];
+      pushHistory(result.ok === false ? "WARN" : "INFO", `debuggee SQL → ${result.ok === false ? "rejected" : `${result.count ?? rows.length} row(s)`}`);
+      if (result.ok === false && result.error) pushHistory("WARN", `debuggee SQL: ${result.error}`);
+      return result;
+    } catch (caught) {
+      error.value = String(caught);
+      pushHistory("ERROR", `debuggee SQL failed: ${String(caught)}`);
+      throw caught;
+    } finally {
+      busy.value = false;
+    }
+  }
+
   /** DBMS_DEBUG.SET_VALUE: assigns a value, then re-reads the frame it belongs to. */
   async function setValue(name: string, frame: number, index: number, value: string) {
     if (!debugId.value) throw new Error("no debug session");
@@ -702,8 +932,22 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     busy.value = true;
     error.value = null;
     try {
-      await plDebugSetValue(debugId.value, name, targetFrame, index, value);
+      const response = await plDebugSetValue(debugId.value, name, targetFrame, index, value);
       pushHistory("INFO", `set ${name} := ${value} (frame ${targetFrame})`);
+      // A stop at the routine entry (DBMS_DEBUG `reason_enter`, 6) happens while
+      // the declaration section is still running, so an assignment accepted here
+      // can be overwritten by the declarations' own initialization (`v_n NUMBER
+      // := 0`) and silently never take effect (measured on Oracle 19c). The
+      // assignment itself is not blocked or failed; the caveat is recorded so a
+      // value that "does not stick" has an explanation on screen.
+      //
+      // The reason comes from the response's nested `snapshot`, not from the
+      // envelope: SET_VALUE answers `{ok, result, message, assignmentSemicolon,
+      // snapshot}` and its top level carries no stop position at all (measured on
+      // 19c through the app's own call path).
+      if (Number(response.snapshot?.reason) === REASON_ENTER) {
+        pushHistory("WARN", `set ${name}: parked at the routine entry (reason 6), so the new value may be overwritten by the declaration section; if it does not take effect, step once and set the value again`);
+      }
       await refreshVariables(targetFrame);
     } catch (caught) {
       error.value = String(caught);
@@ -733,7 +977,11 @@ export const usePlDebugStore = defineStore("plDebug", () => {
 
   async function refreshLog() {
     if (!debugId.value) return;
-    const result = await plDebugGetLog(debugId.value);
+    // The backend always answers with an object; an empty answer is treated as "no output
+    // yet" instead of a crash, so a caller that reads the log automatically (the
+    // program-finished hook in continueWith) cannot turn a transport hiccup into a
+    // TypeError.
+    const result = (await plDebugGetLog(debugId.value)) ?? {};
     output.value = result.output ?? "";
   }
 
@@ -770,6 +1018,10 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     // A frame-source view belongs to the stack it came from: a new session starts
     // on its own target.
     frameSourceView.value = null;
+    // A collected trace belongs to the run it was taken from.
+    traceResult.value = null;
+    traceRunning.value = false;
+    traceStopRequested = false;
     // `history` and `watchNames` deliberately survive a reset: they are the record
     // of the session and the names the user typed, and neither should be lost when
     // the same routine is debugged again.
@@ -785,6 +1037,7 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     busy,
     terminated,
     status,
+    stopSeq,
     breakpoints,
     breakpointLocals,
     variables,
@@ -809,6 +1062,13 @@ export const usePlDebugStore = defineStore("plDebug", () => {
     toggleBreakpoint,
     setBreakpointEnabled,
     setBreakpointCondition,
+    setBreakpointMessage,
+    executeInDebuggee,
+    traceResult,
+    traceRunning,
+    startTrace,
+    stopTrace,
+    clearTrace,
     setBreakpointIgnoreCount,
     refreshBreakpoints,
     resume,
@@ -845,6 +1105,28 @@ const HISTORY_LIMIT = 500;
  */
 const AUTO_CONTINUE_LIMIT = 200;
 
+/**
+ * Step cap of one trace run. Every step is a server round trip (measured on 19c EE:
+ * about 120ms per line when the run-to-the-end loop used it), so an unbounded trace
+ * over a loop could run for minutes with the toolbar busy. 1000 steps is several
+ * minutes of budget at that cost and the run can be stopped between steps.
+ */
+const TRACE_STEP_LIMIT = 1000;
+
+/**
+ * DBMS_DEBUG `reason_breakpoint` (3): the debuggee is parked because an armed
+ * breakpoint was hit. It is the trigger for a breakpoint's own message.
+ */
+const REASON_BREAKPOINT = 3;
+
+/**
+ * DBMS_DEBUG `reason_enter` (6): the debuggee is parked while entering a
+ * program, before its declaration section ran. Assignments made at that stop
+ * can be overwritten by the declarations' own initialization, so `setValue`
+ * records a caveat when the response carries this reason.
+ */
+const REASON_ENTER = 6;
+
 /** Verdict of one minimal breakpoint condition. */
 type PlDebugConditionVerdict = { kind: "true" } | { kind: "false" } | { kind: "unparseable"; reason: string };
 
@@ -853,9 +1135,16 @@ type PlDebugConditionLiteral = { kind: "number"; value: number } | { kind: "stri
 
 const LOCALS_DEFAULT_IGNORE_COUNT = 0;
 const LOCALS_DEFAULT_CONDITION = "";
+const LOCALS_DEFAULT_MESSAGE = "";
 
 function defaultLocals(): PlDebugBreakpointLocals {
-  return { enabled: true, ignoreCount: LOCALS_DEFAULT_IGNORE_COUNT, condition: LOCALS_DEFAULT_CONDITION, hits: 0 };
+  return {
+    enabled: true,
+    ignoreCount: LOCALS_DEFAULT_IGNORE_COUNT,
+    condition: LOCALS_DEFAULT_CONDITION,
+    message: LOCALS_DEFAULT_MESSAGE,
+    hits: 0,
+  };
 }
 
 /** Coerces a stored ignore count to a non-negative integer (default 0). */

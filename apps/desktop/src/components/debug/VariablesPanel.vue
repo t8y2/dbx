@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, Check, Eye, Pencil, Plus, Search, X } from "@lucide/vue";
+import { AlertTriangle, Check, Eye, Info, Pencil, Plus, Search, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { usePlDebugStore, type PlDebugWatchRow } from "@/stores/plDebugStore";
@@ -29,6 +29,8 @@ const watchInput = ref("");
  * disabled by the same flag, so the degraded panel cannot be bypassed.
  */
 const variablesUnsupported = computed(() => store.probe?.variablesSupported === false);
+/** This server has no GET_VALUES, so the agent reads one name per call (GET_VALUE). */
+const variablesFallback = computed(() => store.probe?.variablesFallback === "get_value");
 const unsupportedReason = computed(() => store.probe?.reason ?? "");
 /**
  * Why the panel is degraded, when the agent knows: it reports the DBMS_DEBUG entry
@@ -122,7 +124,11 @@ function watchValueText(row: PlDebugWatchRow): string {
 
 <template>
   <div class="flex h-full flex-col">
-    <div v-if="variablesUnsupported" class="flex items-start gap-1.5 border-b bg-amber-50 px-2 py-1.5 text-xs text-amber-700 dark:bg-amber-950/30 dark:text-amber-400">
+    <div v-if="variablesFallback" class="flex items-start gap-1.5 border-b bg-muted/40 px-2 py-1.5 text-xs text-muted-foreground" :title="t('plDebug.variables.fallback')">
+      <Info class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      <span>{{ t("plDebug.variables.fallback") }}</span>
+    </div>
+    <div v-else-if="variablesUnsupported" class="flex items-start gap-1.5 border-b bg-amber-50 px-2 py-1.5 text-xs text-amber-700 dark:bg-amber-950/30 dark:text-amber-400">
       <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
       <span>
         {{ t("plDebug.variables.unsupported") }}

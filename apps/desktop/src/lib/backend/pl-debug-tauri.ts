@@ -23,8 +23,19 @@ export interface PlDebugProbeResult {
   supported: boolean;
   dbmsDebug?: boolean;
   dbmsOutput?: boolean;
-  /** Whether DBMS_DEBUG.GET_VALUES exists, i.e. the variables panel can work. */
+  /**
+   * Whether the variables panel can show values at all. Two server shapes count:
+   * `GET_VALUES` (OceanBase Oracle mode: one call lists the whole frame) and stock
+   * Oracle's `GET_VALUE`, where the agent enumerates the names it can see (parameters +
+   * source declarations) and reads each one -- see `variablesFallback`.
+   */
   variablesSupported?: boolean;
+  /**
+   * "get_value" when the variables come from the one-name-per-call fallback: the panel
+   * then notes that only scalars the source declares are visible (compound types and
+   * collections are not).
+   */
+  variablesFallback?: string;
   /** Required DBMS_DEBUG subroutines the server does not expose. */
   missingProcedures?: string[];
   /** Optional subroutines the server does not expose (degrades one feature each). */
@@ -140,11 +151,27 @@ export interface PlDebugStatus {
    */
   stoppedOnException?: boolean;
   /**
+   * 超时后 DBMS_DEBUG 对目标做的事（`SET_TIMEOUT_BEHAVIOUR`）：2 = `nodebug_on_timeout`
+   * （超时即调用 `debug_off` 让程序退出调试继续跑），0 = 未知/未设置（服务器默认
+   * `continue_on_timeout`）。diagnostic 字段，界面不显示。
+   */
+  timeoutBehaviour?: number | null;
+  /**
    * The exception-breakpoint resume loop hit its continuation cap without seeing
    * an exception, so it stopped rather than polling forever; `message` carries the
    * agent's explanation. Not an error: the session is still usable.
    */
   exceptionResumeTruncated?: boolean;
+  /**
+   * agent 在 step_in 实际没进入子程序时给出的解释（可能包含「本行没有可进入的调用」
+   * 这种正常情形）；文本由后端作者撰写，前端原样记录，不改写。
+   */
+  stepHint?: string;
+  /**
+   * `resumeIgnoreBreakpoints` 没能跑到结束（有断点禁不掉或续跑次数到顶），
+   * `message` 带原因；此时程序是"停住"而非"跑完"。
+   */
+  runToEndIncomplete?: boolean;
   /**
    * OUT / IN OUT parameter values of the completed target. Only present once the
    * target ran to completion (never while it is parked), so an empty/absent array
@@ -212,10 +239,50 @@ export async function plDebugSetBreakpointEnabled(debugId: string, breakpointNum
 }
 
 /**
+ * SET_VALUE 的 agent 响应信封。与 step/resume 的扁平 `PlDebugStatus` 不同，这一层包装
+ * 不会在 Rust 侧摊平：实机（19c）响应是 `{ok, result, message, assignmentSemicolon,
+ * snapshot}`，停止位置（`reason` 等）只在 `snapshot` 里，顶层没有这些字段。
+ */
+export interface PlDebugSetValueResult {
+  ok?: boolean;
+  /** DBMS_DEBUG.SET_VALUE 的返回码（0 = success）。 */
+  result?: number;
+  /** 可直接记录的说明（例如“补了结尾分号后重试成功”）。 */
+  message?: string;
+  /** 赋值补上结尾分号后才成功：DBMS_DEBUG 要求一段完整的赋值语句。 */
+  assignmentSemicolon?: boolean;
+  /** 赋值后的会话快照；`reason`（如 6 = reason_enter）等停止位置字段都在这里。 */
+  snapshot?: PlDebugStatus;
+}
+
+/**
+ * 在 **debuggee 会话**里执行一条语句的结果（`DBMS_DEBUG.EXECUTE`）。
+ *
+ * 这是唯一能看到调试会话未提交状态（未提交的行、包状态）的通道：调试器连接是另一个
+ * 会话，读一致性隔离看不到那些改动。`rows` 是服务器返回的行文本，`error` 是服务器
+ * 自己的拒绝理由（例如没有停靠点、ORA-00942）。
+ */
+export interface PlDebugExecuteResult {
+  ok?: boolean;
+  rows?: string[];
+  count?: number;
+  message?: string;
+  error?: string;
+}
+
+/**
+ * 在 debuggee 会话里执行一条语句。语句总在**当前帧**执行（服务器只接受 frame# = -1）；
+ * PL/SQL 块（DECLARE/BEGIN）会把 `:1` 集合的内容作为结果行返回，纯 SQL 语句不返回行。
+ */
+export async function plDebugExecute(debugId: string, sql: string, maxRows = 0): Promise<PlDebugExecuteResult> {
+  return invoke("pl_debug_execute", { debugId, sql, maxRows });
+}
+
+/**
  * DBMS_DEBUG.SET_VALUE：修改变量/参数的值。frame/index 分别定位栈帧与同名
  * 变量展开项的下标（复合类型字段），两者省略时后端按 0 处理。
  */
-export async function plDebugSetValue(debugId: string, name: string, frame: number, index: number, value: string): Promise<PlDebugStatus> {
+export async function plDebugSetValue(debugId: string, name: string, frame: number, index: number, value: string): Promise<PlDebugSetValueResult> {
   return invoke("pl_debug_set_value", { debugId, name, frame, index, value });
 }
 

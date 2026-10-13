@@ -233,3 +233,71 @@ describe("plDebugStore exception resume bookkeeping", () => {
     expect(store.history.some((entry) => entry.level === "WARN")).toBe(false);
   });
 });
+
+describe("plDebugStore breakpoint message", () => {
+  /** A breakpoint stop: reason 3 (reason_breakpoint) on line 30. */
+  function hitLine30() {
+    return { line: "30", reason: 3, terminated: false };
+  }
+
+  it("prints the breakpoint's own message when a resume stops on its line", async () => {
+    const store = await startSession();
+    await store.toggleBreakpoint(30);
+    store.setBreakpointMessage(30, "这里是重算余额的地方");
+    plResume.mockResolvedValue(hitLine30());
+
+    await store.resume();
+
+    expect(store.history.some((entry) => entry.message === "breakpoint line 30: 这里是重算余额的地方")).toBe(true);
+  });
+
+  it("stays silent for a line whose breakpoint carries no message", async () => {
+    const store = await startSession();
+    await store.toggleBreakpoint(30);
+    plResume.mockResolvedValue(hitLine30());
+
+    await store.resume();
+
+    expect(store.history.some((entry) => entry.message.startsWith("breakpoint line 30: "))).toBe(false);
+  });
+
+  it("prints nothing for a line the ignore count resumed past", async () => {
+    // The first hit is auto-resumed, so its message does not belong to the stop the
+    // user sees; the run then stops on a line without a breakpoint at all.
+    const store = await startSession();
+    await store.toggleBreakpoint(30);
+    store.setBreakpointIgnoreCount(30, 2);
+    store.setBreakpointMessage(30, "只在停下来时显示");
+    plResume.mockResolvedValueOnce(hitLine30()).mockResolvedValueOnce({ line: "40", reason: 9, terminated: false });
+
+    await store.resume();
+
+    expect(plResume).toHaveBeenCalledTimes(2);
+    // The setter records its own INFO line, so the check asks for the HIT line.
+    expect(store.history.some((entry) => entry.message === "breakpoint line 30: 只在停下来时显示")).toBe(false);
+  });
+
+  it("prints the message for a step that lands on the breakpoint", async () => {
+    // A step can hit an armed breakpoint too; the message belongs to the stop, not to
+    // the resume that produced it.
+    const store = await startSession();
+    await store.toggleBreakpoint(30);
+    store.setBreakpointMessage(30, "单步也会命中");
+    vi.mocked(api.plDebugStepOver).mockResolvedValue(hitLine30());
+
+    await store.stepOver();
+
+    expect(store.history.some((entry) => entry.message === "breakpoint line 30: 单步也会命中")).toBe(true);
+  });
+
+  it("stays silent when a step stops on a line that is not a breakpoint hit", async () => {
+    const store = await startSession();
+    await store.toggleBreakpoint(30);
+    store.setBreakpointMessage(30, "不该出现");
+    vi.mocked(api.plDebugStepOver).mockResolvedValue({ line: "30", reason: 9, terminated: false });
+
+    await store.stepOver();
+
+    expect(store.history.some((entry) => entry.message === "breakpoint line 30: 不该出现")).toBe(false);
+  });
+});

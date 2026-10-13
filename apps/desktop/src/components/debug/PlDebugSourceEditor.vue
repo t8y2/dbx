@@ -13,7 +13,7 @@ import { createPlDebugStepKeyBindings, type PlDebugStepCommand } from "@/lib/edi
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { routineSourceObject } from "@/lib/debug/oracleRoutineEntryLine";
-import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
+import { loadPlDebugObjectSource } from "@/lib/debug/plDebugSourceAlignment";
 import { useTheme } from "@/composables/useTheme";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { usePlDebugStore, type PlDebugSessionTarget } from "@/stores/plDebugStore";
@@ -164,7 +164,7 @@ watch(
     const target = store.target;
     loading.value = true;
     try {
-      const { source } = await loadObjectSourceWithRoutineFallback(api.getObjectSource, connectionId, database, target?.schema || database, request.name, request.objectType);
+      const { source } = await loadPlDebugObjectSource(api.getObjectSource, connectionId, database, target?.schema || database, request.name, request.objectType);
       if (token !== loadToken) return;
       loadedSource.value = source.source ?? "";
     } catch (caught) {

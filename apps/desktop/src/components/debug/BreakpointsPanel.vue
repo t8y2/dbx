@@ -17,6 +17,8 @@ interface BreakpointRow {
   enabled: boolean;
   ignoreCount: number;
   condition: string;
+  /** Note the user attached to the line; shown when a resume stops on it. */
+  message: string;
   /** Reload warning the agent attached to the stored breakpoint, if any. */
   warning: string | null;
 }
@@ -40,6 +42,7 @@ function localsFor(line: number): PlDebugBreakpointLocals {
     ignoreCount: typeof stored?.ignoreCount === "number" && stored.ignoreCount > 0 ? Math.trunc(stored.ignoreCount) : 0,
     condition: typeof stored?.condition === "string" ? stored.condition : "",
     hits: typeof stored?.hits === "number" ? stored.hits : 0,
+    message: typeof stored?.message === "string" ? stored.message : "",
   };
 }
 
@@ -58,6 +61,7 @@ const rows = computed<BreakpointRow[]>(() => {
       enabled: breakpoint.enabled !== false,
       ignoreCount: typeof breakpoint.ignoreCount === "number" ? breakpoint.ignoreCount : locals.ignoreCount,
       condition: typeof breakpoint.condition === "string" ? breakpoint.condition : locals.condition,
+      message: typeof breakpoint.message === "string" ? breakpoint.message : locals.message,
       warning: warningOf(breakpoint),
     };
   });
@@ -67,7 +71,16 @@ const rows = computed<BreakpointRow[]>(() => {
     .filter((line) => !live.some((row) => row.line === line))
     .map((line) => {
       const locals = localsFor(line);
-      return { key: `disabled-${line}`, line, name: targetLabel.value, enabled: false, ignoreCount: locals.ignoreCount, condition: locals.condition, warning: null };
+      return {
+        key: `disabled-${line}`,
+        line,
+        name: targetLabel.value,
+        enabled: false,
+        ignoreCount: locals.ignoreCount,
+        condition: locals.condition,
+        message: locals.message,
+        warning: null,
+      };
     });
   return [...live, ...disabled].sort((left, right) => left.line - right.line);
 });
@@ -111,6 +124,11 @@ function onIgnoreCountChange(row: BreakpointRow, event: Event) {
 function onConditionChange(row: BreakpointRow, event: Event) {
   store.setBreakpointCondition(row.line, (event.target as HTMLInputElement).value.trim());
 }
+
+/** The breakpoint's own note: printed in the debug console when the line is hit. */
+function onMessageChange(row: BreakpointRow, event: Event) {
+  store.setBreakpointMessage(row.line, (event.target as HTMLInputElement).value.trim());
+}
 </script>
 
 <template>
@@ -123,6 +141,7 @@ function onConditionChange(row: BreakpointRow, event: Event) {
             <th class="w-16 px-2 py-1 font-normal">{{ t("plDebug.breakpoints.line") }}</th>
             <th class="w-24 px-2 py-1 font-normal">{{ t("plDebug.breakpoints.ignoreCount") }}</th>
             <th class="w-40 px-2 py-1 font-normal">{{ t("plDebug.breakpoints.condition") }}</th>
+            <th class="w-40 px-2 py-1 font-normal">{{ t("plDebug.breakpoints.message") }}</th>
             <th class="w-20 px-2 py-1 font-normal">{{ t("plDebug.breakpoints.actions") }}</th>
           </tr>
         </thead>
@@ -144,6 +163,9 @@ function onConditionChange(row: BreakpointRow, event: Event) {
               <Input class="h-6 text-xs" :model-value="row.condition" :placeholder="t('plDebug.breakpoints.conditionPlaceholder')" :disabled="busyLine === row.line" @change="onConditionChange(row, $event)" />
             </td>
             <td class="px-2 py-1 align-top">
+              <Input class="h-6 text-xs" :model-value="row.message" :placeholder="t('plDebug.breakpoints.messagePlaceholder')" :disabled="busyLine === row.line" @change="onMessageChange(row, $event)" />
+            </td>
+            <td class="px-2 py-1 align-top">
               <div class="flex items-center">
                 <Button variant="ghost" size="sm" class="h-6 w-6 p-0" :disabled="busyLine === row.line || !store.hasSession" :title="row.enabled ? t('plDebug.breakpoints.disable') : t('plDebug.breakpoints.enable')" @click="toggleEnabled(row)">
                   <Ban v-if="row.enabled" class="h-3.5 w-3.5" />
@@ -156,7 +178,7 @@ function onConditionChange(row: BreakpointRow, event: Event) {
             </td>
           </tr>
           <tr v-if="rows.length === 0">
-            <td colspan="5" class="px-2 py-3 text-center text-muted-foreground">
+            <td colspan="6" class="px-2 py-3 text-center text-muted-foreground">
               {{ t("plDebug.breakpoints.empty") }}
             </td>
           </tr>

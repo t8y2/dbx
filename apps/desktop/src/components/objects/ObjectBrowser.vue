@@ -1798,6 +1798,23 @@ function openProcedureExecution(row: ObjectBrowserRow) {
   showProcedureExecutionConfirm.value = true;
 }
 
+/**
+ * 「调试」from the source panel: the user is looking at a routine's source and wants to
+ * run it under the debugger, so the button reuses the tree action's gate and payload
+ * instead of opening a second launch path (reported from use, 2026-10-13).
+ */
+function debugSourceRow() {
+  const row = sourceRow.value;
+  if (!row) return;
+  openPlDebugRoutine(row);
+}
+
+/** Only routines the debugger can attach to get the button (mirrors the tree action). */
+const sourceRowDebuggable = computed(() => {
+  const type = (sourceRow.value?.type ?? "").toUpperCase();
+  return !sourceEditing.value && (type === "PROCEDURE" || type === "FUNCTION");
+});
+
 function openPlDebugRoutine(row: ObjectBrowserRow) {
   if (row.type !== "PROCEDURE" && row.type !== "FUNCTION") return;
   // The capability probe and the INVALID-object pre-check both live in
@@ -4755,6 +4772,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             </Button>
             <Button v-if="!sourceEditing && sourceCanEdit" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
               <PencilLine class="h-3 w-3" />
+            </Button>
+            <Button v-if="sourceRowDebuggable" variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs" :title="t('objects.debugSourceTitle')" @click="debugSourceRow">
+              <Bug class="h-3 w-3" />
+              {{ t("objects.debugSource") }}
             </Button>
             <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="sourceLoading || sourceSaving" :title="t('structureEditor.refresh')" :aria-label="t('structureEditor.refresh')" @click="refreshActiveSource">
               <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': sourceLoading }" />

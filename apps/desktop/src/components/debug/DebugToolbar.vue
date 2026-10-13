@@ -21,8 +21,25 @@ const stateLabel = computed(() => {
 /** The agent reports an exception stop on the status snapshot. */
 const stoppedOnException = computed(() => store.status?.stoppedOnException === true);
 
-/** Restart replays the launch dialog, which needs a named routine to re-resolve. */
-const canRestart = computed(() => store.hasSession && !store.busy && store.connectionId !== null && store.database !== null && !!store.target?.objectName && store.target.objectType.toUpperCase() !== "ANONYMOUS");
+/**
+ * Restart replays the launch dialog, which needs a named routine to re-resolve.
+ *
+ * It deliberately does NOT require a live session (`store.hasSession`): the moment it
+ * matters most is exactly when the program has finished or its session died, where
+ * every other button is disabled. Requiring a live session there left the user with a
+ * dead panel and no way back except restarting the whole window (reported from use,
+ * 2026-10-13).
+ *
+ * An anonymous block is restartable too: it has no routine name, but its source is
+ * kept on the target and can simply be resubmitted.
+ */
+const canRestart = computed(() => {
+  if (store.busy || store.connectionId === null || store.database === null) return false;
+  const current = store.target;
+  if (!current) return false;
+  if (current.objectType.toUpperCase() === "ANONYMOUS") return !!current.source?.trim();
+  return !!current.objectName;
+});
 
 async function toggleExceptionBreakpoint(enabled: boolean) {
   try {
@@ -54,10 +71,14 @@ async function toggleExceptionBreakpoint(enabled: boolean) {
     <Button variant="ghost" size="sm" :disabled="!store.hasSession" :title="t('plDebug.toolbar.abort')" @click="store.abort()">
       <Square class="h-4 w-4" />
     </Button>
-    <Button variant="ghost" size="sm" :disabled="!store.hasSession || store.busy" :title="t('plDebug.toolbar.close')" @click="store.close()">
+    <Button variant="ghost" size="sm" :disabled="store.busy || !store.debugId" :title="t('plDebug.toolbar.close')" @click="store.close()">
       <X class="h-4 w-4" />
     </Button>
-    <Button variant="ghost" size="sm" :disabled="!canRestart" :title="t('plDebug.toolbar.restart')" @click="emit('restart')">
+    <Button v-if="store.terminated && canRestart" variant="secondary" size="sm" class="h-6 gap-1 px-2 text-xs" :title="t('plDebug.toolbar.restart')" @click="emit('restart')">
+      <RefreshCcw class="h-3.5 w-3.5" />
+      {{ t("plDebug.toolbar.restart") }}
+    </Button>
+    <Button v-else variant="ghost" size="sm" :disabled="!canRestart" :title="t('plDebug.toolbar.restart')" @click="emit('restart')">
       <RefreshCcw class="h-4 w-4" />
     </Button>
     <div class="ml-1 flex items-center gap-1.5">
@@ -65,6 +86,7 @@ async function toggleExceptionBreakpoint(enabled: boolean) {
       <label :for="exceptionSwitchId" class="cursor-pointer text-xs text-muted-foreground">{{ t("plDebug.toolbar.exceptionBreakpoint") }}</label>
     </div>
     <span class="mx-2 text-xs text-muted-foreground">{{ stateLabel }}</span>
+    <span v-if="store.terminated && store.target" class="text-xs text-muted-foreground">{{ t("plDebug.toolbar.finishedHint") }}</span>
     <span v-if="store.currentProgram" class="text-xs text-muted-foreground">
       {{ store.currentProgram }}<template v-if="store.currentLine"> : {{ store.currentLine }}</template>
     </span>

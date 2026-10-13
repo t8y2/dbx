@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { FileCode } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { frameBelongsToTarget, frameSourceCandidates } from "@/lib/debug/plDebugFrameSource";
-import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
+import { loadPlDebugObjectSource } from "@/lib/debug/plDebugSourceAlignment";
 import { usePlDebugStore } from "@/stores/plDebugStore";
 import * as api from "@/lib/backend/api";
 import type { PlDebugFrame } from "@/lib/backend/pl-debug-tauri";
@@ -134,7 +134,7 @@ async function viewFrameSource(frame: StackFrame) {
     for (const candidate of candidates) {
       const owner = candidate.owner || fallbackOwner;
       try {
-        const { source } = await loadObjectSourceWithRoutineFallback(api.getObjectSource, connectionId, database, owner, candidate.name, candidate.objectType);
+        const { source } = await loadPlDebugObjectSource(api.getObjectSource, connectionId, database, owner, candidate.name, candidate.objectType);
         if (source.source?.trim()) {
           store.showFrameSource({ frameIndex: frame.index, program, line: frame.line, owner, name: candidate.name, source: source.source, error: null });
           return;

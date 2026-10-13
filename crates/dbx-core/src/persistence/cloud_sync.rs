@@ -2044,13 +2044,16 @@ impl SnippetSyncClient {
         let passphrase = required_snippet_passphrase(snippet_passphrase)?;
         let existing_id = normalized_snippet_id(self.config.snippet_id.as_deref());
         if expected_remote_content_hash.is_some() && existing_id.is_none() {
-            return Err("Automatic snippet upload needs a snippet ID and a previous successful manual upload."
-                .to_string());
+            return Err(
+                "Automatic snippet upload needs a snippet ID and a previous successful manual upload.".to_string()
+            );
         }
         if let Some(expected_hash) = expected_remote_content_hash {
             if expected_hash.len() != 64 || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err("Automatic snippet upload has an invalid saved remote version. Upload manually to reset it."
-                    .to_string());
+                return Err(
+                    "Automatic snippet upload has an invalid saved remote version. Upload manually to reset it."
+                        .to_string(),
+                );
             }
         }
         let legacy_snapshot = if let Some(id) = existing_id {
@@ -3239,10 +3242,7 @@ fn snippet_token_account(config: &SnippetSyncConfig) -> Result<String, String> {
 }
 
 fn snippet_passphrase_account(config: &SnippetSyncConfig) -> Result<String, String> {
-    Ok(format!(
-        "snippet-passphrase:{}",
-        snippet_provider_storage_key(config.provider, config.instance_url.as_deref())?
-    ))
+    Ok(format!("snippet-passphrase:{}", snippet_provider_storage_key(config.provider, config.instance_url.as_deref())?))
 }
 
 fn validate_snippet_id(provider: SnippetProvider, id: &str) -> Result<(), String> {

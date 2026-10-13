@@ -1468,14 +1468,8 @@ async fn serve() -> Result<(), String> {
         .route("/cloud-sync/snippet/save-token", post(routes::cloud_sync::save_snippet_saved_token))
         .route("/cloud-sync/snippet/forget-token", post(routes::cloud_sync::forget_snippet_saved_token))
         .route("/cloud-sync/snippet/passphrase-status", post(routes::cloud_sync::snippet_passphrase_status))
-        .route(
-            "/cloud-sync/snippet/save-passphrase",
-            post(routes::cloud_sync::save_snippet_saved_passphrase),
-        )
-        .route(
-            "/cloud-sync/snippet/forget-passphrase",
-            post(routes::cloud_sync::forget_snippet_saved_passphrase),
-        )
+        .route("/cloud-sync/snippet/save-passphrase", post(routes::cloud_sync::save_snippet_saved_passphrase))
+        .route("/cloud-sync/snippet/forget-passphrase", post(routes::cloud_sync::forget_snippet_saved_passphrase))
         .route("/cloud-sync/snippet/settings", post(routes::cloud_sync::snippet_sync_settings))
         .route("/cloud-sync/snippet/save-id", post(routes::cloud_sync::save_snippet_sync_id))
         .route("/cloud-sync/snippet/retry-legacy-cleanup", post(routes::cloud_sync::retry_snippet_legacy_cleanup))

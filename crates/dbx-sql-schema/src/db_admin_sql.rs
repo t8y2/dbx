@@ -979,6 +979,9 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     if matches!(database_type, DatabaseType::Transwarp | DatabaseType::StarRocks) {
         return object_type == DatabaseObjectType::Table;
     }
+    if database_type == DatabaseType::SapHana {
+        return object_type == DatabaseObjectType::Table;
+    }
     if matches!(object_type, DatabaseObjectType::Procedure | DatabaseObjectType::Function) {
         return false;
     }
@@ -1027,6 +1030,14 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
             "ALTER TABLE {} RENAME {};",
             qualified_name(database_type, options.schema.as_deref(), &options.old_name),
             quote_rename_identifier(database_type, &options.new_name)
+        ));
+    }
+
+    if database_type == Some(DatabaseType::SapHana) {
+        return Ok(format!(
+            "RENAME TABLE {} TO {};",
+            qualified_name(database_type, options.schema.as_deref(), &options.old_name),
+            qualified_name(database_type, options.schema.as_deref(), &options.new_name)
         ));
     }
 
@@ -3176,6 +3187,22 @@ mod tests {
             })
             .is_err());
         }
+    }
+
+    #[test]
+    fn builds_saphana_table_rename_sql() {
+        let options = RenameObjectSqlOptions {
+            database_type: Some(DatabaseType::SapHana),
+            object_type: DatabaseObjectType::Table,
+            schema: Some("APP".to_string()),
+            old_name: "orders".to_string(),
+            new_name: "orders_copy".to_string(),
+        };
+        assert!(supports_object_rename(options.database_type, options.object_type));
+        assert_eq!(
+            build_rename_object_sql(options).unwrap(),
+            "RENAME TABLE \"APP\".\"orders\" TO \"APP\".\"orders_copy\";"
+        );
     }
 
     #[test]

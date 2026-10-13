@@ -276,6 +276,17 @@ const informixCapabilities = capabilities({
   rebuildIndex: true,
 });
 
+const sapHanaCapabilities = capabilities({
+  dialect: "oracle",
+  addColumn: true,
+  dropColumn: true,
+  renameColumn: true,
+  alterExistingColumn: true,
+  alterType: true,
+  alterNullability: true,
+  alterDefault: true,
+});
+
 // Inceptor accepts ADD COLUMNS and CHANGE. DROP COLUMN and index/constraint DDL
 // remain disabled until a safe server-supported form is verified.
 const transwarpCapabilities = capabilities({
@@ -381,6 +392,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   access: accessCapabilities,
   clickhouse: clickhouseCapabilities,
   informix: informixCapabilities,
+  saphana: sapHanaCapabilities,
   transwarp: transwarpCapabilities,
   influxdb: influxdbCapabilities,
   manticoresearch: manticoreSearchCapabilities,

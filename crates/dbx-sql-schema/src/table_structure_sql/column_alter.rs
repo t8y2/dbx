@@ -163,6 +163,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
                 statements.extend(build_oracle_like_existing_column_sql(dialect, &table, &options.column))
             }
         }
+        StructureDialect::SapHana => statements.extend(build_saphana_existing_column_sql(&table, &options.column)),
         StructureDialect::Dameng => {
             statements.extend(build_dameng_existing_column_sql(&table, &options.column, true, &mut warnings))
         }
@@ -779,6 +780,46 @@ pub(super) fn build_oracle_like_existing_column_sql(
             if clean(&column.comment).is_empty() { "NULL".to_string() } else { quote_string(&clean(&column.comment)) };
         statements
             .push(format!("COMMENT ON COLUMN {table}.{} IS {comment_value};", quote_ident(dialect, &current_name)));
+    }
+    statements
+}
+
+pub(super) fn build_saphana_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    let Some(original) = &column.original else {
+        return Vec::new();
+    };
+    let mut statements = Vec::new();
+    let mut current_name = original.name.clone();
+    if column.name != original.name {
+        statements.push(format!(
+            "RENAME COLUMN {table}.{} TO {};",
+            quote_ident(StructureDialect::SapHana, &original.name),
+            quote_ident(StructureDialect::SapHana, &column.name)
+        ));
+        current_name = column.name.clone();
+    }
+
+    let type_changed = column.data_type.trim() != original.data_type.trim();
+    let nullable_changed = column.is_nullable != original.is_nullable;
+    let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
+    if type_changed || nullable_changed || default_changed {
+        let mut parts = vec![
+            quote_ident(StructureDialect::SapHana, &current_name),
+            column_data_type(StructureDialect::SapHana, column),
+        ];
+        let default_value = normalize_default(Some(&column.default_value));
+        if !default_value.is_empty() {
+            parts.push(format!(
+                "DEFAULT {}",
+                format_default_for_sql(StructureDialect::SapHana, &column.data_type, &default_value)
+            ));
+        } else if default_changed {
+            parts.push("DEFAULT NULL".to_string());
+        }
+        if nullable_changed {
+            parts.push(if column.is_nullable { "NULL" } else { "NOT NULL" }.to_string());
+        }
+        statements.push(format!("ALTER TABLE {table} ALTER ({});", parts.join(" ")));
     }
     statements
 }

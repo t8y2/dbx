@@ -152,6 +152,7 @@ describe("TreeItem production badge scope", () => {
   });
 
   it.each(["database", "schema"] as const)("reserves space for the independent badge on a fixed %s", async (type) => {
+    connection = { ...productionConnection, production_badge_scope: "connection" };
     const container = mountTreeItem({ id: "scope-1", label: "analytics", type, connectionId: productionConnection.id, database: "analytics", schema: "public" }, true);
     await nextTick();
     expect(rowText(container, "scope-1")).not.toContain("PROD");
@@ -168,6 +169,14 @@ describe("TreeItem production badge scope", () => {
     const container = mountTreeItem({ id: "scope-connection", label: "analytics", type, connectionId: productionConnection.id, database: "analytics", schema: "public" });
     await nextTick();
     expect(rowText(container, "scope-connection")).not.toContain("PROD");
+  });
+
+  it("keeps the fixed database/schema row badge inline outside connection scope", async () => {
+    connection = { ...productionConnection, production_badge_scope: "database" };
+    const container = mountTreeItem({ id: "scope-inline", label: "analytics", type: "schema", connectionId: productionConnection.id, database: "analytics", schema: "public" }, true);
+    await nextTick();
+    expect(rowText(container, "scope-inline")).toContain("PROD");
+    expect(container.querySelector<HTMLElement>('[data-node-id="scope-inline"]')?.style.paddingRight).toBe("");
   });
 
   it("leaves ordinary object rows unmarked inside a production connection", async () => {

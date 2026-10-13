@@ -29,8 +29,8 @@ describe("production badge display scope", () => {
 
   it.each(["connection", "database", "table"] as const)("resolves the sticky badge in %s scope", (scope) => {
     const config = { ...connection, production_badge_scope: scope };
-    expect(showSidebarStickyProductionBadge(node("schema"), config)).toBe(true);
-    expect(showSidebarRowProductionBadge(node("database"), config, true)).toBe(false);
+    expect(showSidebarStickyProductionBadge(node("schema"), config)).toBe(scope === "connection");
+    expect(showSidebarRowProductionBadge(node("database"), config, true)).toBe(scope !== "connection");
     expect(showSidebarStickyProductionBadge(undefined, config)).toBe(false);
   });
 
@@ -44,7 +44,7 @@ describe("production badge display scope", () => {
 
   it.each(["connection", "database", "table"] as const)("clears the fixed marker when entering a non-production database in %s scope", (scope) => {
     const config = { ...connection, is_production: false, production_databases: ["app"], production_badge_scope: scope };
-    expect(showSidebarStickyProductionBadge(node("schema"), config)).toBe(true);
+    expect(showSidebarStickyProductionBadge(node("schema"), config)).toBe(scope === "connection");
     expect(showSidebarStickyProductionBadge(node("schema", "other"), config)).toBe(false);
     expect(showSidebarStickyProductionBadge(node("schema"), { ...config, production_databases: [] })).toBe(false);
   });

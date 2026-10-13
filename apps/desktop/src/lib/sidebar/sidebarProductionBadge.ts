@@ -37,8 +37,8 @@ export function sidebarProductionBadgeScope(connection: ConnectionConfig | undef
 }
 
 export function showSidebarRowProductionBadge(node: Pick<TreeNode, "type" | "database">, connection: ConnectionConfig | undefined, stickyContext = false): boolean {
-  if (stickyContext) return false;
   const scope = sidebarProductionBadgeScope(connection);
+  if (stickyContext && scope === "connection") return false;
   const active = productionContextForDatabase(connection, node.database).active;
   // Connection-only display must still warn when just selected databases are
   // production; the safety scope remains limited to those databases.
@@ -47,6 +47,7 @@ export function showSidebarRowProductionBadge(node: Pick<TreeNode, "type" | "dat
 }
 
 export function showSidebarStickyProductionBadge(node: Pick<TreeNode, "database"> | undefined, connection: ConnectionConfig | undefined): boolean {
-  // A fixed header is a navigation safety cue in every display scope.
-  return !!node && productionContextForDatabase(connection, node.database).active;
+  // Only connection scope needs a separate fixed badge. Database/schema and
+  // table/object scopes render the badge on the fixed row itself.
+  return !!node && sidebarProductionBadgeScope(connection) === "connection" && productionContextForDatabase(connection, node.database).active;
 }

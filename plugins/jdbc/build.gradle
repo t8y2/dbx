@@ -16,7 +16,7 @@ repositories {
     mavenCentral()
 }
 
-def mavenResolverVersion = '2.0.18'
+def mavenResolverVersion = '2.0.24'
 def mavenCoreVersion = '4.0.0-rc-5'
 
 dependencies {

@@ -71,6 +71,23 @@ const MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY = "dbx-mqtt-publish-panel-collaps
 const MQTT_MESSAGE_HISTORY_LIMIT = 400;
 const publishPanelCollapsed = ref(restoredUiState.publishPanelCollapsed ?? safeLocalStorageGet(MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY) === "true");
 
+const subscriptionDialogDragOffset = ref({ x: 0, y: 0 });
+const isDraggingSubscriptionDialog = ref(false);
+const subscriptionDialogDragStart = ref({ x: 0, y: 0 });
+const subscriptionDialogDragStartOffset = ref({ x: 0, y: 0 });
+const subscriptionDialogDragStartRect = ref<DOMRect | null>(null);
+const activeSubscriptionDialogPointerId = ref<number | null>(null);
+const subscriptionDialogContentStyle = computed(() => {
+  const { x, y } = subscriptionDialogDragOffset.value;
+  if (isDraggingSubscriptionDialog.value || x !== 0 || y !== 0) {
+    return {
+      transform: `translate(${x}px, ${y}px)`,
+      transition: isDraggingSubscriptionDialog.value ? "none" : "transform 0.15s ease-out",
+    };
+  }
+  return {};
+});
+
 trackUiState(() => ({
   selectedTopic: selectedTopic.value,
   messagesPaused: messagesPaused.value,
@@ -215,6 +232,7 @@ async function handleDelete(config: MqttSavedTopic) {
 }
 
 function openSubscriptionDialog() {
+  resetSubscriptionDialogDrag();
   editingTopic.value = null;
   formTopic.value = "";
   formQos.value = "atmostonce";
@@ -225,6 +243,7 @@ function openSubscriptionDialog() {
 }
 
 function editSubscription(config: MqttSavedTopic) {
+  resetSubscriptionDialogDrag();
   editingTopic.value = config.topic;
   formTopic.value = config.topic;
   formQos.value = config.qos;
@@ -232,6 +251,58 @@ function editSubscription(config: MqttSavedTopic) {
   formEnabled.value = config.enabled !== false;
   error.value = null;
   showSubscriptionDialog.value = true;
+}
+
+function resetSubscriptionDialogDrag() {
+  subscriptionDialogDragOffset.value = { x: 0, y: 0 };
+  isDraggingSubscriptionDialog.value = false;
+  activeSubscriptionDialogPointerId.value = null;
+  subscriptionDialogDragStartRect.value = null;
+}
+
+function startSubscriptionDialogDrag(event: PointerEvent) {
+  if (event.button !== 0) return;
+  const dialogContent = (event.currentTarget as HTMLElement).closest<HTMLElement>('[data-slot="dialog-content"]');
+  if (!dialogContent) return;
+
+  subscriptionDialogDragStartRect.value = dialogContent.getBoundingClientRect();
+  subscriptionDialogDragStart.value = { x: event.clientX, y: event.clientY };
+  subscriptionDialogDragStartOffset.value = { ...subscriptionDialogDragOffset.value };
+  activeSubscriptionDialogPointerId.value = event.pointerId;
+  isDraggingSubscriptionDialog.value = true;
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+function moveSubscriptionDialog(event: PointerEvent) {
+  const rect = subscriptionDialogDragStartRect.value;
+  if (!isDraggingSubscriptionDialog.value || event.pointerId !== activeSubscriptionDialogPointerId.value || !rect) return;
+
+  const startOffset = subscriptionDialogDragStartOffset.value;
+  const deltaX = event.clientX - subscriptionDialogDragStart.value.x;
+  const deltaY = event.clientY - subscriptionDialogDragStart.value.y;
+  const margin = 8;
+  const minX = startOffset.x + margin - rect.left;
+  const maxX = startOffset.x + window.innerWidth - margin - rect.right;
+  const minY = startOffset.y + margin - rect.top;
+  const maxY = startOffset.y + window.innerHeight - margin - rect.bottom;
+  const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), Math.max(min, max));
+
+  subscriptionDialogDragOffset.value = {
+    x: clamp(startOffset.x + deltaX, minX, maxX),
+    y: clamp(startOffset.y + deltaY, minY, maxY),
+  };
+}
+
+function endSubscriptionDialogDrag(event: PointerEvent) {
+  if (!isDraggingSubscriptionDialog.value || event.pointerId !== activeSubscriptionDialogPointerId.value) return;
+  isDraggingSubscriptionDialog.value = false;
+  activeSubscriptionDialogPointerId.value = null;
+  subscriptionDialogDragStartRect.value = null;
+  try {
+    (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+  } catch {
+    // Pointer capture may already be released when the pointer is cancelled.
+  }
 }
 
 function validTopicFilter(topic: string): boolean {
@@ -551,8 +622,8 @@ onUnmounted(stopPolling);
     </div>
 
     <Dialog v-model:open="showSubscriptionDialog">
-      <DialogContent class="sm:max-w-md">
-        <DialogHeader>
+      <DialogContent :style="subscriptionDialogContentStyle" class="sm:max-w-md">
+        <DialogHeader class="cursor-move select-none touch-none" @pointerdown="startSubscriptionDialogDrag" @pointermove="moveSubscriptionDialog" @pointerup="endSubscriptionDialogDrag" @pointercancel="endSubscriptionDialogDrag">
           <DialogTitle>{{ editingTopic ? t("connection.mqttEditSubscription") : t("connection.mqttNewSubscription") }}</DialogTitle>
         </DialogHeader>
         <div class="grid gap-3">

@@ -304,6 +304,7 @@ impl SqlDialectProfile {
 
     fn oracle_like() -> Self {
         Self {
+            supports_backslash_escaped_quotes: false,
             supports_oracle_plsql_blocks: true,
             supports_oracle_q_quotes: true,
             supports_slash_line_block_delimiter: true,
@@ -4735,6 +4736,7 @@ SELECT 2;";
         ] {
             let profile = SqlDialectProfile::for_database_type(db_type);
             assert_eq!(profile, SqlDialectProfile::oracle_like());
+            assert!(!profile.supports_backslash_escaped_quotes);
             assert!(profile.supports_oracle_plsql_blocks);
             assert!(profile.supports_slash_line_block_delimiter);
             assert!(!profile.supports_postgres_dollar_quoted_routines);
@@ -6024,6 +6026,24 @@ CREATE OR REPLACE VIEW v_users AS SELECT id, name FROM users;";
                 "CREATE OR REPLACE VIEW v_users AS SELECT id, name FROM users"
             ]
         );
+    }
+
+    #[test]
+    fn oracle_like_split_does_not_treat_backslash_as_quote_escape() {
+        let sql = "SELECT TO_CLOB('a\\') || TO_CLOB('n};\\n}') FROM dual;\nSELECT 2 FROM dual;";
+        for db_type in [
+            DatabaseType::OceanbaseOracle,
+            DatabaseType::Oracle,
+            DatabaseType::Dameng,
+            DatabaseType::Yashandb,
+            DatabaseType::Oscar,
+        ] {
+            assert_eq!(
+                split_sql_statements_for_database(sql, db_type),
+                vec!["SELECT TO_CLOB('a\\') || TO_CLOB('n};\\n}') FROM dual", "SELECT 2 FROM dual"],
+                "{db_type:?}"
+            );
+        }
     }
 
     #[test]

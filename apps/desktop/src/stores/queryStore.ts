@@ -5197,7 +5197,7 @@ export const useQueryStore = defineStore("query", () => {
 
       clearInvalidDataTabSortState(tab, tableMeta.columns);
       const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
-      const sortOrder = tab.resultSortMode === "database" && tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const sortOrder = tab.resultSortMode !== "local" && tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
       const orderBy = combineDataGridOrderByInputs(tab.orderByInput, tab.structuredOrderByInput) || sortOrder;
       const limit = tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
       const offset = tab.resultPageOffset ?? 0;
@@ -9757,7 +9757,7 @@ export const useQueryStore = defineStore("query", () => {
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
       const identifierQuote = connStore.connectionIdentifierQuote?.(tab.connectionId);
       const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
-      const sortOrder = tab.resultSortMode === "database" && tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const sortOrder = tab.resultSortMode !== "local" && tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
       const orderBy = combineDataGridOrderByInputs(tab.orderByInput, tab.structuredOrderByInput) || sortOrder;
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
       const executionDatabase = tab.database;

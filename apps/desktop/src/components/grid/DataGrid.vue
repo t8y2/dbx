@@ -3851,7 +3851,7 @@ watch(
     const previousOrderWasControlled = previous?.[3] === "database" && simpleDataGridOrderByMatchesSort(orderByInput.value, previous[0], previous[2]);
     const isControlledSort = !!column && !!direction;
     if (columns?.length && mode === "local") setSortColumns(columns, mode);
-    else setSort(column && direction ? column : null, typeof columnIndex === "number" && direction ? columnIndex : null, direction ?? "asc", mode ?? "local");
+    else setSort(column && direction ? column : null, typeof columnIndex === "number" && direction ? columnIndex : null, direction ?? "asc", mode ?? (isControlledSort ? "database" : "local"));
     if (isControlledSort && sortMode.value === "database") {
       syncOrderByInputWithSort(sortCol.value, sortDir.value);
     } else if (previousOrderWasControlled) {

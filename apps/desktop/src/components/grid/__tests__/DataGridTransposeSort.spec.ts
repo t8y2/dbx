@@ -88,7 +88,7 @@ function transposeRecordHeader(host: HTMLElement, recordIndex: number): HTMLElem
   return header;
 }
 
-function mountGrid(rows?: QueryResult["rows"], columnNames = ["zeta", "alpha"]) {
+function mountGrid(rows?: QueryResult["rows"], columnNames = ["zeta", "alpha"], initialSort?: DataGridSortColumn & { mode?: DataGridSortMode }) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -108,10 +108,10 @@ function mountGrid(rows?: QueryResult["rows"], columnNames = ["zeta", "alpha"]) 
       execution_time_ms: 0,
     }),
   );
-  const sortColumn = ref<string>();
-  const sortColumnIndex = ref<number>();
-  const sortDirection = ref<DataGridSortDirection>();
-  const sortMode = ref<DataGridSortMode>();
+  const sortColumn = ref(initialSort?.column);
+  const sortColumnIndex = ref(initialSort?.columnIndex);
+  const sortDirection = ref(initialSort?.direction);
+  const sortMode = ref(initialSort?.mode);
   const sortColumns = ref<DataGridSortColumn[]>();
   const onSort = vi.fn((column: string, columnIndex: number, direction: DataGridSortDirection | null, _whereInput?: string, mode: DataGridSortMode = "local", _effectiveOrderBy?: string, columns?: DataGridSortColumn[]) => {
     const sorts = columns ?? (direction ? [{ column, columnIndex, direction }] : []);
@@ -182,6 +182,14 @@ afterEach(() => {
 });
 
 describe("DataGrid transpose sorting", () => {
+  it.each([undefined, "database"] as const)("preserves restored database sorting (sort mode=%s)", async (mode) => {
+    const { host, onSort } = mountGrid(undefined, ["name", "score"], { column: "score", columnIndex: 1, direction: "desc", mode });
+    await settle();
+    await openTranspose(host);
+    await selectTransposeSort(host, 1, "grid.clearSort");
+    expect(onSort).toHaveBeenLastCalledWith("score", 1, null, undefined, "database", undefined);
+  });
+
   it.each([false, true])("supports default local sort and Alt multi-sort in transpose=%s", async (transpose) => {
     const { host, onSort, result, sortColumns } = mountGrid(
       [

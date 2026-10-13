@@ -1,0 +1,105 @@
+name: Excel Import Live Verification
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact commit or branch to verify
+        required: true
+        default: codex/fix-excel-blank-defaults
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: excel-import-live-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-databases:
+    if: github.repository == 'Rendegou/dbx'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RUST_MIN_STACK: '8388608'
+      OPENSSL_NO_VENDOR: '1'
+      DBX_LIVE_EXCEL_HOST: 127.0.0.1
+      DBX_LIVE_EXCEL_PASSWORD: DbxExcel_CI123!
+    defaults:
+      run:
+        shell: pwsh
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: DbxExcel_CI123!
+          POSTGRES_DB: dbx_excel_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d dbx_excel_test"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: DbxExcel_CI123!
+          MYSQL_DATABASE: dbx_excel_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping --silent"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: DbxExcel_CI123!
+          MSSQL_PID: Developer
+          MSSQL_MEMORY_LIMIT_MB: '2048'
+        ports: ['1433:1433']
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'DbxExcel_CI123!' -C -Q 'SELECT 1'"
+          --health-interval 10s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          sudo apt-get install -y libssl-dev libsqlite3-dev pkg-config cmake ninja-build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: excel-import-live-v1
+          cache-on-failure: true
+      - name: Import unit and SQLite regression tests
+        run: cargo test --locked -p dbx-core --no-default-features --features duckdb-sidecar,sqlite-bundled,openapi --lib table_import -- --test-threads=4
+      - name: MySQL live defaults, generated columns and preflight
+        env:
+          DBX_LIVE_EXCEL_DB_TYPE: mysql
+          DBX_LIVE_EXCEL_PORT: '3306'
+          DBX_LIVE_EXCEL_USER: root
+          DBX_LIVE_EXCEL_DATABASE: dbx_excel_test
+        run: cargo test --locked -p dbx-core --no-default-features --features duckdb-sidecar,sqlite-bundled,openapi --test live_excel_import live_excel_defaults -- --ignored --nocapture
+      - name: PostgreSQL live defaults, generated columns and preflight
+        env:
+          DBX_LIVE_EXCEL_DB_TYPE: postgres
+          DBX_LIVE_EXCEL_PORT: '5432'
+          DBX_LIVE_EXCEL_USER: postgres
+          DBX_LIVE_EXCEL_DATABASE: dbx_excel_test
+        run: cargo test --locked -p dbx-core --no-default-features --features duckdb-sidecar,sqlite-bundled,openapi --test live_excel_import live_excel_defaults -- --ignored --nocapture
+      - name: SQL Server live defaults, identity, bulk and failure cleanup
+        env:
+          DBX_LIVE_EXCEL_DB_TYPE: sqlserver
+          DBX_LIVE_EXCEL_PORT: '1433'
+          DBX_LIVE_EXCEL_USER: sa
+          DBX_LIVE_EXCEL_DATABASE: master
+        run: cargo test --locked -p dbx-core --no-default-features --features duckdb-sidecar,sqlite-bundled,openapi --test live_excel_import -- --ignored --nocapture --test-threads=1

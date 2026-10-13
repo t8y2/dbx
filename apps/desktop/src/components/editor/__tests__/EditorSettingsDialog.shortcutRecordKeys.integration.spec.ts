@@ -10,7 +10,7 @@ import { DEFAULT_EDITOR_SETTINGS } from "@/stores/settingsStore";
 //   2. 录入态吞掉按键（preventDefault + 停止传播），不执行真实快捷键命令。
 // 这里驱动真实控件，避免把「写进了某个 ref」当成行为证明。
 
-const hoisted = vi.hoisted(() => ({ shortcuts: {} as Record<string, string> }));
+const hoisted = vi.hoisted(() => ({ shortcuts: {} as Record<string, string>, hostRecording: [] as boolean[] }));
 
 vi.mock("vue-i18n", async () => {
   const { ref } = await import("vue");
@@ -106,6 +106,19 @@ vi.mock("@/stores/settingsStore", async (importOriginal) => {
   return { ...actual, useSettingsStore: () => store };
 });
 
+// The dialog already resolves this module for its other Tauri calls; here the host-side
+// recording flag is recorded instead of invoked so the wiring is observable.
+vi.mock("@/lib/backend/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/backend/api")>();
+  return {
+    ...actual,
+    setShortcutRecording: (recording: boolean) => {
+      hoisted.hostRecording.push(recording);
+      return Promise.resolve();
+    },
+  };
+});
+
 import EditorSettingsDialog from "../EditorSettingsDialog.vue";
 
 if (!("ResizeObserver" in globalThis)) {
@@ -147,6 +160,7 @@ function defaults() {
 }
 
 async function mountShortcutsTab() {
+  hoisted.hostRecording = [];
   const host = document.createElement("div");
   document.body.append(host);
   const app = createApp(defineComponent({ setup: () => () => h(EditorSettingsDialog, { variant: "page", initialTab: "shortcuts" }) }));
@@ -188,6 +202,9 @@ describe("EditorSettingsDialog shortcut key recording (behaviour)", () => {
 
     expect(button.getAttribute("aria-pressed")).toBe("true");
     expect(button.getAttribute("data-shortcut-recorder")).toBe("active");
+    // 桌面端要让宿主在录入期间放下 WebView2 的浏览器加速键（F5/Ctrl+R、Ctrl+F、F12…），
+    // 否则那批键在页面之前被消费：既录不到，按 F5 还会重载 webview 丢掉录入现场。
+    expect(hoisted.hostRecording).toEqual([true]);
     expect(shortcutsPane(host).textContent).toContain("settings.shortcutRecordKeysRecordingHint");
 
     pressKeys(button, { key: "k", ctrlKey: true, shiftKey: true });
@@ -307,6 +324,8 @@ describe("EditorSettingsDialog shortcut key recording (behaviour)", () => {
     expect(button.getAttribute("aria-pressed")).toBe("false");
     expect(button.hasAttribute("data-shortcut-recorder")).toBe(false);
     expect(shortcutsPane(host).textContent).not.toContain("settings.shortcutRecordKeysRecordingHint");
+    // 退出录入必须把宿主侧开关一起恢复，否则浏览器加速键会一直被关着。
+    expect(hoisted.hostRecording).toEqual([true, false]);
   });
 
   it("survives losing the window and re-arms the recorder when the window comes back", async () => {
@@ -340,6 +359,8 @@ describe("EditorSettingsDialog shortcut key recording (behaviour)", () => {
     expect(button.getAttribute("aria-pressed")).toBe("true");
     expect(document.activeElement).toBe(button);
     expect(shortcutsPane(host).textContent).toContain("settings.shortcutRecordKeysRecordingHint");
+    // 窗口失焦不算退出录入：宿主侧不能被恢复（否则回到 DBX 后浏览器加速键又会被 WebView2 吃掉）。
+    expect(hoisted.hostRecording).toEqual([true]);
 
     pressKeys(button, { key: "k", ctrlKey: true, shiftKey: true });
     await flushAsyncUpdates();

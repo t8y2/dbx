@@ -173,6 +173,7 @@ import {
   saveBackgroundImage,
   loadMaxAgentTurns,
   saveMaxAgentTurns,
+  setShortcutRecording,
   loadMaxRetries,
   saveMaxRetries,
   loadSqlFileUploadMaxBytes,
@@ -3322,19 +3323,32 @@ async function focusShortcutRecorderButton(): Promise<boolean> {
   return true;
 }
 
+/**
+ * 录入态的唯一写入口：本地状态与宿主侧开关一起变。桌面端要让宿主在录入期间放下 WebView2
+ * 的浏览器加速键（`F5`/`Ctrl+R`、`Ctrl+F`、`Ctrl+P`、`F12`……），否则那批键在页面之前就被
+ * 消费掉——既录不进搜索框，按下 `F5` 还会重载整个 webview 丢掉录入现场。幂等过滤避免重复 IPC。
+ */
+function applyShortcutRecording(recording: boolean) {
+  if (shortcutRecording.value === recording) return;
+  shortcutRecording.value = recording;
+  // 宿主侧是尽力而为的增强：失败只降级成「那批浏览器加速键仍录不进来」，错误由 api 层记录，
+  // 不再额外打扰用户。
+  void setShortcutRecording(recording).catch(() => undefined);
+}
+
 async function toggleShortcutRecording() {
   if (shortcutRecording.value) {
-    shortcutRecording.value = false;
+    applyShortcutRecording(false);
     return;
   }
-  shortcutRecording.value = true;
+  applyShortcutRecording(true);
   // 没有焦点就没有让路依据：宁可退回未录入态，也不要留下一个「显示正在录入、实际
   // 吞不掉任何按键」的空转状态。
-  if (!(await focusShortcutRecorderButton())) shortcutRecording.value = false;
+  if (!(await focusShortcutRecorderButton())) applyShortcutRecording(false);
 }
 
 function stopShortcutRecording() {
-  shortcutRecording.value = false;
+  applyShortcutRecording(false);
 }
 
 function onShortcutRecorderBlur() {
@@ -3364,7 +3378,7 @@ function onShortcutRecordingWindowFocus() {
     if (activeIsControl) return;
     void focusShortcutRecorderButton().then((focused) => {
       // 录入表面已不存在（换了页签、设置被关掉）时不保留空转的录入态。
-      if (!focused) shortcutRecording.value = false;
+      if (!focused) applyShortcutRecording(false);
     });
   });
 }
@@ -3588,7 +3602,7 @@ function resetSettingsSearchState() {
   settingsSearchActiveIndex.value = 0;
   pendingSettingsSearchResult = null;
   shortcutSearchQuery.value = "";
-  shortcutRecording.value = false;
+  applyShortcutRecording(false);
   mcpPermissionPreviewSearchQuery.value = "";
   clearSettingsSearchHighlight();
 }
@@ -5329,7 +5343,7 @@ watch(snippetProvider, (provider) => {
 watch(activeSettingsTab, async (tab) => {
   // 离开快捷键页签会卸载录入按钮，而被移除的焦点元素不会再收到 blur：不在这里
   // 复位的话，录入态会残留到下次回到该页签（届时按钮已不在焦点上，吞不掉快捷键）。
-  if (tab !== "shortcuts") shortcutRecording.value = false;
+  if (tab !== "shortcuts") applyShortcutRecording(false);
   void resetSettingsContentScroll();
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
   if (tab === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();

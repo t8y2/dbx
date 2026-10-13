@@ -2381,6 +2381,7 @@ pub fn run() {
             commands::saved_sql::saved_sql_storage_dir,
             commands::saved_sql::open_saved_sql_storage_dir,
             commands::saved_sql::sync_saved_sql_directory,
+            commands::shortcut_recording::set_shortcut_recording,
             commands::fs_open::reveal_path_in_file_manager,
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,

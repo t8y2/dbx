@@ -97,4 +97,10 @@ libloading = "0.8"
 gtk = "0.18"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# 与 vendored wry / tauri-runtime-wry 同版本（Cargo.lock 只有一份 0.38.x），用于在
+# 快捷键录入态运行时切换 WebView2 的浏览器加速键开关（见 commands/shortcut_recording.rs）。
+webview2-com = "0.38"
+# `cast`（Settings → Settings3 的 QueryInterface）来自 windows-core 的 Interface trait，
+# 版本与 vendored wry / webview2-com-sys 一致。
+windows-core = "0.61"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

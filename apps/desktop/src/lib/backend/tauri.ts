@@ -1093,6 +1093,15 @@ export async function requestAppClose(): Promise<void> {
   return invoke("request_app_close_from_window_controls");
 }
 
+/**
+ * #11787：告诉宿主快捷键录入态是否开启。Windows 上宿主据此关掉 WebView2 的浏览器加速键
+ * （F5/Ctrl+R 重载、Ctrl+F 查找、Ctrl+P 打印、Ctrl+± 缩放、F12 DevTools……），让这批键
+ * 在录入期间落到页面被录入态吞掉；退出录入即恢复。其余平台是空实现。
+ */
+export async function setShortcutRecording(recording: boolean): Promise<void> {
+  return invoke("set_shortcut_recording", { recording });
+}
+
 export interface DriverStoreMigrationResult {
   driver_store_dir: string | null;
   plugin_store_dir: string | null;

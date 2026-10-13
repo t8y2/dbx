@@ -21,6 +21,10 @@ vi.mock("vue-i18n", async () => {
   // Interpolate params into the returned string so count assertions can read
   // them (real vue-i18n would fold them into the message text).
   const t = (key: string, params?: Record<string, unknown>) => {
+    // #11632: one label carries a space AND a word its action id does not ("tab"),
+    // so the shortcut-search spec can tell a label match apart from an id match.
+    // A whitespace-stripped query would strip the label too and lose this row.
+    if (key === "settings.shortcutNewQuery") return "New Query Tab";
     if (!params) return key;
     const suffix = Object.keys(params)
       .sort()
@@ -269,6 +273,57 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     expect(header.getAttribute("aria-expanded")).toBe("false");
     expect(contentFor(host, "editor").getAttribute("aria-hidden")).toBe("true");
     expect(contentFor(host, "editor").hasAttribute("inert")).toBe(true);
+  });
+
+  // #11632: the search box used to compare the raw query against the rendered
+  // pill, so only the exact "Ctrl + T" spelling matched — "Ctrl+T" fell through.
+  it("matches a shortcut however the user spaces or cases the separators", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+    const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
+
+    const searchIds = async (value: string) => {
+      search.value = value;
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+      await flushAsyncUpdates();
+      return rows(host).map((row) => row.querySelector<HTMLInputElement>("input[data-shortcut-input]")!.dataset.shortcutInput!);
+    };
+
+    // The pill is platform-dependent ("Ctrl + T" vs "⌘ T"), so read it off the
+    // rendered row instead of hardcoding a spelling.
+    const displayed = inputFor(host, "newQuery").value;
+    expect(displayed).not.toBe("");
+    const compact = displayed.replace(/\s+/g, "");
+
+    const matched = await searchIds(displayed);
+    expect(matched).toContain("newQuery");
+    if (!/mac/i.test(globalThis.navigator?.platform ?? "")) {
+      // The issue's own example: Ctrl+T is a prefix of Ctrl+Tab, so both rows
+      // must survive. (On macOS the modifiers differ: ⌘ T vs ⌃ Tab.)
+      expect(matched).toContain("tabSwitcher");
+    }
+
+    expect(await searchIds(compact)).toEqual(matched);
+    expect(await searchIds(compact.toUpperCase())).toEqual(matched);
+    expect(await searchIds(displayed.replace(/\s+/g, "   "))).toEqual(matched);
+
+    // Still a substring match, not an equality match: dropping the key leaves a
+    // bare modifier prefix, which several actions share.
+    const prefixMatched = await searchIds(compact.slice(0, -1));
+    expect(prefixMatched.length).toBeGreaterThan(1);
+    expect(prefixMatched).toContain("newQuery");
+
+    // The untouched dimensions keep matching on their own terms: a two-word label
+    // still matches with its space, so only the shortcut field may be normalised.
+    // "tab" appears in the label but not in the id, so an id match cannot mask this.
+    expect(await searchIds("new query tab")).toContain("newQuery");
+    expect(await searchIds("NEW QUERY TAB")).toContain("newQuery");
+
+    // Whitespace-only input behaves as no search (the early return), not as
+    // "matches nothing".
+    const all = await searchIds("");
+    expect(all.length).toBeGreaterThan(matched.length);
+    expect(await searchIds("   ")).toEqual(all);
   });
 
   it("treats a same-scope duplicate as blocking: red pills, footer reason and a disabled Apply", async () => {

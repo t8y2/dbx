@@ -230,10 +230,40 @@ const activeNode = shallowRef<TreeNode>(props.node);
 
 const isDisabledTrigger = computed(() => activeNode.value.type === "trigger" && (activeNode.value.meta as TriggerInfo | undefined)?.enabled === false);
 
+// Marked rows answer "which environment am I looking at" for the connection and
+// database that carry the mark, plus the objects below them: a long tree scrolls
+// the boundary row out of sight, and that is exactly when the marker is needed.
+// Grouping rows (group-*), detail rows (column, index, …) and chrome rows stay
+// unmarked so the badge keeps pointing at write targets.
+const PRODUCTION_BADGE_NODE_TYPES: ReadonlySet<TreeNode["type"]> = new Set([
+  "connection",
+  "database",
+  "redis-db",
+  "mongo-db",
+  "table",
+  "table-vgroup",
+  "view",
+  "materialized_view",
+  "procedure",
+  "function",
+  "sequence",
+  "synonym",
+  "type",
+  "package",
+  "job",
+  "extension",
+  "event-trigger",
+  "oracle-db-link",
+  "mongo-collection",
+  "dynamodb-table",
+  "vector-collection",
+  "elasticsearch-index",
+]);
+
 const showProductionBadge = computed(() => {
   const connectionId = activeNode.value.connectionId;
   const context = productionContextForDatabase(connectionId ? connectionStore.getConfig(connectionId) : undefined, activeNode.value.database);
-  return context.active && ["connection", "database", "redis-db", "mongo-db"].includes(activeNode.value.type);
+  return context.active && PRODUCTION_BADGE_NODE_TYPES.has(activeNode.value.type);
 });
 
 function currentDatabaseType(): DatabaseType | undefined {

@@ -93,7 +93,7 @@ interface MountGridOptions {
   quickEntry?: boolean;
   hideNullColumns?: boolean;
   readonlyColumnIndexes?: number[];
-  databaseType?: "dameng" | "mongodb";
+  databaseType?: "dameng" | "mongodb" | "iris";
   customSaveHandler?: CustomSaveHandler;
   editable?: boolean;
   allowInsertRows?: boolean;
@@ -863,5 +863,11 @@ describe("selected transpose edit scope", () => {
     resultRef.value = markRaw({ ...original, rows: [original.rows[2], original.rows[0], original.rows[1]] });
     await settle();
     expect(transposeCells(host).map((cell) => cell.textContent?.trim())).toEqual(["third", "first"]);
+  });
+
+  it("renders the add-row toolbar action for Caché / IRIS table data (#11808)", async () => {
+    const { host } = mountGrid({ databaseType: "iris" });
+    await settle();
+    expect(host.querySelector("[data-toolbar-action='addRow']")).not.toBeNull();
   });
 });

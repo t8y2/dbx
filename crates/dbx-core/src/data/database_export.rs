@@ -264,6 +264,21 @@ fn exports_mysql_trigger_objects(db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Mysql)
 }
 
+/// Oracle writes each table's triggers into its table DDL (see `loadTableTriggerDDLs` in
+/// `agents/drivers/oracle-go`), so a trigger that reads `seq.NEXTVAL` reaches the script
+/// whenever structure is exported. The standalone sequences it depends on are written
+/// before the tables of a whole-schema structure export so the script replays (#11673).
+fn exports_oracle_sequence_objects(request: &DatabaseExportRequest, db_type: DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Oracle) && request.include_structure && request.selected_tables.is_empty()
+}
+
+/// Oracle backs every identity column with a system-named `ISEQ$$_<object id>` sequence.
+/// The identity clause in the table DDL recreates it, so exporting it would only add an
+/// orphan sequence to the target schema.
+fn is_oracle_identity_sequence(name: &str) -> bool {
+    name.starts_with("ISEQ$$_")
+}
+
 fn database_export_total_objects(request: &DatabaseExportRequest, counts: &DatabaseExportObjectCounts) -> usize {
     let mut total = 0;
     if exports_database_tables(request) {
@@ -4008,8 +4023,11 @@ async fn export_database_sql_core_inner(
     let mut functions: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut triggers: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut events: Vec<crate::types::ObjectInfo> = Vec::new();
+    let mut oracle_sequences: Vec<crate::types::ObjectInfo> = Vec::new();
+    let collects_schema_wide_objects = exports_schema_wide_objects(request);
+    let collects_oracle_sequences = exports_oracle_sequence_objects(request, db_type);
 
-    if exports_schema_wide_objects(request) {
+    if collects_schema_wide_objects || collects_oracle_sequences {
         match crate::schema::list_objects_core(
             state,
             &request.connection_id,
@@ -4027,6 +4045,15 @@ async fn export_database_sql_core_inner(
                 for obj in &objects {
                     let ot = obj.object_type.to_uppercase();
                     if is_postgres_extension_member_routine(obj, &postgres_extension_members) {
+                        continue;
+                    }
+                    if ot == "SEQUENCE" {
+                        if collects_oracle_sequences && !is_oracle_identity_sequence(&obj.name) {
+                            oracle_sequences.push(obj.clone());
+                        }
+                        continue;
+                    }
+                    if !collects_schema_wide_objects {
                         continue;
                     }
                     if ot.contains("PROCEDURE") {
@@ -4052,7 +4079,8 @@ async fn export_database_sql_core_inner(
         &DatabaseExportObjectCounts {
             tables: tables.len(),
             views: views.len(),
-            sequences: postgres_sequences.iter().filter(|sequence| !sequence.created_by_table).count(),
+            sequences: postgres_sequences.iter().filter(|sequence| !sequence.created_by_table).count()
+                + oracle_sequences.len(),
             extensions: postgres_extensions.len(),
             enums: postgres_enums.len(),
             procedures: procedures.len(),
@@ -4254,6 +4282,57 @@ async fn export_database_sql_core_inner(
 
         writeln!(file, "{};\n", generate_postgres_sequence_create_ddl(sequence, &request.schema))
             .map_err(|e| format!("Failed to write file: {e}"))?;
+        object_index += 1;
+    }
+
+    for sequence in &oracle_sequences {
+        if is_export_cancelled(&request.export_id).await {
+            return Err("Export cancelled".to_string());
+        }
+
+        emit_database_export_running(
+            &on_progress,
+            &request.export_id,
+            sequence.name.clone(),
+            object_index,
+            total_objects,
+            total_rows_exported,
+            false,
+        );
+
+        match crate::schema::get_object_source_core(
+            state,
+            &request.connection_id,
+            &request.database,
+            &request.schema,
+            &sequence.name,
+            crate::db::ObjectSourceKind::Sequence,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(obj_source) => {
+                let source = build_database_export_object_source_sql(
+                    db_type,
+                    &ObjectSourceKind::Sequence,
+                    &sequence.name,
+                    &obj_source.source,
+                    request.drop_table_if_exists,
+                );
+                if !source.is_empty() {
+                    writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+                }
+            }
+            Err(e) => {
+                record_export_error(
+                    &mut file,
+                    request.fail_on_error,
+                    format!("exporting sequence {}: {e}", sequence.name),
+                    &mut lenient_errors,
+                )?;
+            }
+        }
         object_index += 1;
     }
 
@@ -5325,6 +5404,32 @@ mod tests {
         let request = export_request(true, true, true, vec!["users".to_string(), "active_users".to_string()]);
 
         assert_eq!(database_export_total_objects(&request, &counts), 5);
+    }
+
+    #[test]
+    fn oracle_sequences_are_exported_with_whole_schema_structure() {
+        use super::{exports_oracle_sequence_objects, is_oracle_identity_sequence};
+
+        let cases = [
+            ("structure", DatabaseType::Oracle, export_request(true, false, false, Vec::new()), true),
+            ("all", DatabaseType::Oracle, export_request(true, true, true, Vec::new()), true),
+            ("data only", DatabaseType::Oracle, export_request(false, true, true, Vec::new()), false),
+            (
+                "selected tables",
+                DatabaseType::Oracle,
+                export_request(true, true, true, vec!["ORDERS".to_string()]),
+                false,
+            ),
+            ("postgres", DatabaseType::Postgres, export_request(true, true, true, Vec::new()), false),
+            ("oceanbase oracle", DatabaseType::OceanbaseOracle, export_request(true, true, true, Vec::new()), false),
+        ];
+        for (name, db_type, request, expected) in cases {
+            assert_eq!(exports_oracle_sequence_objects(&request, db_type), expected, "{name}");
+        }
+
+        assert!(is_oracle_identity_sequence("ISEQ$$_115126"));
+        assert!(!is_oracle_identity_sequence("ORDER_SEQ"));
+        assert!(!is_oracle_identity_sequence("iseq$$_custom"));
     }
 
     #[test]

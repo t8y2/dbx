@@ -121,7 +121,7 @@ import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import {
   buildAiContext,
   resolveAiDatabaseTarget,
-  resolveAiMentionDatabase,
+  resolveAiMentionDatabases,
   resolveAiNamespaceSelection,
   resolveDefaultAiSchema,
   aiDatabaseTypeForConnection,
@@ -223,7 +223,20 @@ import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseCapabili
 import ExplainPlanViewer from "@/components/explain/ExplainPlanViewer.vue";
 import { parseExplainResult, parseOracleExplainText, parseDb2ExplainText, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filterAiTableMentionCandidates, formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/ai/aiTableMentions";
+import {
+  AI_TABLE_MENTION_CANDIDATE_LIMIT,
+  AI_TABLE_MENTION_SCHEMA_LIMIT,
+  aiTableMentionDatabasePlan,
+  aiTableMentionKey,
+  aiTableMentionQualifier,
+  filterAiTableMentionCandidates,
+  formatAiTableMention,
+  formatAiTableMentionLabel,
+  normalizeAiTableMentionQuery,
+  parseAiTableMentions,
+  withoutAiTableMentionsOfDatabases,
+  type AiTableMention,
+} from "@/lib/ai/aiTableMentions";
 import { handleAiTableReferenceDropEvent } from "@/lib/ai/aiTableReferenceDrop";
 import { DBX_TABLE_REFERENCE_DROP_EVENT, clearActiveTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { canSubmitAiPrompt, isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
@@ -1641,6 +1654,12 @@ let responsiveControlDragEpoch = 0;
 
 interface AiTableMentionCandidate {
   kind: "table";
+  /**
+   * Owning database (#11660): every listed candidate records the database it
+   * came from. Whether it is also displayed is decided by
+   * `aiTableMentionQualifier`, so a single-database list reads as before.
+   */
+  database?: string;
   schema?: string;
   name: string;
   tableType: string;
@@ -2223,13 +2242,16 @@ function syncSelectedDatabases() {
   const active = selectedNamespace.value;
   const available = dbSelectOptions.value.map((option) => option.database);
   const retained = selectedDatabases.value.filter((database) => available.includes(database));
-  selectedDatabases.value = retained.length ? retained : active ? [active] : [];
+  const next = retained.length ? retained : active ? [active] : [];
+  removeMentionsOfDatabases(selectedDatabases.value.filter((database) => !next.includes(database)));
+  selectedDatabases.value = next;
 }
 
 function toggleDatabase(database: string) {
   if (selectedDatabaseValues.value.has(database)) {
     if (selectedDatabases.value.length === 1) return;
     selectedDatabases.value = selectedDatabases.value.filter((item) => item !== database);
+    removeMentionsOfDatabases([database]);
   } else {
     selectedDatabases.value = [...selectedDatabases.value, database];
   }
@@ -2248,7 +2270,14 @@ const selectedNamespace = computed(() => (boundConnection.value ? resolveAiNames
 watch(
   () => `${boundConnectionId.value}\u0000${boundDatabase.value}\u0000${boundSchema.value ?? ""}\u0000${conversationId.value}`,
   () => {
-    selectedDatabases.value = selectedNamespace.value ? [selectedNamespace.value] : [];
+    const next = selectedNamespace.value ? [selectedNamespace.value] : [];
+    // A chip naming a database this namespace change just dropped out of the
+    // selection would be quoted in the message while the run refuses to read it
+    // (#11660) — the same rule the deselect handler applies, at the other place
+    // the selection changes. An unresolved namespace prunes nothing: the chip is
+    // inert and the request-time scope guard still refuses it.
+    if (next.length) removeMentionsOfDatabases(selectedDatabases.value.filter((database) => !next.includes(database)));
+    selectedDatabases.value = next;
   },
 );
 watch([dbSelectOptions, selectedNamespace], syncSelectedDatabases, { immediate: true });
@@ -2799,8 +2828,11 @@ watch(
   { flush: "post" },
 );
 
-function mentionCacheKey(connectionId: string, database: string, query: string) {
-  return `${connectionId}:${database}:${savedSqlStore.version}:${query.toLowerCase()}`;
+function mentionCacheKey(connectionId: string, databases: readonly string[], query: string) {
+  // The whole database set is part of the key: adding, removing or reordering a
+  // selected database must reload the candidates instead of serving a list that
+  // describes another selection (#11660).
+  return `${connectionId}:${databases.join("|")}:${savedSqlStore.version}:${query.toLowerCase()}`;
 }
 
 function mentionSchemaOrder(schemas: string[]): string[] {
@@ -2823,26 +2855,87 @@ function activeMentionAtCursor(): { start: number; query: string } | null {
   return { start: beforeCursor.length - match[2].length - 1, query: match[2] };
 }
 
-function normalizeMentionQuery(query: string): { schemaPrefix: string; tableFilter: string } {
-  const clean = query.replace(/^["`]+|["`]+$/g, "");
-  const dot = clean.lastIndexOf(".");
-  if (dot < 0) return { schemaPrefix: "", tableFilter: clean };
-  return {
-    schemaPrefix: clean.slice(0, dot).replace(/^["`]+|["`]+$/g, ""),
-    tableFilter: clean.slice(dot + 1).replace(/^["`]+|["`]+$/g, ""),
-  };
+function mentionTargetDatabases(): string[] {
+  return boundConnection.value ? resolveAiMentionDatabases({ database: boundDatabase.value, schema: boundSchema.value }, boundConnection.value, selectedDatabases.value) : [];
 }
 
-function mentionTargetDatabase(): string {
-  return boundConnection.value ? resolveAiMentionDatabase({ database: boundDatabase.value, schema: boundSchema.value }, boundConnection.value, selectedDatabases.value) : "";
+/** Database an unqualified mention resolves against (the head of the list). */
+function mentionPrimaryDatabase(): string {
+  return mentionTargetDatabases()[0] ?? "";
+}
+
+/**
+ * Candidate tables of one database.
+ *
+ * Every candidate records the database it came from (#11660): that is what the
+ * chip is later resolved against and cleaned up by. Whether the database is also
+ * *displayed* is a separate rule (`aiTableMentionQualifier`), so a single
+ * database list still looks exactly as it did before. Whether a candidate is
+ * written as `db.table` or `db.schema.table` follows from the same
+ * `isSchemaAware` gate the rest of the loading path uses.
+ */
+async function loadTableMentionCandidates(connectionId: string, connection: ConnectionConfig, database: string, options: { schemaPrefix: string; tableFilter: string; limit: number }): Promise<AiTableMentionCandidate[]> {
+  const { schemaPrefix, tableFilter, limit } = options;
+  if (isSchemaAware(connection.db_type)) {
+    const schemas = mentionSchemaOrder(await listSchemas(connectionId, database));
+    const filteredSchemas = schemaPrefix ? schemas.filter((schema) => schema.toLowerCase().includes(schemaPrefix.toLowerCase())) : schemas;
+    const results = await Promise.all(
+      filteredSchemas.slice(0, AI_TABLE_MENTION_SCHEMA_LIMIT).map(async (schema) => {
+        const tables = await listTables(connectionId, database, schema, tableFilter || undefined, limit);
+        return filterAiTableMentionCandidates(
+          tables.map((table) => mentionCandidateFromTable(table, schema, database)),
+          tableFilter,
+          limit,
+        );
+      }),
+    );
+    return filterAiTableMentionCandidates(results.flat(), "", limit);
+  }
+  const namespace = connection.db_type === "sqlite" ? normalizeSqliteNamespace(database || connection.database, connection) : database;
+  const schema = namespace || connection.database || "main";
+  const tables = await listTables(connectionId, namespace, schema, tableFilter || undefined, limit);
+  return filterAiTableMentionCandidates(
+    tables.map((table) => mentionCandidateFromTable(table, undefined, database)),
+    tableFilter,
+    limit,
+  );
+}
+
+/**
+ * Candidate tables of several databases, loaded in parallel.
+ *
+ * One unreachable database (permission, timeout, dropped connection) must not
+ * empty the others' candidates, so each database reports its own failure and the
+ * list only fails when every database failed — the pre-existing single-database
+ * outcome.
+ */
+async function loadMentionCandidatesForDatabases(connectionId: string, connection: ConnectionConfig, databases: readonly string[], options: { schemaPrefix: string; tableFilter: string; limit: number }): Promise<AiTableMentionCandidate[]> {
+  let firstError: unknown;
+  const loaded = await Promise.all(
+    databases.map(async (database) => {
+      try {
+        return await loadTableMentionCandidates(connectionId, connection, database, options);
+      } catch (error: unknown) {
+        if (firstError === undefined) firstError = error;
+        return null;
+      }
+    }),
+  );
+  if (loaded.every((candidates) => candidates === null)) throw firstError ?? new Error("mention candidates unavailable");
+  return filterAiTableMentionCandidates(
+    loaded.flatMap((candidates) => candidates ?? []),
+    "",
+    AI_TABLE_MENTION_CANDIDATE_LIMIT,
+  );
 }
 
 async function loadMentionCandidates(query: string) {
   const connection = boundConnection.value;
-  const mentionDatabase = mentionTargetDatabase();
-  if (pluginContext.value || !connection || !supportsAiAssistantContext(connection.db_type) || !boundConnectionId.value || !mentionDatabase) return;
+  const connectionId = boundConnectionId.value;
+  const mentionDatabases = mentionTargetDatabases();
+  if (pluginContext.value || !connection || !supportsAiAssistantContext(connection.db_type) || !connectionId || !mentionDatabases.length) return;
 
-  const key = mentionCacheKey(boundConnectionId.value, mentionDatabase, query);
+  const key = mentionCacheKey(connectionId, mentionDatabases, query);
   if (mentionCache.value[key]) {
     mentionCandidates.value = mentionCache.value[key];
     return;
@@ -2851,37 +2944,18 @@ async function loadMentionCandidates(query: string) {
   const requestId = ++mentionRequestId;
   mentionLoading.value = true;
   mentionError.value = "";
-  const { schemaPrefix, tableFilter } = normalizeMentionQuery(query);
+  const { databasePrefix, schemaPrefix, tableFilter } = normalizeAiTableMentionQuery(query, mentionDatabases);
+  const { databases: scopedDatabases, perDatabaseLimit } = aiTableMentionDatabasePlan(mentionDatabases, databasePrefix);
   let sqlFileCandidates: AiSqlFileMentionCandidate[] = [];
 
   try {
     sqlFileCandidates = await loadSqlFileMentionCandidates(query);
-    await connectionStore.ensureConnected(boundConnectionId.value);
-    let tableCandidates: AiMentionCandidate[] = [];
-    if (isSchemaAware(connection.db_type)) {
-      const schemas = mentionSchemaOrder(await listSchemas(boundConnectionId.value, mentionDatabase));
-      const filteredSchemas = schemaPrefix ? schemas.filter((schema) => schema.toLowerCase().includes(schemaPrefix.toLowerCase())) : schemas;
-      const results = await Promise.all(
-        filteredSchemas.slice(0, AI_TABLE_MENTION_SCHEMA_LIMIT).map(async (schema) => {
-          const tables = await listTables(boundConnectionId.value, mentionDatabase, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
-          return filterAiTableMentionCandidates(
-            tables.map((table) => mentionCandidateFromTable(table, schema)),
-            tableFilter,
-            AI_TABLE_MENTION_CANDIDATE_LIMIT,
-          );
-        }),
-      );
-      tableCandidates = filterAiTableMentionCandidates(results.flat(), "", AI_TABLE_MENTION_CANDIDATE_LIMIT);
-    } else {
-      const database = connection.db_type === "sqlite" ? normalizeSqliteNamespace(mentionDatabase || connection.database, connection) : mentionDatabase;
-      const schema = database || connection.database || "main";
-      const tables = await listTables(boundConnectionId.value, database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
-      tableCandidates = filterAiTableMentionCandidates(
-        tables.map((table) => mentionCandidateFromTable(table)),
-        tableFilter,
-        AI_TABLE_MENTION_CANDIDATE_LIMIT,
-      );
-    }
+    await connectionStore.ensureConnected(connectionId);
+    const tableCandidates = await loadMentionCandidatesForDatabases(connectionId, connection, scopedDatabases, {
+      schemaPrefix,
+      tableFilter,
+      limit: perDatabaseLimit,
+    });
 
     if (requestId !== mentionRequestId) return;
     mentionCache.value[key] = [...tableCandidates, ...sqlFileCandidates];
@@ -2943,25 +3017,30 @@ function savedSqlFolderPath(file: SavedSqlFile): string | undefined {
   return names.length ? names.join(" / ") : undefined;
 }
 
-function mentionCandidateFromTable(table: TableInfo, schema?: string): AiTableMentionCandidate {
-  return { kind: "table", schema, name: table.name, tableType: table.table_type };
+function mentionCandidateFromTable(table: TableInfo, schema: string | undefined, database: string): AiTableMentionCandidate {
+  return { kind: "table", database, schema, name: table.name, tableType: table.table_type };
 }
 
 function mentionCandidateName(candidate: AiMentionCandidate) {
   if (candidate.kind === "sqlFile") return candidate.name;
-  return [candidate.schema, candidate.name].filter(Boolean).join(".");
+  return formatAiTableMentionLabel(candidate.schema, candidate.name, mentionQualifier(candidate.database));
 }
 
 function mentionDisplayName(mention: AiPromptMentionChip) {
   if (mention.kind === "sqlFile") return mention.name;
-  return [mention.schema, mention.table].filter(Boolean).join(".");
+  return formatAiTableMentionLabel(mention.schema, mention.table, mentionQualifier(mention.database));
+}
+
+/** Whether a mention names its database in the label/raw text, not just owns it. */
+function mentionQualifier(database: string | undefined): string | undefined {
+  return aiTableMentionQualifier(database, mentionPrimaryDatabase(), mentionTargetDatabases().length > 1);
 }
 
 function promptMentionChipsFromMessage(message: ChatMessage): AiPromptMentionChip[] {
   const chips: AiPromptMentionChip[] = [];
   for (const mention of message.mentions || []) {
     if (mention.kind === "sqlFile") chips.push({ kind: "sqlFile", raw: mention.raw, id: mention.id, name: mention.name });
-    if (mention.kind === "table") chips.push({ kind: "table", raw: mention.raw, schema: mention.schema, table: mention.table });
+    if (mention.kind === "table") chips.push({ kind: "table", raw: mention.raw, database: mention.database, schema: mention.schema, table: mention.table });
   }
   return chips;
 }
@@ -3063,10 +3142,28 @@ function addSelectedMention(candidate: AiMentionCandidate) {
     selectedSqlFileMentions.value.push({ kind: "sqlFile", raw, id: candidate.id, name: candidate.name });
     return;
   }
-  const raw = formatAiTableMention(candidate.schema, candidate.name);
-  const key = `${candidate.schema || ""}.${candidate.name}`.toLowerCase();
-  if (selectedMentions.value.some((mention) => `${mention.schema || ""}.${mention.table}`.toLowerCase() === key)) return;
-  selectedMentions.value.push({ raw, schema: candidate.schema, table: candidate.name });
+  // The owning database is recorded only from the caller (#11660) — a candidate
+  // carries the database it was listed from, and the external entrypoints pass
+  // the namespace their table came from. Guessing it from the binding here would
+  // capture whatever the binding was mid-retarget, so a caller that names none
+  // leaves the mention unqualified and resolved at request time, as before.
+  const ownDatabase = candidate.database;
+  const raw = formatAiTableMention(candidate.schema, candidate.name, mentionQualifier(ownDatabase));
+  // Both sides key an unqualified mention by the primary database, so a caller
+  // that names no database cannot add a second chip for a table already listed.
+  const primaryDatabase = mentionPrimaryDatabase();
+  const key = aiTableMentionKey(candidate.schema, candidate.name, ownDatabase ?? primaryDatabase);
+  if (selectedMentions.value.some((mention) => aiTableMentionKey(mention.schema, mention.table, mention.database ?? primaryDatabase) === key)) return;
+  selectedMentions.value.push(ownDatabase ? { raw, database: ownDatabase, schema: candidate.schema, table: candidate.name } : { raw, schema: candidate.schema, table: candidate.name });
+}
+
+/**
+ * Drops the mentions of databases the composer no longer selects (#11660).
+ * Keeping the chip would send a reference the run has to discard, so the user
+ * would see the table quoted in their message and missing from the request.
+ */
+function removeMentionsOfDatabases(databases: Iterable<string>) {
+  selectedMentions.value = withoutAiTableMentionsOfDatabases(selectedMentions.value, databases);
 }
 
 function formatMentionCandidateType(candidate: AiMentionCandidate) {
@@ -3109,13 +3206,15 @@ function selectedMessageMentions(tableMentions: AiTableMention[], sqlFileMention
   // Only ever reached for the visible conversation: every caller passes empty
   // arrays for a background/auto send (see the `auto ? [] : …` locals in send()).
   const connectionId = boundConnectionId.value;
-  const database = mentionTargetDatabase() || boundConnection.value?.database || "";
+  const database = mentionPrimaryDatabase() || boundConnection.value?.database || "";
   return [
     ...tableMentions.map((mention) => ({
       kind: "table" as const,
       raw: mention.raw,
       connectionId,
-      database,
+      // A mention of another selected database keeps its own database, so the
+      // chip reopens the table it actually names (#11660).
+      database: mention.database || database,
       schema: mention.schema,
       table: mention.table,
     })),
@@ -3210,7 +3309,7 @@ function refreshMentionState() {
   commandOpen.value = false;
 
   const mention = activeMentionAtCursor();
-  if (!mention || !boundConnection.value || !mentionTargetDatabase()) {
+  if (!mention || !boundConnection.value || !mentionTargetDatabases().length) {
     mentionOpen.value = false;
     return;
   }
@@ -3668,7 +3767,10 @@ function onTableReferenceDropEvent(event: Event) {
       // contract, which existed only because the panel's connection was whatever
       // tab was active and there was nothing to retarget — #9902.)
       void bindConversation({ connectionId: payload.connectionId, database: payload.database, schema: payload.schema });
-      addSelectedMention({ kind: "table", schema: mention.schema, name: mention.table, tableType: "table" });
+      // The dropped table's own database rides along (#11660): the drop retargets
+      // the conversation, but with several databases selected the chip still has
+      // to name the database the table came from.
+      addSelectedMention({ kind: "table", database: payload.database, schema: mention.schema, name: mention.table, tableType: "table" });
       clearActiveTableReferencePayload(payload);
       nextTick(() => promptTextareaRef.value?.focus());
     },
@@ -3967,7 +4069,7 @@ async function send() {
   // A selection describes the namespace the user picked it in, so it is dropped
   // exactly like the other composer context when the run targets another one.
   const selectionContexts = auto || confirmationRetargets ? [] : [...selectedEditorSelections.value];
-  const mentionedTables = [...selectedTableMentions, ...parseAiTableMentions(text)];
+  const mentionedTables = [...selectedTableMentions, ...parseAiTableMentions(text, runDatabases)];
   const modelInstruction = buildAiModelInstruction({
     tableMentionRaws: selectedTableMentions.map((mention) => mention.raw),
     sqlFileMentionRaws: selectedSqlFiles.map((mention) => mention.raw),
@@ -4356,6 +4458,7 @@ async function send() {
         },
         connection,
         {
+          databases: runDatabases,
           mentionedTables,
           sqlFiles,
           csvFiles: csvAttachments,
@@ -6064,7 +6167,10 @@ function openExternalContext(request: AiExternalContextRequest) {
     selectedEditorSelections.value.push(createSelectionContext(selection, uuid()));
   }
   for (const mention of request.tableMentions ?? []) {
-    addSelectedMention({ kind: "table", schema: mention.schema, name: mention.table, tableType: "TABLE" });
+    // The table's own namespace is the one the request targets: the binding has
+    // this very moment been retargeted to it, while a mention recorded without it
+    // would be resolved against whatever database the run ends up with (#11660).
+    addSelectedMention({ kind: "table", database: mention.database ?? plan.binding.database, schema: mention.schema, name: mention.table, tableType: "TABLE" });
   }
   nextTick(() => promptTextareaRef.value?.focus());
   if (request.action) triggerAction(request.action, request.instruction);
@@ -6953,7 +7059,7 @@ async function openExternalUrl(url: string) {
             <div v-else ref="mentionListRef" class="max-h-56 overflow-auto p-1">
               <button
                 v-for="(candidate, index) in mentionCandidates"
-                :key="candidate.kind === 'sqlFile' ? `sql-file:${candidate.id}` : `table:${candidate.schema || ''}.${candidate.name}`"
+                :key="candidate.kind === 'sqlFile' ? `sql-file:${candidate.id}` : `table:${candidate.database || ''}.${candidate.schema || ''}.${candidate.name}`"
                 type="button"
                 :data-mention-index="index"
                 class="flex w-full min-w-0 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"

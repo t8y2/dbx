@@ -94,7 +94,7 @@ defineExpose({
       <span class="flex h-7 w-7 shrink-0 items-center justify-center text-muted-foreground" :title="t('editor.gotoLine.placeholder')" aria-hidden="true">
         <ArrowRightToLine class="h-4 w-4" />
       </span>
-      <div class="flex h-8 w-40 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring" :class="gotoLineError && 'border-destructive focus-within:border-destructive'">
+      <div class="flex h-8 w-40 items-center rounded-md border border-input bg-background focus-within:bg-background-solid focus-within:border-ring focus-within:ring-1 focus-within:ring-ring" :class="gotoLineError && 'border-destructive focus-within:border-destructive'">
         <input
           ref="gotoLineInputRef"
           v-model="gotoLineInput"

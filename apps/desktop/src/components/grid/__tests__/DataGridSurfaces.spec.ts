@@ -180,6 +180,8 @@ describe("DataGridSearchBar", () => {
       onClose: close,
     });
     const input = findOne(mounted.root, (node) => node.type === "input");
+    const rootEl = findOne(mounted.root, (node) => "data-grid-search-bar" in node.props);
+    expect(rootEl.props.class).toContain("focus-within:bg-background-solid");
 
     mounted.exposed.value.focus(true);
     expect(input.focused).toBe(true);

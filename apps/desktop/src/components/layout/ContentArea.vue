@@ -195,7 +195,7 @@ import { queryResultExportBaseName } from "@/lib/export/saveTextFile";
 import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { buildMongoQueryResultOperations, formatMongoQueryResultOperationPreview } from "@/lib/mongo/mongoQueryResultEditing";
 import { buildInfluxDbV1DeleteStatements, canDeleteInfluxDbV1Row, resolveInfluxDbV1DeleteTarget } from "@/lib/influxdb/influxDbV1Delete";
-import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import type { DataGridSortColumn, DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { isDataGridToolbarCompact, type DataGridReloadIntent, type DataGridToolbarActionCapability } from "@/lib/dataGrid/dataGridToolbar";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
@@ -639,9 +639,9 @@ const neo4jNodeTable = useNeo4jNodeTableResult(
 const activeGridResult = computed(() => (hasNeo4jNodes.value ? neo4jNodeTable.result.value : props.activeTab.result));
 const activeGridSort = computed(() => (hasNeo4jNodes.value ? neo4jNodeTable.sort.value : undefined));
 
-function sortQueryGrid(column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string) {
-  if (hasNeo4jNodes.value) neo4jNodeTable.setSort(column, columnIndex, direction);
-  else emit("sort", props.activeTab.id, column, columnIndex, direction, whereInput, mode, effectiveOrderBy);
+function sortQueryGrid(column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string, columns?: DataGridSortColumn[]) {
+  if (hasNeo4jNodes.value) neo4jNodeTable.setSort(column, columnIndex, direction, columns);
+  else emit("sort", props.activeTab.id, column, columnIndex, direction, whereInput, mode, effectiveOrderBy, columns);
 }
 
 async function fetchGridResultForExport(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, probeRowLimit = false, tabId = props.activeTab.id) {
@@ -2691,6 +2691,7 @@ defineExpose({
                 :result="activeGridResult!"
                 :sort-column="hasNeo4jNodes ? activeGridSort?.column : activeTab.resultSortColumn"
                 :sort-column-index="hasNeo4jNodes ? activeGridSort?.columnIndex : activeTab.resultSortColumnIndex"
+                :sort-columns="hasNeo4jNodes ? activeGridSort?.columns : activeTab.resultSortColumns"
                 :sort-direction="hasNeo4jNodes ? activeGridSort?.direction : activeTab.resultSortDirection"
                 :sort-mode="hasNeo4jNodes ? 'local' : activeTab.resultSortMode"
                 :database-sort-enabled="!hasNeo4jNodes"
@@ -3201,6 +3202,7 @@ defineExpose({
           :result="activeTab.result"
           :sort-column="activeTab.resultSortColumn"
           :sort-column-index="activeTab.resultSortColumnIndex"
+          :sort-columns="activeTab.resultSortColumns"
           :sort-direction="activeTab.resultSortDirection"
           :sort-mode="activeTab.resultSortMode"
           :initial-order-by-input="activeTab.orderByInput"
@@ -3239,7 +3241,9 @@ defineExpose({
           @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
           @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', activeTab.id, sql, searchText, whereInput, orderBy, limit, offset, intent)"
           @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy, appendResult)"
-          @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string) => emit('sort', activeTab.id, column, columnIndex, direction, whereInput, mode, effectiveOrderBy)"
+          @sort="
+            (column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string, columns?: DataGridSortColumn[]) => emit('sort', activeTab.id, column, columnIndex, direction, whereInput, mode, effectiveOrderBy, columns)
+          "
           @change-query-timeout="(connectionId: string) => emit('openConnectionSettings', connectionId, 'advanced')"
         >
           <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">

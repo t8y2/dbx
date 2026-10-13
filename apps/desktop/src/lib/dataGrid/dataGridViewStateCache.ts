@@ -71,6 +71,7 @@ export interface DataGridViewProbeInput {
     sortColumn?: string;
     sortDirection?: string;
     sortMode?: string;
+    sortColumns?: ReadonlyArray<{ column: string; columnIndex: number; direction: string }>;
   };
 }
 
@@ -304,6 +305,6 @@ export function buildDataGridViewProbe(input: DataGridViewProbeInput): string {
     rowCount: input.rowCount,
     first: rowProbe(input.firstRow, 0),
     last: rowProbe(input.lastRow, Math.max(0, input.rowCount - 1)),
-    nav: navigation ? [navigation.whereInput ?? "", navigation.orderByInput ?? "", navigation.pageOffset ?? 0, navigation.pageLimit ?? 0, navigation.sortColumn ?? "", navigation.sortDirection ?? "", navigation.sortMode ?? ""] : undefined,
+    nav: navigation ? [navigation.whereInput ?? "", navigation.orderByInput ?? "", navigation.pageOffset ?? 0, navigation.pageLimit ?? 0, navigation.sortColumn ?? "", navigation.sortDirection ?? "", navigation.sortMode ?? "", navigation.sortColumns ?? []] : undefined,
   });
 }

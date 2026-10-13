@@ -1520,6 +1520,7 @@ export interface QueryResultRun {
   resultSortedSql?: string;
   resultSortColumn?: string;
   resultSortColumnIndex?: number;
+  resultSortColumns?: Array<{ column: string; columnIndex: number; direction: "asc" | "desc" }>;
   resultSortDirection?: "asc" | "desc";
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
@@ -2051,6 +2052,7 @@ export interface QueryTab {
   resultSortedSql?: string;
   resultSortColumn?: string;
   resultSortColumnIndex?: number;
+  resultSortColumns?: Array<{ column: string; columnIndex: number; direction: "asc" | "desc" }>;
   resultSortDirection?: "asc" | "desc";
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];

@@ -1,5 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { compareDataGridValues, databaseSortSupportedForDatabase, simpleDataGridOrderByColumn, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn } from "@/lib/dataGrid/dataGridSort";
+import { compareDataGridValues, databaseSortSupportedForDatabase, simpleDataGridOrderByColumn, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexesByColumns, updateDataGridSortColumns, type DataGridSortColumn } from "@/lib/dataGrid/dataGridSort";
+
+describe("multi-column local sorting", () => {
+  const first: DataGridSortColumn = { column: "group", columnIndex: 0, direction: "asc" };
+  const second: DataGridSortColumn = { column: "amount", columnIndex: 1, direction: "desc" };
+
+  it("compares columns in priority order, keeps NULL last and preserves source order for ties", () => {
+    const rows = [
+      ["b", "10"],
+      ["a", null],
+      ["a", "9007199254740992"],
+      ["a", "9007199254740993"],
+      ["a", "9007199254740993"],
+      [null, "2"],
+      [null, "10"],
+    ];
+    expect(sortDataGridRowIndexesByColumns(rows, [first, second], ["varchar", "bigint"])).toEqual([3, 4, 2, 1, 0, 6, 5]);
+    expect(sortDataGridRowIndexesByColumns(rows, [])).toEqual([0, 1, 2, 3, 4, 5, 6]);
+  });
+
+  it("appends and changes a column in place without changing previous priorities", () => {
+    expect(updateDataGridSortColumns([first], second.column, second.columnIndex, "desc", true)).toEqual([first, second]);
+    expect(updateDataGridSortColumns([first, second], first.column, first.columnIndex, "desc", true)).toEqual([{ ...first, direction: "desc" }, second]);
+    expect(updateDataGridSortColumns([first, second], first.column, first.columnIndex, null, true)).toEqual([second]);
+    expect(updateDataGridSortColumns([first, second], second.column, second.columnIndex, "asc")).toEqual([{ ...second, direction: "asc" }]);
+    expect(updateDataGridSortColumns([first, second], second.column, second.columnIndex, null)).toEqual([]);
+  });
+});
 
 describe("databaseSortSupportedForDatabase", () => {
   it("keeps database-side sorting for databases that support ORDER BY", () => {

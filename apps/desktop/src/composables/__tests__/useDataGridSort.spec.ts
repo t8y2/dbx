@@ -22,6 +22,7 @@ describe("useDataGridSort", () => {
     expect(sort.sortColumn.value).toBeNull();
     expect(sort.sortColumnIndex.value).toBeNull();
     expect(sort.sortDirection.value).toBe("asc");
-    expect(sort.sortMode.value).toBe("database");
+    expect(sort.sortMode.value).toBe("local");
+    expect(sort.sortColumns.value).toEqual([]);
   });
 });

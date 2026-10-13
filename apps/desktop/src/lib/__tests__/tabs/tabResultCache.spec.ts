@@ -17,6 +17,36 @@ function backend(name: ResultCacheBackend["name"], overrides: Partial<ResultCach
 }
 
 describe("tab result cache statement execution metadata", () => {
+  it("retains multi-column sort priority and original row order through cache restore", async () => {
+    const { buildTabResultSnapshot } = await import("@/lib/tabs/tabResultCache");
+    const result = {
+      columns: ["name", "score"],
+      rows: [
+        ["a", 2],
+        ["a", 1],
+      ],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    };
+    const sorts = [
+      { column: "name", columnIndex: 0, direction: "asc" as const },
+      { column: "score", columnIndex: 1, direction: "desc" as const },
+    ];
+    const originalRows = [
+      ["a", 1],
+      ["a", 2],
+    ];
+    const largeValueCells = [{ row_index: 0, column_index: 1, original_bytes: 1000000 }];
+    const tab = { result, resultSortColumns: sorts, resultLocalSortOriginalRows: originalRows, resultLocalSortOriginalLargeValueCells: largeValueCells };
+    const snapshot = buildTabResultSnapshot(tab as Parameters<typeof buildTabResultSnapshot>[0])!;
+    expect(snapshot.resultSortColumns).not.toBe(sorts);
+    expect(snapshot.resultLocalSortOriginalLargeValueCells).not.toBe(largeValueCells);
+    const restored = decodeTabResultSnapshot(encodeTabResultSnapshot(snapshot));
+    expect(restored?.resultSortColumns).toEqual(sorts);
+    expect(restored?.resultLocalSortOriginalRows).toEqual(originalRows);
+    expect(restored?.resultLocalSortOriginalLargeValueCells).toEqual(largeValueCells);
+  });
+
   it("retains Redis console output through cache restore", () => {
     const result = {
       columns: ["result"],

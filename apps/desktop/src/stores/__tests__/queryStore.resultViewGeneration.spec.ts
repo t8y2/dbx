@@ -80,6 +80,45 @@ describe("queryStore resultViewGeneration", { timeout: 30_000 }, () => {
     vi.doUnmock("@/lib/tabs/tabResultCache");
   });
 
+  it("preserves row metadata and original order through multi-column sorting and clearing", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "multi-sort", "query");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    const rows: QueryResult["rows"] = [
+      ["b", "10", "preview-b"],
+      ["a", "2", "preview-a2"],
+      ["a", "10", "preview-a10"],
+    ];
+    tab.result = {
+      ...sampleResult(0),
+      columns: ["name", "score", "content"],
+      column_types: ["varchar", "bigint", "text"],
+      rows,
+      large_value_cells: [{ row_index: 0, column_index: 2, original_bytes: 1000000 }],
+      mongo_documents: rows.map((_, index) => ({ source: index })),
+      mongo_copy_documents: rows.map((_, index) => JSON.stringify({ source: index })),
+    };
+    const columns = [
+      { column: "name", columnIndex: 0, direction: "asc" as const },
+      { column: "score", columnIndex: 1, direction: "desc" as const },
+    ];
+    store.sortTabResultLocally(tabId, "score", 1, "desc", columns);
+    expect(tab.result.rows).toEqual([rows[2], rows[1], rows[0]]);
+    expect(tab.result.mongo_documents).toEqual([{ source: 2 }, { source: 1 }, { source: 0 }]);
+    expect(tab.result.mongo_copy_documents).toEqual(['{"source":2}', '{"source":1}', '{"source":0}']);
+    expect(tab.result.large_value_cells?.[0]?.row_index).toBe(2);
+    expect(tab.resultSortColumns).toEqual(columns);
+    expect(tab.resultSortColumn).toBe("name");
+    store.sortTabResultLocally(tabId, "score", 1, null, [columns[0]!]);
+    expect(tab.result.rows).toEqual([rows[1], rows[2], rows[0]]);
+    store.sortTabResultLocally(tabId, "name", 0, null, []);
+    expect(tab.result.rows).toEqual(rows);
+    expect(tab.result.large_value_cells?.[0]?.row_index).toBe(0);
+    expect(tab.resultSortColumns).toBeUndefined();
+    expect(tab.resultLocalSortOriginalRows).toBeUndefined();
+  });
+
   it("projects the run's generation onto the tab when switching result runs", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

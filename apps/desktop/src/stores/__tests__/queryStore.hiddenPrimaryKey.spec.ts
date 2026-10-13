@@ -1978,7 +1978,7 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.result?.hidden_column_indexes).toEqual([1]);
   });
 
-  it("clears result sorting when the editor SQL is executed again", async () => {
+  it.each(["database", "local"] as const)("clears %s result sorting when the editor SQL is executed again", async (mode) => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("mysql-1", "app", "Query");
@@ -1986,7 +1986,14 @@ describe("queryStore hidden primary key editing", () => {
     tab.resultSortColumn = "name";
     tab.resultSortColumnIndex = 0;
     tab.resultSortDirection = "desc";
-    tab.resultSortMode = "database";
+    tab.resultSortMode = mode;
+    tab.resultSortColumns =
+      mode === "local"
+        ? [
+            { column: "name", columnIndex: 0, direction: "desc" },
+            { column: "id", columnIndex: 1, direction: "asc" },
+          ]
+        : undefined;
     tab.resultSortedSql = "SELECT name FROM users ORDER BY name DESC";
 
     await store.executeCurrentSql("SELECT name FROM users");
@@ -1995,8 +2002,28 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.resultSortColumnIndex).toBeUndefined();
     expect(tab.resultSortDirection).toBeUndefined();
     expect(tab.resultSortMode).toBeUndefined();
+    expect(tab.resultSortColumns).toBeUndefined();
     expect(tab.resultSortedSql).toBeUndefined();
     expect(executeMulti).toHaveBeenLastCalledWith("mysql-1", "app", "SELECT name, `id` AS `__DBX_PK_0` FROM users", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+  });
+
+  it("clears current-page multi-sort when pagination fetches new rows", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.resultSortColumn = "name";
+    tab.resultSortColumnIndex = 0;
+    tab.resultSortDirection = "desc";
+    tab.resultSortMode = "local";
+    tab.resultSortColumns = [
+      { column: "name", columnIndex: 0, direction: "desc" },
+      { column: "id", columnIndex: 1, direction: "asc" },
+    ];
+    await store.executeTabSql(tabId, "SELECT name FROM users", { pagination: { limit: 10, offset: 10 }, preserveResultDuringExecution: true });
+    expect(tab.resultSortColumns).toBeUndefined();
+    expect(tab.resultSortMode).toBeUndefined();
+    expect(tab.resultSortColumn).toBeUndefined();
   });
 
   it("preserves the original query behavior when the primary key is already returned", async () => {

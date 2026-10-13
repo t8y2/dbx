@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { QueryResult } from "@/types/database";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { sortDataGridRowIndexesByColumns, type DataGridSortColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 
 vi.mock("vue-virtual-scroller", async () => {
   const { defineComponent, h } = await import("vue");
@@ -56,26 +57,72 @@ function transposeFieldNames(host: HTMLElement): string[] {
   return [...host.querySelectorAll<HTMLElement>("[data-grid-transpose-column-index]")].map((field) => field.textContent?.trim().split("\n")[0] ?? "");
 }
 
-function mountGrid() {
+function transposeField(host: HTMLElement, columnIndex: number): HTMLElement {
+  const field = host.querySelector<HTMLElement>(`[data-grid-transpose-column-index="${columnIndex}"]`);
+  if (!field) throw new Error(`Transpose field not found: ${columnIndex}`);
+  return field.closest<HTMLElement>(".data-grid-transpose-row")!;
+}
+
+function menuAction(label: string): HTMLButtonElement {
+  const button = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((candidate) => candidate.textContent?.trim() === label);
+  if (!button) throw new Error(`Sort menu action not found: ${label}`);
+  return button;
+}
+
+async function selectTransposeSort(host: HTMLElement, columnIndex: number, labelKey: string) {
+  const trigger = transposeField(host, columnIndex).querySelector<HTMLButtonElement>("[data-grid-transpose-sort]");
+  if (!trigger) throw new Error(`Transpose sort trigger not found: ${columnIndex}`);
+  trigger.click();
+  await settle();
+  menuAction(i18n.global.t(labelKey)).click();
+  await settle();
+}
+
+function transposeValues(host: HTMLElement, columnIndex: number): string[] {
+  return [...transposeField(host, columnIndex).querySelectorAll<HTMLElement>("[data-grid-transpose-cell]")].map((cell) => cell.textContent?.trim() ?? "");
+}
+
+function transposeRecordHeader(host: HTMLElement, recordIndex: number): HTMLElement {
+  const header = host.querySelector<HTMLElement>(`[data-grid-transpose-record-header][data-grid-transpose-record-index="${recordIndex}"]`);
+  if (!header) throw new Error(`Transpose record header not found: ${recordIndex}`);
+  return header;
+}
+
+function mountGrid(rows?: QueryResult["rows"], columnNames = ["zeta", "alpha"]) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
   settingsStore.updateEditorSettings({ dataGridRenderMode: "dom", dataGridMultiRowTranspose: true });
 
-  const originalRows: QueryResult["rows"] = [
+  const originalRows: QueryResult["rows"] = rows ?? [
     ["b", "10"],
     ["a", null],
     ["c", "2"],
   ];
   const result = ref<QueryResult>(
     markRaw({
-      columns: ["zeta", "alpha"],
+      columns: columnNames,
       column_types: ["varchar", "bigint"],
       rows: originalRows,
       affected_rows: 0,
       execution_time_ms: 0,
     }),
   );
+  const sortColumn = ref<string>();
+  const sortColumnIndex = ref<number>();
+  const sortDirection = ref<DataGridSortDirection>();
+  const sortMode = ref<DataGridSortMode>();
+  const sortColumns = ref<DataGridSortColumn[]>();
+  const onSort = vi.fn((column: string, columnIndex: number, direction: DataGridSortDirection | null, _whereInput?: string, mode: DataGridSortMode = "local", _effectiveOrderBy?: string, columns?: DataGridSortColumn[]) => {
+    const sorts = columns ?? (direction ? [{ column, columnIndex, direction }] : []);
+    const indexes = sortDataGridRowIndexesByColumns(originalRows, sorts, result.value.column_types);
+    result.value = markRaw({ ...result.value, rows: indexes.map((index) => originalRows[index]!) });
+    sortColumn.value = sorts[0]?.column;
+    sortColumnIndex.value = sorts[0]?.columnIndex;
+    sortDirection.value = sorts[0]?.direction;
+    sortMode.value = sorts.length ? mode : undefined;
+    sortColumns.value = mode === "local" ? sorts : undefined;
+  });
 
   const host = document.createElement("div");
   document.body.append(host);
@@ -89,15 +136,21 @@ function mountGrid() {
             default: () =>
               h(DataGrid, {
                 result: result.value,
+                onSort,
                 databaseType: "mysql",
                 context: "table-data",
+                sortColumn: sortColumn.value,
+                sortColumnIndex: sortColumnIndex.value,
+                sortDirection: sortDirection.value,
+                sortMode: sortMode.value,
+                sortColumns: sortColumns.value,
                 tableMeta: {
                   tableName: "scores",
                   columns: [
-                    { name: "zeta", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
-                    { name: "alpha", data_type: "bigint", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+                    { name: columnNames[0]!, data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+                    { name: columnNames[1]!, data_type: "bigint", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
                   ],
-                  primaryKeys: ["zeta"],
+                  primaryKeys: [columnNames[0]!],
                 },
               }),
           },
@@ -109,7 +162,7 @@ function mountGrid() {
   app.use(i18n);
   app.mount(host);
   mountedApps.push({ app, host });
-  return { host };
+  return { host, onSort, result, sortColumns };
 }
 
 async function openTranspose(host: HTMLElement) {
@@ -129,6 +182,92 @@ afterEach(() => {
 });
 
 describe("DataGrid transpose sorting", () => {
+  it.each([false, true])("supports default local sort and Alt multi-sort in transpose=%s", async (transpose) => {
+    const { host, onSort, result, sortColumns } = mountGrid(
+      [
+        ["b", "10"],
+        ["a", "2"],
+        ["a", "10"],
+        ["a", "2"],
+      ],
+      ["name", "score"],
+    );
+    await settle();
+    if (transpose) await openTranspose(host);
+    const clickSort = async (columnIndex: number, altKey = false) => {
+      const button = host.querySelector<HTMLButtonElement>(`[data-grid-column-sort][data-grid-sort-column-index="${columnIndex}"]`)!;
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, altKey }));
+      await settle();
+    };
+    await clickSort(0);
+    expect(onSort).toHaveBeenLastCalledWith("name", 0, "asc", undefined, "local");
+    await clickSort(1, true);
+    expect(sortColumns.value).toEqual([
+      { column: "name", columnIndex: 0, direction: "asc" },
+      { column: "score", columnIndex: 1, direction: "asc" },
+    ]);
+    expect(result.value.rows).toEqual([
+      ["a", "2"],
+      ["a", "2"],
+      ["a", "10"],
+      ["b", "10"],
+    ]);
+    expect([...host.querySelectorAll("[data-grid-sort-priority]")].map((el) => el.textContent)).toEqual(["1", "2"]);
+    await clickSort(1, true);
+    expect(result.value.rows).toEqual([
+      ["a", "10"],
+      ["a", "2"],
+      ["a", "2"],
+      ["b", "10"],
+    ]);
+    await clickSort(1, true);
+    expect(sortColumns.value).toEqual([{ column: "name", columnIndex: 0, direction: "asc" }]);
+    await clickSort(1);
+    expect(sortColumns.value).toEqual([{ column: "score", columnIndex: 1, direction: "asc" }]);
+    await clickSort(1);
+    await clickSort(1);
+    expect(result.value.rows).toEqual([
+      ["b", "10"],
+      ["a", "2"],
+      ["a", "10"],
+      ["a", "2"],
+    ]);
+    expect(host.querySelectorAll("[data-grid-sort-priority]")).toHaveLength(0);
+  });
+
+  it("uses the shared local/database sort actions and keeps the active record and row selection", async () => {
+    const { host, onSort } = mountGrid(undefined, ["name", "score"]);
+    await settle();
+    await openTranspose(host);
+
+    expect(transposeValues(host, 1)).toEqual(["10", "NULL", "2"]);
+    const nextRecordButton = host.querySelector(".lucide-chevron-right")?.closest<HTMLButtonElement>("button");
+    if (!nextRecordButton) throw new Error("Next transpose record button not found");
+    nextRecordButton.click();
+    await settle();
+    expect(transposeRecordHeader(host, 0).classList.contains("transpose-record-header-selected")).toBe(true);
+    expect(transposeRecordHeader(host, 1).classList.contains("transpose-record-header-active")).toBe(true);
+
+    await selectTransposeSort(host, 1, "grid.sortCurrentPageAscending");
+    expect(onSort).toHaveBeenLastCalledWith("score", 1, "asc", undefined, "local");
+    expect(transposeValues(host, 1)).toEqual(["2", "10", "NULL"]);
+    expect(transposeRecordHeader(host, 1).classList.contains("transpose-record-header-selected")).toBe(true);
+    expect(transposeRecordHeader(host, 2).classList.contains("transpose-record-header-active")).toBe(true);
+
+    await selectTransposeSort(host, 1, "grid.sortDatabaseDescending");
+    expect(onSort).toHaveBeenLastCalledWith("score", 1, "desc", undefined, "database", "`score` DESC");
+    expect(transposeValues(host, 1)).toEqual(["10", "2", "NULL"]);
+    expect(transposeRecordHeader(host, 0).classList.contains("transpose-record-header-selected")).toBe(true);
+    expect(transposeRecordHeader(host, 2).classList.contains("transpose-record-header-active")).toBe(true);
+
+    await selectTransposeSort(host, 1, "grid.clearSort");
+    expect(onSort).toHaveBeenLastCalledWith("score", 1, null, undefined, "database", undefined);
+    expect(transposeValues(host, 1)).toEqual(["10", "NULL", "2"]);
+    expect(transposeRecordHeader(host, 0).classList.contains("transpose-record-header-selected")).toBe(true);
+    expect(transposeRecordHeader(host, 1).classList.contains("transpose-record-header-active")).toBe(true);
+    expect(host.querySelector(".transpose-grid-scroller")).not.toBeNull();
+  });
+
   it("sorts transpose field rows from the column-name header", async () => {
     const { host } = mountGrid();
     await settle();

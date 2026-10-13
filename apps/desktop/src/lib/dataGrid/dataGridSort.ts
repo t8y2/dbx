@@ -4,6 +4,22 @@ import { isNumericColumnType } from "@/lib/dataGrid/dataGridColumnType";
 export type DataGridSortDirection = "asc" | "desc";
 export type DataGridSortMode = "database" | "local";
 
+export interface DataGridSortColumn {
+  column: string;
+  columnIndex: number;
+  direction: DataGridSortDirection;
+}
+
+export function updateDataGridSortColumns(current: readonly DataGridSortColumn[], column: string, columnIndex: number, direction: DataGridSortDirection | null, append = false): DataGridSortColumn[] {
+  const next = append ? current.slice() : [];
+  const index = next.findIndex((sort) => sort.column === column && sort.columnIndex === columnIndex);
+  if (!direction) return next.filter((_, sortIndex) => sortIndex !== index);
+  const sort = { column, columnIndex, direction };
+  if (index < 0) next.push(sort);
+  else next[index] = sort;
+  return next;
+}
+
 /**
  * Cassandra rejects ORDER BY unless the partition key is restricted by an
  * equality filter, so a browse query can never be sorted database-side there
@@ -77,14 +93,20 @@ export function sortDataGridRows<T extends DataGridRow>(rows: readonly T[], colu
 }
 
 export function sortDataGridRowIndexes(rows: readonly DataGridRow[], columnIndex: number, direction: DataGridSortDirection, columnType?: string): number[] {
-  const directionMultiplier = direction === "asc" ? 1 : -1;
+  const columnTypes: Array<string | undefined> = [];
+  columnTypes[columnIndex] = columnType;
+  return sortDataGridRowIndexesByColumns(rows, [{ column: "", columnIndex, direction }], columnTypes);
+}
+
+export function sortDataGridRowIndexesByColumns(rows: readonly DataGridRow[], columns: readonly DataGridSortColumn[], columnTypes?: readonly (string | null | undefined)[]): number[] {
   return rows
     .map((row, index) => ({ row, index }))
     .sort((left, right) => {
-      const emptyCompared = compareEmptyValues(left.row[columnIndex], right.row[columnIndex]);
-      if (emptyCompared !== null) return emptyCompared;
-      const compared = compareDataGridValues(left.row[columnIndex], right.row[columnIndex], columnType);
-      if (compared !== 0) return compared * directionMultiplier;
+      for (const { columnIndex, direction } of columns) {
+        const emptyCompared = compareEmptyValues(left.row[columnIndex], right.row[columnIndex]);
+        const compared = emptyCompared ?? compareDataGridValues(left.row[columnIndex], right.row[columnIndex], columnTypes?.[columnIndex] ?? undefined);
+        if (compared !== 0) return emptyCompared !== null ? compared : compared * (direction === "asc" ? 1 : -1);
+      }
       return left.index - right.index;
     })
     .map((item) => item.index);

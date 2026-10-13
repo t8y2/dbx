@@ -42,7 +42,7 @@ test("data grid column width uses measured header text as the normal minimum", (
     headerTextWidth: 54,
   });
 
-  expect(width).toBe(113);
+  expect(width).toBe(137);
 });
 
 test("data grid caps pathological field names independently of density", () => {

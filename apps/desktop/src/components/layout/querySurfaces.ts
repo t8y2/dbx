@@ -1,7 +1,7 @@
 import type { ConnectionConfig, ObjectBrowserFilter, ObjectBrowserViewport, QueryTab, TabOutputView, TableInfoTab } from "@/types/database";
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
-import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import type { DataGridSortColumn, DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import type { SqlExecutionOverride, SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
@@ -100,7 +100,7 @@ export interface ContentAreaSurfaceEmits {
   formatError: [tabId: string];
   reload: [tabId: string, sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent];
   paginate: [tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean];
-  sort: [tabId: string, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string];
+  sort: [tabId: string, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string, columns?: DataGridSortColumn[]];
   executeSql: [tabId: string, sql: string];
   clickTable: [tabId: string, target: SqlObjectNavigationTarget];
   viewTableData: [tabId: string, target: SqlObjectNavigationTarget];

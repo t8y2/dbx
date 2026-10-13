@@ -21,6 +21,7 @@ export interface TabResultSnapshot {
   results?: QueryResult[];
   activeResultIndex?: number;
   resultEditorFingerprint?: string;
+  resultSortColumns?: QueryTab["resultSortColumns"];
   /**
    * Source ordering retained while a local grid sort is active. It must travel
    * with the snapshot so clearing the sort after a cache/archive restore can
@@ -398,6 +399,7 @@ function stripResultRunSessionIds(resultRuns: QueryTab["resultRuns"]): QueryTab[
     ...run,
     result: stripSessionIds(run.result),
     results: stripResultSessionIds(run.results),
+    resultSortColumns: run.resultSortColumns?.map((sort) => ({ ...sort })),
     resultLocalSortOriginalRows: run.resultLocalSortOriginalRows?.map((row) => [...row]),
     resultLocalSortOriginalLargeValueCells: run.resultLocalSortOriginalLargeValueCells?.map((cell) => ({ ...cell })),
     resultLocalSortOriginalMongoDocuments: run.resultLocalSortOriginalMongoDocuments ? clonePlain(run.resultLocalSortOriginalMongoDocuments) : undefined,
@@ -804,7 +806,9 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     results: stripResultSessionIds(tab.results),
     activeResultIndex: tab.activeResultIndex,
     resultEditorFingerprint: tab.resultEditorFingerprint,
+    resultSortColumns: tab.resultSortColumns?.map((sort) => ({ ...sort })),
     resultLocalSortOriginalRows: tab.resultLocalSortOriginalRows?.map((row) => [...row]),
+    resultLocalSortOriginalLargeValueCells: tab.resultLocalSortOriginalLargeValueCells?.map((cell) => ({ ...cell })),
     resultLocalSortOriginalMongoDocuments: tab.resultLocalSortOriginalMongoDocuments ? clonePlain(tab.resultLocalSortOriginalMongoDocuments) : undefined,
     resultLocalSortOriginalMongoCopyDocuments: tab.resultLocalSortOriginalMongoCopyDocuments ? clonePlain(tab.resultLocalSortOriginalMongoCopyDocuments) : undefined,
     resultRuns: stripResultRunSessionIds(tab.resultRuns),

@@ -246,7 +246,7 @@ describe("useDataGridColumnResize", () => {
     });
 
     state.initColumnWidths();
-    expect(state.columnWidths.value[0]).toBe(60);
+    expect(state.columnWidths.value[0]).toBe(83);
 
     state.autoFitColumn(0);
 
@@ -418,8 +418,8 @@ describe("useDataGridColumnResize", () => {
     await nextTick();
 
     const widthNonCompact = state.renderedColumnWidths.value[0];
-    // standard compactActions=true: 21×8+59=227
-    // standard compactActions=false: 21×8+83=251
+    // standard compactActions=true: 21×8+83=251
+    // standard compactActions=false: 21×8+107=275
     expect(widthNonCompact).toBeGreaterThan(widthCompact);
   });
 
@@ -433,12 +433,12 @@ describe("useDataGridColumnResize", () => {
     });
 
     state.initColumnWidths();
-    expect(state.columnWidths.value[0]).toBe(113);
+    expect(state.columnWidths.value[0]).toBe(137);
 
     state.setHeaderTextWidth(70);
     await nextTick();
 
-    expect(state.columnWidths.value[0]).toBe(129);
+    expect(state.columnWidths.value[0]).toBe(153);
   });
 
   it("compact mode keeps normal field names complete and caps pathological names", () => {
@@ -450,8 +450,8 @@ describe("useDataGridColumnResize", () => {
       compactColumnHeaderActions: true,
     });
     short.initColumnWidths();
-    // "id"=2×7+45=59 < min 60 → 60
-    expect(short.columnWidths.value[0]).toBe(60);
+    // "id"=2×7+69=83
+    expect(short.columnWidths.value[0]).toBe(83);
 
     // 中等字段名：刚好完整显示
     const mid = createResizeState({
@@ -461,8 +461,8 @@ describe("useDataGridColumnResize", () => {
       compactColumnHeaderActions: true,
     });
     mid.initColumnWidths();
-    // 9×7+45=108
-    expect(mid.columnWidths.value[0]).toBe(108);
+    // 9×7+69=132
+    expect(mid.columnWidths.value[0]).toBe(132);
 
     // 异常超长字段名：使用独立表头上限，避免单列撑爆表格
     const longName = createResizeState({
@@ -472,7 +472,7 @@ describe("useDataGridColumnResize", () => {
       compactColumnHeaderActions: true,
     });
     longName.initColumnWidths();
-    // 100×7+45=745，表头自动宽度限制为 500
+    // 100×7+69=769，表头自动宽度限制为 500
     expect(longName.columnWidths.value[0]).toBe(500);
   });
 
@@ -484,12 +484,12 @@ describe("useDataGridColumnResize", () => {
       compactColumnHeaderActions: true,
     });
     state.initColumnWidths();
-    expect(state.columnWidths.value[0]).toBe(60);
+    expect(state.columnWidths.value[0]).toBe(83);
 
     state.setIndexIndicatorColumnIndexes([0]);
     await nextTick();
 
-    expect(state.columnWidths.value[0]).toBe(75);
+    expect(state.columnWidths.value[0]).toBe(99);
   });
 
   it("comfortable mode uses percentile to ignore outlier values", () => {
@@ -505,9 +505,9 @@ describe("useDataGridColumnResize", () => {
 
     state.initColumnWidths();
     // P95 of 50 samples ignores the single 200-char outlier;
-    // "short" = 5 chars → 5×8+24+12=76, header "data"=4×8+59=91 → max=91
+    // "short" = 5 chars → 5×8+24+12=76, header "data"=4×8+83=115 → max=115
     expect(state.columnWidths.value[0]).toBeLessThan(600);
-    expect(state.columnWidths.value[0]).toBe(91);
+    expect(state.columnWidths.value[0]).toBe(115);
   });
 
   it("sizes short numeric columns from large sample values", () => {
@@ -537,11 +537,11 @@ describe("useDataGridColumnResize", () => {
     state.initColumnWidths();
     const narrowWidth = state.columnWidths.value[0];
 
-    rows.value = Array.from({ length: 20 }, (_, index) => [1_217_001 + index]);
+    rows.value = Array.from({ length: 20 }, (_, index) => [12_170_001 + index]);
     await nextTick();
 
     expect(state.columnWidths.value[0]).toBeGreaterThan(narrowWidth);
-    expect(state.columnWidths.value[0]).toBeGreaterThanOrEqual(92);
+    expect(state.columnWidths.value[0]).toBeGreaterThanOrEqual(100);
 
     const remounted = createResizeState({
       columns: ["id"],
@@ -564,7 +564,7 @@ describe("useDataGridColumnResize", () => {
     });
 
     state.initColumnWidths();
-    expect(state.columnWidths.value[0]).toBe(75);
+    expect(state.columnWidths.value[0]).toBe(99);
 
     rows.value = [["x"], ...Array.from({ length: 49 }, () => ["x".repeat(40)])];
     await nextTick();

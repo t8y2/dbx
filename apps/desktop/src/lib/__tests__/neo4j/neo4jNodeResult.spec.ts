@@ -103,6 +103,32 @@ describe("Neo4j node table projection", () => {
     }
   });
 
+  it("preserves multi-column priority in the node presentation without reordering the source", () => {
+    const scope = effectScope();
+    const source = ref(result(["n"], [[node([property("name", "Ada"), property("age", "10", "Integer")])], [node([property("name", "Bob"), property("age", "1", "Integer")])], [node([property("name", "Ada"), property("age", "2", "Integer")])]]));
+    const table = scope.run(() =>
+      useNeo4jNodeTableResult(
+        computed(() => source.value),
+        computed(() => "nodes"),
+      ),
+    )!;
+    table.setSort("n.age", 2, "asc", [
+      { column: "n.name", columnIndex: 1, direction: "asc" },
+      { column: "n.age", columnIndex: 2, direction: "asc" },
+    ]);
+    expect(table.result.value?.rows.map((row) => row.slice(1))).toEqual([
+      ["Ada", "2"],
+      ["Ada", "10"],
+      ["Bob", "1"],
+    ]);
+    expect(source.value.neo4j_node_cells?.map((cell) => cell.properties[1].value)).toEqual(["10", "1", "2"]);
+    table.setSort("n.name", 1, null, [{ column: "n.age", columnIndex: 2, direction: "desc" }]);
+    expect(table.result.value?.rows.map((row) => row[2])).toEqual(["10", "2", "1"]);
+    table.setSort("n.age", 2, null, []);
+    expect(table.result.value?.rows.map((row) => row[2])).toEqual(["10", "1", "2"]);
+    scope.stop();
+  });
+
   it("sorts only presentation rows with exact integers and resets on result changes", async () => {
     const scope = effectScope();
     const source = ref(result(["n"], [[node([property("age", "9007199254740993", "Integer")])], [node([property("age", "9007199254740992", "Integer")])]]));

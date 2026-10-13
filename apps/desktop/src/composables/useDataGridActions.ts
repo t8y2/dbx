@@ -19,7 +19,7 @@ import { invalidateTableMetadataCache, loadTableColumns, loadTableMetadata, TABL
 import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
 import { applyMongoFindSort } from "@/lib/mongo/mongoShellCommand";
 import { uuid } from "@/lib/common/utils";
-import { simpleDataGridOrderByReferencesMissingColumn, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import { simpleDataGridOrderByReferencesMissingColumn, type DataGridSortColumn, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { continuousQueryResultMaxRows, MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
 import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
@@ -450,6 +450,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       tab.resultSortColumn = undefined;
       tab.resultSortColumnIndex = undefined;
       tab.resultSortDirection = undefined;
+      tab.resultSortColumns = undefined;
       tab.resultSortMode = undefined;
       tab.resultSortedSql = undefined;
       await queryStore.executeTabSql(tab.id, resultGroupSql, {
@@ -640,20 +641,22 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     });
   }
 
-  async function onSort(tabId: string | undefined, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "database", effectiveOrderBy?: string) {
+  async function onSort(tabId: string | undefined, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "local", effectiveOrderBy?: string, columns?: DataGridSortColumn[]) {
     const tab = resolveActionTab(tabId);
     if (!tab) return;
     tab.resultSortColumn = direction ? column : undefined;
     tab.resultSortColumnIndex = direction ? columnIndex : undefined;
     tab.resultSortDirection = direction ?? undefined;
     tab.resultSortMode = direction ? mode : undefined;
+    tab.resultSortColumns = undefined;
 
     if (mode === "local") {
       if (tab.mode === "data") {
         tab.whereInput = whereInput ?? "";
         tab.orderByInput = undefined;
       }
-      queryStore.sortTabResultLocally(tab.id, column, columnIndex, direction);
+      if (columns) queryStore.sortTabResultLocally(tab.id, column, columnIndex, direction, columns);
+      else queryStore.sortTabResultLocally(tab.id, column, columnIndex, direction);
       return;
     }
 

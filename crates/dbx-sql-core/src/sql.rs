@@ -2975,10 +2975,11 @@ impl HanaScriptBlock {
             return true;
         }
         let mut index = 1;
-        if first == "CREATE" && self.tokens.get(index).is_some_and(|token| token.is_word("OR")) {
-            if self.tokens.get(index + 1).is_some_and(|token| token.is_word("REPLACE")) {
-                index += 2;
-            }
+        if first == "CREATE"
+            && self.tokens.get(index).is_some_and(|token| token.is_word("OR"))
+            && self.tokens.get(index + 1).is_some_and(|token| token.is_word("REPLACE"))
+        {
+            index += 2;
         }
         let Some(object_type) = self.tokens.get(index).and_then(OraclePlSqlToken::as_word) else {
             return false;

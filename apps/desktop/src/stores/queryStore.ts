@@ -7838,7 +7838,10 @@ export const useQueryStore = defineStore("query", () => {
       if (conn?.db_type === "mongodb" && mongoCommands.length === 0 && sql.trim()) {
         // Avoid falling through to the SQL executor, which only returns the generic
         // "Use MongoDB-specific commands" rejection and hides parse/syntax details.
-        throw new Error(describeMongoCommandParseFailure(sql));
+        // Shell JavaScript is the rare case; load its parser only when needed.
+        const { expandMongoScriptCommands, isMongoScriptSyntax } = await import("@/lib/mongo/mongoScriptRunner");
+        if (!isMongoScriptSyntax(sql)) throw new Error(describeMongoCommandParseFailure(sql));
+        mongoCommands = await expandMongoScriptCommands(sql);
       }
 
       if (mongoCommands.length > 0) {

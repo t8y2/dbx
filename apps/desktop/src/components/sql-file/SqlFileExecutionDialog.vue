@@ -33,6 +33,7 @@ import { orderConnectionsForSidebarDisplay } from "@/lib/sidebar/connectionListS
 import SqlFileProgressIndicator from "./SqlFileProgressIndicator.vue";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { translateBackendError } from "@/i18n/backend-errors";
+import { openSqlFileExecutionTask } from "@/composables/useDialogSources";
 import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
 
 const { t } = useI18n();
@@ -42,6 +43,7 @@ const { addSqlFileTask, updateSqlFileTask } = useExportTracker();
 const open = defineModel<boolean>("open", { default: false });
 
 const props = defineProps<{
+  taskId?: string | null;
   prefillConnectionId?: string;
   prefillDatabase?: string;
   prefillSchema?: string;
@@ -643,6 +645,29 @@ async function refreshTargetAfterImport(target: SqlFileExecutionTarget) {
   }
 }
 
+const inspectingExecutionId = ref<string | null>(null);
+const isRunningInBackground = ref(false);
+
+function openCurrentTask(targetTaskId?: string) {
+  const targetId = targetTaskId ?? executionId.value;
+  inspectingExecutionId.value = targetId || null;
+  isRunningInBackground.value = false;
+  openSqlFileExecutionTask(targetId || undefined);
+  open.value = true;
+}
+
+function handleRunInBackground() {
+  const currentExecutionId = executionId.value;
+  isRunningInBackground.value = true;
+  handleOpenChange(false);
+  toast(t("sqlFile.backgroundStarted"), 4000, {
+    label: t("sqlFile.viewDetails"),
+    onClick: () => {
+      openCurrentTask(currentExecutionId);
+    },
+  });
+}
+
 async function startExecution() {
   if (!canStart.value || previews.value.length === 0) return;
   const target = sqlFileExecutionTarget();
@@ -670,6 +695,7 @@ async function startExecution() {
 
   resetPerFileState();
   refreshedTarget.value = false;
+  isRunningInBackground.value = false;
   const batchId = uuid();
   executionId.value = batchId;
   running.value = true;
@@ -682,7 +708,9 @@ async function startExecution() {
   activeExecutionTask.value = null;
   failureDetailsExpanded.value = false;
   const taskLabel = previews.value.length === 1 ? previews.value[0]!.fileName : `${previews.value[0]!.fileName} (+${previews.value.length - 1})`;
-  activeExecutionTask.value = addSqlFileTask(batchId, taskLabel, filePathDisplay.value);
+  activeExecutionTask.value = addSqlFileTask(batchId, taskLabel, filePathDisplay.value, () => {
+    openCurrentTask(batchId);
+  });
   let completedSuccessfully = false;
 
   try {
@@ -806,6 +834,14 @@ async function startExecution() {
         }
       }
       if (!txnSessionId.value) await refreshTargetAfterImport(target);
+      if (isRunningInBackground.value || !open.value) {
+        toast(t("sqlFile.backgroundCompleted", { name: taskLabel }), 4000, {
+          label: t("sqlFile.viewDetails"),
+          onClick: () => {
+            openCurrentTask(batchId);
+          },
+        });
+      }
     }
   } catch (e: any) {
     terminalStatus.value = cancelRequested.value ? "cancelled" : "error";
@@ -823,7 +859,16 @@ async function startExecution() {
       error: terminalError.value,
     });
     if (!cancelRequested.value) {
-      toast(terminalError.value, 5000);
+      if (isRunningInBackground.value || !open.value) {
+        toast(t("sqlFile.backgroundFailed", { name: taskLabel }), 5000, {
+          label: t("sqlFile.viewDetails"),
+          onClick: () => {
+            openCurrentTask(batchId);
+          },
+        });
+      } else {
+        toast(terminalError.value, 5000);
+      }
     }
   } finally {
     if (txnSessionId.value && (!completedSuccessfully || disposed || cancelRequested.value)) {
@@ -862,6 +907,9 @@ async function handleOpenChange(nextOpen: boolean) {
     if (!window.confirm(t("sqlFile.rollbackBeforeClose"))) return;
     if (!(await finishTransaction(false))) return;
   }
+  if (!nextOpen && running.value) {
+    isRunningInBackground.value = true;
+  }
   open.value = nextOpen;
 }
 
@@ -875,15 +923,23 @@ watch(sqlConnections, () => {
 });
 
 watch(
-  open,
-  (value) => {
+  [open, () => props.taskId],
+  ([value, taskId]) => {
     if (!value) {
+      inspectingExecutionId.value = null;
       if (!running.value) void releaseManagedPreviews();
       if (manualTransaction.value && running.value) void cancelExecution();
       else if (txnSessionId.value) void finishTransaction(false);
       return;
     }
+    isRunningInBackground.value = false;
     if (running.value || txnSessionId.value || resolvingTransaction.value) return;
+    const targetTaskId = taskId || inspectingExecutionId.value;
+    if (targetTaskId && (targetTaskId === executionId.value || targetTaskId === activeExecutionTask.value?.exportId)) {
+      inspectingExecutionId.value = null;
+      return;
+    }
+    inspectingExecutionId.value = null;
     resetState();
     if (connectionId.value) {
       loadDatabasesForConnection(connectionId.value);
@@ -1185,7 +1241,7 @@ watch(
       <DialogFooter class="shrink-0">
         <template v-if="running">
           <p v-if="manualTransaction" class="mr-auto text-xs text-muted-foreground">{{ t("sqlFile.manualCancelHint") }}</p>
-          <Button v-else variant="outline" size="sm" @click="handleOpenChange(false)">
+          <Button v-else variant="outline" size="sm" @click="handleRunInBackground">
             {{ t("sqlFile.runInBackground") }}
           </Button>
           <Button variant="destructive" size="sm" class="w-32" :disabled="cancelling" @click="cancelExecution">

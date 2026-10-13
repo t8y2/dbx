@@ -137,6 +137,37 @@ describe("data generation background task", () => {
   });
 });
 
+describe("SQL file task open", () => {
+  it("opens the SQL file execution task when clicking the open button or title", async () => {
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const task = tracker.addSqlFileTask("sql-open-test", "large.sql", "/tmp/large.sql", onOpen);
+    tracker.updateSqlFileTask(task.exportId, {
+      executionId: task.exportId,
+      status: "running",
+      statementIndex: 10,
+      successCount: 10,
+      failureCount: 0,
+      affectedRows: 10,
+      elapsedMs: 2000,
+      statementSummary: "SELECT 1;",
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("SQL file: large.sql");
+    const openButton = document.body.querySelector<HTMLButtonElement>('button[title="Open task"]');
+    expect(openButton).not.toBeNull();
+    openButton?.click();
+    expect(onOpen).toHaveBeenCalledOnce();
+
+    const titleSpan = document.body.querySelector<HTMLSpanElement>('span[title="/tmp/large.sql"]');
+    expect(titleSpan).not.toBeNull();
+    titleSpan?.click();
+    expect(onOpen).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("SQL file byte progress", () => {
   it("keeps legacy progress indeterminate instead of using successful statements as the total", async () => {
     const tracker = useExportTracker();

@@ -6676,6 +6676,10 @@ export default withEnglishFallback({
     fileProgress: "파일 {current}/{total}",
     fileColumn: "파일",
     totalFiles: "{count}개 파일",
+    backgroundStarted: "SQL 파일이 백그라운드에서 실행되었습니다. 백그라운드 작업에서 진행 상황을 확인할 수 있습니다.",
+    viewDetails: "상세 보기",
+    backgroundCompleted: "SQL 파일 “{name}” 실행 완료",
+    backgroundFailed: "SQL 파일 “{name}” 실행 실패",
   },
   sqlFileTree: {
     folderNameInvalid: "경로가 아닌 폴더 이름 하나를 입력하세요.",

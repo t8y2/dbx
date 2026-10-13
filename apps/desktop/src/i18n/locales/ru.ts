@@ -8120,6 +8120,10 @@ export default withEnglishFallback({
     },
     fileColumn: "Файл",
     totalFiles: "{count} файлов",
+    backgroundStarted: "SQL-файл запущен в фоновом режиме. Прогресс можно посмотреть в фоновых задачах.",
+    viewDetails: "Подробнее",
+    backgroundCompleted: "Выполнение SQL-файла «{name}» завершено",
+    backgroundFailed: "Выполнение SQL-файла «{name}» завершилось ошибкой",
   },
   sqlFileTree: {
     folderNameInvalid: "Введите одно имя папки, а не путь.",

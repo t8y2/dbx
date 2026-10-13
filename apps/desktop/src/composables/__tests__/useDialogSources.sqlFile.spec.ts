@@ -18,12 +18,13 @@ vi.mock("@/stores/connectionStore", async () => {
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
-import { useDialogSources } from "@/composables/useDialogSources";
+import { resetDialogSourcesForTest, useDialogSources } from "@/composables/useDialogSources";
 
 let app: App | undefined;
 afterEach(() => {
   app?.unmount();
   document.body.innerHTML = "";
+  resetDialogSourcesForTest();
 });
 
 it("hands prepared Web previews to the dialog, clears them on close, and preserves desktop paths", async () => {
@@ -53,4 +54,27 @@ it("hands prepared Web previews to the dialog, clears them on close, and preserv
   await nextTick();
   expect(dialogs.sqlFilePrefillFilePath.value).toBe("/local/backup.sql");
   expect(dialogs.sqlFilePrefillPreview.value).toBeUndefined();
+});
+
+it("opens SQL file execution task and resets taskId on close", async () => {
+  let dialogs!: ReturnType<typeof useDialogSources>;
+  app = createApp(
+    defineComponent({
+      setup() {
+        dialogs = useDialogSources();
+        return () => h("div");
+      },
+    }),
+  );
+  app.mount(document.body.appendChild(document.createElement("div")));
+
+  const { openSqlFileExecutionTask } = await import("@/composables/useDialogSources");
+  openSqlFileExecutionTask("batch-123");
+  await nextTick();
+  expect(dialogs.showSqlFileDialog.value).toBe(true);
+  expect(dialogs.sqlFileTaskId.value).toBe("batch-123");
+
+  dialogs.showSqlFileDialog.value = false;
+  await nextTick();
+  expect(dialogs.sqlFileTaskId.value).toBeNull();
 });

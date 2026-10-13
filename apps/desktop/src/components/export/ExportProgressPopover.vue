@@ -369,7 +369,7 @@ function openTask(task: ExportTask): void {
       <div class="max-h-96 overflow-y-auto">
         <div v-for="task in visibleTasks" :key="task.exportId" class="flex items-start gap-3 border-b px-4 py-3 text-xs last:border-b-0">
           <div class="flex-1 min-w-0 flex flex-col gap-1.5">
-            <div class="flex items-center gap-1.5">
+            <div class="flex items-center gap-1.5" :class="{ 'cursor-pointer hover:underline': Boolean(task.onOpen) }" @click="task.onOpen ? openTask(task) : undefined">
               <component :is="statusIcon(task)" :class="[statusColor(task.status), (task.kind === 'table-export' || task.status === 'Cancelling') && isActive(task.status) ? 'animate-spin' : '']" class="h-3.5 w-3.5 shrink-0" />
               <span class="truncate font-medium" :title="task.filePath || undefined">{{ taskTitle(task) }}</span>
             </div>

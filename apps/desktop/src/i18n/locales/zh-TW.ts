@@ -6221,6 +6221,10 @@ export default withEnglishFallback({
     fileColumn: "檔案",
     totalFiles: "{count} 個檔案",
     runInBackground: "背景執行",
+    backgroundStarted: "SQL 檔案已在背景執行，可在背景任務中查看進度。",
+    viewDetails: "查看詳情",
+    backgroundCompleted: "SQL 檔案「{name}」執行完成",
+    backgroundFailed: "SQL 檔案「{name}」執行失敗",
   },
   diff: {
     progress: {

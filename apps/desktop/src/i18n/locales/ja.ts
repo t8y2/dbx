@@ -6899,6 +6899,10 @@ export default withEnglishFallback({
     fileProgress: "ファイル {current}/{total}",
     fileColumn: "ファイル",
     totalFiles: "{count} ファイル",
+    backgroundStarted: "SQL ファイルはバックグラウンドで実行中です。進捗はバックグラウンドタスクで確認できます。",
+    viewDetails: "詳細を表示",
+    backgroundCompleted: "SQL ファイル「{name}」の実行が完了しました",
+    backgroundFailed: "SQL ファイル「{name}」の実行に失敗しました",
   },
   diff: {
     progress: {

@@ -476,6 +476,16 @@ describe("SQL-file failure details", () => {
     expect(replacement.sqlFileFailures).toEqual([]);
     expect(replacement.sqlFileFailuresOmitted).toBe(0);
   });
+
+  it("stores onOpen callback when provided", () => {
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const task = tracker.addSqlFileTask("sql-open-id", "test.sql", "/tmp/test.sql", onOpen);
+
+    expect(task.onOpen).toBe(onOpen);
+    task.onOpen?.();
+    expect(onOpen).toHaveBeenCalledOnce();
+  });
 });
 
 describe("formatDataTransferDuration", () => {

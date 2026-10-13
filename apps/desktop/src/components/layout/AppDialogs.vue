@@ -267,6 +267,7 @@ watch(
   />
   <SqlFileExecutionDialog
     v-model:open="dialogs.showSqlFileDialog.value"
+    :task-id="dialogs.sqlFileTaskId.value"
     :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value"
     :prefill-database="dialogs.sqlFilePrefillDatabase.value"
     :prefill-schema="dialogs.sqlFilePrefillSchema.value"

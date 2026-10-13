@@ -249,7 +249,7 @@ beforeEach(() => {
   mocks.highlighterState = reactive({ ready: false, appearance: "light" });
   mocks.highlight.mockReset().mockImplementation((sql: string) => (mocks.highlighterState!.ready ? `<span data-theme="${mocks.highlighterState!.appearance}">${sql}</span>` : sql));
   mocks.trackerTask = undefined;
-  mocks.addSqlFileTask.mockImplementation((exportId: string, tableName: string, filePath: string) => {
+  mocks.addSqlFileTask.mockImplementation((exportId: string, tableName: string, filePath: string, onOpen?: () => void) => {
     mocks.trackerTask = reactive({
       exportId,
       kind: "sql-file",
@@ -262,6 +262,7 @@ beforeEach(() => {
       errorMessage: null,
       sqlFileFailures: [],
       sqlFileFailuresOmitted: 0,
+      onOpen,
     });
     return mocks.trackerTask;
   });
@@ -454,6 +455,56 @@ describe("SqlFileExecutionDialog retries", () => {
     onOpenChange.mockClear();
     findButton("common.close").click();
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("provides view-details shortcut on background notifications and tracker task", async () => {
+    const onOpenChange = vi.fn();
+    await mountReadyDialog(onOpenChange);
+    const gate = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(() => gate.promise);
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalledOnce());
+
+    findButton("sqlFile.runInBackground").click();
+    await nextTick();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+
+    // Toast is shown with action to reopen dialog
+    const backgroundToastCall = mocks.toast.mock.calls.find((call: any[]) => call[0] === "sqlFile.backgroundStarted");
+    expect(backgroundToastCall).toBeDefined();
+    expect(backgroundToastCall![2]?.label).toBe("sqlFile.viewDetails");
+
+    onOpenChange.mockClear();
+    backgroundToastCall![2].onClick();
+    await nextTick();
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+
+    // Close dialog again while running
+    onOpenChange.mockClear();
+    findButton("sqlFile.runInBackground").click();
+    await nextTick();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+
+    // Tracker task onOpen also reopens dialog
+    onOpenChange.mockClear();
+    mocks.trackerTask?.onOpen?.();
+    await nextTick();
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+
+    // Close dialog again while running
+    onOpenChange.mockClear();
+    findButton("sqlFile.runInBackground").click();
+    await nextTick();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+
+    // Complete in background
+    mocks.progressHandler?.(progress("run-1", "done"));
+    gate.resolve();
+    await vi.waitFor(() => {
+      const completedToastCall = mocks.toast.mock.calls.find((call: any[]) => call[0] === "sqlFile.backgroundCompleted");
+      expect(completedToastCall).toBeDefined();
+      expect(completedToastCall![2]?.label).toBe("sqlFile.viewDetails");
+    });
   });
 
   it("cancels the active ordinary run and allows a fresh retry", async () => {

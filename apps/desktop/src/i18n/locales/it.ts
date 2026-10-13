@@ -6871,6 +6871,10 @@ export default withEnglishFallback({
     fileProgress: "File {current} di {total}",
     fileColumn: "File",
     totalFiles: "{count} file",
+    backgroundStarted: "Il file SQL è stato eseguito in background; è possibile visualizzare l'avanzamento nelle attività in background.",
+    viewDetails: "Visualizza dettagli",
+    backgroundCompleted: "Esecuzione del file SQL “{name}” completata",
+    backgroundFailed: "Esecuzione del file SQL “{name}” non riuscita",
   },
   diff: {
     progress: {

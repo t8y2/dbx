@@ -471,7 +471,7 @@ export function useExportTracker() {
     if (task.status === "Done" || task.status === "Error") finishExportTask(task);
   }
 
-  function addSqlFileTask(executionId: string, fileName: string, filePath: string): ExportTask {
+  function addSqlFileTask(executionId: string, fileName: string, filePath: string, onOpen?: () => void): ExportTask {
     sqlFileFailureStates.delete(executionId);
     const task = reactive<ExportTask>({
       exportId: executionId,
@@ -491,6 +491,7 @@ export function useExportTracker() {
       statementSummary: "",
       sqlFileFailures: [],
       sqlFileFailuresOmitted: 0,
+      onOpen,
     });
     taskMap.set(executionId, task);
     return task;

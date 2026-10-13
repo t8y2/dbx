@@ -7087,6 +7087,10 @@ export default withEnglishFallback({
     },
     fileColumn: "Archivo",
     totalFiles: "{count} archivos",
+    backgroundStarted: "El archivo SQL se ha ejecutado en segundo plano; puede ver el progreso en las tareas en segundo plano.",
+    viewDetails: "Ver detalles",
+    backgroundCompleted: "La ejecución del archivo SQL “{name}” ha finalizado",
+    backgroundFailed: "La ejecución del archivo SQL “{name}” ha fallado",
   },
   diff: {
     progress: {

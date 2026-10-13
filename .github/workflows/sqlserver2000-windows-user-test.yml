@@ -22,7 +22,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           cache: pnpm
 
       - name: Setup Java

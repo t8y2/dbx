@@ -263,7 +263,7 @@ async function mountIndexesEditor() {
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.executeQuery.mockResolvedValue({ columns: ["user", "host", "plugin"], rows: [["app_user", "LOGIN", ""]] });
   mocks.listDataTypes.mockResolvedValue([]);
-  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
   mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({
     value: facet === "comment" ? "" : facet === "owner" ? "app_user" : [],
@@ -311,7 +311,7 @@ function concurrentCheckboxInRow(row: HTMLElement): HTMLInputElement {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
   mocks.getTableOwner.mockResolvedValue("app_user");
   mocks.buildTableOwnerChangeSql.mockResolvedValue({ statements: [], warnings: [] });
 });
@@ -376,7 +376,7 @@ describe("TableStructureEditor concurrent availability transition", () => {
 
     // Recovery: a later successful probe must lift the blocker and regenerate
     // the preview with the original Concurrent intent, never a blocking CREATE.
-    mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+    mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
     buttonWithText(root, "structureEditor.refresh").click();
     await vi.waitFor(() => expect(mocks.getTablePartitionStatus).toHaveBeenCalledTimes(3), { timeout: 3000 });
     await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql.mock.calls.length).toBeGreaterThan(callsAtEnabledPhase), { timeout: 3000 });

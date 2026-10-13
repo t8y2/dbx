@@ -65,6 +65,12 @@ vi.mock("@/lib/table/tableSelectSql", async (importOriginal) => {
   };
 });
 
+// Disk-cache maintenance is outside navigation and has no web backend in Vitest.
+vi.mock("@/lib/tabs/tabResultCache", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/tabs/tabResultCache")>()),
+  pruneTabResultSnapshots: vi.fn().mockResolvedValue(undefined),
+}));
+
 const dialogs = {
   showFieldLineageDialog: { value: false },
   showDatabaseSearchDialog: { value: false },
@@ -126,6 +132,69 @@ describe("useNavigationTargets with the real query store", () => {
       cacheStatus: "miss",
       ageMs: 0,
     }));
+  });
+
+  it.each(["always-new", "same-table", "active-tab"] as const)("reports the selected SQL tab before loading completes in %s mode", async (mode) => {
+    mocks.settingsStore.editorSettings.dataTabReuseMode = mode;
+    const { navigation, queryStore } = await setupNavigation();
+    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "VIEW" };
+    await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
+    const previousId = queryStore.activeTabId;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mocks.connectionStore.ensureConnected.mockReturnValue(gate);
+    const onOpened = vi.fn();
+    const pending = navigation.openObjectBrowserTableTarget(target, { onOpened });
+    await vi.waitFor(() => expect(onOpened).toHaveBeenCalledOnce());
+    const targetId = onOpened.mock.calls[0]![0] as string;
+    const selected = queryStore.tabs.find((tab) => tab.id === targetId)!;
+    expect(selected).toMatchObject({ mode: "data", isExecuting: true, tableMeta: { database: "app", schema: "public", tableName: "users", tableType: "VIEW" } });
+    expect(targetId === previousId).toBe(mode === "active-tab");
+    // A new same-name tab on another connection must not receive this load.
+    const otherId = queryStore.createTab("connection-2", "app", "users", "data", "public", undefined, undefined, { forceNew: true });
+    release();
+    await pending;
+    expect(queryStore.activeTabId).toBe(otherId);
+    expect(queryStore.tabs.find((tab) => tab.id === otherId)?.result).toBeUndefined();
+    expect(selected.sql).toBe("SELECT * FROM users");
+    expect(onOpened).toHaveBeenCalledExactlyOnceWith(targetId);
+  });
+
+  it("reports an existing same-table tab without launching a second query", async () => {
+    const { navigation, queryStore } = await setupNavigation();
+    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
+    await navigation.openObjectBrowserTableTarget(target);
+    const tabId = queryStore.activeTabId;
+    const onOpened = vi.fn();
+    vi.mocked(queryStore.executeTabSql).mockClear();
+    await navigation.openObjectBrowserTableTarget(target, { onOpened });
+    expect(onOpened).toHaveBeenCalledExactlyOnceWith(tabId);
+    expect(queryStore.executeTabSql).not.toHaveBeenCalled();
+  });
+
+  it.each(["always-new", "same-table", "active-tab"] as const)("does not open an obsolete target in %s mode", async (mode) => {
+    mocks.settingsStore.editorSettings.dataTabReuseMode = mode;
+    const { navigation, queryStore } = await setupNavigation();
+    const onOpened = vi.fn();
+    await navigation.openObjectBrowserTableTarget({ connectionId: "connection-1", database: "app", tableName: "users" }, { onOpened, isCurrent: () => false });
+    expect(queryStore.tabs).toHaveLength(0);
+    expect(onOpened).not.toHaveBeenCalled();
+  });
+
+  it("reports Mongo's reused tab after updating its collection identity", async () => {
+    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
+    mocks.settingsStore.editorSettings.dataTabReuseMode = "active-tab";
+    const { navigation, queryStore } = await setupNavigation();
+    const target = { connectionId: "connection-1", database: "app", tableName: "users" };
+    await navigation.openObjectBrowserTableTarget(target);
+    const originalId = queryStore.activeTabId;
+    const onOpened = vi.fn((tabId: string) => {
+      expect(queryStore.tabs.find((tab) => tab.id === tabId)).toMatchObject({ mode: "mongo", sql: "orders", tableMeta: { tableName: "orders" } });
+    });
+    await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" }, { onOpened });
+    expect(onOpened).toHaveBeenCalledExactlyOnceWith(originalId);
   });
 
   it("opens same-table search results with different predicates in separate tabs", async () => {

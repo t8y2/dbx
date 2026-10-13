@@ -20,6 +20,7 @@ export interface GridSnapshotStyleOptions {
   showRowNumbers?: boolean;
   wrapCells?: boolean;
   transpose?: boolean;
+  stripedRows?: boolean;
   fieldNameLabel?: string;
   compact?: boolean;
 }
@@ -152,7 +153,7 @@ export function renderGridSnapshotHtml(source: GridSnapshotSource, options: Grid
   const body = displayRows
     .map(
       (row, rowIndex) =>
-        `<tr style="background:${rowIndex % 2 === 1 ? GRID_SNAPSHOT_STRIPED_ROW[appearance] : GRID_SNAPSHOT_BACKGROUND[appearance]}">${showRowNumbers ? `<td class="dbx-grid-snapshot__cell dbx-grid-snapshot__cell--row-number" style="background:${GRID_SNAPSHOT_ROW_NUMBER[appearance]};color:${GRID_SNAPSHOT_MUTED[appearance]};padding:${cellPadding}">${rowIndex + 1}</td>` : ""}${transpose && showFieldNames ? renderFieldCell(source.columns[rowIndex] ?? "", rowIndex, "td") : ""}${row
+        `<tr style="background:${options.stripedRows !== false && rowIndex % 2 === 1 ? GRID_SNAPSHOT_STRIPED_ROW[appearance] : GRID_SNAPSHOT_BACKGROUND[appearance]}">${showRowNumbers ? `<td class="dbx-grid-snapshot__cell dbx-grid-snapshot__cell--row-number" style="background:${GRID_SNAPSHOT_ROW_NUMBER[appearance]};color:${GRID_SNAPSHOT_MUTED[appearance]};padding:${cellPadding}">${rowIndex + 1}</td>` : ""}${transpose && showFieldNames ? renderFieldCell(source.columns[rowIndex] ?? "", rowIndex, "td") : ""}${row
           .map((value) => {
             const nullClass = value === null ? " dbx-grid-snapshot__cell--null" : "";
             return `<td class="dbx-grid-snapshot__cell${wrapCells ? " dbx-grid-snapshot__cell--wrapped" : ""}${nullClass}" style="color:${value === null ? GRID_SNAPSHOT_MUTED[appearance] : GRID_SNAPSHOT_TEXT[appearance]};padding:${cellPadding}">${escapeHtml(formatGridSnapshotCell(value))}</td>`;

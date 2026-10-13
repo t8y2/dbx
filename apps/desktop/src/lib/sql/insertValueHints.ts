@@ -623,7 +623,7 @@ export function findEnclosingDollarQuoteStartInText(doc: SqlTextSlice, position:
       chunkEnd = Math.min(chunkEnd + DOLLAR_QUOTE_CHUNK_TAIL_EXTENSION, end);
     }
     const chunk = doc.sliceString(scanned, chunkEnd);
-    for (let local = 0; local < chunk.length; ) {
+    for (let local = 0; local < chunk.length;) {
       const index = scanned + local;
       if (index >= end) break;
       if (chunk[local] === "$") {

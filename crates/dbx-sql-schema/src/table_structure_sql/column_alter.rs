@@ -1,17 +1,25 @@
 use super::column_format::{
     clickhouse_column_type, column_data_type, column_definition, has_dameng_identity,
-    is_dameng_identity_compatible_type, is_mysql_character_data_type, original_is_mysql_generated_column,
-    original_mysql_generated_clause,
+    is_dameng_identity_compatible_type, is_mysql_character_data_type, normalize_generation_expression,
+    normalize_mysql_generated_storage, original_is_mysql_generated_column, original_mysql_generated_clause,
+    original_mysql_generated_values, strip_outer_parentheses,
 };
-use super::columns::build_drop_column_sql;
+use super::columns::{build_add_column_sql, build_drop_column_sql};
 use super::comments::build_sqlserver_column_comment_sql_for_profile;
 use super::dialect::{capabilities_for, database_label, StructureDialect};
-use super::types::{EditableStructureColumn, SingleColumnAlterSqlOptions, TableStructureSqlResult};
+use super::types::{ColumnIdentity, EditableStructureColumn, SingleColumnAlterSqlOptions, TableStructureSqlResult};
 use super::util::{
     clean, format_default_for_sql, is_protected_manticore_id_column, normalize_default, original_comment,
     original_default, qualified_table, quote_ident, quote_string,
 };
+use super::validation::mysql_literal_default_error;
 use crate::table_structure_sql::ColumnExtra;
+
+const SINGLE_COLUMN_ADD_PREVIEW_ID_PREFIX: &str = "ddl-preview:";
+
+fn single_column_literal_default_error(options: &SingleColumnAlterSqlOptions) -> Option<String> {
+    mysql_literal_default_error(options.database_type, options.driver_profile.as_deref(), false, &options.column)
+}
 
 pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> TableStructureSqlResult {
     let capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
@@ -38,7 +46,48 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
             warnings.push("Manticore Search id column cannot be dropped from this editor.".to_string());
             return TableStructureSqlResult { statements, warnings };
         }
-        statements.push(build_drop_column_sql(dialect, &table, &original.name));
+        statements.extend(build_drop_column_sql(dialect, &table, original));
+        return TableStructureSqlResult { statements, warnings };
+    }
+
+    // The sidebar marks field-DDL previews explicitly in the draft id. Keep
+    // `original` in that request so generated-column expressions can be copied
+    // into the ADD definition without changing the meaning of position data
+    // for existing API callers.
+    if options.column.id.starts_with(SINGLE_COLUMN_ADD_PREVIEW_ID_PREFIX) {
+        if !capabilities.add_column {
+            warnings.push(format!("Adding columns is not supported for {database_label} from this editor."));
+            return TableStructureSqlResult { statements, warnings };
+        }
+        if options.column.name.trim().is_empty() {
+            warnings.push("Column name cannot be empty.".to_string());
+            return TableStructureSqlResult { statements, warnings };
+        }
+        if options.column.data_type.trim().is_empty() {
+            warnings.push("Column type cannot be empty.".to_string());
+            return TableStructureSqlResult { statements, warnings };
+        }
+        if let Some(warning) = single_column_literal_default_error(&options) {
+            warnings.push(warning);
+            return TableStructureSqlResult { statements, warnings };
+        }
+        if !capabilities.comment && !clean(&options.column.comment).is_empty() {
+            warnings.push(format!(
+                "Column comments are not supported for {database_label} from this editor; the comment for \"{}\" was ignored.",
+                options.column.name
+            ));
+        }
+        statements.extend(build_add_column_sql(
+            dialect,
+            options.database_type,
+            capabilities.comment,
+            &table,
+            &options.column,
+            "",
+            options.schema.as_deref(),
+            &options.table_name,
+            options.driver_profile.as_deref(),
+        ));
         return TableStructureSqlResult { statements, warnings };
     }
 
@@ -49,8 +98,12 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         return TableStructureSqlResult { statements, warnings };
     };
 
-    if !has_existing_column_attribute_change(&options.column) && !has_column_extra_change(&options.column) {
+    if !has_existing_column_attribute_change(&options.column) && !has_column_extra_change(dialect, &options.column) {
         warnings.push("No changes detected for this column.".to_string());
+        return TableStructureSqlResult { statements, warnings };
+    }
+    if let Some(warning) = single_column_literal_default_error(&options) {
+        warnings.push(warning);
         return TableStructureSqlResult { statements, warnings };
     }
 
@@ -93,7 +146,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         ));
         return TableStructureSqlResult { statements, warnings };
     }
-    if !has_rename && !has_attribute_change && !has_column_extra_change(&options.column) {
+    if !has_rename && !has_attribute_change && !has_column_extra_change(dialect, &options.column) {
         return TableStructureSqlResult { statements, warnings };
     }
 
@@ -107,9 +160,15 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
             } else if options.database_type == Some(crate::models::connection::DatabaseType::Xugu) {
                 statements.extend(build_xugu_existing_column_sql(&table, &options.column));
             } else {
-                statements.extend(build_oracle_like_existing_column_sql(dialect, &table, &options.column))
+                statements.extend(build_oracle_like_existing_column_sql(
+                    dialect,
+                    &table,
+                    &options.column,
+                    options.database_type,
+                ))
             }
         }
+        StructureDialect::SapHana => statements.extend(build_saphana_existing_column_sql(&table, &options.column)),
         StructureDialect::Dameng => {
             statements.extend(build_dameng_existing_column_sql(&table, &options.column, true, &mut warnings))
         }
@@ -136,10 +195,33 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
     TableStructureSqlResult { statements, warnings }
 }
 
+fn is_column_identity_empty(identity: &Option<ColumnIdentity>) -> bool {
+    let Some(id) = identity.as_ref() else { return true };
+    let generation_empty =
+        id.generation.as_deref().map(|g| g.trim().is_empty() || g.eq_ignore_ascii_case("none")).unwrap_or(true);
+    generation_empty && id.seed.is_none() && id.increment.is_none()
+}
+
+fn postgres_identity_from_column(column: &EditableStructureColumn) -> Option<&ColumnIdentity> {
+    let identity = column.extra.as_ref()?.identity.as_ref()?;
+    if let Some(generation) = &identity.generation {
+        let trimmed = generation.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+            return None;
+        }
+        return Some(identity);
+    }
+    if identity.seed.is_some() || identity.increment.is_some() {
+        return Some(identity);
+    }
+    None
+}
+
 fn is_column_extra_empty(extra: &ColumnExtra) -> bool {
     !extra.auto_increment.unwrap_or(false)
         && !extra.on_update_current_timestamp.unwrap_or(false)
-        && extra.identity.is_none()
+        && is_column_identity_empty(&extra.identity)
+        && !extra.generated.as_ref().is_some_and(|generated| !generated.expression.trim().is_empty())
         && !extra.manticore_indexed.unwrap_or(false)
         && !extra.manticore_stored.unwrap_or(false)
         && !extra.manticore_attribute.unwrap_or(false)
@@ -217,9 +299,16 @@ fn postgres_identity_values(extra: &str) -> Option<(String, Option<i64>, Option<
     Some((generation, seed, increment))
 }
 
-fn identity_matches_original(identity: &super::types::ColumnIdentity, original_extra: &str) -> bool {
+fn identity_matches_original(identity: &ColumnIdentity, original_extra: &str) -> bool {
     if let Some((generation, original_seed, original_increment)) = postgres_identity_values(original_extra) {
-        return identity.generation.as_deref().unwrap_or("BY DEFAULT").eq_ignore_ascii_case(&generation)
+        if is_column_identity_empty(&Some(identity.clone())) {
+            return false;
+        }
+        let curr_generation = match identity.generation.as_deref() {
+            Some(g) if g.eq_ignore_ascii_case("always") => "ALWAYS",
+            _ => "BY DEFAULT",
+        };
+        return curr_generation.eq_ignore_ascii_case(&generation)
             && identity.seed.unwrap_or(1) == original_seed.unwrap_or(1)
             && identity.increment.unwrap_or(1) == original_increment.unwrap_or(1);
     }
@@ -298,9 +387,10 @@ pub(super) fn validate_dameng_existing_identity_change(
     }
 }
 
-pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool {
+pub(super) fn has_column_extra_change(dialect: StructureDialect, column: &EditableStructureColumn) -> bool {
     let Some(original) = &column.original else { return false };
     let current_extra = column.extra.as_ref();
+    let is_mysql = dialect == StructureDialect::Mysql;
     match (current_extra, original.extra.as_deref()) {
         // Neither has extra → no change
         (None, None | Some("")) => false,
@@ -312,6 +402,12 @@ pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool 
             original_has_auto_increment(orig)
                 || orig_lower.contains("on update")
                 || original_has_identity(orig)
+                // MySQL-only: PostgreSQL-family introspection reports generated
+                // columns in the same `generated always as (...) stored` shape,
+                // which the structure editor of those dialects never parses
+                // into `extra.generated` — treating it as a change would flag
+                // untouched PG generated columns on every save.
+                || (is_mysql && original_mysql_generated_values(orig).is_some())
                 || indexed
                 || stored
                 || attribute
@@ -328,9 +424,16 @@ pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool 
             let orig_has_ai = original_has_auto_increment(orig) || (orig_has_identity && curr_has_ai);
             let curr_has_on_update = curr.on_update_current_timestamp.unwrap_or(false);
             let orig_has_on_update = orig_lower.contains("on update");
+            let curr_identity_empty = is_column_identity_empty(&curr.identity);
             let identity_changed = match (&curr.identity, orig_has_identity) {
-                (Some(identity), true) => !identity_matches_original(identity, orig),
-                (Some(_), false) => true,
+                (Some(identity), true) => {
+                    if curr_identity_empty {
+                        true
+                    } else {
+                        !identity_matches_original(identity, orig)
+                    }
+                }
+                (Some(_), false) => !curr_identity_empty,
                 (None, true) => !curr_has_ai,
                 (None, false) => false,
             };
@@ -344,8 +447,34 @@ pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool 
             curr_has_ai != orig_has_ai
                 || curr_has_on_update != orig_has_on_update
                 || identity_changed
+                || (is_mysql && mysql_generated_changed(curr, orig))
                 || curr_manticore != orig_manticore
         }
+    }
+}
+
+/// Edit detection for MySQL generated columns. `None` inherits the original
+/// definition (no change); an empty edited expression removes the attribute
+/// (changed only when the original was generated); otherwise the expression is
+/// compared whitespace- and case-insensitively and the storage normalized, so
+/// an untouched column does not register a spurious `MODIFY`.
+fn mysql_generated_changed(curr: &ColumnExtra, orig: &str) -> bool {
+    match &curr.generated {
+        Some(generated) => {
+            // Same single-layer unwrapping the renderer applies, so wrapping
+            // parentheses typed by hand do not produce a no-op MODIFY.
+            let edited = strip_outer_parentheses(generated.expression.trim());
+            match original_mysql_generated_values(orig) {
+                Some((original_expression, original_storage)) if !edited.is_empty() => {
+                    let edited_normalized = normalize_generation_expression(edited);
+                    let edited_storage = normalize_mysql_generated_storage(generated.storage.as_deref());
+                    edited_normalized != original_expression || edited_storage != original_storage
+                }
+                Some(_) => true,
+                None => !edited.is_empty(),
+            }
+        }
+        None => false,
     }
 }
 
@@ -361,12 +490,12 @@ pub(super) fn build_mysql_existing_column_sql(
 pub(super) fn build_mysql_existing_column_clause(column: &EditableStructureColumn, position_clause: &str) -> String {
     let original_name = column.original.as_ref().map(|original| original.name.as_str()).unwrap_or(&column.name);
     let operation = if column.name == original_name {
-        format!("MODIFY COLUMN {}", column_definition(StructureDialect::Mysql, column))
+        format!("MODIFY COLUMN {}", column_definition(StructureDialect::Mysql, column, None))
     } else {
         format!(
             "CHANGE COLUMN {} {}",
             quote_ident(StructureDialect::Mysql, original_name),
-            column_definition(StructureDialect::Mysql, column)
+            column_definition(StructureDialect::Mysql, column, None)
         )
     };
     format!("{operation}{position_clause}")
@@ -377,7 +506,7 @@ pub(super) fn build_transwarp_existing_column_clause(column: &EditableStructureC
     format!(
         "CHANGE {} {}",
         quote_ident(StructureDialect::Mysql, original_name),
-        column_definition(StructureDialect::Mysql, column)
+        column_definition(StructureDialect::Mysql, column, None)
     )
 }
 
@@ -409,7 +538,7 @@ pub(super) fn build_doris_existing_column_sql(
     if type_changed || nullable_changed || default_changed || comment_changed || !position_clause.is_empty() {
         statements.push(format!(
             "ALTER TABLE {table} MODIFY COLUMN {}{position_clause};",
-            column_definition(StructureDialect::Doris, &current_column)
+            column_definition(StructureDialect::Doris, &current_column, None)
         ));
     }
 
@@ -445,7 +574,7 @@ fn build_postgres_like_existing_column_sql(
     let type_changed = column.data_type.trim() != original.data_type.trim();
     if type_changed {
         let column_name = quote_ident(StructureDialect::Postgres, current_name);
-        let data_type = column_data_type(StructureDialect::Postgres, column);
+        let data_type = column_data_type(StructureDialect::Postgres, column, None);
         if use_xugu_type_syntax {
             statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column_name} {data_type};"));
         } else {
@@ -467,6 +596,15 @@ fn build_postgres_like_existing_column_sql(
             // an incompatible restored default fail atomically instead of leaving it dropped.
             statements.push(format!("ALTER TABLE {table} {};", alterations.join(", ")));
         }
+    }
+    let orig_identity =
+        if !use_xugu_type_syntax { original.extra.as_deref().and_then(postgres_identity_values) } else { None };
+    let curr_identity = if !use_xugu_type_syntax { postgres_identity_from_column(column) } else { None };
+    if orig_identity.is_some() && curr_identity.is_none() {
+        statements.push(format!(
+            "ALTER TABLE {table} ALTER COLUMN {} DROP IDENTITY;",
+            quote_ident(StructureDialect::Postgres, current_name)
+        ));
     }
     if column.is_nullable != original.is_nullable {
         let action = if column.is_nullable { "DROP NOT NULL" } else { "SET NOT NULL" };
@@ -491,6 +629,69 @@ fn build_postgres_like_existing_column_sql(
             "ALTER TABLE {table} ALTER COLUMN {} {action};",
             quote_ident(StructureDialect::Postgres, current_name)
         ));
+    }
+    if !use_xugu_type_syntax {
+        match (orig_identity, curr_identity) {
+            (None, Some(identity)) => {
+                if column.is_nullable {
+                    statements.push(format!(
+                        "ALTER TABLE {table} ALTER COLUMN {} SET NOT NULL;",
+                        quote_ident(StructureDialect::Postgres, current_name)
+                    ));
+                }
+                if !original_default(column).is_empty()
+                    && normalize_default(Some(&column.default_value)) == original_default(column)
+                {
+                    statements.push(format!(
+                        "ALTER TABLE {table} ALTER COLUMN {} DROP DEFAULT;",
+                        quote_ident(StructureDialect::Postgres, current_name)
+                    ));
+                }
+                let generation = match identity.generation.as_deref() {
+                    Some(g) if g.eq_ignore_ascii_case("always") => "ALWAYS",
+                    _ => "BY DEFAULT",
+                };
+                let mut clause = format!("ADD GENERATED {generation} AS IDENTITY");
+                if identity.seed.is_some() || identity.increment.is_some() {
+                    let start = identity.seed.unwrap_or(1);
+                    let inc = identity.increment.unwrap_or(1);
+                    clause.push_str(&format!(" (START WITH {start} INCREMENT BY {inc})"));
+                }
+                statements.push(format!(
+                    "ALTER TABLE {table} ALTER COLUMN {} {clause};",
+                    quote_ident(StructureDialect::Postgres, current_name)
+                ));
+            }
+            (Some((orig_generation, orig_seed, orig_increment)), Some(identity)) => {
+                let curr_generation = match identity.generation.as_deref() {
+                    Some(g) if g.eq_ignore_ascii_case("always") => "ALWAYS",
+                    _ => "BY DEFAULT",
+                };
+                if !curr_generation.eq_ignore_ascii_case(&orig_generation) {
+                    statements.push(format!(
+                        "ALTER TABLE {table} ALTER COLUMN {} SET GENERATED {curr_generation};",
+                        quote_ident(StructureDialect::Postgres, current_name)
+                    ));
+                }
+                if identity.seed.unwrap_or(1) != orig_seed.unwrap_or(1) {
+                    let new_seed = identity.seed.unwrap_or(1);
+                    statements.push(format!(
+                        "ALTER TABLE {table} ALTER COLUMN {} RESTART WITH {new_seed};",
+                        quote_ident(StructureDialect::Postgres, current_name)
+                    ));
+                }
+                if identity.increment.unwrap_or(1) != orig_increment.unwrap_or(1) {
+                    let new_increment = identity.increment.unwrap_or(1);
+                    if new_increment != 0 {
+                        statements.push(format!(
+                            "ALTER TABLE {table} ALTER COLUMN {} SET INCREMENT BY {new_increment};",
+                            quote_ident(StructureDialect::Postgres, current_name)
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     if clean(&column.comment) != original_comment(column) {
         let comment_value =
@@ -522,7 +723,7 @@ pub(super) fn build_informix_existing_column_sql(table: &str, column: &EditableS
     let nullable_changed = column.is_nullable != original.is_nullable;
     let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
     if type_changed || nullable_changed || default_changed {
-        let mut parts = vec![quote_ident(dialect, &current_name), column_data_type(dialect, column)];
+        let mut parts = vec![quote_ident(dialect, &current_name), column_data_type(dialect, column, None)];
         if column.is_nullable {
             parts.push("NULL".to_string());
         } else {
@@ -543,6 +744,7 @@ pub(super) fn build_oracle_like_existing_column_sql(
     dialect: StructureDialect,
     table: &str,
     column: &EditableStructureColumn,
+    database_type: Option<crate::models::connection::DatabaseType>,
 ) -> Vec<String> {
     let Some(original) = &column.original else {
         return Vec::new();
@@ -561,7 +763,7 @@ pub(super) fn build_oracle_like_existing_column_sql(
     let nullable_changed = column.is_nullable != original.is_nullable;
     let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
     if type_changed || nullable_changed || default_changed {
-        let data_type = column_data_type(dialect, column);
+        let data_type = column_data_type(dialect, column, database_type);
         let mut parts = vec![quote_ident(dialect, &current_name), data_type];
         let default_value = normalize_default(Some(&column.default_value));
         if !default_value.is_empty() {
@@ -588,6 +790,46 @@ pub(super) fn build_oracle_like_existing_column_sql(
     statements
 }
 
+pub(super) fn build_saphana_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    let Some(original) = &column.original else {
+        return Vec::new();
+    };
+    let mut statements = Vec::new();
+    let mut current_name = original.name.clone();
+    if column.name != original.name {
+        statements.push(format!(
+            "RENAME COLUMN {table}.{} TO {};",
+            quote_ident(StructureDialect::SapHana, &original.name),
+            quote_ident(StructureDialect::SapHana, &column.name)
+        ));
+        current_name = column.name.clone();
+    }
+
+    let type_changed = column.data_type.trim() != original.data_type.trim();
+    let nullable_changed = column.is_nullable != original.is_nullable;
+    let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
+    if type_changed || nullable_changed || default_changed {
+        let mut parts = vec![
+            quote_ident(StructureDialect::SapHana, &current_name),
+            column_data_type(StructureDialect::SapHana, column, None),
+        ];
+        let default_value = normalize_default(Some(&column.default_value));
+        if !default_value.is_empty() {
+            parts.push(format!(
+                "DEFAULT {}",
+                format_default_for_sql(StructureDialect::SapHana, &column.data_type, &default_value)
+            ));
+        } else if default_changed {
+            parts.push("DEFAULT NULL".to_string());
+        }
+        if nullable_changed {
+            parts.push(if column.is_nullable { "NULL" } else { "NOT NULL" }.to_string());
+        }
+        statements.push(format!("ALTER TABLE {table} ALTER ({});", parts.join(" ")));
+    }
+    statements
+}
+
 pub(super) fn build_dameng_existing_column_sql(
     table: &str,
     column: &EditableStructureColumn,
@@ -603,7 +845,12 @@ pub(super) fn build_dameng_existing_column_sql(
         statements.push(format!("ALTER TABLE {table} DROP IDENTITY;"));
     }
 
-    statements.extend(build_oracle_like_existing_column_sql(StructureDialect::Dameng, table, column));
+    statements.extend(build_oracle_like_existing_column_sql(
+        StructureDialect::Dameng,
+        table,
+        column,
+        Some(crate::models::connection::DatabaseType::Dameng),
+    ));
 
     if let DamengIdentityTransition::Add { seed, increment } = transition {
         statements.push(format!(
@@ -633,7 +880,7 @@ pub(super) fn build_iris_existing_column_sql(table: &str, column: &EditableStruc
     let nullable_changed = column.is_nullable != original.is_nullable;
     let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
     if type_changed || nullable_changed || default_changed {
-        let mut parts = vec![quote_ident(dialect, &current_name), column_data_type(dialect, column)];
+        let mut parts = vec![quote_ident(dialect, &current_name), column_data_type(dialect, column, None)];
         let default_value = normalize_default(Some(&column.default_value));
         if !default_value.is_empty() {
             parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
@@ -679,7 +926,7 @@ pub(super) fn build_oscar_existing_column_sql(
 
     // 类型或默认值变更：带括号的 MODIFY 只允许 "col TYPE [DEFAULT ...]"，不含 NULL/NOT NULL。
     if type_changed || default_changed {
-        let data_type = column_data_type(dialect, column);
+        let data_type = column_data_type(dialect, column, None);
         let mut parts = vec![quote_ident(dialect, &current_name), data_type];
         let default_value = normalize_default(Some(&column.default_value));
         if !default_value.is_empty() {
@@ -753,7 +1000,7 @@ pub(super) fn build_sqlserver_existing_column_sql(
         statements.push(build_sqlserver_alter_column_preserving_default_sql(
             table,
             &current_name,
-            &column_data_type(dialect, column),
+            &column_data_type(dialect, column, None),
             column.is_nullable,
         ));
     } else {
@@ -765,7 +1012,7 @@ pub(super) fn build_sqlserver_existing_column_sql(
             statements.push(format!(
                 "ALTER TABLE {table} ALTER COLUMN {} {} {null_clause};",
                 quote_ident(dialect, &current_name),
-                column_data_type(dialect, column)
+                column_data_type(dialect, column, None)
             ));
         }
     }
@@ -892,7 +1139,7 @@ pub(super) fn build_h2_existing_column_sql(table: &str, column: &EditableStructu
         statements.push(format!(
             "ALTER TABLE {table} ALTER COLUMN {} SET DATA TYPE {};",
             quote_ident(StructureDialect::H2, &current_name),
-            column_data_type(StructureDialect::H2, column)
+            column_data_type(StructureDialect::H2, column, None)
         ));
     }
     if column.is_nullable != original.is_nullable {
@@ -1029,6 +1276,7 @@ pub(super) fn build_sqlite_existing_column_sql(
     statements
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 pub(super) fn build_duckdb_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
     let Some(original) = &column.original else {
         return Vec::new();
@@ -1060,7 +1308,7 @@ pub(super) fn build_questdb_existing_column_sql(table: &str, column: &EditableSt
         statements.push(format!(
             "ALTER TABLE {table} ALTER COLUMN {} TYPE {};",
             quote_ident(StructureDialect::Questdb, current_name),
-            column_data_type(StructureDialect::Questdb, column)
+            column_data_type(StructureDialect::Questdb, column, None)
         ));
     }
     statements

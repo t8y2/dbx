@@ -59,6 +59,24 @@ export function canonicalShortcutKey(shortcut: string): string {
     .toLowerCase();
 }
 
+/**
+ * #11632: 组合键搜索用的归一化形式——抹掉全部空白（`\s` 已含全角空格）并把全角
+ * ＋ 折成半角，使 `Ctrl+T` / `Ctrl + T` / `⌘T` / `⌘ T` 归一到同一串。只作用于
+ * 组合键字段：功能名等多词文本必须保留空格，否则 "new query" 会因去空白而失配。
+ *
+ * 不复用 canonicalShortcutKey：它按 Win32 语义把 Mod 展开成 Ctrl（macOS 的 ⌘ 会
+ * 被误判），而且 parseShortcutParts 不 trim，`"Ctrl + T"` 会原样留下内部空格。
+ */
+export function normalizeShortcutSearch(value: string): string {
+  // 全角 Ａ-Ｚ / ａ-ｚ / ＋ 等（码点 U+FF01–U+FF5E，与 ASCII 相差 0xFEE0）一并折成
+  // 半角：中文输入法全角状态下打出的 ｃｔｒｌ＋ｔ 也要能命中。该折叠已覆盖独立
+  // 处理全角 ＋ 的做法；全角空格由下面的 \s 处理（\s 含 U+3000）。
+  return value
+    .replace(/[！-～]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0))
+    .toLowerCase()
+    .replace(/\s+/g, "");
+}
+
 export function shortcutDisplayStrokes(shortcut?: string, platform = globalThis.navigator?.platform || ""): string[][] {
   return parseShortcutStrokes(shortcut).map((parts) => shortcutDisplayOrder(parts, platform));
 }
@@ -96,4 +114,10 @@ export function formatShortcutDisplay(shortcut: string, platform = globalThis.na
   return shortcutDisplayStrokes(shortcut, platform)
     .map((parts) => parts.map((part) => shortcutKeyLabel(part, platform)).join(keySeparator))
     .join(", ");
+}
+
+export function formatShortcutTooltip(label: string, shortcut?: string, platform = globalThis.navigator?.platform || ""): string {
+  if (!shortcut?.trim()) return label;
+  const display = formatShortcutDisplay(shortcut, platform);
+  return display && display !== "—" ? `${label} (${display})` : label;
 }

@@ -18,12 +18,12 @@ const runId = randomUUID();
 const group = `DBX_VERIFY_ONLY_${runId}`;
 const oldValue = `mysql-old-${runId}.invalid:3306`;
 const newValue = `mysql-new-${runId}.invalid:3306`;
-const keys = ["one.yaml", "two.properties"].map(name => ({ namespace: "", group, dataId: `${runId}-${name}` }));
+const keys = ["one.yaml", "two.properties"].map((name) => ({ namespace: "", group, dataId: `${runId}-${name}` }));
 const created = [];
 const outputDir = process.env.DBX_TEST_OUTPUT || path.resolve("outputs/nacos-history-verification");
 await mkdir(outputDir, { recursive: true });
 const metadata = JSON.parse(await readFile("node_modules/.vite/deps/_metadata.json", "utf8"));
-const dependencyUrl = name => `/@fs/${path.resolve("node_modules/.vite/deps", metadata.optimized[name].file).replaceAll("\\", "/")}?v=${metadata.browserHash}`;
+const dependencyUrl = (name) => `/@fs/${path.resolve("node_modules/.vite/deps", metadata.optimized[name].file).replaceAll("\\", "/")}?v=${metadata.browserHash}`;
 
 async function request(endpoint, body) {
   const response = await fetch(`${backend}${endpoint}`, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : undefined);
@@ -31,12 +31,14 @@ async function request(endpoint, body) {
   return response.json();
 }
 function checksum() {
-  return execFileSync("docker", ["exec", "dbx-nacos-mysql", "sh", "-c",
-    'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot --batch --skip-column-names -e "SET SESSION group_concat_max_len=16777216; SELECT COUNT(*), MD5(GROUP_CONCAT(CONCAT(id, CHAR(58), MD5(content)) ORDER BY id)) FROM nacos.config_info;"',
-  ], { encoding: "utf8" }).trim();
+  return execFileSync(
+    "docker",
+    ["exec", "dbx-nacos-mysql", "sh", "-c", 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot --batch --skip-column-names -e "SET SESSION group_concat_max_len=16777216; SELECT COUNT(*), MD5(GROUP_CONCAT(CONCAT(id, CHAR(58), MD5(content)) ORDER BY id)) FROM nacos.config_info;"'],
+    { encoding: "utf8" },
+  ).trim();
 }
 const connections = await request("/api/connection/list");
-const connection = connections.find(item => item.id === connectionId);
+const connection = connections.find((item) => item.id === connectionId);
 assert(connection?.db_type === "nacos");
 const addr = new URL(connection.external_config.serverAddr);
 assert(["host.docker.internal", "127.0.0.1", "localhost", "database"].includes(addr.hostname), "Only local Docker Nacos is allowed");
@@ -51,11 +53,17 @@ try {
   const context = await browser.newContext({ locale: "zh-CN", viewport: { width: 1366, height: 900 } });
   const page = await context.newPage();
   const pageErrors = [];
-  page.on("pageerror", error => { pageErrors.push(error.message); console.error("Browser module error:", error.message); });
-  page.on("requestfailed", req => console.error("Browser module request failed:", new URL(req.url()).pathname));
+  page.on("pageerror", (error) => {
+    pageErrors.push(error.message);
+    console.error("Browser module error:", error.message);
+  });
+  page.on("requestfailed", (req) => console.error("Browser module request failed:", new URL(req.url()).pathname));
   // Mount the real component in an isolated harness without touching user tabs
   // or the normal app's saved connections, layout and editor state.
-  await page.route(`${frontend}/`, route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="test-root"></div><script type="module">
+  await page.route(`${frontend}/`, (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="test-root"></div><script type="module">
     import {createApp,h,ref} from ${JSON.stringify(dependencyUrl("vue"))};
     import {createPinia} from ${JSON.stringify(dependencyUrl("pinia"))};
     import Dialog from '/src/components/nacos/NacosContentReplaceDialog.vue';
@@ -65,10 +73,15 @@ try {
     const open=ref(true); window.setTestOpen=value=>open.value=value;
     const app=createApp({setup:()=>()=>h(Dialog,{open:open.value,connectionId:${JSON.stringify(connectionId)},currentNamespace:'','onUpdate:open':value=>open.value=value})});
     app.use(createPinia()); app.use(i18n); app.mount('#test-root'); window.testReady=true;
-  </script></body></html>` }));
-  await page.route("**/api/nacos/configs/publish", async route => {
+  </script></body></html>`,
+    }),
+  );
+  await page.route("**/api/nacos/configs/publish", async (route) => {
     const { req } = route.request().postDataJSON();
-    assert(keys.some(key => req.group === key.group && req.dataId === key.dataId && !req.namespace), "Browser tried to publish outside the fixtures");
+    assert(
+      keys.some((key) => req.group === key.group && req.dataId === key.dataId && !req.namespace),
+      "Browser tried to publish outside the fixtures",
+    );
     assert([`url=${oldValue}\nreplica=${oldValue}`, `url=${newValue}\nreplica=${newValue}`].includes(req.content));
     await route.continue();
   });
@@ -94,21 +107,32 @@ try {
   await page.screenshot({ path: path.join(outputDir, "history-desktop.png") });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: path.join(outputDir, "history-mobile.png") });
-  const overflow = await page.locator('[role="dialog"]').evaluate(element => element.scrollWidth > element.clientWidth + 2);
+  const overflow = await page.locator('[role="dialog"]').evaluate((element) => element.scrollWidth > element.clientWidth + 2);
   assert.equal(overflow, false, "History dialog has horizontal overflow on mobile");
   await page.setViewportSize({ width: 1366, height: 900 });
-  const secureStorage = await page.evaluate(async ({ connectionId, oldValue, newValue }) => {
-    const storage = await import('/src/lib/nacos/nacosReplaceHistoryStorage.ts');
-    const entries = await storage.listNacosReplaceHistory(connectionId);
-    const db = await new Promise((resolve, reject) => { const req = indexedDB.open('dbx-nacos-replace-history', 1); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
-    const get = req => new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
-    const rows = await get(db.transaction('entries').objectStore('entries').getAll());
-    const key = await get(db.transaction('keys').objectStore('keys').get('encryption-key'));
-    db.close();
-    const raw = JSON.stringify(rows);
-    const foreign = await storage.getNacosReplaceHistory(entries[0].id, 'other-connection');
-    return { count: entries.length, extractable: key.extractable, plaintext: raw.includes(oldValue) || raw.includes(newValue), foreign: !!foreign };
-  }, { connectionId, oldValue, newValue });
+  const secureStorage = await page.evaluate(
+    async ({ connectionId, oldValue, newValue }) => {
+      const storage = await import("/src/lib/nacos/nacosReplaceHistoryStorage.ts");
+      const entries = await storage.listNacosReplaceHistory(connectionId);
+      const db = await new Promise((resolve, reject) => {
+        const req = indexedDB.open("dbx-nacos-replace-history", 1);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      const get = (req) =>
+        new Promise((resolve, reject) => {
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+      const rows = await get(db.transaction("entries").objectStore("entries").getAll());
+      const key = await get(db.transaction("keys").objectStore("keys").get("encryption-key"));
+      db.close();
+      const raw = JSON.stringify(rows);
+      const foreign = await storage.getNacosReplaceHistory(entries[0].id, "other-connection");
+      return { count: entries.length, extractable: key.extractable, plaintext: raw.includes(oldValue) || raw.includes(newValue), foreign: !!foreign };
+    },
+    { connectionId, oldValue, newValue },
+  );
   assert.deepEqual(secureStorage, { count: 1, extractable: false, plaintext: false, foreign: false });
   await page.getByTestId("nacos-replace-history-rollback").click();
   await page.getByRole("button", { name: "回滚已替换配置", exact: true }).last().waitFor();
@@ -117,7 +141,8 @@ try {
   await page.getByRole("button", { name: "回滚已替换配置", exact: true }).last().click();
   await page.getByText("回滚结果：已恢复 2 个，冲突 0 个，失败 0 个", { exact: true }).waitFor({ timeout: 60000 });
   for (const key of keys) assert.equal((await request("/api/nacos/configs/get", { connectionId, key })).content, `url=${oldValue}\nreplica=${oldValue}`);
-  await page.reload(); await page.waitForFunction(() => window.testReady);
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
   await page.getByTestId("nacos-replace-history-tab").click();
   await page.getByText("回滚结果：已恢复 2 个，冲突 0 个，失败 0 个", { exact: true }).waitFor();
   await page.getByTestId("nacos-replace-history-details").click();

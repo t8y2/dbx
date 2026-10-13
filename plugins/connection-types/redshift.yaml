@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 250
 dbType: redshift
+compareModes: [schema, data]
 rustVariant: Redshift
 label: Redshift
 dialect: Redshift

@@ -513,6 +513,7 @@ mod tests {
             source_truncated: false,
             target_truncated: false,
             row_budget: 100_000,
+            sync_eligible: true,
             degradation_level: Some("full".to_string()),
             sampling_rate: Some(1.0),
             confidence_score: Some(1.0),

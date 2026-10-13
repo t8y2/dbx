@@ -26,6 +26,9 @@ pub struct SshConfigHostEntry {
     /// may declare its own `ProxyJump`, which `resolve_ssh_tunnel_chain`
     /// follows recursively.
     pub proxy_jump: Option<String>,
+    /// The `ProxyCommand` line, verbatim, used to reach this host instead of
+    /// a direct TCP connection. `None` when the block declares none.
+    pub proxy_command: Option<String>,
 }
 
 /// Reads and parses `~/.ssh/config`, following `Include` directives the way
@@ -51,11 +54,50 @@ pub fn find_host(alias: &str) -> Option<SshConfigHostEntry> {
 /// `auth_method` retain the legacy default-filling behavior so imported
 /// connections continue to resolve their aliases. Payloads produced by the
 /// current connection form keep all user and port values as entered.
+///
+/// A key-auth request with no `key_path` (the user picked "key" but left the
+/// path blank, expecting the usual `~/.ssh/id_*` default) falls back to the
+/// first existing default key, the way OpenSSH does. Without this the tunnel
+/// builder rejects the empty path with "File path cannot be empty" (#11839).
 pub fn resolve_ssh_tunnel_config(ssh: &SshTunnelConfig) -> SshTunnelConfig {
-    match find_host(&ssh.host) {
+    let resolved = match find_host(&ssh.host) {
         Some(entry) => apply_host_entry(ssh, entry),
         None => ssh.clone(),
+    };
+    apply_default_identity_file(resolved)
+}
+
+/// OpenSSH's default identity files, in its own preference order.
+const DEFAULT_IDENTITY_FILE_NAMES: [&str; 4] = ["id_ed25519", "id_ecdsa", "id_ecdsa_sk", "id_rsa"];
+
+/// Fills an empty `key_path` when the connection is set up for key auth, using
+/// the first default identity file that exists.
+///
+/// Only key-based methods are considered: for `password`/`agent`/`none` an
+/// empty path is meaningful (there is no key to load), and filling one in would
+/// silently change which credential the user asked DBX to use. A path is only
+/// supplied when the file is actually present, so a user with no keys still
+/// gets the original "no key configured" behavior instead of a path that
+/// cannot be read.
+fn apply_default_identity_file(ssh: SshTunnelConfig) -> SshTunnelConfig {
+    apply_default_identity_file_with(ssh, |candidate| Path::new(&expand_tilde(candidate)).is_file())
+}
+
+/// Same as [`apply_default_identity_file`] with an injectable existence probe,
+/// so tests do not depend on the developer's real `~/.ssh`.
+fn apply_default_identity_file_with(mut ssh: SshTunnelConfig, exists: impl Fn(&str) -> bool) -> SshTunnelConfig {
+    if !ssh.key_path.trim().is_empty() {
+        return ssh;
     }
+    if ssh.auth_method != "key" && ssh.auth_method != "key+password" {
+        return ssh;
+    }
+    if let Some(path) =
+        DEFAULT_IDENTITY_FILE_NAMES.iter().map(|name| format!("~/.ssh/{name}")).find(|candidate| exists(candidate))
+    {
+        ssh.key_path = path;
+    }
+    ssh
 }
 
 /// Resolves `ssh.host` plus, when its `~/.ssh/config` entry (or an ancestor
@@ -76,7 +118,9 @@ fn resolve_chain_from_entries(ssh: &SshTunnelConfig, entries: &[SshConfigHostEnt
     let find = |alias: &str| entries.iter().find(|entry| entry.alias == alias).cloned();
 
     let Some(target_entry) = find(&ssh.host) else {
-        return vec![ssh.clone()];
+        // Same default-key fallback as `resolve_ssh_tunnel_config`, so a host
+        // with no `~/.ssh/config` block still gets an identity file.
+        return vec![apply_default_identity_file(ssh.clone())];
     };
     let resolved_target = apply_host_entry(ssh, target_entry.clone());
 
@@ -97,7 +141,10 @@ fn resolve_chain_from_entries(ssh: &SshTunnelConfig, entries: &[SshConfigHostEnt
 
     jump_hops.reverse();
     jump_hops.push(resolved_target);
-    jump_hops
+    // Any hop still without a key path (no explicit form value, no
+    // `IdentityFile`) falls back to the user's default key. Applied last so an
+    // `IdentityFile` from `~/.ssh/config` always wins.
+    jump_hops.into_iter().map(apply_default_identity_file).collect()
 }
 
 /// Builds a synthetic hop for a `ProxyJump` host. Unlike the leaf host in
@@ -121,6 +168,7 @@ fn jump_hop_from_entry(leaf: &SshTunnelConfig, entry: SshConfigHostEntry) -> Ssh
         ssh_agent_sock_path: leaf.ssh_agent_sock_path.clone(),
         auth_method: leaf.auth_method.clone(),
         allow_exec_channel_proxy: leaf.allow_exec_channel_proxy,
+        proxy_command: entry.proxy_command.unwrap_or_default(),
         profile_id: String::new(),
     }
 }
@@ -155,6 +203,13 @@ fn apply_host_entry(ssh: &SshTunnelConfig, entry: SshConfigHostEntry) -> SshTunn
             if resolved.auth_method.is_empty() || (resolved.auth_method == "password" && resolved.password.is_empty()) {
                 resolved.auth_method = "key".to_string();
             }
+        }
+    }
+    // A ProxyCommand typed into the connection form wins; otherwise inherit
+    // the one from the matched `~/.ssh/config` block.
+    if resolved.proxy_command.trim().is_empty() {
+        if let Some(proxy_command) = entry.proxy_command {
+            resolved.proxy_command = proxy_command;
         }
     }
 
@@ -243,6 +298,7 @@ impl SshConfigLoader {
                             user: None,
                             identity_file: None,
                             proxy_jump: None,
+                            proxy_command: None,
                         });
                     }
                     self.current_aliases = aliases;
@@ -262,6 +318,9 @@ impl SshConfigLoader {
                 }),
                 "identityfile" => self.set_current_field(|entry| {
                     entry.identity_file = Some(value.to_string());
+                }),
+                "proxycommand" => self.set_current_field(|entry| {
+                    entry.proxy_command = Some(value.to_string());
                 }),
                 "proxyjump" => {
                     if let Some(first_hop) = value.split(',').next().map(str::trim).filter(|hop| !hop.is_empty()) {
@@ -365,6 +424,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: String::new(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
         }
     }
 
@@ -423,6 +483,39 @@ mod tests {
         assert_eq!(entries[0].proxy_jump, None);
     }
 
+    #[test]
+    fn parses_proxy_command_verbatim() {
+        let entries = parse_ssh_config("Host proxied\n  HostName 10.0.0.5\n  ProxyCommand nc %h %p\n");
+        assert_eq!(entries[0].proxy_command, Some("nc %h %p".to_string()));
+    }
+
+    #[test]
+    fn resolve_inherits_proxy_command_only_when_form_is_empty() {
+        let mut ssh = config("myserver");
+        let mut source = entry("myserver");
+        source.proxy_command = Some("nc %h %p".to_string());
+
+        let inherited = apply_host_entry(&ssh, source.clone());
+        assert_eq!(inherited.proxy_command, "nc %h %p");
+
+        ssh.proxy_command = "cloudflared access ssh --hostname %h".to_string();
+        let explicit = apply_host_entry(&ssh, source);
+        assert_eq!(explicit.proxy_command, "cloudflared access ssh --hostname %h");
+    }
+
+    #[test]
+    fn jump_hop_carries_its_own_proxy_command() {
+        let ssh = config("target");
+        let mut gateway = jump_entry("gateway", "1.1.1.1", None);
+        gateway.proxy_command = Some("nc %h %p".to_string());
+        let entries = [gateway, jump_entry("target", "1.1.1.2", Some("gateway"))];
+
+        let chain = resolve_chain_from_entries(&ssh, &entries);
+
+        assert_eq!(chain[0].proxy_command, "nc %h %p");
+        assert_eq!(chain[1].proxy_command, "");
+    }
+
     fn entry(alias: &str) -> SshConfigHostEntry {
         SshConfigHostEntry {
             alias: alias.to_string(),
@@ -431,6 +524,7 @@ mod tests {
             user: Some("deploy".to_string()),
             identity_file: Some("~/.ssh/id_ed25519".to_string()),
             proxy_jump: None,
+            proxy_command: None,
         }
     }
 
@@ -500,6 +594,69 @@ mod tests {
         assert_eq!(resolved, ssh);
     }
 
+    // #11839: picking "key" auth without typing a path must fall back to the
+    // usual `~/.ssh/id_*` defaults instead of reaching the tunnel builder with
+    // an empty path ("File path cannot be empty").
+    #[test]
+    fn key_auth_without_a_path_falls_back_to_the_existing_default_key() {
+        let mut ssh = config("host");
+        ssh.auth_method = "key".to_string();
+        // No id_ed25519 on this imaginary machine: the next candidate wins.
+        let resolved = apply_default_identity_file_with(ssh, |candidate| candidate.ends_with("id_rsa"));
+        assert_eq!(resolved.key_path, "~/.ssh/id_rsa");
+    }
+
+    #[test]
+    fn default_key_fallback_prefers_ed25519_over_rsa() {
+        let mut ssh = config("host");
+        ssh.auth_method = "key+password".to_string();
+        let resolved = apply_default_identity_file_with(ssh, |_| true);
+        assert_eq!(resolved.key_path, "~/.ssh/id_ed25519");
+    }
+
+    #[test]
+    fn default_key_fallback_leaves_non_key_methods_untouched() {
+        // Empty is meaningful for these methods; supplying a key path would
+        // silently change the credential the user selected.
+        for method in ["password", "agent", "none", ""] {
+            let mut ssh = config("host");
+            ssh.auth_method = method.to_string();
+            let resolved = apply_default_identity_file_with(ssh, |_| true);
+            assert_eq!(resolved.key_path, "", "method {method:?} must not get a default key");
+        }
+    }
+
+    #[test]
+    fn default_key_fallback_keeps_an_explicit_path() {
+        let mut ssh = config("host");
+        ssh.auth_method = "key".to_string();
+        ssh.key_path = "/explicit/key".to_string();
+        let resolved = apply_default_identity_file_with(ssh, |_| true);
+        assert_eq!(resolved.key_path, "/explicit/key");
+    }
+
+    #[test]
+    fn default_key_fallback_is_skipped_when_no_candidate_exists() {
+        // A user with no keys keeps the previous behavior (and its clearer
+        // error) rather than getting an unreadable path.
+        let mut ssh = config("host");
+        ssh.auth_method = "key".to_string();
+        let resolved = apply_default_identity_file_with(ssh, |_| false);
+        assert_eq!(resolved.key_path, "");
+    }
+
+    #[test]
+    fn an_ssh_config_identity_file_still_wins_over_the_default_key() {
+        let mut ssh = config("myserver");
+        ssh.auth_method = "key".to_string();
+        let mut config_entry = entry("myserver");
+        config_entry.identity_file = Some("~/.ssh/config_declared_key".to_string());
+        // The config's own IdentityFile is filled first, so the later
+        // default-key pass must leave it alone.
+        let resolved = apply_default_identity_file_with(apply_host_entry(&ssh, config_entry), |_| true);
+        assert_eq!(resolved.key_path, "~/.ssh/config_declared_key");
+    }
+
     fn jump_entry(alias: &str, host_name: &str, proxy_jump: Option<&str>) -> SshConfigHostEntry {
         SshConfigHostEntry {
             alias: alias.to_string(),
@@ -508,6 +665,7 @@ mod tests {
             user: None,
             identity_file: None,
             proxy_jump: proxy_jump.map(str::to_string),
+            proxy_command: None,
         }
     }
 

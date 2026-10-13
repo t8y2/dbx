@@ -30,11 +30,7 @@ function piContent(content) {
   for (const item of content ?? []) {
     if (item?.type === "text" && typeof item.text === "string") {
       result.push({ type: "text", text: item.text });
-    } else if (
-      item?.type === "image" &&
-      typeof item.data === "string" &&
-      typeof item.mimeType === "string"
-    ) {
+    } else if (item?.type === "image" && typeof item.data === "string" && typeof item.mimeType === "string") {
       result.push({ type: "image", data: item.data, mimeType: item.mimeType });
     }
   }
@@ -81,9 +77,7 @@ export default async function registerDbxMcpBridge(pi) {
   child.on("exit", (code, signal) => {
     closed = true;
     const detail = stderr.trim();
-    rejectPending(
-      `DBX MCP process exited (${signal ?? code ?? "unknown"})${detail ? `: ${detail}` : ""}`,
-    );
+    rejectPending(`DBX MCP process exited (${signal ?? code ?? "unknown"})${detail ? `: ${detail}` : ""}`);
   });
 
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });

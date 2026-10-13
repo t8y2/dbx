@@ -1,4 +1,4 @@
-import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterIndentStyle, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { formatSqlLayout, type SqlLayoutOptions } from "@/lib/sql/layout";
 import { looksLikeXml } from "@/lib/sql/autoFormat";
 import { compressCypherText, formatCypherText } from "@/lib/sql/cypherFormatter";
@@ -8,6 +8,37 @@ export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "
 export const MAX_SQL_FORMAT_CHARS = 1_000_000;
 
 type SqlFormatterModule = typeof import("sql-formatter");
+
+// MySQL's REPLACE is both a write statement and a string function. The
+// upstream tokenizer prioritizes the statement token, which cannot appear in
+// a CASE branch. Resolve calls by the next non-comment token without changing
+// REPLACE INTO / LOW_PRIORITY / DELAYED statements or the source text.
+let mysqlFunctionSafeDialect: SqlFormatterModule["mysql"] | null = null;
+
+function resolveMysqlFunctionSafeDialect(sqlFormatter: SqlFormatterModule): SqlFormatterModule["mysql"] {
+  if (mysqlFunctionSafeDialect) return mysqlFunctionSafeDialect;
+
+  const options = sqlFormatter.mysql.tokenizerOptions;
+  mysqlFunctionSafeDialect = {
+    ...sqlFormatter.mysql,
+    tokenizerOptions: {
+      ...options,
+      postProcess: (inputTokens) => {
+        const tokens = options.postProcess?.(inputTokens) ?? inputTokens;
+        return tokens.map((token, index) => {
+          if (token.type !== "RESERVED_CLAUSE" || token.text !== "REPLACE") return token;
+
+          let nextIndex = index + 1;
+          while (tokens[nextIndex]?.type === "LINE_COMMENT" || tokens[nextIndex]?.type === "BLOCK_COMMENT") nextIndex += 1;
+          if (tokens[nextIndex]?.type !== "OPEN_PAREN") return token;
+
+          return { ...token, type: "RESERVED_FUNCTION_NAME" as (typeof tokens)[number]["type"] };
+        });
+      },
+    },
+  };
+  return mysqlFunctionSafeDialect;
+}
 
 // sql-formatter classifies ClickHouse date-part abbreviations as reserved
 // keywords even where ClickHouse accepts them as ordinary identifiers. Keep
@@ -26,6 +57,28 @@ function resolveClickHouseIdentifierSafeDialect(sqlFormatter: SqlFormatterModule
     },
   };
   return clickHouseIdentifierSafeDialect;
+}
+
+// sql-formatter's plsql dialect only registers a minimal subset of character
+// functions (e.g. SUBSTR, INSTR, LENGTH) and omits Oracle's byte/multibyte/code-point
+// variants. Register them as reserved function names so functionCase normalizes them.
+const ORACLE_EXTENDED_FUNCTION_NAMES = ["SUBSTRB", "SUBSTR2", "SUBSTR4", "SUBSTRC", "INSTRB", "INSTR2", "INSTR4", "INSTRC", "LENGTHB", "LENGTH2", "LENGTH4", "LENGTHC"];
+let oracleExtendedDialect: SqlFormatterModule["plsql"] | null = null;
+
+function resolveOracleExtendedDialect(sqlFormatter: SqlFormatterModule): SqlFormatterModule["plsql"] {
+  if (oracleExtendedDialect) return oracleExtendedDialect;
+
+  const existingFunctions = new Set(sqlFormatter.plsql.tokenizerOptions.reservedFunctionNames);
+  const extraFunctions = ORACLE_EXTENDED_FUNCTION_NAMES.filter((name) => !existingFunctions.has(name));
+
+  oracleExtendedDialect = {
+    ...sqlFormatter.plsql,
+    tokenizerOptions: {
+      ...sqlFormatter.plsql.tokenizerOptions,
+      reservedFunctionNames: [...sqlFormatter.plsql.tokenizerOptions.reservedFunctionNames, ...extraFunctions],
+    },
+  };
+  return oracleExtendedDialect;
 }
 
 export function canFormatSqlForDatabaseType(dbType: string | null | undefined): boolean {
@@ -114,6 +167,18 @@ function formatterLanguage(dialect: SqlFormatDialect) {
   }
 }
 
+/**
+ * sql-formatter's language key for a format dialect, or `null` for a dialect
+ * that has no SQL grammar at all (Cypher — see {@link formatSqlText}, which
+ * routes it to the Cypher formatter before reaching sql-formatter).
+ *
+ * Exported so callers that need sql-formatter's own tokenization — keyword-only
+ * case conversion — resolve the dialect exactly the way formatting does.
+ */
+export function formatterLanguageForDialect(dialect: SqlFormatDialect): string | null {
+  return dialect === "cypher" ? null : formatterLanguage(dialect);
+}
+
 function splitTrailingStandaloneDot(sql: string): { body: string; suffix: string } | null {
   const match = /\s+\.(\s*)$/.exec(sql);
   if (!match || match.index === 0) return null;
@@ -180,7 +245,7 @@ function restoreProtectedEmptyLines(sql: string, markers: readonly string[]): st
 
   const markerSet = new Set(markers);
   const lines = sql.split(/\r\n|\r|\n/);
-  for (let index = 0; index < lines.length; ) {
+  for (let index = 0; index < lines.length;) {
     if (!markerSet.has(lines[index].trim())) {
       index += 1;
       continue;
@@ -367,7 +432,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
           },
         }
       : options;
-  const resolvedDialect = dialect === "clickhouse" ? resolveClickHouseIdentifierSafeDialect(sqlFormatter) : undefined;
+  const resolvedDialect = dialect === "mysql" ? resolveMysqlFunctionSafeDialect(sqlFormatter) : dialect === "clickhouse" ? resolveClickHouseIdentifierSafeDialect(sqlFormatter) : dialect === "oracle" ? resolveOracleExtendedDialect(sqlFormatter) : undefined;
   const formatWithFallback = (input: string): string => {
     try {
       if (resolvedDialect) {
@@ -396,11 +461,14 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     return emptyLineProtection ? restoreProtectedEmptyLines(laidOut, emptyLineProtection.markers) : laidOut;
   };
 
-  // DBX's own layout printer produces the default style. It needs the AST and
-  // sql-formatter's internal layout machinery, so it can decline an input — an
-  // unparseable statement, an internal shape that moved. `null` means "use the
-  // public formatter", which is also what the tabular indent styles ask for:
-  // those are an alternative layout this printer deliberately does not reproduce.
+  // DBX's own layout printer produces the default `dbx` style. It needs the AST
+  // and sql-formatter's internal layout machinery, so it can decline an input —
+  // an unparseable statement, an internal shape that moved. `null` means "use
+  // the public formatter", which is also what the `classic` layout style asks
+  // for: that style is sql-formatter's own layout, i.e. the pre-v0.6.16 default,
+  // and the applySqlFormatterLayout post-passes exist to serve it. The tabular
+  // indent styles likewise are an alternative layout this printer deliberately
+  // does not reproduce.
   const layoutOptions: Partial<SqlLayoutOptions> = {
     lineWidth: normalizedSettings.expressionWidth,
     indentWidth: normalizedSettings.tabWidth,
@@ -409,8 +477,9 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     fromClauseSourceOnSameLine: normalizedSettings.fromClauseLayout === "sameLine",
     keywordCase: normalizedSettings.keywordCase,
     logicalOperatorNewline: normalizedSettings.logicalOperatorNewline,
+    commaPosition: normalizedSettings.commaPosition,
   };
-  const usesDefaultStyle = normalizedSettings.indentStyle === "standard";
+  const usesDefaultStyle = normalizedSettings.layoutStyle === "dbx" && normalizedSettings.indentStyle === "standard";
 
   const formatOnce = async (input: string): Promise<string> => {
     const laidOut = usesDefaultStyle ? await formatSqlLayout({ sql: input, language, dialectOptions: resolvedDialect, cfg: formatterOptions, options: layoutOptions }) : null;
@@ -644,7 +713,7 @@ function normalizeLikeOperatorCase(sql: string, settings: SqlFormatterSettings, 
   return restoreSpans(normalized, spans);
 }
 
-function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
+function keepFromClauseAndFirstSourceOnSameLine(sql: string, indentStyle: SqlFormatterIndentStyle): string {
   const lines = sql.split("\n");
   for (let index = 0; index < lines.length - 1; index += 1) {
     const clauseMatch = lines[index].match(/^(\s*)FROM\s*$/i);
@@ -660,12 +729,68 @@ function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
 
     const clauseIndent = clauseMatch[1];
     const sourceIndent = sourceMatch[1];
-    const separator = sourceIndent.startsWith(clauseIndent) ? sourceIndent.slice(clauseIndent.length) : " ";
+    // The source line's indent is the gap to reuse only for the tabular styles:
+    // there it is the column sql-formatter aligned every clause to, and
+    // collapsing it would destroy that alignment (`FROM      t`). Under the
+    // standard indent the same indent is just the clause body's step, so reusing
+    // it doubles the gap (`FROM  t`) — the upstream one-line form is a single
+    // space, and that is what merging is supposed to produce.
+    const separator = indentStyle === "standard" ? " " : sourceIndent.startsWith(clauseIndent) ? sourceIndent.slice(clauseIndent.length) : " ";
     lines[index] = `${lines[index]}${separator || " "}${source}`;
     lines.splice(index + 1, 1);
     index -= 1;
   }
   return lines.join("\n");
+}
+
+function formatLeadingCommas(sql: string, dialect: SqlFormatDialect = "generic"): string {
+  const { masked, spans } = maskStringAndCommentSpans(sql, dialect);
+  const lines = masked.split("\n");
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = lines[i].match(/^(.*),\s*((?:\x00\d+\x00\s*)*)$/);
+    if (!match || match[1].trim().length === 0) continue;
+
+    let j = i + 1;
+    while (j < lines.length) {
+      const trimmed = lines[j].trim();
+      if (!trimmed) {
+        j += 1;
+        continue;
+      }
+      if (/^(?:\x00\d+\x00\s*)+$/.test(trimmed)) {
+        j += 1;
+        continue;
+      }
+      break;
+    }
+    if (j >= lines.length) continue;
+
+    const nextTrimmed = lines[j].trim();
+    if (nextTrimmed.startsWith(")") || nextTrimmed.startsWith("]") || nextTrimmed.startsWith(";") || nextTrimmed.startsWith(",")) {
+      continue;
+    }
+
+    const codeBeforeComma = match[1].trimEnd();
+    const trailingComments = match[2] ? (codeBeforeComma.endsWith(" ") ? match[2] : ` ${match[2]}`) : "";
+    lines[i] = codeBeforeComma + trailingComments;
+
+    const nextIndentMatch = lines[j].match(/^(\s*)/);
+    const nextIndent = nextIndentMatch ? nextIndentMatch[1] : "";
+    const nextRest = lines[j].slice(nextIndent.length);
+    const currentIndentMatch = lines[i].match(/^(\s*)/);
+    const currentIndent = currentIndentMatch ? currentIndentMatch[1] : "";
+
+    if (currentIndent === nextIndent) {
+      lines[j] = `${nextIndent}, ${nextRest}`;
+    } else if (nextIndent.length >= 2) {
+      lines[j] = `${nextIndent.slice(0, -2)}, ${nextRest}`;
+    } else {
+      lines[j] = `${nextIndent}, ${nextRest}`;
+    }
+  }
+
+  return restoreSpans(lines.join("\n"), spans);
 }
 
 /**
@@ -683,7 +808,8 @@ function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
 function applySqlFormatterLayout(sql: string, settings: SqlFormatterSettings, dialect: SqlFormatDialect): string {
   let formatted = normalizeLikeOperatorCase(sql, settings, dialect);
   if (settings.logicalOperatorNewline === "none") formatted = keepLogicalOperatorsOnSameLine(formatted, dialect);
-  if (settings.fromClauseLayout === "sameLine") formatted = keepFromClauseAndFirstSourceOnSameLine(formatted);
+  if (settings.fromClauseLayout === "sameLine") formatted = keepFromClauseAndFirstSourceOnSameLine(formatted, settings.indentStyle);
+  if (settings.commaPosition === "before") formatted = formatLeadingCommas(formatted, dialect);
   return formatted;
 }
 

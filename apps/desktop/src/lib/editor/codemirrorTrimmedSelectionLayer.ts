@@ -163,11 +163,59 @@ function markerClass(rects: TrimmedSelectionRect[], index: number): string {
   return classes.join(" ");
 }
 
+/**
+ * A whole selected line's rectangles, plus the line block they were measured
+ * against. The block is what tells a later frame whether the measurement is
+ * still valid: a line's own top and height only move when its layout changes,
+ * and comparing the two of them is free next to re-running `coordsAtPos`.
+ */
+interface CachedLineRects {
+  top: number;
+  height: number;
+  rects: TrimmedSelectionRect[];
+}
+
+/**
+ * A line block is only allowed to move by less than half a pixel before its
+ * cached rectangles are re-measured. The heights CodeMirror reports while it is
+ * still refining a viewport are fractional and can wobble by a fraction of a
+ * pixel, and re-measuring for that would put the cost straight back.
+ */
+const CACHED_BLOCK_TOLERANCE = 0.5;
+
+/**
+ * Upper bound on the per-line cache. A selection that spans more lines than
+ * this keeps the memory bounded and simply re-measures the overflow, which is
+ * what the layer did for every line before the cache.
+ */
+const MAX_CACHED_SELECTION_LINES = 20_000;
+
 export function trimmedSelectionLayer() {
+  // Rectangles are produced in layer coordinates, which are measured from the
+  // scroll container's content origin, so they do not move while the viewport
+  // scrolls — only the layer's own offset does. A line that is wholly selected
+  // keeps the same rectangle for as long as it stays selected, so it is
+  // measured once instead of on every scroll frame. Without this a select-all
+  // re-measured each visible line (four `coordsAtPos` calls plus a visual-line
+  // binary search apiece) on every frame of the scroll.
+  const wholeLineRects = new Map<number, CachedLineRects>();
+  let geometrySignature = "";
+
+  // Line metrics change with a font zoom without any document or selection
+  // transaction, so they are part of the cache key rather than only an
+  // invalidation on `geometryChanged`.
+  const currentGeometrySignature = (view: EditorView) => `${view.scaleX}:${view.scaleY}:${view.defaultCharacterWidth}:${view.defaultLineHeight}`;
+
   return layer({
     above: false,
     class: "cm-trimmedSelectionLayer",
     markers(view) {
+      const signature = currentGeometrySignature(view);
+      if (signature !== geometrySignature) {
+        geometrySignature = signature;
+        wholeLineRects.clear();
+      }
+
       const markers: InstanceType<typeof RectangleMarker>[] = [];
       const base = layerBase(view);
 
@@ -184,7 +232,31 @@ export function trimmedSelectionLayer() {
             const from = Math.max(pos, line.from);
             const to = Math.min(endPos, line.to);
             const includesLineBreak = endPos > line.to && range.to > line.to;
-            rects.push(...markerRectsForLineRange(view, from, to, line.from, line.to, includesLineBreak, base));
+            // Only a line the selection covers in full, line break included,
+            // has a rectangle that is independent of where the viewport sits:
+            // the trimming only has to reason about the two lines the selection
+            // starts and ends on.
+            const coversWholeLine = from === line.from && to === line.to && includesLineBreak;
+            let measured: TrimmedSelectionRect[] | undefined;
+            if (coversWholeLine) {
+              const block = view.lineBlockAt(line.from);
+              const cached = wholeLineRects.get(line.from);
+              if (cached && Math.abs(cached.top - block.top) < CACHED_BLOCK_TOLERANCE && Math.abs(cached.height - block.height) < CACHED_BLOCK_TOLERANCE) {
+                measured = cached.rects;
+              } else {
+                measured = markerRectsForLineRange(view, from, to, line.from, line.to, includesLineBreak, base);
+                // An empty measurement means the line was not laid out when it
+                // was taken; caching that would leave the line unpainted until
+                // something else invalidated it.
+                if (measured.length) {
+                  if (wholeLineRects.size >= MAX_CACHED_SELECTION_LINES) wholeLineRects.clear();
+                  wholeLineRects.set(line.from, { top: block.top, height: block.height, rects: measured });
+                }
+              }
+            } else {
+              measured = markerRectsForLineRange(view, from, to, line.from, line.to, includesLineBreak, base);
+            }
+            rects.push(...measured);
 
             const next = line.to + 1;
             if (next <= pos) break;
@@ -201,6 +273,15 @@ export function trimmedSelectionLayer() {
       return markers;
     },
     update(update) {
+      // A scroll only moves the viewport, and the cached rectangles are
+      // measured from the content origin, so they survive it — including the
+      // `geometryChanged` an update carries while a scroll is measuring lines
+      // for the first time, which is most of the frames of a long scroll and
+      // used to throw every cached line away. Anything that can move a line's
+      // own rectangle — an edit, a different selection, a re-measure after a
+      // font or theme change — is caught either here or by the block and
+      // geometry checks in `markers` above.
+      if (update.docChanged || update.selectionSet) wholeLineRects.clear();
       return update.docChanged || update.selectionSet || update.viewportChanged || update.geometryChanged;
     },
   });

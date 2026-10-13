@@ -61,7 +61,7 @@ export interface PluginShortcutEntry {
   disabled: boolean;
 }
 
-export function collectPluginShortcuts(registry: FrontendPluginRegistry): PluginShortcutEntry[] {
+export function collectPluginShortcuts(registry: FrontendPluginRegistry, includeUnboundWorkbenches = false): PluginShortcutEntry[] {
   const result = new Map<string, PluginShortcutEntry>();
   const add = (pluginId: string, kind: PluginShortcutEntry["kind"], targetId: string, label: string, icon?: string, command?: PluginCommandContribution, rootUri?: string) => {
     const plugin = registry.findPlugin(pluginId)?.plugin;
@@ -80,7 +80,7 @@ export function collectPluginShortcuts(registry: FrontendPluginRegistry): Plugin
       rootUri,
       disabled: command
         ? !evaluatePluginCommandConditions(command.enablement?.all, {
-            surface: command.action.presentation === "panel" ? "panel" : "tab",
+            surface: command.action.presentation === "panel" ? "dock" : "tab",
             "connection.state": "none",
             readOnly: false,
           })
@@ -92,7 +92,11 @@ export function collectPluginShortcuts(registry: FrontendPluginRegistry): Plugin
   const connected = new Set(registry.listConnectionProviders().map(({ plugin }) => plugin.manifest.id));
   for (const { plugin, contribution } of registry.listWorkbenches()) {
     const pluginId = plugin.manifest.id;
-    if (connected.has(pluginId)) continue;
+    if (connected.has(pluginId)) {
+      // Detail launch may expose an independent workbench alongside connection-bound ones.
+      const bound = registry.listConnectionProviders().some((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.workbench === contribution.id);
+      if (!includeUnboundWorkbenches || bound) continue;
+    }
     const command = registry.findCommandTargetingWorkbench(pluginId, contribution.id);
     if (command) {
       // A declared toolbar visibility rule must not be bypassed by the legacy fallback.

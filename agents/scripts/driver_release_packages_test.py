@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+import hashlib
 import io
 import json
+import secrets
 import subprocess
 import tarfile
 import tempfile
@@ -9,7 +11,72 @@ import zipfile
 from pathlib import Path
 
 from build_driver_zips import build_driver_zips, remove_raw_driver_artifacts
+from validate_agents import CRATE_NATIVE_AGENT_MODULES, NATIVE_ONLY_AGENT_MODULES
 from version_agent_artifacts import NATIVE_DRIVERS, version_agent_artifacts
+
+
+AGENTS_ROOT = Path(__file__).resolve().parent.parent
+
+
+def native_only_modules() -> set[str]:
+    declared = {
+        name
+        for name, relative in {**NATIVE_ONLY_AGENT_MODULES, **CRATE_NATIVE_AGENT_MODULES}.items()
+        if (AGENTS_ROOT / relative).exists()
+    }
+    return declared
+
+
+class NativeReleaseCoverageTest(unittest.TestCase):
+    """Guards the hand-maintained native module list in the release packaging.
+
+    `version_agent_artifacts` renames `dbx-agent-<module>-<platform>` into the
+    versioned name the registry generator looks for. A native module missing from
+    its list is not a loud failure: the raw artifact is dropped, the module never
+    reaches `agent-registry.json`, and the driver simply disappears from the app.
+    `oracle-oci` was lost exactly that way, so cross-check the list against the
+    modules `validate_agents` treats as native-only rather than trusting it to be
+    maintained by hand.
+    """
+
+    def test_lists_every_native_only_module(self) -> None:
+        declared = native_only_modules()
+        listed = set(NATIVE_DRIVERS)
+
+        self.assertEqual(
+            sorted(listed - declared),
+            [],
+            "NATIVE_DRIVERS lists entries validate_agents no longer declares native-only",
+        )
+        self.assertEqual(
+            sorted(declared - listed),
+            [],
+            "native-only modules missing from version_agent_artifacts.NATIVE_DRIVERS",
+        )
+
+    def test_every_listed_module_has_a_version(self) -> None:
+        versions = json.loads((AGENTS_ROOT / "versions.json").read_text(encoding="utf-8"))
+
+        missing = sorted(name for name in NATIVE_DRIVERS if not versions.get(name))
+
+        self.assertEqual(missing, [], "native modules without a versions.json entry")
+
+    def test_versions_platform_limited_native_artifacts(self) -> None:
+        # A module published for one platform only (Oracle OCI is Windows x64)
+        # must still be versioned; platforms it does not publish are skipped.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            source = release_dir / "dbx-agent-oracle-oci-windows-x64.exe"
+            source.write_bytes(b"MZtest-oracle-oci-agent")
+            versions = {driver: "0.1.0" for driver in NATIVE_DRIVERS}
+            versions["oracle-oci"] = "0.1.7"
+
+            renamed = version_agent_artifacts(release_dir, versions)
+            versioned = release_dir / "dbx-agent-oracle-oci-0.1.7-windows-x64.exe"
+
+            self.assertEqual(renamed, [versioned])
+            self.assertFalse(source.exists())
+            self.assertEqual(versioned.read_bytes(), b"MZtest-oracle-oci-agent")
 
 
 class DriverReleasePackagesTest(unittest.TestCase):
@@ -41,6 +108,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
             versions = {
                 "h2": "0.2.5",
                 "oracle": "0.1.10",
+                "oracle-oci": "0.1.0",
                 "xugu": "0.1.20",
                 "kingbase": "0.1.34",
                 "iotdb": "0.1.30",
@@ -398,6 +466,145 @@ class DriverReleasePackagesTest(unittest.TestCase):
             with zipfile.ZipFile(arm64_bundle) as archive:
                 self.assertIn("jre/dbx-jre-21-windows-aarch64.tar.zst", archive.namelist())
                 self.assertIn(f"drivers/{kafka_filename}", archive.namelist())
+
+
+class DriverDeltaPatchTest(unittest.TestCase):
+    """Incremental `zstd --patch-from` deltas emitted by build_driver_zips."""
+
+    @staticmethod
+    def _incompressible_filler(size: int) -> bytes:
+        # Deterministic, incompressible shared payload: two packages built from
+        # it stay ~`size` bytes large while their version differences stay a
+        # few bytes, so the delta ratio reflects the small real change.
+        chunks = []
+        counter = 0
+        while sum(len(chunk) for chunk in chunks) < size:
+            chunks.append(hashlib.sha256(f"demo-filler-{counter}".encode()).digest())
+            counter += 1
+        return b"".join(chunks)[:size]
+
+    @staticmethod
+    def _write_release(release_dir: Path, version: str, jar_payload: bytes) -> None:
+        jar = release_dir / f"dbx-agent-demo-{version}.jar"
+        jar.write_bytes(jar_payload)
+        registry = {
+            "jres": {"21": {"version": "21", "platforms": {}}},
+            "drivers": {
+                "demo": {
+                    "version": version,
+                    "label": "Demo",
+                    "min_app_version": "0.6.0",
+                    "jre": "21",
+                    "jar": {"url": f"https://example.com/{jar.name}", "size": jar.stat().st_size},
+                }
+            },
+        }
+        (release_dir / "agent-registry.json").write_text(json.dumps(registry), encoding="utf-8")
+
+    @staticmethod
+    def _zstd_available() -> bool:
+        try:
+            subprocess.run(["zstd", "--version"], capture_output=True, check=True)
+            return True
+        except (OSError, subprocess.CalledProcessError):
+            return False
+
+    def _build_previous_release(self, release_dir: Path) -> None:
+        filler = self._incompressible_filler(96 * 1024)
+        jar_v1 = b"PK-demo-jar-v1\x00" + filler + b"\x00trailer-v1"
+        self._write_release(release_dir, "0.1.0", jar_v1)
+        build_driver_zips(release_dir)
+        registry = json.loads((release_dir / "agent-registry.json").read_text(encoding="utf-8"))
+        package = release_dir / "dbx-agent-demo-0.1.0.tar.zst"
+        # Point the previous registry at the local package so the generator
+        # fetches its base the same way production fetches the previous release.
+        registry["drivers"]["demo"]["jar"]["url"] = package.resolve().as_uri()
+        (release_dir / "previous-agent-registry.json").write_text(json.dumps(registry), encoding="utf-8")
+
+    def test_delta_patch_generated_and_registry_annotated(self) -> None:
+        if not self._zstd_available():
+            self.skipTest("zstd CLI is unavailable")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            self._build_previous_release(release_dir)
+
+            filler = self._incompressible_filler(96 * 1024)
+            jar_v2 = b"PK-demo-jar-v2\x00" + filler + b"\x00trailer-v2"
+            self._write_release(release_dir, "0.2.0", jar_v2)
+            previous = json.loads((release_dir / "previous-agent-registry.json").read_text(encoding="utf-8"))
+            build_driver_zips(release_dir, previous, delta_min_full_size=0)
+
+            package_v2 = release_dir / "dbx-agent-demo-0.2.0.tar.zst"
+            delta_path = release_dir / "dbx-agent-demo-0.1.0-to-0.2.0.tar.zst.delta"
+            self.assertTrue(delta_path.is_file(), "delta file must be written into the release dir")
+            self.assertLess(delta_path.stat().st_size, package_v2.stat().st_size)
+
+            registry = json.loads((release_dir / "agent-registry.json").read_text(encoding="utf-8"))
+            delta = registry["drivers"]["demo"]["jar"].get("delta")
+            self.assertIsNotNone(delta, "registry must carry the delta block")
+            self.assertEqual(delta["base_version"], "0.1.0")
+            self.assertEqual(delta["size"], delta_path.stat().st_size)
+            self.assertEqual(delta["sha256"], hashlib.sha256(delta_path.read_bytes()).hexdigest())
+            self.assertTrue(delta["url"].endswith(delta_path.name))
+            self.assertEqual(delta["url"].rpartition("/")[0], "https://example.com")
+
+            # The delta must reconstruct the exact full package from the base.
+            reconstructed = release_dir / "reconstructed.tar.zst"
+            subprocess.run(
+                [
+                    "zstd", "-q", "-d", "--patch-from",
+                    str(release_dir / "dbx-agent-demo-0.1.0.tar.zst"),
+                    str(delta_path), "-o", str(reconstructed), "--force",
+                ],
+                check=True,
+            )
+            self.assertEqual(reconstructed.read_bytes(), package_v2.read_bytes())
+
+    def test_delta_skipped_when_ratio_exceeds_threshold(self) -> None:
+        if not self._zstd_available():
+            self.skipTest("zstd CLI is unavailable")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            self._build_previous_release(release_dir)
+            # A completely unrelated payload produces a delta as large as the
+            # full package; the generator must drop it and leave no block.
+            self._write_release(release_dir, "0.2.0", secrets.token_bytes(96 * 1024))
+            previous = json.loads((release_dir / "previous-agent-registry.json").read_text(encoding="utf-8"))
+            build_driver_zips(release_dir, previous, delta_min_full_size=0, delta_max_ratio=0.5)
+
+            self.assertEqual(list(release_dir.glob("*.delta")), [])
+            registry = json.loads((release_dir / "agent-registry.json").read_text(encoding="utf-8"))
+            self.assertIsNone(registry["drivers"]["demo"]["jar"].get("delta"))
+
+    def test_delta_skipped_for_unchanged_version(self) -> None:
+        if not self._zstd_available():
+            self.skipTest("zstd CLI is unavailable")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            self._build_previous_release(release_dir)
+            # Same version in the previous registry: no delta, and the previous
+            # artifact must not even be fetched (its URL is intentionally dead).
+            previous = json.loads((release_dir / "previous-agent-registry.json").read_text(encoding="utf-8"))
+            previous["drivers"]["demo"]["jar"]["url"] = "https://example.invalid/no-such-package.tar.zst"
+            build_driver_zips(release_dir, previous, delta_min_full_size=0)
+            self.assertEqual(list(release_dir.glob("*.delta")), [])
+
+    def test_cleanup_keeps_delta_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            delta = release_dir / "dbx-agent-demo-0.1.0-to-0.2.0.tar.zst.delta"
+            delta.write_bytes(b"delta-frame")
+            raw = release_dir / "dbx-agent-demo-0.2.0.jar"
+            raw.write_bytes(b"raw")
+            removed = remove_raw_driver_artifacts(release_dir)
+            self.assertEqual(removed, [raw])
+            self.assertTrue(delta.is_file())
+
+    def test_release_uploads_delta_files_to_r2(self) -> None:
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/agents-release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('--include "dbx-agent-*.tar.zst.delta"', workflow)
 
 
 if __name__ == "__main__":

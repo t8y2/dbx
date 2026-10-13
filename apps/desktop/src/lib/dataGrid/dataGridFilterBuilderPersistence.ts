@@ -171,6 +171,15 @@ export function saveDataGridStructuredFilterState(cacheKey: string, state: DataG
   persistToStorage();
 }
 
+export function copyDataGridStructuredFilterStatesForTab(sourceTabId: string, targetTabId: string) {
+  if (sourceTabId === targetTabId) return;
+  ensureHydrated();
+  const entries = [...structuredFilterStateCache.entries()].filter(([key]) => key === sourceTabId || key.startsWith(`${sourceTabId}-`));
+  for (const [key, state] of entries) {
+    saveDataGridStructuredFilterState(`${targetTabId}${key.slice(sourceTabId.length)}`, state);
+  }
+}
+
 export function clearDataGridStructuredFilterStatesForTab(tabId: string) {
   ensureHydrated();
   structuredFilterStateCache.delete(tabId);

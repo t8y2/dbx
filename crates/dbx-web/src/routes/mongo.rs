@@ -474,6 +474,15 @@ pub async fn find_documents(
         ),
     )
     .await?;
+    if result.documents.is_empty() {
+        dbx_core::mongo_ops::ensure_collection_exists_for_query(
+            &state.app,
+            &req.connection_id,
+            &database,
+            &req.collection,
+        )
+        .await?;
+    }
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 

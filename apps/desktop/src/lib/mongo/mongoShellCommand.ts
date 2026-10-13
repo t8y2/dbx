@@ -1455,25 +1455,26 @@ function splitMongoSegmentAtSoftStarts(segment: MongoTextRange): MongoTextRange[
   for (let index = 1; index < boundaries.length; index += 1) {
     const boundary = boundaries[index] ?? 0;
     const candidate = trimMongoOuterCommentRange(segment.text, start, boundary);
-    // Only accept newline-based splitting when every slice is a valid command;
-    // otherwise keep the original text intact and let normal parsing reject it.
-    if (!candidate || !parseMongoCommand(candidate.text)) return [segment];
-    segments.push({
-      from: segment.from + candidate.from,
-      to: segment.from + candidate.to,
-      text: candidate.text,
-    });
+    if (candidate) pushMongoSlice(segments, segment, candidate);
     start = boundary;
   }
 
   const last = trimMongoOuterCommentRange(segment.text, start, segment.text.length);
-  if (!last || !parseMongoCommand(last.text)) return [segment];
-  segments.push({
-    from: segment.from + last.from,
-    to: segment.from + last.to,
-    text: last.text,
-  });
-  return segments;
+  if (last) pushMongoSlice(segments, segment, last);
+  // Splitting is an improvement only when at least one slice really is a command;
+  // otherwise keep the text intact so the normal parser reports the failure once
+  // instead of once per line.
+  return segments.some((slice) => isMongoCommandText(slice.text)) && segments.length > 1 ? segments : [segment];
+}
+
+function pushMongoSlice(segments: MongoTextRange[], parent: MongoTextRange, slice: MongoTextRange): void {
+  segments.push({ from: parent.from + slice.from, to: parent.from + slice.to, text: slice.text });
+}
+
+/** Does this text start like a shell command (`db…`, `use …`, `show dbs`)? */
+export function isMongoCommandText(text: string): boolean {
+  const trimmed = text.trimStart();
+  return isMongoCommandLineStart(trimmed, 0) || /^rs[.\[]|^sh[.\[]/i.test(trimmed);
 }
 
 function mongoTopLevelCommandLineStarts(segment: string): number[] {
@@ -1485,15 +1486,26 @@ function mongoTopLevelCommandLineStarts(segment: string): number[] {
   let blockComment = false;
   let lineStart = 0;
   let firstNonWhitespaceOnLine = -1;
+  // Does the line we just finished close a statement? Used so a JS helper line
+  // between two commands (`var ids = [...]`) still starts its own statement instead
+  // of being glued onto the command above it.
+  let lineHadCode = false;
+  let closesStatement = false;
+  let afterClosedStatement = false;
 
   for (let i = 0; i < segment.length; i += 1) {
     const char = segment[i] ?? "";
     const next = segment[i + 1] ?? "";
 
-    if (char === "\n") {
+    // A lone CR is a line break too (pasted shell history, old Mac files); CRLF is
+    // handled by the LF branch once the CR falls inside the same line.
+    if (char === "\n" || (char === "\r" && next !== "\n")) {
       if (lineComment) lineComment = false;
+      afterClosedStatement = depth === 0 && lineHadCode && closesStatement;
       lineStart = i + 1;
       firstNonWhitespaceOnLine = -1;
+      lineHadCode = false;
+      closesStatement = false;
       continue;
     }
 
@@ -1530,16 +1542,31 @@ function mongoTopLevelCommandLineStarts(segment: string): number[] {
 
     if (char === '"' || char === "'" || char === "`") {
       if (firstNonWhitespaceOnLine === -1 && !/\s/.test(char)) firstNonWhitespaceOnLine = i;
+      lineHadCode = true;
+      closesStatement = false;
       quote = char;
       continue;
     }
 
+    if (/\s/.test(char)) continue;
+
     if (char === "{" || char === "[" || char === "(") depth += 1;
-    else if ((char === "}" || char === "]" || char === ")") && depth > 0) depth -= 1;
+    else if (char === "}" || char === "]" || char === ")") {
+      if (depth > 0) depth -= 1;
+      closesStatement = depth === 0;
+    } else if (char === ";" && depth === 0) {
+      closesStatement = true;
+    } else {
+      closesStatement = false;
+    }
+    lineHadCode = true;
 
     if (firstNonWhitespaceOnLine === -1 && !/\s/.test(char)) {
       firstNonWhitespaceOnLine = i;
-      if (depth === 0 && char !== "." && isMongoCommandLineStart(segment, i)) starts.push(i);
+      if (depth === 0 && char !== "." && (isMongoCommandLineStart(segment, i) || afterClosedStatement)) {
+        starts.push(i);
+        afterClosedStatement = false;
+      }
     }
   }
 

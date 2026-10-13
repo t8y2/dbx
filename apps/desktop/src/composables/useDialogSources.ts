@@ -6,7 +6,7 @@ import { useToast } from "@/composables/useToast";
 import { rememberExportPassphrase } from "@/lib/backend/exportPassphraseSession";
 import { hasSidebarLayoutEntries } from "@/lib/sidebar/sidebarLayout";
 import type { ConnectionConfigBundle } from "@/lib/connection/connectionConfigTransfer";
-import type { ConnectionConfig, SidebarLayout } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/database";
 
 const showTransferDialog = ref(false);
 const transferTaskId = ref<string | null>(null);
@@ -22,6 +22,10 @@ const showMongoDatabaseDumpDialog = ref(false);
 const mongoDatabaseDumpPrefillConnectionId = ref("");
 const mongoDatabaseDumpPrefillDatabase = ref("");
 const mongoDatabaseDumpMode = ref<"dump" | "restore">("dump");
+const showDamengDumpDialog = ref(false);
+const damengDumpPrefillConnectionId = ref("");
+const damengDumpPrefillDatabase = ref("");
+const damengDumpMode = ref<"export" | "import">("export");
 const showTableDataGenerateDialog = ref(false);
 const tableDataGenerateSessionId = ref<string | null>(null);
 const showFieldLineageDialog = ref(false);
@@ -38,6 +42,7 @@ const pendingImportContent = ref("");
 const showConfigConnectionSelectDialog = ref(false);
 const configConnectionSelectMode = ref<"export" | "import">("export");
 const configConnectionSelectList = ref<ConnectionConfig[]>([]);
+const configConnectionSelectLayout = ref<SidebarLayout | null>(null);
 const pendingExportConnectionIds = ref<string[]>([]);
 const pendingImportPreview = ref<ConnectionConfigBundle | null>(null);
 const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip">("dbx");
@@ -91,6 +96,7 @@ const tableDataGeneratePrefillDatabase = ref("");
 const tableDataGeneratePrefillSchema = ref("");
 const tableDataGeneratePrefillTable = ref("");
 const lineagePrefillConnectionId = ref("");
+const lineagePrefillDatabaseType = ref<DatabaseType>();
 const lineagePrefillDatabase = ref("");
 const lineagePrefillSchema = ref("");
 const lineagePrefillTable = ref("");
@@ -328,6 +334,18 @@ export function useDialogSources() {
     );
 
     watch(
+      () => connectionStore.damengDumpSource,
+      (source) => {
+        if (!source) return;
+        damengDumpPrefillConnectionId.value = source.connectionId;
+        damengDumpPrefillDatabase.value = source.database;
+        damengDumpMode.value = source.mode;
+        showDamengDumpDialog.value = true;
+        connectionStore.damengDumpSource = null;
+      },
+    );
+
+    watch(
       () => connectionStore.tableDataGenerateSource,
       (v) => {
         if (v) {
@@ -351,6 +369,7 @@ export function useDialogSources() {
       (v) => {
         if (v) {
           lineagePrefillConnectionId.value = v.connectionId;
+          lineagePrefillDatabaseType.value = v.databaseType;
           lineagePrefillDatabase.value = v.database;
           lineagePrefillSchema.value = v.schema ?? "";
           lineagePrefillTable.value = v.tableName;
@@ -396,18 +415,21 @@ export function useDialogSources() {
     pendingImportPreview.value = null;
     pendingImportSource.value = "dbx";
     configConnectionSelectList.value = [];
+    configConnectionSelectLayout.value = null;
     configPassphraseError.value = "";
   }
 
   function clearPendingExportState() {
     pendingExportConnectionIds.value = [];
     configConnectionSelectList.value = [];
+    configConnectionSelectLayout.value = null;
     configPassphraseError.value = "";
   }
 
-  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[]) {
+  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[], layout?: SidebarLayout | null) {
     configConnectionSelectMode.value = mode;
     configConnectionSelectList.value = connections;
+    configConnectionSelectLayout.value = layout ?? null;
     showConfigConnectionSelectDialog.value = true;
   }
 
@@ -425,6 +447,9 @@ export function useDialogSources() {
       keychainFilled = await connectionStore.applyDataGripKeychainPasswords();
     }
     toast(importSuccessMessage(source, count, keychainFilled), source === "dbx" ? 2000 : 4000);
+    if (source === "datagrip" && (connectionStore.lastDataGripFallbackUsernamesCount ?? 0) > 0) {
+      toast(t("configExport.importDatagripUsernamesFallbackWarning"), 5000);
+    }
     if (hasSidebarLayoutEntries(layout)) {
       pendingImportLayout.value = layout;
       showImportLayoutConfirm.value = true;
@@ -435,7 +460,7 @@ export function useDialogSources() {
   // Config export/import helpers
   function onExportClick() {
     clearPendingExportState();
-    openConnectionSelect("export", connectionStore.connections);
+    openConnectionSelect("export", connectionStore.connections, connectionStore.sidebarLayout);
   }
 
   function onExportConnectionsSelected(connectionIds: string[]) {
@@ -516,7 +541,7 @@ export function useDialogSources() {
       const preview = await connectionStore.parseConnectionsImport(result.content, null);
       pendingImportPreview.value = preview;
       if (source === "dbx") {
-        openConnectionSelect("import", preview.connections);
+        openConnectionSelect("import", preview.connections, preview.layout);
         return;
       }
       const { count, layout } = await connectionStore.applyConnectionsImport(preview);
@@ -533,7 +558,7 @@ export function useDialogSources() {
       pendingImportPreview.value = preview;
       showConfigPassphraseDialog.value = false;
       configPassphraseError.value = "";
-      openConnectionSelect("import", preview.connections);
+      openConnectionSelect("import", preview.connections, preview.layout);
     } catch (e: any) {
       configPassphraseError.value = e?.message === "wrong_passphrase" ? t("configExport.wrongPassphrase") : e?.message === "crypto_unavailable" ? t("configExport.cryptoUnavailable") : e?.message || String(e);
     }
@@ -594,6 +619,10 @@ export function useDialogSources() {
     mongoDatabaseDumpPrefillConnectionId,
     mongoDatabaseDumpPrefillDatabase,
     mongoDatabaseDumpMode,
+    showDamengDumpDialog,
+    damengDumpPrefillConnectionId,
+    damengDumpPrefillDatabase,
+    damengDumpMode,
     showTableDataGenerateDialog,
     tableDataGenerateSessionId,
     showFieldLineageDialog,
@@ -611,6 +640,7 @@ export function useDialogSources() {
     applyingImportSelection,
     configConnectionSelectMode,
     configConnectionSelectList,
+    configConnectionSelectLayout,
     transferPrefillConnectionId,
     transferPrefillDatabase,
     transferPrefillCatalog,
@@ -659,6 +689,7 @@ export function useDialogSources() {
     tableDataGeneratePrefillSchema,
     tableDataGeneratePrefillTable,
     lineagePrefillConnectionId,
+    lineagePrefillDatabaseType,
     lineagePrefillDatabase,
     lineagePrefillSchema,
     lineagePrefillTable,

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { DialogContentEmits, DialogContentProps } from "reka-ui";
 
-import { ref, type HTMLAttributes } from "vue";
+import { type HTMLAttributes } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { XIcon } from "@lucide/vue";
 import { DialogClose, DialogContent, DialogDescription, DialogPortal, VisuallyHidden, useForwardPropsEmits } from "reka-ui";
@@ -23,14 +23,13 @@ const delegatedProps = reactiveOmit(props, "class", "showOverlay", "showCloseBut
 
 const forwarded = useForwardPropsEmits(delegatedProps, emits);
 
-const positioner = ref<HTMLElement | null>(null);
-useDialogLayerOrder(positioner);
+const { layerStyle } = useDialogLayerOrder();
 </script>
 
 <template>
   <DialogPortal>
-    <DialogOverlay v-if="props.showOverlay" />
-    <div ref="positioner" data-slot="dialog-positioner" class="fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none">
+    <DialogOverlay v-if="props.showOverlay" :style="layerStyle" />
+    <div data-slot="dialog-positioner" :style="layerStyle" class="fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none">
       <DialogContent
         data-slot="dialog-content"
         :class="cn('relative z-50 grid max-h-[calc(var(--dbx-viewport-height)-6rem)] w-full max-w-lg my-8 gap-4 rounded-lg border border-border bg-popover text-popover-foreground p-4 shadow-lg duration-200 md:w-full pointer-events-auto', props.class)"

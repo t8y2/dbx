@@ -7,6 +7,7 @@ import { filterSchemaDiffTables } from "@/lib/schema/schemaDiffTableFilter";
 import { compileSchemaDiffTableFilter } from "@/lib/schema/schemaDiffTableFilter";
 import { filterSchemaDiffFunctions } from "@/lib/schema/schemaDiffRoutine";
 import { loadSchemaDetails } from "@/lib/schema/schemaDiffMetadataLoad";
+import { registerSchemaDiffTask } from "@/lib/schema/schemaDiffCancellation";
 import type { SchemaDiffTableIdentity, SchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
 import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjectPhase, shouldLoadSchemaDiffRoutines, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
 import { schemaDiffRoutineObjectTypesIntersection } from "@/lib/database/databaseObjectCapabilities";
@@ -112,7 +113,15 @@ function publishProgress(session: SchemaDiffSession, progress: SchemaDiffSession
   });
 }
 
-async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: SchemaDiffSessionDependencies): Promise<void> {
+async function settleRequests<T>(requests: Promise<T>[]): Promise<T[]> {
+  const results = await Promise.allSettled(requests);
+  return results.map((result) => {
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  });
+}
+
+async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: SchemaDiffSessionDependencies, signal: AbortSignal): Promise<void> {
   const input = session.config;
   const tracker = useExportTracker();
   const options = normalizeSchemaDiffCompareOptions(input.options, input.targetDbType);
@@ -143,7 +152,8 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
         database: input.targetDatabase,
         schema: input.targetSchema,
       };
-      const [sourceTableList, targetTableList] = await Promise.all([dependencies.tableListLoader.load(sourceTableIdentity, { refresh: true }), dependencies.tableListLoader.load(targetTableIdentity, { refresh: true })]);
+      const [sourceTableList, targetTableList] = await settleRequests([dependencies.tableListLoader.load(sourceTableIdentity, { refresh: true }), dependencies.tableListLoader.load(targetTableIdentity, { refresh: true })]);
+      signal.throwIfAborted();
       ({ sourceTables, targetTables } = filterSchemaDiffTables(sourceTableList, targetTableList, tableFilter, sessionOptions, sessionOptions.selectedTables));
 
       publishProgress(session, { phase: "loading-source-details", current: 0, total: sourceTables.length });
@@ -155,11 +165,13 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
           schema: input.sourceSchema,
           dbType: input.sourceDbType,
           options: sessionOptions,
+          signal,
           onProgress: (progress) => publishProgress(session, { phase: "loading-source-details", ...progress }),
         },
         api,
       );
 
+      signal.throwIfAborted();
       publishProgress(session, { phase: "loading-target-details", current: 0, total: targetTables.length });
       targetDetails = await loadSchemaDetails(
         targetTables,
@@ -169,12 +181,14 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
           schema: input.targetSchema,
           dbType: input.targetDbType,
           options: sessionOptions,
+          signal,
           onProgress: (progress) => publishProgress(session, { phase: "loading-target-details", ...progress }),
         },
         api,
       );
     }
 
+    signal.throwIfAborted();
     const promises: Promise<unknown>[] = [];
     if (loadRoutines) {
       promises.push(api.listFunctions(input.sourceConnectionId, input.sourceDatabase, input.sourceSchema));
@@ -194,7 +208,8 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
     }
 
     if (hasExtraObjectPhase) publishProgress(session, { phase: "loading-extra-objects" });
-    const extraObjects = await Promise.all(promises);
+    const extraObjects = await settleRequests(promises);
+    signal.throwIfAborted();
     let index = 0;
     const listedSourceFunctions = loadRoutines ? filterFunctionsByRoutineKinds(extraObjects[index++] as FunctionInfo[], routineKinds) : [];
     const listedTargetFunctions = loadRoutines ? filterFunctionsByRoutineKinds(extraObjects[index++] as FunctionInfo[], routineKinds) : [];
@@ -251,6 +266,7 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
         })) || [],
     });
 
+    signal.throwIfAborted();
     publishProgress(session, { phase: "generating" });
     session.result = result;
     session.progress = { phase: "complete" };
@@ -265,7 +281,7 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
       compareResultCount: resultObjectCount(result),
     });
   } catch (error: unknown) {
-    const message = sessionError(error);
+    const message = sessionError(signal.aborted ? signal.reason : error);
     session.error = message;
     session.progress = null;
     session.version += 1;
@@ -302,7 +318,9 @@ export function startSchemaDiffSession(input: Omit<SchemaDiffSessionConfig, "opt
     () => openSchemaDiffSession(id),
     () => removeSchemaDiffSession(id),
   );
-  void runSchemaDiffSession(session, dependencies);
+  const controller = new AbortController();
+  const settled = runSchemaDiffSession(session, dependencies, controller.signal);
+  registerSchemaDiffTask([input.sourceConnectionId, input.targetConnectionId], controller, settled);
   return session;
 }
 

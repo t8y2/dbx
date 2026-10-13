@@ -169,6 +169,13 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
             format!("`{}`", name.replace('`', "``"))
         }
         Some(DatabaseType::Informix) if is_simple_informix_identifier(name) => name.to_string(),
+        // SUNDB folds unquoted identifiers to uppercase (its JDBC driver reports
+        // storesUpperCaseIdentifiers=true / supportsMixedCaseIdentifiers=false), so
+        // `select * from rs_salest_budget` resolves to RS_SALEST_BUDGET. Quoting the
+        // name preserves its case instead, and the generated UPDATE then finds no such
+        // table (#11986). Emit simple names unquoted, as Informix does; a name that
+        // needs quoting keeps the generic double-quote form.
+        Some(DatabaseType::Sundb) if is_simple_informix_identifier(name) => name.to_string(),
         Some(DatabaseType::Neo4j) => format!("`{}`", name.replace('`', "``")),
         Some(DatabaseType::Nebula) => format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`")),
         Some(DatabaseType::SqlServer) => format!("[{}]", name.replace(']', "]]")),

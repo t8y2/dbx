@@ -30,7 +30,7 @@ Desktop file paths belong to the local computer. Docker/Web paths belong to the 
 
 ### Specialized Data Models and Services
 
-- Redis and MongoDB
+- Redis, MongoDB, and Apache CouchDB
 - Elasticsearch, Easysearch, Meilisearch, and Manticore Search
 - Qdrant, Milvus, Weaviate, and ChromaDB
 - HBase
@@ -50,6 +50,15 @@ These connections use key-value, document, search, vector, messaging, or configu
 | JDBC plugin | Optional generic JDBC extension | Unknown engines run with generic JDBC capabilities |
 
 See [Driver Management](/en/docs/driver-management) for installation, upgrades, offline packages, and runtime monitoring, and [JDBC Plugin](/en/docs/plugins) for custom JDBC.
+
+### Oracle OCI (thick driver)
+
+Oracle connections default to the thin driver. The connection dialog's driver mode also offers **OCI**, which runs the separate `oracle-oci` Agent built against the Oracle Call Interface so the Oracle Client handles the connection. The OCI driver is currently shipped for Windows x64.
+
+- **Instant Client directory** is a global setting: enter the directory that contains `oci.dll` once, and every OCI connection reuses it. The directory is prepended to the Agent process's loader path.
+- **NLS_LANG** is process-scoped for the Oracle Client, so it is configured in two layers: a global default, plus an optional per-connection override. A connection that overrides NLS_LANG gets its own Agent process instead of sharing one, so character sets never leak between connections.
+- **TNS names, wallets, and sqlnet.ora**: `TNS_ADMIN` supports a global default plus a per-connection override (fill the directory in the OCI connection form, or leave it empty to follow the global default), so any OCI connection can use tnsnames.ora aliases, ADB wallets, and sqlnet.ora network options (compression, encryption) without switching to the TNS connection form; the TNS connection form also passes its directory to the Agent process.
+- OCI only affects how the client library is loaded. Grid editing, DDL, transfer, and other features behave the same as on the thin driver.
 
 ## Capability Levels
 
@@ -95,7 +104,7 @@ Both runtimes share most Rust core query, metadata, and safety policy, but are n
 
 ## Default Ports and Connection URLs
 
-Profiles prefill common defaults such as MySQL `3306`, PostgreSQL `5432`, Redis `6379`, MongoDB `27017`, SQL Server `1433`, Oracle `1521`, Elasticsearch `9200`, Meilisearch `7700`, and RabbitMQ AMQP `5672`. These are defaults, not requirements.
+Profiles prefill common defaults such as MySQL `3306`, PostgreSQL `5432`, Redis `6379`, MongoDB `27017`, SQL Server `1433`, Oracle `1521`, Elasticsearch `9200`, CouchDB `5984`, Meilisearch `7700`, and RabbitMQ AMQP `5672`. These are defaults, not requirements.
 
 Services such as RabbitMQ may expose separate business and management ports. A custom AMQP port must not be used to infer the Management API port. SSH tunnels, HTTP proxies, TLS SNI, and physical dial targets should also be verified independently.
 

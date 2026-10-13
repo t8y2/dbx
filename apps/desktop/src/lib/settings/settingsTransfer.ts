@@ -3,7 +3,7 @@ import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_E
 import { EDITOR_MAX_FONT_SIZE, EDITOR_MIN_FONT_SIZE } from "@/lib/editor/editorZoom";
 import { DATA_GRID_TYPE_COLOR_KEYS, DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { SHORTCUT_DEFINITIONS } from "@/lib/editor/shortcutRegistry";
-import { isCompleteSqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, isCompleteSqlFormatterSettings, type SqlFormatterOptionSettings } from "@/lib/sql/sqlFormatterConfig";
 import { SQL_VARIABLE_SYNTAX_KEYS } from "@/lib/sql/sqlVariableSyntax";
 
 /**
@@ -71,7 +71,7 @@ export function serializeSettingsTransfer(settings: EditorSettings, meta: Settin
 const SETTINGS_TRANSFER_CATEGORY_ORDER: readonly SettingsTransferCategoryId[] = ["appearance", "editor", "formatter", "navigation", "data", "shortcuts", "snippets", "other"];
 
 const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readonly EditorSettingsDraftKey[]> = {
-  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems"],
+  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "welcomePageMode", "webLogoPosition"],
   editor: [
     "executeMode",
     "defaultTransactionMode",
@@ -79,6 +79,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "executeAllOnBlankLine",
     "showExecutionTargetPicker",
     "showStatementRunButtons",
+    "locateCursorOnGutterExecute",
     "showLineNumbers",
     "showCurrentStatementFrame",
     "showInsertValueHints",
@@ -86,12 +87,15 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "tableCompletionSchemaQualification",
     "insertSpaceAfterCompletion",
     "sqlServerSpaceConfirmsCompletion",
+    "functionCompletionIncludeParams",
     "sortCompletionColumnsAlphabetically",
     "selectFirstCompletionOnOpen",
     "completionTriggerMode",
+    "excludedCompletionItems",
     "wordWrap",
     "showWhitespace",
     "vimModeEnabled",
+    "caretBrowsingEnabled",
     "doubleClickStringSelectionMode",
     "autoCloseBrackets",
     "restoreSqlFromSourcePasteEnabled",
@@ -102,6 +106,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "appCloseUnsavedTabsMode",
     "savedSqlOpenTargetMode",
     "prefillNewQueryWithSelect",
+    "openQueryOnConnectionOpen",
     "generateSqlIncludeDatabaseName",
     "generateSqlQuoteIdentifiers",
     "formatSqlOnSqlFileSave",
@@ -119,14 +124,17 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "tabGroupMode",
     "colorizeConnectionTabs",
     "tabSortMode",
+    "tabMaxWidth",
     "sidebarActivation",
     "sidebarObjectDisplay",
     "routineSourceOpenMode",
     "sidebarTableSearchEnabled",
     "sidebarSearchOpenedDatabasesOnly",
     "autoSelectActiveSidebarNode",
+    "sidebarPinDefaultDatabase",
     "sidebarBrowseObjectsOnDatabaseActivation",
     "openTabsRestoreMode",
+    "autoReloadRestoredDataTabsOnOpen",
     "disconnectTabHandlingMode",
     "deleteConnectionTabHandlingMode",
     "rememberConnectionDatabaseOnDelete",
@@ -138,6 +146,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sidebarShowTooltips",
     "sidebarIndent",
     "sidebarFontSize",
+    "sidebarDensity",
     "sidebarHiddenTablePrefixes",
     "sidebarCopyTableNameSeparator",
     "sidebarCopyTableNameIncludeSchema",
@@ -147,6 +156,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "showColumnTypesInHeader",
     "showColumnHeaderTooltips",
     "showResultSourceDatabase",
+    "resultTabNamingMode",
+    "resultTabPreferComments",
     "dataGridShowTransposeFieldMetadata",
     "colorizeDataGridCellTypes",
     "dataGridTypeColorSchemes",
@@ -160,9 +171,15 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridToolbarLayout",
     "defaultAutoKeepResults",
     "multiStatementDefaultView",
+    "defaultExplainView",
     "dataGridAutoTransposeSingleRow",
     "dataGridCellDetailButtonVisible",
+    "dataGridCellDetailDialogDefault",
     "dataGridCrosshairHighlight",
+    "dataGridCrosshairRowBg",
+    "dataGridCrosshairColBg",
+    "dataGridStripedRows",
+    "dataGridZebraRowBg",
     "flatteningMultiLineText",
     "dataGridShowWhitespace",
     "pageSize",
@@ -176,10 +193,15 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "infiniteScroll",
     "regexMaxMatchCount",
     "autoCalculateTotalRows",
+    "modelGenerationTemplates",
     "tableColumnTemplateFields",
     "redisKeyTemplates",
     "redisDatabaseDisplayLimit",
     "exportBatchSize",
+    "preferredExportPath",
+    "damengClientBinDir",
+    "autoOpenExportFolder",
+    "applyColumnFormattersOnExport",
     "csvQuoteMode",
     "csvNullMode",
     "exportRowLimitEnabled",
@@ -190,7 +212,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "globalDateTimeImportFormat",
   ],
   shortcuts: ["shortcuts", "sqlShortcuts"],
-  snippets: ["snippets"],
+  snippets: ["snippets", "snippetTriggerKey"],
   other: ["updateDownloadSource", "updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins"],
 };
 
@@ -272,21 +294,25 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "showWhitespace",
   "showExecutionTargetPicker",
   "autoAliasTables",
+  "functionCompletionIncludeParams",
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",
   "showColumnCommentsInHeader",
   "showColumnTypesInHeader",
   "showColumnHeaderTooltips",
   "showResultSourceDatabase",
+  "resultTabPreferComments",
   "colorizeDataGridCellTypes",
   "showIndexIndicatorsInHeader",
   "compactColumnHeaderActions",
   "dataGridQuickEntry",
+  "dataGridStripedRows",
   "flatteningMultiLineText",
   "dataGridShowWhitespace",
   "infiniteScroll",
   "autoCalculateTotalRows",
   "autoSelectActiveSidebarNode",
+  "sidebarPinDefaultDatabase",
   "sidebarAllowHorizontalScroll",
   "sidebarShowTooltips",
   "updateNotificationsEnabled",
@@ -301,8 +327,12 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
 const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
   // The editor font slider and the Ctrl+wheel zoom both clamp to this range.
   fontSize: (value) => typeof value === "number" && Number.isFinite(value) && value >= EDITOR_MIN_FONT_SIZE && value <= EDITOR_MAX_FONT_SIZE,
+  welcomePageMode: (value) => value === "intro" || value === "workspace",
   appLayout: (value) => value === "separated" || value === "classic",
+  webLogoPosition: (value) => value === "left" || value === "right" || value === "hidden",
+  resultTabNamingMode: (value) => value === "source" || value === "ordinal" || value === "comment",
   activeCustomThemeId: (value) => typeof value === "string" && value.trim().length > 0,
+  sidebarDensity: (value) => value === "default" || value === "compact",
   // normalizeToolbarItems keeps unknown/typed values for every known key, so
   // each one must already be the boolean the UI writes, and no extra key may
   // appear.
@@ -340,7 +370,7 @@ const CUSTOM_THEME_DDL_COLORS_SHAPE = valueKindShape(DEFAULT_CUSTOM_THEME_DDL_CO
  * cover them and a wrong-typed value (e.g. `background: {}`) would otherwise
  * pass validation and reach the persisted settings.
  */
-const CUSTOM_THEME_OPTIONAL_COLOR_KEYS = ["background", "foreground"] as const;
+const CUSTOM_THEME_OPTIONAL_COLOR_KEYS = ["background", "foreground", "activeLine", "selection", "cursor", "gutterBackground", "lineNumber", "matchingBracket"] as const;
 
 function hasValidOptionalColorKinds(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
@@ -376,6 +406,16 @@ function isSqlSnippetItem(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
   if (!isNonEmptyTrimmedString(value.id) || !isNonEmptyTrimmedString(value.label) || !isNonEmptyTrimmedString(value.prefix) || typeof value.body !== "string") return false;
   return value.enabled === undefined || typeof value.enabled === "boolean";
+}
+
+function isModelGenerationTemplatesShape(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  const ids = new Set<string>();
+  return value.every((item) => {
+    if (!isPlainObject(item) || typeof item.id !== "string" || !item.id || ids.has(item.id) || !isNonEmptyTrimmedString(item.name) || typeof item.extension !== "string" || !/^[a-zA-Z0-9]+$/.test(item.extension) || typeof item.body !== "string") return false;
+    ids.add(item.id);
+    return true;
+  });
 }
 
 function isSqlShortcutActionItem(value: unknown): boolean {
@@ -419,6 +459,33 @@ function isRawToolbarItemsShape(value: unknown): boolean {
 
 const SQL_VARIABLE_SYNTAX_KEY_SET = new Set<string>(SQL_VARIABLE_SYNTAX_KEYS);
 
+/**
+ * Formatter option keys introduced after the settings-transfer format shipped
+ * (v0.6.7). An export written before a key existed legitimately lacks it, so
+ * requiring every current key would reject the entire file and discard every
+ * other setting it carries — which is what happened when `commaPosition`
+ * landed in v0.6.35. Absence is only tolerated for these keys, and only
+ * because the version boundary is known; nothing is inferred about which
+ * style the user meant. Every future formatter option must be added here.
+ */
+const SQL_FORMATTER_KEYS_ADDED_AFTER_TRANSFER_FORMAT = new Set<keyof SqlFormatterOptionSettings>(["commaPosition", "layoutStyle"]);
+
+/**
+ * Complete-schema check that tolerates the absence of the post-transfer
+ * formatter keys: present keys keep the strict check (valid value, no unknown
+ * key), and the missing baseline-compatible ones are filled with their
+ * defaults before delegating, so a payload missing a baseline key such as
+ * `keywordCase` is still rejected.
+ */
+function isTransferableSqlFormatterSettings(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const filled: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  for (const key of SQL_FORMATTER_KEYS_ADDED_AFTER_TRANSFER_FORMAT) {
+    if (!(key in filled)) filled[key] = DEFAULT_SQL_FORMATTER_SETTINGS[key];
+  }
+  return isCompleteSqlFormatterSettings(filled);
+}
+
 function isSqlVariableSyntaxOverridesShape(value: unknown, isAllowedToggle: (toggle: unknown) => boolean): boolean {
   if (!isPlainObject(value)) return false;
   return Object.values(value).every((entry) => isPlainObject(entry) && Object.entries(entry).every(([key, toggle]) => SQL_VARIABLE_SYNTAX_KEY_SET.has(key) && isAllowedToggle(toggle)));
@@ -437,10 +504,11 @@ const NESTED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: un
   dataGridTypeColorSchemes: (value) => isArrayOfShape(value, isDataGridTypeColorSchemeItem),
   tableColumnTemplateFields: isNonEmptyStringArray,
   shortcuts: isShortcutSettingsShape,
-  sqlFormatter: isCompleteSqlFormatterSettings,
+  sqlFormatter: isTransferableSqlFormatterSettings,
   sidebarHiddenTablePrefixes: isNonEmptyStringArray,
   redisKeyTemplates: isNonEmptyStringArray,
   snippets: (value) => isArrayOfShape(value, isSqlSnippetItem),
+  modelGenerationTemplates: isModelGenerationTemplatesShape,
   sqlShortcuts: (value) => isArrayOfShape(value, isSqlShortcutActionItem),
   sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => toggle === false),
 };
@@ -461,10 +529,11 @@ const RAW_STRUCTURED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (v
   tableColumnTemplateFields: isStringArray,
   shortcuts: isRawShortcutSettingsShape,
   toolbarItems: isRawToolbarItemsShape,
-  sqlFormatter: isCompleteSqlFormatterSettings,
+  sqlFormatter: isTransferableSqlFormatterSettings,
   sidebarHiddenTablePrefixes: isStringArray,
   redisKeyTemplates: isStringArray,
   snippets: (value) => isArrayOfShape(value, isSqlSnippetItem),
+  modelGenerationTemplates: isModelGenerationTemplatesShape,
   sqlShortcuts: (value) => isArrayOfShape(value, isSqlShortcutActionItem),
   sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => typeof toggle === "boolean"),
 };

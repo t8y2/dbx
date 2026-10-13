@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connection::ConnectionConfig {
     dbx_core::models::connection::ConnectionConfig {
+        oracle_oci_nls_lang: None,
+        oracle_oci_tns_admin: None,
         docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
@@ -51,6 +53,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
         redis_key_templates: Vec::new(),
+        redis_key_filter: None,
         redis_key_grouping: None,
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
@@ -67,8 +70,10 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
+        show_database_links: None,
         database_info: None,
     }
 }
@@ -126,19 +131,22 @@ async fn live_sqlserver_xlsx_export_can_outlive_query_timeout_while_rows_keep_ar
         timeout_secs: Some(1),
         keyset_optimization_enabled: true,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-sqlserver-xlsx-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
         null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
         selected_columns: None,
         export_column_extras: None,
         column_comments: None,
+        header_comment_rows: false,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     let rows_exported = AtomicU64::new(0);

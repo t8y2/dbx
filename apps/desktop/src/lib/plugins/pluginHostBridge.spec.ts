@@ -1032,18 +1032,24 @@ describe("PluginHostBridge", () => {
   });
 
   it("injects a <base> and widens resource CSP sources for the plugin asset origin", () => {
-    const document = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, { baseUrl: "dbx-plugin://localhost/io.github.t8y2.s3/assets/" });
+    const document = pluginSandboxDocument('<html><head></head><body><script type="module" src="dbx-plugin://localhost/io.github.t8y2.s3/entry/app.mjs"></script><script type="module" src="https://cdn.example.test/app.mjs"></script></body></html>', [], undefined, {
+      baseUrl: "dbx-plugin://localhost/io.github.t8y2.s3/assets/",
+    });
     expect(document).toContain('<base href="dbx-plugin://localhost/io.github.t8y2.s3/assets/">');
     expect(document).toContain("script-src 'unsafe-inline' blob: dbx-plugin:;");
     expect(document).toContain("font-src data: blob: dbx-plugin:;");
+    expect(document).toContain('src="dbx-plugin://localhost/io.github.t8y2.s3/entry/app.mjs"');
+    const scriptPolicy = document.match(/script-src[^;]+;/)?.[0] ?? "";
+    expect(scriptPolicy).not.toContain("https://cdn.example.test");
     // <base> leads the head injection so inlined CSS url() resolves against it.
     expect(document.indexOf("<base ")).toBeLessThan(document.indexOf("<style>"));
   });
 
   it("allows the WebView2-mapped asset origin exactly", () => {
-    const document = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, { baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/" });
+    const document = pluginSandboxDocument('<html><head></head><body><script type="module" src="http://dbx-plugin.localhost/io.github.t8y2.s3/entry/app.mjs"></script></body></html>', [], undefined, { baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/" });
     expect(document).toContain("script-src 'unsafe-inline' blob: http://dbx-plugin.localhost;");
     expect(document).toContain('<base href="http://dbx-plugin.localhost/io.github.t8y2.s3/assets/">');
+    expect(document).toContain('src="http://dbx-plugin.localhost/io.github.t8y2.s3/entry/app.mjs"');
   });
 
   it("rejects malformed asset base URLs without touching the CSP", () => {
@@ -1057,6 +1063,22 @@ describe("PluginHostBridge", () => {
     expect(document).toContain("script-src 'unsafe-inline' blob:;");
     expect(document).toContain("font-src data: blob:;");
     expect(document).not.toContain("<base ");
+  });
+
+  it("adds unsafe-eval to script-src only for the granted plugin", () => {
+    const granted = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, {
+      baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/",
+      allowUnsafeEval: true,
+    });
+    expect(granted).toContain("script-src 'unsafe-inline' 'unsafe-eval' blob: http://dbx-plugin.localhost;");
+    // The grant is scoped to script-src; no other directive picks it up.
+    expect(granted).toContain("style-src 'unsafe-inline' blob:;");
+    expect(granted).not.toContain("img-src data: blob: http://dbx-plugin.localhost 'unsafe-eval'");
+
+    const withheld = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, {
+      baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/",
+    });
+    expect(withheld).not.toContain("unsafe-eval");
   });
 
   it("pre-seeds the current theme as the sandbox first paint", () => {
@@ -1645,11 +1667,16 @@ describe("PluginHostBridge", () => {
 describe("plugin SDK source", () => {
   interface SdkWindow {
     dbxPlugin?: {
+      ready: Promise<unknown>;
+      contributionId?: string;
+      context?: Record<string, unknown>;
+      onInit: (listener: (context: unknown) => void) => () => void;
       invoke: (method: string, params?: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
       getPlanCapabilities: (connectionId: string) => Promise<unknown>;
       explainPlan: (request: unknown) => Promise<unknown>;
       getTableMetadata: (context: unknown) => Promise<unknown>;
     };
+    receiveHostMessage: (message: unknown) => void;
   }
 
   function loadSdk(posted: unknown[], initialTheme?: { appearance: "dark" | "light"; tokens: Record<string, string> }): SdkWindow {
@@ -1661,10 +1688,19 @@ describe("plugin SDK source", () => {
       },
       dispatchEvent: vi.fn(),
     } as unknown as Document;
+    let onMessage: ((event: MessageEvent) => void) | undefined;
+    const parent = { postMessage: (message: unknown) => posted.push(message) };
+    const addEventListener = (type: string, listener: (event: MessageEvent) => void) => {
+      if (type === "message") onMessage = listener;
+    };
     // The SDK IIFE only touches window and the bare-global addEventListener at
     // boot; parent.postMessage is captured for later request() calls, so a
     // stub window/parent is enough here.
-    new Function("window", "parent", "addEventListener", "document", pluginSdkSource(initialTheme))(sandbox, { postMessage: (message: unknown) => posted.push(message) }, () => {}, document);
+    new Function("window", "parent", "addEventListener", "document", pluginSdkSource(initialTheme))(sandbox, parent, addEventListener, document);
+    sandbox.receiveHostMessage = (message) => {
+      if (!onMessage) throw new Error("SDK did not register its host-message listener");
+      onMessage({ source: parent, data: message } as unknown as MessageEvent);
+    };
     return sandbox;
   }
 
@@ -1702,6 +1738,51 @@ describe("plugin SDK source", () => {
 
     expect(dbxPlugin).toBeDefined();
     expect(posted[0]).toMatchObject({ source: "dbx-plugin", type: "ready" });
+  });
+
+  it("exposes the opened contribution after ready when init was already delivered and context is empty", async () => {
+    const sdkMessages: unknown[] = [];
+    const hostMessages: unknown[] = [];
+    const sdk = loadSdk(sdkMessages);
+    const probe: PluginWorkbenchContribution = { type: "workbench", id: "sample.probe", label: "Probe" };
+    const generation: PluginWorkbenchContribution = { type: "workbench", id: "sample.generation", label: "Generation" };
+    const target = { postMessage: (message: unknown) => hostMessages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin([], [probe, generation]), generation, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+
+    bridge.sendInit();
+    const init = hostMessages[0] as Record<string, unknown>;
+    expect(init).toMatchObject({ type: "init", contributionId: "sample.generation", context: {} });
+    sdk.receiveHostMessage(init);
+
+    await sdk.dbxPlugin!.ready;
+
+    expect(sdk.dbxPlugin!.contributionId).toBe("sample.generation");
+    expect(sdk.dbxPlugin!.contributionId).not.toBe(probe.id);
+    expect(sdk.dbxPlugin!.context).toEqual({});
+    const lateInit = vi.fn();
+    sdk.dbxPlugin!.onInit(lateInit);
+    expect(lateInit).toHaveBeenCalledWith({});
+  });
+
+  it("sets contribution identity independently of table context before ready and onInit", async () => {
+    const sdk = loadSdk([]);
+    const hostMessages: unknown[] = [];
+    const tableContext = { connectionId: "connection-1", database: "app", schema: "public", table: "orders" };
+    const generation: PluginWorkbenchContribution = { type: "workbench", id: "sample.generation", label: "Generation" };
+    const target = { postMessage: (message: unknown) => hostMessages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin([], [generation]), generation, tableContext, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    let observed: { context: unknown; contributionId?: string } | undefined;
+    sdk.dbxPlugin!.onInit((context) => {
+      observed = { context, contributionId: sdk.dbxPlugin!.contributionId };
+    });
+
+    bridge.sendInit();
+    sdk.receiveHostMessage(hostMessages[0]);
+    await sdk.dbxPlugin!.ready;
+
+    expect(observed).toEqual({ context: tableContext, contributionId: "sample.generation" });
+    expect(sdk.dbxPlugin!.context).toEqual(tableContext);
+    expect(sdk.dbxPlugin!.contributionId).toBe("sample.generation");
   });
 
   it("keeps cloneable values intact and plain scalars by reference", () => {
@@ -1884,5 +1965,149 @@ describe("AI completion bridge", () => {
     expect(api.generateAiText).not.toHaveBeenCalled();
     expect((await request("host.ai.generateText", { pluginName: "forged", configId: "one", model: "a", prompt: "hi" })).result).toBe("fix: example");
     expect(api.generateAiText).toHaveBeenCalledWith("Sample", { configId: "one", model: "a", prompt: "hi" });
+  });
+  it("validates the host-owned task enum and forwards known presets only", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const generateAiText = vi.fn().mockResolvedValue("ls -la");
+    const bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), generateAiText });
+    const request = async (params: unknown) => {
+      const count = messages.length;
+      bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: String(count), method: "host.ai.generateText", params } } as MessageEvent);
+      await vi.waitFor(() => expect(messages.length).toBe(count + 1));
+      return messages[count];
+    };
+    expect((await request({ configId: "one", model: "a", prompt: "hi", task: "system prompt injection" })).error).toContain("Invalid AI task");
+    expect(generateAiText).not.toHaveBeenCalled();
+    expect((await request({ configId: "one", model: "a", prompt: "hi", task: 42 })).error).toContain("Invalid AI task");
+    expect((await request({ configId: "one", model: "a", prompt: "hi", task: "command-generation" })).result).toBe("ls -la");
+    expect(generateAiText).toHaveBeenCalledWith("Sample", { configId: "one", model: "a", prompt: "hi", task: "command-generation" });
+    // Absent/null task keeps the exact legacy call shape.
+    generateAiText.mockClear();
+    expect((await request({ configId: "one", model: "a", prompt: "hi" })).result).toBe("ls -la");
+    expect(generateAiText).toHaveBeenCalledWith("Sample", { configId: "one", model: "a", prompt: "hi" });
+    expect((await request({ configId: "one", model: "a", prompt: "hi", task: null })).result).toBe("ls -la");
+    expect(generateAiText).toHaveBeenLastCalledWith("Sample", { configId: "one", model: "a", prompt: "hi" });
+  });
+  it("streams generations as requestId-scoped chunk events and resolves with the full text", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    let pushChunk!: (delta: string, done: boolean) => void;
+    let settle!: () => void;
+    const generateAiTextStream = vi.fn((_pluginName: string, _request: unknown, onChunk: (chunk: { delta: string; done: boolean }) => void) => {
+      pushChunk = (delta, done) => onChunk({ delta, done });
+      return new Promise<string>((resolve) => {
+        settle = () => resolve("ls -la");
+      });
+    });
+    const bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), generateAiTextStream, cancelAiGeneration: vi.fn().mockResolvedValue(true) });
+    const send = (id: string, method: string, params: unknown) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method, params } } as MessageEvent);
+    const waitResponse = async (id: string) => {
+      await vi.waitFor(() => expect(messages.some((message) => message.type === "response" && message.id === id)).toBe(true));
+      return messages.find((message) => message.type === "response" && message.id === id);
+    };
+    bridge.sendInit();
+    expect(messages[0].capabilities.aiCompletionStream).toBe(true);
+    send("open", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "list files", requestId: "gen-1", task: "command-generation" });
+    await vi.waitFor(() => expect(generateAiTextStream).toHaveBeenCalledOnce());
+    expect(generateAiTextStream.mock.calls[0][0]).toBe("Sample");
+    expect(generateAiTextStream.mock.calls[0][1]).toMatchObject({ configId: "one", model: "a", prompt: "list files", requestId: "gen-1", task: "command-generation" });
+    pushChunk("ls ", false);
+    pushChunk("-la", false);
+    await vi.waitFor(() => expect(messages.filter((message) => message.type === "event" && message.method === "host.ai.generationChunk")).toHaveLength(2));
+    expect(messages.filter((message) => message.method === "host.ai.generationChunk").map((message) => message.params)).toEqual([
+      { requestId: "gen-1", delta: "ls ", done: false },
+      { requestId: "gen-1", delta: "-la", done: false },
+    ]);
+    send("cancel", "host.ai.cancelGeneration", { requestId: "gen-1" });
+    await waitResponse("cancel");
+    expect(messages.find((message) => message.id === "cancel").result).toEqual({ cancelled: true });
+    // The completion emits the final done chunk before its promise resolves.
+    pushChunk("", true);
+    settle();
+    expect((await waitResponse("open")).result).toBe("ls -la");
+    // A finished stream is no longer cancellable and unknown ids answer false.
+    send("late", "host.ai.cancelGeneration", { requestId: "gen-1" });
+    await waitResponse("late");
+    expect(messages.find((message) => message.id === "late").result).toEqual({ cancelled: false });
+  });
+  it("gates streaming, validates requestId and task, and keeps the capability honest", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const baseApi = () => ({ invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    const generateAiTextStream = vi.fn().mockResolvedValue("done");
+    const cancelAiGeneration = vi.fn().mockResolvedValue(true);
+    // Without both stream and cancel the capability stays off and the call is refused.
+    let bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, { ...baseApi(), generateAiTextStream });
+    const send = (b: PluginHostBridge, id: string, method: string, params: unknown) => b.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method, params } } as MessageEvent);
+    const waitResponse = async (id: string) => {
+      await vi.waitFor(() => expect(messages.some((message) => message.type === "response" && message.id === id)).toBe(true));
+      return messages.find((message) => message.type === "response" && message.id === id);
+    };
+    bridge.sendInit();
+    expect(messages[messages.length - 1].capabilities.aiCompletionStream).toBe(false);
+    send(bridge, "half", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "hi", requestId: "gen-0" });
+    expect((await waitResponse("half")).error).toContain("unavailable");
+    // With both methods the capability is advertised, but permission, requestId
+    // and the task enum are still enforced.
+    bridge = new PluginHostBridge(plugin([]), workbench, {}, () => target, { ...baseApi(), generateAiTextStream, cancelAiGeneration });
+    send(bridge, "gate", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "hi", requestId: "gen-1" });
+    expect((await waitResponse("gate")).error).toContain("host.ai");
+    bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, { ...baseApi(), generateAiTextStream, cancelAiGeneration });
+    send(bridge, "missing-id", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "hi" });
+    expect((await waitResponse("missing-id")).error).toContain("AI requestId");
+    send(bridge, "bad-task", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "hi", requestId: "gen-2", task: "injected" });
+    expect((await waitResponse("bad-task")).error).toContain("Invalid AI task");
+    send(bridge, "ok", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "hi", requestId: "gen-2" });
+    expect((await waitResponse("ok")).result).toBe("done");
+    expect(generateAiTextStream).toHaveBeenCalledOnce();
+    expect(generateAiTextStream.mock.calls[0][1]).toMatchObject({ requestId: "gen-2" });
+  });
+  it("cancels only its own active streams and stops forwarding after cancellation", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    let pushChunk!: (delta: string, done: boolean) => void;
+    const generateAiTextStream = vi.fn((_pluginName: string, _request: unknown, onChunk: (chunk: { delta: string; done: boolean }) => void) => {
+      pushChunk = (delta, done) => onChunk({ delta, done });
+      return new Promise<string>(() => undefined);
+    });
+    const cancelAiGeneration = vi.fn().mockResolvedValue(true);
+    const bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), generateAiTextStream, cancelAiGeneration });
+    const send = (id: string, method: string, params: unknown) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method, params } } as MessageEvent);
+    const waitResponse = async (id: string) => {
+      await vi.waitFor(() => expect(messages.some((message) => message.type === "response" && message.id === id)).toBe(true));
+      return messages.find((message) => message.type === "response" && message.id === id);
+    };
+    send("open", "host.ai.generateTextStream", { configId: "one", model: "a", prompt: "hi", requestId: "gen-1" });
+    await vi.waitFor(() => expect(generateAiTextStream).toHaveBeenCalledOnce());
+    // A request from another workbench (never registered here) cannot cancel.
+    send("foreign", "host.ai.cancelGeneration", { requestId: "someone-else" });
+    await waitResponse("foreign");
+    expect(cancelAiGeneration).not.toHaveBeenCalled();
+    expect(messages.find((message) => message.id === "foreign").result).toEqual({ cancelled: false });
+    send("cancel", "host.ai.cancelGeneration", { requestId: "gen-1" });
+    await waitResponse("cancel");
+    expect(cancelAiGeneration).toHaveBeenCalledWith("gen-1");
+    expect(messages.find((message) => message.id === "cancel").result).toEqual({ cancelled: true });
+    // Chunks after cancellation are no longer forwarded.
+    pushChunk("late", false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(messages.some((message) => message.method === "host.ai.generationChunk" && message.params.delta === "late")).toBe(false);
+  });
+  it("cancels active streams when the workbench is disposed", async () => {
+    const target = { postMessage: vi.fn() } as unknown as Window;
+    const cancelAiGeneration = vi.fn().mockResolvedValue(true);
+    const bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      generateAiTextStream: vi.fn(() => new Promise<string>(() => undefined)),
+      cancelAiGeneration,
+    });
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: "open", method: "host.ai.generateTextStream", params: { configId: "one", model: "a", prompt: "hi", requestId: "gen-1" } } } as MessageEvent);
+    await vi.waitFor(() => expect(cancelAiGeneration.mock.calls.length).toBeGreaterThanOrEqual(0));
+    bridge.dispose();
+    expect(cancelAiGeneration).toHaveBeenCalledWith("gen-1");
   });
 });

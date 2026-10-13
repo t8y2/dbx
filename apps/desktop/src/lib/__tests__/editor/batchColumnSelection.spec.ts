@@ -22,6 +22,32 @@ describe("batchColumnSelectionColumnList", () => {
   it("does not add a qualifier to INSERT target columns", () => {
     expect(batchColumnSelectionColumnList(["id", "name"], "insert", "users")).toBe("id, name");
   });
+
+  it("formats candidates with column comments in SELECT mode (#11354)", () => {
+    const candidates = [{ apply: "order_start_time", comment: "医嘱开始时间" }, { apply: "order_end_time", comment: "医嘱结束时间" }, { apply: "patient_id" }];
+    expect(batchColumnSelectionColumnList(candidates, "select", "t", "  ")).toBe("order_start_time, -- 医嘱开始时间\n  t.order_end_time, -- 医嘱结束时间\n  t.patient_id");
+  });
+
+  it("normalizes newlines in column comments (#11354)", () => {
+    const candidates = [
+      { apply: "status", comment: "状态:\n0-停用\r\n1-启用" },
+      { apply: "created_at", comment: "创建时间" },
+    ];
+    expect(batchColumnSelectionColumnList(candidates, "select", undefined, "  ")).toBe("status, -- 状态: 0-停用 1-启用\n  created_at -- 创建时间");
+  });
+
+  it("adds trailing comma when trailingComma option is enabled (#11354)", () => {
+    const candidates = [{ apply: "id", comment: "主键ID" }];
+    expect(batchColumnSelectionColumnList(candidates, "select", undefined, "  ", { trailingComma: true })).toBe("id, -- 主键ID");
+  });
+
+  it("ignores candidate comments in INSERT mode (#11354)", () => {
+    const candidates = [
+      { apply: "id", comment: "主键ID" },
+      { apply: "name", comment: "名称" },
+    ];
+    expect(batchColumnSelectionColumnList(candidates, "insert", "users")).toBe("id, name");
+  });
 });
 
 describe("batchColumnSelectionReplaceTo", () => {

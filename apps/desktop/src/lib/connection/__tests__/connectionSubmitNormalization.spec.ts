@@ -16,6 +16,18 @@ function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
 }
 
 describe("connection submit normalization", () => {
+  it.each(["connection", "database", "table"] as const)("preserves %s badge scope without changing production protection", (scope) => {
+    const value = config({ production_badge_scope: scope, is_production: true, production_databases: ["app"] });
+    normalizeConnectionScope(value);
+    expect(value).toMatchObject({ production_badge_scope: scope, is_production: true, production_databases: ["app"] });
+  });
+
+  it("defaults legacy connections to database/schema badges", () => {
+    const value = config();
+    normalizeConnectionScope(value);
+    expect(value.production_badge_scope).toBe("database");
+  });
+
   it("normalizes invalid timeout values and inherited global values", () => {
     const inherited = config({ connect_timeout_inherit: true, query_timeout_inherit: true, idle_timeout_secs: -1, keepalive_interval_secs: Number.NaN });
     normalizeConnectionTimeouts(inherited, 12, 34);

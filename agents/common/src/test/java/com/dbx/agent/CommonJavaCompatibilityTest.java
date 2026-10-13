@@ -121,6 +121,17 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
+    void constraintMetadataUnsupportedIsNotAnEmptySuccess() {
+        JsonRpcServer server = new JsonRpcServer(new MinimalAgent());
+        JsonObject response = JsonParser.parseString(server.handleRequest(
+            "{\"id\":1,\"method\":\"list_constraints\",\"params\":{\"schema\":\"APP\",\"table\":\"T\"}}"
+        )).getAsJsonObject();
+
+        assertFalse(response.has("result"));
+        assertTrue(response.getAsJsonObject("error").get("message").getAsString().contains("not supported"));
+    }
+
+    @Test
     void jsonRpcConnectionTestAddsOptionalDatabaseInfoWithoutChangingLegacySuccess() {
         JsonRpcServer legacyServer = new JsonRpcServer(new MinimalAgent());
         JsonObject legacyResult = JsonParser.parseString(legacyServer.handleRequest(
@@ -382,6 +393,66 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
+    void nativeSessionCancellationOnlyCancelsTargetSession() throws Exception {
+        nativeCancellationProof("cancel_session");
+    }
+
+    @Test
+    void nativeSessionCloseCancelsTargetBeforeWaitingForItsRequestLock() throws Exception {
+        nativeCancellationProof("close_session");
+    }
+
+    private void nativeCancellationProof(String action) throws Exception {
+        List<NativeCancelAgent> created = Collections.synchronizedList(new ArrayList<>());
+        MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(() -> {
+            NativeCancelAgent agent = new NativeCancelAgent();
+            created.add(agent);
+            return agent;
+        });
+        nativeRequest(server, "open_session", "a", 1);
+        nativeRequest(server, "open_session", "b", 2);
+        try (var workers = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+            var target = workers.submit(() -> nativeRequest(server, "get_explain_info", "a", 3));
+            var sibling = workers.submit(() -> nativeRequest(server, "get_explain_info", "b", 4));
+            try {
+                assertTrue(created.get(0).started.await(3, TimeUnit.SECONDS));
+                assertTrue(created.get(1).started.await(3, TimeUnit.SECONDS));
+                nativeRequest(server, action, "a", 5);
+                String targetResponse = target.get(2, TimeUnit.SECONDS);
+                assertTrue(JsonParser.parseString(targetResponse).getAsJsonObject().has("error"), targetResponse);
+                assertTrue(created.get(0).cancelled.get());
+                assertTrue(created.get(0).cleaned.get());
+                assertFalse(created.get(0).executor.hasActiveStatements());
+                assertFalse(created.get(1).cancelled.get(), "Sibling native Statement remains active");
+                assertFalse(sibling.isDone(), "Sibling request remains blocked until its own release");
+                if ("close_session".equals(action)) {
+                    assertTrue(created.get(0).closed.await(2, TimeUnit.SECONDS), "Close acquired request lock after cancellation");
+                }
+                created.get(1).release.countDown();
+                String siblingResponse = sibling.get(2, TimeUnit.SECONDS);
+                assertTrue(JsonParser.parseString(siblingResponse).getAsJsonObject().has("result"), siblingResponse);
+            } finally {
+                created.forEach(agent -> agent.release.countDown());
+                nativeRequest(server, "close_session", "a", 6);
+                nativeRequest(server, "close_session", "b", 7);
+            }
+        }
+    }
+
+    private static String nativeRequest(MultiSessionJsonRpcServer server, String method, String session, int id) {
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", id);
+        request.addProperty("method", method);
+        JsonObject params = new JsonObject();
+        params.addProperty("agentSessionId", session);
+        params.addProperty("sql", "SELECT 1");
+        params.addProperty("timeoutSecs", 0);
+        params.addProperty("mode", "explain");
+        request.add("params", params);
+        return server.handleRequest(request.toString());
+    }
+    @Test
     void cancelActiveStatementsClosesOnlyThatExecutorPagedSessions() {
         JdbcExecutor target = new JdbcExecutor();
         JdbcExecutor other = new JdbcExecutor();
@@ -434,6 +505,19 @@ class CommonJavaCompatibilityTest {
         assertTrue(row.get(1).getAsJsonPrimitive().isString());
         assertEquals(42, row.get(2).getAsInt());
         assertTrue(row.get(2).getAsJsonPrimitive().isNumber());
+    }
+
+    @Test
+    void jsonRpcServerDispatchesDeferredLobOption() {
+        MinimalAgent agent = new MinimalAgent();
+        JsonRpcServer server = new JsonRpcServer(agent);
+
+        String response = server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"" + AgentProtocol.METHOD_EXECUTE_QUERY + "\",\"params\":{\"sql\":\"select payload from documents\",\"deferLobs\":true}}"
+        );
+
+        assertTrue(JsonParser.parseString(response).getAsJsonObject().has("result"));
+        assertTrue(agent.lastExecuteOptions.getDeferLobs());
     }
 
     @Test
@@ -524,14 +608,14 @@ class CommonJavaCompatibilityTest {
         JsonRpcServer server = new JsonRpcServer(agent);
 
         String startResponse = server.handleRequest(
-            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"" + AgentProtocol.METHOD_START_TABLE_READ + "\",\"params\":{\"sql\":\"select * from orders\",\"schema\":\"public\",\"pageSize\":2,\"fetchSize\":8,\"maxRows\":20,\"timeoutSecs\":3}}"
+            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"" + AgentProtocol.METHOD_START_TABLE_READ + "\",\"params\":{\"sql\":\"select * from orders\",\"schema\":\"public\",\"pageSize\":2,\"fetchSize\":8,\"maxRows\":20,\"timeoutSecs\":3,\"deferLobs\":true}}"
         );
         JsonObject startJson = JsonParser.parseString(startResponse).getAsJsonObject();
 
         assertTrue(startJson.has("result"));
         assertEquals("select * from orders", agent.lastSql);
         assertEquals("public", agent.lastSchema);
-        assertEquals(new QueryPageOptions(2, 8, 20, 3), agent.lastOptions);
+        assertEquals(new QueryPageOptions(2, 8, 20, 3, true), agent.lastOptions);
         assertEquals("table-session", startJson.getAsJsonObject("result").get("session_id").getAsString());
 
         String fetchResponse = server.handleRequest(
@@ -586,7 +670,9 @@ class CommonJavaCompatibilityTest {
         assertEquals(true, page.getHas_more());
 
         assertEquals(JdbcExecutor.DEFAULT_MAX_ROWS, new ExecuteQueryOptions().getMaxRows());
+        assertFalse(new ExecuteQueryOptions().getDeferLobs());
         assertEquals(100, new QueryPageOptions().getPageSize());
+        assertFalse(new QueryPageOptions().getDeferLobs());
         assertNotNull(JdbcExecutor.INSTANCE);
     }
 
@@ -885,6 +971,8 @@ class CommonJavaCompatibilityTest {
     }
 
     private static class MinimalAgent implements DatabaseAgent {
+        private ExecuteQueryOptions lastExecuteOptions;
+
         @Override
         public void connect(ConnectParams params) {
         }
@@ -934,6 +1022,7 @@ class CommonJavaCompatibilityTest {
 
         @Override
         public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+            lastExecuteOptions = options;
             return new QueryResult(Collections.emptyList(), Collections.emptyList(), 0L, 0L);
         }
 
@@ -962,6 +1051,41 @@ class CommonJavaCompatibilityTest {
         }
     }
 
+    private static final class NativeCancelAgent extends MinimalAgent {
+        private final CountDownLatch started = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+        private final CountDownLatch closed = new CountDownLatch(1);
+        private final AtomicBoolean cancelled = new AtomicBoolean();
+        private final AtomicBoolean cleaned = new AtomicBoolean();
+        private volatile JdbcExecutor executor;
+        private final java.sql.Statement statement = proxy(java.sql.Statement.class, (method, args) -> {
+            if ("cancel".equals(method.getName())) {
+                cancelled.set(true);
+                release.countDown();
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        @Override
+        public String getExplainInfo(String sql, String database, String schema, int timeout, String mode) {
+            executor = JdbcExecutor.current();
+            try (var operation = executor.beginNativeOperation(); var tracked = executor.trackStatement(statement)) {
+                started.countDown();
+                if (!release.await(5, TimeUnit.SECONDS)) throw new AssertionError("Native Statement was not cancelled");
+                operation.checkCancelled();
+                return "{}";
+            } catch (InterruptedException | java.sql.SQLException error) {
+                throw new RuntimeException(error);
+            } finally {
+                cleaned.set(true);
+            }
+        }
+
+        @Override
+        public void disconnect() {
+            closed.countDown();
+        }
+    }
     private static final class CancelTrackingAgent extends MinimalAgent {
         private final CountDownLatch statementStarted = new CountDownLatch(1);
         private final CountDownLatch release = new CountDownLatch(1);

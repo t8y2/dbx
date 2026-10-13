@@ -1,6 +1,12 @@
 import type { TreeNode, TreeNodeType } from "@/types/database";
 
-export const SIDEBAR_TREE_ROW_HEIGHT = 28;
+export const SIDEBAR_TREE_ROW_HEIGHT_DEFAULT = 28;
+export const SIDEBAR_TREE_ROW_HEIGHT_COMPACT = 24;
+export const SIDEBAR_TREE_ROW_HEIGHT = SIDEBAR_TREE_ROW_HEIGHT_DEFAULT;
+
+export function getSidebarTreeRowHeight(density?: string): number {
+  return density === "compact" ? SIDEBAR_TREE_ROW_HEIGHT_COMPACT : SIDEBAR_TREE_ROW_HEIGHT_DEFAULT;
+}
 export const SIDEBAR_TREE_SCROLL_BUFFER = 600;
 export const SIDEBAR_TREE_PRERENDER_COUNT = 48;
 

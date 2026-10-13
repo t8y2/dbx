@@ -41,7 +41,7 @@ export function executePluginCommand(registry: FrontendPluginRegistry, queryStor
   if (!workbench) return { error: `Command '${pluginId}.${commandId}' references missing workbench '${action.workbench}'` };
   // §5.4 re-validate enablement right before execution (against the current context snapshot; the surface key follows
   // presentation).
-  const commandContextKeys: PluginConditionContextKeys = { surface: action.presentation === "panel" ? "panel" : "tab", "connection.state": "none", readOnly: false };
+  const commandContextKeys: PluginConditionContextKeys = { surface: action.presentation === "panel" ? "dock" : "tab", "connection.state": "none", readOnly: false };
   if (!evaluatePluginCommandConditions(command.enablement?.all, commandContextKeys)) {
     return { error: `Command '${pluginId}.${commandId}' is disabled by enablement` };
   }

@@ -4,7 +4,7 @@ import { Download, RefreshCcw } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import * as api from "@/lib/backend/api";
+import { consulOperatorRead, consulSnapshotGenerate, consulSnapshotRestore, consulAutopilotUpdate, consulRaftTransfer, consulRaftRemove, consulKeyringWrite, consulLicenseWrite } from "@/lib/backend/api";
 import type { ConsulCapabilities, ConsulOperatorDocument, ConsulOperatorReadKind } from "@/types/consul";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
@@ -38,7 +38,7 @@ async function refresh() {
   await Promise.all(
     kinds.map(async (kind) => {
       try {
-        documents.value[kind] = await api.consulOperatorRead(props.connectionId, kind);
+        documents.value[kind] = await consulOperatorRead(props.connectionId, kind);
         delete failures.value[kind];
       } catch (error) {
         failures.value[kind] = error instanceof Error ? error.message : String(error);
@@ -49,12 +49,12 @@ async function refresh() {
 }
 
 async function downloadSnapshot() {
-  const snapshot = await api.consulSnapshotGenerate(props.connectionId);
-  const binary = atob(snapshot.dataBase64);
+  const snapshotResult = await consulSnapshotGenerate(props.connectionId);
+  const binary = atob(snapshotResult.dataBase64);
   const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
   const link = document.createElement("a");
   link.href = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
-  link.download = `consul-${snapshot.datacenter || "snapshot"}.snap`;
+  link.download = `consul-${snapshotResult.datacenter || "snapshot"}.snap`;
   link.click();
   URL.revokeObjectURL(link.href);
 }
@@ -116,7 +116,7 @@ defineExpose({ refresh });
           <Input type="file" @change="selectSnapshot" /><Input v-model="snapshot.datacenter" :placeholder="t('consul.ui.targetDatacenter')" /><Input v-model="snapshot.confirmation" :placeholder="t('consul.ui.restoreSnapshotConfirmation', { datacenter: snapshot.datacenter })" /><Button
             size="sm"
             :disabled="!snapshot.data"
-            @click="runWrite(() => api.consulSnapshotRestore(props.connectionId, { snapshotBase64: snapshot.data, targetDatacenter: snapshot.datacenter, confirmation: snapshot.confirmation }))"
+            @click="runWrite(() => consulSnapshotRestore(props.connectionId, { snapshotBase64: snapshot.data, targetDatacenter: snapshot.datacenter, confirmation: snapshot.confirmation }))"
             >{{ t("consul.ui.restoreSnapshot") }}</Button
           >
         </div>
@@ -124,7 +124,7 @@ defineExpose({ refresh });
       <section v-if="autopilotWriteVisible" class="border p-3">
         <h3 class="mb-3 text-xs font-medium uppercase">{{ t("consul.ui.autopilotUpdate") }}</h3>
         <label class="mb-2 flex items-center gap-2 text-xs"><input v-model="autopilot.cleanupDeadServers" type="checkbox" />{{ t("consul.ui.cleanupDeadServers") }}</label
-        ><Input v-model="autopilot.confirmation" :placeholder="t('consul.ui.updateAutopilotConfirmation')" /><Button class="mt-2" size="sm" @click="runWrite(() => api.consulAutopilotUpdate(props.connectionId, { CleanupDeadServers: autopilot.cleanupDeadServers }, autopilot.confirmation))">{{
+        ><Input v-model="autopilot.confirmation" :placeholder="t('consul.ui.updateAutopilotConfirmation')" /><Button class="mt-2" size="sm" @click="runWrite(() => consulAutopilotUpdate(props.connectionId, { CleanupDeadServers: autopilot.cleanupDeadServers }, autopilot.confirmation))">{{
           t("consul.ui.updateAutopilot")
         }}</Button>
       </section>
@@ -133,8 +133,8 @@ defineExpose({ refresh });
         <div class="grid gap-2">
           <Input v-model="raft.serverId" :placeholder="t('consul.ui.serverId')" /><Input v-model="raft.address" :placeholder="t('consul.ui.peerAddress')" /><Input v-model="raft.confirmation" :placeholder="t('consul.ui.reenterIdAddress')" />
           <div class="flex gap-2">
-            <Button size="sm" @click="runWrite(() => api.consulRaftTransfer(props.connectionId, { serverId: raft.serverId || null, address: null, confirmation: raft.confirmation }))">{{ t("consul.ui.transferLeader") }}</Button
-            ><Button size="sm" variant="destructive" @click="runWrite(() => api.consulRaftRemove(props.connectionId, { serverId: raft.serverId || null, address: raft.address || null, confirmation: raft.confirmation }))">{{ t("consul.ui.removePeer") }}</Button>
+            <Button size="sm" @click="runWrite(() => consulRaftTransfer(props.connectionId, { serverId: raft.serverId || null, address: null, confirmation: raft.confirmation }))">{{ t("consul.ui.transferLeader") }}</Button
+            ><Button size="sm" variant="destructive" @click="runWrite(() => consulRaftRemove(props.connectionId, { serverId: raft.serverId || null, address: raft.address || null, confirmation: raft.confirmation }))">{{ t("consul.ui.removePeer") }}</Button>
           </div>
         </div>
       </section>
@@ -146,7 +146,7 @@ defineExpose({ refresh });
             <option value="install">{{ t("consul.ui.install") }}</option>
             <option value="use">{{ t("consul.ui.use") }}</option>
             <option value="remove">{{ t("consul.ui.remove") }}</option></select
-          ><Input v-model="keyring.key" type="password" :placeholder="t('consul.ui.gossipKey')" /><Input v-model="keyring.confirmation" :placeholder="t('consul.ui.changeKeyringConfirmation')" /><Button size="sm" @click="runWrite(() => api.consulKeyringWrite(props.connectionId, keyring))">{{
+          ><Input v-model="keyring.key" type="password" :placeholder="t('consul.ui.gossipKey')" /><Input v-model="keyring.confirmation" :placeholder="t('consul.ui.changeKeyringConfirmation')" /><Button size="sm" @click="runWrite(() => consulKeyringWrite(props.connectionId, keyring))">{{
             t("consul.ui.changeKeyring")
           }}</Button>
         </div>
@@ -156,7 +156,7 @@ defineExpose({ refresh });
         <div class="grid gap-2">
           <Input v-model="license.value" type="password" :placeholder="t('consul.ui.license')" /><Input v-model="license.confirmation" :placeholder="t('consul.ui.updateLicenseConfirmation')" /><Button
             size="sm"
-            @click="runWrite(() => api.consulLicenseWrite(props.connectionId, { license: license.value, confirmation: license.confirmation }))"
+            @click="runWrite(() => consulLicenseWrite(props.connectionId, { license: license.value, confirmation: license.confirmation }))"
             >{{ t("consul.ui.updateLicense") }}</Button
           >
         </div>

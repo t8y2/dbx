@@ -276,7 +276,7 @@ async function fetchSnapshot(options: { silent?: boolean } = {}) {
   if (!options.silent) loading.value = true;
   error.value = "";
   try {
-    await connectionStore.ensureConnected(connectionId);
+    await connectionStore.ensureConnected(connectionId, { skipIfClosedByUser: true });
     const value = await api.nacosGetDashboard(connectionId, { namespace });
     if (requestId !== latestRequestId) return;
     samples.value = appendDashboardSample(samples.value, { at: Date.now(), snapshot: value });

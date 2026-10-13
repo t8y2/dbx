@@ -1,5 +1,5 @@
 import { DriversClient } from "./DriversClient";
-import { fetchAgentDownloadCatalog } from "@/lib/agentRegistrySource";
+import { fetchAgentDownloadCatalogWithRegistry } from "@/lib/agentRegistrySource";
 import { buildMetadata } from "@/lib/metadata";
 import type { Metadata } from "next";
 import { resolveLang } from "@/lib/i18n";
@@ -30,7 +30,7 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
 }
 
 export default async function DriversPage() {
-  const catalog = await fetchAgentDownloadCatalog();
-  if (!catalog) throw new Error("Unable to generate the static driver catalog from R2 or CNB");
-  return <DriversClient initialCatalog={catalog} />;
+  const source = await fetchAgentDownloadCatalogWithRegistry();
+  if (!source) throw new Error("Unable to generate the static driver catalog from R2 or CNB");
+  return <DriversClient initialCatalog={source.catalog} initialRegistry={source.registry} />;
 }

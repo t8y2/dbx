@@ -52,7 +52,7 @@ watch(
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="fixed inset-0 z-[100] flex items-start justify-center pt-[18vh]" @mousedown.self="emit('update:open', false)">
+    <div v-if="open" data-slot="dialog-overlay" class="fixed inset-0 z-[100] flex items-start justify-center pt-[18vh]" @mousedown.self="emit('update:open', false)">
       <div class="w-[420px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg border bg-popover shadow-2xl" role="listbox" :aria-label="t('tabs.switcherTitle')">
         <div class="border-b px-3 py-2 text-xs font-medium text-muted-foreground">{{ t("tabs.switcherTitle") }}</div>
         <div ref="listRef" class="max-h-[60vh] overflow-y-auto p-1">

@@ -474,19 +474,22 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         timeout_secs: Some(30),
         keyset_optimization_enabled: false,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-mysql-query-export-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
         null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
         selected_columns: None,
         export_column_extras: None,
         column_comments: None,
+        header_comment_rows: false,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
@@ -570,19 +573,22 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
         timeout_secs: Some(30),
         keyset_optimization_enabled: false,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-mysql-issue-8803-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
         null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
         selected_columns: None,
         export_column_extras: None,
         column_comments: None,
+        header_comment_rows: false,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     export_query_result_core(&state, &request, None, |_| {}).await.expect("export fixture");
@@ -690,19 +696,22 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         timeout_secs: Some(1),
         keyset_optimization_enabled: false,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-mysql-query-export-timeout-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
         null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
         selected_columns: None,
         export_column_extras: None,
         column_comments: None,
+        header_comment_rows: false,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     let rows_exported = AtomicU64::new(0);
@@ -831,6 +840,67 @@ DROP PROCEDURE IF EXISTS {procedure};"
 
     execution.unwrap();
     cleanup.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection"]
+async fn live_mysql_repeated_delimiter_executes_original_user_script() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let config = live_mysql_sql_file_config(&format!("live-mysql-repeated-delimiter-{suffix}"));
+    let (state, db_path) = app_state_with_config(config.clone()).await;
+    let database = format!("dbx_repeated_delimiter_{suffix}");
+    let sql = "\
+DELIMITER ;;
+drop procedure if exists p_ludp_data_table_scripts;;
+delimiter ;;
+create procedure p_ludp_data_table_scripts()
+begin
+    -- 定义变量,存储表及字段存在状态
+   declare filedExist INT DEFAULT 0;
+   declare currentDatabaseName VARCHAR(200) DEFAULT '';
+   declare tableCount INT DEFAULT 0;
+
+end ;;
+call p_ludp_data_table_scripts();";
+
+    let execution = async {
+        execute_sql_statement(&state, &config.id, "", &format!("CREATE DATABASE `{database}`"), None, None).await?;
+        let results = execute_multi_core(&state, &config.id, &database, sql, None, None).await?;
+        assert_eq!(results.len(), 3);
+        for result in &results {
+            assert_ne!(result.columns, vec!["Error"], "script failed: {result:?}");
+        }
+
+        let source = execute_sql_statement(
+            &state,
+            &config.id,
+            &database,
+            "SHOW CREATE PROCEDURE p_ludp_data_table_scripts",
+            None,
+            None,
+        )
+        .await?;
+        assert_eq!(source.rows.len(), 1);
+
+        // Exercise the same UTF-16 cursor lookup used by the desktop command,
+        // then execute the extracted routine against the live server.
+        let cursor = sql[..sql.find("declare currentDatabaseName").unwrap()].encode_utf16().count();
+        let current = dbx_core::sql::find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Mysql);
+        assert!(current.starts_with("create procedure"));
+        execute_sql_statement(&state, &config.id, &database, "DROP PROCEDURE p_ludp_data_table_scripts", None, None)
+            .await?;
+        execute_sql_statement(&state, &config.id, &database, &current, None, None).await?;
+        execute_sql_statement(&state, &config.id, &database, "CALL p_ludp_data_table_scripts()", None, None).await?;
+        Ok::<_, String>(())
+    }
+    .await;
+
+    let cleanup =
+        execute_sql_statement(&state, &config.id, "", &format!("DROP DATABASE IF EXISTS `{database}`"), None, None)
+            .await;
+    let _ = std::fs::remove_file(db_path);
+    cleanup.expect("remove isolated test database");
+    execution.expect("original repeated DELIMITER script and cursor execution should succeed");
 }
 
 #[tokio::test]
@@ -1306,6 +1376,7 @@ INSERT INTO install_check (id) VALUES (1), (2);
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
     };
 
     let _ = execute_sql_statement(
@@ -1396,6 +1467,7 @@ INSERT INTO children (parent_id) VALUES (LAST_INSERT_ID());
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
     };
 
     let _ = execute_sql_statement(
@@ -1470,6 +1542,7 @@ async fn live_sql_file_import_preserves_raw_mysql_binary_literal_bytes() {
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
     };
 
     tokio::fs::write(&request.file_path, script).await.unwrap();

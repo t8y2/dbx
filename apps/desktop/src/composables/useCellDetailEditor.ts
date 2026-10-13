@@ -4,19 +4,23 @@ import { EditorView, keymap, drawSelection, dropCursor, highlightSpecialChars, h
 import { json } from "@codemirror/lang-json";
 import { search as cmSearch } from "@codemirror/search";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
-import { bracketMatching, foldGutter, foldKeymap } from "@codemirror/language";
+import { bracketMatching, foldKeymap } from "@codemirror/language";
+import { createConsistentFoldGutter } from "@/lib/editor/codemirrorFoldGutter";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, cellDetailActiveLineColor, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
+import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, isJsonColumnType } from "@/lib/dataGrid/cellDetailPresentation";
+import { isJsonColumnType } from "@/lib/dataGrid/cellDetailPresentation";
 import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import i18n from "@/i18n";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorTheme } from "@/stores/settingsStore";
 import type { AppThemeAppearance, AppThemePalette } from "@/lib/app/appTheme";
 import { selectAllCellDetailText } from "@/lib/dataGrid/cellDetailSelection";
+import { selectLineEnds } from "@/lib/editor/selectLineEnds";
+import { preserveSourceHistory, rawSourceField, restoreRawSource } from "@/lib/editor/preserveTextLineEndings";
 
 export interface UseCellDetailEditorOptions {
   onChange?: (value: string) => void;
@@ -24,7 +28,9 @@ export interface UseCellDetailEditorOptions {
   onBlur?: () => void;
   /** Return true after handling a save shortcut so CodeMirror consumes it. */
   onSaveShortcut?: (event: KeyboardEvent) => boolean;
-  language?: "auto" | "json";
+  language?: "auto" | "json" | "text";
+  /** Keep source line endings and suppress change events during external text synchronization. */
+  preserveLineEndings?: boolean;
   readOnly?: boolean | (() => boolean);
   /** Keep cell detail editors gutter-free unless a caller explicitly opts in. */
   lineNumbers?: boolean;
@@ -64,8 +70,10 @@ function looksLikeJsonString(text: string): boolean {
   return trimmed.startsWith("{") || trimmed.startsWith("[");
 }
 
+export const CELL_DETAIL_JSON_MODE_MAX_LENGTH = 2_000_000;
+
 function shouldUseJsonMode(columnType?: string, value?: string): boolean {
-  if (value && value.length > CELL_DETAIL_JSON_FORMAT_MAX_LENGTH) return false;
+  if (value && value.length > CELL_DETAIL_JSON_MODE_MAX_LENGTH) return false;
   if (isJsonColumnType(columnType)) return true;
   if (value && looksLikeJsonString(value)) return true;
   return false;
@@ -79,8 +87,10 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
   const fontThemeComp = new Compartment();
   const lineWrappingComp = new Compartment();
   const readOnlyComp = new Compartment();
+  const shortcutComp = new Compartment();
 
   let destroyed = false;
+  let synchronizingValue = false;
   let currentIsJson = false;
   let liveFontSize = clampEditorFontSize(options.fontSize());
   let gestureStartFontSize = liveFontSize;
@@ -105,6 +115,10 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
 
   function isReadOnly(): boolean {
     return typeof options.readOnly === "function" ? options.readOnly() : Boolean(options.readOnly);
+  }
+
+  function isLineWrapping(): boolean {
+    return typeof options.lineWrapping === "function" ? options.lineWrapping() : settingsStore.editorSettings.wordWrap;
   }
 
   function readOnlyExtensions(readOnly: boolean) {
@@ -173,11 +187,20 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
   });
 
   watch(
-    () => options.lineWrapping?.() ?? false,
+    () => isLineWrapping(),
     (lineWrapping) => {
       const editor = view.value;
       if (!editor || destroyed) return;
       editor.dispatch({ effects: lineWrappingComp.reconfigure(lineWrapping ? EditorView.lineWrapping : []) });
+    },
+  );
+
+  watch(
+    () => settingsStore.editorSettings.shortcuts.selectLineEnds,
+    (shortcut) => {
+      const editor = view.value;
+      if (!editor || destroyed) return;
+      editor.dispatch({ effects: shortcutComp.reconfigure(keymap.of([{ key: shortcutToCodeMirrorKey(shortcut), preventDefault: true, run: selectLineEnds }])) });
     },
   );
 
@@ -194,7 +217,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     if (destroyed) return;
 
     const doc = initialValue ?? "";
-    currentIsJson = options.language === "json" || shouldUseJsonMode(columnType, doc);
+    currentIsJson = options.language !== "text" && (options.language === "json" || shouldUseJsonMode(columnType, doc));
 
     const theme = await loadEditorTheme(options.editorTheme(), options.appAppearance(), undefined, options.appPalette());
     if (destroyed) return;
@@ -214,9 +237,10 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
         }),
         // Keep the compact detail-editor baseline; gutters and wrapping are opt-in.
         ...(options.lineNumbers ? [lineNumbers(), highlightActiveLineGutter()] : []),
-        ...(options.folding ? [foldGutter()] : []),
+        ...(options.folding ? [createConsistentFoldGutter()] : []),
         highlightSpecialChars(),
         history(),
+        ...(options.preserveLineEndings ? preserveSourceHistory(doc) : []),
         drawSelection(),
         editorClipboardLineEndingsExtension(EditorView),
         trimmedSelectionLayer(),
@@ -250,10 +274,11 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
               ]),
         ]),
         languageComp.of(currentIsJson ? json() : []),
-        lineWrappingComp.of(options.lineWrapping?.() ? EditorView.lineWrapping : []),
+        lineWrappingComp.of(isLineWrapping() ? EditorView.lineWrapping : []),
         readOnlyComp.of(readOnlyExtensions(isReadOnly())),
         themeComp.of(theme),
         fontThemeComp.of(fontTheme),
+        shortcutComp.of(keymap.of([{ key: shortcutToCodeMirrorKey(shortcuts.selectLineEnds), preventDefault: true, run: selectLineEnds }])),
         keymap.of([
           {
             key: "Mod-a",
@@ -270,11 +295,20 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
         ]),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
-            options.onChange?.(update.state.doc.toString());
+            if (options.preserveLineEndings) {
+              if (synchronizingValue) return;
+              options.onChange?.(update.state.field(rawSourceField));
+            } else {
+              options.onChange?.(update.state.doc.toString());
+            }
           }
         }),
         EditorView.domEventHandlers({
-          keydown(event) {
+          keydown(event, eventView) {
+            if (matchesShortcut(event, settingsStore.editorSettings.shortcuts.selectLineEnds)) {
+              event.preventDefault();
+              return selectLineEnds(eventView);
+            }
             if (!options.onSaveShortcut?.(event)) return false;
             event.preventDefault();
             event.stopPropagation();
@@ -327,7 +361,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     if (!editor || destroyed) return;
 
     const text = value ?? "";
-    const newIsJson = options.language === "json" || shouldUseJsonMode(columnType, text);
+    const newIsJson = options.language !== "text" && (options.language === "json" || shouldUseJsonMode(columnType, text));
     const effects: ReturnType<typeof Compartment.prototype.reconfigure>[] = [];
 
     if (newIsJson !== currentIsJson) {
@@ -335,13 +369,19 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
       currentIsJson = newIsJson;
     }
 
-    editor.dispatch({
-      changes: { from: 0, to: editor.state.doc.length, insert: text },
-      effects,
-    });
+    synchronizingValue = true;
+    try {
+      editor.dispatch({
+        changes: { from: 0, to: editor.state.doc.length, insert: text },
+        effects: options.preserveLineEndings ? [...effects, restoreRawSource.of(text)] : effects,
+      });
+    } finally {
+      synchronizingValue = false;
+    }
   }
 
   function getValue(): string {
+    if (options.preserveLineEndings && view.value) return view.value.state.field(rawSourceField);
     return view.value?.state.doc.toString() ?? "";
   }
 

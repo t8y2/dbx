@@ -14,6 +14,7 @@ import { usePluginShortcutHeight } from "@/composables/usePluginShortcutHeight";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { movePluginShortcut, type PluginShortcutEntry, type PluginShortcutPosition } from "@/lib/plugins/pluginShortcuts";
+import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 
 const props = defineProps<{ position: PluginShortcutPosition }>();
 const { t } = useI18n();
@@ -21,7 +22,7 @@ const settings = useSettingsStore();
 const openSettings = inject(OPEN_PLUGIN_SETTINGS, () => {});
 const showSettingsEntry = computed(() => settings.editorSettings.pluginShortcuts.showSettingsEntry);
 const { toast } = useToast();
-const { entries, open, isActive } = usePluginShortcuts();
+const { entries, allEntries, open, isActive } = usePluginShortcuts();
 const { update, saving } = usePluginShortcutPreferences();
 const section = ref<HTMLElement | null>(null);
 const scroll = ref<HTMLElement | null>(null);
@@ -76,97 +77,134 @@ function activate(entry: PluginShortcutEntry) {
 function activateSettings() {
   if (!sorting.suppressClick()) openSettings();
 }
+function togglePluginVisibility(pluginId: string, visible: boolean) {
+  return update((current) => ({
+    hiddenPluginIds: visible ? current.hiddenPluginIds.filter((id) => id !== pluginId) : [...new Set([...current.hiddenPluginIds, pluginId])],
+  })).catch(saveError);
+}
+function pluginContextMenuItems(entry: PluginShortcutEntry): ContextMenuItem[] {
+  const visible = !settings.editorSettings.pluginShortcuts.hiddenPluginIds.includes(entry.pluginId);
+  return [
+    {
+      label: t("pluginPlatform.shortcutsShowInSidebar"),
+      checked: visible,
+      checkedStyle: "switch",
+      action: () => void togglePluginVisibility(entry.pluginId, !visible),
+    },
+  ];
+}
+function sidebarContextMenuItems(): ContextMenuItem[] {
+  const plugins = new Map<string, PluginShortcutEntry>();
+  for (const entry of allEntries.value) if (!plugins.has(entry.pluginId)) plugins.set(entry.pluginId, entry);
+  return [...plugins.values()].map((entry) => {
+    return {
+      label: entry.pluginName,
+      get checked() {
+        return !settings.editorSettings.pluginShortcuts.hiddenPluginIds.includes(entry.pluginId);
+      },
+      checkedStyle: "switch" as const,
+      closeOnSelect: false,
+      disabled: () => saving.value,
+      action: () => void togglePluginVisibility(entry.pluginId, settings.editorSettings.pluginShortcuts.hiddenPluginIds.includes(entry.pluginId)),
+    };
+  });
+}
 </script>
 
 <template>
-  <nav
-    v-if="settings.isEditorSettingsLoaded && settings.editorSettings.pluginShortcuts.enabled && entries.length"
-    ref="section"
-    :aria-label="t('pluginPlatform.shortcutsTitle')"
-    :data-plugin-shortcut-position="position"
-    class="plugin-shortcut-bar flex shrink-0 flex-col"
-    :class="sidebarList ? 'min-w-0' : ['min-h-0 w-10 self-stretch bg-muted/30', left ? 'border-r' : 'border-l']"
-    @dragstart.prevent
-  >
-    <div
-      v-if="sidebarList && entries.length"
-      data-shortcut-resize
-      role="separator"
-      tabindex="0"
-      aria-orientation="horizontal"
-      :aria-label="t('pluginPlatform.shortcutsResize')"
-      :aria-valuenow="Math.round(sizing.height.value)"
-      :title="t('pluginPlatform.shortcutsResize')"
-      class="h-1.5 shrink-0 cursor-row-resize touch-none border-t border-border transition-colors hover:bg-primary/30 focus-visible:bg-primary/30 focus-visible:outline-none"
-      @pointerdown="!saving && sizing.start($event)"
-      @dblclick="!saving && sizing.reset()"
-      @keydown="!saving && sizing.resizeWithKeyboard($event)"
-    />
-    <div v-if="sidebarList" data-shortcut-header class="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-border/60 px-3" :class="{ 'border-t': !entries.length }">
-      <span class="min-w-0 truncate text-xs font-medium text-muted-foreground">{{ t("pluginPlatform.shortcutsHeading") }}</span>
-      <LightTooltip v-if="showSettingsEntry" :text="t('pluginPlatform.shortcutsSettings')" :disabled="drag.active || sizing.resizing.value" side="top">
-        <Button variant="ghost" size="icon" data-plugin-shortcut-settings class="shortcut-button size-6 shrink-0" :aria-label="t('pluginPlatform.shortcutsSettings')" @click="activateSettings">
-          <Settings2 class="size-3.5 text-foreground" />
-        </Button>
-      </LightTooltip>
-    </div>
-    <div v-show="!sidebarList || entries.length" ref="scroll" data-shortcut-scroll class="min-h-0 overflow-y-auto overflow-x-hidden p-1" :class="sidebarList ? 'shrink-0' : 'flex-1'" :style="sidebarList ? { height: `${sizing.height.value}px` } : undefined">
-      <div class="shortcut-items flex flex-col" :class="sidebarList ? 'gap-0' : ['min-h-full gap-1', { 'shortcut-items--bottom': bottom }]">
-        <LightTooltip v-for="(entry, index) in entries" :key="entry.id" :text="entry.label" :disabled="drag.active || sizing.resizing.value" :side="sidebarList ? 'top' : left ? 'right' : 'left'" content-class="shortcut-tooltip">
-          <span
-            class="shortcut-item relative flex shrink-0 touch-none"
-            :class="{
-              'w-full min-w-0': sidebarList,
-              'mt-auto': bottom && index === 0,
-              'drop-before': drag.target === entry.id && !drag.after && drag.source !== entry.id,
-              'drop-after': drag.target === entry.id && drag.after && drag.source !== entry.id,
-              'opacity-40': drag.active && drag.source === entry.id,
-            }"
-            :data-shortcut-id="entry.id"
-            @pointerdown="sorting.start($event, entry.id)"
-          >
-            <Button
-              variant="ghost"
-              size="icon"
-              class="shortcut-button relative shrink-0"
-              :class="[sidebarList ? 'shortcut-list-button h-auto min-h-7 w-full min-w-0 justify-start gap-2 rounded-none px-2 py-1 text-left font-normal' : 'size-8', { 'shortcut-button--active': isActive(entry) }]"
-              :style="sidebarList ? { fontSize: `${settings.editorSettings.sidebarFontSize}px` } : undefined"
-              :aria-label="entry.label"
-              :aria-pressed="isActive(entry)"
-              :disabled="entry.disabled"
-              @click="activate(entry)"
-            >
-              <PluginIcon :plugin-id="entry.pluginId" :icon="entry.icon" :class="sidebarList ? 'size-3.5' : 'size-4'" class="shrink-0 [&_svg]:text-current [&_img]:pointer-events-none" />
-              <span v-if="sidebarList" data-shortcut-label class="min-w-0 flex-1 truncate">{{ entry.label }}</span>
-              <span v-if="isActive(entry)" data-shortcut-active-indicator :class="sidebarList ? 'size-1.5 shrink-0 rounded-full bg-green-500' : 'absolute left-0 h-3 w-0.5 rounded-full bg-primary'" aria-hidden="true" />
-            </Button>
-          </span>
-        </LightTooltip>
-        <LightTooltip v-if="showSettingsEntry && !sidebarList" :text="t('pluginPlatform.shortcutsSettings')" :disabled="drag.active || sizing.resizing.value" :side="left ? 'right' : 'left'" content-class="shortcut-tooltip">
-          <span class="relative flex shrink-0" :class="{ 'mt-auto': bottom && !entries.length, 'pt-2': entries.length > 0 }">
-            <span v-if="entries.length" class="pointer-events-none absolute inset-x-2 top-0 z-10 h-px bg-border/60" aria-hidden="true" />
-            <Button variant="ghost" size="icon" data-plugin-shortcut-settings class="shortcut-button size-8 shrink-0" :aria-label="t('pluginPlatform.shortcutsSettings')" @click="activateSettings">
-              <Settings2 class="size-4 shrink-0 text-foreground" />
-            </Button>
-          </span>
-        </LightTooltip>
-      </div>
-    </div>
-    <Teleport to="body">
-      <div v-if="drag.active || sizing.resizing.value" class="shortcut-pointer-overlay fixed inset-0 select-none touch-none" :style="{ cursor: drag.active ? 'grabbing' : 'row-resize' }" aria-hidden="true" />
+  <CustomContextMenu v-if="settings.isEditorSettingsLoaded && settings.editorSettings.pluginShortcuts.enabled && allEntries.length" :items="sidebarContextMenuItems" v-slot="{ onContextMenu }">
+    <nav
+      ref="section"
+      :aria-label="t('pluginPlatform.shortcutsTitle')"
+      :data-plugin-shortcut-position="position"
+      class="plugin-shortcut-bar flex shrink-0 flex-col"
+      :class="sidebarList ? 'min-w-0' : ['min-h-0 w-10 self-stretch bg-muted/30', left ? 'border-r' : 'border-l']"
+      @dragstart.prevent
+      @contextmenu="onContextMenu"
+    >
       <div
-        v-if="drag.active && draggedEntry"
-        ref="preview"
-        data-shortcut-drag-preview
-        class="shortcut-drag-preview pointer-events-none fixed flex w-max max-w-xs overflow-hidden items-center gap-2 rounded-md border border-primary/50 bg-popover px-2 py-1.5 text-xs text-popover-foreground shadow-md"
-        :style="previewStyle"
-        aria-hidden="true"
-      >
-        <PluginIcon :plugin-id="draggedEntry.pluginId" :icon="draggedEntry.icon" class="size-4 [&_svg]:text-current" />
-        <span class="truncate">{{ draggedEntry.label }}</span>
+        v-if="sidebarList && entries.length"
+        data-shortcut-resize
+        role="separator"
+        tabindex="0"
+        aria-orientation="horizontal"
+        :aria-label="t('pluginPlatform.shortcutsResize')"
+        :aria-valuenow="Math.round(sizing.height.value)"
+        :title="t('pluginPlatform.shortcutsResize')"
+        class="h-1.5 shrink-0 cursor-row-resize touch-none border-t border-border transition-colors hover:bg-primary/30 focus-visible:bg-primary/30 focus-visible:outline-none"
+        @pointerdown="!saving && sizing.start($event)"
+        @dblclick="!saving && sizing.reset()"
+        @keydown="!saving && sizing.resizeWithKeyboard($event)"
+      />
+      <div v-if="sidebarList" data-shortcut-header class="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-border/60 px-3" :class="{ 'border-t': !entries.length }">
+        <span class="min-w-0 truncate text-xs font-medium text-muted-foreground">{{ t("pluginPlatform.shortcutsHeading") }}</span>
+        <LightTooltip v-if="showSettingsEntry" :text="t('pluginPlatform.shortcutsSettings')" :disabled="drag.active || sizing.resizing.value" side="top">
+          <Button variant="ghost" size="icon" data-plugin-shortcut-settings class="shortcut-button size-6 shrink-0" :aria-label="t('pluginPlatform.shortcutsSettings')" @click="activateSettings">
+            <Settings2 class="size-3.5 text-foreground" />
+          </Button>
+        </LightTooltip>
       </div>
-    </Teleport>
-  </nav>
+      <div v-show="!sidebarList || entries.length" ref="scroll" data-shortcut-scroll class="min-h-0 overflow-y-auto overflow-x-hidden p-1" :class="sidebarList ? 'shrink-0' : 'flex-1'" :style="sidebarList ? { height: `${sizing.height.value}px` } : undefined">
+        <div class="shortcut-items flex flex-col" :class="sidebarList ? 'gap-0' : ['min-h-full gap-1', { 'shortcut-items--bottom': bottom }]">
+          <CustomContextMenu v-for="(entry, index) in entries" :key="entry.id" :items="() => pluginContextMenuItems(entry)" v-slot="{ onContextMenu }">
+            <LightTooltip :text="entry.label" :disabled="drag.active || sizing.resizing.value" :side="sidebarList ? 'top' : left ? 'right' : 'left'" content-class="shortcut-tooltip">
+              <span
+                class="shortcut-item relative flex shrink-0 touch-none"
+                :class="{
+                  'w-full min-w-0': sidebarList,
+                  'mt-auto': bottom && index === 0,
+                  'drop-before': drag.target === entry.id && !drag.after && drag.source !== entry.id,
+                  'drop-after': drag.target === entry.id && drag.after && drag.source !== entry.id,
+                  'opacity-40': drag.active && drag.source === entry.id,
+                }"
+                :data-shortcut-id="entry.id"
+                @pointerdown="sorting.start($event, entry.id)"
+                @contextmenu="onContextMenu"
+              >
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="shortcut-button relative shrink-0"
+                  :class="[sidebarList ? 'shortcut-list-button h-auto min-h-7 w-full min-w-0 justify-start gap-2 rounded-none px-2 py-1 text-left font-normal' : 'size-8', { 'shortcut-button--active': isActive(entry) }]"
+                  :style="sidebarList ? { fontSize: `${settings.editorSettings.sidebarFontSize}px` } : undefined"
+                  :aria-label="entry.label"
+                  :aria-pressed="isActive(entry)"
+                  :disabled="entry.disabled"
+                  @click="activate(entry)"
+                >
+                  <PluginIcon :plugin-id="entry.pluginId" :icon="entry.icon" :class="sidebarList ? 'size-3.5' : 'size-4'" class="shrink-0 [&_svg]:text-current [&_img]:pointer-events-none" />
+                  <span v-if="sidebarList" data-shortcut-label class="min-w-0 flex-1 truncate">{{ entry.label }}</span>
+                  <span v-if="isActive(entry)" data-shortcut-active-indicator :class="sidebarList ? 'size-1.5 shrink-0 rounded-full bg-green-500' : 'absolute left-0 h-3 w-0.5 rounded-full bg-primary'" aria-hidden="true" />
+                </Button>
+              </span>
+            </LightTooltip>
+          </CustomContextMenu>
+          <LightTooltip v-if="showSettingsEntry && !sidebarList" :text="t('pluginPlatform.shortcutsSettings')" :disabled="drag.active || sizing.resizing.value" :side="left ? 'right' : 'left'" content-class="shortcut-tooltip">
+            <span class="relative flex shrink-0" :class="{ 'mt-auto': bottom && !entries.length, 'pt-2': entries.length > 0 }">
+              <span v-if="entries.length" class="pointer-events-none absolute inset-x-2 top-0 z-10 h-px bg-border/60" aria-hidden="true" />
+              <Button variant="ghost" size="icon" data-plugin-shortcut-settings class="shortcut-button size-8 shrink-0" :aria-label="t('pluginPlatform.shortcutsSettings')" @click="activateSettings">
+                <Settings2 class="size-4 shrink-0 text-foreground" />
+              </Button>
+            </span>
+          </LightTooltip>
+        </div>
+      </div>
+      <Teleport to="body">
+        <div v-if="drag.active || sizing.resizing.value" class="shortcut-pointer-overlay fixed inset-0 select-none touch-none" :style="{ cursor: drag.active ? 'grabbing' : 'row-resize' }" aria-hidden="true" />
+        <div
+          v-if="drag.active && draggedEntry"
+          ref="preview"
+          data-shortcut-drag-preview
+          class="shortcut-drag-preview pointer-events-none fixed flex w-max max-w-xs overflow-hidden items-center gap-2 rounded-md border border-primary/50 bg-popover px-2 py-1.5 text-xs text-popover-foreground shadow-md"
+          :style="previewStyle"
+          aria-hidden="true"
+        >
+          <PluginIcon :plugin-id="draggedEntry.pluginId" :icon="draggedEntry.icon" class="size-4 [&_svg]:text-current" />
+          <span class="truncate">{{ draggedEntry.label }}</span>
+        </div>
+      </Teleport>
+    </nav>
+  </CustomContextMenu>
 </template>
 
 <style scoped>

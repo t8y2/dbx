@@ -232,6 +232,27 @@ impl SecretCodec {
         Self::resolve(SecretKeyPolicy::PlatformDefault, std::path::Path::new("."), true).map(|resolved| resolved.codec)
     }
 
+    pub(crate) fn from_platform_store() -> Result<Option<Self>, String> {
+        platform_keyring_codec(false)
+    }
+
+    pub(crate) fn persist_managed_data_dir_key(&self, data_dir: &std::path::Path) -> Result<(), String> {
+        let path = managed_key_path(data_dir);
+        let parent = path.parent().ok_or_else(|| "KEY_FILE_UNAVAILABLE".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;
+        }
+        let persisted = write_key_file(&path, true, *self)?;
+        if persisted.key != self.key {
+            return Err("SECRET_KEY_MISMATCH".to_string());
+        }
+        secure_managed_key_permissions(&path)
+    }
+
     fn read_key_file(path: &std::path::Path, reject_symlink: bool) -> Result<Self, String> {
         let metadata = if reject_symlink { path.symlink_metadata() } else { path.metadata() }
             .map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;
@@ -345,6 +366,31 @@ where
     worker.join().map_err(|_| "KEYRING_ACCESS_FAILED: secret service worker failed".to_string())?
 }
 
+#[cfg(any(test, all(feature = "os-keyring", target_os = "linux")))]
+fn read_secret_service_item<I, U, R, E>(mut is_locked: I, mut unlock: U, mut read: R) -> Result<Vec<u8>, String>
+where
+    I: FnMut() -> Result<bool, E>,
+    U: FnMut() -> Result<(), E>,
+    R: FnMut() -> Result<Vec<u8>, E>,
+    E: std::fmt::Display,
+{
+    let locked =
+        is_locked().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret lock status check failed: {error}"))?;
+    if locked {
+        // Unlock drives the provider's prompt flow (KWallet, GNOME Keyring,
+        // and other Secret Service implementations). Never treat a denied or
+        // failed prompt as a missing item: doing so could provision a
+        // replacement key and strand existing ciphertext.
+        unlock().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret unlock failed: {error}"))?;
+        let still_locked = is_locked()
+            .map_err(|error| format!("KEYRING_ACCESS_FAILED: secret lock status check failed after unlock: {error}"))?;
+        if still_locked {
+            return Err("KEYRING_ACCESS_FAILED: secret remained locked after unlock".to_string());
+        }
+    }
+    read().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret read failed: {error}"))
+}
+
 #[cfg(all(feature = "os-keyring", target_os = "linux"))]
 fn secret_service_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec>, String> {
     use secret_service::{blocking::SecretService, EncryptionType, Error as SecretServiceError};
@@ -372,8 +418,7 @@ fn secret_service_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec
 
     let item = search.unlocked.into_iter().next().or_else(|| search.locked.into_iter().next());
     if let Some(item) = item {
-        let secret =
-            item.get_secret().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret read failed: {error}"))?;
+        let secret = read_secret_service_item(|| item.is_locked(), || item.unlock(), || item.get_secret())?;
         let material = String::from_utf8(secret).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
         let codec = SecretCodec::from_key_material(material.trim()).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
         return Ok(Some(codec));
@@ -411,8 +456,7 @@ fn secret_service_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec
     let item = found.into_iter().next();
     match item {
         Some(item) => {
-            let secret =
-                item.get_secret().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret read failed: {error}"))?;
+            let secret = read_secret_service_item(|| item.is_locked(), || item.unlock(), || item.get_secret())?;
             let material = String::from_utf8(secret).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
             let codec =
                 SecretCodec::from_key_material(material.trim()).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
@@ -483,12 +527,16 @@ fn secure_managed_key_permissions(path: &std::path::Path) -> Result<(), String> 
 }
 
 fn create_key_file(path: &std::path::Path, managed: bool) -> Result<SecretCodec, String> {
+    let mut key = [0u8; 32];
+    OsRng.fill_bytes(&mut key);
+    write_key_file(path, managed, SecretCodec::new(key))
+}
+
+fn write_key_file(path: &std::path::Path, managed: bool, codec: SecretCodec) -> Result<SecretCodec, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;
     }
-    let mut key = [0u8; 32];
-    OsRng.fill_bytes(&mut key);
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(codec.key);
     let write_result = {
         #[cfg(unix)]
         {
@@ -599,8 +647,8 @@ mod tests {
     }
 
     use super::{
-        managed_key_path, read_key_file_with_retry, run_secret_service_operation, SecretCodec, SecretKeyPolicy,
-        SecretKeySource,
+        managed_key_path, read_key_file_with_retry, read_secret_service_item, run_secret_service_operation,
+        SecretCodec, SecretKeyPolicy, SecretKeySource,
     };
     use base64::Engine as _;
     use std::sync::{Mutex, OnceLock};
@@ -669,13 +717,22 @@ mod tests {
 
     #[test]
     fn denied_or_corrupt_platform_key_never_creates_a_fallback() {
-        for provider_error in ["KEYRING_ACCESS_FAILED: permission denied", "SECRET_KEY_INVALID"] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("secret.key");
-            let expected = provider_error.to_string();
-            let result = SecretCodec::resolve_platform_default(Some(path.clone()), true, move |_| Err(expected));
-            assert!(matches!(result, Err(error) if error == provider_error));
-            assert!(!path.exists());
+        for allow_create in [false, true] {
+            for provider_error in [
+                "KEYRING_ACCESS_FAILED: permission denied",
+                "KEYRING_ACCESS_FAILED: locked credential store",
+                "SECRET_KEY_INVALID",
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("secret.key");
+                let expected = provider_error.to_string();
+                let result = SecretCodec::resolve_platform_default(Some(path.clone()), allow_create, move |create| {
+                    assert_eq!(create, allow_create);
+                    Err(expected)
+                });
+                assert!(matches!(result, Err(error) if error == provider_error));
+                assert!(!path.exists());
+            }
         }
     }
 
@@ -688,6 +745,84 @@ mod tests {
         });
         assert!(matches!(result, Err(error) if error == "KEYRING_ACCESS_FAILED: secret service worker failed"));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn locked_secret_service_item_is_unlocked_before_read() {
+        use std::cell::{Cell, RefCell};
+
+        let locked = Cell::new(true);
+        let calls = RefCell::new(Vec::new());
+        let secret = read_secret_service_item(
+            || {
+                calls.borrow_mut().push("is_locked");
+                Ok::<_, &'static str>(locked.get())
+            },
+            || {
+                calls.borrow_mut().push("unlock");
+                locked.set(false);
+                Ok::<_, &'static str>(())
+            },
+            || {
+                calls.borrow_mut().push("read");
+                Ok::<_, &'static str>(b"secret".to_vec())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(secret, b"secret");
+        assert_eq!(*calls.borrow(), ["is_locked", "unlock", "is_locked", "read"]);
+    }
+
+    #[test]
+    fn unlocked_secret_service_item_is_read_without_an_unlock_prompt() {
+        let unlock_called = std::cell::Cell::new(false);
+        let secret = read_secret_service_item(
+            || Ok::<_, &'static str>(false),
+            || {
+                unlock_called.set(true);
+                Ok::<_, &'static str>(())
+            },
+            || Ok::<_, &'static str>(b"secret".to_vec()),
+        )
+        .unwrap();
+
+        assert_eq!(secret, b"secret");
+        assert!(!unlock_called.get());
+    }
+
+    #[test]
+    fn secret_service_unlock_rejection_or_provider_failure_is_not_treated_as_missing() {
+        for detail in ["prompt dismissed by user", "provider returned an error"] {
+            let read_called = std::cell::Cell::new(false);
+            let result = read_secret_service_item(
+                || Ok::<_, &'static str>(true),
+                || Err(detail),
+                || {
+                    read_called.set(true);
+                    Ok::<_, &'static str>(Vec::new())
+                },
+            );
+
+            assert_eq!(result.unwrap_err(), format!("KEYRING_ACCESS_FAILED: secret unlock failed: {detail}"));
+            assert!(!read_called.get());
+        }
+    }
+
+    #[test]
+    fn secret_service_item_still_locked_after_unlock_is_an_access_error() {
+        let read_called = std::cell::Cell::new(false);
+        let result = read_secret_service_item(
+            || Ok::<_, &'static str>(true),
+            || Ok::<_, &'static str>(()),
+            || {
+                read_called.set(true);
+                Ok::<_, &'static str>(Vec::new())
+            },
+        );
+
+        assert_eq!(result.unwrap_err(), "KEYRING_ACCESS_FAILED: secret remained locked after unlock");
+        assert!(!read_called.get());
     }
 
     #[cfg(all(feature = "os-keyring", target_os = "linux"))]

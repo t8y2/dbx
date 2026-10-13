@@ -8,11 +8,26 @@ export type ActiveTabSidebarTarget =
       connectionId: string;
     }
   | {
+      type: "management";
+      connectionId: string;
+      nodeType: "user-admin" | "xugu-user-admin" | "dameng-users" | "dameng-roles" | "dameng-job-admin";
+    }
+  | {
       type: "table";
+      catalog?: string;
       connectionId: string;
       database: string;
       schema?: string;
       tableName: string;
+    }
+  | {
+      type: "redis-db";
+      connectionId: string;
+      database: string;
+    }
+  | {
+      type: "mqtt-topic";
+      connectionId: string;
     }
   | {
       type: "mongo-collection";
@@ -110,8 +125,44 @@ export function findSidebarConnectionNode(nodes: readonly TreeNode[], connection
 export function activeTabSidebarTarget(tab: QueryTab | undefined | null): ActiveTabSidebarTarget | null {
   if (!tab) return null;
 
+  const managementNodeTypes = {
+    users: "user-admin",
+    "xugu-users": "xugu-user-admin",
+    "dameng-users": "dameng-users",
+    "dameng-roles": "dameng-roles",
+    "dameng-jobs": "dameng-job-admin",
+  } as const;
+  if (Object.prototype.hasOwnProperty.call(managementNodeTypes, tab.mode)) {
+    if (!tab.connectionId) return null;
+    return { type: "management", connectionId: tab.connectionId, nodeType: managementNodeTypes[tab.mode as keyof typeof managementNodeTypes] };
+  }
+
   if (tab.mode === "databases") {
     return { type: "connection", connectionId: tab.connectionId };
+  }
+
+  if (tab.mode === "objects" || tab.mode === "database-search" || (tab.mode === "structure" && !tab.structureTableName)) {
+    if (!tab.connectionId) return null;
+    if (!tab.database) return { type: "connection", connectionId: tab.connectionId };
+    return {
+      type: "query-context",
+      connectionId: tab.connectionId,
+      database: tab.database,
+      catalog: tab.objectBrowser?.catalog ?? tab.catalog,
+      schema: tab.objectBrowser?.schema ?? tab.schema,
+    };
+  }
+
+  if (tab.mode === "structure") {
+    return { type: "table", connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog, schema: tab.schema, tableName: tab.structureTableName! };
+  }
+
+  if (tab.mode === "redis") {
+    return { type: "redis-db", connectionId: tab.connectionId, database: tab.database };
+  }
+
+  if (tab.mode === "mqtt") {
+    return { type: "mqtt-topic", connectionId: tab.connectionId };
   }
 
   if (tab.mode === "data") {
@@ -122,6 +173,7 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
       type: "table",
       connectionId: tab.connectionId,
       database: tableMeta?.database ?? tab.database,
+      ...(tab.catalog ? { catalog: tab.catalog } : {}),
       schema: tableMeta?.schema ?? tab.schema,
       tableName,
     };
@@ -229,7 +281,8 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
   }
 
   if (tab.mode === "query") {
-    if (!tab.connectionId || !tab.database) return null;
+    if (!tab.connectionId) return null;
+    if (!tab.database) return { type: "connection", connectionId: tab.connectionId };
     return {
       type: "query-context",
       connectionId: tab.connectionId,
@@ -239,7 +292,9 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     };
   }
 
-  return null;
+  // Connection workspaces (dashboards, MQ without a tenant, and plugins)
+  // have no more specific object identity.
+  return tab.connectionId ? { type: "connection", connectionId: tab.connectionId } : null;
 }
 
 function schemaMatches(node: TreeNode, schema: string | undefined): boolean {
@@ -256,6 +311,17 @@ function schemaMatches(node: TreeNode, schema: string | undefined): boolean {
 export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): boolean {
   if (target.type === "connection") {
     return node.type === "connection" && node.connectionId === target.connectionId;
+  }
+
+  if (target.type === "management") {
+    return node.type === target.nodeType && node.connectionId === target.connectionId;
+  }
+
+  if (target.type === "redis-db") {
+    return node.type === "redis-db" && node.connectionId === target.connectionId && node.database === target.database;
+  }
+  if (target.type === "mqtt-topic") {
+    return node.type === "mqtt-topic" && node.connectionId === target.connectionId;
   }
 
   if (target.type === "mongo-collection") {
@@ -286,7 +352,7 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
     if (target.schema) {
       return node.type === "schema" && node.connectionId === target.connectionId && node.database === target.database && node.label === target.schema;
     }
-    return node.type === "database" && node.connectionId === target.connectionId && node.label === target.database;
+    return (node.type === "database" || node.type === "mongo-db" || node.type === "redis-db" || node.type === "vector-database") && node.connectionId === target.connectionId && (node.database ?? node.label) === target.database;
   }
 
   if (target.type === "etcd-root") {
@@ -327,7 +393,14 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
     return node.type === "saved-sql-file" && node.savedSqlId === target.savedSqlId;
   }
 
-  return (node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId === target.connectionId && node.database === target.database && schemaMatches(node, target.schema) && node.label === target.tableName;
+  return (
+    (node.type === "table" || node.type === "view" || node.type === "materialized_view") &&
+    (node.catalog || undefined) === (target.catalog || undefined) &&
+    node.connectionId === target.connectionId &&
+    node.database === target.database &&
+    schemaMatches(node, target.schema) &&
+    node.label === target.tableName
+  );
 }
 
 export function findSidebarNodeForActiveTab(tab: QueryTab | undefined | null, flatNodes: readonly FlatTreeNode[]): FlatTreeNode | null {
@@ -398,4 +471,15 @@ function findPath(nodes: readonly TreeNode[], predicate: (node: TreeNode) => boo
     }
   }
   return null;
+}
+
+/** Expand loaded ancestors, including runtime Queries containers without metadata load markers. */
+export function expandSidebarLocatePath(path: readonly TreeNode[], canToggleLoaded: (node: TreeNode) => boolean): void {
+  for (let index = 0; index < path.length; index++) {
+    const node = path[index]!;
+    const next = path[index + 1];
+    const runtimeSqlAncestor = (node.type === "saved-sql-root" || node.type === "saved-sql-folder") && !!next && !!node.children?.some((child) => child.id === next.id);
+    // Keep unloaded table/collection leaves collapsed: their columns were not fetched.
+    if (!node.isExpanded && (runtimeSqlAncestor || canToggleLoaded(node))) node.isExpanded = true;
+  }
 }

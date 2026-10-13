@@ -11,12 +11,13 @@ const source = readFileSync(new URL("../NacosAdminConsole.vue", import.meta.url)
  * wiring that only exists inside this component, which is too large to mount.
  */
 describe("NacosAdminConsole YAML diagnostics wiring", () => {
-  it("blocks publishing on error severity only", () => {
-    expect(source).toContain("if (nacosConfigValidationBlocksPublish(diagnostics)) {");
-    expect(source).not.toContain('diagnostics.some((diagnostic) => nacosConfigDiagnosticSeverity(diagnostic) === "error")');
-    // `showSuccess` now also means "the user asked for validation", so a warnings-only
-    // run reports them instead of a success toast, and publishing is not blocked.
-    expect(source).toContain("if (!showSuccess) return true;");
+  it("keeps syntax validation separate from publishing", () => {
+    const saveRequest = source.slice(source.indexOf("function requestSaveConfig()"), source.indexOf("async function saveConfig()"));
+    expect(saveRequest).not.toContain("validateCurrentConfig");
+    expect(saveRequest).toContain("canRequestConfigSave.value");
+    expect(saveRequest).toContain("void saveConfig()");
+    expect(source).toContain('@click="validateCurrentConfig()"');
+    expect(source).toContain("nacosConfigValidationHasErrors(configValidationDiagnostics.value)");
   });
 
   it("localizes every key it references, including the new severity labels", () => {

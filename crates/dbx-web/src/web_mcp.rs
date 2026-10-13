@@ -319,6 +319,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deployment_token_without_allowed_hosts_returns_error() {
+        let (_dir, storage) = test_storage().await;
+        let result = WebMcpRuntime::load_with_deployment(
+            &storage,
+            Some(DeploymentConfig {
+                token: "deployment-secret".to_string(),
+                source: TokenSource::Environment,
+                allowed_hosts: vec![],
+                allowed_origins: vec![],
+            }),
+            false,
+        )
+        .await;
+
+        assert_eq!(result.err().as_deref(), Some("DBX_WEB_MCP_ALLOWED_HOSTS or a Web MCP allowed Host is required"));
+    }
+
+    #[tokio::test]
+    async fn page_managed_settings_without_allowed_hosts_returns_dual_path_error() {
+        let (_dir, storage) = test_storage().await;
+        let runtime = WebMcpRuntime::load_with_deployment(&storage, None, true).await.unwrap();
+
+        let result = runtime.update(&storage, request(true, &[], false)).await;
+
+        assert_eq!(result.err().as_deref(), Some("DBX_WEB_MCP_ALLOWED_HOSTS or a Web MCP allowed Host is required"));
+        assert!(!runtime.auth.enabled());
+        assert!(storage.get_secret(SECRET_NAMESPACE, SECRET_KEY).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn valid_deployment_configuration_enables_mcp() {
+        let (_dir, storage) = test_storage().await;
+        let runtime = WebMcpRuntime::load_with_deployment(
+            &storage,
+            Some(DeploymentConfig {
+                token: "deployment-secret".to_string(),
+                source: TokenSource::Environment,
+                allowed_hosts: vec!["dbx.example.test:4224".to_string()],
+                allowed_origins: vec![],
+            }),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(runtime.status("/mcp".to_string(), false).enabled);
+    }
+
+    #[tokio::test]
+    async fn absent_deployment_configuration_leaves_mcp_disabled() {
+        let (_dir, storage) = test_storage().await;
+        let runtime = WebMcpRuntime::load_with_deployment(&storage, None, false).await.unwrap();
+
+        assert!(!runtime.status("/mcp".to_string(), false).enabled);
+    }
+
+    #[tokio::test]
     async fn managed_token_survives_restart_and_is_encrypted() {
         let (_dir, storage) = test_storage().await;
         let runtime = WebMcpRuntime::load_with_deployment(&storage, None, true).await.unwrap();

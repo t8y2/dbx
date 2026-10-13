@@ -12,6 +12,7 @@ export interface DataGridWheelInput {
   deltaY: number;
   deltaMode: number;
   shiftKey?: boolean;
+  altKey?: boolean;
   ctrlKey?: boolean;
   metaKey?: boolean;
   lineSize: number;
@@ -52,7 +53,7 @@ export function resolveDataGridWheelScroll(input: DataGridWheelInput): DataGridW
   const accelerationFactor = input.accelerationFactor ?? 1;
   const normalizedDeltaX = wheelDeltaToPixels(input.deltaX, input.deltaMode, input.lineSize, metrics.clientWidth);
   const normalizedDeltaY = wheelDeltaToPixels(input.deltaY, input.deltaMode, input.lineSize, metrics.clientHeight);
-  const shiftedDeltaY = input.shiftKey && Math.abs(normalizedDeltaY) > Math.abs(normalizedDeltaX) ? normalizedDeltaY : 0;
+  const shiftedDeltaY = (input.shiftKey || input.altKey) && Math.abs(normalizedDeltaY) > Math.abs(normalizedDeltaX) ? normalizedDeltaY : 0;
   // Native pixel deltas are already expressed in CSS pixels. When a device reports deltaX,
   // preserve both axes at 1:1 so diagonal trackpad input is not distorted by Canvas acceleration.
   const hasNativePixelDeltaX = input.deltaMode === DOM_DELTA_PIXEL && input.deltaX !== 0;

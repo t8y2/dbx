@@ -16,6 +16,7 @@ export type DataGridStructuredFilterRule = {
 
 export type UseDataGridFilterBuilderOptions = {
   columns: MaybeRefOrGetter<readonly string[]>;
+  commentByColumn?: MaybeRefOrGetter<ReadonlyMap<string, string>>;
   createId?: () => string;
   isComplete: (rule: DataGridStructuredFilterRule) => boolean;
   buildCondition: (rule: DataGridStructuredFilterRule) => Promise<string | undefined>;
@@ -76,7 +77,8 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
   const appliedWhereInput = ref("");
   const filteredColumns = computed(() => {
     const query = columnSearch.value.trim();
-    return query ? toValue(options.columns).filter((column) => matchesIdentifierSearch(column, query)) : [...toValue(options.columns)];
+    const comments = toValue(options.commentByColumn);
+    return query ? toValue(options.columns).filter((column) => matchesIdentifierSearch(column, query) || matchesIdentifierSearch(comments?.get(column) ?? comments?.get(column.toLowerCase()) ?? "", query)) : [...toValue(options.columns)];
   });
   const activeCount = computed(() => rules.value.filter((rule) => !rule.disabled && rule.columnName && options.isComplete(rule)).length);
 
@@ -86,8 +88,10 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
   function ensureRule() {
     if (!rules.value.length && toValue(options.columns).length) rules.value = [defaultRule()];
   }
-  function addRule() {
-    rules.value = [...rules.value, defaultRule()];
+  function addRule(patch?: Partial<Omit<DataGridStructuredFilterRule, "id">>): DataGridStructuredFilterRule {
+    const rule = { ...defaultRule(), ...patch };
+    rules.value = [...rules.value, rule];
+    return rule;
   }
   function removeRule(id: string) {
     rules.value = rules.value.filter((rule) => rule.id !== id);

@@ -166,6 +166,8 @@ fn live_connection_config(
     database: &str,
 ) -> ConnectionConfig {
     ConnectionConfig {
+        oracle_oci_nls_lang: None,
+        oracle_oci_tns_admin: None,
         docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
@@ -210,6 +212,7 @@ fn live_connection_config(
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
         redis_key_templates: Vec::new(),
+        redis_key_filter: None,
         redis_key_grouping: None,
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
@@ -226,8 +229,10 @@ fn live_connection_config(
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
+        show_database_links: None,
         database_info: None,
     }
 }

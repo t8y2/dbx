@@ -20,6 +20,30 @@ pub enum DatabaseRuntimeMode {
     External,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseTransferObjectFamily {
+    Mysql,
+    Postgres,
+    Oracle,
+    SqlServer,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum DatabaseTransferSupportLevel {
+    BestEffort,
+    FamilyCompatible,
+    Verified,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseCompareMode {
+    Schema,
+    Data,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseDriverProfile {
@@ -49,6 +73,12 @@ pub struct ManagedDriverEntry {
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseManifestEntry {
     pub db_type: DatabaseType,
+    #[serde(default)]
+    pub compare_modes: Vec<DatabaseCompareMode>,
+    #[serde(default)]
+    pub transfer_object_family: Option<DatabaseTransferObjectFamily>,
+    #[serde(default)]
+    pub transfer_support_level: Option<DatabaseTransferSupportLevel>,
     pub label: String,
     #[serde(default)]
     pub dialect: Option<String>,
@@ -106,6 +136,18 @@ pub fn dialect_name(db_type: &DatabaseType) -> Option<&'static str> {
     entry(db_type).and_then(|candidate| candidate.dialect.as_deref())
 }
 
+pub fn transfer_object_family(db_type: &DatabaseType) -> Option<DatabaseTransferObjectFamily> {
+    entry(db_type).and_then(|candidate| candidate.transfer_object_family)
+}
+
+pub fn transfer_support_level(db_type: &DatabaseType) -> Option<DatabaseTransferSupportLevel> {
+    entry(db_type).and_then(|candidate| candidate.transfer_support_level)
+}
+
+pub fn supports_compare_mode(db_type: &DatabaseType, mode: DatabaseCompareMode) -> bool {
+    entry(db_type).is_some_and(|candidate| candidate.compare_modes.contains(&mode))
+}
+
 pub fn is_agent_runtime(db_type: &DatabaseType) -> bool {
     entry(db_type).is_some_and(|candidate| candidate.runtime_mode == DatabaseRuntimeMode::Agent)
 }
@@ -141,5 +183,34 @@ mod tests {
         assert_eq!(entry(&DatabaseType::Postgres).map(|entry| entry.default_port), Some(Some(5432)));
         assert_eq!(entry(&DatabaseType::Sqlite).map(|entry| entry.skip_tcp_probe), Some(true));
         assert_eq!(entry(&DatabaseType::H2).map(|entry| entry.agent_key.as_deref()), Some(Some("h2")));
+    }
+
+    #[test]
+    fn transfer_object_families_come_from_the_shared_manifest() {
+        assert_eq!(transfer_object_family(&DatabaseType::Mysql), Some(DatabaseTransferObjectFamily::Mysql));
+        assert_eq!(transfer_object_family(&DatabaseType::Kingbase), Some(DatabaseTransferObjectFamily::Postgres));
+        assert_eq!(transfer_object_family(&DatabaseType::Dameng), Some(DatabaseTransferObjectFamily::Oracle));
+        assert_eq!(transfer_object_family(&DatabaseType::SqlServer), Some(DatabaseTransferObjectFamily::SqlServer));
+        assert_eq!(transfer_object_family(&DatabaseType::Sqlite), None);
+    }
+
+    #[test]
+    fn transfer_support_levels_distinguish_evidence_strength() {
+        assert_eq!(transfer_support_level(&DatabaseType::Mysql), Some(DatabaseTransferSupportLevel::Verified));
+        assert_eq!(
+            transfer_support_level(&DatabaseType::Kingbase),
+            Some(DatabaseTransferSupportLevel::FamilyCompatible)
+        );
+        assert_eq!(transfer_support_level(&DatabaseType::Db2), Some(DatabaseTransferSupportLevel::BestEffort));
+        assert_eq!(transfer_support_level(&DatabaseType::Gbase), None);
+    }
+
+    #[test]
+    fn compare_modes_come_from_the_shared_manifest() {
+        assert!(supports_compare_mode(&DatabaseType::Mysql, DatabaseCompareMode::Schema));
+        assert!(supports_compare_mode(&DatabaseType::Mysql, DatabaseCompareMode::Data));
+        assert!(supports_compare_mode(&DatabaseType::Kingbase, DatabaseCompareMode::Data));
+        assert!(!supports_compare_mode(&DatabaseType::MongoDb, DatabaseCompareMode::Data));
+        assert!(!supports_compare_mode(&DatabaseType::Redis, DatabaseCompareMode::Schema));
     }
 }

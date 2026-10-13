@@ -92,6 +92,18 @@ Cookie: dbx_session=...
 | `DBX_MAX_UPLOAD_MB` | Override the general request and uploaded-file limit; default 1024 MB. Multipart routes reserve fixed protocol overhead (set at least `4096` for a 4 GiB file) |
 | `DBX_AGENT_DIR` | Override the Web Agent/driver directory; defaults to `agents` under the data directory |
 | `DBX_STATIC_DIR` | Override the Web static asset directory |
+| `RUST_LOG` | Configure Rust backend log filtering; the default is `dbx_web=info,tower_http=info` |
+| `RUST_BACKTRACE=1` | Include Rust backtraces when an error reports one |
+
+## Logging and Troubleshooting
+
+DBX Web reads the standard `RUST_LOG` filter when it starts. For a focused diagnostic run, increase the Web and HTTP middleware targets without enabling every dependency:
+
+```bash
+RUST_LOG=dbx_web=debug,tower_http=info ./dbx
+```
+
+Set `RUST_BACKTRACE=1` as well when the error includes a Rust backtrace. If the problem is inside another DBX crate, add its target to the same filter, such as `dbx_core`, `dbx_drivers`, `dbx_sql`, `dbx_plugin_runtime`, `dbx_ai_provider`, or `dbx_platform`. `RUST_LOG=debug` enables a much broader and noisier filter. Logs are written to the process output; redirect that output when you need to save a diagnostic file.
 
 ## Request Format
 

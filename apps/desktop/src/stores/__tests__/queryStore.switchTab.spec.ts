@@ -270,4 +270,30 @@ describe("queryStore switchTab", () => {
       scrollLeft: 0,
     });
   });
+
+  it("stores and increments grid column reveal request", () => {
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("pg-1", "app", "users", "data", "public");
+
+    queryStore.requestGridRevealColumn(tabId, "email");
+    const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+    expect(tab?.gridRevealColumnRequest).toEqual({ id: expect.any(Number), columnName: "email" });
+    const firstId = tab?.gridRevealColumnRequest?.id;
+
+    queryStore.requestGridRevealColumn(tabId, "email");
+    expect(tab?.gridRevealColumnRequest?.id).toBeGreaterThan(firstId!);
+    expect(tab?.gridRevealColumnRequest?.columnName).toBe("email");
+  });
+
+  it("reveals column in data grid and switches to that tab", () => {
+    const queryStore = useQueryStore();
+    const tab1Id = queryStore.createTab("pg-1", "app", "users", "data", "public");
+    const tab2Id = queryStore.createTab("pg-1", "app", "orders", "data", "public");
+    queryStore.activeTabId = tab2Id;
+
+    queryStore.revealColumnInDataGrid(tab1Id, "created_at");
+    expect(queryStore.activeTabId).toBe(tab1Id);
+    const tab1 = queryStore.tabs.find((candidate) => candidate.id === tab1Id);
+    expect(tab1?.gridRevealColumnRequest).toEqual({ id: expect.any(Number), columnName: "created_at" });
+  });
 });

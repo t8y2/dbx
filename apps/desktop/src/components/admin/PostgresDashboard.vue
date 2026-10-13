@@ -146,7 +146,7 @@ async function fetchStatus(options: { silent?: boolean } = {}) {
   if (!options.silent) loading.value = true;
   error.value = "";
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
     const sql = fallbackStatusSql.value ?? activeDriver.statusSql;
     let result;
     try {

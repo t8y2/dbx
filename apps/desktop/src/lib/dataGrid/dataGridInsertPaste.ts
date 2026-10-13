@@ -5,14 +5,11 @@
 // functions, hex literals) is kept verbatim so the regular cell coercion
 // handles it.
 
+import { DATA_GRID_CLIPBOARD_BATCH_CHARS, DataGridClipboardCapacityError, finishDataGridRowPreparation, runDataGridRowPreparation, type DataGridClipboardLimits, type DataGridRowPreparationOptions, type DataGridRowPreparationProgress } from "./dataGridRowPreparation";
+
 export interface ParsedInsertStatementPaste {
   rows: Array<Array<string | null>>;
   columnNames: string[] | null;
-}
-
-interface InsertStatementPart {
-  columnNames: string[] | null;
-  tuples: Array<Array<string | null>>;
 }
 
 type CharClass = "code" | "single-quote" | "double-quote" | "backtick" | "bracket-ident";
@@ -26,11 +23,17 @@ function appendRaw(state: ScanState, char: string): void {
   state.text += char;
 }
 
-function splitTopLevelStatements(text: string): string[] {
+function* splitTopLevelStatements(text: string): Generator<DataGridRowPreparationProgress, string[]> {
   const statements: string[] = [];
   const state: ScanState = { class: "code", text: "" };
   let depth = 0;
+  let nextYield = DATA_GRID_CLIPBOARD_BATCH_CHARS;
+  if (text.length > DATA_GRID_CLIPBOARD_BATCH_CHARS) yield { completed: 0, total: text.length * 2, phase: "parsing" };
   for (let index = 0; index < text.length; index++) {
+    if (index >= nextYield) {
+      yield { completed: index, total: text.length * 2, phase: "parsing" };
+      nextYield = index + DATA_GRID_CLIPBOARD_BATCH_CHARS;
+    }
     const char = text[index]!;
     if (state.class === "code") {
       if (char === "'" || char === '"' || char === "`") {
@@ -102,6 +105,10 @@ function normalizeIdentifier(raw: string): string {
 interface Lexer {
   source: string;
   pos: number;
+  nextYield: number;
+  progressOffset: number;
+  progressTotal: number;
+  maxItems: number;
 }
 
 function skipWhitespace(lexer: Lexer): void {
@@ -118,7 +125,7 @@ function matchKeyword(lexer: Lexer, keyword: string): boolean {
   return true;
 }
 
-function readBracketedGroup(lexer: Lexer): string[] | null {
+function* readBracketedGroup(lexer: Lexer): Generator<DataGridRowPreparationProgress, string[] | null> {
   skipWhitespace(lexer);
   if (lexer.source[lexer.pos] !== "(") return null;
   lexer.pos++;
@@ -127,6 +134,10 @@ function readBracketedGroup(lexer: Lexer): string[] | null {
   let depth = 0;
   let classState: CharClass = "code";
   while (lexer.pos < lexer.source.length) {
+    if (lexer.pos >= lexer.nextYield) {
+      yield { completed: lexer.progressOffset + lexer.pos, total: lexer.progressTotal, phase: "parsing" };
+      lexer.nextYield = lexer.pos + DATA_GRID_CLIPBOARD_BATCH_CHARS;
+    }
     const char = lexer.source[lexer.pos++]!;
     if (classState === "code") {
       if (char === "'" || char === '"' || char === "`") {
@@ -137,11 +148,13 @@ function readBracketedGroup(lexer: Lexer): string[] | null {
         depth++;
       } else if (char === ")") {
         if (depth === 0) {
+          if (items.length >= lexer.maxItems) throw new DataGridClipboardCapacityError();
           items.push(current);
           return items;
         }
         depth--;
       } else if (char === "," && depth === 0) {
+        if (items.length >= lexer.maxItems) throw new DataGridClipboardCapacityError();
         items.push(current);
         current = "";
         continue;
@@ -223,8 +236,8 @@ function convertValue(raw: string | null): string | null {
   return trimmed;
 }
 
-function parseSingleInsertStatement(statement: string): InsertStatementPart | null {
-  const lexer: Lexer = { source: statement, pos: 0 };
+function* parseSingleInsertStatement(statement: string, rows: ParsedInsertStatementPaste["rows"], limits: Required<DataGridClipboardLimits>, progressOffset: number, progressTotal: number, budget: { cells: number }): Generator<DataGridRowPreparationProgress, { columnNames: string[] | null } | null> {
+  const lexer: Lexer = { source: statement, pos: 0, nextYield: DATA_GRID_CLIPBOARD_BATCH_CHARS, progressOffset, progressTotal, maxItems: limits.maxCells };
   if (!matchKeyword(lexer, "INSERT")) return null;
   if (!matchKeyword(lexer, "INTO")) return null;
   // Skip the table reference (possibly db.schema."table" or `db`.`table`).
@@ -232,22 +245,26 @@ function parseSingleInsertStatement(statement: string): InsertStatementPart | nu
   // Optional column-name list: the next bracketed group before VALUES/VALUE.
   const save = lexer.pos;
   let columnNames: string[] | null = null;
-  const group = readBracketedGroup(lexer);
+  const group = yield* readBracketedGroup(lexer);
   if (group) {
     columnNames = group.map(normalizeIdentifier);
   } else {
     lexer.pos = save;
   }
   if (!matchKeyword(lexer, "VALUES") && !matchKeyword(lexer, "VALUE")) return null;
-  const tuples: Array<Array<string | null>> = [];
+  const firstRow = rows.length;
   for (;;) {
     skipWhitespace(lexer);
     if (lexer.source[lexer.pos] !== "(") break;
-    const rawValues = readBracketedGroup(lexer);
+    if (rows.length >= limits.maxRows) throw new DataGridClipboardCapacityError();
+    lexer.maxItems = limits.maxCells - budget.cells;
+    const rawValues = yield* readBracketedGroup(lexer);
     if (rawValues === null) return null;
     // Values inside a tuple: split on top-level commas again (readBracketedGroup
     // already did that) and convert each token.
-    tuples.push(rawValues.map(convertValue));
+    budget.cells += rawValues.length;
+    rows.push(rawValues.map(convertValue));
+    if (rows.length % 1000 === 0) yield { completed: progressOffset + lexer.pos, total: progressTotal, phase: "parsing" };
     skipWhitespace(lexer);
     if (lexer.source[lexer.pos] === ",") {
       lexer.pos++;
@@ -255,20 +272,31 @@ function parseSingleInsertStatement(statement: string): InsertStatementPart | nu
     }
     break;
   }
-  if (tuples.length === 0) return null;
-  return { columnNames, tuples };
+  if (rows.length === firstRow) return null;
+  return { columnNames };
 }
 
-export function parseInsertStatementPaste(text: string): ParsedInsertStatementPaste | null {
-  const statements = splitTopLevelStatements(text);
+export function parseInsertStatementPaste(text: string, limits: DataGridClipboardLimits = {}): ParsedInsertStatementPaste | null {
+  return finishDataGridRowPreparation(prepareInsertStatementPaste(text, limits));
+}
+
+export function parseInsertStatementPasteInBatches(text: string, options: DataGridRowPreparationOptions = {}, limits: DataGridClipboardLimits = {}): Promise<ParsedInsertStatementPaste | null> {
+  return runDataGridRowPreparation(prepareInsertStatementPaste(text, limits), options, null);
+}
+
+function* prepareInsertStatementPaste(text: string, limits: DataGridClipboardLimits): Generator<DataGridRowPreparationProgress, ParsedInsertStatementPaste | null> {
+  const statements = yield* splitTopLevelStatements(text);
   // The first statement decides the paste's semantics; leading comments were
   // already stripped by the statement splitter.
   if (statements.length === 0 || !/^\s*insert\s+into\s/i.test(statements[0]!)) return null;
   const rows: Array<Array<string | null>> = [];
   let columnNames: string[] | null = null;
   let sawColumnNames = false;
+  let progressOffset = text.length;
+  const budget = { cells: 0 };
+  const resolvedLimits = { maxRows: limits.maxRows ?? 100_000, maxCells: limits.maxCells ?? 1_000_000 };
   for (const statement of statements) {
-    const parsed = parseSingleInsertStatement(statement);
+    const parsed = yield* parseSingleInsertStatement(statement, rows, resolvedLimits, progressOffset, text.length * 2, budget);
     if (!parsed) return null;
     if (parsed.columnNames) {
       if (!sawColumnNames) {
@@ -278,7 +306,7 @@ export function parseInsertStatementPaste(text: string): ParsedInsertStatementPa
         columnNames = null;
       }
     }
-    rows.push(...parsed.tuples);
+    progressOffset += statement.length;
   }
   if (rows.length === 0) return null;
   return { rows, columnNames };

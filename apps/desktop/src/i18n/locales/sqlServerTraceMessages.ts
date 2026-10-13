@@ -15,7 +15,6 @@ export const sqlServerTraceMessages = {
   highCost: "Higher overhead",
   elapsed: "{seconds}s",
   eventCount: "Showing {visible} / {total} events",
-  cleanedStaleSessions: "Cleaned {count} expired DBX trace session(s).",
   permissionHint: "Requires ALTER ANY EVENT SESSION and server-state viewing permissions",
   filterSql: "Filter procedure or SQL text",
   filterLogin: "Login",
@@ -32,11 +31,7 @@ export const sqlServerTraceMessages = {
     stopped: "Stopped",
     error: "Error",
   },
-  eventTypes: {
-    rpc_completed: "RPC completed",
-    sql_batch_completed: "Batch completed",
-    sp_statement_completed: "Procedure statement",
-  },
+  eventTypes: {},
   columns: {
     time: "Time",
     event: "Event",

@@ -19,7 +19,7 @@ export async function loadObjectSourceWithRoutineFallback(
   relationName?: string,
 ): Promise<{ source: ObjectSource; objectType: ObjectSourceKind }> {
   const primary = await getObjectSource(connectionId, database, schema, name, objectType, signature, relationName);
-  if (primary.source?.trim()) {
+  if (primary.source?.trim() || primary.routine_parameters !== undefined) {
     return { source: primary, objectType };
   }
 
@@ -28,7 +28,7 @@ export async function loadObjectSourceWithRoutineFallback(
   for (const fallbackType of fallbacks) {
     try {
       const alternate = await getObjectSource(connectionId, database, schema, name, fallbackType, signature, relationName);
-      if (alternate.source?.trim()) {
+      if (alternate.source?.trim() || alternate.routine_parameters !== undefined) {
         return { source: alternate, objectType: fallbackType };
       }
     } catch {

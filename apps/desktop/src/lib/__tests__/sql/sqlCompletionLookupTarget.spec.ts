@@ -17,6 +17,34 @@ import {
 } from "@/lib/sql/sqlCompletionLookupTarget";
 
 describe("sqlCompletionLookupTarget", () => {
+  it.each([
+    ["Adventureworks2025.Public", "ADVENTUREWORKS2025", "PUBLIC"],
+    ['"Adventureworks2025".public', "Adventureworks2025", "PUBLIC"],
+    ['"My.DB"."Sales Area"', "My.DB", "Sales Area"],
+    ['"My.DB"."A""B"', "My.DB", 'A"B'],
+    ['"adventureworks2025".PUBLIC', "adventureworks2025", "PUBLIC"],
+  ])("resolves Snowflake %s using unquoted uppercase and quoted exact names", (qualifier, database, schema) => {
+    const sql = `SELECT * FROM ${qualifier}.Di`;
+    const completionContext = getSqlCompletionContext(sql, sql.length, { databaseType: "snowflake" });
+    expect(completionContext.qualifierParts).toEqual([database, schema]);
+    expect(
+      resolveSqlCompletionTableLookupTarget({
+        databaseType: "snowflake",
+        currentDatabase: "DEFAULT_DB",
+        currentSchema: "PUBLIC",
+        supportsDatabaseQualifier: false,
+        supportsDatabaseSchemaQualifier: true,
+        knownDatabases: ["Adventureworks2025", "ADVENTUREWORKS2025", "My.DB"],
+        completionContext,
+      }),
+    ).toEqual({ database, schema, filter: "Di", qualifierDatabase: database });
+  });
+
+  it.each(["postgres", "sqlserver", "trino", "mysql"] as const)("preserves %s qualifier casing", (databaseType) => {
+    const sql = "SELECT * FROM Adventureworks2025.Public.";
+    expect(getSqlCompletionContext(sql, sql.length, { databaseType }).qualifierParts).toEqual(["Adventureworks2025", "Public"]);
+  });
+
   it("treats qualified table completion as a database lookup for MySQL-compatible engines", () => {
     const target = resolveSqlCompletionTableLookupTarget({
       currentDatabase: "default_db",

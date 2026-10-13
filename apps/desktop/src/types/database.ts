@@ -4,6 +4,7 @@ import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
+import type { GraphResult } from "@/lib/graph/graphResult";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
 
@@ -17,6 +18,10 @@ export function isMeilisearchDatabaseType(dbType?: DatabaseType): boolean {
 
 export function isSolrDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "solr";
+}
+
+export function isCouchDbDatabaseType(dbType?: DatabaseType): boolean {
+  return dbType === "couchdb";
 }
 
 export interface SqlSnippet {
@@ -78,6 +83,7 @@ export interface CompletionAssistantCandidate {
   comment?: string | null;
   data_type?: string | null;
   signature?: string | null;
+  routine_id?: string | null;
 }
 
 export interface CompletionAssistantResponse {
@@ -105,6 +111,8 @@ export interface ConnectionConfig {
   visible_database_patterns?: string[];
   visible_schemas?: Record<string, string[]>;
   show_system_schemas?: boolean;
+  /** Whether to show Oracle / OceanBase-Oracle database links node in the sidebar tree. Defaults to true. */
+  show_database_links?: boolean;
   /** Load every page when the sidebar's Tables group is opened for this connection. */
   sidebar_auto_load_all_tables?: boolean;
   attached_databases?: AttachedDatabaseConfig[];
@@ -129,6 +137,13 @@ export interface ConnectionConfig {
   client_key_path?: string;
   sysdba?: boolean;
   oracle_connection_type?: "service_name" | "sid" | "tns";
+  /** Connection-level NLS_LANG override; empty follows the global default. */
+  oracle_oci_nls_lang?: string;
+  /**
+   * Connection-level TNS_ADMIN override for OCI (tnsnames.ora / sqlnet.ora /
+   * wallet directory); empty follows the global default.
+   */
+  oracle_oci_tns_admin?: string;
   connection_string?: string;
   jdbc_driver_class?: string;
   jdbc_driver_paths?: string[];
@@ -144,6 +159,8 @@ export interface ConnectionConfig {
   redis_database_aliases?: Record<string, string>;
   /** Key-search templates for the Redis browser. Non-empty overrides global settings. */
   redis_key_templates?: string[];
+  /** Default Redis glob pattern applied when opening a new key-browser tab. */
+  redis_key_filter?: string;
   redis_key_grouping?: import("@/lib/redis/redisKeyGrouping").RedisKeyGrouping;
   etcd_endpoints?: string;
   gbase_server?: string;
@@ -165,9 +182,13 @@ export interface ConnectionConfig {
   is_production?: boolean;
   /** Database-level production markers for multi-database connections. */
   production_databases?: string[];
+  /** Sidebar presentation only; absent means database/schema rows plus sticky context. */
+  production_badge_scope?: ProductionBadgeScope;
   /** Metadata captured from the latest successful connection test for the saved config. */
   database_info?: DatabaseConnectionInfo;
 }
+
+export type ProductionBadgeScope = "connection" | "database" | "table";
 
 export type IdentifierCase = "lower" | "upper" | "mixed";
 
@@ -189,6 +210,26 @@ export interface ConnectionTestResult {
   message: string;
   databaseInfo?: DatabaseConnectionInfo;
 }
+
+/**
+ * Why the backend declared a connection's pools dead while the app was idle (#4339).
+ * A stable enum by design: raw driver/network error text must not reach a background
+ * UI notification.
+ */
+export type ConnectionLivenessFailureKind = "probe_failed" | "timed_out";
+
+/**
+ * A message on the backend connection-liveness channel (#4339).
+ *
+ * Mirrors the Rust `ConnectionLivenessMessage`, and both transports deliver this exact shape:
+ * the desktop shell forwards it unwrapped and the web SSE stream sends the object itself, so
+ * there is no envelope beyond the message's own `kind` discriminator.
+ *
+ * `resync` means the transport skipped messages, so the frontend must re-check every
+ * connection it still shows as connected — without it, a dropped `lost` would leave a
+ * sidebar green indefinitely.
+ */
+export type ConnectionLivenessMessage = { kind: "lost"; connectionId: string; failureKind: ConnectionLivenessFailureKind } | { kind: "resync" };
 
 export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig) | ({ type: "http_tunnel" } & HttpTunnelConfig);
 
@@ -229,6 +270,15 @@ export interface SshTunnelConfig {
   /** Allow `nc` through an SSH exec channel when direct-tcpip is prohibited. */
   allow_exec_channel_proxy?: boolean;
   /**
+   * OpenSSH-style `ProxyCommand` used to reach this host instead of a direct
+   * TCP connection, e.g. `nc %h %p` or
+   * `cloudflared access ssh --hostname %h`. `%h`/`%p`/`%r`/`%%` expand from
+   * the effective host, port and user. The executable must be one of the
+   * helpers the backend allowlists (`nc`, `ncat`, `netcat`, `cloudflared`,
+   * `socat`, `connect`, `corkscrew`, `ssh`). Empty means a direct connection.
+   */
+  proxy_command?: string;
+  /**
    * When set, this layer references a shared tunnel profile; the profile's
    * configuration replaces this layer's fields at connect time (only `id`
    * and `enabled` are kept).
@@ -242,6 +292,7 @@ export interface SshConfigHostEntry {
   port?: number;
   user?: string;
   identity_file?: string;
+  proxy_command?: string | null;
 }
 
 export interface ProxyTunnelConfig {
@@ -280,6 +331,12 @@ export interface PluginDriverManifest {
   label: string;
   kind: string;
   database_type?: string;
+}
+
+export interface PluginCapabilityManifest {
+  id: string;
+  label: string;
+  kind?: string;
 }
 
 export type PluginFormFieldType = "text" | "password" | "number" | "boolean" | "select" | "radio" | "textarea";
@@ -486,6 +543,7 @@ export interface PluginContextMenuContribution {
   description?: string;
   icon?: string;
   menu: PluginContextMenuTarget;
+  dynamic?: boolean;
   action?: PluginOpenWorkbenchTarget;
 }
 
@@ -672,6 +730,7 @@ export interface PluginManifest {
   homepage?: string;
   executable?: string;
   drivers: PluginDriverManifest[];
+  capabilities?: PluginCapabilityManifest[];
   contributions?: PluginContribution[];
   localizations?: Record<string, PluginManifestLocalization>;
 }
@@ -984,12 +1043,28 @@ export interface ObjectStatistics {
 
 export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
+export type RoutineParameterMetadataMode = "IN" | "OUT" | "INOUT" | "RETURN" | "UNKNOWN";
+
+export interface RoutineParameterMetadata {
+  name?: string | null;
+  mode: RoutineParameterMetadataMode;
+  jdbc_type?: number | null;
+  type_name?: string | null;
+  precision?: number | null;
+  length?: number | null;
+  scale?: number | null;
+  nullable?: boolean | null;
+  ordinal?: number | null;
+}
+
 export interface ObjectSource {
   name: string;
   object_type: ObjectSourceKind;
   schema?: string | null;
   source: string;
   editable?: boolean;
+  /** Optional structured metadata exposed by generic JDBC sidecars. */
+  routine_parameters?: RoutineParameterMetadata[];
 }
 
 export interface MysqlEventInfo {
@@ -1073,6 +1148,8 @@ export interface ColumnInfo {
   name: string;
   data_type: string;
   resolved_schema?: string;
+  resolved_table?: string;
+  resolved_object_type?: string;
   is_nullable: boolean;
   column_default: string | null;
   is_primary_key: boolean;
@@ -1154,10 +1231,10 @@ export interface ConstraintInfo {
   match_type?: string | null;
   on_update?: string | null;
   on_delete?: string | null;
-  deferrable: boolean;
-  initially_deferred: boolean;
-  enabled: boolean;
-  valid: boolean;
+  deferrable?: boolean | null;
+  initially_deferred?: boolean | null;
+  enabled?: boolean | null;
+  valid?: boolean | null;
 }
 
 export interface PartitionInfo {
@@ -1238,8 +1315,13 @@ export interface QueryMessage {
   hint?: string;
 }
 
+export type QueryResultSourceLabelKind = "source" | "comment";
+
 export interface QueryResult {
   columns: string[];
+  /** Typed Neo4j node properties; source columns remain unchanged for paging. */
+  neo4j_node_cells?: import("@/lib/neo4j/neo4jNodeResult").Neo4jNodeCell[];
+  graph_data?: GraphResult;
   /** One SRID per geometry/geography column (first non-null observed). */
   spatial_columns?: SpatialColumn[];
   /**
@@ -1321,7 +1403,11 @@ export interface QueryResult {
   total_is_exact?: boolean;
   truncated?: boolean;
   /** Variable-length cells represented by bounded previews in `rows`. */
-  large_value_cells?: Array<{ row_index: number; column_index: number; original_bytes: number }>;
+  large_value_cells?: Array<{ row_index: number; column_index: number; original_bytes: number; value_ref?: string }>;
+  /** Frontend-only original result connection, independent of the currently active tab. */
+  large_value_context?: { connectionId: string; database: string; clientSessionId?: string; txnSessionId?: string; catalog?: string };
+  /** Retained result refs also cover cells already hydrated into complete local values. */
+  large_value_refs?: string[];
   session_id?: string | null;
   has_more?: boolean;
   /** For Elasticsearch REST search results parsed into a _source table,
@@ -1331,6 +1417,8 @@ export interface QueryResult {
   /** Preformatted Redis command output retained alongside the default grid rows. */
   redis_console_output?: string;
   sourceLabel?: string;
+  /** Identifies whether sourceLabel came from a parsed object source or a SQL preamble comment. */
+  sourceLabelKind?: QueryResultSourceLabelKind;
   /** 结果集来源的库名 / schema（与 sourceLabel 同时写入），供结果集页签按设置决定是否展示。 */
   sourceQualifier?: string;
   /** 结果集来源的对象名（通常为表名），关闭“结果集名称包含数据库名”时用于展示短名称。 */
@@ -1413,6 +1501,8 @@ export interface QueryResultRun {
    */
   sourceLabel?: string;
   sourceName?: string;
+  /** Identifies whether sourceLabel came from a parsed object source or a SQL preamble comment. */
+  sourceLabelKind?: QueryResultSourceLabelKind;
   /**
    * Logical-result identity for the tab-switch view snapshot cache. Distinct
    * from `resultGridRevision` (the grid remount key): this one changes on every
@@ -1506,6 +1596,12 @@ export interface SqlColumnReference {
   scope_id?: number;
 }
 
+export interface SqlGroupByViolation {
+  span: SqlTextSpan;
+  column: string;
+  qualifier?: string | null;
+}
+
 export interface SqlReferenceScope {
   id: number;
   parent_id?: number | null;
@@ -1515,6 +1611,7 @@ export interface SqlReferenceAnalysis {
   tables: SqlTableReference[];
   columns: SqlColumnReference[];
   scopes?: SqlReferenceScope[];
+  group_by_violations?: SqlGroupByViolation[];
 }
 
 export type TreeNodeType =
@@ -1544,6 +1641,7 @@ export type TreeNodeType =
   | "package-body"
   | "group-columns"
   | "group-indexes"
+  | "group-database-indexes"
   | "group-fkeys"
   | "group-triggers"
   | "group-events"
@@ -1557,6 +1655,8 @@ export type TreeNodeType =
   | "group-materialized-views"
   | "group-procedures"
   | "group-functions"
+  | "group-internal-functions"
+  | "group-udf-functions"
   | "group-types"
   | "group-sequences"
   | "group-synonyms"
@@ -1703,6 +1803,9 @@ export interface TreeNode {
     parentId: string;
     offset: number;
     pageSize: number;
+    /** Backend filter and global-search identity for OceanBase metadata pages. */
+    searchFilter?: string;
+    searchQuery?: string;
     /**
      * Identity of the row that was expected to open this page: the peek row the
      * previous page fetched but did not display. Offset paging is not snapshot
@@ -1844,7 +1947,7 @@ export interface QueryPageJumpProgress {
   targetPage: number;
 }
 
-export type TabOutputView = "result" | "summary" | "explain" | "chart" | "messages" | "profile";
+export type TabOutputView = "result" | "graph" | "summary" | "explain" | "chart" | "messages" | "profile";
 
 export type RedisResultViewMode = "grid" | "console";
 
@@ -1858,6 +1961,43 @@ export interface TabUiState {
   resultPaneOpen?: boolean;
   /** Small JSON-compatible snapshots owned by special-page components. */
   page?: Record<string, TabPageUiState>;
+}
+
+export type DatabaseSearchScope = "data" | "structure";
+
+export interface DatabaseSearchResultItem {
+  id: string;
+  schema?: string;
+  tableName: string;
+  tableType?: string;
+  matchedColumns: string[];
+  preview: string;
+  whereInput: string;
+  /** Present for structure-scope hits (column name / comment search). */
+  searchScope?: DatabaseSearchScope;
+  columnName?: string;
+  columnComment?: string;
+  structureMatchIn?: Array<"name" | "comment">;
+}
+
+export interface DatabaseSearchTableTask {
+  schema?: string;
+  table: TableInfo;
+}
+
+export interface DatabaseSearchTabState {
+  keyword: string;
+  searchScope?: DatabaseSearchScope;
+  perTableLimit: number;
+  progressDone: number;
+  progressTotal: number;
+  results: DatabaseSearchResultItem[];
+  tableErrors: Array<{ tableName: string; message: string }>;
+  generalError: string;
+  tableTasks: DatabaseSearchTableTask[];
+  nextTableIndex: number;
+  activeKeyword: string;
+  activePerTableLimit: number;
 }
 
 export interface QueryTab {
@@ -1876,6 +2016,11 @@ export interface QueryTab {
    */
   titleNumber?: number;
   titleNumberKey?: string;
+  /**
+   * User-chosen suffix shown after the tab title (set from the tab context menu).
+   * It replaces the automatic `titleNumber` for this tab and is persisted with it.
+   */
+  titleSuffix?: string;
   /** Force the editor to word-wrap regardless of the global setting, e.g. for auto-generated single-line templates. */
   forceWordWrap?: boolean;
   connectionId: string;
@@ -1894,6 +2039,7 @@ export interface QueryTab {
   sql: string;
   savedSqlId?: string;
   externalSqlPath?: string;
+  externalSqlEncoding?: "auto" | "utf8" | "utf8Bom" | "utf16le" | "utf16be" | "gbk";
   externalSqlFileVersion?: ExternalSqlFileVersion;
   externalSqlIgnoredFileVersion?: ExternalSqlFileVersion;
   externalSqlFileMissing?: boolean;
@@ -1912,6 +2058,12 @@ export interface QueryTab {
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
+  /**
+   * Structured (sort builder) ORDER BY applied on top of `orderByInput`. Kept as
+   * a sibling field so the manual input stays editable while store-side SQL
+   * rebuilds (refresh/export/restore) still reproduce the composite sort.
+   */
+  structuredOrderByInput?: string;
   resultPageSql?: string;
   resultPageLimit?: number;
   resultPageOffset?: number;
@@ -1976,7 +2128,13 @@ export interface QueryTab {
     line: number;
     column?: number;
   };
+  /** Ephemeral request to reveal/scroll to a specific column in the data grid. */
+  gridRevealColumnRequest?: {
+    id: number;
+    columnName: string;
+  };
   executionId?: string;
+  liveQueryMessages?: QueryMessage[];
   /** Ephemeral result run targeted by the current execution; null means a new run is being produced. */
   executingResultRunId?: string | null;
   isExplaining?: boolean;
@@ -2024,7 +2182,8 @@ export interface QueryTab {
     | "solr-admin"
     | "dolt-version-control"
     | "plugin-workbench"
-    | "plugin-filesystem";
+    | "plugin-filesystem"
+    | "database-search";
   pluginWorkbench?: {
     /** Host command that created this tab; distinct commands can share a workbench. */
     commandId?: string;
@@ -2057,6 +2216,7 @@ export interface QueryTab {
   structureInitialTabRequestId?: number;
   structureInitialTarget?: TableStructureEditorTarget;
   structureDraft?: TableStructureEditorDraft;
+  databaseSearchState?: DatabaseSearchTabState;
   objectBrowser?: {
     catalog?: string;
     schema?: string;
@@ -2132,6 +2292,8 @@ export interface QueryTab {
     database?: string;
     columns: ColumnInfo[];
     primaryKeys: string[];
+    /** User-declared row identifier columns, used only when no automatic stable identifier exists. */
+    virtualPrimaryKeys?: string[];
     /** Physical primary keys used for table-open default sorting; excludes unique and synthetic row identifiers. */
     physicalPrimaryKeys?: string[];
   };
@@ -2229,6 +2391,10 @@ export interface QueryTab {
   autoCommit?: boolean;
   /** Session ID for an active manual transaction, set after beginManualTransaction */
   txnSessionId?: string;
+  /** Runtime-only SQL Server transaction lifecycle and last terminal notice. */
+  txnStatus?: "opening" | "active" | "executing" | "ending" | "lost" | "unknown";
+  txnNotice?: string;
+  txnIndependentConnectionExplained?: boolean;
   /** Set to true when a manual transaction was auto-rolled back due to inactivity */
   txnAutoRolledBack?: boolean;
   /** Sticky proven-read-only dialects (Oracle/OceanBase-Oracle/MySQL/PostgreSQL),
@@ -2308,6 +2474,8 @@ export interface TransferTaskConfig {
   targetTableNameCase: TransferTableNameCase;
   quoteTargetColumnNames: boolean;
   batchSize: number;
+  /** Optional per-source-table transfer filter (bare WHERE or a full SELECT). */
+  tableFilters?: Record<string, string>;
   /** Legacy-compatible rebuild flag; true takes precedence over the saved DML mode. */
   dropTargetBeforeCreate?: boolean;
   /** Legacy field only. Saved confirmation is always ignored and reset to false. */

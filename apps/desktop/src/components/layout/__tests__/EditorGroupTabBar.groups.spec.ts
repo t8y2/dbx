@@ -68,6 +68,7 @@ function mountBar(groupId: string, tabs: ReturnType<ReturnType<typeof useQuerySt
             duplicateTab: "Duplicate",
             copyName: "Copy name",
             closeTab: "Close",
+            reopenClosedTab: "Reopen closed tab",
             closeOtherTabs: "Close other tabs",
             closeLeftTabs: "Close left tabs",
             closeRightTabs: "Close right tabs",
@@ -75,6 +76,8 @@ function mountBar(groupId: string, tabs: ReturnType<ReturnType<typeof useQuerySt
             closeTabGroup: "Close group",
             editTabGroup: "Edit group",
             resetTabGroup: "Reset group",
+            collapseAll: "Collapse all",
+            expandAll: "Expand all",
             pinTab: "Pin",
             unpinTab: "Unpin",
             fullTabTitle: "Full title",
@@ -183,6 +186,41 @@ describe("EditorGroupTabBar group behavior", () => {
     },
   );
 
+  it.each(["classic", "separated"] as const)("keeps only the active horizontal grouped tab tinted across placement changes in %s layout", async (layout) => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "pg-1", name: "Postgres", db_type: "postgres", driver_profile: "postgres", color: "#3b82f6" } as ConnectionConfig];
+    settings.editorSettings.appLayout = layout;
+    settings.editorSettings.tabGroupMode = "connection";
+    settings.editorSettings.tabPlacement = "top";
+    const activeTabId = store.createTab("pg-1", "app", "PG 1", "query");
+    const inactiveTabId = store.createTab("pg-1", "app", "PG 2", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), activeTabId, pinia);
+
+    try {
+      for (const placement of ["top", "bottom"] as const) {
+        settings.editorSettings.tabPlacement = placement;
+        await settle();
+        // Changing placement may replace the strip's nodes; inspect the
+        // currently rendered tabs instead of retaining horizontal elements.
+        const activeTab = host.querySelector<HTMLElement>(`[data-tab-id="${activeTabId}"]`)!;
+        const inactiveTab = host.querySelector<HTMLElement>(`[data-tab-id="${inactiveTabId}"]`)!;
+        expect(activeTab.getAttribute("data-active-tab")).toBe("true");
+        expect(activeTab.style.getPropertyValue("--app-tab-background")).not.toBe("");
+        expect(inactiveTab.getAttribute("data-active-tab")).toBe("false");
+        expect(inactiveTab.style.getPropertyValue("--app-tab-background")).toBe("");
+        // Vertical grouped selection can be painted by CSS instead of an
+        // inline background. Returning to horizontal must restore its wash.
+        settings.editorSettings.tabPlacement = "left";
+        await settle();
+      }
+    } finally {
+      app.unmount();
+      host.remove();
+    }
+  });
+
   it("renders one header per connection cluster and collapses it to a count badge", async () => {
     const store = useQueryStore();
     const settings = useSettingsStore();
@@ -215,6 +253,70 @@ describe("EditorGroupTabBar group behavior", () => {
 
     app.unmount();
     host.remove();
+  });
+
+  it.each(["left", "right"] as const)("applies the connection color to the active %s side tab", async (placement) => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    const connections = useConnectionStore();
+    connections.connections = [
+      { id: "pg-1", name: "Postgres", db_type: "postgres", color: "#22c55e" },
+      { id: "mysql-1", name: "MySQL", db_type: "mysql", color: "#3b82f6" },
+    ] as ConnectionConfig[];
+    settings.editorSettings.tabPlacement = placement;
+    settings.editorSettings.tabGroupMode = "none";
+    settings.editorSettings.colorizeConnectionTabs = true;
+    const inactiveTabId = store.createTab("mysql-1", "app", "Inactive", "query");
+    const tabId = store.createTab("pg-1", "app", "Active", "query");
+    const { app, host } = mountBar(store.focusedGroupId, store.tabs.slice(), tabId, pinia);
+
+    try {
+      await settle();
+      const tab = host.querySelector<HTMLElement>(`[data-tab-id="${tabId}"]`)!;
+      const inactiveTab = host.querySelector<HTMLElement>(`[data-tab-id="${inactiveTabId}"]`)!;
+      expect(tab.style.getPropertyValue("--app-tab-background")).toBe("rgba(34, 197, 94, 0.24)");
+      expect(tab.style.getPropertyValue("--app-tab-active-border")).toBe("rgba(34, 197, 94, 0.72)");
+      expect(tab.style.getPropertyValue("--app-tab-active-accent")).toBe("#22c55e");
+      expect(inactiveTab.style.getPropertyValue("--app-tab-background")).toBe("rgba(59, 130, 246, 0.09)");
+      expect(inactiveTab.style.getPropertyValue("--app-tab-hover-background")).toBe("rgba(59, 130, 246, 0.16)");
+      expect(inactiveTab.style.borderColor).toBe("rgba(59, 130, 246, 0.18)");
+
+      settings.editorSettings.colorizeConnectionTabs = false;
+      await settle();
+      expect(tab.style.getPropertyValue("--app-tab-background")).toBe("");
+      expect(tab.style.getPropertyValue("--app-tab-active-border")).toBe("");
+      expect(tab.style.getPropertyValue("--app-tab-active-accent")).toBe("");
+      expect(inactiveTab.style.getPropertyValue("--app-tab-background")).toBe("");
+      expect(inactiveTab.style.getPropertyValue("--app-tab-hover-background")).toBe("");
+      expect(inactiveTab.style.borderColor).toBe("");
+    } finally {
+      app.unmount();
+      host.remove();
+    }
+  });
+
+  it.each(["left", "right"] as const)("keeps the active %s special-page tab on the neutral active wash", async (placement) => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabPlacement = placement;
+    settings.editorSettings.tabGroupMode = "none";
+    settings.editorSettings.colorizeConnectionTabs = true;
+    store.createTab("pg-1", "app", "Query", "query");
+    const { app, host } = mountBar(store.focusedGroupId, store.tabs.slice(), store.activeTabId, pinia, {
+      specialPageTabs: { settingsOpen: true, settingsActive: true, driverStoreOpen: false, driverStoreActive: false, pluginCenterOpen: false, pluginCenterActive: false, driverUpdateCount: 0 },
+    });
+
+    try {
+      await settle();
+      const specialTab = host.querySelector<HTMLElement>("[data-settings-page-tab]")!;
+      expect(specialTab.getAttribute("data-active-tab")).toBe("true");
+      // Special pages have no connection color: the active vertical wash must
+      // come from the appTabBar.css fallback, not an inline solid override.
+      expect(specialTab.style.getPropertyValue("--app-tab-background")).toBe("");
+    } finally {
+      app.unmount();
+      host.remove();
+    }
   });
 
   it("only reveals a right-edge group when expansion leaves every member offscreen", async () => {
@@ -333,6 +435,138 @@ describe("EditorGroupTabBar group behavior", () => {
     headers[0]!.click();
     await settle();
     expect(host.querySelector(".tab-group-count")?.textContent).toBe("2");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("renders connection-to-database-to-tab guide segments for multiple databases", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "sidebar";
+    settings.editorSettings.tabPlacement = "left";
+    store.createTab("mysql-1", "app", "App 1", "query");
+    store.createTab("mysql-1", "app", "App 2", "query");
+    store.createTab("mysql-1", "audit", "Audit", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), store.activeTabId, pinia);
+    await settle();
+
+    expect(host.querySelectorAll(".tab-group-header")).toHaveLength(3);
+    expect(host.querySelectorAll("[data-tree-level='connection']")).toHaveLength(1);
+    expect(host.querySelectorAll("[data-tree-level='database']")).toHaveLength(2);
+    expect(host.querySelector("[data-tree-level='connection'] .tab-group-connection-icon")).not.toBeNull();
+    expect(host.querySelector("[data-tree-level='database'] .tab-group-library-icon")).not.toBeNull();
+    expect(host.querySelectorAll(".tab-tree-guide--through")).toHaveLength(2);
+    expect(host.querySelectorAll(".tab-tree-guide--branch")).toHaveLength(2);
+    expect(host.querySelectorAll(".tab-tree-guide--last-branch")).toHaveLength(3);
+
+    const databaseHeader = host.querySelector<HTMLElement>("[data-tree-level='database']")!;
+    databaseHeader.click();
+    await settle();
+    expect(databaseHeader.querySelector(".tab-tree-guide--start")).toBeNull();
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("renders standalone plugin workbenches outside the connection hierarchy", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "sidebar";
+    settings.editorSettings.tabPlacement = "left";
+    const pluginTabId = store.openPluginWorkbench("io.dbx.ssh", "io.dbx.ssh.workbench", { title: "SSH server" });
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), pluginTabId, pinia);
+    await settle();
+
+    expect(host.querySelectorAll(".tab-group-header")).toHaveLength(0);
+    expect(host.querySelector(`[data-tab-id="${pluginTabId}"]`)?.textContent).toContain("SSH server");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("uses plugin-aware icons for sidebar connection headers", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "ssh-1",
+        name: "SSH",
+        db_type: "plugin",
+        driver_profile: "plugin",
+        host: "127.0.0.1",
+        port: 22,
+        color: "",
+        plugin_id: "io.dbx.ssh",
+        plugin_connection_provider: "io.dbx.ssh.connection",
+      } as ConnectionConfig,
+    ];
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "sidebar";
+    settings.editorSettings.tabPlacement = "left";
+    const pluginTabId = store.openPluginWorkbench("io.dbx.ssh", "io.dbx.ssh.workbench", { title: "SSH server", connectionId: "ssh-1" });
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), pluginTabId, pinia);
+    for (let index = 0; index < 20 && !host.querySelector("[data-tree-level='connection'] img"); index += 1) {
+      await new Promise((resolveTimeout) => setTimeout(resolveTimeout, 5));
+    }
+
+    expect(host.querySelector("[data-tree-level='connection'] img")).not.toBeNull();
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("labels Redis database branches with their indexes and aliases", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "redis-1",
+        name: "Redis Cache",
+        db_type: "redis",
+        driver_profile: "redis",
+        host: "127.0.0.1",
+        port: 6379,
+        color: "",
+        redis_database_aliases: { "1": "Sessions" },
+      } as ConnectionConfig,
+    ];
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "sidebar";
+    settings.editorSettings.tabPlacement = "left";
+    const db0 = store.createTab("redis-1", "0", "Redis 0", "redis");
+    store.createTab("redis-1", "1", "Redis 1", "redis");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), db0, pinia);
+    await settle();
+
+    const headers = Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-header"));
+    expect(headers.map((header) => header.title)).toEqual(["Redis Cache", "db0", "db1 · Sessions"]);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("collapses every sidebar connection and database branch from a header menu", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "sidebar";
+    settings.editorSettings.tabPlacement = "left";
+    store.createTab("mysql-1", "app", "App", "query");
+    store.createTab("mysql-1", "audit", "Audit", "query");
+    store.createTab("pg-1", "app", "Postgres", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), store.activeTabId, pinia);
+    await settle();
+
+    host.querySelector<HTMLElement>(".tab-group-header")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await settle();
+    const menu = document.body.querySelector<HTMLElement>("[data-dbx-context-menu]")!;
+    const collapseAll = Array.from(menu.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Collapse all"));
+    expect(collapseAll).toBeDefined();
+    collapseAll!.click();
+    await settle();
+
+    expect(Array.from(host.querySelectorAll(".tab-group-header"), (header) => header.getAttribute("aria-expanded"))).toEqual(["false", "false", "false", "false", "false"]);
+    expect(host.querySelectorAll(".tab-group-entry--collapsed")).toHaveLength(3);
 
     app.unmount();
     host.remove();

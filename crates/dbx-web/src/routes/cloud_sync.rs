@@ -221,6 +221,7 @@ pub async fn webdav_sync_upload(
     State(state): State<Arc<WebState>>,
     Json(mut req): Json<WebDavUploadRequest>,
 ) -> Result<Json<WebDavSyncSummary>, AppError> {
+    state.ensure_secret_export_allowed(req.include_secrets)?;
     resolve_webdav_password(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     let explicit_passphrase = req.secrets_passphrase.as_deref().and_then(|value| {
         let value = value.trim();
@@ -374,6 +375,7 @@ pub async fn snippet_sync_upload(
     State(state): State<Arc<WebState>>,
     Json(mut req): Json<SnippetUploadRequest>,
 ) -> Result<Json<SnippetSyncSummary>, AppError> {
+    state.ensure_secret_export_allowed(req.include_secrets)?;
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     let secrets_passphrase = if req.include_secrets {
         Some(

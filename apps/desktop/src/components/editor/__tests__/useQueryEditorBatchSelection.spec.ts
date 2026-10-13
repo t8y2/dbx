@@ -28,7 +28,7 @@ afterEach(() => {
   toast.mockReset();
 });
 
-function createHarness(doc = "SELECT  FROM users", mode: "select" | "insert" = "select") {
+function createHarness(doc = "SELECT  FROM users", mode: "select" | "insert" = "select", customItems?: SqlCompletionItem[], customFrom?: number) {
   const completionComp = new Compartment();
   const parent = document.createElement("div");
   document.body.append(parent);
@@ -46,8 +46,8 @@ function createHarness(doc = "SELECT  FROM users", mode: "select" | "insert" = "
   };
   const accepted = vi.fn();
   const batch = useQueryEditorBatchSelection({ view, runtime, settingsStore: { editorSettings: { sqlFormatter: { keywordCase: "upper" } } } as Options["settingsStore"], markCompletionAccepted: accepted });
-  const items: SqlCompletionItem[] = ["id", "name", "email"].map((label) => ({ label, apply: label, type: "column", batchSelectionMode: mode }));
-  const from = mode === "select" ? 7 : doc.length;
+  const items: SqlCompletionItem[] = customItems ?? ["id", "name", "email"].map((label) => ({ label, apply: label, type: "column", batchSelectionMode: mode }));
+  const from = customFrom ?? (mode === "select" ? 7 : doc.length);
   const session = batch.prepareBatchColumnSelectionSession(items, doc, from, from)!;
   batch.attach(currentView, parent);
   cleanups.push(() => {
@@ -134,6 +134,42 @@ describe("QueryEditor batch selection ownership", () => {
     expect(session.selectedKeys.size).toBe(2);
     expect(batch.applySelectedBatchColumnSelection(currentView)).toBe(true);
     expect(currentView.state.doc.toString()).toBe("SELECT id, email FROM users");
+  });
+
+  it("inserts fields with column comments formatted with indentation and comments (#11354)", () => {
+    const doc = "SELECT\n  t.\nFROM users";
+    const from = "SELECT\n  t.".length;
+    const items: SqlCompletionItem[] = [
+      { label: "id", apply: "id", type: "column", batchSelectionMode: "select", batchSelectionQualifier: "t", comment: "编号" },
+      { label: "name", apply: "name", type: "column", batchSelectionMode: "select", batchSelectionQualifier: "t", comment: "名称" },
+    ];
+    const { batch, session, currentView } = createHarness(doc, "select", items, from);
+    batch.toggleAllBatchColumnSelection(currentView, session.key);
+    expect(batch.applySelectedBatchColumnSelection(currentView)).toBe(true);
+    expect(currentView.state.doc.toString()).toBe("SELECT\n  t.id, -- 编号\n  t.name -- 名称\nFROM users");
+  });
+
+  it("pushes trailing SQL to a new line when inserting commented columns on a single line (#11354)", () => {
+    const doc = "SELECT t. FROM users";
+    const from = "SELECT t.".length;
+    const items: SqlCompletionItem[] = [
+      { label: "id", apply: "id", type: "column", batchSelectionMode: "select", batchSelectionQualifier: "t", comment: "编号" },
+      { label: "name", apply: "name", type: "column", batchSelectionMode: "select", batchSelectionQualifier: "t", comment: "名称" },
+    ];
+    const { batch, session, currentView } = createHarness(doc, "select", items, from);
+    batch.toggleAllBatchColumnSelection(currentView, session.key);
+    expect(batch.applySelectedBatchColumnSelection(currentView)).toBe(true);
+    expect(currentView.state.doc.toString()).toBe("SELECT t.id, -- 编号\n  t.name -- 名称\nFROM users");
+  });
+
+  it("moves existing trailing comma before comment when inserting commented columns (#11354)", () => {
+    const doc = "SELECT\n  t.,\n  other\nFROM users";
+    const from = "SELECT\n  t.".length;
+    const items: SqlCompletionItem[] = [{ label: "id", apply: "id", type: "column", batchSelectionMode: "select", batchSelectionQualifier: "t", comment: "编号" }];
+    const { batch, session, currentView } = createHarness(doc, "select", items, from);
+    batch.toggleAllBatchColumnSelection(currentView, session.key);
+    expect(batch.applySelectedBatchColumnSelection(currentView)).toBe(true);
+    expect(currentView.state.doc.toString()).toBe("SELECT\n  t.id, -- 编号\n  other\nFROM users");
   });
 
   it("rejects stale documents and pending completion without recording acceptance", () => {

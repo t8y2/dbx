@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { isCloseAllTabsShortcut } from "@/lib/editor/keyboardShortcuts";
 import {
   closeOtherTabsDefaultShortcut,
   countShortcutConflictPairs,
   DEFAULT_SHORTCUT_SETTINGS,
+  filterShortcutConflictsByVisibleIds,
   findCrossScopeShortcutConflicts,
   findShortcutConflict,
+  foldAllDefaultShortcut,
   formatShortcut,
   gotoLineDefaultShortcut,
   isReservedShortcut,
@@ -13,10 +16,12 @@ import {
   normalizeShortcutSettings,
   resolveCapturedShortcutEdit,
   selectionOccurrenceDefaultShortcut,
+  selectLineEndsDefaultShortcut,
   SHORTCUT_DEFINITIONS,
   shortcutToCodeMirrorKey,
   toggleAiPanelDefaultShortcut,
   type ShortcutActionId,
+  type ShortcutSettings,
 } from "@/lib/editor/shortcutRegistry";
 
 describe("shortcutRegistry editor actions", () => {
@@ -40,10 +45,13 @@ describe("shortcutRegistry editor actions", () => {
     "selectAllSelectionOccurrences",
     "uppercaseSelection",
     "lowercaseSelection",
+    "toggleCaseSelection",
     "exPasteSqlInCondition",
     "toggleFold",
+    "foldAll",
+    "unfoldAll",
   ];
-  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "viewTableDdl"];
+  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl", "editSidebarTableStructure"];
 
   it("registers pagination navigation as unassigned grid shortcuts", () => {
     const paginationActions = [
@@ -117,6 +125,18 @@ describe("shortcutRegistry editor actions", () => {
     expect(findShortcutConflict("goToColumn", "Mod+F", shortcuts)).toBeNull();
   });
 
+  it("registers edit-cell F2 as a conflict-free grid default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "editCell");
+
+    expect(definition).toMatchObject({
+      labelKey: "settings.shortcutEditCell",
+      scope: "grid",
+      defaultShortcut: "F2",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.editCell).toBe("F2");
+    expect(findShortcutConflict("editCell", DEFAULT_SHORTCUT_SETTINGS.editCell, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("registers copy-current-row Mod+D and edit-table-structure Mod+Shift+D as conflict-free grid defaults", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "editTableStructure");
 
@@ -174,6 +194,16 @@ describe("shortcutRegistry editor actions", () => {
     expect(definition).toMatchObject({ labelKey: "toolbar.explainPlan", scope: "editor", defaultShortcut: "Mod+E" });
     expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.explainSql)).toBe("Mod-e");
     expect(findShortcutConflict("explainSql", "Mod+E", DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
+  it("registers a configurable editor shortcut for selecting the current statement", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "selectCurrentStatement");
+
+    expect(definition).toMatchObject({ labelKey: "settings.shortcutSelectCurrentStatement", scope: "editor", defaultShortcut: "Mod+Shift+E" });
+    expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.selectCurrentStatement)).toBe("Mod-Shift-e");
+    expect(findShortcutConflict("selectCurrentStatement", DEFAULT_SHORTCUT_SETTINGS.selectCurrentStatement, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    // 与侧栏「断开连接」同键属于有意的跨作用域复用（仅提示，不影响编辑器内触发）
+    expect(findCrossScopeShortcutConflicts(DEFAULT_SHORTCUT_SETTINGS).selectCurrentStatement).toContain("disconnectSidebarConnection");
   });
 
   it("keeps current-view search and editor find contextual on Mod+F", () => {
@@ -248,6 +278,54 @@ describe("shortcutRegistry editor actions", () => {
     expect(normalizeShortcutSettings({ closeTab: "" }).closeTab).toBe("");
   });
 
+  it("registers reopenClosedTab as a global shortcut with Shift+Mod+T default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "reopenClosedTab");
+    expect(definition).toMatchObject({
+      id: "reopenClosedTab",
+      labelKey: "settings.shortcutReopenClosedTab",
+      scope: "global",
+      defaultShortcut: "Shift+Mod+T",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab).toBe("Shift+Mod+T");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab, "Win32")).toBe("Ctrl+Shift+T");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab, "MacIntel")).toBe("Shift+Cmd+T");
+    expect(findShortcutConflict("reopenClosedTab", DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
+  it("registers closeWindow as a global shortcut with Shift+Mod+W default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "closeWindow");
+    expect(definition).toMatchObject({
+      id: "closeWindow",
+      labelKey: "settings.shortcutCloseWindow",
+      scope: "global",
+      defaultShortcut: "Shift+Mod+W",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.closeWindow).toBe("Shift+Mod+W");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.closeWindow, "Win32")).toBe("Ctrl+Shift+W");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.closeWindow, "MacIntel")).toBe("Shift+Cmd+W");
+    expect(normalizeShortcutSettings({ closeWindow: "Mod+Alt+W" }).closeWindow).toBe("Mod+Alt+W");
+    expect(normalizeShortcutSettings({ closeWindow: "" }).closeWindow).toBe("");
+  });
+
+  it("registers closeAllTabs as an unbound global shortcut that users can assign", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "closeAllTabs");
+    expect(definition).toMatchObject({
+      id: "closeAllTabs",
+      labelKey: "contextMenu.closeAllTabs",
+      scope: "global",
+      defaultShortcut: "",
+    });
+    // 无默认键位：保持未绑定状态，由用户在设置里自行分配
+    expect(DEFAULT_SHORTCUT_SETTINGS.closeAllTabs).toBe("");
+    expect(normalizeShortcutSettings({}).closeAllTabs).toBe("");
+    expect(normalizeShortcutSettings({ closeAllTabs: "Shift+Mod+Alt+W" }).closeAllTabs).toBe("Shift+Mod+Alt+W");
+    expect(normalizeShortcutSettings({ closeAllTabs: "" }).closeAllTabs).toBe("");
+    const event = { key: "w", shiftKey: true, metaKey: true, altKey: true };
+    // 显式分配后生效；默认未绑定时永不触发
+    expect(isCloseAllTabsShortcut(event, { closeAllTabs: "Shift+Mod+Alt+W" }, "MacIntel")).toBe(true);
+    expect(isCloseAllTabsShortcut(event, {}, "MacIntel")).toBe(false);
+  });
+
   it("normalizes custom, cleared, and invalid modifier-only shortcuts", () => {
     expect(normalizeShortcutSettings({ openDataInNewTab: "Shift" }).openDataInNewTab).toBe("Shift");
     expect(normalizeShortcutSettings({ openDataInNewTab: "" }).openDataInNewTab).toBe("");
@@ -289,8 +367,28 @@ describe("shortcutRegistry editor actions", () => {
     expect(shortcuts.selectAllSelectionOccurrences).toBe(selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences"));
     expect(shortcuts.uppercaseSelection).toBe("Shift+Alt+U");
     expect(shortcuts.lowercaseSelection).toBe("Shift+Alt+L");
+    expect(shortcuts.toggleCaseSelection).toBe("Mod+Shift+U");
     expect(shortcuts.exPasteSqlInCondition).toBe("");
     expect(shortcuts.toggleFold).toBe("Mod+.");
+    expect(shortcuts.foldAll).toBe(foldAllDefaultShortcut("foldAll"));
+    expect(shortcuts.unfoldAll).toBe(foldAllDefaultShortcut("unfoldAll"));
+  });
+
+  it("uses platform-safe fold-all defaults and migrates the colliding defaults", () => {
+    expect(foldAllDefaultShortcut("foldAll", "MacIntel")).toBe("Ctrl+Alt+[");
+    expect(foldAllDefaultShortcut("unfoldAll", "MacIntel")).toBe("Ctrl+Alt+]");
+    expect(foldAllDefaultShortcut("foldAll", "Win32")).toBe("Shift+Alt+[");
+    expect(foldAllDefaultShortcut("unfoldAll", "Linux x86_64")).toBe("Shift+Alt+]");
+    expect(normalizeShortcutSettings({ foldAll: "Mod+Alt+[", unfoldAll: "Mod+Alt+]" }, "MacIntel")).toMatchObject({ foldAll: "Ctrl+Alt+[", unfoldAll: "Ctrl+Alt+]" });
+    expect(normalizeShortcutSettings({ foldAll: "Ctrl+Alt+[", unfoldAll: "Ctrl+Alt+]" }, "Win32")).toMatchObject({ foldAll: "Shift+Alt+[", unfoldAll: "Shift+Alt+]" });
+    expect(normalizeShortcutSettings({ foldAll: "", unfoldAll: "" }, "Win32")).toMatchObject({ foldAll: "", unfoldAll: "" });
+  });
+
+  it("registers toggle case as a configurable editor shortcut (#5085)", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "toggleCaseSelection");
+
+    expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Mod+Shift+U", labelKey: "settings.shortcutToggleCaseSelection" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.toggleCaseSelection).toBe("Mod+Shift+U");
   });
 
   it("registers IntelliJ-style extend selection as a configurable editor shortcut", () => {
@@ -307,6 +405,14 @@ describe("shortcutRegistry editor actions", () => {
     expect(next).toMatchObject({ scope: "editor", defaultShortcut: "Ctrl+G" });
     expect(all).toMatchObject({ scope: "editor", defaultShortcut: "Ctrl+Mod+G" });
     expect(findShortcutConflict("selectAllSelectionOccurrences", DEFAULT_SHORTCUT_SETTINGS.selectAllSelectionOccurrences, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
+  it("registers the VS Code-style select-line-ends shortcut", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "selectLineEnds");
+    expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Alt+Shift+I", labelKey: "settings.shortcutSelectLineEnds" });
+    expect(selectLineEndsDefaultShortcut("MacIntel")).toBe("Alt+Shift+I");
+    expect(selectLineEndsDefaultShortcut("Win32")).toBe("Alt+Shift+I");
+    expect(shortcutToCodeMirrorKey(selectLineEndsDefaultShortcut("MacIntel"))).toBe("Alt-Shift-i");
   });
 
   it("resolves occurrence selection defaults per platform", () => {
@@ -353,6 +459,13 @@ describe("shortcutRegistry editor actions", () => {
       expect(definition?.scope).toBe("sidebar");
       expect(DEFAULT_SHORTCUT_SETTINGS[actionId]).toBe(definition?.defaultShortcut);
     }
+  });
+
+  it("registers editSidebarTableStructure F4 as a conflict-free sidebar default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "editSidebarTableStructure");
+    expect(definition).toMatchObject({ scope: "sidebar", defaultShortcut: "F4", labelKey: "settings.shortcutEditSidebarTableStructure" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.editSidebarTableStructure).toBe("F4");
+    expect(findShortcutConflict("editSidebarTableStructure", DEFAULT_SHORTCUT_SETTINGS.editSidebarTableStructure, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
   it("detects conflicts only within sidebar shortcuts", () => {
@@ -495,6 +608,32 @@ describe("shortcutRegistry editor actions", () => {
     });
   });
 
+  describe("filterShortcutConflictsByVisibleIds", () => {
+    it("keeps a conflict whose partner row is filtered out (detection stays global)", () => {
+      // find(editor) <-> focusSearch(global) 默认跨作用域同键；搜索只留下 find
+      // 一行时，这组重叠仍要计入徽章——对方行被过滤不代表冲突消失。
+      const conflicts = findCrossScopeShortcutConflicts(DEFAULT_SHORTCUT_SETTINGS);
+      const filtered = filterShortcutConflictsByVisibleIds(conflicts, new Set<ShortcutActionId>(["find"]));
+      expect(filtered.find).toContain("focusSearch");
+      expect(filtered.focusSearch).toContain("find");
+      expect(Object.keys(filtered)).not.toContain("explainSql");
+    });
+
+    it("handles the L1 same-scope shape and the empty visible set", () => {
+      const seeded = normalizeShortcutSettings({ explainSql: DEFAULT_SHORTCUT_SETTINGS.formatSql });
+      const l1: Partial<Record<ShortcutActionId, ShortcutActionId>> = {};
+      for (const definition of SHORTCUT_DEFINITIONS) {
+        const conflict = findShortcutConflict(definition.id, seeded[definition.id], seeded);
+        if (conflict) l1[definition.id] = conflict;
+      }
+      expect(Object.keys(l1).sort()).toEqual(["explainSql", "formatSql"]);
+      // 只留冲突一方时整组保留；可见集与冲突无关或为空时返回空映射。
+      expect(filterShortcutConflictsByVisibleIds(l1, new Set<ShortcutActionId>(["explainSql"]))).toEqual(l1);
+      expect(filterShortcutConflictsByVisibleIds(l1, new Set<ShortcutActionId>(["goToColumn"]))).toEqual({});
+      expect(filterShortcutConflictsByVisibleIds(l1, new Set())).toEqual({});
+    });
+  });
+
   describe("gotoLine", () => {
     it("resolves the platform default and maps it to the CodeMirror key", () => {
       // macOS 的 ⌃G 已分配给「选中下一个相同词」（JetBrains 风格），沿用
@@ -549,6 +688,8 @@ describe("shortcutRegistry editor actions", () => {
       ["selectAllSelectionOccurrences", "Ctrl+Alt+Shift+J"],
       ["toggleAiPanel", "Ctrl+Alt+I"],
       ["gotoLine", "Mod+G"],
+      ["foldAll", "Shift+Alt+["],
+      ["unfoldAll", "Shift+Alt+]"],
     ];
 
     it("flags combinations that are another platform's default for the same action", () => {
@@ -611,6 +752,31 @@ describe("shortcutRegistry editor actions", () => {
       expect(countShortcutConflictPairs({})).toBe(0);
       expect(countShortcutConflictPairs({ find: "" })).toBe(0);
       expect(countShortcutConflictPairs({ find: [] })).toBe(0);
+    });
+  });
+
+  describe("modifier double-tap shortcut conflicts", () => {
+    const settingsWith = (overrides: Partial<ShortcutSettings>): ShortcutSettings => ({ ...DEFAULT_SHORTCUT_SETTINGS, ...overrides });
+
+    it("treats Mod Mod and Meta Meta as the same double tap on macOS", () => {
+      const settings = settingsWith({ globalSearch: "Meta Meta" });
+      expect(findShortcutConflict("quickOpen", "Mod Mod", settings, "MacIntel")).toBe("globalSearch");
+    });
+
+    it("keeps Mod Mod and Meta Meta distinct on Windows", () => {
+      const settings = settingsWith({ globalSearch: "Meta Meta" });
+      expect(findShortcutConflict("quickOpen", "Mod Mod", settings, "Win32")).toBeNull();
+    });
+
+    it("matches Mod Mod with Ctrl Ctrl on Windows but not on macOS", () => {
+      const settings = settingsWith({ globalSearch: "Ctrl Ctrl" });
+      expect(findShortcutConflict("quickOpen", "Mod Mod", settings, "Win32")).toBe("globalSearch");
+      expect(findShortcutConflict("quickOpen", "Mod Mod", settings, "MacIntel")).toBeNull();
+    });
+
+    it("never conflicts a double tap with a chord shortcut", () => {
+      const settings = settingsWith({ globalSearch: "Mod+Alt+F" });
+      expect(findShortcutConflict("quickOpen", "Alt Alt", settings, "Win32")).toBeNull();
     });
   });
 });

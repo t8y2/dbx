@@ -1,6 +1,37 @@
 @echo off
 setlocal EnableDelayedExpansion
 
+for %%A in (%*) do (
+    if /I "%%~A"=="-h" goto :help
+    if /I "%%~A"=="--help" goto :help
+    if /I "%%~A"=="/help" goto :help
+)
+goto :main
+
+:help
+echo Usage: start.bat [OPTION]
+echo.
+echo Start the DBX Web browser service.
+echo.
+echo Options:
+echo   -h, --help, /help  Show this help message and exit.
+echo.
+echo Environment variables:
+echo   DBX_PORT              Listen port (default: 4224)
+echo   DBX_DATA_DIR          Data directory (default: package-dir\data)
+echo   DBX_PUBLIC_BASE_PATH  URL path prefix (default: /)
+echo   DBX_PASSWORD          Set the Web login password
+echo   DBX_DISABLE_PASSWORD  Set to 1 to disable login protection
+echo   RUST_LOG              Configure backend log filtering
+echo   RUST_BACKTRACE        Set to 1 to include Rust backtraces
+echo.
+echo Examples:
+echo   set DBX_PORT=8080 ^&^& start.bat
+echo   set RUST_LOG=dbx_web=debug,tower_http=info ^&^& start.bat
+exit /b 0
+
+:main
+
 :: 脚本所在目录（等价于 ROOT）
 set ROOT=%~dp0
 :: 去掉末尾反斜杠

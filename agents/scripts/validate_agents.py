@@ -18,6 +18,7 @@ NATIVE_ONLY_AGENT_MODULES = {
     "hive": "drivers/hive-go",
     "argo": "drivers/argo-go",
     "oracle": "drivers/oracle-go",
+    "oracle-oci": "drivers/oracle-go",
     "kingbase": "drivers/kingbase-go",
     "iotdb": "drivers/iotdb",
     "neo4j": "drivers/neo4j-go",

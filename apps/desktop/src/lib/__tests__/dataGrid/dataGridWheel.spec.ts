@@ -66,6 +66,16 @@ describe("data grid wheel scrolling", () => {
     });
   });
 
+  it("turns Alt plus deltaY into horizontal-only movement", () => {
+    expect(resolveWheel({ deltaY: 40, altKey: true, accelerationFactor: 1.5 })).toMatchObject({
+      scrollDeltaX: 60,
+      scrollDeltaY: 0,
+      nextScrollTop: 100,
+      nextScrollLeft: 260,
+      moved: true,
+    });
+  });
+
   it("keeps plain deltaY vertical", () => {
     expect(resolveWheel({ deltaY: 40 })).toMatchObject({
       scrollDeltaX: 0,

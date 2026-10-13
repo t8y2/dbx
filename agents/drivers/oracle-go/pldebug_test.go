@@ -7,12 +7,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 )
 
 // The helper-package DDL templates already contain the double quotes around the
@@ -672,12 +677,66 @@ func TestPLDebugParseBacktraceFramesKeepsCurrentFrameFirst(t *testing.T) {
 	}
 }
 
+// Every user-visible diagnostic of this agent has to be English (ledger §2 #39): the
+// desktop store prints the messages verbatim next to its own English history lines
+// ("step in -> line 5", "run to end: ..."), and the UI ships a dozen locales the agent
+// cannot switch between -- so a Chinese sentence next to an English one is a defect the
+// user sees, not a style question. Comments may stay Chinese; string literals may not.
+// The AST walk covers every non-test file in the package, so a new diagnostic in any
+// file is caught, and the test files (which legitimately carry CJK as test DATA) are
+// left out.
+func TestPLDebugUserFacingStringsAreEnglish(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("the package directory cannot be listed: %v", err)
+	}
+	checked := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		checked++
+		files := token.NewFileSet()
+		parsed, err := parser.ParseFile(files, name, nil, 0)
+		if err != nil {
+			t.Fatalf("%s cannot be parsed: %v", name, err)
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			literal, ok := node.(*ast.BasicLit)
+			if !ok || literal.Kind != token.STRING {
+				return true
+			}
+			value, err := strconv.Unquote(literal.Value)
+			if err != nil {
+				return true
+			}
+			for _, char := range value {
+				if unicode.Is(unicode.Han, char) {
+					t.Errorf("%s:%d: the string literal carries CJK text, so a diagnostic is not English: %q",
+						name, files.Position(literal.Pos()).Line, value)
+					break
+				}
+			}
+			return true
+		})
+	}
+	if checked == 0 {
+		t.Fatal("no non-test Go file was inspected; the walk is broken")
+	}
+}
+
 // An overloaded target armed without signature/sequence must warn; a unique
 // target, or one the caller disambiguated, must stay silent.
 func TestPLDebugOverloadWarningRequiresSignature(t *testing.T) {
 	warning := plDebugOverloadWarningForTarget("CHZ", "PKG.PROC", 3, false, false)
-	if !strings.Contains(warning, "重载") || !strings.Contains(warning, "signature") || !strings.Contains(warning, "sequence") {
+	if !strings.Contains(warning, "overload") || !strings.Contains(warning, "signature") || !strings.Contains(warning, "sequence") {
 		t.Fatalf("overload warning does not name the missing attributes: %q", warning)
+	}
+	// The diagnostics are English: the store prints them verbatim next to its own
+	// English history lines (ledger §2 #39).
+	if strings.ContainsAny(warning, "重载存在断点禁用启用") {
+		t.Fatalf("the overload warning still carries Chinese text: %q", warning)
 	}
 	if got := plDebugOverloadWarningForTarget("CHZ", "PKG.PROC", 1, false, false); got != "" {
 		t.Fatalf("unique target produced a warning: %q", got)
@@ -4245,10 +4304,18 @@ func TestPLDebugProbeRejectsMissingDebugConnectSessionWithActionableReason(t *te
 		!strings.Contains(strings.Join(warnings, " "), "DEBUG ANY PROCEDURE") {
 		t.Fatalf("warnings = %v, want the missing DEBUG ANY PROCEDURE reported as a warning", warnings)
 	}
-	// GET_VALUES is an OceanBase extension: its absence must only disable the
-	// variable feature (verified behaviour, unchanged by this fix).
-	if response["variablesSupported"] != false {
-		t.Fatalf("variablesSupported = %v, want false without GET_VALUES", response["variablesSupported"])
+	// GET_VALUES is an OceanBase extension, and stock Oracle declares GET_VALUE instead:
+	// its absence must not disable the variable feature any more. The agent enumerates the
+	// names it can see and reads them one by one, which the probe reports as a fallback
+	// (the panel then explains what stays invisible: compound types and collections).
+	if response["variablesSupported"] != true {
+		t.Fatalf("variablesSupported = %v, want true with GET_VALUE present", response["variablesSupported"])
+	}
+	if response["variablesFallback"] != "get_value" {
+		t.Fatalf("variablesFallback = %v, want get_value", response["variablesFallback"])
+	}
+	if missing, _ := response["missingProcedures"].([]string); len(missing) != 0 {
+		t.Fatalf("GET_VALUES is optional and must not be reported as required: %v", missing)
 	}
 }
 
@@ -4412,6 +4479,7 @@ func TestPLDebugCurrentProgramLabel(t *testing.T) {
 		targetPackage string
 		targetLines   plDebugLineRange
 		lastLine      int
+		stackDepth    int
 		frames        []plDebugFrame
 		want          string
 	}{
@@ -4495,20 +4563,45 @@ func TestPLDebugCurrentProgramLabel(t *testing.T) {
 			want:          "OTHER_PKG",
 		},
 		{
-			name:          "an empty reported name is never composed",
+			name:          "an empty reported name is never composed for a package target",
 			reported:      "",
 			targetProgram: "DBX_PKG.RUN_ME",
 			targetPackage: "DBX_PKG",
 			frames:        []plDebugFrame{{Source: "PROCEDURE LEAF IS"}},
 			want:          "",
 		},
+		{
+			// A standalone routine's frames carry no program name at all (the engine prints
+			// the source line where a name would go: "[Line 6] BEGIN", measured on 19c EE
+			// against DBX_T_PROC), so at stack depth 1 -- the frame the session opened -- the
+			// session's own label is the only accurate name and the panels need it
+			// (reported from use, 2026-10-13: the executing line was never highlighted).
+			name:          "a standalone target at depth 1 is named by the session",
+			reported:      "",
+			targetProgram: "DBX_T_PROC",
+			frames:        []plDebugFrame{{Source: "BEGIN"}},
+			stackDepth:    1,
+			want:          "DBX_T_PROC",
+		},
+		{
+			// Deeper than 1 means a CALLEE: the target's name would be a lie there, and the
+			// engine reports no name for the callee either, so the label stays empty (the
+			// editor then clears its current-line highlight, which is the honest state).
+			name:          "a standalone target is not named for a callee frame",
+			reported:      "",
+			targetProgram: "DBX_T_PROC",
+			frames:        []plDebugFrame{{Source: "BEGIN"}, {Source: "DBX_T_LEAF;"}},
+			stackDepth:    2,
+			want:          "",
+		},
 	} {
 		session := &plDebugSession{
-			lastProgram:   testCase.reported,
-			targetProgram: testCase.targetProgram,
-			targetPackage: testCase.targetPackage,
-			targetLines:   testCase.targetLines,
-			lastLine:      testCase.lastLine,
+			lastProgram:    testCase.reported,
+			targetProgram:  testCase.targetProgram,
+			targetPackage:  testCase.targetPackage,
+			targetLines:    testCase.targetLines,
+			lastLine:       testCase.lastLine,
+			lastStackDepth: testCase.stackDepth,
 		}
 		if got := session.currentProgramLabel(testCase.frames); got != testCase.want {
 			t.Fatalf("%s: currentProgramLabel(%+v, line %d) = %q, want %q",
@@ -4652,8 +4745,14 @@ func TestPLDebugResumeIgnoreBreakpointsDisablesAndRestores(t *testing.T) {
 		if terminated, _ := response["terminated"].(bool); terminated {
 			t.Fatalf("a breakpoint stop must not report a finished program: %#v", response)
 		}
-		if message, _ := response["message"].(string); !strings.Contains(message, "断点") {
+		// The message reaches the UI (the store prints it when the flag is set), so it
+		// is English like every other agent message, and the flag is what asks for the
+		// warning: the run did not reach the program's end.
+		if message, _ := response["message"].(string); !strings.Contains(message, "breakpoint") {
 			t.Fatalf("the breakpoint stop carries no explanation: %#v", response["message"])
+		}
+		if response["runToEndIncomplete"] != true {
+			t.Fatalf("the breakpoint stop is not marked as an incomplete run to the end: %#v", response)
 		}
 		if got := enableCalls(driver); len(got) != 1 || got[0] != "7" {
 			t.Fatalf("re-enabled breakpoints = %v, want [7]", got)
@@ -4680,4 +4779,384 @@ func TestPLDebugResumeIgnoreBreakpointsDisablesAndRestores(t *testing.T) {
 			t.Fatalf("nothing was disabled, so nothing may be re-enabled: %v", got)
 		}
 	})
+
+	t.Run("a run that never ends stops at the cap and says so", func(t *testing.T) {
+		db, driver := openOracleDebugCallTestDB(t)
+		session := newPLDebugCallSession(db, false)
+		// A debuggee that keeps answering ordinary line stops: no breakpoint, no
+		// termination, so only the iteration cap can end the loop.
+		driver.scriptOut(procCntNextBreakpoint, 0, plDebugErrSuccess)
+		driver.scriptOut(procCntNextBreakpoint, 1,
+			" run_info.breakpoint = , run_info.stackdepth = 1, run_info.reason = 9, run_info.programname = PRO1, run_info.programowner = CHZ")
+
+		response, err := session.resumeIgnoreBreakpoints()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if terminated, _ := response["terminated"].(bool); terminated {
+			t.Fatalf("a capped run must not report a finished program: %#v", response)
+		}
+		if message, _ := response["message"].(string); !strings.Contains(message, "did not finish") {
+			t.Fatalf("the capped run carries no explanation: %#v", response["message"])
+		}
+		if response["runToEndIncomplete"] != true {
+			t.Fatalf("the capped run is not marked as an incomplete run to the end: %#v", response)
+		}
+		if got := countRoutine(driver.recordedRoutines(), procCntNextBreakpoint); got != plDebugIgnoreResumeIterations {
+			t.Fatalf("the run continued %d times, want the %d-iteration cap", got, plDebugIgnoreResumeIterations)
+		}
+	})
+}
+
+// stepIn is a step-over whenever DBMS_DEBUG cannot enter the callee: a program
+// compiled without debug information is executed without stopping inside it, and the
+// interpreter answers with an ordinary reason_line (9) at the same stack depth. The
+// agent has to say so in the response -- otherwise the toolbar's step-in reads as a
+// plain step-over and the user has no way to tell the callee was never entered.
+func TestPLDebugStepInReportsWhenItDidNotEnter(t *testing.T) {
+	t.Run("a line stop at the same depth carries the hint", func(t *testing.T) {
+		db, drv := openOracleDebugCallTestDB(t)
+		drv.scriptOut(procCntStepIn, 0, plDebugErrSuccess)
+		drv.scriptOut(procCntStepIn, 1, plDebugRunInfo("TOP", "DBX_DEBUG", 0, 1, plDebugReasonLine))
+		session := newPLDebugCallSession(db, false)
+		session.lastStackDepth = 1
+		session.lastProgram = "TOP"
+
+		response, err := session.stepIn()
+		if err != nil {
+			t.Fatalf("stepIn failed: %v", err)
+		}
+		hint, _ := response["stepHint"].(string)
+		if !strings.Contains(hint, "did not enter") || !strings.Contains(hint, "COMPILE DEBUG") {
+			t.Fatalf("the step-in that did not enter carries no usable hint: %#v", response)
+		}
+	})
+
+	t.Run("entering a callee carries no hint", func(t *testing.T) {
+		db, drv := openOracleDebugCallTestDB(t)
+		drv.scriptOut(procCntStepIn, 0, plDebugErrSuccess)
+		drv.scriptOut(procCntStepIn, 1, plDebugRunInfo("LEAF", "DBX_DEBUG", 0, 2, plDebugReasonEnter))
+		session := newPLDebugCallSession(db, false)
+		session.lastStackDepth = 1
+		session.lastProgram = "TOP"
+
+		response, err := session.stepIn()
+		if err != nil {
+			t.Fatalf("stepIn failed: %v", err)
+		}
+		if _, present := response["stepHint"]; present {
+			t.Fatalf("a step-in that entered a callee must not carry the hint: %#v", response)
+		}
+	})
+
+	t.Run("a line stop in a deeper frame carries no hint", func(t *testing.T) {
+		// The callee can answer with a line stop of its own when the engine reports the
+		// enter as a step; the depth is what proves the interpreter went in, and the
+		// hint must follow the depth, not the reason alone.
+		db, drv := openOracleDebugCallTestDB(t)
+		drv.scriptOut(procCntStepIn, 0, plDebugErrSuccess)
+		drv.scriptOut(procCntStepIn, 1, plDebugRunInfo("LEAF", "DBX_DEBUG", 0, 2, plDebugReasonLine))
+		session := newPLDebugCallSession(db, false)
+		session.lastStackDepth = 1
+
+		response, err := session.stepIn()
+		if err != nil {
+			t.Fatalf("stepIn failed: %v", err)
+		}
+		if _, present := response["stepHint"]; present {
+			t.Fatalf("a deeper frame means the step-in entered: %#v", response)
+		}
+	})
+
+	t.Run("a terminated step-in carries no hint", func(t *testing.T) {
+		// The program ended while stepping in: there is nothing to explain, and the
+		// caller shows the outcome instead.
+		db, drv := openOracleDebugCallTestDB(t)
+		drv.scriptOut(procCntStepIn, 0, plDebugErrSuccess)
+		drv.scriptOut(procCntStepIn, 1, plDebugRunInfo("LEAF", "DBX_DEBUG", 0, 1, plDebugReasonKnlExit))
+		session := newPLDebugCallSession(db, false)
+		session.lastStackDepth = 1
+
+		response, err := session.stepIn()
+		if err != nil {
+			t.Fatalf("stepIn failed: %v", err)
+		}
+		if _, present := response["stepHint"]; present {
+			t.Fatalf("a terminated step-in must not carry the hint: %#v", response)
+		}
+	})
+
+	t.Run("a failed step-in is still an error", func(t *testing.T) {
+		db, drv := openOracleDebugCallTestDB(t)
+		drv.scriptError(procCntStepIn, errors.New("ORA-06550: simulated DBX_CNT_STEP_IN failure"))
+		session := newPLDebugCallSession(db, false)
+
+		if _, err := session.stepIn(); err == nil {
+			t.Fatal("a failed step-in was reported as a successful one")
+		}
+	})
+}
+
+// "Run SQL inside the debug session" goes through DBMS_DEBUG.EXECUTE on the debugger
+// connection: the statement runs in the DEBUGGEE's context, which is the only way to
+// see its uncommitted work. The rows travel as a nested table (SYS.DBMS_DEBUG_VC2COLL)
+// no client can bind, so the block joins them with CHR(31) and the agent splits them
+// again; the server's own failure text has to survive as well.
+func TestPLDebugExecuteStatementRunsInTheDebuggeeContext(t *testing.T) {
+	t.Run("rows are split and reported", func(t *testing.T) {
+		db, drv := openOracleDebugCallTestDB(t)
+		drv.scriptOut("", 4, "\x1fa-row\x1fb-row")
+		drv.scriptOut("", 5, 2)
+		drv.scriptOut("", 6, "")
+		session := newPLDebugCallSession(db, false)
+
+		response, err := session.executeStatement("BEGIN :1 := SYS.DBMS_DEBUG_VC2COLL('a-row', 'b-row'); END;", 50)
+		if err != nil {
+			t.Fatalf("executeStatement failed: %v", err)
+		}
+		rows, _ := response["rows"].([]string)
+		if len(rows) != 2 || rows[0] != "a-row" || rows[1] != "b-row" {
+			t.Fatalf("rows = %#v, want the two joined rows split apart", response["rows"])
+		}
+		if response["count"] != 2 || response["ok"] != true {
+			t.Fatalf("response = %#v, want count 2 and ok", response)
+		}
+		call := drv.callFor(t, "")
+		if !strings.Contains(call.query, "DBMS_DEBUG.EXECUTE") {
+			t.Fatalf("the call did not go through DBMS_DEBUG.EXECUTE: %q", call.query)
+		}
+		if len(call.inValues) < 2 || call.inValues[1] != "1" {
+			t.Fatalf("a PL/SQL block must be bound with bind_results=1: %#v", call.inValues)
+		}
+	})
+
+	t.Run("a PL/SQL block is bound as a block and gets the row channel", func(t *testing.T) {
+		// The spec: only bind_results=1 hands the block its `:1` collection, and only a
+		// block can fill one -- a plain statement runs with its result set discarded.
+		db, drv := openOracleDebugCallTestDB(t)
+		drv.scriptOut("", 4, "\x1fcount=1")
+		drv.scriptOut("", 5, 1)
+		drv.scriptOut("", 6, "")
+		session := newPLDebugCallSession(db, false)
+
+		response, err := session.executeStatement("DECLARE v INTEGER; BEGIN v := 1; :1 := SYS.DBMS_DEBUG_VC2COLL('count=' || v); END;", 0)
+		if err != nil {
+			t.Fatalf("executeStatement failed: %v", err)
+		}
+		call := drv.callFor(t, "")
+		if len(call.inValues) < 2 || call.inValues[1] != "1" {
+			t.Fatalf("a PL/SQL block was not bound with bind_results=1: %#v", call.inValues)
+		}
+		rows, _ := response["rows"].([]string)
+		if len(rows) != 1 || rows[0] != "count=1" {
+			t.Fatalf("rows = %#v, want the block's row", response["rows"])
+		}
+	})
+
+	t.Run("a plain statement loses its trailing semicolon and keeps bind_results=0", func(t *testing.T) {
+		// The spec: a plain SQL statement must not end with a semicolon (ORA-00911), and
+		// a statement cannot fill the `:1` collection.
+		db, drv := openOracleDebugCallTestDB(t)
+		drv.scriptOut("", 4, "")
+		drv.scriptOut("", 5, 0)
+		drv.scriptOut("", 6, "")
+		session := newPLDebugCallSession(db, false)
+
+		response, err := session.executeStatement("INSERT INTO t VALUES (1);  ", 0)
+		if err != nil {
+			t.Fatalf("executeStatement failed: %v", err)
+		}
+		call := drv.callFor(t, "")
+		if call.inValues[0] != "INSERT INTO t VALUES (1)" {
+			t.Fatalf("the trailing semicolon was not removed: %#v", call.inValues)
+		}
+		if len(call.inValues) < 2 || call.inValues[1] != "0" {
+			t.Fatalf("a plain statement must keep bind_results=0: %#v", call.inValues)
+		}
+		// The collection still holds the placeholder the block seeded it with; it must
+		// not be reported as a row of the statement.
+		if rows, _ := response["rows"].([]string); len(rows) != 0 {
+			t.Fatalf("a plain statement reported rows: %#v", rows)
+		}
+		if response["count"] != 0 {
+			t.Fatalf("a plain statement reported a row count: %#v", response["count"])
+		}
+	})
+
+	t.Run("the server's own error text is reported, not thrown", func(t *testing.T) {
+		db, drv := openOracleDebugCallTestDB(t)
+		drv.scriptOut("", 5, 0)
+		drv.scriptOut("", 6, "ORA-00942: table or view does not exist")
+		session := newPLDebugCallSession(db, false)
+
+		response, err := session.executeStatement("SELECT * FROM no_such", 50)
+		if err != nil {
+			t.Fatalf("the server's rejection must be an answer, not an RPC error: %v", err)
+		}
+		if response["ok"] != false || response["error"] != "ORA-00942: table or view does not exist" {
+			t.Fatalf("response = %#v, want the server's error text", response)
+		}
+	})
+
+	t.Run("an empty statement is refused before any round trip", func(t *testing.T) {
+		db, drv := openOracleDebugCallTestDB(t)
+		session := newPLDebugCallSession(db, false)
+		if _, err := session.executeStatement("   ", 0); err == nil {
+			t.Fatal("an empty statement was accepted")
+		}
+		if len(drv.recordedRoutines()) != 0 {
+			t.Fatalf("an empty statement reached the server: %v", drv.recordedRoutines())
+		}
+	})
+
+	t.Run("a finished debuggee is refused", func(t *testing.T) {
+		db, _ := openOracleDebugCallTestDB(t)
+		session := newPLDebugCallSession(db, false)
+		session.terminated = true
+		if _, err := session.executeStatement("SELECT 1 FROM DUAL", 0); err == nil {
+			t.Fatal("a finished debuggee accepted an EXECUTE")
+		}
+	})
+}
+
+// The start sequence must tell Probe what to do with the target when the debugger
+// stops answering (ledger §2 #34): DBMS_DEBUG.SET_TIMEOUT_BEHAVIOUR with
+// nodebug_on_timeout (2, the value the 19c spec declares), and the value is read back
+// so the snapshot reports the state instead of assuming the call worked.
+func TestPLDebugStartSetsNodebugOnTimeout(t *testing.T) {
+	db, drv := openOracleDebugCallTestDB(t)
+	// Both calls are raw debugger statements, so the fake driver files them under the
+	// empty routine name; index 0 is the SET call's IN value (ignored by setOutDest) and
+	// the GET call's OUT register.
+	drv.scriptOut("", 0, plDebugTimeoutBehaviourNodebug)
+	session := newPLDebugCallSession(db, false)
+
+	session.applyTimeoutBehaviour()
+
+	setCall, ok := drv.recordedStatementContaining("SET_TIMEOUT_BEHAVIOUR(:1)")
+	if !ok {
+		t.Fatalf("the start sequence never set the timeout behaviour: %v", drv.recordedRoutines())
+	}
+	if len(setCall.inValues) == 0 || setCall.inValues[0] != "2" {
+		t.Fatalf("the behaviour was not sent as the literal 2: %#v", setCall.inValues)
+	}
+	if !strings.Contains(setCall.query, "DBMS_DEBUG.SET_TIMEOUT_BEHAVIOUR") {
+		t.Fatalf("the statement is not the one the spec documents: %q", setCall.query)
+	}
+	if _, ok := drv.recordedStatementContaining("GET_TIMEOUT_BEHAVIOUR"); !ok {
+		t.Fatal("the behaviour was never read back, so the snapshot would have to assume it")
+	}
+	if session.timeoutBehaviour != plDebugTimeoutBehaviourNodebug {
+		t.Fatalf("session.timeoutBehaviour = %d, want %d", session.timeoutBehaviour, plDebugTimeoutBehaviourNodebug)
+	}
+	if got := session.snapshot("")["timeoutBehaviour"]; got != plDebugTimeoutBehaviourNodebug {
+		t.Fatalf("the snapshot reports timeoutBehaviour = %#v, want %d", got, plDebugTimeoutBehaviourNodebug)
+	}
+}
+
+// A server that cannot set the behaviour (older engine, rejected value) must keep the
+// session: the default continue_on_timeout is what this agent used before, so the
+// failure is logged and the start goes on with the behaviour left unreported (0).
+func TestPLDebugTimeoutBehaviourFailureIsNotFatal(t *testing.T) {
+	db, drv := openOracleDebugCallTestDB(t)
+	drv.scriptError("", errors.New("ORA-06550: PLS-00302: component 'SET_TIMEOUT_BEHAVIOUR' must be declared"))
+	session := newPLDebugCallSession(db, false)
+
+	session.applyTimeoutBehaviour()
+
+	if session.timeoutBehaviour != 0 {
+		t.Fatalf("a failed setter must leave the behaviour unknown, got %d", session.timeoutBehaviour)
+	}
+	if got := session.snapshot("")["timeoutBehaviour"]; got != 0 {
+		t.Fatalf("the snapshot reports %#v for an unknown behaviour, want 0", got)
+	}
+}
+
+// The declaration parser behind the GET_VALUE fallback. A name it reads wrongly only ever
+// costs one rejected GET_VALUE (error_no_such_object), never a wrong value -- but a name
+// it misses is a variable the panel will not show, so both directions are pinned here.
+func TestPLDebugDeclaredNames(t *testing.T) {
+	lines := []string{
+		"  v_n NUMBER := 0;",
+		"  l_text VARCHAR2(32000);",
+		"  c_max CONSTANT PLS_INTEGER := 10;",
+		"  v_a, v_b DATE;",
+		"  -- a comment, not a declaration: v_ghost NUMBER;",
+		"  CURSOR c_rows IS SELECT 1 FROM dual;",
+		"  PROCEDURE nested IS",
+		"  BEGIN",
+		"  END;",
+		"  TYPE t_rec IS RECORD (",
+		"    v_multi NUMBER :=",
+		"  (SELECT 1 FROM dual);",
+		"  l_name VARCHAR2(10) := 'semi;colon';",
+	}
+	got := plDebugDeclaredNames(lines)
+	want := []string{"v_n", "l_text", "c_max", "v_a", "v_b", "l_name"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("plDebugDeclaredNames = %v, want %v", got, want)
+	}
+}
+
+// The fallback path: a server whose helper answers the GET_VALUES capability sentinel must
+// still produce variables, one DBMS_DEBUG.GET_VALUE call per candidate name. The fake
+// driver files the raw GET_VALUE blocks under the empty routine name, so the hook scripted
+// here walks the three answers in call order (a value, a NULL, and a name the frame does
+// not have).
+func TestPLDebugVariablesFallbackUsesGetValue(t *testing.T) {
+	db, drv := openOracleDebugCallTestDB(t)
+	drv.scriptOut(procGetValues, 0, "")
+	drv.scriptOut(procGetValues, 1, plDebugErrGetValuesUnavailable)
+
+	type answer struct {
+		code  int
+		value string
+	}
+	answers := []answer{
+		{plDebugErrSuccess, "5"},
+		{plDebugErrNullValue, ""},
+		{plDebugErrNoSuchObject, ""},
+	}
+	call := 0
+	scriptNext := func() {
+		if call >= len(answers) {
+			return
+		}
+		drv.scriptOut("", 2, answers[call].code)
+		drv.scriptOut("", 3, answers[call].value)
+	}
+	scriptNext()
+	drv.onExec = func(routine string) {
+		if routine != "" {
+			return
+		}
+		call++
+		scriptNext()
+	}
+
+	session := newPLDebugCallSession(db, false)
+	session.parameterNames = []string{"P_A", "V_N", "V_GONE"}
+	response, err := session.variables(0)
+	if err != nil {
+		t.Fatalf("variables() failed instead of falling back: %v", err)
+	}
+	if response["variablesSource"] != "get_value" {
+		t.Fatalf("the response does not say where the variables came from: %#v", response["variablesSource"])
+	}
+	entries, _ := response["variables"].([]map[string]interface{})
+	if len(entries) != 2 {
+		t.Fatalf("variables = %#v, want the parameter and the NULL local (the missing name is absent)", response["variables"])
+	}
+	if entries[0]["name"] != "P_A" || entries[0]["value"] != "5" {
+		t.Fatalf("first entry = %#v, want P_A=5", entries[0])
+	}
+	if entries[1]["name"] != "V_N" || entries[1]["value"] != "" {
+		t.Fatalf("a NULL variable must be listed with an empty value: %#v", entries[1])
+	}
+	if call != len(answers) {
+		t.Fatalf("GET_VALUE ran %d times, want %d (one per candidate)", call, len(answers))
+	}
+	if message, _ := response["message"].(string); !strings.Contains(message, "no GET_VALUES") {
+		t.Fatalf("the message does not explain the fallback: %q", message)
+	}
 }

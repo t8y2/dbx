@@ -252,6 +252,13 @@ const (
 	// server can answer, and it is no reason to run the debuggee anyway.
 	plDebugErrNameIncomplete = 11
 	plDebugErrBadHandle      = 16
+	// plDebugErrNoSuchObject (3) and plDebugErrNullValue (32) are what
+	// DBMS_DEBUG.GET_VALUE answers for "this frame has no such variable" and "the
+	// variable exists but is NULL". The numbers are the 19c package spec's own
+	// constants; they drive the GET_VALUE fallback (variablesByValue), which is how a
+	// session on a server without GET_VALUES still lists variables.
+	plDebugErrNoSuchObject = 3
+	plDebugErrNullValue    = 32
 	// plDebugReasonException and plDebugReasonHandler are the run_info.reason
 	// values an exception breakpoint stops on (dbms_debug.reason_exception=11,
 	// reason_handler=16). Every other reason -- notably reason_finish (8), which
@@ -857,6 +864,15 @@ type plDebugSession struct {
 	// parked in a nested routine would be labelled with the enclosing routine's name
 	// (see plDebugNestedRange).
 	nestedLines []plDebugNestedRange
+	// parameterNames are the target routine's parameter names as the launch dialog sent
+	// them. They are the first candidates the GET_VALUE fallback asks about (see
+	// variablesByValue): a server without GET_VALUES has no other way to learn names.
+	parameterNames []string
+	// timeoutBehaviour is what DBMS_DEBUG was told to do with the TARGET when a
+	// timeout occurs (plDebugTimeoutBehaviourNodebug), or 0 when the session never
+	// managed to set or read it. It is published in the snapshot so a client can see
+	// which state the session is in instead of assuming the call worked.
+	timeoutBehaviour int
 	// targetProgram / targetPackage remember the composed "PACKAGE.SUBPROGRAM"
 	// label that pl_debug_start published. For a package subprogram the engine
 	// reports only the PACKAGE name in run_info -- the subprogram lives in
@@ -1487,6 +1503,7 @@ func plDebugStart(s *server, debuggee, debugger *sql.DB, request map[string]inte
 		debuggee:           debuggee,
 		debugger:           debugger,
 		programInfoFields:  programInfoFields,
+		parameterNames:     plDebugParameterNames(request),
 		oci:                usesOCIProfile(s.params),
 		lastActivityMillis: nowMillis(),
 		targetDone:         make(chan struct{}),
@@ -1578,6 +1595,11 @@ func plDebugStart(s *server, debuggee, debugger *sql.DB, request map[string]inte
 		_ = session.Close()
 		return nil, err
 	}
+	// Release the target if the debugger stops answering: the behaviour is set here,
+	// right after the session exists and before anything parks the program, so a later
+	// timeout cannot leave the user's program sitting in a debug session nobody drives
+	// (see applyTimeoutBehaviour). Non-fatal on purpose.
+	session.applyTimeoutBehaviour()
 	// Synchronize with the debuggee. This is the handshake every later CONTINUE
 	// depends on -- without it CONTINUE answers no result at all and nothing can be
 	// stopped -- so a failure is fatal rather than logged (see synchronizeDebuggee).
@@ -1672,6 +1694,59 @@ func (p *plDebugSession) synchronizeDebuggee() error {
 	p.touch()
 	p.mu.Unlock()
 	return nil
+}
+
+// plDebugTimeoutBehaviourNodebug is DBMS_DEBUG's `nodebug_on_timeout`, whose value the
+// 19c package spec declares as `nodebug_on_timeout CONSTANT BINARY_INTEGER := 2` (read
+// from ALL_SOURCE of SYS.DBMS_DEBUG, next to `continue_on_timeout := 1`). The literal
+// is used on purpose: the number is what the server checks, and a named constant has to
+// exist on every engine the agent talks to (see the helper body's rule about named
+// constants).
+const plDebugTimeoutBehaviourNodebug = 2
+
+// applyTimeoutBehaviour tells Probe what to do with the TARGET when a debugger timeout
+// occurs: leave debug mode and let the program run on, rather than leaving it inside a
+// debug session nobody is driving any more. ODC sets the same behaviour in its start
+// sequence.
+//
+// The spec's own wording for the two behaviours: `continue_on_timeout` (1, the default)
+// "Continue execution, using same event flags" keeps the target inside the debug session,
+// while `nodebug_on_timeout` (2) "Turn debug-mode OFF (ie. call debug_off) and" continues
+// -- the session is over and the program is released on its own.
+//
+// Measured on 19c EE (2026-10-12, `e2e-verify/v65_timeout_behaviour_{new,old}.out`) with
+// an abandoned session (no debugger call for 140s while SET_TIMEOUT is 120s): BOTH
+// behaviours end with the program finished and its DBMS_OUTPUT complete, with and without
+// a breakpoint armed past the stop. What this setting changes in that scenario is
+// therefore not "hangs vs runs" but what the session leaves behind: the default keeps the
+// target in debug mode, nodebug_on_timeout has Probe close it (ODC sets the same value in
+// its own start sequence, which is why this agent does too).
+//
+// A session where the call fails keeps the default, which is exactly what this agent did
+// before, so the failure is logged and never fails the start.
+//
+// The value is read back afterwards (DBMS_DEBUG.GET_TIMEOUT_BEHAVIOUR) and published in
+// the snapshot: the point of the call is the state it puts the session in, so the state
+// is reported rather than assumed.
+func (p *plDebugSession) applyTimeoutBehaviour() {
+	if err := p.plDebugDebuggerExec("DBMS_DEBUG.SET_TIMEOUT_BEHAVIOUR",
+		"BEGIN DBMS_DEBUG.SET_TIMEOUT_BEHAVIOUR(:1); END;", p.debugCallTimeout(),
+		plDebugTimeoutBehaviourNodebug); err != nil {
+		plDebugLogf("DBMS_DEBUG.SET_TIMEOUT_BEHAVIOUR(%d) failed; the session keeps the server's "+
+			"default continue_on_timeout: %v", plDebugTimeoutBehaviourNodebug, err)
+		return
+	}
+	var behaviour int
+	if err := p.plDebugDebuggerExec("DBMS_DEBUG.GET_TIMEOUT_BEHAVIOUR",
+		"BEGIN :1 := DBMS_DEBUG.GET_TIMEOUT_BEHAVIOUR(); END;", p.debugCallTimeout(),
+		plDebugOutArg(p.oci, &behaviour)); err != nil {
+		plDebugLogf("DBMS_DEBUG.GET_TIMEOUT_BEHAVIOUR failed; the timeout behaviour stays unreported: %v", err)
+		return
+	}
+	p.mu.Lock()
+	p.timeoutBehaviour = behaviour
+	p.touch()
+	p.mu.Unlock()
 }
 
 // stepIntoRoutine steps the parked debuggee into target, one
@@ -2035,7 +2110,10 @@ func (p *plDebugSession) setBreakpoints(requested []plDebugBreakpoint) ([]plDebu
 				ignored = append(ignored, "sequence")
 			}
 			if len(ignored) > 0 {
-				ignoredWarning := fmt.Sprintf("该服务器 DBMS_DEBUG.PROGRAM_INFO 不支持 %s 属性，已忽略", strings.Join(ignored, "/"))
+				// English like every other user-visible diagnostic: the store prints these
+				// warnings verbatim next to its own English lines (ledger §2 #39).
+				ignoredWarning := fmt.Sprintf("this server's DBMS_DEBUG.PROGRAM_INFO has no %s attribute; it was ignored",
+					strings.Join(ignored, "/"))
 				warnings = append(warnings, ignoredWarning)
 				plDebugLogf("dbms_debug.program_info has no %s attribute; ignoring it for %s.%s",
 					strings.Join(ignored, "/"), breakpointOwner, breakpointName)
@@ -2056,7 +2134,7 @@ func (p *plDebugSession) setBreakpoints(requested []plDebugBreakpoint) ([]plDebu
 				// DBX_SET_BREAKPOINT_ENTRY carries no signature/sequence attribute: the
 				// entrypointname is what locates the subprogram. Saying so beats arming
 				// the wrong overload silently.
-				overloadIgnored := "包内子程序断点改用 entrypointname 定位，已忽略 signature/sequence"
+				overloadIgnored := "package-subprogram breakpoints are located by entrypointname; signature/sequence was ignored"
 				warnings = append(warnings, overloadIgnored)
 				plDebugLogf("%s: %s.%s", overloadIgnored, breakpointOwner, breakpointName)
 			}
@@ -2181,8 +2259,8 @@ func plDebugOverloadCount(db *sql.DB, owner, name string) (int, error) {
 // this line may hit a different implementation instead of letting it fail
 // silently.
 func plDebugOverloadWarning(owner, name string, overloads int) string {
-	return fmt.Sprintf("%s.%s 存在 %d 个同名重载，未提供 signature/sequence 时可能断到错误的实现（overloaded target: %d candidates）",
-		owner, name, overloads, overloads)
+	return fmt.Sprintf("%s.%s has %d same-named overloads; without signature/sequence the breakpoint may bind to "+
+		"the wrong implementation (overloaded target: %d candidates)", owner, name, overloads, overloads)
 }
 
 // plDebugOverloadWarningForTarget decides whether the overload warning applies:
@@ -2546,15 +2624,21 @@ func (p *plDebugSession) runToTermination() (map[string]interface{}, error) {
 		breakpoint, _ := current["breakpoint"].(int)
 		reason, _ := current["reason"].(int)
 		if breakpoint > 0 || reason == plDebugReasonBreakpoint {
+			// The flag is what makes the store display the message (a stopped "run to
+			// end" is not an error, the session stays usable). The text is English
+			// because the store embeds it in its own English warning line
+			// ("run to end: ...").
+			current["runToEndIncomplete"] = true
 			current["message"] = fmt.Sprintf(
-				"运行到结束在断点处停下（该断点未能被禁用）: breakpoint=%d reason=%d", breakpoint, reason)
+				"Run to end stopped at a breakpoint that could not be disabled: breakpoint=%d reason=%d", breakpoint, reason)
 			return current, nil
 		}
 	}
 	if response == nil {
 		return nil, nil
 	}
-	response["message"] = fmt.Sprintf("运行到结束在 %d 次续跑后仍未终止", plDebugIgnoreResumeIterations)
+	response["runToEndIncomplete"] = true
+	response["message"] = fmt.Sprintf("Run to end did not finish after %d continuations", plDebugIgnoreResumeIterations)
 	return response, nil
 }
 
@@ -2562,8 +2646,41 @@ func (p *plDebugSession) stepOver() (map[string]interface{}, error) {
 	return p.continueWith(procCntNextLine)
 }
 
+// plDebugStepInMissHint explains a step-in that behaved like a step-over.
+//
+// Measured on 19c EE (2026-10-10): entering a callee stops with reason_enter (6) on the
+// callee's first line and a deeper stack, while a callee compiled without debug
+// information is executed without ever stopping inside it -- the step-in answers with an
+// ordinary reason_line (9) in the same program at the same depth. DBMS_DEBUG reports
+// nothing else in that case, so without this note the toolbar's step-in reads as having
+// stepped over for no reason. The text names both causes because the stop alone cannot
+// tell them apart: the command was issued on a line with no call at all, or on a call
+// the debugger could not enter.
+const plDebugStepInMissHint = "Step into did not enter a subprogram: the statement ran without stopping inside " +
+	"a nested unit. Either the current line has no call to step into, or the callee was compiled without debug " +
+	"information (recompile a stored subprogram with ALTER <TYPE> <NAME> COMPILE DEBUG; built-in subprograms " +
+	"cannot be entered)."
+
+// stepIn is continueWith plus the "did not enter" note above. The stack depth is read
+// before the call because the response alone cannot say whether it changed.
 func (p *plDebugSession) stepIn() (map[string]interface{}, error) {
-	return p.continueWith(procCntStepIn)
+	p.mu.Lock()
+	depthBefore := p.lastStackDepth
+	p.mu.Unlock()
+
+	response, err := p.continueWith(procCntStepIn)
+	if err != nil {
+		return nil, err
+	}
+
+	p.mu.Lock()
+	entered := p.lastStackDepth > depthBefore
+	reason, terminated := p.lastReason, p.terminated
+	p.mu.Unlock()
+	if !terminated && !entered && reason == plDebugReasonLine {
+		response["stepHint"] = plDebugStepInMissHint
+	}
+	return response, nil
 }
 
 func (p *plDebugSession) stepOut() (map[string]interface{}, error) {
@@ -2589,6 +2706,290 @@ func (p *plDebugSession) abort() (map[string]interface{}, error) {
 // `*name*type*value` text; when the listing is not in that Oracle format (for
 // example OceanBase's JSON) the current-frame listing is returned unchanged and
 // frameScoped=false tells the caller.
+// plDebugParameterNames reads the names out of a launch request's params array. They
+// are one half of the GET_VALUE fallback's candidate list.
+func plDebugParameterNames(request map[string]interface{}) []string {
+	raw, ok := request["params"]
+	if !ok || raw == nil {
+		return nil
+	}
+	items, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		paramMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if name := strings.TrimSpace(stringField(paramMap, "name")); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// plDebugGetValueBlock is one DBMS_DEBUG.GET_VALUE call. The routine's 19c signature is
+// `FUNCTION get_value(variable_name IN VARCHAR2, frame# IN BINARY_INTEGER,
+// scalar_value OUT VARCHAR2, format IN VARCHAR2 := NULL) RETURN BINARY_INTEGER`. The
+// handler turns Probe's raise into the -1 code, so the caller reports "could not read"
+// instead of a driver error.
+const plDebugGetValueBlock = `DECLARE
+  value VARCHAR2(32000);
+  result BINARY_INTEGER;
+BEGIN
+  result := DBMS_DEBUG.GET_VALUE(:1, :2, value, NULL);
+  :3 := result;
+  :4 := value;
+EXCEPTION WHEN OTHERS THEN
+  :3 := -1;
+  :4 := SQLERRM;
+END;`
+
+// plDebugStandaloneSourceQuery reads a standalone routine's source the way the
+// package-body query reads a package: plain ALL_SOURCE rows, no DBMS_DEBUG call.
+const plDebugStandaloneSourceQuery = `SELECT LINE, TEXT FROM ALL_SOURCE
+	  WHERE OWNER = :1 AND NAME = :2 AND TYPE IN ('PROCEDURE', 'FUNCTION') ORDER BY LINE`
+
+// plDebugDeclarationKeyword reports whether a declaration-section line starts a construct
+// that introduces no readable variable (a nested subprogram, a type, a cursor, a label).
+func plDebugDeclarationKeyword(upper string) bool {
+	for _, keyword := range []string{
+		"PROCEDURE ", "FUNCTION ", "TYPE ", "SUBTYPE ", "CURSOR ", "PRAGMA ", "EXCEPTION",
+		"BEGIN", "END", "IF ", "ELSE", "ELSIF", "LOOP", "WHEN ", "RETURN", "DECLARE", "<<",
+	} {
+		if strings.HasPrefix(upper, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// plDebugDeclaredNames lists the identifiers a declaration section introduces:
+// `name [CONSTANT] type ...;` and `name1, name2 type ...;`. Only lines that close with a
+// semicolon are considered and keyword-led lines are skipped, so a misread line can only
+// ever produce a name the server then rejects (error_no_such_object) -- never a wrong
+// value. A declaration split over several lines is missed, which costs one candidate.
+func plDebugDeclaredNames(lines []string) []string {
+	names := make([]string, 0, 16)
+	seen := map[string]bool{}
+	inBlockComment := false
+	for _, text := range lines {
+		line := strings.TrimSpace(plDebugStripSQLComments(text, &inBlockComment))
+		if line == "" || !strings.HasSuffix(line, ";") {
+			continue
+		}
+		if plDebugDeclarationKeyword(strings.ToUpper(line)) {
+			continue
+		}
+		tokens := strings.Fields(strings.TrimSuffix(line, ";"))
+		if len(tokens) < 2 {
+			continue
+		}
+		// The name list is the comma-separated head of the line: every token that is a
+		// name and still followed by a comma belongs to it, and the first token that is not
+		// a name (CONSTANT, the type, the initialiser) ends it.
+		for _, token := range tokens {
+			candidate := strings.TrimSuffix(token, ",")
+			if !plDebugPlainIdentifier(candidate) || plDebugDeclarationKeyword(strings.ToUpper(candidate)) {
+				break
+			}
+			key := strings.ToUpper(candidate)
+			if !seen[key] {
+				seen[key] = true
+				names = append(names, candidate)
+			}
+			if !strings.HasSuffix(token, ",") {
+				break
+			}
+		}
+	}
+	return names
+}
+
+// plDebugDeclarationLines returns the part of a routine's source that precedes its own
+// BEGIN, with the nested subprograms declared inside it removed: their bodies hold BEGINs
+// of their own and their declarations belong to them, not to the enclosing routine.
+func plDebugDeclarationLines(lines []plDebugSourceLine, target plDebugLineRange) []plDebugSourceLine {
+	nested := plDebugNestedSubprogramRanges(lines, target)
+	declarations := make([]plDebugSourceLine, 0, 32)
+	for _, line := range lines {
+		if line.Line < target.First || line.Line > target.Last {
+			continue
+		}
+		insideNested := false
+		for _, nestedRange := range nested {
+			if line.Line >= nestedRange.First && line.Line <= nestedRange.Last {
+				insideNested = true
+				break
+			}
+		}
+		if insideNested {
+			continue
+		}
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(line.Text)), "BEGIN") {
+			break
+		}
+		declarations = append(declarations, line)
+	}
+	return declarations
+}
+
+// debugValue reads one named variable of one frame with DBMS_DEBUG.GET_VALUE. ok is
+// false when that frame has no such variable; a variable that IS NULL answers ok with an
+// empty value, exactly like the server's own listing reports it.
+func (p *plDebugSession) debugValue(name string, frame int) (string, bool, error) {
+	var result int
+	var value string
+	args := []any{name, frame, plDebugOutArg(p.oci, &result), plDebugLogOutArg(p.oci, &value)}
+	if err := p.plDebugDebuggerExec("DBMS_DEBUG.GET_VALUE", plDebugGetValueBlock, p.debugCallTimeout(), args...); err != nil {
+		return "", false, err
+	}
+	switch result {
+	case plDebugErrSuccess:
+		return value, true, nil
+	case plDebugErrNullValue:
+		return "", true, nil
+	default:
+		return "", false, nil
+	}
+}
+
+// variableNamesForFrame returns the names worth asking GET_VALUE about for one frame: the
+// target's parameters plus the declarations of the routine the frame is parked in. The
+// routine comes from the backtrace (its name and owner), its source from ALL_SOURCE --
+// the same two reads the frame labels use.
+func (p *plDebugSession) variableNamesForFrame(frame int) []string {
+	names := append([]string(nil), p.parameterNames...)
+	_, _, frames, err := p.fetchBacktrace()
+	if err != nil || frame < 0 || frame >= len(frames) {
+		return names
+	}
+	program := strings.TrimSpace(frames[frame].Program)
+	owner := strings.TrimSpace(frames[frame].ProgramOwner)
+	if program == "" {
+		// A standalone routine's innermost frame arrives WITHOUT a program name: the
+		// engine prints the routine's own declaration line where the name would go
+		// (measured on 19c EE: frames[0].program = "" while programOwner is filled), so
+		// the name has to come from the session's target label or from that line -- the
+		// same two sources the frame labels use (see currentProgramLabel).
+		program = strings.TrimSpace(p.targetProgram)
+		if program == "" {
+			program = strings.TrimSpace(plDebugSubprogramFromDeclaration(strings.TrimSpace(frames[frame].Source)))
+		}
+	}
+	if program == "" {
+		return names
+	}
+	if owner == "" {
+		owner = p.owner
+	}
+	lines, target, ok := p.routineSource(owner, program)
+	if !ok {
+		return names
+	}
+	names = append(names, plDebugDeclaredNames(plDebugSourceTexts(plDebugDeclarationLines(lines, target)))...)
+	return names
+}
+
+// routineSource reads one routine's source lines and the line range that routine covers:
+// for a package member the subprogram's range inside the package body, for a standalone
+// routine everything its ALL_SOURCE rows hold.
+func (p *plDebugSession) routineSource(owner, program string) ([]plDebugSourceLine, plDebugLineRange, bool) {
+	packageName, subprogram := "", program
+	if dot := strings.IndexByte(program, '.'); dot > 0 && dot < len(program)-1 {
+		packageName, subprogram = program[:dot], program[dot+1:]
+	}
+	query := plDebugStandaloneSourceQuery
+	args := []any{owner, subprogram}
+	if packageName != "" {
+		query = plDebugPackageBodySourceQuery
+		args = []any{owner, packageName}
+	}
+	rows, err := p.debugger.Query(query, args...)
+	if err != nil {
+		plDebugLogf("reading the source of %s.%s for the variable fallback failed: %v", owner, program, err)
+		return nil, plDebugLineRange{}, false
+	}
+	defer rows.Close()
+	lines := make([]plDebugSourceLine, 0, 128)
+	for rows.Next() {
+		var line plDebugSourceLine
+		if err := rows.Scan(&line.Line, &line.Text); err != nil {
+			plDebugLogf("reading the source lines of %s.%s failed: %v", owner, program, err)
+			return nil, plDebugLineRange{}, false
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return nil, plDebugLineRange{}, false
+	}
+	target := plDebugLineRange{First: lines[0].Line, Last: lines[len(lines)-1].Line}
+	if packageName != "" {
+		first, last, _, found := plDebugSubprogramRange(lines, subprogram)
+		if !found {
+			return nil, plDebugLineRange{}, false
+		}
+		target = plDebugLineRange{First: first, Last: last}
+	}
+	return lines, target, true
+}
+
+// plDebugSourceTexts keeps the text of the given lines, in order.
+func plDebugSourceTexts(lines []plDebugSourceLine) []string {
+	texts := make([]string, 0, len(lines))
+	for _, line := range lines {
+		texts = append(texts, line.Text)
+	}
+	return texts
+}
+
+// variablesByValue is the fallback for a server without DBMS_DEBUG.GET_VALUES (stock
+// Oracle): the names come from the launch request and from the source of the routine the
+// frame is parked in, and DBMS_DEBUG.GET_VALUE reads them one by one.
+//
+// A name that frame does not have (error_no_such_object) is simply absent, a NULL
+// variable arrives as an empty value, and every other code is skipped -- so the panel can
+// only ever show variables the debuggee itself confirmed. The response says which shape
+// it came from (`variablesSource: "get_value"`).
+//
+// The caller holds p.mu.
+func (p *plDebugSession) variablesByValue(frame int) (map[string]interface{}, error) {
+	names := p.variableNamesForFrame(frame)
+	variables := make([]map[string]interface{}, 0, len(names))
+	read := 0
+	failures := 0
+	var firstErr error
+	for _, name := range names {
+		value, ok, err := p.debugValue(name, frame)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			failures++
+			continue
+		}
+		if !ok {
+			continue
+		}
+		read++
+		variables = append(variables, map[string]interface{}{"name": name, "type": "", "value": value})
+	}
+	if read == 0 && failures > 0 && failures == len(names) {
+		return nil, fmt.Errorf("reading variables with DBMS_DEBUG.GET_VALUE failed: %w", firstErr)
+	}
+	p.touch()
+	response := p.snapshot("")
+	response["frame"] = frame
+	response["variables"] = variables
+	response["variablesSource"] = "get_value"
+	response["message"] = fmt.Sprintf(
+		"DBMS_DEBUG.GET_VALUE read %d of %d name(s) in frame %d (this server has no GET_VALUES)",
+		read, len(names), frame)
+	return response, nil
+}
+
 func (p *plDebugSession) variables(frame int) (map[string]interface{}, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -2608,8 +3009,10 @@ func (p *plDebugSession) variables(frame int) (map[string]interface{}, error) {
 	}
 	if result != 0 {
 		if result == plDebugErrGetValuesUnavailable {
-			return nil, fmt.Errorf("PL/SQL variables are unavailable on this server: " +
-				"DBMS_DEBUG.GET_VALUES is not declared, so only breakpoints, stepping and the backtrace are supported")
+			// Stock Oracle declares GET_VALUE but no GET_VALUES (measured on 19c EE), so
+			// the listing is built from the names this session can see: the launch
+			// parameters and the declarations of the routine the frame is parked in.
+			return p.variablesByValue(frame)
 		}
 		return nil, fmt.Errorf("get_values failed: result=%d", result)
 	}
@@ -2833,7 +3236,7 @@ func (p *plDebugSession) setValue(name string, frame, index int, value string) (
 	// rejected" at once, so the message decides: a missing primitive is answered
 	// before any retry, because retrying a capability answer is pointless.
 	if result == plDebugErrCapabilityUnavailable && plDebugCapabilityMissing(serverError) {
-		return nil, errors.New("该服务器不支持改变量值（DBMS_DEBUG.SET_VALUE 不可用）")
+		return nil, errors.New("this server cannot change variable values (DBMS_DEBUG.SET_VALUE is not available)")
 	}
 	usedTerminator := false
 	if retryAssignment, retry := plDebugSetValueRetry(result, serverError, assignment); retry {
@@ -2843,7 +3246,7 @@ func (p *plDebugSession) setValue(name string, frame, index int, value string) (
 			return nil, fmt.Errorf("set_value failed: %w", err)
 		}
 		if result == plDebugErrCapabilityUnavailable && plDebugCapabilityMissing(serverError) {
-			return nil, errors.New("该服务器不支持改变量值（DBMS_DEBUG.SET_VALUE 不可用）")
+			return nil, errors.New("this server cannot change variable values (DBMS_DEBUG.SET_VALUE is not available)")
 		}
 	}
 	if result == plDebugErrCapabilityUnavailable {
@@ -2871,21 +3274,23 @@ func (p *plDebugSession) setValue(name string, frame, index int, value string) (
 // sentinel must stay distinct from error_no_such_breakpt (13): the latter means the
 // server does implement the primitive but does not know that breakpoint number.
 func plDebugBreakpointEnabledMessage(breakpoint int, enabled bool, result int) string {
-	action := "禁用"
+	// English like every other agent diagnostic the UI shows (ledger §2 #39). The verb
+	// form and the past participle are kept apart so each sentence reads correctly.
+	verb, done := "disable", "disabled"
 	if enabled {
-		action = "启用"
+		verb, done = "enable", "enabled"
 	}
 	switch result {
 	case plDebugErrSuccess:
-		return fmt.Sprintf("断点 %d 已%s", breakpoint, action)
+		return fmt.Sprintf("breakpoint %d %s", breakpoint, done)
 	case plDebugErrCapabilityUnavailable:
-		return fmt.Sprintf("该服务器不支持%s断点（DBMS_DEBUG.ENABLE_BREAKPOINT / DISABLE_BREAKPOINT 不可用），"+
-			"请保留客户端兜底路径", action)
+		return fmt.Sprintf("this server cannot %s breakpoints (DBMS_DEBUG.ENABLE_BREAKPOINT / "+
+			"DISABLE_BREAKPOINT is not available); keep the client-side fallback", verb)
 	case plDebugErrNoSuchBreakpoint:
-		return fmt.Sprintf("断点 %d 不存在（error_no_such_breakpt），无法%s",
-			breakpoint, action)
+		return fmt.Sprintf("breakpoint %d does not exist (error_no_such_breakpt), cannot %s it",
+			breakpoint, verb)
 	default:
-		return fmt.Sprintf("断点 %d %s失败：DBMS_DEBUG 返回 result=%d", breakpoint, action, result)
+		return fmt.Sprintf("failed to %s breakpoint %d: DBMS_DEBUG returned result=%d", verb, breakpoint, result)
 	}
 }
 
@@ -3595,6 +4000,153 @@ func (p *plDebugSession) plDebugDebuggerExec(label, query string, timeout time.D
 		_, err := p.debugger.Exec(query, args...)
 		return err
 	})
+}
+
+// plDebugExecuteDefaultRows / plDebugExecuteMaxRows bound one EXECUTE answer. The
+// collection is read inside PL/SQL and joined into one register, so the row bound and
+// the register size are the same budget: 50 rows of up to 2000 characters already fill
+// the 32000-character bind, which is why the block also stops on the text length.
+const (
+	plDebugExecuteDefaultRows = 50
+	plDebugExecuteMaxRows     = 200
+	plDebugExecuteTextLimit   = 30000
+)
+
+// plDebugExecuteBlock runs ONE statement in the debuggee's own context through
+// DBMS_DEBUG.EXECUTE, the primitive that makes a debug session able to see what the
+// debuggee sees: its uncommitted rows and its package state (measured on 19c EE: the
+// routine exists, with the signature EXECUTE(what IN VARCHAR2, frame# IN BINARY_INTEGER,
+// bind_results IN BINARY_INTEGER, results IN OUT SYS.DBMS_DEBUG_VC2COLL, errm IN OUT
+// VARCHAR2)).
+//
+// Three details come from the routine's own package spec (ALL_SOURCE of SYS.DBMS_DEBUG,
+// read on the real machine):
+//   * `frame#` accepts -1 only -- the spec's EXCEPTIONS section says "unimplemented -
+//     frame# other than -1" -- so the statement always runs in the CURRENT frame.
+//     Passing 0 answered "User-Defined Exception" (measured).
+//   * A plain SQL statement must NOT end with a semicolon (the spec's note: the kernel
+//     answers ORA-00911), while a PL/SQL block is passed as written.
+//   * Rows come back only when `bind_results` is 1: the caller's collection then is the
+//     block's `:1` and the block fills it (the spec's own sample does `:1 := vc;`).
+//     With 0 the statement runs and its result set is discarded.
+//
+// The collection starts with one element because the server rejects an empty one for
+// bind_results=1 (the spec: the user's code "must allocate space in 'results'").
+// The rows are read and joined here with CHR(31) because no client can bind a nested
+// table, and the register is the one the driver sizes (plDebugLogChars).
+//
+// The exception handler turns DBMS_DEBUG's own failure (it raises rather than returning
+// a code) into `errm`, so the caller can report the server's sentence instead of a bare
+// driver error. A statement the debuggee may not run, or a session that is not parked,
+// are the server's judgement and are passed through unchanged.
+const plDebugExecuteBlock = `DECLARE
+  results SYS.DBMS_DEBUG_VC2COLL := SYS.DBMS_DEBUG_VC2COLL('x');
+  errm VARCHAR2(4000);
+  position BINARY_INTEGER;
+  joined VARCHAR2(32000) := NULL;
+  fetched INTEGER := 0;
+BEGIN
+  BEGIN
+    DBMS_DEBUG.EXECUTE(:1, -1, :2, results, errm);
+  EXCEPTION WHEN OTHERS THEN
+    errm := SQLERRM;
+  END;
+  position := results.FIRST;
+  WHILE position IS NOT NULL AND fetched < :3 LOOP
+    joined := joined || CHR(31) || results(position);
+    fetched := fetched + 1;
+    position := results.NEXT(position);
+    EXIT WHEN LENGTH(joined) > :4;
+  END LOOP;
+  :5 := joined;
+  :6 := fetched;
+  :7 := errm;
+END;`
+
+// executeStatement is the agent side of "run SQL inside the debug session": the
+// statement executes in the DEBUGGEE's context (DBMS_DEBUG.EXECUTE), which is the only
+// way to see the debuggee's uncommitted work -- the debugger connection is a different
+// session and read-committed isolation hides that work from it.
+//
+// It is only meaningful while the debuggee is parked: DBMS_DEBUG rejects the call for a
+// session that is not stopped, and the error is reported verbatim.
+func (p *plDebugSession) executeStatement(statement string, maxRows int) (map[string]interface{}, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.terminated {
+		return nil, fmt.Errorf("debuggee has finished")
+	}
+	statement = strings.TrimSpace(statement)
+	if statement == "" {
+		return nil, fmt.Errorf("the statement is empty")
+	}
+	// A PL/SQL block fills `:1` and gets its rows back; a plain SQL statement runs with
+	// its result set discarded (the spec's `bind_results` switch) and must not carry a
+	// trailing semicolon.
+	plsqlBlock := plDebugExecuteIsPlsqlBlock(statement)
+	bindResults := 0
+	if plsqlBlock {
+		bindResults = 1
+	} else {
+		statement = strings.TrimSpace(strings.TrimSuffix(statement, ";"))
+	}
+	if maxRows <= 0 {
+		maxRows = plDebugExecuteDefaultRows
+	}
+	if maxRows > plDebugExecuteMaxRows {
+		maxRows = plDebugExecuteMaxRows
+	}
+
+	var joined string
+	var fetched int
+	var serverError string
+	args := []any{
+		statement, bindResults, maxRows, plDebugExecuteTextLimit,
+		plDebugLogOutArg(p.oci, &joined), plDebugOutArg(p.oci, &fetched), plDebugOutArg(p.oci, &serverError),
+	}
+	if err := p.plDebugDebuggerExec("DBMS_DEBUG.EXECUTE", plDebugExecuteBlock, p.debugCallTimeout(), args...); err != nil {
+		return nil, fmt.Errorf("executing in the debuggee session failed: %w", err)
+	}
+	p.touch()
+
+	rows := []string{}
+	// Only the bind_results=1 mode fills the collection; with 0 the statement's result
+	// set is discarded and the collection still holds the placeholder element the block
+	// seeded it with (reporting that as a row would be a lie).
+	if plsqlBlock && joined != "" {
+		// The block prefixes every row with CHR(31), so the split starts with one empty
+		// element.
+		rows = strings.Split(joined, "\x1f")
+		if len(rows) > 0 && rows[0] == "" {
+			rows = rows[1:]
+		}
+	}
+	if !plsqlBlock {
+		fetched = 0
+	}
+	mode := "the statement ran"
+	if plsqlBlock {
+		mode = fmt.Sprintf("the PL/SQL block ran and returned %d row(s) through :1", fetched)
+	}
+	response := map[string]interface{}{
+		"ok":      serverError == "",
+		"rows":    rows,
+		"count":   fetched,
+		"message": fmt.Sprintf("%s in the debuggee session", mode),
+	}
+	if serverError != "" {
+		response["error"] = serverError
+	}
+	return response, nil
+}
+
+// plDebugExecuteIsPlsqlBlock reports whether the text is a PL/SQL block (DECLARE, BEGIN
+// or a labelled block) rather than a plain SQL statement: only a block can be handed the
+// `:1` collection to fill, and only a plain statement has its trailing semicolon removed
+// (the spec: the kernel answers ORA-00911 otherwise).
+func plDebugExecuteIsPlsqlBlock(statement string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(statement))
+	return strings.HasPrefix(upper, "DECLARE") || strings.HasPrefix(upper, "BEGIN") || strings.HasPrefix(upper, "<<")
 }
 
 // plDebugDriverArgs rewrites the OUT bindings of the debuggee call -- a function's
@@ -4822,6 +5374,9 @@ func (p *plDebugSession) snapshot(message string) map[string]interface{} {
 		// stopped on reason_exception / reason_handler.
 		"stoppedOnException":  p.stoppedOnException,
 		"exceptionBreakpoint": p.exceptionBreakpoint,
+		// What DBMS_DEBUG was told to do with the target when a timeout occurs
+		// (2 = nodebug_on_timeout), 0 while unknown: see applyTimeoutBehaviour.
+		"timeoutBehaviour": p.timeoutBehaviour,
 	}
 	if message != "" {
 		response["message"] = message
@@ -4889,6 +5444,24 @@ func (p *plDebugSession) outParamValues() []plDebugOutParam {
 //   - anything else keeps the bare package name the engine reported: vague, never wrong.
 func (p *plDebugSession) currentProgramLabel(frames []plDebugFrame) string {
 	reported := p.lastProgram
+	// A standalone routine's frames carry no program name: the engine prints the source line
+	// where a name would go ("[Line 6] BEGIN", measured on 19c EE against DBX_T_PROC), so
+	// run_info and the backtrace both leave it empty -- and this label, which the stack panel,
+	// the editor's current-line highlight and the GET_VALUE fallback all read, stayed empty
+	// too (reported from use, 2026-10-13: the executing line was never highlighted).
+	//
+	// The depth is what makes the session's own target label safe to use here: at stack depth
+	// 1 the interpreter is running the routine the session opened (that is the frame the
+	// start sequence parked in), while a deeper stack means a CALLEE -- where the target's
+	// name would be a lie and an empty label is the honest answer (the frame is in another
+	// unit, whose name this engine does not report at all). Package targets never reach this
+	// branch: run_info names their package, which the rules below fold correctly.
+	// The fallback is for STANDALONE targets only (no package in the label): run_info always
+	// names a package, so an empty name on a package target means the interpreter is between
+	// units -- there the old rule stands and the label stays empty rather than guessing.
+	if reported == "" && p.lastStackDepth <= 1 && p.targetProgram != "" && !strings.Contains(p.targetProgram, ".") {
+		reported = p.targetProgram
+	}
 	// The dedicated package field is not always populated -- the start path composes
 	// target.Program ("PACKAGE.SUBPROGRAM") from the request -- so when it is empty the
 	// package is taken from that label instead. Without this the guard below short
@@ -4907,7 +5480,10 @@ func (p *plDebugSession) currentProgramLabel(frames []plDebugFrame) string {
 	// package whose initialization section is longer than the step-in budget: the
 	// session parked on line 44 of the initialization section and pl_debug_start still
 	// named DBX_G2_LONG.RUN_LONG, a routine that line does not belong to.
-	if p.targetProgram != "" && strings.EqualFold(reported, p.targetProgram) {
+	// Only a target that HAS a package folds back to it: for a standalone routine
+	// packageName is empty, and folding would throw the label away (the standalone fallback
+	// above is exactly the case where it must survive).
+	if packageName != "" && p.targetProgram != "" && strings.EqualFold(reported, p.targetProgram) {
 		reported = packageName
 	}
 	if reported == "" || packageName == "" || !strings.EqualFold(reported, packageName) {

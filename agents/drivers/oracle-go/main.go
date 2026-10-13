@@ -1069,6 +1069,9 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "pl_debug_get_variables":
 		result, err := s.plDebugGetVariables(stringParam(params, "debugId"), intParam(params, "frame"))
 		return result, false, err
+	case "pl_debug_execute":
+		result, err := s.plDebugExecute(stringParam(params, "debugId"), params)
+		return result, false, err
 	case "pl_debug_set_value":
 		result, err := s.plDebugSetValue(stringParam(params, "debugId"), params)
 		return result, false, err
@@ -4047,8 +4050,16 @@ func (s *server) plDebugProbe() map[string]interface{} {
 	response["missingProcedures"] = missing
 	response["missingOptionalProcedures"] = missingOptional
 	// variablesSupported tells the client whether get_variables can return
-	// anything at all, so it can hide/disable just that feature.
-	response["variablesSupported"] = seen["GET_VALUES"]
+	// anything at all, so it can hide/disable just that feature. Two shapes count:
+	//   * GET_VALUES (OceanBase Oracle mode's extension) lists a whole frame in one call;
+	//   * stock Oracle declares GET_VALUE only. The agent then enumerates the names it can
+	//     see -- the launch parameters and the declarations of the routine the frame is
+	//     parked in -- and reads each one, which is reported as variablesFallback so the
+	//     panel can say that compound types and collections stay invisible.
+	response["variablesSupported"] = seen["GET_VALUES"] || seen["GET_VALUE"]
+	if !seen["GET_VALUES"] && seen["GET_VALUE"] {
+		response["variablesFallback"] = "get_value"
+	}
 	supported := len(missing) == 0 && len(outputProcedures) > 0
 	reason := ""
 	if len(outputProcedures) == 0 {
@@ -4287,6 +4298,31 @@ func (s *server) plDebugGetVariables(debugID string, frame int) (interface{}, er
 		return nil, err
 	}
 	return session.variables(frame)
+}
+
+// plDebugExecute runs one statement in the DEBUGGEE's context (DBMS_DEBUG.EXECUTE), so
+// a debug session can read the state only that session can see -- uncommitted rows, a
+// package's variables. The statement always runs in the current frame (the server's
+// frame# only accepts -1), and maxRows bounds the answer because the rows travel
+// through one text register.
+func (s *server) plDebugExecute(debugID string, params map[string]json.RawMessage) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	statement := ""
+	if raw, ok := params["sql"]; ok {
+		if err := json.Unmarshal(raw, &statement); err != nil {
+			return nil, err
+		}
+	}
+	var maxRows int
+	if raw, ok := params["maxRows"]; ok {
+		if err := json.Unmarshal(raw, &maxRows); err != nil {
+			return nil, err
+		}
+	}
+	return session.executeStatement(statement, maxRows)
 }
 
 // plDebugSetValue changes the value of a variable in the parked debuggee. It is

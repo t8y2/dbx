@@ -10411,7 +10411,7 @@ export default withEnglishFallback({
     badgeScopeDatabase: "資料庫 / 結構描述（預設）",
     badgeScopeTable: "資料表 / 物件",
     badgeScopeHintConnection: "在連線列顯示 PROD；捲動時，頂端固定物件也保留對應的 PROD 提示。",
-    badgeScopeHintDatabase: "連線列顯示 PROD；資料庫或結構描述固定在頂端時顯示對應標記。",
+    badgeScopeHintDatabase: "在連線、資料庫與結構描述列顯示 PROD，固定在頂端時也保留標記。",
     badgeScopeHintTable: "連線、資料庫、結構描述及資料表等物件列均顯示 PROD。",
     badgeScopeSafetyHint: "僅影響側邊欄標記顯示，不改變正式環境保護規則。",
     title: "生產環境",

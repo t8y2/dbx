@@ -19,7 +19,7 @@ describe("production badge display scope", () => {
 
   it.each(["database", "schema", "table", "view", "procedure", "mongo-collection", "nacos-namespace"] as const)("respects the selected range on ordinary %s rows", (type) => {
     for (const scope of ["connection", "database", "table"] as const) {
-      expect(showSidebarRowProductionBadge(node(type), { ...connection, production_badge_scope: scope })).toBe(scope === "table");
+      expect(showSidebarRowProductionBadge(node(type), { ...connection, production_badge_scope: scope })).toBe(scope === "table" || (scope === "database" && ["database", "schema", "nacos-namespace"].includes(type)));
     }
   });
 

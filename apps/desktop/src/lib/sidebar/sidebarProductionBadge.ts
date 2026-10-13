@@ -1,6 +1,8 @@
 import { productionContextForDatabase, productionDatabases } from "@/lib/database/productionSafety";
 import type { ConnectionConfig, ProductionBadgeScope, TreeNode } from "@/types/database";
 
+const productionContainerTypes: ReadonlySet<TreeNode["type"]> = new Set(["database", "schema", "redis-db", "mongo-db", "mq-tenant", "nacos-namespace", "consul-root"]);
+
 const productionObjectTypes: ReadonlySet<TreeNode["type"]> = new Set([
   "database",
   "schema",
@@ -41,7 +43,7 @@ export function showSidebarRowProductionBadge(node: Pick<TreeNode, "type" | "dat
   // Connection-only display must still warn when just selected databases are
   // production; the safety scope remains limited to those databases.
   if (node.type === "connection") return active || (scope === "connection" && productionDatabases(connection).length > 0);
-  return active && scope === "table" && productionObjectTypes.has(node.type);
+  return active && ((scope === "database" && productionContainerTypes.has(node.type)) || (scope === "table" && productionObjectTypes.has(node.type)));
 }
 
 export function showSidebarStickyProductionBadge(node: Pick<TreeNode, "database"> | undefined, connection: ConnectionConfig | undefined): boolean {

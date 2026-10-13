@@ -4,6 +4,7 @@ import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
+import com.dbx.agent.DdlBuilder;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcIdentifiers;
@@ -158,6 +159,53 @@ public final class TrinoAgent extends AbstractJdbcAgent {
         return Collections.emptyList();
     }
 
+    /**
+     * Trino's {@code SHOW CREATE TABLE} returns the authoritative DDL, including
+     * the {@code WITH (...)} clause that carries a table's connector properties
+     * (format, bucket_count, partitioned_by, ...). The metadata-based fallback
+     * only knows columns, so it silently dropped those properties and the DDL no
+     * longer round-tripped (#11977). A server or connector that rejects the
+     * statement, or returns nothing, keeps the previous metadata-based DDL.
+     */
+    @Override
+    public String getTableDdl(String schema, String table) {
+        try {
+            String tableReference = tableReference(schema, table);
+            try (java.sql.Statement stmt = requireConnected().createStatement();
+                 ResultSet rs = stmt.executeQuery("SHOW CREATE TABLE " + tableReference)) {
+                if (rs.next()) {
+                    String ddl = trimToNull(rs.getString(1));
+                    if (ddl != null) {
+                        return ddl;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // A connector may not implement SHOW CREATE TABLE; the metadata-based
+            // DDL below is a valid (if less complete) fallback.
+        }
+        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), Collections.emptyList(), Collections.emptyList());
+    }
+
+    /**
+     * Qualifies {@code schema.table} for {@code SHOW CREATE TABLE}. Trino resolves
+     * an unqualified schema against the session catalog, so the catalog is only
+     * included when it is known.
+     */
+    private String tableReference(String schema, String table) {
+        String catalog;
+        try {
+            catalog = blankToNull(requireConnected().getCatalog());
+        } catch (java.sql.SQLException error) {
+            catalog = null;
+        }
+        StringBuilder reference = new StringBuilder();
+        if (catalog != null) {
+            reference.append(quoteIdentifier(catalog)).append('.');
+        }
+        return reference.append(quoteIdentifier(schema)).append('.').append(quoteIdentifier(table)).toString();
+    }
+
     @Override
     public String setSchemaSQL(String schema) {
         return "USE " + JdbcIdentifiers.INSTANCE.doubleQuote(schema);
@@ -260,6 +308,14 @@ public final class TrinoAgent extends AbstractJdbcAgent {
 
     private static String quoteIdentifier(String identifier) {
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    private static String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private static boolean isNumericType(int sqlType) {

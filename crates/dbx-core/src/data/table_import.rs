@@ -5069,7 +5069,7 @@ fn normalize_import_value_cow<'a>(
     // Strip validated thousands separators before integer canonicalization so "1,234.00"
     // still collapses to a plain integer literal for integer targets.
     let thousands_canonical =
-        normalized.as_str().and_then(|value| normalize_thousands_numeric_literal(value, db_type, data_type));
+        normalized.as_str().and_then(|value| normalize_thousands_numeric_literal(value, data_type));
     if let Some(integer_text) = thousands_canonical
         .as_deref()
         .or_else(|| normalized.as_str())
@@ -11794,6 +11794,14 @@ mod tests {
         rows: Vec<Vec<serde_json::Value>>,
         target_types: &[(&str, &str)],
     ) -> Vec<ImportSqlBatch> {
+        import_batches_for(rows, target_types, &DatabaseType::Postgres)
+    }
+
+    fn import_batches_for(
+        rows: Vec<Vec<serde_json::Value>>,
+        target_types: &[(&str, &str)],
+        db_type: &DatabaseType,
+    ) -> Vec<ImportSqlBatch> {
         let data = ParsedImportFile {
             columns: target_types.iter().map(|(column, _)| column.to_string()).collect(),
             rows,
@@ -11812,16 +11820,7 @@ mod tests {
             .iter()
             .map(|(column, data_type)| (column.to_string(), data_type.to_string()))
             .collect::<Vec<_>>();
-        build_import_insert_batches(
-            &data,
-            &mappings,
-            &target_column_types,
-            "issue_6491",
-            "",
-            &DatabaseType::Postgres,
-            500,
-        )
-        .unwrap()
+        build_import_insert_batches(&data, &mappings, &target_column_types, "issue_6491", "", db_type, 500).unwrap()
     }
 
     #[test]
@@ -11844,6 +11843,59 @@ mod tests {
                 format!("INSERT INTO \"issue_6491\" (\"amount\") VALUES\n({expected})"),
                 "{value} -> {data_type}"
             );
+        }
+    }
+
+    #[test]
+    fn mysql_import_converts_valid_thousands_separators_for_numeric_targets() {
+        // #11993: MySQL/TiDB imports previously kept "123,456" as text, so a
+        // numeric target column rejected the row.
+        for (value, data_type, expected) in [
+            ("123,456", "bigint", "123456"),
+            ("1,234.56", "decimal(18,2)", "1234.56"),
+            ("-1,234.56", "decimal(18,2)", "-1234.56"),
+            ("1,234,567,890", "bigint", "1234567890"),
+            ("1,234.5", "double", "1234.5"),
+        ] {
+            let batches = import_batches_for(
+                vec![vec![serde_json::json!(value)]],
+                &[("amount", data_type)],
+                &DatabaseType::Mysql,
+            );
+            assert_eq!(
+                batches[0].sql,
+                format!("INSERT INTO `issue_6491` (`amount`) VALUES\n({expected})"),
+                "{value} -> {data_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_import_preserves_thousands_separators_for_text_targets() {
+        // A text column must keep the literal characters the user wrote.
+        for data_type in ["varchar(64)", "text"] {
+            let batches = import_batches_for(
+                vec![vec![serde_json::json!("123,456")]],
+                &[("amount", data_type)],
+                &DatabaseType::Mysql,
+            );
+            assert_eq!(
+                batches[0].sql,
+                format!("INSERT INTO `issue_6491` (`amount`) VALUES\n('123,456')"),
+                "{data_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_import_keeps_malformed_grouping_untouched() {
+        for value in ["1,23,4", "12,34.56", "1,,234", ",123", "123,", "1,234,", "1,234.5.6", "abc,123", "1,234abc"] {
+            let batches = import_batches_for(
+                vec![vec![serde_json::json!(value)]],
+                &[("amount", "decimal(18,2)")],
+                &DatabaseType::Mysql,
+            );
+            assert_eq!(batches[0].sql, format!("INSERT INTO `issue_6491` (`amount`) VALUES\n('{value}')"), "{value}");
         }
     }
 
@@ -11936,6 +11988,45 @@ mod tests {
         .unwrap();
 
         assert_eq!(batches[0].sql, "INSERT INTO \"issue_6491\" (\"amount\") VALUES\n('1234.56'),\n('-1234')");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn excel_text_cell_with_thousands_separator_imports_to_mysql_numeric() {
+        // #11993: the same spreadsheet into a MySQL/TiDB numeric column used to be
+        // inserted as the literal string "123,456".
+        let path = std::env::temp_dir().join(format!("dbx-table-import-11993-{}.xlsx", uuid::Uuid::new_v4()));
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:A3"/>
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>amount</t></is></c></row>
+    <row r="2"><c r="A2" t="inlineStr"><is><t>123,456</t></is></c></row>
+    <row r="3"><c r="A3" t="inlineStr"><is><t>1,234.56</t></is></c></row>
+  </sheetData>
+</worksheet>"#;
+        std::fs::write(&path, build_preview_test_xlsx(sheet_xml, None)).unwrap();
+        let options = TableImportParseOptions::default();
+
+        let data = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        assert_eq!(data.rows, vec![vec![serde_json::json!("123,456")], vec![serde_json::json!("1,234.56")]]);
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "amount".to_string(),
+            target_column: "amount".to_string(),
+            target_data_type: None,
+        }];
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("amount".to_string(), "decimal(18,2)".to_string())],
+            "issue_11993",
+            "",
+            &DatabaseType::Mysql,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(batches[0].sql, "INSERT INTO `issue_11993` (`amount`) VALUES\n(123456),\n(1234.56)");
         let _ = std::fs::remove_file(path);
     }
 

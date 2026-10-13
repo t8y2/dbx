@@ -1,3 +1,4 @@
+import { sidebarProductionBadgeScope } from "@/lib/sidebar/sidebarProductionBadge";
 import { normalizeIdleTimeoutSecs } from "@/lib/connection/timeoutLimits";
 import { isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import { normalizeGlobalConnectTimeoutSecs, normalizeGlobalQueryTimeoutSecs } from "@/stores/settingsStore";
@@ -13,6 +14,7 @@ export function normalizeConnectionTimeouts(config: ConnectionConfig, connectTim
 }
 
 export function normalizeConnectionScope(config: ConnectionConfig): void {
+  config.production_badge_scope = sidebarProductionBadgeScope(config);
   if (!config.one_time) config.one_time = undefined;
   if (!config.read_only) config.read_only = undefined;
   // Persist only an explicit opt-out; absent/true keeps the existing save-password behavior.

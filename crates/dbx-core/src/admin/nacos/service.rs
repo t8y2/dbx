@@ -708,6 +708,7 @@ mod tests {
             read_only: true,
             is_production: false,
             production_databases: Vec::new(),
+            production_badge_scope: None,
             database_info: None,
         };
         cfg.read_only = true;
@@ -795,6 +796,7 @@ mod tests {
             read_only: true,
             is_production: false,
             production_databases: Vec::new(),
+            production_badge_scope: None,
             database_info: None,
         };
         state.configs.write().await.insert(cfg.id.clone(), cfg);

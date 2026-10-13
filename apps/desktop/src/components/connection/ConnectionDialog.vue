@@ -9,6 +9,8 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
+import { sidebarProductionBadgeScope } from "@/lib/sidebar/sidebarProductionBadge";
+import type { ProductionBadgeScope } from "@/types/database";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -454,6 +456,7 @@ const defaultForm = (): ConnectionForm => ({
   sidebar_auto_load_all_tables: false,
   is_production: false,
   production_databases: [],
+  production_badge_scope: "database",
   visible_databases: undefined,
   save_password: true,
 });
@@ -3147,6 +3150,7 @@ watch(
         sidebar_auto_load_all_tables: config.sidebar_auto_load_all_tables === true,
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
+        production_badge_scope: sidebarProductionBadgeScope(config),
         visible_databases: config.visible_databases,
         visible_schemas: config.visible_schemas,
         save_password: config.save_password !== false,
@@ -10311,7 +10315,9 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.readOnly") }}</Label>
+                  <Label :class="connectionLabelSmallClass">
+                    <span class="inline-flex items-center gap-1">{{ t("connection.readOnly") }} <HelpTooltip :label="t('connection.readOnlyExplanation')" /></span>
+                  </Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="form.read_only" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.readOnlyHint") }}</span>
@@ -10354,7 +10360,7 @@ function openExternalUrl(url: string) {
                 </div>
                 <div v-if="!isPluginConnection" class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">
                   <Label :class="[connectionLabelSmallClass, 'pt-0.5 text-red-700 dark:text-red-300']">
-                    <span class="inline-flex items-center justify-end gap-1"><ShieldAlert class="h-3.5 w-3.5" />PROD</span>
+                    <span class="inline-flex items-center justify-end gap-1"><ShieldAlert class="h-3.5 w-3.5" />PROD <HelpTooltip :label="t('production.explanation')" trigger-class="text-red-700/70 dark:text-red-300/70" /></span>
                   </Label>
                   <div class="col-span-3 grid gap-2">
                     <div class="flex items-center justify-between gap-3">
@@ -10381,6 +10387,19 @@ function openExternalUrl(url: string) {
                           <ListFilter v-else class="mr-1.5 h-4 w-4" />
                           {{ t(productionScopePickerLabelKey) }}
                         </Button>
+                      </div>
+                      <div class="grid gap-1.5 pt-1">
+                        <Label for="production-badge-scope" class="text-xs font-medium">{{ t("production.badgeScope") }}</Label>
+                        <Select :model-value="form.production_badge_scope || 'database'" @update:model-value="form.production_badge_scope = $event as ProductionBadgeScope">
+                          <SelectTrigger id="production-badge-scope" class="h-8" :aria-label="t('production.badgeScope')"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="connection">{{ t("production.badgeScopeConnection") }}</SelectItem>
+                            <SelectItem value="database">{{ t("production.badgeScopeDatabase") }}</SelectItem>
+                            <SelectItem value="table">{{ t("production.badgeScopeTable") }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t(`production.badgeScopeHint${form.production_badge_scope === "connection" ? "Connection" : form.production_badge_scope === "table" ? "Table" : "Database"}`) }}</p>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("production.badgeScopeSafetyHint") }}</p>
                       </div>
                     </template>
                   </div>

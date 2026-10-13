@@ -79,6 +79,7 @@ fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,

@@ -33,7 +33,8 @@ function fixture(tree: TreeNode[], grouped: boolean, rowHeight: number) {
     }),
   );
   const stickyScrollTop = ref(0);
-  const bindings = { computed, flatNodes, flatTreeIndex, stickyScrollTop, sidebarTreeRowHeight: ref(rowHeight), isTreeSearchFiltering: ref(false), isSidebarTableSearchControlNode, SCHEMA_LEVEL_TYPES: new Set(["schema"]) };
+  const plainStickyContainerIndex = ref(-1);
+  const bindings = { computed, flatNodes, flatTreeIndex, stickyScrollTop, plainStickyContainerIndex, sidebarTreeRowHeight: ref(rowHeight), useVirtualTree: ref(true), isTreeSearchFiltering: ref(false), isSidebarTableSearchControlNode, SCHEMA_LEVEL_TYPES: new Set(["schema"]) };
   const state = new Function(...Object.keys(bindings), `${compiled}; return {stickyNode, stickyTableSearchNode, stickyHeaderStyle, stickyHeaderHeight};`)(...Object.values(bindings));
   return {
     state,

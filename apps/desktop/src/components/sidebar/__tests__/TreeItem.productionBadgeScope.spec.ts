@@ -118,14 +118,14 @@ function createTreeRuntimeHost(): SidebarTreeRuntimeHost {
   };
 }
 
-function mountTreeItem(node: TreeNode) {
+function mountTreeItem(node: TreeNode, isStickyContext = false) {
   const container = document.createElement("div");
   document.body.appendChild(container);
 
   const runtime = createSidebarTreeRuntime(createTreeRuntimeHost());
   const rootComponent = defineComponent({
     setup() {
-      return () => h(TreeItem, { node, depth: 1 });
+      return () => h(TreeItem, { node, depth: 1, isStickyContext });
     },
   });
 
@@ -145,11 +145,45 @@ function rowText(container: HTMLElement, nodeId: string): string {
 }
 
 describe("TreeItem production badge scope", () => {
-  it("marks object rows inside a production connection", async () => {
+  it("keeps the connection's production marker visible", async () => {
+    const container = mountTreeItem({ id: "connection-1", label: "Orders", type: "connection", connectionId: productionConnection.id });
+    await nextTick();
+    expect(rowText(container, "connection-1")).toContain("PROD");
+  });
+
+  it.each(["database", "schema"] as const)("reserves space for the independent badge on a fixed %s", async (type) => {
+    connection = { ...productionConnection, production_badge_scope: "connection" };
+    const container = mountTreeItem({ id: "scope-1", label: "analytics", type, connectionId: productionConnection.id, database: "analytics", schema: "public" }, true);
+    await nextTick();
+    expect(rowText(container, "scope-1")).not.toContain("PROD");
+    expect(container.querySelector<HTMLElement>('[data-node-id="scope-1"]')?.style.paddingRight).toBe("72px");
+  });
+
+  it.each(["database", "schema"] as const)("marks ordinary %s rows by default", async (type) => {
+    const container = mountTreeItem({ id: "scope-1", label: "analytics", type, connectionId: productionConnection.id, database: "analytics", schema: "public" });
+    await nextTick();
+    expect(rowText(container, "scope-1")).toContain("PROD");
+  });
+  it.each(["database", "schema"] as const)("does not mark ordinary %s rows in connection scope", async (type) => {
+    connection = { ...productionConnection, production_badge_scope: "connection" };
+    const container = mountTreeItem({ id: "scope-connection", label: "analytics", type, connectionId: productionConnection.id, database: "analytics", schema: "public" });
+    await nextTick();
+    expect(rowText(container, "scope-connection")).not.toContain("PROD");
+  });
+
+  it("keeps the fixed database/schema row badge inline outside connection scope", async () => {
+    connection = { ...productionConnection, production_badge_scope: "database" };
+    const container = mountTreeItem({ id: "scope-inline", label: "analytics", type: "schema", connectionId: productionConnection.id, database: "analytics", schema: "public" }, true);
+    await nextTick();
+    expect(rowText(container, "scope-inline")).toContain("PROD");
+    expect(container.querySelector<HTMLElement>('[data-node-id="scope-inline"]')?.style.paddingRight).toBe("");
+  });
+
+  it("leaves ordinary object rows unmarked inside a production connection", async () => {
     const container = mountTreeItem({ id: "table-1", label: "orders", type: "table", connectionId: productionConnection.id, database: "shop" });
     await nextTick();
 
-    expect(rowText(container, "table-1")).toContain("PROD");
+    expect(rowText(container, "table-1")).not.toContain("PROD");
   });
 
   it("keeps grouping and detail rows unmarked", async () => {
@@ -177,14 +211,14 @@ describe("TreeItem production badge scope", () => {
     expect(rowText(container, "table-1")).not.toContain("PROD");
   });
 
-  it("marks object rows only for the databases marked as production", async () => {
+  it("leaves ordinary objects unmarked even in a database marked as production", async () => {
     connection = databaseMarkedConnection;
 
     const markedContainer = mountTreeItem({ id: "table-1", label: "orders", type: "table", connectionId: productionConnection.id, database: "analytics" });
     const otherContainer = mountTreeItem({ id: "table-2", label: "orders", type: "table", connectionId: productionConnection.id, database: "staging" });
     await nextTick();
 
-    expect(rowText(markedContainer, "table-1")).toContain("PROD");
+    expect(rowText(markedContainer, "table-1")).not.toContain("PROD");
     expect(rowText(otherContainer, "table-2")).not.toContain("PROD");
   });
 });

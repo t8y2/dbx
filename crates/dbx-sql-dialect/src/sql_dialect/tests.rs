@@ -33,6 +33,12 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Gaussdb), "\"MixedCase\""), "\"MixedCase\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::OpenGauss), "\"MixedCase\""), "\"MixedCase\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Informix), "users_1"), "users_1");
+    // SUNDB folds unquoted names to uppercase, so a simple lowercase name must stay
+    // unquoted; quoting it preserved the case and the statement found no such table (#11986).
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Sundb), "rs_salest_budget"), "rs_salest_budget");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Sundb), "YEAR"), "YEAR");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Sundb), "user name"), "\"user name\"");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Sundb), "user\"name"), "\"user\"\"name\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "users_1"), "users_1");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "user name"), "user name");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Iotdb), "root.test.device2"), "root.test.device2");

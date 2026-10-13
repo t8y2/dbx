@@ -1711,7 +1711,11 @@ pub(crate) fn normalize_integer_literal(
     Some(integer.to_string())
 }
 
-fn is_postgres_numeric_family(data_type: &str) -> bool {
+/// Target types whose stored value is a plain number, so an en-US thousands
+/// separator in the source text is formatting rather than data. Covers the
+/// PostgreSQL/Oracle spellings and the MySQL-family ones (`int`, `tinyint`,
+/// `mediumint`); a type not listed here keeps its literal text.
+fn is_numeric_target_type(data_type: &str) -> bool {
     let normalized = data_type.trim().to_ascii_lowercase();
     let base = normalized.split(['(', ' ']).next().unwrap_or("");
     matches!(
@@ -1720,8 +1724,11 @@ fn is_postgres_numeric_family(data_type: &str) -> bool {
             | "int2"
             | "integer"
             | "int4"
+            | "int"
             | "bigint"
             | "int8"
+            | "tinyint"
+            | "mediumint"
             | "numeric"
             | "decimal"
             | "real"
@@ -1738,12 +1745,13 @@ fn is_postgres_numeric_family(data_type: &str) -> bool {
 /// grouping ("1,23,4", "1,,234") or any non-numeric character returns None so the original
 /// text reaches the database and keeps its existing validation error instead of being
 /// silently coerced. Values without a comma are left untouched.
-pub(crate) fn normalize_thousands_numeric_literal(
-    value: &str,
-    db_type: &DatabaseType,
-    column_type: Option<&str>,
-) -> Option<String> {
-    if !is_postgres_transfer_dialect(db_type) || !column_type.is_some_and(is_postgres_numeric_family) {
+///
+/// Keyed on the target column type rather than the dialect: `123,456` is a formatted
+/// number wherever the column stores a number, and a text column keeps the characters
+/// as written. This started PostgreSQL-only, which left MySQL/TiDB imports inserting
+/// `'123,456'` into a numeric column and failing (#11993).
+pub(crate) fn normalize_thousands_numeric_literal(value: &str, column_type: Option<&str>) -> Option<String> {
+    if !column_type.is_some_and(is_numeric_target_type) {
         return None;
     }
     let trimmed = value.trim();
@@ -13599,6 +13607,7 @@ for line in sys.stdin:
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
             docs_notes_path: None,
         }
@@ -20749,6 +20758,7 @@ SELECT 1 FROM dual"#
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         };
         let mut gbase_jdbc = config.clone();

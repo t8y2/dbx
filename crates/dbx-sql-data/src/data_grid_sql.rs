@@ -4504,6 +4504,29 @@ mod tests {
         }
     }
 
+    fn sundb_people_save_options() -> DataGridSaveStatementOptions {
+        let mut options = mysql_people_save_options(1);
+        options.database_type = Some(DatabaseType::Sundb);
+        // SUNDB resolves unquoted names case-insensitively (folding to uppercase), so the
+        // grid must not quote them: a quoted `"rs_salest_budget"` preserved the case and
+        // matched nothing (#11986).
+        options.table_meta.table_name = "rs_salest_budget".to_string();
+        options.table_meta.schema = None;
+        options.dirty_rows = vec![(0, vec![(1, json!("blocked"))])];
+        options
+    }
+
+    #[test]
+    fn sundb_grid_save_leaves_simple_identifiers_unquoted() {
+        let statements =
+            build_data_grid_save_statements(&sundb_people_save_options(), None, &mut Vec::new(), &mut Vec::new());
+
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].starts_with("UPDATE rs_salest_budget SET "), "{}", statements[0]);
+        assert!(statements[0].contains("WHERE id = 1"), "{}", statements[0]);
+        assert!(!statements[0].contains("\"rs_salest_budget\""), "{}", statements[0]);
+    }
+
     fn mysql_people_save_options(row_count: usize) -> DataGridSaveStatementOptions {
         DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Mysql),

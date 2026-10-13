@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, nextTick } from "vue";
+import { computed, defineAsyncComponent, ref, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { Command, FileCode, FileText, Search, FolderPlus, SlidersHorizontal, X } from "@lucide/vue";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
@@ -11,6 +11,8 @@ import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { getGlobalSearchRoots, saveGlobalSearchRoots, getGlobalSearchExtensions, saveGlobalSearchExtensions } from "@/lib/globalSearch/globalSearchSettings";
+
+const QuickOpenFilePreview = defineAsyncComponent(() => import("./QuickOpenFilePreview.vue"));
 
 const props = defineProps<{
   open: boolean;
@@ -29,7 +31,7 @@ const { t } = useI18n();
 const pluginPalette = usePluginCommandPalette();
 const { toast } = useToast();
 const { searchQuery, filteredItems, selectedIndex, selectedItem, selectNext, selectPrevious, setQuery, loadExternalSqlFiles, loadPluginWorkbenches, contentMode, contentGroups, contentSelectedItem, contentSearching, setContentMode } = useQuickOpen({ extraItems: pluginPalette.items });
-const inputRef = ref<HTMLInputElement | null>(null);
+const inputRef = ref<InstanceType<typeof Input> | null>(null);
 const listRef = ref<HTMLElement | null>(null);
 const settingsStore = useSettingsStore();
 const globalSearchShortcut = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.globalSearch || "Mod+Shift+F"));
@@ -247,7 +249,7 @@ watch(
       // Refresh plugin workbench entries so installs/uninstalls show up without a restart
       void loadPluginWorkbenches();
       nextTick(() => {
-        inputRef.value?.focus();
+        inputRef.value?.$el.focus();
       });
     }
   },
@@ -274,9 +276,9 @@ watch(selectedIndex, async () => {
 <template>
   <Dialog :open="dialogOpen" @update:open="dialogOpen = $event">
     <DialogContent class="max-w-2xl p-0 gap-0 rounded-lg overflow-hidden">
-      <div class="flex flex-col bg-background">
+      <div class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] min-h-0 flex-col bg-background">
         <!-- Search Input -->
-        <div class="flex items-center gap-3 px-4 pr-12 py-3 border-b">
+        <div class="flex shrink-0 items-center gap-3 px-4 pr-12 py-3 border-b">
           <Command class="h-5 w-5 text-muted-foreground" />
           <Input
             ref="inputRef"
@@ -304,7 +306,7 @@ watch(selectedIndex, async () => {
         </div>
 
         <!-- Search settings panel -->
-        <div v-if="searchSettingsOpen" class="space-y-3 border-b bg-muted/30 px-4 py-3 text-sm">
+        <div v-if="searchSettingsOpen" class="max-h-[30vh] shrink-0 space-y-3 overflow-y-auto border-b bg-muted/30 px-4 py-3 text-sm">
           <div>
             <div class="mb-1.5 flex items-center justify-between">
               <span class="text-xs text-muted-foreground">{{ t("quickOpen.searchRoots") }}</span>
@@ -332,7 +334,7 @@ watch(selectedIndex, async () => {
         </div>
 
         <!-- Results List -->
-        <div ref="listRef" class="max-h-[400px] overflow-y-auto">
+        <div ref="listRef" class="min-h-0 overflow-y-auto" :class="contentMode ? 'max-h-[min(36vh,320px)]' : 'max-h-[400px]'">
           <!-- Content search mode: group matches by file (DataGrip-style) -->
           <template v-if="contentMode">
             <div v-if="contentSearching" class="px-4 py-8 text-center text-muted-foreground">
@@ -353,7 +355,15 @@ watch(selectedIndex, async () => {
                   <span class="text-xs text-muted-foreground whitespace-nowrap">{{ row.count }}</span>
                 </div>
                 <!-- Match line -->
-                <div v-else class="px-4 py-1.5 cursor-pointer" :data-selected="row.flatIndex === selectedIndex" :class="[row.flatIndex === selectedIndex ? 'bg-accent' : 'hover:bg-muted']" @click="handleSelect(row.item!)" @mouseenter="selectedIndex = row.flatIndex">
+                <div
+                  v-else
+                  class="px-4 py-1.5 cursor-pointer"
+                  :data-selected="row.flatIndex === selectedIndex"
+                  :class="[row.flatIndex === selectedIndex ? 'bg-accent' : 'hover:bg-muted']"
+                  @click="selectedIndex = row.flatIndex"
+                  @dblclick="handleSelect(row.item!)"
+                  @mouseenter="selectedIndex = row.flatIndex"
+                >
                   <!-- Filename-only match (no content hit): show highlighted file name -->
                   <div v-if="row.item!.line === 0" class="flex items-center gap-2 min-w-0">
                     <FileText class="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -413,8 +423,10 @@ watch(selectedIndex, async () => {
           </div>
         </div>
 
+        <QuickOpenFilePreview v-if="contentMode && !contentSearching && contentSelectedItem" :item="contentSelectedItem" class="h-[min(32vh,280px)] shrink-0" />
+
         <!-- Footer -->
-        <div class="px-4 py-2 border-t text-xs text-muted-foreground flex justify-between">
+        <div class="shrink-0 flex flex-wrap justify-between gap-2 px-4 py-2 border-t text-xs text-muted-foreground">
           <div>{{ contentMode ? contentMatchCount : filteredItems.length }} {{ t("quickOpen.results") }}</div>
           <div class="flex gap-4">
             <span><kbd class="px-2 py-1 rounded bg-muted">↑↓</kbd> {{ t("quickOpen.navigate") }}</span>

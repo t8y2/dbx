@@ -2777,6 +2777,9 @@ export default withEnglishFallback({
     inputPlaceholder: "YYYY-MM-DD HH:mm:ss",
   },
   quickOpen: {
+    filePreview: "Fayla önbaxış",
+    previewFailed: "Bu fayla önbaxış mümkün deyil. Məzmunu görmək üçün faylı açın.",
+    previewEmpty: "Fayl boşdur",
     placeholder: "Əlaqələri, verilənlər bazalarını, cədvəlləri, SQL fayllarını və digər obyektləri axtar...",
     emptyPlaceholder: "Axtarış üçün yazmağa başlayın",
     noResults: "Nəticə tapılmadı",
@@ -6746,6 +6749,8 @@ export default withEnglishFallback({
     deleteFolderConfirm: "{name} və filtrin gizlətdiyi fayllar daxil olmaqla bütün məzmun silinsin? Bu əməliyyat geri qaytarıla bilməz.",
     folderDeleted: "Qovluq silindi",
     deleteFolderFailed: "Qovluq silinə bilmədi: {message}",
+    locateActiveFile: "Cari faylı tap",
+    activeFileNotFound: "Cari fayl tapılmadı. Faylın mövcud olduğunu və ya fayl filtri ilə gizlədilmədiyini yoxlayın.",
     title: "SQL faylları",
     storageHelp: "Bunlar Qovluq aç ilə açılan diskdəki fayllardır. Standart olaraq .sql və .ddl faylları göstərilir; fayl süzgəcini dəyişə bilərsiniz. Düzəlişlər birbaşa orijinal fayla yazılır.",
     openFolder: "Qovluq aç",

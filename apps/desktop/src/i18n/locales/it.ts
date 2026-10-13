@@ -3058,6 +3058,9 @@ export default withEnglishFallback({
     inputPlaceholder: "AAAA-MM-GG HH:mm:ss",
   },
   quickOpen: {
+    filePreview: "Anteprima del file",
+    previewFailed: "Impossibile visualizzare l’anteprima. Apri il file per vedere il contenuto.",
+    previewEmpty: "Il file è vuoto",
     placeholder: "Cerca connessioni, database, tabelle, file SQL e altri oggetti...",
     emptyPlaceholder: "Inizia a digitare per cercare",
     noResults: "Nessun risultato trovato",
@@ -9649,6 +9652,8 @@ export default withEnglishFallback({
     deleteFolderConfirm: "Eliminare {name} e tutto il contenuto, inclusi i file nascosti dal filtro? Questa azione è irreversibile.",
     folderDeleted: "Cartella eliminata",
     deleteFolderFailed: "Eliminazione della cartella non riuscita: {message}",
+    locateActiveFile: "Trova il file corrente",
+    activeFileNotFound: "File corrente non trovato. Verifica che esista o che non sia nascosto dal filtro dei file.",
     title: "File SQL",
     storageHelp: "Sono file sul disco aperti con Apri cartella. Per impostazione predefinita vengono mostrati i file .sql e .ddl; puoi personalizzare il filtro. Le modifiche vengono salvate direttamente nel file originale.",
     openFolder: "Apri cartella",

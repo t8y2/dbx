@@ -5,6 +5,10 @@ description: Write, understand, parameterize, execute, analyze, and reuse SQL in
 
 The query editor is the SQL workspace in DBX. It combines dialect-aware highlighting and completion, semantic diagnostics, parameter input, execution progress, multiple results, execution plans, query history, the SQL library, and AI assistance in one tab.
 
+## Global file search preview
+
+In the desktop app, global file content search previews the selected file below the results. Use the up and down arrow keys, hover, or click to select a result. The preview shows its path and line numbers and scrolls to the highlighted match. The preview is read-only; scroll to inspect context or copy text. Press Enter or double-click a result to open the file. Filename-only matches preview the beginning of the file. Empty files and read failures show an appropriate message.
+
 ## Vim configuration
 
 In the desktop app, enable Vim mode in **Editor Settings** to load commands from `~/.dbx/vimrc`. Create the file if needed, then restart DBX after editing it. Blank lines and lines beginning with `"` are ignored. Commands supported by CodeMirror Vim, such as these mappings, apply to every SQL editor tab:
@@ -175,6 +179,8 @@ Query history stores executed SQL per connection with time and context. You can:
 | Query tabs | Temporary analysis and unfinished drafts | Settings can restore all tabs, pinned tabs only, or none |
 
 The save dialog can search or create folders. Quick Open indexes both SQL Library entries and SQL Files.
+
+On Desktop, the **Locate current file** button in the SQL Files panel expands parent directories, selects the current file, and scrolls it into view. If its directory is not open yet, it is added to the file tree first. Unsaved queries cannot be located. File filters remain in effect; hidden or missing files show a notification.
 
 ## Safety and Boundaries
 

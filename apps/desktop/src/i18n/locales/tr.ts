@@ -2753,6 +2753,9 @@ export default withEnglishFallback({
     inputPlaceholder: "YYYY-MM-DD HH:mm:ss",
   },
   quickOpen: {
+    filePreview: "Dosya önizlemesi",
+    previewFailed: "Bu dosya önizlenemiyor. İçeriğini görmek için dosyayı açın.",
+    previewEmpty: "Bu dosya boş",
     placeholder: "Bağlantı, veritabanı, tablo, SQL dosyası ve diğer nesnelerde ara...",
     emptyPlaceholder: "Aramak için yazmaya başlayın",
     noResults: "Sonuç bulunamadı",
@@ -6627,6 +6630,8 @@ export default withEnglishFallback({
     deleteFolderConfirm: "{name} ve filtreyle gizlenen dosyalar dahil tüm içeriği silinsin mi? Bu işlem geri alınamaz.",
     folderDeleted: "Klasör silindi",
     deleteFolderFailed: "Klasör silinemedi: {message}",
+    locateActiveFile: "Geçerli dosyayı bul",
+    activeFileNotFound: "Geçerli dosya bulunamadı. Dosyanın var olup olmadığını veya dosya filtresi tarafından gizlenip gizlenmediğini kontrol edin.",
     title: "SQL Dosyaları",
     storageHelp: "Klasör Aç ile açılan diskteki dosyalardır. Varsayılan olarak .sql ve .ddl dosyaları gösterilir; dosya filtresini özelleştirebilirsiniz. Düzenlemeler doğrudan özgün dosyaya kaydedilir.",
     openFolder: "Klasör Aç",

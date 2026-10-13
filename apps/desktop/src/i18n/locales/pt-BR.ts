@@ -3058,6 +3058,9 @@ export default withEnglishFallback({
     inputPlaceholder: "AAAA-MM-DD HH:mm:ss",
   },
   quickOpen: {
+    filePreview: "Prévia do arquivo",
+    previewFailed: "Não foi possível visualizar este arquivo. Abra-o para ver o conteúdo.",
+    previewEmpty: "Este arquivo está vazio",
     placeholder: "Pesquisar conexões, bancos de dados, tabelas, arquivos SQL e outros objetos...",
     emptyPlaceholder: "Comece a digitar para pesquisar",
     noResults: "Nenhum resultado encontrado",
@@ -9646,6 +9649,8 @@ export default withEnglishFallback({
     deleteFolderConfirm: "Excluir {name} e todo o conteúdo, incluindo arquivos ocultos pelo filtro? Esta ação não pode ser desfeita.",
     folderDeleted: "Pasta excluída",
     deleteFolderFailed: "Falha ao excluir pasta: {message}",
+    locateActiveFile: "Localizar arquivo atual",
+    activeFileNotFound: "Arquivo atual não encontrado. Verifique se ele existe ou está oculto pelo filtro de arquivos.",
     title: "Arquivos SQL",
     storageHelp: "São arquivos no disco abertos com Abrir pasta. Por padrão, são exibidos arquivos .sql e .ddl; você pode personalizar o filtro. As edições são salvas diretamente no arquivo original.",
     openFolder: "Abrir pasta",

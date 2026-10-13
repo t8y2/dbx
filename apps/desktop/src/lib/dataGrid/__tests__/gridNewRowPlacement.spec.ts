@@ -159,10 +159,13 @@ describe("buildOrderedGridRows", () => {
 
   it("merges the maximum result page without quadratic placement scans", () => {
     const sourceIndices = Array.from({ length: 100_000 }, (_, index) => index);
-    const meta = Array.from({ length: 1_000 }, (_, index): GridNewRowMeta => ({
-      token: index + 1,
-      placement: { anchorId: index * 100, position: index % 2 === 0 ? "above" : "below" },
-    }));
+    const meta = Array.from(
+      { length: 1_000 },
+      (_, index): GridNewRowMeta => ({
+        token: index + 1,
+        placement: { anchorId: index * 100, position: index % 2 === 0 ? "above" : "below" },
+      }),
+    );
 
     const startedAt = performance.now();
     const result = entries(sourceIndices, meta);

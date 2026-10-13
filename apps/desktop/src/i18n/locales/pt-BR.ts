@@ -10396,7 +10396,7 @@ export default withEnglishFallback({
     badgeScopeDatabase: "Banco de dados / esquema (padrão)",
     badgeScopeTable: "Tabela / objeto",
     badgeScopeHintConnection: "Mostrar PROD nas conexões e mantê-lo nos objetos fixos durante a rolagem.",
-    badgeScopeHintDatabase: "Mostrar PROD nas conexões, bancos de dados e esquemas, incluindo o cabeçalho fixo.",
+    badgeScopeHintDatabase: "Mostrar PROD nas conexões e quando um banco de dados ou esquema for fixado no topo.",
     badgeScopeHintTable: "Mostrar PROD nas conexões, bancos de dados, esquemas e objetos.",
     badgeScopeSafetyHint: "Afeta apenas os marcadores da barra lateral; as regras de proteção não mudam.",
     title: "Ambiente de Produção",

@@ -5936,7 +5936,7 @@ export default withEnglishFallback({
     badgeScopeDatabase: "Veritabanı / şema (varsayılan)",
     badgeScopeTable: "Tablo / nesne",
     badgeScopeHintConnection: "PROD bağlantılarda gösterilir ve kaydırırken sabitlenmiş nesnelerde korunur.",
-    badgeScopeHintDatabase: "PROD bağlantı, veritabanı ve şema satırlarında, sabitlenmiş başlık dahil gösterilir.",
+    badgeScopeHintDatabase: "PROD bağlantılarda ve veritabanı veya şema üstte sabitlendiğinde gösterilir.",
     badgeScopeHintTable: "PROD bağlantılarda, veritabanlarında, şemalarda ve nesnelerde gösterilir.",
     badgeScopeSafetyHint: "Yalnızca kenar çubuğu işaretlerini etkiler; üretim koruma kuralları değişmez.",
     title: "Üretim ortamı",

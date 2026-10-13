@@ -6042,7 +6042,7 @@ export default withEnglishFallback({
     badgeScopeDatabase: "Verilənlər bazası / sxem (standart)",
     badgeScopeTable: "Cədvəl / obyekt",
     badgeScopeHintConnection: "PROD bağlantılarda göstərilir və sürüşdürmə zamanı sabitlənmiş obyektlərdə saxlanılır.",
-    badgeScopeHintDatabase: "PROD bağlantılarda, verilənlər bazası və sxem sətirlərində, həmçinin sabit başlıqda göstərilir.",
+    badgeScopeHintDatabase: "PROD bağlantılarda və verilənlər bazası və ya sxem yuxarıda sabitlənəndə göstərilir.",
     badgeScopeHintTable: "PROD bağlantılarda, verilənlər bazalarında, sxemlərdə və obyektlərdə göstərilir.",
     badgeScopeSafetyHint: "Yalnız yan panel nişanlarına təsir edir; istehsal mühiti qoruma qaydaları dəyişmir.",
     title: "İstismar mühiti",

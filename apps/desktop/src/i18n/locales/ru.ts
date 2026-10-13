@@ -7383,7 +7383,7 @@ export default withEnglishFallback({
     badgeScopeDatabase: "База данных / схема (по умолчанию)",
     badgeScopeTable: "Таблица / объект",
     badgeScopeHintConnection: "Показывать PROD в подключениях и сохранять его на закреплённых объектах при прокрутке.",
-    badgeScopeHintDatabase: "Показывать PROD в строках подключений, баз данных и схем, включая закреплённый заголовок.",
+    badgeScopeHintDatabase: "Показывать PROD в подключениях и при закреплении базы данных или схемы вверху.",
     badgeScopeHintTable: "Показывать PROD в подключениях, базах данных, схемах и объектах.",
     badgeScopeSafetyHint: "Меняет только метки в боковой панели; правила защиты рабочей среды не меняются.",
     title: "Продуктивная среда",

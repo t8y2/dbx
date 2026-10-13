@@ -10437,7 +10437,7 @@ export default withEnglishFallback({
     badgeScopeDatabase: "データベース / スキーマ（既定）",
     badgeScopeTable: "テーブル / オブジェクト",
     badgeScopeHintConnection: "接続行に PROD を表示し、スクロール中も固定されたオブジェクトに表示します。",
-    badgeScopeHintDatabase: "接続、データベース、スキーマの行と固定された見出しに PROD を表示します。",
+    badgeScopeHintDatabase: "接続行に PROD を表示し、データベースまたはスキーマが上部に固定されたときに表示します。",
     badgeScopeHintTable: "接続、データベース、スキーマ、オブジェクト行に PROD を表示します。",
     badgeScopeSafetyHint: "サイドバーの表示のみを変更します。本番環境の保護ルールは変わりません。",
     title: "本番環境",

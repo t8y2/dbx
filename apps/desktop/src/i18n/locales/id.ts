@@ -6708,7 +6708,7 @@ export default withEnglishFallback({
     badgeScopeDatabase: "Basis data / skema (default)",
     badgeScopeTable: "Tabel / objek",
     badgeScopeHintConnection: "Tampilkan PROD pada koneksi dan pertahankan pada objek yang disematkan saat menggulir.",
-    badgeScopeHintDatabase: "Tampilkan PROD pada koneksi, basis data, dan skema, termasuk judul yang disematkan.",
+    badgeScopeHintDatabase: "Tampilkan PROD pada koneksi dan saat basis data atau skema disematkan di bagian atas.",
     badgeScopeHintTable: "Tampilkan PROD pada koneksi, basis data, skema, dan objek.",
     badgeScopeSafetyHint: "Hanya memengaruhi penanda bilah sisi; aturan perlindungan produksi tidak berubah.",
     title: "Lingkungan produksi",

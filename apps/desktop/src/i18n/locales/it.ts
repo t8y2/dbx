@@ -10399,7 +10399,7 @@ export default withEnglishFallback({
     badgeScopeDatabase: "Database / schema (predefinito)",
     badgeScopeTable: "Tabella / oggetto",
     badgeScopeHintConnection: "Mostra PROD nelle connessioni e mantienilo sugli oggetti fissi durante lo scorrimento.",
-    badgeScopeHintDatabase: "Mostra PROD nelle connessioni, nei database e negli schemi, inclusa la testata fissa.",
+    badgeScopeHintDatabase: "Mostra PROD nelle connessioni e quando un database o schema viene fissato in alto.",
     badgeScopeHintTable: "Mostra PROD nelle connessioni, nei database, negli schemi e negli oggetti.",
     badgeScopeSafetyHint: "Modifica solo i badge della barra laterale; le regole di protezione restano invariate.",
     title: "Ambiente di produzione",

@@ -5956,7 +5956,7 @@ export default withEnglishFallback({
     badgeScopeDatabase: "데이터베이스 / 스키마 (기본값)",
     badgeScopeTable: "테이블 / 객체",
     badgeScopeHintConnection: "연결 행에 PROD를 표시하고 스크롤 중에도 고정된 객체에 표시합니다.",
-    badgeScopeHintDatabase: "연결, 데이터베이스, 스키마 행과 고정된 제목에 PROD를 표시합니다.",
+    badgeScopeHintDatabase: "연결 행에 PROD를 표시하고 데이터베이스 또는 스키마가 상단에 고정될 때 표시합니다.",
     badgeScopeHintTable: "연결, 데이터베이스, 스키마 및 객체 행에 PROD를 표시합니다.",
     badgeScopeSafetyHint: "사이드바 표시에만 영향을 주며 운영 환경 보호 규칙은 변경하지 않습니다.",
     title: "프로덕션 환경",

@@ -158,10 +158,10 @@ describe("TreeItem production badge scope", () => {
     expect(container.querySelector<HTMLElement>('[data-node-id="scope-1"]')?.style.paddingRight).toBe("72px");
   });
 
-  it.each(["database", "schema"] as const)("marks ordinary %s rows by default", async (type) => {
+  it.each(["database", "schema"] as const)("does not mark ordinary %s rows by default", async (type) => {
     const container = mountTreeItem({ id: "scope-1", label: "analytics", type, connectionId: productionConnection.id, database: "analytics", schema: "public" });
     await nextTick();
-    expect(rowText(container, "scope-1")).toContain("PROD");
+    expect(rowText(container, "scope-1")).not.toContain("PROD");
   });
   it.each(["database", "schema"] as const)("does not mark ordinary %s rows in connection scope", async (type) => {
     connection = { ...productionConnection, production_badge_scope: "connection" };

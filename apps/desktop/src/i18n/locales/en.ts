@@ -6973,7 +6973,7 @@ export default {
     badgeScopeDatabase: "Database / schema (default)",
     badgeScopeTable: "Table / object",
     badgeScopeHintConnection: "Show PROD on connection rows, and keep it on pinned objects while scrolling.",
-    badgeScopeHintDatabase: "Show PROD on connection, database, and schema rows, including the pinned header.",
+    badgeScopeHintDatabase: "Show PROD on connections and when a database or schema is pinned at the top.",
     badgeScopeHintTable: "Show PROD on connections, databases, schemas, and object rows.",
     badgeScopeSafetyHint: "Only affects sidebar badges; production protection rules stay unchanged.",
     title: "Production environment",

@@ -7968,6 +7968,8 @@ export default withEnglishFallback({
     syncDownload: "ダウンロード",
     syncTestSuccess: "WebDAVターゲットに到達可能です。",
     syncUploadSuccess: "{bytes}バイトを{path}にアップロードしました。",
+    syncLastSuccessful: "最終同期成功日時: {time}",
+    syncNeverSuccessful: "同期の成功記録はありません",
     syncAutoUpload: "スナップショットを自動アップロード",
     syncAutoUploadInterval: "間隔",
     syncAutoUploadMinutes: "分",

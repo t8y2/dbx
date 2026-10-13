@@ -7798,6 +7798,8 @@ export default withEnglishFallback({
     syncDownload: "Endir",
     syncTestSuccess: "WebDAV hədəfi əlçatandır.",
     syncUploadSuccess: "{path} yoluna {bytes} bayt yükləndi.",
+    syncLastSuccessful: "Son uğurlu sinxronizasiya: {time}",
+    syncNeverSuccessful: "Hələ uğurlu sinxronizasiya yoxdur",
     syncAutoUpload: "Anlıq nüsxələri avtomatik yüklə",
     syncAutoUploadInterval: "Hər",
     syncAutoUploadMinutes: "dəqiqə",

@@ -8941,6 +8941,8 @@ export default {
     syncDownload: "Download",
     syncTestSuccess: "WebDAV target is reachable.",
     syncUploadSuccess: "Uploaded {bytes} bytes to {path}.",
+    syncLastSuccessful: "Last successful sync: {time}",
+    syncNeverSuccessful: "No successful sync yet",
     syncAutoUpload: "Automatically upload snapshots",
     syncAutoUploadInterval: "Every",
     syncAutoUploadMinutes: "minutes",

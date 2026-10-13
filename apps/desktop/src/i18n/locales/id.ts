@@ -8603,6 +8603,8 @@ export default withEnglishFallback({
     syncDownload: "Unduh",
     syncTestSuccess: "Target WebDAV dapat dijangkau.",
     syncUploadSuccess: "{bytes} byte berhasil diunggah ke {path}.",
+    syncLastSuccessful: "Sinkronisasi terakhir berhasil: {time}",
+    syncNeverSuccessful: "Belum ada sinkronisasi yang berhasil",
     syncAutoUpload: "Unggah snapshot secara otomatis",
     syncAutoUploadInterval: "Setiap",
     syncAutoUploadMinutes: "menit",

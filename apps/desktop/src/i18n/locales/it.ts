@@ -7956,6 +7956,8 @@ export default withEnglishFallback({
     syncDownload: "Scarica",
     syncTestSuccess: "La destinazione WebDAV è raggiungibile.",
     syncUploadSuccess: "Caricati {bytes} byte su {path}.",
+    syncLastSuccessful: "Ultima sincronizzazione riuscita: {time}",
+    syncNeverSuccessful: "Nessuna sincronizzazione riuscita",
     syncAutoUpload: "Carica automaticamente gli snapshot",
     syncAutoUploadInterval: "Ogni",
     syncAutoUploadMinutes: "minuti",

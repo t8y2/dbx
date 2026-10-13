@@ -1649,6 +1649,7 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
+                .skip_initial_state("main")
                 .build(),
         );
 
@@ -1686,6 +1687,7 @@ pub fn run() {
             create_linux_main_window(app)?;
             eprintln!("[STARTUP] plugins registered in {:?}", startup_begin.elapsed());
             append_startup_probe(format!("setup entered after {:?}", startup_begin.elapsed()));
+            window_state_guard::restore_main_window_state(app.handle());
 
             if should_show_main_window_before_setup_tasks() {
                 prepare_main_window_for_display(app.handle());

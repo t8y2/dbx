@@ -78,10 +78,7 @@ for (const file of files) {
   }
 
   const languagePattern = LANGUAGES.join("|");
-  const links = [
-    ...content.matchAll(new RegExp(`\\]\\(/(${languagePattern})/docs/([^)#?]+)(?:#[^)]*)?\\)`, "g")),
-    ...content.matchAll(new RegExp(`href="/(${languagePattern})/docs/([^"#?]+)(?:#[^"]*)?"`, "g")),
-  ];
+  const links = [...content.matchAll(new RegExp(`\\]\\(/(${languagePattern})/docs/([^)#?]+)(?:#[^)]*)?\\)`, "g")), ...content.matchAll(new RegExp(`href="/(${languagePattern})/docs/([^"#?]+)(?:#[^"]*)?"`, "g"))];
 
   for (const link of links) {
     const [, language, slug] = link;
@@ -93,18 +90,14 @@ for (const file of files) {
 const databaseSupportSource = fs.readFileSync(path.join(repositoryDir, "docs/data/databaseSupport.ts"), "utf8");
 const connectionProfilesSource = fs.readFileSync(path.join(repositoryDir, "apps/desktop/src/types/generated/connectionProfiles.ts"), "utf8");
 const jdbcProductProfilesSource = fs.readFileSync(path.join(repositoryDir, "apps/desktop/src/lib/database/jdbcProductProfiles.ts"), "utf8");
-const connectionOptionsMatch = connectionProfilesSource.match(
-  /export const CONNECTION_PICKER_OPTIONS = \[([\s\S]*?)\n\] as const satisfies readonly ConnectionPickerOption\[\];/,
-);
+const connectionOptionsMatch = connectionProfilesSource.match(/export const CONNECTION_PICKER_OPTIONS = \[([\s\S]*?)\n\] as const satisfies readonly ConnectionPickerOption\[\];/);
 const jdbcProductProfilesMatch = jdbcProductProfilesSource.match(/JDBC_PRODUCT_PROFILES = \[([^\]]*)\]/);
 
 if (!connectionOptionsMatch) {
   errors.push("Unable to read database options from connectionProfiles.ts");
 } else {
   const connectionModeIds = new Set(["custom_mysql", "custom_postgres"]);
-  const connectionIds = [...connectionOptionsMatch[1].matchAll(/value: "([^"]+)"/g)]
-    .map((match) => match[1])
-    .filter((id) => !connectionModeIds.has(id));
+  const connectionIds = [...connectionOptionsMatch[1].matchAll(/value: "([^"]+)"/g)].map((match) => match[1]).filter((id) => !connectionModeIds.has(id));
 
   if (!jdbcProductProfilesMatch) {
     errors.push("Unable to read registered JDBC product profiles");
@@ -129,9 +122,7 @@ if (!connectionOptionsMatch) {
     }
   }
 
-  const websiteIds = [...databaseSupportSource.matchAll(/\{ id: "([^"]+)"/g)]
-    .map((match) => match[1])
-    .filter((id) => id !== "request");
+  const websiteIds = [...databaseSupportSource.matchAll(/\{ id: "([^"]+)"/g)].map((match) => match[1]).filter((id) => id !== "request");
 
   for (const [label, ids] of [
     ["connectionProfiles.ts", connectionIds],

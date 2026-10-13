@@ -2735,6 +2735,8 @@ pub fn run() {
             commands::mqtt_cmd::mqtt_get_messages,
             #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_clear_messages,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_delete_message,
             commands::history::save_history,
             commands::history::load_history,
             commands::history::search_history,

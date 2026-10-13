@@ -245,7 +245,7 @@ function restoreProtectedEmptyLines(sql: string, markers: readonly string[]): st
 
   const markerSet = new Set(markers);
   const lines = sql.split(/\r\n|\r|\n/);
-  for (let index = 0; index < lines.length; ) {
+  for (let index = 0; index < lines.length;) {
     if (!markerSet.has(lines[index].trim())) {
       index += 1;
       continue;

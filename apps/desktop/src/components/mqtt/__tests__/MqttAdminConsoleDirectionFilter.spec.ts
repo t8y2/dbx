@@ -11,15 +11,13 @@ const { mqttGetMessagesMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/backend/api", () => ({
-  mqttGetBrokerInfo: vi.fn(
-    async (): Promise<MqttBrokerInfo> => ({
-      brokerUrl: "mqtt://localhost:1883",
-      clientId: "dbx-test",
-      connected: true,
-      protocolVersion: "5.0",
-      subscriptionCount: 1,
-    }),
-  ),
+  mqttGetBrokerInfo: vi.fn(async (): Promise<MqttBrokerInfo> => ({
+    brokerUrl: "mqtt://localhost:1883",
+    clientId: "dbx-test",
+    connected: true,
+    protocolVersion: "5.0",
+    subscriptionCount: 1,
+  })),
   mqttListTopics: vi.fn(async () => [["device/status", "atmostonce"]]),
   mqttListSavedTopicConfigs: vi.fn(async () => [{ topic: "device/status", qos: "atmostonce", enabled: true, noLocal: false }]),
   mqttGetMessages: mqttGetMessagesMock,
@@ -86,6 +84,16 @@ afterEach(() => {
 });
 
 describe("MQTT 控制台按消息方向筛选 (issue #11848)", () => {
+  it("以本地日期和时间显示消息时间戳", async () => {
+    const item = message(0, "received");
+    item.receivedAtMs = new Date(2024, 0, 2, 3, 4, 5).getTime();
+    mqttGetMessagesMock.mockResolvedValueOnce([item]);
+
+    const container = await mountConsole();
+
+    expect(container.querySelector("time")?.textContent).toBe("2024-01-02 03:04:05");
+  });
+
   it("在全部、已接收和已发送之间切换消息列表", async () => {
     const container = await mountConsole();
 

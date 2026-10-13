@@ -7351,6 +7351,47 @@ impl Storage {
         self.delete_state(&key).await
     }
 
+    /// Remove one exact message from a connection's persisted MQTT history.
+    #[cfg(feature = "mq-admin")]
+    pub async fn delete_mqtt_message_history_entry(
+        &self,
+        connection_id: &str,
+        message: &MqttMessage,
+    ) -> Result<(), String> {
+        let key = format!("{MQTT_MESSAGE_HISTORY_STATE_KEY_PREFIX}{connection_id}");
+        let message_identity = mqtt_history_message_identity(message);
+        self.with_conn(move |conn| {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            let current: Option<Vec<u8>> = tx
+                .query_row("SELECT value FROM state_store WHERE key = ?1", [&key], |row| row.get(0))
+                .optional()
+                .map_err(|error| error.to_string())?;
+            let Some(bytes) = current else {
+                tx.commit().map_err(|error| error.to_string())?;
+                return Ok(());
+            };
+            let mut messages: Vec<MqttMessage> = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+            if let Some(index) =
+                messages.iter().position(|candidate| mqtt_history_message_identity(candidate) == message_identity)
+            {
+                messages.remove(index);
+                if messages.is_empty() {
+                    tx.execute("DELETE FROM state_store WHERE key = ?1", [&key]).map_err(|error| error.to_string())?;
+                } else {
+                    let value = serde_json::to_vec(&messages).map_err(|error| error.to_string())?;
+                    tx.execute(
+                        "UPDATE state_store SET value = ?1, version = version + 1 WHERE key = ?2",
+                        params![value, key],
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+            }
+            tx.commit().map_err(|error| error.to_string())
+        })
+        .await
+    }
+
     /// Update only the persisted driver identity for an existing connection.
     /// This is used after runtime driver fallback and deliberately leaves all
     /// other connection metadata and separately stored secrets untouched.

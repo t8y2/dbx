@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { MqttMessage } from "@/types/mqtt";
 
 export async function mqttGetBrokerInfo(connectionId: string) {
   return invoke("mqtt_get_broker_info", { connectionId });
@@ -42,4 +43,8 @@ export async function mqttGetMessages(connectionId: string, topicFilter?: string
 
 export async function mqttClearMessages(connectionId: string) {
   return invoke("mqtt_clear_messages", { connectionId });
+}
+
+export async function mqttDeleteMessage(connectionId: string, message: MqttMessage) {
+  return invoke("mqtt_delete_message", { connectionId, message });
 }

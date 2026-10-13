@@ -49,7 +49,7 @@ function hasUnresolvedDollarQuoteBefore(doc: Text, from: number, lookback: numbe
   const scanStart = Math.max(0, from - lookback);
   const slice = doc.sliceString(scanStart, from);
   let openTag: string | null = null;
-  for (let index = 0; index < slice.length; ) {
+  for (let index = 0; index < slice.length;) {
     if (slice[index] === "$") {
       const marker = matchDollarQuoteTag(slice, index);
       if (marker) {

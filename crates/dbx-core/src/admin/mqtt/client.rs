@@ -1135,6 +1135,14 @@ impl MqttClient {
         filtered
     }
 
+    /// Remove one matching message from the live console buffer.
+    pub async fn delete_message(&self, message: &MqttMessage) {
+        let mut buffer = self.message_buffer.write().await;
+        if let Some(index) = buffer.iter().position(|candidate| mqtt_messages_match(candidate, message)) {
+            buffer.remove(index);
+        }
+    }
+
     pub async fn lock_message_history(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.message_history_operation.lock().await
     }
@@ -1212,6 +1220,16 @@ impl MqttClient {
             }
         }
     }
+}
+
+fn mqtt_messages_match(left: &MqttMessage, right: &MqttMessage) -> bool {
+    left.topic == right.topic
+        && left.payload_base64 == right.payload_base64
+        && left.payload_text == right.payload_text
+        && left.qos == right.qos
+        && left.retain == right.retain
+        && left.received_at_ms == right.received_at_ms
+        && left.direction == right.direction
 }
 
 impl Drop for MqttClient {

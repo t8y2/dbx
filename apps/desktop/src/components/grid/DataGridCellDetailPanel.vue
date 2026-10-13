@@ -216,8 +216,7 @@ defineExpose({ openSearch });
           class="dbx-data-grid-value-font overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
           :class="[{ 'cursor-text': detail.isEditable }, panelIsBottom && detail.imagePreviewUrl ? 'min-h-24 max-h-32 shrink-0' : '', valueFillsHeight && !detail.imagePreviewUrl ? 'min-h-0 flex-1' : '']"
           @dblclick="emit('startEdit')"
-          >{{ presentedValuePreview }}</pre
-        >
+          >{{ presentedValuePreview }}</pre>
         <div v-if="detail.isValuePreviewTruncated && !sideJsonView" class="text-[11px] text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: detail.rawValuePreview.length }) }}</div>
       </div>
     </div>

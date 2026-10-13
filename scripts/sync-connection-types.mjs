@@ -46,24 +46,7 @@ const profileCatalogKeys = new Set(["schemaVersion", "profiles"]);
 const connectionProfileKeys = new Set(["id", "dbType", "label", "pickerLabel", "icon", "pickerIcon", "port", "user", "host", "urlParams", "category"]);
 const driverProfileKeys = new Set(["profile", "agentKey", "packageKey", "label", "storeVisible", "storeOrder"]);
 const managedDriverKeys = new Set(["key", "label", "storeVisible", "storeOrder"]);
-const capabilityKeys = new Set([
-  "queryExecution",
-  "metadataBrowse",
-  "objectBrowser",
-  "objectSource",
-  "schemaSearch",
-  "diagram",
-  "tableDataEdit",
-  "tableStructureEdit",
-  "tableImport",
-  "dataTransfer",
-  "sqlFileExecution",
-  "databaseCreate",
-  "fieldLineage",
-  "sqlExplain",
-  "userAdmin",
-  "driverManagement",
-]);
+const capabilityKeys = new Set(["queryExecution", "metadataBrowse", "objectBrowser", "objectSource", "schemaSearch", "diagram", "tableDataEdit", "tableStructureEdit", "tableImport", "dataTransfer", "sqlFileExecution", "databaseCreate", "fieldLineage", "sqlExplain", "userAdmin", "driverManagement"]);
 const traitKeys = new Set(["schemaAware", "databaseSchemaQualified", "singleDatabase", "clearableQuerySchema", "fetchFirst", "treeSchema", "databaseObjectTree", "pgVacuum", "pgLikeStructure", "diagramSql"]);
 
 function connectionTypeFiles() {

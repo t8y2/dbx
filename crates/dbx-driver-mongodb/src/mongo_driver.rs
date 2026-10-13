@@ -1276,6 +1276,30 @@ fn validate_find_explain_verbosity(verbosity: &str) -> Result<&str, String> {
     }
 }
 
+/// Parses a find's projection and sort up front, so invalid input fails before
+/// the count and the find start.
+fn parse_find_projection_and_sort(
+    projection: Option<&str>,
+    sort: Option<&str>,
+) -> Result<(Option<Document>, Option<Document>), String> {
+    let projection_doc = match projection {
+        Some(p) if !p.trim().is_empty() => {
+            let json: serde_json::Value =
+                serde_json::from_str(p).map_err(|e| format!("Invalid projection JSON: {e}"))?;
+            Some(json_object_to_document(&json).map_err(|e| format!("Invalid projection: {e}"))?)
+        }
+        _ => None,
+    };
+    let sort_doc = match sort {
+        Some(s) if !s.trim().is_empty() => {
+            let json: serde_json::Value = serde_json::from_str(s).map_err(|e| format!("Invalid sort JSON: {e}"))?;
+            Some(json_object_to_document(&json).map_err(|e| format!("Invalid sort: {e}"))?)
+        }
+        _ => None,
+    };
+    Ok((projection_doc, sort_doc))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn find_documents_with_total(
     client: &Client,
@@ -1300,48 +1324,48 @@ async fn find_documents_with_total(
     };
 
     let collation = parse_find_collation(collation)?;
+    let (projection_doc, sort_doc) = parse_find_projection_and_sort(projection, sort)?;
     let count_is_exact = !filter_doc.is_empty();
-    let total_result = if !include_total {
-        None
-    } else if count_is_exact {
-        let mut count = col.count_documents(filter_doc.clone());
-        if let Some(collation) = collation.clone() {
-            count = count.collation(collation);
+    // The total does not depend on the page, so count while the find runs
+    // rather than before it: a filtered count visits every match, which made
+    // slow queries take roughly twice as long as the find itself.
+    let total = async {
+        if !include_total {
+            None
+        } else if count_is_exact {
+            let mut count = col.count_documents(filter_doc.clone());
+            if let Some(collation) = collation.clone() {
+                count = count.collation(collation);
+            }
+            Some(count.await.map_err(|e| e.to_string()))
+        } else {
+            Some(estimated_document_count(client, database, collection).await)
         }
-        Some(count.await.map_err(|e| e.to_string()))
-    } else {
-        Some(estimated_document_count(client, database, collection).await)
     };
-
-    let mut find = col.find(filter_doc).skip(skip).limit(limit);
-    if let Some(p) = projection {
-        if !p.trim().is_empty() {
-            let json: serde_json::Value =
-                serde_json::from_str(p).map_err(|e| format!("Invalid projection JSON: {e}"))?;
-            let projection_doc = json_object_to_document(&json).map_err(|e| format!("Invalid projection: {e}"))?;
+    let page = async {
+        let mut find = col.find(filter_doc.clone()).skip(skip).limit(limit);
+        if let Some(projection_doc) = projection_doc {
             find = find.projection(projection_doc);
         }
-    }
-    if let Some(s) = sort {
-        if !s.trim().is_empty() {
-            let json: serde_json::Value = serde_json::from_str(s).map_err(|e| format!("Invalid sort JSON: {e}"))?;
-            let sort_doc = json_object_to_document(&json).map_err(|e| format!("Invalid sort: {e}"))?;
+        if let Some(sort_doc) = sort_doc {
             find = find.sort(sort_doc);
         }
-    }
-    if let Some(collation) = collation {
-        find = find.collation(collation);
-    }
+        if let Some(collation) = collation.clone() {
+            find = find.collation(collation);
+        }
 
-    let mut cursor = find.await.map_err(|e| e.to_string())?;
-
-    let mut documents = Vec::new();
-    let mut extended_documents = Vec::new();
-    while cursor.advance().await.map_err(|e| e.to_string())? {
-        let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        documents.push(bson_to_json(&Bson::Document(doc.clone())));
-        extended_documents.push(Bson::Document(doc).into_canonical_extjson());
-    }
+        let mut cursor = find.await.map_err(|e| e.to_string())?;
+        let mut documents = Vec::new();
+        let mut extended_documents = Vec::new();
+        while cursor.advance().await.map_err(|e| e.to_string())? {
+            let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
+            documents.push(bson_to_json(&Bson::Document(doc.clone())));
+            extended_documents.push(Bson::Document(doc).into_canonical_extjson());
+        }
+        Ok::<_, String>((documents, extended_documents))
+    };
+    let (total_result, page) = tokio::join!(total, page);
+    let (documents, extended_documents) = page?;
     let (total, total_is_exact) = match total_result {
         Some(total_result) => resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len()),
         None => (documents.len() as u64, false),
@@ -1498,47 +1522,45 @@ pub async fn find_documents_extended_json(
     };
 
     let collation = parse_find_collation(collation)?;
+    let (projection_doc, sort_doc) = parse_find_projection_and_sort(projection, sort)?;
     let count_is_exact = !filter_doc.is_empty();
-    let total_result = if count_is_exact {
-        let mut count = col.count_documents(filter_doc.clone());
-        if let Some(collation) = collation.clone() {
-            count = count.collation(collation);
+    // Count alongside the find, as in `find_documents_with_total`.
+    let total = async {
+        if count_is_exact {
+            let mut count = col.count_documents(filter_doc.clone());
+            if let Some(collation) = collation.clone() {
+                count = count.collation(collation);
+            }
+            count.await.map_err(|e| e.to_string())
+        } else {
+            estimated_document_count(client, database, collection).await
         }
-        count.await.map_err(|e| e.to_string())
-    } else {
-        estimated_document_count(client, database, collection).await
     };
-
-    let mut find = col.find(filter_doc).skip(skip).limit(limit);
-    if let Some(p) = projection {
-        if !p.trim().is_empty() {
-            let json: serde_json::Value =
-                serde_json::from_str(p).map_err(|e| format!("Invalid projection JSON: {e}"))?;
-            let projection_doc = json_object_to_document(&json).map_err(|e| format!("Invalid projection: {e}"))?;
+    let page = async {
+        let mut find = col.find(filter_doc.clone()).skip(skip).limit(limit);
+        if let Some(projection_doc) = projection_doc {
             find = find.projection(projection_doc);
         }
-    }
-    if let Some(s) = sort {
-        if !s.trim().is_empty() {
-            let json: serde_json::Value = serde_json::from_str(s).map_err(|e| format!("Invalid sort JSON: {e}"))?;
-            let sort_doc = json_object_to_document(&json).map_err(|e| format!("Invalid sort: {e}"))?;
+        if let Some(sort_doc) = sort_doc {
             find = find.sort(sort_doc);
         }
-    }
-    if let Some(collation) = collation {
-        find = find.collation(collation);
-    }
+        if let Some(collation) = collation.clone() {
+            find = find.collation(collation);
+        }
 
-    let mut cursor = find.await.map_err(|e| e.to_string())?;
-
-    let mut documents = Vec::new();
-    let mut extended_documents = Vec::new();
-    while cursor.advance().await.map_err(|e| e.to_string())? {
-        let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        let (document, extended_document) = document_json_views(doc);
-        documents.push(document);
-        extended_documents.push(extended_document);
-    }
+        let mut cursor = find.await.map_err(|e| e.to_string())?;
+        let mut documents = Vec::new();
+        let mut extended_documents = Vec::new();
+        while cursor.advance().await.map_err(|e| e.to_string())? {
+            let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
+            let (document, extended_document) = document_json_views(doc);
+            documents.push(document);
+            extended_documents.push(extended_document);
+        }
+        Ok::<_, String>((documents, extended_documents))
+    };
+    let (total_result, page) = tokio::join!(total, page);
+    let (documents, extended_documents) = page?;
     let (total, total_is_exact) = resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len());
 
     Ok(MongoDocumentResult {

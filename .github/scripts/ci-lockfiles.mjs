@@ -3,11 +3,13 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 export function lockfileManifests(plan) {
-  return [...(plan.rust ? ["Cargo.toml"] : []),
+  return [
+    ...(plan.rust ? ["Cargo.toml"] : []),
     ...plan.agent_rust.include.map(({ driver }) => {
       if (!["duckdb", "tdengine"].includes(driver)) throw new Error(`Unknown native Rust driver: ${driver}`);
       return `agents/drivers/${driver}/Cargo.toml`;
-    })];
+    }),
+  ];
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

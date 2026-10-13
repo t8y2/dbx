@@ -412,7 +412,17 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     String sqlState = candidate.getSQLState();
                     if ("0A000".equalsIgnoreCase(sqlState)
                         || "42000".equalsIgnoreCase(sqlState)
-                        || "42501".equalsIgnoreCase(sqlState)) {
+                        || "42501".equalsIgnoreCase(sqlState)
+                        // DM 在无 DBMS_OUTPUT 权限时用 28000（invalid authorization
+                        // specification），与 Oracle 的 42000/42501 对应。
+                        || "28000".equalsIgnoreCase(sqlState)) {
+                        return true;
+                    }
+                    // 达梦中文环境只回「权限不足」（vendorCode -5669，SQLState 28000），消息里
+                    // 不含 `dbms_output` 字样，无法走 isDbmsOutputUnavailableMessage 的匹配。
+                    // DBMS_OUTPUT.ENABLE 是可选步骤，这里执行的也只可能是这一句，因此权限类失败
+                    // 一律只让该功能降级，不能阻断用户自己的 SQL（#11875）。
+                    if (isDamengPermissionError(candidate)) {
                         return true;
                     }
                     String message = candidate.getMessage();

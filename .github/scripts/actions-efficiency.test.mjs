@@ -25,14 +25,21 @@ function evaluateCondition(content, github) {
   const expression = (folded?.[1] ?? content.match(/^    if: (.+)$/m)?.[1])?.trim();
   assert.ok(expression, "missing job condition");
   const evaluate = new Function("github", "contains", `return (${expression.replace(/^\$\{\{\s*|\s*\}\}$/g, "")});`);
-  return evaluate(github, (search, item) => String(search ?? "").toLowerCase().includes(String(item).toLowerCase()));
+  return evaluate(github, (search, item) =>
+    String(search ?? "")
+      .toLowerCase()
+      .includes(String(item).toLowerCase()),
+  );
 }
 
 function commentEvent(body, { userType = "User", login = "contributor", pullRequest = false } = {}) {
-  return { repository_owner: "t8y2", event: {
-    issue: { pull_request: pullRequest ? { url: "https://api.github.com/repos/t8y2/dbx/pulls/123" } : undefined },
-    comment: { body, user: { type: userType, login } },
-  } };
+  return {
+    repository_owner: "t8y2",
+    event: {
+      issue: { pull_request: pullRequest ? { url: "https://api.github.com/repos/t8y2/dbx/pulls/123" } : undefined },
+      comment: { body, user: { type: userType, login } },
+    },
+  };
 }
 
 test("issue command prefilter admits every supported command and skips unrelated comments", async () => {
@@ -56,10 +63,15 @@ test("spam prefilter retains all existing malicious-link cases and never bypasse
   const content = job(workflow("spam-comment-guard"), "delete-malicious-link");
   const pattern = content.match(/grep -qiP '([^']+)'/)[1];
   const matcher = new RegExp(pattern.replaceAll("[:space:]", "\\s"), "i");
-  for (const body of ["https://evil.example/update.zip", "https://evil.example/update.ZIP?download=1",
-    "[update.zip](//evil.example/download)", "[update.ZIP](https://evil%2Eexample/download)",
-    "[update.7z](https://evil.example/download)", "[update.exe](https://evil.example/download)",
-    "[update.SCR](//evil.example/download)"]) {
+  for (const body of [
+    "https://evil.example/update.zip",
+    "https://evil.example/update.ZIP?download=1",
+    "[update.zip](//evil.example/download)",
+    "[update.ZIP](https://evil%2Eexample/download)",
+    "[update.7z](https://evil.example/download)",
+    "[update.exe](https://evil.example/download)",
+    "[update.SCR](//evil.example/download)",
+  ]) {
     assert.equal(matcher.test(body), true, body);
     assert.equal(evaluateCondition(content, commentEvent(body)), true, body);
     assert.equal(evaluateCondition(content, commentEvent(body, { userType: "Bot" })), false);
@@ -69,9 +81,7 @@ test("spam prefilter retains all existing malicious-link cases and never bypasse
   for (const body of ["Thanks!", "https://example.com/docs", "", null]) {
     assert.equal(evaluateCondition(content, commentEvent(body)), false);
   }
-  for (const body of ["Please upload a .zip", "https://github.com/t8y2/dbx/archive/main.zip",
-    "https://user-images.githubusercontent.com/files/logs.zip", "[logs.exe](https://github.com/user-attachments/files/123/logs.exe)",
-    "[logs.7z](//raw.githubusercontent.com/t8y2/dbx/main/logs.7z)"]) {
+  for (const body of ["Please upload a .zip", "https://github.com/t8y2/dbx/archive/main.zip", "https://user-images.githubusercontent.com/files/logs.zip", "[logs.exe](https://github.com/user-attachments/files/123/logs.exe)", "[logs.7z](//raw.githubusercontent.com/t8y2/dbx/main/logs.7z)"]) {
     assert.equal(evaluateCondition(content, commentEvent(body)), true, body);
     assert.equal(matcher.test(body), false, body);
   }
@@ -98,8 +108,7 @@ test("plugin checks run once before unchanged cross-platform verification", () =
   assert.match(tests, /needs: checks/);
   assert.match(tests, /os: \[ubuntu-24\.04, macos-15, windows-2022\]/);
   assert.doesNotMatch(tests, /npm run (?:lint|fmt:check)/);
-  for (const command of ["npm test --prefix plugins/sdk/dev-host", "cargo nextest run", "cargo test --doc",
-    "npm test --prefix packages/plugin-cli", "node scripts/verify-plugin-cli-package.mjs", "DBX_PLUGIN_CLI_VERIFY_NATIVE: '1'"]) {
+  for (const command of ["npm test --prefix plugins/sdk/dev-host", "cargo nextest run", "cargo test --doc", "npm test --prefix packages/plugin-cli", "node scripts/verify-plugin-cli-package.mjs", "DBX_PLUGIN_CLI_VERIFY_NATIVE: '1'"]) {
     assert.ok(tests.includes(command), command);
   }
   assert.match(content, /group: \$\{\{ github\.workflow \}\}-\$\{\{ github\.ref \}\}\s+cancel-in-progress: true/);
@@ -118,11 +127,16 @@ test("GitHub script selection excludes planner tests only when fast checks own t
   const files = readdirSync(new URL(".github/scripts/", repository)).filter((file) => file.endsWith(".test.mjs"));
   for (const fast of ["true", "false", ""]) {
     const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", `node() { printf '%s\\n' "$@"; }\n${script}`], {
-      cwd: repository, encoding: "utf8", env: { ...process.env, FAST_CHECKS: fast },
+      cwd: repository,
+      encoding: "utf8",
+      env: { ...process.env, FAST_CHECKS: fast },
     });
     assert.equal(result.status, 0, result.stderr);
     const selected = result.stdout.trim().split("\n").slice(1).sort();
-    const expected = files.filter((file) => fast !== "true" || !file.startsWith("ci-")).map((file) => `.github/scripts/${file}`).sort();
+    const expected = files
+      .filter((file) => fast !== "true" || !file.startsWith("ci-"))
+      .map((file) => `.github/scripts/${file}`)
+      .sort();
     assert.deepEqual(selected, expected);
     assert.ok(selected.includes(".github/scripts/actions-efficiency.test.mjs"));
   }
@@ -135,8 +149,7 @@ async function snapshotFixture(context) {
 }
 
 function snapshot() {
-  return { repository: "t8y2/dbx", generatedAt: "2026-10-01T18:00:00.000Z", stars: 10,
-    contributors: [{ login: "contributor", commits: 3, mergedPullRequests: 1 }] };
+  return { repository: "t8y2/dbx", generatedAt: "2026-10-01T18:00:00.000Z", stars: 10, contributors: [{ login: "contributor", commits: 3, mergedPullRequests: 1 }] };
 }
 
 test("a missing contributor snapshot is created and timestamp-only refreshes preserve exact bytes", async (context) => {
@@ -154,9 +167,12 @@ test("a missing contributor snapshot is created and timestamp-only refreshes pre
 test("actual contributor, star and repository changes update the snapshot", async (context) => {
   const outputPath = await snapshotFixture(context);
   const original = snapshot();
-  for (const updated of [{ ...original, stars: 11 }, { ...original, repository: "other/dbx" },
+  for (const updated of [
+    { ...original, stars: 11 },
+    { ...original, repository: "other/dbx" },
     { ...original, contributors: [{ ...original.contributors[0], commits: 4 }] },
-    { ...original, contributors: [] }]) {
+    { ...original, contributors: [] },
+  ]) {
     await writeContributorSnapshot(outputPath, original);
     const refreshed = { ...updated, generatedAt: "2026-10-08T18:00:00.000Z" };
     assert.equal(await writeContributorSnapshot(outputPath, refreshed), true);

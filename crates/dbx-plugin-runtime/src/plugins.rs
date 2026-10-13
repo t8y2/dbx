@@ -334,8 +334,16 @@ impl PluginRegistry {
         let session = PluginSidecarSession::start(plugin, self.app_version.clone(), env).await?;
         let result =
             session.invoke_with_timeout(method, params, Some(capability_id), Some(PLUGIN_REQUEST_TIMEOUT)).await;
-        session.shutdown().await;
-        result
+        match (result, session.shutdown().await) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(invoke_error), Ok(())) => Err(invoke_error),
+            (Ok(_), Err(shutdown_error)) => {
+                Err(format!("Plugin capability invocation completed but shutdown failed: {shutdown_error}"))
+            }
+            (Err(invoke_error), Err(shutdown_error)) => {
+                Err(format!("{invoke_error}; additionally failed to stop plugin: {shutdown_error}"))
+            }
+        }
     }
 
     pub async fn invoke_driver<T>(&self, driver_id: &str, method: &str, params: serde_json::Value) -> Result<T, String>

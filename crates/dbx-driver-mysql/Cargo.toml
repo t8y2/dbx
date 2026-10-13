@@ -21,7 +21,7 @@ mysql_async = { version = "0.37", default-features = false, features = ["default
 percent-encoding = "2"
 rust_decimal = { version = "1", features = ["serde"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
-sqlparser = { version = "0.62.0", features = ["visitor"] }
+sqlparser = { version = "0.63.0", features = ["visitor"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 

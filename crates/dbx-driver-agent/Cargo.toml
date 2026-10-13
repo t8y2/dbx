@@ -19,17 +19,17 @@ flate2 = "1"
 futures = "0.3"
 log = "0.4"
 percent-encoding = "2"
-reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "stream", "rustls-tls", "socks"] }
+reqwest = { version = "0.13", default-features = false, features = ["cookies", "json", "stream", "rustls-tls", "socks"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
-sha2 = "0.10"
+sha2 = "0.11"
 tar = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 zip = { version = "4", default-features = false, features = ["deflate"] }
-zstd = "0.13"
+zstd = "0.14"
 
 [target.'cfg(windows)'.dependencies]
-sysinfo = { version = "0.32", features = ["system"] }
+sysinfo = { version = "0.39", features = ["system"] }

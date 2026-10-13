@@ -1665,6 +1665,7 @@ export default withEnglishFallback({
     mqttClientCertPath: "用戶端憑證路徑",
     mqttClientKeyPath: "用戶端私鑰路徑",
     mqttNoLocal: "禁止本機轉送",
+    readOnlyExplanation: "唯讀模式：直接阻止目前連線的寫入操作，需要暫時解鎖後才能寫入。",
   },
   editor: {
     duckdbDraining: "上一筆 DuckDB 查詢仍在停止，請稍後重試。",
@@ -10469,6 +10470,7 @@ export default withEnglishFallback({
     sourceAdmin: "資料庫管理",
     aiReviewRequired: "生產 SQL 已放入編輯器。請先檢查，再手動執行以確認。",
     sourceMultiDbSql: "多庫 SQL 執行",
+    explanation: "生產保護：對生產資料庫的寫入、DDL、匯入匯出等變更操作，執行前要求再次確認；一般查詢不受影響。它不會把連線設為唯讀。",
   },
   readOnlyUnlock: {
     confirmTitle: "暫時解鎖寫入",

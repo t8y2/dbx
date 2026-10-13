@@ -50,6 +50,14 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ webLogoPosition: undefined }).webLogoPosition).toBe("left");
   });
 
+  it("defaults caretBrowsingEnabled to false and normalizes boolean values (#11827)", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.caretBrowsingEnabled).toBe(false);
+    expect(normalizeEditorSettings({}).caretBrowsingEnabled).toBe(false);
+    expect(normalizeEditorSettings({ caretBrowsingEnabled: true }).caretBrowsingEnabled).toBe(true);
+    expect(normalizeEditorSettings({ caretBrowsingEnabled: false }).caretBrowsingEnabled).toBe(false);
+    expect(normalizeEditorSettings({ caretBrowsingEnabled: "true" as any }).caretBrowsingEnabled).toBe(false);
+  });
+
   it("defaults the welcome page to the workspace overview and honors an explicitly saved intro mode", () => {
     expect(DEFAULT_EDITOR_SETTINGS.welcomePageMode).toBe("workspace");
     expect(normalizeEditorSettings({}).welcomePageMode).toBe("workspace");

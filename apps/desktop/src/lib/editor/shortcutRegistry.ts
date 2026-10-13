@@ -53,6 +53,7 @@ export type ShortcutActionId =
   | "newQuery"
   | "openSettings"
   | "closeTab"
+  | "reopenClosedTab"
   | "closeOtherTabs"
   | "closeAllTabs"
   | "closeWindow"
@@ -485,6 +486,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutCloseTab",
     scope: "global",
     defaultShortcut: "Mod+W",
+  },
+  {
+    id: "reopenClosedTab",
+    labelKey: "settings.shortcutReopenClosedTab",
+    scope: "global",
+    defaultShortcut: "Shift+Mod+T",
   },
   {
     id: "closeOtherTabs",

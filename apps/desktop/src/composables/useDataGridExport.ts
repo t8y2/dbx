@@ -504,10 +504,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   function externalizeRows(rows: CellValue[][], columnIndexes?: number[]): CellValue[][] {
     if (columnIndexes) {
-      return rows.map((row) => columnIndexes.map((colIdx) => (options.externalCellValue ? options.externalCellValue(row[colIdx], colIdx) : row[colIdx])));
+      return rows.map((row) => columnIndexes.map((colIdx) => externalCellValue(row[colIdx], colIdx)));
     }
-    if (!options.externalCellValue) return rows;
-    return rows.map((row) => row.map((value, columnIndex) => options.externalCellValue!(value, columnIndex)));
+    return rows.map((row) => row.map((value, columnIndex) => externalCellValue(value, columnIndex)));
   }
 
   async function resultToExport(
@@ -743,9 +742,23 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return binaryCellClipboardText(value, columnTypes.value?.[columnIndex], databaseType.value) ?? value;
   }
 
-  function externalCellValue(value: CellValue, columnIndex: number): CellValue {
+  function isOracleTemporalColumn(columnIndex: number, sourceIndex?: number): boolean {
+    const dbType = options.databaseType.value;
+    if (dbType !== "oracle" && dbType !== "oceanbase-oracle") return false;
+    const colType = options.columnTypes.value?.[columnIndex] ?? (sourceIndex !== undefined ? options.allColumnTypes?.value?.[sourceIndex] : undefined);
+    return isTemporalColumnType(colType);
+  }
+
+  function externalCellValue(value: CellValue, columnIndex: number, sourceIndex?: number): CellValue {
     const externalValue = options.externalCellValue?.(value, columnIndex);
-    return externalValue === undefined ? value : externalValue;
+    const resolvedValue = externalValue === undefined ? value : externalValue;
+    if (resolvedValue !== null && resolvedValue !== undefined && options.displayValue) {
+      const resolvedSourceIndex = sourceIndex ?? visibleColumnIndexes.value[columnIndex] ?? columnIndex;
+      if (isOracleTemporalColumn(columnIndex, resolvedSourceIndex)) {
+        return options.displayValue(resolvedValue, resolvedSourceIndex);
+      }
+    }
+    return resolvedValue;
   }
 
   function rowToJsonObject(item: RowItem): Record<string, unknown> {
@@ -791,7 +804,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const val = resolvedItem?.data[columnIndex] ?? null;
     // 外部剪贴板呈现文本型 MySQL VARBINARY（NULL 也按空串输出）；内部网格副本仍保留原 hex，保证回粘无损。
     const rawValue = options.cellClipboardText?.(val, sourceIndex) ?? clipboardCellValue(binaryClipboardCellValue(val, columnIndex));
-    const copyValue = options.databaseType.value === "oracle" && isTemporalColumnType(options.columnTypes.value?.[columnIndex]) ? (options.displayValue?.(val, sourceIndex) ?? rawValue) : rawValue;
+    const copyValue = isOracleTemporalColumn(columnIndex, sourceIndex) ? (options.displayValue?.(val, sourceIndex) ?? rawValue) : rawValue;
     await copyText(copyValue, { rows: [[val]] });
   }
 
@@ -936,6 +949,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     buildMongoUpdate: buildMongoExtractorUpdate,
     partialLoadInfo: partialLoadCopyInfo,
     canBuildMongoUpdate: canBuildMongoExtractorUpdate,
+    displayValue: options.displayValue,
     externalCellValue: (value, columnIndex) => {
       const externalValue = options.externalCellValue?.(value as CellValue, columnIndex);
       return externalValue === undefined ? value : externalValue;

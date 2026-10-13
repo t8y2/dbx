@@ -18,29 +18,35 @@ function job(name, content = workflow) {
 function concurrencySettings(github) {
   const block = workflow.match(/^concurrency:\n((?:  [^\n]+\n)+)/m)?.[1];
   assert.ok(block, "missing workflow concurrency");
-  const format = (template, value) => template.replace("{0}", String(value));
+  const format = (template, ...values) => template.replace(/\{(\d+)\}/g, (_, index) => String(values[Number(index)]));
+  const endsWith = (search, value) => String(search).toLowerCase().endsWith(String(value).toLowerCase());
   return Object.fromEntries(block.trim().split("\n").map((line) => {
     const [, setting, value] = line.match(/^\s*([\w-]+):\s*(.+)$/);
-    const evaluate = (expression) => new Function("github", "format", `return (${expression});`)(github, format);
+    const evaluate = (expression) =>
+      new Function("github", "format", "endsWith", `return (${expression});`)(github, format, endsWith);
     const expressions = [...value.matchAll(/\$\{\{\s*(.*?)\s*\}\}/g)];
     return [setting, expressions.length === 1 && expressions[0][0] === value
       ? evaluate(expressions[0][1]) : value.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, expression) => evaluate(expression))];
   }));
 }
 
-function concurrencyContext({ authorId = 101, author = "contributor", actor = author, ref = "refs/pull/100/merge", eventName = "pull_request" } = {}) {
+function concurrencyContext({ authorId = 101, author = "contributor", actor = author, number = 100, ref = `refs/pull/${number}/merge`, eventName = "pull_request" } = {}) {
   return { workflow: "CI", repository_owner: "t8y2", actor, ref, event_name: eventName,
-    event: eventName === "pull_request" ? { pull_request: { user: { id: authorId, login: author } } } : {} };
+    event: eventName === "pull_request" ? { pull_request: { number, user: { id: authorId, login: author } } } : {} };
 }
 
-test("a contributor shares one main CI queue across all PRs regardless of trigger actor", () => {
-  const settings = concurrencySettings(concurrencyContext());
-  assert.deepEqual(settings, { group: "CI-pr-author-101", "cancel-in-progress": false, queue: "max" });
-  for (const context of [concurrencyContext({ ref: "refs/pull/200/merge" }), concurrencyContext({ actor: "t8y2" }),
+test("a contributor's PRs share two main CI queues split by PR number parity, regardless of trigger actor", () => {
+  const even = concurrencySettings(concurrencyContext());
+  assert.deepEqual(even, { group: "CI-pr-author-101-even", "cancel-in-progress": false, queue: "max" });
+  for (const context of [concurrencyContext({ number: 202 }), concurrencyContext({ actor: "t8y2" }),
     concurrencyContext({ actor: "github-actions[bot]" }), concurrencyContext({ author: "renamed-contributor" })]) {
-    assert.deepEqual(concurrencySettings(context), settings);
+    assert.deepEqual(concurrencySettings(context), even);
   }
-  assert.notEqual(concurrencySettings(concurrencyContext({ authorId: 102, author: "another-contributor" })).group, settings.group);
+  for (const number of [101, 11849, 11853, 7]) {
+    assert.deepEqual(concurrencySettings(concurrencyContext({ number })), { ...even, group: "CI-pr-author-101-odd" }, String(number));
+  }
+  for (const number of [2, 4, 6, 8, 11850]) assert.equal(concurrencySettings(concurrencyContext({ number })).group, even.group);
+  assert.notEqual(concurrencySettings(concurrencyContext({ authorId: 102, author: "another-contributor" })).group, even.group);
 });
 
 test("repository-owner PRs remain independent and superseded runs are cancelled only within a PR", () => {
@@ -260,7 +266,7 @@ test("Rust test jobs install pinned nextest and retain separate doctests", () =>
   const pluginRelease = readFileSync(new URL("../workflows/plugin-cli-release.yml", import.meta.url), "utf8");
   const consumers = [job("packages"), job("rust-test"), job("agent-rust"), job("agent-integration"), job("test", pluginDevHost), job("prepare", pluginRelease)];
   for (const content of consumers) {
-    assert.ok(content.includes("uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3"));
+    assert.ok(content.includes("uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b"));
     assert.ok(content.includes("tool: cargo-nextest@0.9.137"));
     assert.doesNotMatch(content, /cargo test (?!.*--doc)/);
     const testCommand = content.indexOf("cargo nextest run") >= 0 ? "cargo nextest run" : content.includes("pnpm test:packages") ? "pnpm test:packages" : content.includes("ci-rust.mjs test") ? "ci-rust.mjs test" : "ci-agent-integration.sh";

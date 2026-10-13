@@ -10,6 +10,7 @@ import { checkStartupAuthentication, type StartupAuthentication } from "@/lib/st
 import { useAuthStore } from "@/stores/authStore";
 import { markStartupPhase } from "@/lib/startup/startupTiming";
 import { retryStartupAfterPreloadFailure } from "@/lib/startup/startupPreloadRecovery";
+import { initializePasswordViewerCapability } from "@/lib/security/passwordViewer";
 
 // App setup installs listeners and instantiates business stores, so even its import
 // is deferred until authentication and the security migration have completed.
@@ -94,6 +95,9 @@ async function initialize() {
         history.replaceState(null, "", webPath("/login"));
         return;
       }
+      await initializePasswordViewerCapability();
+    } else {
+      await initializePasswordViewerCapability();
     }
     markStartupPhase("auth-ready");
     await migration.initialize();

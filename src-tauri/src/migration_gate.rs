@@ -46,6 +46,7 @@ pub fn allowed_command(command: &str) -> bool {
             | "get_platform"
             | "load_app_appearance_settings"
             | "update_app_appearance_settings"
+            | "set_macos_app_icon_appearance"
             | "set_app_locale"
     )
 }

@@ -1,5 +1,6 @@
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
+import type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
 import type { PluginUiStorageItemRef, SqlFileFailureLogExportPayload, SqlFileFailureLogInfo, SqlFileFailureLogKey, SqlFileFailureLogTextPayload, SyncCatalogItem, SyncSelection, SyncSnapshotCatalog } from "@/lib/backend/tauri";
@@ -2381,6 +2382,10 @@ export async function rotateWebMcpToken(): Promise<import("@/lib/backend/tauri")
   return res.json();
 }
 
+export async function loadWebCapabilities(): Promise<import("@/lib/backend/tauri").WebCapabilities> {
+  return get("/api/app-settings/web-capabilities");
+}
+
 export async function loadMaxAgentTurns(): Promise<number> {
   return get("/api/app-settings/max-agent-turns");
 }
@@ -2944,7 +2949,7 @@ export interface SqlFileEntry {
   children: SqlFileEntry[];
 }
 
-export async function listSqlFilesInFolder(_folderPath: string, _fileFilter?: string): Promise<SqlFileEntry[]> {
+export async function listSqlFilesInFolder(_folderPath: string, _fileFilter?: string, _includeEmptyDirectories?: boolean): Promise<SqlFileEntry[]> {
   throw new Error("Listing SQL files in a folder is only available in the desktop app");
 }
 
@@ -2958,6 +2963,18 @@ export async function renameSqlFileInFolder(_rootPath: string, _filePath: string
 
 export async function deleteSqlFileInFolder(_rootPath: string, _filePath: string): Promise<void> {
   throw new Error("Managing SQL files in folders is only available in the desktop app");
+}
+
+export async function createSqlFolderInFolder(_rootPath: string, _directoryPath: string, _folderName: string): Promise<string> {
+  throw new Error("Managing SQL folders is only available in the desktop app");
+}
+
+export async function renameSqlFolderInFolder(_rootPath: string, _folderPath: string, _folderName: string): Promise<string> {
+  throw new Error("Managing SQL folders is only available in the desktop app");
+}
+
+export async function deleteSqlFolderInFolder(_rootPath: string, _folderPath: string): Promise<void> {
+  throw new Error("Managing SQL folders is only available in the desktop app");
 }
 
 export interface GlobalSearchRequest {
@@ -3507,6 +3524,22 @@ function downloadTableExportFile(exportId: string): void {
   const a = document.createElement("a");
   a.href = apiUrl(`/api/export/table/download/${exportId}`);
   a.click();
+}
+
+// Native dexp/dimp tools only exist next to a local Dameng client install, so
+// the web deployment has no server-side implementation by design.
+const DAMENG_DUMP_WEB_UNSUPPORTED = "Dameng native .dmp export/import requires the desktop application.";
+
+export async function startDamengDump(_request: DamengDumpRequest, _onProgress: (progress: DamengDumpProgress) => void): Promise<DamengDumpProgress> {
+  throw new Error(DAMENG_DUMP_WEB_UNSUPPORTED);
+}
+
+export async function cancelDamengDump(_taskId: string): Promise<void> {
+  throw new Error(DAMENG_DUMP_WEB_UNSUPPORTED);
+}
+
+export async function resolveDamengDumpTool(_binDir: string, _kind: DamengDumpKind): Promise<string> {
+  throw new Error(DAMENG_DUMP_WEB_UNSUPPORTED);
 }
 
 export async function cancelTableExport(exportId: string): Promise<void> {

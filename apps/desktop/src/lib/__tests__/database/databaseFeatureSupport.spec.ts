@@ -176,6 +176,8 @@ describe("database and schema qualifiers", () => {
 describe("supportsTransaction", () => {
   it("returns true for supported database types", () => {
     expect(supportsTransaction("postgres")).toBe(true);
+    expect(supportsTransaction("gaussdb")).toBe(true);
+    expect(supportsTransaction("opengauss")).toBe(true);
     expect(supportsTransaction("mysql")).toBe(true);
     expect(supportsTransaction("oracle")).toBe(true);
     expect(supportsTransaction("jdbc")).toBe(true);
@@ -215,6 +217,8 @@ describe("defaultAutoCommitForDbType", () => {
   it("honors the configured default transaction mode", () => {
     expect(defaultAutoCommitForDbType("mysql", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("postgres", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("gaussdb", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("opengauss", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("sqlserver", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("sqlserver", "auto")).toBe(true);
     expect(defaultAutoCommitForDbType("oracle", "manual")).toBe(false);
@@ -249,11 +253,13 @@ describe("usesOracleStickyTransactionState", () => {
 });
 
 describe("usesProvenReadOnlyStickyTransactionState", () => {
-  it("enables the sticky toolbar for the Oracle family, MySQL and PostgreSQL", () => {
+  it("enables the sticky toolbar for the Oracle family, MySQL and the PostgreSQL family", () => {
     expect(usesProvenReadOnlyStickyTransactionState("oracle")).toBe(true);
     expect(usesProvenReadOnlyStickyTransactionState("oceanbase-oracle")).toBe(true);
     expect(usesProvenReadOnlyStickyTransactionState("mysql")).toBe(true);
     expect(usesProvenReadOnlyStickyTransactionState("postgres")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("gaussdb")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("opengauss")).toBe(true);
   });
 
   it("keeps databases without manual-transaction support on the legacy toolbar", () => {
@@ -267,7 +273,7 @@ describe("usesProvenReadOnlyStickyTransactionState", () => {
   it("only enables sticky state where manual mode is reachable", () => {
     // The sticky UX gates commit/rollback in manual mode; a member without
     // transaction support could never reach it. Guards against drift.
-    for (const dbType of ["oracle", "oceanbase-oracle", "mysql", "postgres"]) {
+    for (const dbType of ["oracle", "oceanbase-oracle", "mysql", "postgres", "gaussdb", "opengauss"]) {
       expect(supportsTransaction(dbType)).toBe(true);
     }
   });

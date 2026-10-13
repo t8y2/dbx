@@ -84,6 +84,38 @@ describe("generateCellValues", () => {
     expect(generateCellValues("increment", 3, { startValue: 9_007_199_254_740_993n })).toEqual(["9007199254740993", "9007199254740994", "9007199254740995"]);
   });
 
+  it("pads increment values with leading zeros", () => {
+    expect(generateCellValues("increment", 3, { startValue: 1n, padLength: 4 })).toEqual(["0001", "0002", "0003"]);
+    expect(generateCellValues("increment", 2, { startValue: 99n, padLength: 4 })).toEqual(["0099", "0100"]);
+    expect(generateCellValues("increment", 2, { startValue: 1000n, padLength: 3 })).toEqual(["1000", "1001"]);
+    expect(generateCellValues("increment", 2, { startValue: 1n, padLength: 0 })).toEqual(["1", "2"]);
+    expect(generateCellValues("increment", 2, { startValue: 1n, padLength: -1 })).toEqual(["1", "2"]);
+  });
+
+  it("applies prefix and suffix to increment values", () => {
+    expect(generateCellValues("increment", 2, { startValue: 1n, prefix: "USER_" })).toEqual(["USER_1", "USER_2"]);
+    expect(generateCellValues("increment", 2, { startValue: 1n, suffix: "_TEST" })).toEqual(["1_TEST", "2_TEST"]);
+    expect(
+      generateCellValues("increment", 3, {
+        startValue: 1n,
+        padLength: 4,
+        prefix: "USER_",
+        suffix: "_TEST",
+      }),
+    ).toEqual(["USER_0001_TEST", "USER_0002_TEST", "USER_0003_TEST"]);
+  });
+
+  it("formats negative increment values with padding and affixes", () => {
+    expect(
+      generateCellValues("increment", 4, {
+        startValue: -2n,
+        padLength: 3,
+        prefix: "ID:",
+        suffix: "!",
+      }),
+    ).toEqual(["ID:-002!", "ID:-001!", "ID:000!", "ID:001!"]);
+  });
+
   it("keeps snowflake IDs unique and ordered beyond one sequence window", () => {
     const generator = createSnowflakeIdGenerator({ workerId: 7, now: () => 1_800_000_000_000 });
     const values = generateCellValues("snowflake", 5000, { now: new Date(1_800_000_000_000), snowflakeGenerator: generator }) as string[];

@@ -4,14 +4,15 @@ import { EditorView, keymap, drawSelection, dropCursor, highlightSpecialChars, h
 import { json } from "@codemirror/lang-json";
 import { search as cmSearch } from "@codemirror/search";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
-import { bracketMatching, foldGutter, foldKeymap } from "@codemirror/language";
+import { bracketMatching, foldKeymap } from "@codemirror/language";
+import { createConsistentFoldGutter } from "@/lib/editor/codemirrorFoldGutter";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, cellDetailActiveLineColor, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, isJsonColumnType } from "@/lib/dataGrid/cellDetailPresentation";
+import { isJsonColumnType } from "@/lib/dataGrid/cellDetailPresentation";
 import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import i18n from "@/i18n";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
@@ -66,8 +67,10 @@ function looksLikeJsonString(text: string): boolean {
   return trimmed.startsWith("{") || trimmed.startsWith("[");
 }
 
+export const CELL_DETAIL_JSON_MODE_MAX_LENGTH = 2_000_000;
+
 function shouldUseJsonMode(columnType?: string, value?: string): boolean {
-  if (value && value.length > CELL_DETAIL_JSON_FORMAT_MAX_LENGTH) return false;
+  if (value && value.length > CELL_DETAIL_JSON_MODE_MAX_LENGTH) return false;
   if (isJsonColumnType(columnType)) return true;
   if (value && looksLikeJsonString(value)) return true;
   return false;
@@ -230,7 +233,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
         }),
         // Keep the compact detail-editor baseline; gutters and wrapping are opt-in.
         ...(options.lineNumbers ? [lineNumbers(), highlightActiveLineGutter()] : []),
-        ...(options.folding ? [foldGutter()] : []),
+        ...(options.folding ? [createConsistentFoldGutter()] : []),
         highlightSpecialChars(),
         history(),
         drawSelection(),

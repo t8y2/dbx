@@ -130,7 +130,7 @@ jobs:
           fi
 
       - name: Install nextest
-        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3
+        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b
         with:
           tool: cargo-nextest@0.9.137
 

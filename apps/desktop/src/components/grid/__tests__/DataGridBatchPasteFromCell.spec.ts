@@ -839,6 +839,47 @@ describe("selected transpose edit scope", () => {
     ).toEqual(["1", "hidden", "2"]);
   });
 
+  it("generates increment values with zero padding, prefix, and suffix in the dialog", async () => {
+    const { host } = mountGrid({ result: resultWithThreeRows() });
+    await openSelectedRows(host);
+    transposeCells(host)[0].click();
+    await settle();
+    transposeCells(host)[1].dispatchEvent(new MouseEvent("click", { shiftKey: true, bubbles: true }));
+    await settle();
+    transposeCells(host)[1].dispatchEvent(new MouseEvent("contextmenu", { shiftKey: true, bubbles: true, cancelable: true, clientX: 12, clientY: 12 }));
+    await settle();
+    const menuButton = (label: string) => {
+      const button = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((item) => item.textContent?.trim() === label);
+      if (!button) throw new Error(`Context menu item not found: ${label}`);
+      return button;
+    };
+    menuButton(i18n.global.t("grid.generateValue")).dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    menuButton(i18n.global.t("grid.generateIncrementId")).click();
+    await settle();
+    const dialog = document.querySelector<HTMLElement>("[role='dialog']")!;
+    const inputs = dialog.querySelectorAll<HTMLInputElement>("input");
+    expect(inputs).toHaveLength(4);
+    inputs[1].value = "4";
+    inputs[1].dispatchEvent(new Event("input"));
+    inputs[2].value = "ITEM_";
+    inputs[2].dispatchEvent(new Event("input"));
+    inputs[3].value = "_V1";
+    inputs[3].dispatchEvent(new Event("input"));
+    await settle();
+    expect(dialog.textContent).toContain("ITEM_0001_V1, ITEM_0002_V1");
+    const apply = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("grid.applyBulkEdit"))!;
+    apply.click();
+    await settle();
+    expect(useToast().message.value).toBe(i18n.global.t("grid.generatedValuesApplied", { count: 2 }));
+    await toggleTranspose(host);
+    expect(
+      displayRows(host)
+        .slice(0, 3)
+        .map((row) => visibleCellTexts(row)[2]),
+    ).toEqual(["ITEM_0001_V1", "hidden", "ITEM_0002_V1"]);
+  });
+
   it("maps pasted records through the transpose scope and stops at its end", async () => {
     const { host } = mountGrid({ result: resultWithThreeRows() });
     await openSelectedRows(host);

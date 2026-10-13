@@ -3,7 +3,7 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStor
 
 const STORAGE_KEY = "dbx-sql-file-folders";
 const FILTER_STORAGE_KEY = "dbx-sql-file-filter";
-export const DEFAULT_SQL_FILE_FILTER = "*.sql";
+export const DEFAULT_SQL_FILE_FILTER = "(?i)\\.(sql|ddl)$";
 
 /**
  * Shared reactive version counter — bumped whenever SQL file folder paths change.

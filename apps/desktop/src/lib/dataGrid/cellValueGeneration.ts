@@ -38,16 +38,17 @@ export function createSnowflakeIdGenerator(options: { workerId?: number; now?: (
 
 const defaultSnowflakeIdGenerator = createSnowflakeIdGenerator();
 
-export function generateCellValues(
-  kind: CellValueGenerationKind,
-  count: number,
-  options: {
-    now?: Date;
-    startValue?: bigint;
-    uuidFactory?: () => string;
-    snowflakeGenerator?: SnowflakeIdGenerator;
-  } = {},
-): Array<string | null> {
+export interface CellValueGenerationOptions {
+  now?: Date;
+  startValue?: bigint;
+  padLength?: number;
+  prefix?: string;
+  suffix?: string;
+  uuidFactory?: () => string;
+  snowflakeGenerator?: SnowflakeIdGenerator;
+}
+
+export function generateCellValues(kind: CellValueGenerationKind, count: number, options: CellValueGenerationOptions = {}): Array<string | null> {
   const size = Math.max(0, Math.trunc(count));
   const now = options.now ?? new Date();
   const uuidFactory = options.uuidFactory ?? uuid;
@@ -66,7 +67,18 @@ export function generateCellValues(
       const timestamp = now.getTime().toString(16).padStart(12, "0");
       return `${timestamp.slice(0, 8)}-${timestamp.slice(8)}-7${uuidFactory().slice(15)}`;
     }
-    if (kind === "increment") return String((options.startValue ?? 1n) + BigInt(index));
+    if (kind === "increment") {
+      const num = (options.startValue ?? 1n) + BigInt(index);
+      const isNegative = num < 0n;
+      const absStr = (isNegative ? -num : num).toString();
+      const rawPad = options.padLength;
+      const padLength = typeof rawPad === "number" && Number.isFinite(rawPad) && rawPad > 0 ? Math.min(Math.trunc(rawPad), 64) : 0;
+      const padded = padLength > 0 ? absStr.padStart(padLength, "0") : absStr;
+      const numStr = isNegative ? `-${padded}` : padded;
+      const prefix = options.prefix ?? "";
+      const suffix = options.suffix ?? "";
+      return `${prefix}${numStr}${suffix}`;
+    }
     return snowflakeGenerator.next(now.getTime());
   });
 }

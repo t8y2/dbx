@@ -29,7 +29,7 @@ use crate::types::{ObjectSourceKind, SpatialColumn, SqlExportColumnSelection};
 static EXPORT_CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
 
-const EXPORT_CANCELLED_ERROR: &str = "Export cancelled";
+pub const EXPORT_CANCELLED_ERROR: &str = "Export cancelled";
 const EXPORT_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// MySQL scripts written by the exporter are always UTF-8: values are decoded off the

@@ -10111,7 +10111,7 @@ fn mysql_external_driver_url(config: &ConnectionConfig) -> Option<bool> {
         .map(|value| value.to_ascii_lowercase().starts_with("jdbc:mysql:"))
 }
 
-fn is_oracle_external_driver_config(config: &ConnectionConfig) -> bool {
+pub(crate) fn is_oracle_external_driver_config(config: &ConnectionConfig) -> bool {
     if config.db_type != DatabaseType::Jdbc {
         return false;
     }

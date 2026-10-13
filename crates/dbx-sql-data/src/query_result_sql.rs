@@ -466,7 +466,19 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
         return err("not_select");
     }
 
-    if options.database_type == Some(DatabaseType::OceanbaseOracle) && !rownum_wrapper_projection_is_safe(statement) {
+    // Oracle expands `SELECT *` over a derived table by name, so a projection
+    // with duplicate labels fails with ORA-00918 no matter how ORDER BY refers
+    // to the column. Sort the original statement by position instead.
+    let oracle_has_duplicate_labels = options.database_type == Some(DatabaseType::Oracle)
+        && options
+            .result_columns
+            .iter()
+            .enumerate()
+            .any(|(index, column)| options.result_columns[..index].iter().any(|candidate| candidate == column));
+    if oracle_has_duplicate_labels
+        || (options.database_type == Some(DatabaseType::OceanbaseOracle)
+            && !rownum_wrapper_projection_is_safe(statement))
+    {
         let Ok(statements) = Parser::parse_sql(&GenericDialect {}, statement) else {
             return err("unsupported");
         };
@@ -540,13 +552,7 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     let use_sort_ordinal = !use_derived_column_aliases
         && matches!(
             options.database_type,
-            Some(
-                DatabaseType::Dameng
-                    | DatabaseType::Oracle
-                    | DatabaseType::OceanbaseOracle
-                    | DatabaseType::SapHana
-                    | DatabaseType::Iris
-            )
+            Some(DatabaseType::Dameng | DatabaseType::OceanbaseOracle | DatabaseType::SapHana | DatabaseType::Iris)
         )
         && options.result_columns.get(options.column_index).is_some_and(|column| {
             options.result_columns.iter().filter(|candidate| candidate.eq_ignore_ascii_case(column)).count() > 1
@@ -6475,10 +6481,67 @@ WHERE u.id = picked.id;
             direction: QuerySortDirection::Asc,
         });
 
+        assert_eq!(result.sql.unwrap(), "SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id ORDER BY 1 ASC;");
+    }
+
+    #[test]
+    fn oracle_sort_with_duplicate_labels_does_not_wrap_the_query() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "select c1, t.* from dbx_eval_t t order by c1".to_string(),
+            database_type: Some(DatabaseType::Oracle),
+            result_columns: vec!["C1".to_string(), "C1".to_string(), "C2".to_string()],
+            column_index: 2,
+            column: "C2".to_string(),
+            direction: QuerySortDirection::Desc,
+        });
+
+        assert_eq!(result.sql.unwrap(), "select c1, t.* from dbx_eval_t t ORDER BY 3 DESC;");
+    }
+
+    #[test]
+    fn oracle_sort_with_duplicate_labels_rejects_row_limiting_clause() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT c1, t.* FROM dbx_eval_t t FETCH FIRST 10 ROWS ONLY".to_string(),
+            database_type: Some(DatabaseType::Oracle),
+            result_columns: vec!["C1".to_string(), "C1".to_string(), "C2".to_string()],
+            column_index: 0,
+            column: "C1".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+
+        assert!(!result.ok);
+        assert_eq!(result.reason.as_deref(), Some("unsupported"));
+    }
+
+    #[test]
+    fn oracle_sort_with_case_distinct_quoted_labels_keeps_the_derived_table() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT id AS \"x\", id AS \"X\" FROM t WHERE ROWNUM <= 10".to_string(),
+            database_type: Some(DatabaseType::Oracle),
+            result_columns: vec!["x".to_string(), "X".to_string()],
+            column_index: 1,
+            column: "X".to_string(),
+            direction: QuerySortDirection::Desc,
+        });
+
         assert_eq!(
             result.sql.unwrap(),
-            "SELECT * FROM (SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id) t ORDER BY 1 ASC;"
+            "SELECT * FROM (SELECT id AS \"x\", id AS \"X\" FROM t WHERE ROWNUM <= 10) t ORDER BY \"X\" DESC;"
         );
+    }
+
+    #[test]
+    fn oracle_sort_without_duplicate_labels_keeps_the_derived_table() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT * FROM dbx_eval_t".to_string(),
+            database_type: Some(DatabaseType::Oracle),
+            result_columns: vec!["C1".to_string(), "C2".to_string()],
+            column_index: 1,
+            column: "C2".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT * FROM dbx_eval_t) t ORDER BY \"C2\" ASC;");
     }
 
     #[test]

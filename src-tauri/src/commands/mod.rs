@@ -9,6 +9,7 @@ pub mod connection;
 #[allow(dead_code, unused_imports)]
 mod connection_secrets;
 pub mod csv_export;
+pub mod dameng_dump;
 pub mod data_compare;
 pub mod database_export;
 pub mod deep_link;

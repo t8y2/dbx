@@ -32,11 +32,13 @@ type EditorState = {
   modelValue: string;
   formatRequestId: number | undefined;
   compressRequestId: number | undefined;
+  keywordCaseRequestId: number | undefined;
+  keywordCaseRequestMode: "upper" | "lower" | undefined;
 };
 
 const WAIT = { timeout: 5000, interval: 20 };
 
-function mountEditor(initial: { modelValue: string; tabId: string; databaseType?: DatabaseType; formatRequestId?: number; compressRequestId?: number }) {
+function mountEditor(initial: { modelValue: string; tabId: string; databaseType?: DatabaseType; formatRequestId?: number; compressRequestId?: number; keywordCaseRequestId?: number; keywordCaseRequestMode?: "upper" | "lower" }) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const state = reactive<EditorState>({
@@ -44,6 +46,8 @@ function mountEditor(initial: { modelValue: string; tabId: string; databaseType?
     modelValue: initial.modelValue,
     formatRequestId: initial.formatRequestId,
     compressRequestId: initial.compressRequestId,
+    keywordCaseRequestId: initial.keywordCaseRequestId,
+    keywordCaseRequestMode: initial.keywordCaseRequestMode,
   });
   const emits: string[] = [];
   const formatErrors: string[] = [];
@@ -58,6 +62,8 @@ function mountEditor(initial: { modelValue: string; tabId: string; databaseType?
         autoFocus: false,
         formatRequestId: state.formatRequestId,
         compressRequestId: state.compressRequestId,
+        keywordCaseRequestId: state.keywordCaseRequestId,
+        keywordCaseRequestMode: state.keywordCaseRequestMode,
         "onUpdate:modelValue": (value: string) => {
           emits.push(value);
           // Mirror the app: App.vue writes the emitted text back into the tab
@@ -295,5 +301,73 @@ describe("QueryEditor format/compress request replay", () => {
       expect(editorView.state.selection.main.from).toBe(0);
       expect(editorView.state.selection.main.to).toBe(editorView.state.doc.length);
     }
+  });
+
+  // #11828: the toolbar `a`/`A` button used to only flip the formatter
+  // preference, so clicking it left the text untouched and read as broken.
+  it("re-cases keywords in place for the whole document", async () => {
+    const source = "select id, name from users where status = 'active'";
+    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "keyword-case" });
+    await waitForEditor(host);
+
+    state.keywordCaseRequestMode = "upper";
+    state.keywordCaseRequestId = 1;
+    await vi.waitFor(() => expect(emits.at(-1)).toBe("SELECT id, name FROM users WHERE status = 'active'"), WAIT);
+  });
+
+  it("re-cases only the selected range when there is a selection", async () => {
+    const source = "select a from t";
+    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "keyword-case" });
+    await waitForEditor(host);
+    const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
+    const from = source.indexOf("from");
+    editorView.dispatch({ selection: { anchor: from, head: from + 4 } });
+
+    state.keywordCaseRequestMode = "upper";
+    state.keywordCaseRequestId = 2;
+    await vi.waitFor(() => expect(emits.at(-1)).toBe("select a FROM t"), WAIT);
+  });
+
+  it("keeps column names and string literals untouched while converting keywords", async () => {
+    // `status` / `note` are ordinary identifiers, and the literal's text must
+    // survive even though it contains keyword spellings.
+    const source = "select status, note from t where note = 'from where'";
+    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "keyword-case" });
+    await waitForEditor(host);
+
+    state.keywordCaseRequestMode = "upper";
+    state.keywordCaseRequestId = 3;
+    await vi.waitFor(() => expect(emits.at(-1)).toBe("SELECT status, note FROM t WHERE note = 'from where'"), WAIT);
+  });
+
+  it("does not re-case a non-SQL document such as an Elasticsearch request", async () => {
+    const source = "GET /_search\n{}";
+    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "es", databaseType: "elasticsearch" });
+    await waitForEditor(host);
+
+    state.keywordCaseRequestMode = "upper";
+    state.keywordCaseRequestId = 4;
+    await settle();
+    await settle();
+
+    expect(emits).toEqual([]);
+  });
+
+  it("does not replay a stale keyword-case request on a fresh mount", async () => {
+    const first = mountEditor({ modelValue: "select 1", tabId: "keyword-case" });
+    await waitForEditor(first.host);
+    first.state.keywordCaseRequestMode = "upper";
+    first.state.keywordCaseRequestId = 5;
+    await vi.waitFor(() => expect(first.emits.at(-1)).toBe("SELECT 1"), WAIT);
+    first.unmount();
+
+    // A remount re-arms the same stale id; the module-scope cursor must consume
+    // it instead of converting again.
+    const second = mountEditor({ modelValue: "SELECT 1", tabId: "keyword-case", keywordCaseRequestId: 5, keywordCaseRequestMode: "upper" });
+    await waitForEditor(second.host);
+    await settle();
+    await settle();
+
+    expect(second.emits).toEqual([]);
   });
 });

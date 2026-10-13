@@ -5201,6 +5201,10 @@ function isShiftEnterShortcut(event: KeyboardEvent): boolean {
   return !event.isComposing && event.key === "Enter" && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
 }
 
+function isPlainStructureRefreshShortcut(event: KeyboardEvent): boolean {
+  return !event.isComposing && !event.repeat && event.key === "F5" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+}
+
 function isPlainModDeleteShortcut(event: KeyboardEvent): boolean {
   if (isPlainModShortcut(event, "delete")) return true;
   if (!event.metaKey || event.ctrlKey || !isPlainModShortcut(event, "backspace")) return false;
@@ -5211,6 +5215,22 @@ function isPlainModDeleteShortcut(event: KeyboardEvent): boolean {
 }
 
 function onStructureEditorKeydown(event: KeyboardEvent) {
+  // Desktop blocks F5 before this bubble listener and marks it defaultPrevented.
+  // Handle the shortcut first so that guard still refreshes the open table (#11850).
+  if (isPlainStructureRefreshShortcut(event)) {
+    // Only react when the keypress originates inside this editor: the listener is
+    // window-level and every activated structure editor registers one, so without
+    // this check a plain F5 typed into another editor group (where F5 is the global
+    // refresh-data shortcut) would silently discard THIS editor's unsaved drafts.
+    const target = event.target;
+    if (!(target instanceof Element) || !rootRef.value?.contains(target)) return;
+    if (target.closest('[role="dialog"], [role="alertdialog"]')) return;
+    if (isCreateMode.value) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!loading.value && !saving.value && !ddlLoading.value) void reloadStructureFromDatabase();
+    return;
+  }
   if (event.defaultPrevented) return;
   if (activeTab.value === "columns" && !eventTargetUsesNativeClipboard(event)) {
     if (isPlainClipboardShortcut(event, "a")) {
@@ -5629,7 +5649,7 @@ watch(
       <Database :class="[structureIconClass, 'text-muted-foreground']" />
       <span class="min-w-0 flex-1 truncate font-medium">{{ targetLabel || t("editor.noDatabase") }}</span>
       <Badge variant="outline">{{ connection?.driver_label || databaseType }}</Badge>
-      <Button v-if="!isCreateMode" variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="loading || saving || ddlLoading" @click="reloadStructureFromDatabase">
+      <Button v-if="!isCreateMode" variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="loading || saving || ddlLoading" :title="t('structureEditor.refresh') + ' (F5)'" aria-keyshortcuts="F5" data-refresh-structure-shortcut @click="reloadStructureFromDatabase">
         <RefreshCw :class="structureIconClass" />
         {{ t("structureEditor.refresh") }}
       </Button>

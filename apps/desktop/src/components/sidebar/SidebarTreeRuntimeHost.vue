@@ -33,6 +33,8 @@ import {
   Plug,
   Unplug,
   Pin,
+  Package,
+  PackageOpen,
   PlugZap,
   ArrowRightLeft,
   Download,
@@ -237,6 +239,7 @@ import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructur
 import { formatSidebarTableCopyText, type FormatSidebarTableNamesOptions } from "@/lib/sidebar/sidebarTableNameCopy";
 import { supportsScheduledDatabaseBackup } from "@/lib/backup/scheduledDatabaseBackup";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { passwordViewerEnabled } from "@/lib/security/passwordViewer";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { buildConnectionUrlCopy, CONNECTION_URL_COPY_WITH_PASSWORD_FORMATS, connectionUrlCopyFormats, type ConnectionUrlCopyFormat } from "@/lib/connection/connectionUrlBuilder";
 import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/savedSqlHistory";
@@ -509,6 +512,7 @@ const { copyStructureAs, copyStructureDocText, copyStructurePreview, exportData,
 
 const {
   openAllDatabasesExport,
+  openDamengDump,
   openDataCompare,
   openDatabaseExport,
   openDatabaseSearch,
@@ -2680,7 +2684,7 @@ function connectionUrlCopyMenuItem(databaseOverride?: string): ContextMenuItem |
   const node = activeNode.value;
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
   if (!config) return null;
-  const formats = connectionUrlCopyFormats(config);
+  const formats = connectionUrlCopyFormats(config).filter((format) => passwordViewerEnabled.value || !CONNECTION_URL_COPY_WITH_PASSWORD_FORMATS.has(format));
   if (formats.length === 0) return null;
   return {
     sidebarActionId: "contextMenu.copyConnectionInfo",
@@ -6399,6 +6403,12 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ sidebarActionId: "diff.title", label: t("diff.title"), action: openSchemaDiff, icon: ArrowRightLeft });
     items.push({ sidebarActionId: "dataCompare.title", label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
     items.push({ sidebarActionId: "contextMenu.exportDatabase", label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
+    // Native dexp/dimp (.dmp) shortcut — Dameng only; the dialog guides the user
+    // to the client bin-dir setting when the tools are not installed.
+    if (currentDatabaseType() === "dameng") {
+      items.push({ sidebarActionId: "damengDump.menuExport", label: t("damengDump.menuExport"), action: () => openDamengDump("export"), icon: Package });
+      items.push({ sidebarActionId: "damengDump.menuImport", label: t("damengDump.menuImport"), action: () => openDamengDump("import"), icon: PackageOpen });
+    }
     if (canOpenDataDictionary.value) {
       items.push({ sidebarActionId: "dataDictionary.title", label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
     }

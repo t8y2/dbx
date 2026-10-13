@@ -120,7 +120,7 @@ Do not assume that every DDL feature is editable because a database can connect.
 - Drafts are based on metadata read when the editor opened and do not merge external schema changes automatically
 - If execution fails, earlier statements may already have succeeded
 - Atomicity of SQLite rebuilds and multi-statement DDL depends on database and driver behavior
-- Refresh reloads structure and may require discarding an unsaved draft
+- F5 or the toolbar Refresh Structure action reloads structure and may require discarding an unsaved draft
 - Read-only connections block save, and production writes require explicit confirmation every time
 
 ## Recommendations

@@ -59,6 +59,8 @@ pub struct WebState {
     pub public_base_path: String,
     /// 仅 `DBX_DISABLE_PASSWORD=1` 时为 true：所有请求放行（无认证）。
     pub password_disabled: bool,
+    /// Whether the web UI may reveal saved connection passwords.
+    pub password_viewer_enabled: bool,
     /// `DBX_DEMO_MODE`：公网演示部署的封锁开关（见 `demo` 模块）。
     pub demo_mode: bool,
     /// `DBX_TRUST_PROXY=1`：客户端 IP 优先取 `X-Forwarded-For` 首值。
@@ -162,6 +164,7 @@ impl WebState {
             notes_roots: Vec::new(),
             public_base_path: "/".to_string(),
             password_disabled: false,
+            password_viewer_enabled: true,
             demo_mode: false,
             trust_proxy: false,
             password_hash: RwLock::new(None),

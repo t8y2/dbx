@@ -933,7 +933,12 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       if (localResult) {
         scheduleCompletionMetadataRefresh(completionContext, fullDoc, position, completionScope);
         const hasLocalColumnResult = localResult.options.some((option) => option.type === "column");
-        if ((!explicit || typedActivation) && (!shouldResolveColumnCompletion || hasLocalColumnResult)) return localResult;
+        // A local snippet hit may skip the async column fetch, but not for on-demand-only
+        // column metadata (trino/presto): their fetch is never re-triggered from the
+        // metadata cache, so short-circuiting here would suppress column suggestions
+        // for as long as the typed prefix keeps matching the snippet prefix.
+        const hasLocalSnippetResult = !usesOnDemandOnlyCompletionColumns() && localResult.options.some((option) => option.type === "snippet");
+        if ((!explicit || typedActivation) && (!shouldResolveColumnCompletion || hasLocalColumnResult || hasLocalSnippetResult)) return localResult;
       }
       if ((!explicit || typedActivation) && !shouldResolveAsyncCompletion) {
         scheduleCompletionMetadataRefresh(completionContext, fullDoc, position, completionScope);

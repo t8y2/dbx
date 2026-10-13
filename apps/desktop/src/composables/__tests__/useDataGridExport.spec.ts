@@ -1001,6 +1001,121 @@ describe("useDataGridExport prepared row statements", () => {
     expect(copyToClipboard).toHaveBeenCalledWith("2020-12-02 15:18:29");
   });
 
+  it("copies Oracle temporal cells using the displayed value via copyWithPreference", async () => {
+    const table: DataGridTableMeta = {
+      tableName: "events",
+      columns: [{ name: "created_at", data_type: "timestamp", is_nullable: true }],
+      primaryKeys: [],
+    };
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0],
+      columns: ["created_at"],
+      rows: [["2020-12-02T15:18:29"]],
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
+      text: "2020-12-02 15:18:29",
+      mimeType: "text/plain",
+      fileExtension: "txt",
+      rowCount: 1,
+      columnCount: 1,
+    });
+    const state = createExportState(table, ["created_at"], matrix, ["2020-12-02T15:18:29"], undefined, [["2020-12-02T15:18:29"]], [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 0, "oracle", () => "2020-12-02 15:18:29");
+
+    await state.copyWithPreference("smart");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rows: [["2020-12-02 15:18:29"]],
+      }),
+    );
+    expect(copyToClipboard).toHaveBeenCalledWith("2020-12-02 15:18:29");
+  });
+
+  it("copies OceanBase-Oracle temporal cells using the displayed value", async () => {
+    const table: DataGridTableMeta = {
+      tableName: "events",
+      columns: [{ name: "created_at", data_type: "date", is_nullable: true }],
+      primaryKeys: [],
+    };
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0],
+      columns: ["created_at"],
+      rows: [["2020-12-02T15:18:29"]],
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
+      text: "2020-12-02 15:18:29",
+      mimeType: "text/plain",
+      fileExtension: "txt",
+      rowCount: 1,
+      columnCount: 1,
+    });
+    const state = createExportState(table, ["created_at"], matrix, ["2020-12-02T15:18:29"], undefined, [["2020-12-02T15:18:29"]], [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 0, "oceanbase-oracle", () => "2020-12-02 15:18:29");
+
+    await state.copyCell();
+    expect(copyToClipboard).toHaveBeenCalledWith("2020-12-02 15:18:29");
+
+    await state.copyWithPreference("smart");
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rows: [["2020-12-02 15:18:29"]],
+      }),
+    );
+  });
+
+  it("copies all rows with Oracle temporal cells formatted using the displayed value", async () => {
+    const table: DataGridTableMeta = {
+      tableName: "events",
+      columns: [{ name: "created_at", data_type: "timestamp", is_nullable: true }],
+      primaryKeys: [],
+    };
+    const state = createExportState(table, ["created_at"], undefined, undefined, undefined, [["2020-12-02T15:18:29"]], [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 0, "oracle", () => "2020-12-02 15:18:29");
+
+    await state.copyAll();
+
+    expect(copyToClipboard).toHaveBeenCalledWith("created_at\n2020-12-02 15:18:29");
+  });
+
+  it("copies rows as JSON with Oracle temporal cells formatted using the displayed value", async () => {
+    const table: DataGridTableMeta = {
+      tableName: "events",
+      columns: [{ name: "created_at", data_type: "timestamp", is_nullable: true }],
+      primaryKeys: [],
+    };
+    const state = createExportState(table, ["created_at"], undefined, undefined, undefined, [["2020-12-02T15:18:29"]], [1], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 0, "oracle", () => "2020-12-02 15:18:29");
+
+    await state.copyRow();
+
+    expect(copyToClipboard).toHaveBeenCalledWith(JSON.stringify({ created_at: "2020-12-02 15:18:29" }, null, 2));
+  });
+
+  it("keeps the raw Oracle temporal value for SQL extractors even with a display formatter", async () => {
+    const table: DataGridTableMeta = {
+      tableName: "events",
+      columns: [{ name: "created_at", data_type: "timestamp", is_nullable: true }],
+      primaryKeys: [],
+    };
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0],
+      columns: ["created_at"],
+      rows: [["2020-12-02T15:18:29"]],
+    };
+    const state = createExportState(table, ["created_at"], matrix, ["2020-12-02T15:18:29"], undefined, [["2020-12-02T15:18:29"]], [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 0, "oracle", () => "2020-12-02 15:18:29");
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "SELECT * FROM events WHERE created_at = ...", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
+
+    expect(state.canCopyWithExtractor("sql-select")).toBe(true);
+    await state.copyWithExtractor("sql-select");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "sql-select",
+        rows: [["2020-12-02T15:18:29"]],
+      }),
+    );
+  });
+
   it("copies all rows with the null literal for NULL cells", async () => {
     const text = "id\tname\n1\t\\N\n2\tAda";
     const state = createExportState(editableTable, ["id", "name"], undefined, undefined, undefined, [

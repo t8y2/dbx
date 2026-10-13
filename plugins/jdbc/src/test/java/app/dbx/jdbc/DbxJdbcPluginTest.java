@@ -6472,4 +6472,27 @@ final class DbxJdbcPluginTest {
             response.path("error").path("message").asText()
         );
     }
+
+    @Test
+    void oracleStatementTrimKeepsThePlSqlUnitTerminator() {
+        List<String> units = List.of(
+            "DECLARE\n  l NUMBER;\nBEGIN\n  l := 1;\nEND;",
+            "CREATE OR REPLACE EDITIONABLE FUNCTION \"APP\".\"F\" (p VARCHAR2) RETURN VARCHAR2 IS\n"
+                + "  l VARCHAR2(200);\nBEGIN\n  RETURN l;\nEND;",
+            "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;",
+            "CREATE OR REPLACE PACKAGE BODY pkg AS\n  FUNCTION f RETURN NUMBER IS\n  BEGIN\n    RETURN 1;\n  END;\nEND pkg;",
+            "-- leading comment\nBEGIN\n  NULL;\nEND;"
+        );
+        for (String unit : units) {
+            assertEquals(unit, DbxJdbcPlugin.trimStatementSql(unit, true));
+            assertEquals(unit, DbxJdbcPlugin.trimStatementSql(unit + "\n/", true));
+        }
+    }
+
+    @Test
+    void oracleStatementTrimStillDropsThePlainSqlSemicolon() {
+        assertEquals("SELECT 1 FROM DUAL", DbxJdbcPlugin.trimStatementSql("SELECT 1 FROM DUAL;", true));
+        assertEquals("BEGIN\n  NULL;\nEND IF", DbxJdbcPlugin.trimStatementSql("BEGIN\n  NULL;\nEND IF;", true));
+        assertEquals("BEGIN\n  NULL;\nEND", DbxJdbcPlugin.trimStatementSql("BEGIN\n  NULL;\nEND;", false));
+    }
 }

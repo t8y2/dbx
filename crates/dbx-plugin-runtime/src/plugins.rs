@@ -431,7 +431,29 @@ impl PluginDriverSession {
         if let Some(logical) = &self.logical {
             return logical.invoke(method, params, timeout_duration).await;
         }
-        self.sidecar.invoke_with_timeout(method, params, Some(&self.driver_id), timeout_duration).await
+        let mut params = params;
+        let mut cancel = self.cancel_statement_on_drop(&mut params);
+        let result = self.sidecar.invoke_with_timeout(method, params, Some(&self.driver_id), timeout_duration).await;
+        if let Some(cancel) = cancel.as_mut() {
+            cancel.token = None;
+        }
+        result
+    }
+
+    /// The JDBC plugin runs one statement at a time on its shared connection, so a request the host
+    /// abandons (the user pressed stop) would otherwise keep the next request waiting until the
+    /// database finishes it. Tagging the request lets the plugin cancel exactly that statement.
+    fn cancel_statement_on_drop(&self, params: &mut serde_json::Value) -> Option<CancelStatementOnDrop> {
+        if self.driver_id != "jdbc" {
+            return None;
+        }
+        let token = uuid::Uuid::new_v4().to_string();
+        params.as_object_mut()?.insert(JDBC_CANCEL_TOKEN_PARAM.into(), token.clone().into());
+        Some(CancelStatementOnDrop {
+            sidecar: self.sidecar.clone(),
+            driver_id: self.driver_id.clone(),
+            token: Some(token),
+        })
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
@@ -470,6 +492,40 @@ impl PluginDriverSession {
     ) -> Result<Self, String> {
         let activity = PluginLifecycle::default().begin_connection(&plugin.manifest.id, &driver_id)?;
         Self::start(plugin, driver_id, env!("CARGO_PKG_VERSION").to_string(), env, activity).await
+    }
+}
+
+const JDBC_CANCEL_STATEMENT_METHOD: &str = "cancelStatement";
+const JDBC_CANCEL_TOKEN_PARAM: &str = "cancelToken";
+const JDBC_CANCEL_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct CancelStatementOnDrop {
+    sidecar: Arc<PluginSidecarSession>,
+    driver_id: String,
+    token: Option<String>,
+}
+
+impl Drop for CancelStatementOnDrop {
+    fn drop(&mut self) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let sidecar = self.sidecar.clone();
+        let driver_id = std::mem::take(&mut self.driver_id);
+        handle.spawn(async move {
+            // Plugins without `cancelStatement` reply with an error once the abandoned statement ends.
+            let _: Result<serde_json::Value, _> = sidecar
+                .invoke_with_timeout(
+                    JDBC_CANCEL_STATEMENT_METHOD,
+                    serde_json::json!({ JDBC_CANCEL_TOKEN_PARAM: token }),
+                    Some(&driver_id),
+                    Some(JDBC_CANCEL_STATEMENT_TIMEOUT),
+                )
+                .await;
+        });
     }
 }
 
@@ -640,6 +696,89 @@ sleep 30
 
         assert!(!process_exists(pid));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropped_jdbc_request_cancels_its_statement_by_token() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("plugin.py");
+        std::fs::write(
+            &executable,
+            r#"#!/usr/bin/python3
+import json, os, sys
+root = os.path.dirname(__file__)
+for line in sys.stdin:
+    request = json.loads(line)
+    params = request.get('params', {})
+    if request['method'] == 'cancelStatement':
+        with open(os.path.join(root, 'cancelled'), 'w') as out:
+            out.write(params.get('cancelToken', ''))
+        print(json.dumps({'id': request['id'], 'result': {'cancelled': True}}), flush=True)
+    elif request['method'] == 'executeQuery' and params.get('sql') == 'slow':
+        with open(os.path.join(root, 'running'), 'w') as out:
+            out.write(params.get('cancelToken', ''))
+    else:
+        print(json.dumps({'id': request['id'], 'result': {'token': params.get('cancelToken')}}), flush=True)
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let plugin = InstalledPlugin::new(
+            PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                executable: Some("plugin.py".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..PluginManifest::default()
+            },
+            dir.path().to_path_buf(),
+            env!("CARGO_PKG_VERSION"),
+        );
+        let session = std::sync::Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
+        );
+
+        let completed: serde_json::Value = session.invoke("listTables", serde_json::json!({})).await.unwrap();
+        assert!(completed["token"].is_string(), "every JDBC request carries a cancel token");
+
+        let running = dir.path().join("running");
+        let slow_session = session.clone();
+        let slow = tokio::spawn(async move {
+            slow_session.invoke::<serde_json::Value>("executeQuery", serde_json::json!({ "sql": "slow" })).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !running.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        slow.abort();
+        assert!(slow.await.unwrap_err().is_cancelled());
+
+        let cancelled = dir.path().join("cancelled");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !cancelled.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropping the request must send cancelStatement");
+        let slow_token = std::fs::read_to_string(&running).unwrap();
+        assert!(!slow_token.is_empty());
+        assert_eq!(std::fs::read_to_string(&cancelled).unwrap(), slow_token);
+        assert_ne!(completed["token"], slow_token.as_str(), "completed requests are never cancelled");
+        session.shutdown().await.unwrap();
     }
 
     #[cfg(unix)]

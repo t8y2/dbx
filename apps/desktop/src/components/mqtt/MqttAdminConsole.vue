@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { mqttGetBrokerInfo, mqttListTopics, mqttListSavedTopicConfigs, mqttGetMessages, mqttSubscribe, mqttUnsubscribe, mqttSaveTopicConfig, mqttDeleteTopicConfig, mqttClearMessages } from "@/lib/backend/api";
-import type { MqttBrokerInfo, MqttSavedTopic, MqttTopicNode, MqttMessage, MqttQoS } from "@/types/mqtt";
+import type { MqttBrokerInfo, MqttSavedTopic, MqttTopicNode, MqttMessage, MqttMessageDirection, MqttQoS } from "@/types/mqtt";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import TopicTreeNode from "./TopicTreeNode.vue";
@@ -25,6 +25,7 @@ interface MqttTabUiState {
   displayEncoding?: PayloadEncoding;
   topicSearch?: string;
   payloadSearch?: string;
+  messageDirectionFilter?: MqttMessageDirectionFilter;
   showSubscriptionDialog?: boolean;
   formTopic?: string;
   formQos?: MqttQoS;
@@ -38,6 +39,8 @@ interface MqttMessagePreview extends MqttMessage {
   previewKey: string;
   payloadElementId: string;
 }
+
+type MqttMessageDirectionFilter = "all" | MqttMessageDirection;
 
 const { initialState: restoredUiState, track: trackUiState } = useTabUiState<MqttTabUiState>({}, "MqttAdminConsole");
 
@@ -56,6 +59,7 @@ const messagesPaused = ref(restoredUiState.messagesPaused ?? false);
 const displayEncoding = ref<PayloadEncoding>(restoredUiState.displayEncoding ?? "plaintext");
 const topicSearch = ref(restoredUiState.topicSearch ?? "");
 const payloadSearch = ref(restoredUiState.payloadSearch ?? "");
+const messageDirectionFilter = ref<MqttMessageDirectionFilter>(restoredUiState.messageDirectionFilter ?? "all");
 const showSubscriptionDialog = ref(restoredUiState.showSubscriptionDialog ?? false);
 const savingSubscription = ref(false);
 const formTopic = ref(restoredUiState.formTopic ?? "");
@@ -64,6 +68,7 @@ const formNoLocal = ref(restoredUiState.formNoLocal ?? false);
 const formEnabled = ref(restoredUiState.formEnabled ?? true);
 const editingTopic = ref<string | null>(restoredUiState.editingTopic ?? null);
 const MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY = "dbx-mqtt-publish-panel-collapsed";
+const MQTT_MESSAGE_HISTORY_LIMIT = 400;
 const publishPanelCollapsed = ref(restoredUiState.publishPanelCollapsed ?? safeLocalStorageGet(MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY) === "true");
 
 trackUiState(() => ({
@@ -72,6 +77,7 @@ trackUiState(() => ({
   displayEncoding: displayEncoding.value,
   topicSearch: topicSearch.value,
   payloadSearch: payloadSearch.value,
+  messageDirectionFilter: messageDirectionFilter.value,
   showSubscriptionDialog: showSubscriptionDialog.value,
   formTopic: formTopic.value,
   formQos: formQos.value,
@@ -138,10 +144,15 @@ const messagePreviews = computed<MqttMessagePreview[]>(() => {
   });
 });
 
+const directionFilteredMessages = computed(() => {
+  if (messageDirectionFilter.value === "all") return messagePreviews.value;
+  return messagePreviews.value.filter((msg) => (msg.direction ?? "received") === messageDirectionFilter.value);
+});
+
 const filteredMessages = computed(() => {
   const query = payloadSearch.value.trim().toLowerCase();
-  if (!query) return messagePreviews.value;
-  return messagePreviews.value.filter((msg) => messagePayloadText(msg).toLowerCase().includes(query));
+  if (!query) return directionFilteredMessages.value;
+  return directionFilteredMessages.value.filter((msg) => messagePayloadText(msg).toLowerCase().includes(query));
 });
 
 async function refreshData() {
@@ -150,7 +161,7 @@ async function refreshData() {
       mqttGetBrokerInfo(props.connectionId) as Promise<MqttBrokerInfo>,
       mqttListTopics(props.connectionId) as Promise<[string, string][]>,
       mqttListSavedTopicConfigs(props.connectionId) as Promise<MqttSavedTopic[]>,
-      mqttGetMessages(props.connectionId, selectedTopic.value || undefined, 50) as Promise<MqttMessage[]>,
+      mqttGetMessages(props.connectionId, selectedTopic.value || undefined, MQTT_MESSAGE_HISTORY_LIMIT) as Promise<MqttMessage[]>,
     ]);
     brokerInfo.value = info;
     subscribedTopics.value = active;
@@ -305,7 +316,7 @@ function startPolling() {
   pollingTimer.value = setInterval(async () => {
     if (messagesPaused.value) return;
     try {
-      const nextMessages = (await mqttGetMessages(props.connectionId, selectedTopic.value || undefined, 50)) as MqttMessage[];
+      const nextMessages = (await mqttGetMessages(props.connectionId, selectedTopic.value || undefined, MQTT_MESSAGE_HISTORY_LIMIT)) as MqttMessage[];
       if (!messagesPaused.value) messages.value = nextMessages;
     } catch {
       /* ignore polling errors */
@@ -424,6 +435,38 @@ onUnmounted(stopPolling);
             <span v-if="selectedTopic" class="min-w-0 truncate">{{ t("connection.mqttMessagesForTopic", { topic: selectedTopic }) }}</span>
             <span v-else class="min-w-0 truncate">{{ t("connection.mqttAllMessages") }}</span>
             <div class="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+              <div class="inline-flex h-6 shrink-0 items-center rounded-md border p-0.5" role="group" :aria-label="t('connection.mqttMessageDirectionFilterLabel')">
+                <button
+                  type="button"
+                  data-testid="mqtt-direction-filter-all"
+                  class="h-5 rounded px-1.5 text-[10px] font-normal transition-colors"
+                  :class="messageDirectionFilter === 'all' ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'"
+                  :aria-pressed="messageDirectionFilter === 'all'"
+                  @click="messageDirectionFilter = 'all'"
+                >
+                  {{ t("connection.mqttDirectionFilterAll") }}
+                </button>
+                <button
+                  type="button"
+                  data-testid="mqtt-direction-filter-received"
+                  class="h-5 rounded px-1.5 text-[10px] font-normal transition-colors"
+                  :class="messageDirectionFilter === 'received' ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'"
+                  :aria-pressed="messageDirectionFilter === 'received'"
+                  @click="messageDirectionFilter = 'received'"
+                >
+                  {{ t("connection.mqttDirectionFilterReceived") }}
+                </button>
+                <button
+                  type="button"
+                  data-testid="mqtt-direction-filter-sent"
+                  class="h-5 rounded px-1.5 text-[10px] font-normal transition-colors"
+                  :class="messageDirectionFilter === 'sent' ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'"
+                  :aria-pressed="messageDirectionFilter === 'sent'"
+                  @click="messageDirectionFilter = 'sent'"
+                >
+                  {{ t("connection.mqttDirectionFilterSent") }}
+                </button>
+              </div>
               <input
                 v-model="payloadSearch"
                 data-testid="mqtt-payload-search"
@@ -432,7 +475,7 @@ onUnmounted(stopPolling);
                 :aria-label="t('connection.mqttSearchPayloadPlaceholder')"
               />
               <span data-testid="mqtt-message-count" class="font-normal" aria-live="polite">
-                <template v-if="payloadSearch.trim()">{{ filteredMessages.length }} / {{ messages.length }}</template>
+                <template v-if="payloadSearch.trim() || messageDirectionFilter !== 'all'">{{ filteredMessages.length }} / {{ messages.length }}</template>
                 <template v-else>{{ messages.length }}</template>
               </span>
               <select v-model="displayEncoding" class="h-6 rounded border bg-transparent px-1.5 text-[11px] text-muted-foreground outline-none">

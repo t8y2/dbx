@@ -967,6 +967,8 @@ export interface EditorSettings {
   refreshDdlOnOpen: boolean;
   excludeDdlStorage: boolean;
   vimModeEnabled: boolean;
+  /** 是否允许按 F7 切换浏览器的插入光标浏览模式（关闭时拦截 F7 避免误触）。 */
+  caretBrowsingEnabled: boolean;
   /** Double click inside a string literal selects the whole value ("content") or a single word ("word"). */
   doubleClickStringSelectionMode: DoubleClickStringSelectionMode;
   autoCloseBrackets: boolean;
@@ -1018,6 +1020,12 @@ export interface EditorSettings {
    * is OCI; the connection dialog backfills it and edits write it back here.
    */
   oracleOciClientPath: string;
+  /**
+   * Dameng client bin directory (the directory that contains dexp/dimp).
+   * Shared by every Dameng connection's native .dmp export/import; the tools
+   * ship with the DM client install and are not bundled with DBX.
+   */
+  damengClientBinDir: string;
   /**
    * Client character set for OCI connections, injected as the NLS_LANG
    * environment variable when the OCI agent starts. Empty keeps the OCI
@@ -1322,6 +1330,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   refreshDdlOnOpen: false,
   excludeDdlStorage: true,
   vimModeEnabled: false,
+  caretBrowsingEnabled: false,
   doubleClickStringSelectionMode: "content",
   autoCloseBrackets: true,
   restoreSqlFromSourcePasteEnabled: true,
@@ -1363,6 +1372,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showColumnHeaderTooltips: true,
   showResultSourceDatabase: true,
   oracleOciClientPath: "",
+  damengClientBinDir: "",
   oracleOciNlsLang: "",
   oracleOciTnsAdmin: "",
   resultTabNamingMode: "source",
@@ -1969,6 +1979,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     ddlOpenMode: settings.ddlOpenMode === "tab" ? "tab" : DEFAULT_EDITOR_SETTINGS.ddlOpenMode,
     refreshDdlOnOpen: typeof settings.refreshDdlOnOpen === "boolean" ? settings.refreshDdlOnOpen : DEFAULT_EDITOR_SETTINGS.refreshDdlOnOpen,
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
+    caretBrowsingEnabled: typeof settings.caretBrowsingEnabled === "boolean" ? settings.caretBrowsingEnabled : DEFAULT_EDITOR_SETTINGS.caretBrowsingEnabled,
     doubleClickStringSelectionMode: normalizeDoubleClickStringSelectionMode(settings.doubleClickStringSelectionMode),
     autoCloseBrackets: typeof settings.autoCloseBrackets === "boolean" ? settings.autoCloseBrackets : DEFAULT_EDITOR_SETTINGS.autoCloseBrackets,
     restoreSqlFromSourcePasteEnabled: typeof settings.restoreSqlFromSourcePasteEnabled === "boolean" ? settings.restoreSqlFromSourcePasteEnabled : DEFAULT_EDITOR_SETTINGS.restoreSqlFromSourcePasteEnabled,
@@ -2012,6 +2023,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     oracleOciNlsLang: typeof settings.oracleOciNlsLang === "string" ? settings.oracleOciNlsLang.trim() : "",
     oracleOciTnsAdmin: typeof settings.oracleOciTnsAdmin === "string" ? settings.oracleOciTnsAdmin.trim() : "",
     oracleOciClientPath: typeof settings.oracleOciClientPath === "string" ? settings.oracleOciClientPath.trim() : "",
+    damengClientBinDir: typeof settings.damengClientBinDir === "string" ? settings.damengClientBinDir.trim() : "",
     resultTabNamingMode: normalizeResultTabNamingMode(settings.resultTabNamingMode),
     resultTabPreferComments: settings.resultTabPreferComments !== false,
     dataGridShowTransposeFieldMetadata: settings.dataGridShowTransposeFieldMetadata === true,
@@ -2847,6 +2859,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.ddlOpenMode !== undefined) editorSettings.value.ddlOpenMode = partial.ddlOpenMode === "tab" ? "tab" : "dialog";
     if (partial.refreshDdlOnOpen !== undefined) editorSettings.value.refreshDdlOnOpen = partial.refreshDdlOnOpen === true;
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;
+    if (partial.caretBrowsingEnabled !== undefined) editorSettings.value.caretBrowsingEnabled = partial.caretBrowsingEnabled === true;
     if (partial.doubleClickStringSelectionMode !== undefined) editorSettings.value.doubleClickStringSelectionMode = normalizeDoubleClickStringSelectionMode(partial.doubleClickStringSelectionMode);
     if (partial.autoCloseBrackets !== undefined) editorSettings.value.autoCloseBrackets = partial.autoCloseBrackets === true;
     if (partial.restoreSqlFromSourcePasteEnabled !== undefined) editorSettings.value.restoreSqlFromSourcePasteEnabled = partial.restoreSqlFromSourcePasteEnabled === true;
@@ -2893,6 +2906,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.oracleOciNlsLang !== undefined) editorSettings.value.oracleOciNlsLang = partial.oracleOciNlsLang.trim();
     if (partial.oracleOciTnsAdmin !== undefined) editorSettings.value.oracleOciTnsAdmin = partial.oracleOciTnsAdmin.trim();
     if (partial.oracleOciClientPath !== undefined) editorSettings.value.oracleOciClientPath = partial.oracleOciClientPath.trim();
+    if (partial.damengClientBinDir !== undefined) editorSettings.value.damengClientBinDir = partial.damengClientBinDir.trim();
     if (partial.resultTabNamingMode !== undefined) editorSettings.value.resultTabNamingMode = normalizeResultTabNamingMode(partial.resultTabNamingMode);
     if (partial.resultTabPreferComments !== undefined) editorSettings.value.resultTabPreferComments = partial.resultTabPreferComments !== false;
     if (partial.dataGridShowTransposeFieldMetadata !== undefined) editorSettings.value.dataGridShowTransposeFieldMetadata = partial.dataGridShowTransposeFieldMetadata === true;

@@ -3094,6 +3094,10 @@ impl OraclePlSqlBlock {
             }
             None => Vec::new(),
         };
+        // A stored PROCEDURE/FUNCTION has no DECLARE keyword: its declare section
+        // starts right after its own IS/AS. Opening it there lets a local subprogram
+        // own its BEGIN ... END instead of ending the routine.
+        let mut awaiting_routine_declarations = self.is_create_routine();
         let mut saw_begin = false;
         let mut complete = false;
 
@@ -3105,7 +3109,10 @@ impl OraclePlSqlBlock {
                 continue;
             }
 
-            if token.is_word("DECLARE") {
+            if awaiting_routine_declarations && token.is_any_word(&["IS", "AS"]) {
+                awaiting_routine_declarations = false;
+                scopes.push(OraclePlSqlScope::Declaration);
+            } else if token.is_word("DECLARE") {
                 if !matches!(scopes.last(), Some(OraclePlSqlScope::Declaration)) {
                     scopes.push(OraclePlSqlScope::Declaration);
                 }
@@ -3175,10 +3182,36 @@ impl OraclePlSqlBlock {
             [object, body, ..] if object.is_any_word(&["PACKAGE", "TYPE"]) && body.is_word("BODY") => {
                 Some(OraclePlSqlCreateObjectKind::Body)
             }
+            // A compound trigger's timing-point sections each own a BEGIN ... END
+            // <timing point>, and only the outer END [trigger] finishes it.
+            [object, header @ ..] if object.is_word("TRIGGER") && Self::is_compound_trigger_header(header) => {
+                Some(OraclePlSqlCreateObjectKind::Body)
+            }
             // Only PACKAGE specs lack BEGIN; plain TYPE objects are ordinary SQL.
             [object, ..] if object.is_word("PACKAGE") => Some(OraclePlSqlCreateObjectKind::Spec),
             _ => None,
         }
+    }
+
+    /// Whether a trigger header (the tokens after `TRIGGER`) declares a `COMPOUND TRIGGER`.
+    /// Only the header is inspected: it ends at the body of a simple trigger.
+    fn is_compound_trigger_header(tokens: &[OraclePlSqlToken]) -> bool {
+        let header_end = tokens
+            .iter()
+            .position(|token| token.is_semicolon() || token.is_any_word(&["BEGIN", "DECLARE", "CALL"]))
+            .unwrap_or(tokens.len());
+        tokens[..header_end].windows(2).any(|pair| pair[0].is_word("COMPOUND") && pair[1].is_word("TRIGGER"))
+    }
+
+    /// `CREATE [OR REPLACE] [EDITIONABLE] PROCEDURE|FUNCTION ...`.
+    fn is_create_routine(&self) -> bool {
+        let [first, rest @ ..] = self.tokens.as_slice() else {
+            return false;
+        };
+        first.is_word("CREATE")
+            && Self::skip_create_modifiers(rest)
+                .first()
+                .is_some_and(|object| object.is_any_word(&["PROCEDURE", "FUNCTION"]))
     }
 
     /// Skip OR REPLACE / FORCE / NOFORCE / EDITIONABLE modifiers after CREATE.
@@ -4772,6 +4805,57 @@ SELECT 2 FROM DUMMY;";
         assert_eq!(
             split_sql_statements_for_database(&sql, DatabaseType::Oracle),
             vec![block.to_string(), "SELECT 1 FROM dual".to_string()]
+        );
+    }
+
+    // A stored routine declares its local subprograms right after its own IS/AS, with
+    // no DECLARE keyword, so their END must not finish the routine.
+    #[test]
+    fn oracle_split_keeps_stored_routines_with_local_subprograms_together() {
+        let cases = [
+            "CREATE OR REPLACE EDITIONABLE PROCEDURE \"A\".\"P\" AS\n  PROCEDURE inner_p IS BEGIN NULL; END;\nBEGIN\n  inner_p;\nEND;",
+            "CREATE PROCEDURE p(x NUMBER) IS\n  v NUMBER;\n  PROCEDURE inner_p IS\n  BEGIN\n    NULL;\n  END inner_p;\nBEGIN\n  inner_p;\nEND p;",
+            "CREATE OR REPLACE FUNCTION f RETURN NUMBER AS\n  FUNCTION g RETURN NUMBER IS BEGIN RETURN 1; END g;\nBEGIN\n  RETURN g;\nEND;",
+            "CREATE OR REPLACE PROCEDURE p AS\n  PROCEDURE fwd(x NUMBER);\n  PROCEDURE fwd(x NUMBER) IS BEGIN NULL; END;\nBEGIN\n  fwd(1);\nEND;",
+            "CREATE OR REPLACE PROCEDURE p AS\n  CURSOR c IS SELECT 1 FROM dual;\nBEGIN\n  NULL;\nEND;",
+        ];
+        for routine in cases {
+            for database in [DatabaseType::Oracle, DatabaseType::Dameng, DatabaseType::Xugu] {
+                assert_eq!(
+                    split_sql_statements_for_database(&format!("{routine}\nSELECT 1 FROM dual;"), database),
+                    vec![routine.to_string(), "SELECT 1 FROM dual".to_string()],
+                    "{database:?}: {routine}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_split_keeps_compound_trigger_together() {
+        let trigger = "\
+CREATE OR REPLACE EDITIONABLE TRIGGER \"A\".\"T\" FOR INSERT OR UPDATE ON \"A\".\"X\" COMPOUND TRIGGER
+  total NUMBER := 0;
+  BEFORE EACH ROW IS
+  BEGIN
+    IF :NEW.ID IS NULL THEN total := total + 1; END IF;
+  END BEFORE EACH ROW;
+  AFTER STATEMENT IS
+  BEGIN
+    NULL;
+  END AFTER STATEMENT;
+END \"T\";";
+        assert_eq!(
+            split_sql_statements_for_database(
+                &format!("{trigger}\nALTER TRIGGER \"A\".\"T\" ENABLE;"),
+                DatabaseType::Oracle
+            ),
+            vec![trigger.to_string(), "ALTER TRIGGER \"A\".\"T\" ENABLE".to_string()]
+        );
+        // A simple trigger still ends at its own END.
+        let simple = "CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN NULL; END;";
+        assert_eq!(
+            split_sql_statements_for_database(&format!("{simple}\nSELECT 1 FROM dual;"), DatabaseType::Oracle),
+            vec![simple.to_string(), "SELECT 1 FROM dual".to_string()]
         );
     }
 

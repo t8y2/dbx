@@ -19,11 +19,16 @@ import {
   queryEditorOpenFileAccept,
   queryEditorOpenFileFilters,
   readBrowserSqlFile,
+  relocateExternalSqlPathWithinFolder,
 } from "@/lib/sql/sqlFileOpen";
 
 describe("external SQL file paths", () => {
   it("normalizes Windows separators for identity checks", () => {
     expect(normalizeExternalSqlPath(" C:\\work\\demo.sql ")).toBe("C:/work/demo.sql");
+  });
+
+  it("preserves the backend UNC prefix when relocating a folder path", () => {
+    expect(relocateExternalSqlPathWithinFolder("\\\\server\\share\\old\\nested\\query.sql", "\\\\server\\share\\old", "\\\\server\\share\\renamed")).toBe("\\\\server\\share\\renamed/nested/query.sql");
   });
 
   it("distinguishes SQL files from other filtered text files", () => {

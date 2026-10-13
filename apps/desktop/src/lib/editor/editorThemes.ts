@@ -867,6 +867,36 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       paddingRight: "8px",
       userSelect: "none",
     },
+    ".cm-foldGutter": {
+      width: "16px",
+    },
+    ".cm-foldGutter .cm-gutterElement": {
+      alignItems: "center",
+      cursor: "pointer",
+      display: "flex",
+      justifyContent: "center",
+      padding: "0",
+      userSelect: "none",
+    },
+    ".cm-foldMarker-svg": {
+      alignItems: "center",
+      color: "var(--muted-foreground)",
+      display: "inline-flex",
+      height: "16px",
+      justifyContent: "center",
+      opacity: "0.65",
+      transition: "opacity 0.15s",
+      verticalAlign: "middle",
+      width: "16px",
+    },
+    ".cm-foldMarker-svg:hover": {
+      opacity: "0.95",
+    },
+    ".cm-foldMarker-svg svg": {
+      display: "block",
+      height: "16px",
+      width: "16px",
+    },
     ".cm-run-statement-gutter": {
       minWidth: "28px",
     },

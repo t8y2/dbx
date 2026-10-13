@@ -170,6 +170,32 @@ describe("EditorGroupTabBar group behavior", () => {
     },
   );
 
+  it("keeps horizontal grouped member backgrounds clear except for the active tab", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "pg-1", name: "Postgres", db_type: "postgres", driver_profile: "postgres", color: "#3b82f6" } as ConnectionConfig];
+    settings.editorSettings.tabGroupMode = "connection";
+    settings.editorSettings.tabPlacement = "top";
+    const activeTabId = store.createTab("pg-1", "app", "PG 1", "query");
+    const inactiveTabId = store.createTab("pg-1", "app", "PG 2", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), activeTabId, pinia);
+
+    await settle();
+    const activeTab = host.querySelector<HTMLElement>(`[data-tab-id="${activeTabId}"]`)!;
+    const inactiveTab = host.querySelector<HTMLElement>(`[data-tab-id="${inactiveTabId}"]`)!;
+    expect(activeTab.style.getPropertyValue("--app-tab-background")).not.toBe("");
+    expect(inactiveTab.style.getPropertyValue("--app-tab-background")).toBe("");
+
+    settings.editorSettings.tabPlacement = "left";
+    await settle();
+    expect(activeTab.style.getPropertyValue("--app-tab-background")).not.toBe("");
+    expect(inactiveTab.style.getPropertyValue("--app-tab-background")).toBe("");
+
+    app.unmount();
+    host.remove();
+  });
+
   it("renders one header per connection cluster and collapses it to a count badge", async () => {
     const store = useQueryStore();
     const settings = useSettingsStore();

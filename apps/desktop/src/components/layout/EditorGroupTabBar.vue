@@ -906,6 +906,11 @@ function tabColorStyle(tab: QueryTab): CSSProperties | undefined {
     const color = connectionColor(tab.connectionId);
     return { "--app-tab-background": color ? hexToRgba(color, 0.12) : "var(--accent)" } as CSSProperties;
   }
+  // Keep horizontal tabs quiet by default; group headers and rails already
+  // provide the connection identity, while the selected tab gets the wash.
+  if (!isTabActive(tab)) {
+    return undefined;
+  }
   return sharedTabColorStyle(tab, isTabActive(tab), isClassicLayout.value);
 }
 

@@ -390,6 +390,25 @@ describe("EditorSettingsDialog shortcut key recording (behaviour)", () => {
     }
   });
 
+  it("records Ctrl+Shift+W, which is closeWindow's own Windows default", async () => {
+    // closeWindow 的默认键在 Windows/Linux 上展开就是 Ctrl+Shift+W（#7654），同时它也是
+    // 「浏览器保留的关窗键」：实测反馈里这条组合录不出来。应用内这条路径必须是通的——
+    // 录制态吞掉按键（否则会触发关闭窗口），并把文本写进搜索框命中 closeWindow。
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+    const button = recorderButton(host);
+    button.click();
+    await flushAsyncUpdates();
+
+    const event = pressKeys(button, { key: "W", shiftKey: true, ctrlKey: true });
+    await flushAsyncUpdates();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(searchInput(host).value).toBe("Ctrl + Shift + W");
+    expect(visibleRowIds(host)).toContain("closeWindow");
+    expect(document.activeElement).toBe(button);
+  });
+
   it("leaves plain text search untouched after recording", async () => {
     hoisted.shortcuts = defaults();
     const host = await mountShortcutsTab();

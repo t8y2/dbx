@@ -807,6 +807,8 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         Some(DatabaseType::Mysql | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
     ) {
         format!("CREATE TABLE {target} LIKE {source};")
+    } else if options.database_type == Some(DatabaseType::SapHana) {
+        format!("CREATE TABLE {target} LIKE {source};")
     } else if options.database_type == Some(DatabaseType::Questdb) {
         format!("CREATE TABLE {target} (LIKE {source});")
     } else if options.database_type.is_some_and(is_postgres_like_structure_copy) {
@@ -2581,6 +2583,24 @@ mod tests {
                 "{database_type:?}"
             );
         }
+    }
+
+    #[test]
+    fn duplicate_table_structure_saphana_uses_like_instead_of_ctas() {
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::SapHana),
+                schema: Some("APP".to_string()),
+                source_name: "orders".to_string(),
+                target_name: "orders_copy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+                primary_key_columns: vec![],
+                primary_key_constraint_name: None,
+                identifier_quote: None,
+            }),
+            "CREATE TABLE \"APP\".\"orders_copy\" LIKE \"APP\".\"orders\";"
+        );
     }
 
     #[test]

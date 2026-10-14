@@ -1255,7 +1255,7 @@ describe("useDataGridActions", () => {
     });
     const actions = useDataGridActions(computed(() => tab));
 
-    await actions.onSort(tab.id, "sort_value", 0, "asc", "status = 'active'", "database");
+    await actions.onSort(tab.id, "sort_value", 0, "asc", "status = 'active'");
 
     expect(tab.result?.rows.map((row) => row[0])).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     expect(tab.orderByInput).toBe('"sort_value" ASC');
@@ -1378,7 +1378,7 @@ describe("useDataGridActions", () => {
     expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT sorted page 2", expect.objectContaining({ pagination: { offset: 10, limit: 10 }, preserveTotalRowCountDuringExecution: true }));
   });
 
-  it("defaults to local sorting without issuing a database request", async () => {
+  it("sorts locally without issuing a database request when explicitly selected", async () => {
     const tab = tableDataTab({
       result: { columns: ["sort_value"], rows: [[50], [60], [70]], affected_rows: 30, execution_time_ms: 1 },
       resultPageLimit: 10,
@@ -1393,7 +1393,7 @@ describe("useDataGridActions", () => {
     });
     const actions = useDataGridActions(computed(() => tab));
 
-    await actions.onSort(tab.id, "sort_value", 0, "asc", "status = 'active'");
+    await actions.onSort(tab.id, "sort_value", 0, "asc", "status = 'active'", "local");
 
     expect(mocks.sortTabResultLocally).toHaveBeenCalledWith("tab-1", "sort_value", 0, "asc");
     expect(mocks.buildTableSelectSql).not.toHaveBeenCalled();

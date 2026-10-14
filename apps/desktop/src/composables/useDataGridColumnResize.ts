@@ -38,6 +38,8 @@ export interface UseDataGridColumnResizeOptions {
   widthMode: Ref<DataGridColumnWidthMode>;
   compactColumnHeaderActions: ComputedRef<boolean>;
   columnIndexIndicators?: ComputedRef<readonly boolean[]>;
+  /** Transient header controls; excluded from cached widths and manual sizing. */
+  headerExtraWidths?: ComputedRef<readonly number[]>;
   cacheKey?: ComputedRef<string | undefined>;
   columnStructureSignature: ComputedRef<string>;
   measureHeaderText?: (text: string) => number | undefined;
@@ -250,7 +252,10 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
   const resolvedRowNumberWidth = computed(() => options.rowNumberWidth?.value ?? DATA_GRID_ROW_NUM_WIDTH);
 
   const renderedColumnWidths = computed(() => {
-    const widths = columnWidths.value.slice();
+    const widths = columnWidths.value.map((width, index) => {
+      const actualIndex = columnIndexes.value[index];
+      return width + (actualIndex !== undefined && !userSizedColumnIndexes.value.has(actualIndex) ? (options.headerExtraWidths?.value[index] ?? 0) : 0);
+    });
     if (options.widthMode.value === "content") return widths;
     const viewportWidth = options.viewportWidth?.value ?? 0;
     const surplus = viewportWidth - resolvedRowNumberWidth.value - widths.reduce((sum, width) => sum + width, 0);

@@ -113,7 +113,7 @@ function mountGrid(rows?: QueryResult["rows"], columnNames = ["zeta", "alpha"], 
   const sortDirection = ref(initialSort?.direction);
   const sortMode = ref(initialSort?.mode);
   const sortColumns = ref<DataGridSortColumn[]>();
-  const onSort = vi.fn((column: string, columnIndex: number, direction: DataGridSortDirection | null, _whereInput?: string, mode: DataGridSortMode = "local", _effectiveOrderBy?: string, columns?: DataGridSortColumn[]) => {
+  const onSort = vi.fn((column: string, columnIndex: number, direction: DataGridSortDirection | null, _whereInput?: string, mode: DataGridSortMode = "database", _effectiveOrderBy?: string, columns?: DataGridSortColumn[]) => {
     const sorts = columns ?? (direction ? [{ column, columnIndex, direction }] : []);
     const indexes = sortDataGridRowIndexesByColumns(originalRows, sorts, result.value.column_types);
     result.value = markRaw({ ...result.value, rows: indexes.map((index) => originalRows[index]!) });
@@ -190,7 +190,7 @@ describe("DataGrid transpose sorting", () => {
     expect(onSort).toHaveBeenLastCalledWith("score", 1, null, undefined, "database", undefined);
   });
 
-  it.each([false, true])("supports default local sort and Alt multi-sort in transpose=%s", async (transpose) => {
+  it.each([false, true])("preserves database sorting by default and supports Alt multi-sort in transpose=%s", async (transpose) => {
     const { host, onSort, result, sortColumns } = mountGrid(
       [
         ["b", "10"],
@@ -208,7 +208,7 @@ describe("DataGrid transpose sorting", () => {
       await settle();
     };
     await clickSort(0);
-    expect(onSort).toHaveBeenLastCalledWith("name", 0, "asc", undefined, "local");
+    expect(onSort).toHaveBeenLastCalledWith("name", 0, "asc", undefined, "database", "`name` ASC");
     await clickSort(1, true);
     expect(sortColumns.value).toEqual([
       { column: "name", columnIndex: 0, direction: "asc" },
@@ -231,7 +231,8 @@ describe("DataGrid transpose sorting", () => {
     await clickSort(1, true);
     expect(sortColumns.value).toEqual([{ column: "name", columnIndex: 0, direction: "asc" }]);
     await clickSort(1);
-    expect(sortColumns.value).toEqual([{ column: "score", columnIndex: 1, direction: "asc" }]);
+    expect(onSort).toHaveBeenLastCalledWith("score", 1, "asc", undefined, "database", "`score` ASC");
+    expect(sortColumns.value).toBeUndefined();
     await clickSort(1);
     await clickSort(1);
     expect(result.value.rows).toEqual([
@@ -241,6 +242,20 @@ describe("DataGrid transpose sorting", () => {
       ["a", "2"],
     ]);
     expect(host.querySelectorAll("[data-grid-sort-priority]")).toHaveLength(0);
+    await clickSort(0, true);
+    await clickSort(1, true);
+    const menu = host.querySelectorAll<HTMLButtonElement>(transpose ? "[data-grid-transpose-sort]" : "[data-grid-sort-menu]")[1]!;
+    menu.click();
+    await settle();
+    menuAction(i18n.global.t("grid.clearSort")).click();
+    await settle();
+    expect(sortColumns.value).toEqual([]);
+    expect(result.value.rows).toEqual([
+      ["b", "10"],
+      ["a", "2"],
+      ["a", "10"],
+      ["a", "2"],
+    ]);
   });
 
   it("uses the shared local/database sort actions and keeps the active record and row selection", async () => {

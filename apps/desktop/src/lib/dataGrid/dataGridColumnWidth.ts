@@ -31,10 +31,10 @@ export interface ColumnWidthDensityPreset {
 
 export const COLUMN_WIDTH_DENSITY_PRESETS: Record<ColumnWidthDensity, ColumnWidthDensityPreset> = {
   compact: {
-    // Compact controls stack vertically; the sort button and menu reserve 40px.
+    // 紧凑：以字段名为基准。控件垂直堆叠 16px + padding 16px + gap 4px + border 1px = 37 + 渲染余量 8px = 45
     charWidth: 7,
-    headerControlWidth: 69,
-    headerControlWidthCompact: 69,
+    headerControlWidth: 45,
+    headerControlWidthCompact: 45,
     cellPadding: 24,
     valueTextLimit: 20,
     maxWidth: 480,
@@ -43,10 +43,11 @@ export const COLUMN_WIDTH_DENSITY_PRESETS: Record<ColumnWidthDensity, ColumnWidt
   },
   standard: {
     // 标准：紧凑表头，减少固定开销
-    // Reserve another 24px for the sort priority and adjacent menu.
+    // compactActions → 实际 57px + 2px 余量 = 59
+    // 非 compactActions → 实际 81px + 2px 余量 = 83
     charWidth: 8,
-    headerControlWidth: 107,
-    headerControlWidthCompact: 83,
+    headerControlWidth: 83,
+    headerControlWidthCompact: 59,
     cellPadding: 24,
     valueTextLimit: 40,
     maxWidth: 360,
@@ -56,8 +57,8 @@ export const COLUMN_WIDTH_DENSITY_PRESETS: Record<ColumnWidthDensity, ColumnWidt
   comfortable: {
     // 宽松：展示更多内容，valueTextLimit=120 几乎不截断，maxWidth=600
     charWidth: 8,
-    headerControlWidth: 107,
-    headerControlWidthCompact: 83,
+    headerControlWidth: 83,
+    headerControlWidthCompact: 59,
     cellPadding: 24,
     valueTextLimit: 120,
     maxWidth: 600,

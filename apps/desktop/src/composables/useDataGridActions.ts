@@ -641,7 +641,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     });
   }
 
-  async function onSort(tabId: string | undefined, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "local", effectiveOrderBy?: string, columns?: DataGridSortColumn[]) {
+  async function onSort(tabId: string | undefined, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "database", effectiveOrderBy?: string, columns?: DataGridSortColumn[]) {
     const tab = resolveActionTab(tabId);
     if (!tab) return;
     tab.resultSortColumn = direction ? column : undefined;

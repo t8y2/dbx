@@ -5,7 +5,7 @@ export function useDataGridSort() {
   const sortColumn = ref<string | null>(null);
   const sortColumnIndex = ref<number | null>(null);
   const sortDirection = ref<DataGridSortDirection>("asc");
-  const sortMode = ref<DataGridSortMode>("local");
+  const sortMode = ref<DataGridSortMode>("database");
   const sortColumns = ref<DataGridSortColumn[]>([]);
 
   function setSort(column: string | null, columnIndex: number | null, direction: DataGridSortDirection, mode: DataGridSortMode) {
@@ -23,7 +23,7 @@ export function useDataGridSort() {
   }
 
   function clearSort() {
-    setSort(null, null, "asc", "local");
+    setSort(null, null, "asc", "database");
   }
 
   return {

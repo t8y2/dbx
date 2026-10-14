@@ -25,6 +25,9 @@ export type RegexValueResult = { status: "ok"; value: string } | { status: "empt
 const MAX_ATTEMPTS = 8;
 const MAX_REPEAT_EXTRA = 32;
 const MAX_UNBOUNDED_EXTRA = 4;
+// Absolute cap on a single counted repeat: larger min counts (e.g. `a{2000000000}`)
+// pass `new RegExp` but would allocate strings past the engine's max length.
+const MAX_REPEAT_COUNT = 4096;
 const DOT_POOL = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 
 const DIGIT_RANGES: Array<[number, number]> = [[48, 57]];
@@ -127,7 +130,12 @@ function parseEscape(p: Parser, asClass: boolean): Node | ClassPart[] | null {
     if (asClass) return classParts;
     return { t: "class", parts: classParts, negated: false };
   }
-  if (ch === "b" || ch === "B") return asClass ? null : { t: "anchor" };
+  if (ch === "b") {
+    // Inside a class `[\b]` is the backspace character, not a word boundary.
+    if (asClass) return [{ ranges: [[8, 8]], complement: false }];
+    return { t: "anchor" };
+  }
+  if (ch === "B") return asClass ? null : { t: "anchor" };
   if (ch === "n") return asClass ? [{ ranges: [[10, 10]], complement: false }] : { t: "lit", s: "\n" };
   if (ch === "r") return asClass ? [{ ranges: [[13, 13]], complement: false }] : { t: "lit", s: "\r" };
   if (ch === "t") return asClass ? [{ ranges: [[9, 9]], complement: false }] : { t: "lit", s: "\t" };
@@ -385,6 +393,7 @@ function gen(node: Node, ctx: Ctx): string | null {
       return null;
     }
     case "rep": {
+      if (node.min > MAX_REPEAT_COUNT) return null;
       const bound = node.max === null ? node.min + MAX_UNBOUNDED_EXTRA : Math.min(node.max, node.min + MAX_REPEAT_EXTRA);
       const count = node.min + Math.floor(Math.random() * (bound - node.min + 1));
       let out = "";
@@ -428,8 +437,13 @@ export function generateRegexValue(pattern: string | undefined, rawPattern?: boo
   if (!compiled) return { status: "invalid" };
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
     const ctx: Ctx = { captures: [], names: new Map() };
-    const value = gen(compiled.ast, ctx);
-    if (value !== null && compiled.re.test(value)) return { status: "ok", value };
+    try {
+      const value = gen(compiled.ast, ctx);
+      if (value !== null && compiled.re.test(value)) return { status: "ok", value };
+    } catch {
+      // Generation is best-effort; any runtime failure (e.g. string-length
+      // limits) degrades to the nomatch fallback instead of aborting the table.
+    }
   }
   return { status: "nomatch" };
 }

@@ -64,4 +64,17 @@ describe("regex data generation (#12077)", () => {
       expect(value).toMatch(/user_\d+/);
     }
   });
+
+  it("degrades to fallback instead of throwing for huge counted repeats", () => {
+    expect(generateRegexValue("a{2000000000}")).toEqual({ status: "nomatch" });
+    const value = generateValue("col", "character varying(20)", "regex", 0, { pattern: "a{2000000000}" });
+    expect(value).toBe("value_1");
+  });
+
+  it("treats [\\b] in a class as backspace instead of invalid", () => {
+    const result = generateRegexValue("[\\b]");
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(result.value).toBe("\b");
+  });
 });

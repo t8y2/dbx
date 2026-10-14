@@ -162,8 +162,13 @@ pub async fn install_jdbc_plugin_local(
 }
 
 pub async fn uninstall_jdbc_plugin(State(state): State<Arc<WebState>>) -> Result<Json<JdbcPluginStatus>, AppError> {
-    let root = state.app.plugins.root_dir();
-    Ok(Json(jdbc::uninstall_jdbc_plugin(root).map_err(AppError::internal)?))
+    let root = state.app.plugins.root_dir().to_path_buf();
+    // Blocking on purpose: the process scan and kill-wait loop before removal
+    // sleep on the thread (#12004); the blocking pool absorbs it.
+    let status = tokio::task::spawn_blocking(move || jdbc::uninstall_jdbc_plugin(&root))
+        .await
+        .map_err(|err| AppError::internal(err.to_string()))?;
+    Ok(Json(status.map_err(AppError::internal)?))
 }
 
 // ---- System Fonts ----

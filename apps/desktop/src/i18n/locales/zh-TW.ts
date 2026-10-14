@@ -7457,7 +7457,7 @@ export default withEnglishFallback({
     redisScanPageSize: "Redis 掃描數量",
     redisScanPageSizeDescription: "瀏覽 Redis Key 時每次 SCAN 請求的 Key 數量。",
     redisScanPageSizeOption: "{count} 個 Key",
-    redisValuePreviewLimit: "Redis 值預覽上限",
+    redisValuePreviewLimit: "值預覽上限",
     redisValuePreviewLimitDescription: "String 和 Bitmap 值在編輯器中最多載入的大小。預設 64 KiB，可設為 1–65536 KiB（64 MiB）。超過上限時可下載完整值；修改後沒有未儲存編輯的詳細資料會自動重新整理。",
     redisDatabaseDisplayLimit: "側邊欄資料庫清單上限",
     redisDatabaseDisplayLimitDescription: "側邊欄一次最多顯示的資料庫數量，超出部分可透過「載入更多」查看。",

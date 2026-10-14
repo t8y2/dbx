@@ -10282,16 +10282,6 @@ function openExternalUrl(url: string) {
                     <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.etcdGrpcMaxInboundHint") }}</p>
                   </div>
                 </div>
-                <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-start gap-4">
-                  <Label for="redis-value-preview-limit-input" :class="connectionLabelTopClass">{{ t("settings.redisValuePreviewLimit") }}</Label>
-                  <div class="col-span-3 space-y-1">
-                    <div class="flex items-center gap-2">
-                      <Input id="redis-value-preview-limit-input" v-model.number="editRedisValuePreviewLimitKiB" type="number" :min="REDIS_VALUE_PREVIEW_LIMIT_KIB_MIN" :max="REDIS_VALUE_PREVIEW_LIMIT_KIB_MAX" step="1" class="h-8 w-32 text-xs" />
-                      <span class="text-xs text-muted-foreground">KiB</span>
-                    </div>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.redisValuePreviewLimitDescription") }}</p>
-                  </div>
-                </div>
                 <!-- query_timeout_secs only feeds the database query pipeline
                      (dataGrid/queryStore); plugin connections like SSH never
                      consume it, so the generic radio would only suggest a
@@ -10441,6 +10431,16 @@ function openExternalUrl(url: string) {
                       </SelectContent>
                     </Select>
                     <p class="text-xs text-muted-foreground">{{ t("settings.redisScanPageSizeDescription") }}</p>
+                  </div>
+                </div>
+                <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-start gap-4">
+                  <Label for="redis-value-preview-limit-input" :class="connectionLabelTopClass">{{ t("settings.redisValuePreviewLimit") }}</Label>
+                  <div class="col-span-3 space-y-1">
+                    <div class="flex items-center gap-2">
+                      <Input id="redis-value-preview-limit-input" v-model.number="editRedisValuePreviewLimitKiB" type="number" :min="REDIS_VALUE_PREVIEW_LIMIT_KIB_MIN" :max="REDIS_VALUE_PREVIEW_LIMIT_KIB_MAX" step="1" class="h-8 w-32 text-xs" />
+                      <span class="text-xs text-muted-foreground">KiB</span>
+                    </div>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.redisValuePreviewLimitDescription") }}</p>
                   </div>
                 </div>
               </div>

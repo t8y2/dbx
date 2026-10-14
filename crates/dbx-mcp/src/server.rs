@@ -1067,7 +1067,8 @@ impl DbxMcpServer {
 impl DbxMcpServer {
     #[tool(
         name = "dbx_plugin_list",
-        description = "List DBX plugins that contribute MCP tools. Returns each plugin's id, name, tool count, and the number of connections available for its tools. Use dbx_plugin_tools with a plugin id to inspect its tools; call them through dbx_plugin_call."
+        description = "List DBX plugins that contribute MCP tools. Returns each plugin's id, name, tool count, and the number of connections available for its tools. Use dbx_plugin_tools with a plugin id to inspect its tools; call them through dbx_plugin_call.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn plugin_list(&self, Parameters(request): Parameters<PluginListRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_plugin_list").await {
@@ -1107,7 +1108,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_plugin_tools",
-        description = "List the MCP tools of one DBX plugin by its plugin id (from dbx_plugin_list). Returns each tool's name, description, arguments schema, read-only hint, and whether a connection must be selected. Call the tool through dbx_plugin_call."
+        description = "List the MCP tools of one DBX plugin by its plugin id (from dbx_plugin_list). Returns each tool's name, description, arguments schema, read-only hint, and whether a connection must be selected. Call the tool through dbx_plugin_call.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn plugin_tools(&self, Parameters(request): Parameters<PluginToolsRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_plugin_tools").await {
@@ -1197,7 +1199,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_plugin_call",
-        description = "Call one MCP tool of a DBX plugin by plugin id (from dbx_plugin_list) and tool name (from dbx_plugin_tools). The host binds the connection from DBX settings and generates the credentials payload; pass dbx_connection only when dbx_plugin_tools lists several allowed connections."
+        description = "Call one MCP tool of a DBX plugin by plugin id (from dbx_plugin_list) and tool name (from dbx_plugin_tools). The host binds the connection from DBX settings and generates the credentials payload; pass dbx_connection only when dbx_plugin_tools lists several allowed connections.",
+        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = true)
     )]
     async fn plugin_call(&self, Parameters(request): Parameters<PluginCallRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_plugin_call").await {
@@ -1232,7 +1235,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_list_connections",
-        description = "List database connections configured in DBX. Returns connection IDs, names, group paths, database types, endpoints, selected databases, and saved connection notes."
+        description = "List database connections configured in DBX. Returns connection IDs, names, group paths, database types, endpoints, selected databases, and saved connection notes.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn list_connections(
         &self,
@@ -1262,7 +1266,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_list_databases",
-        description = "List database names available through a DBX connection. When the connection has a database allowlist, returns only the databases allowed by DBX MCP settings; use this before listing tables if the connection has no default database."
+        description = "List database names available through a DBX connection. When the connection has a database allowlist, returns only the databases allowed by DBX MCP settings; use this before listing tables if the connection has no default database.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn list_databases(&self, Parameters(request): Parameters<ListDatabasesRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_list_databases").await {
@@ -1275,7 +1280,11 @@ impl DbxMcpServer {
         self.list_databases_for_resolved(&resolved).await
     }
 
-    #[tool(name = "dbx_list_tables", description = "List tables and views for a database connection")]
+    #[tool(
+        name = "dbx_list_tables",
+        description = "List tables and views for a database connection",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn list_tables(&self, Parameters(request): Parameters<ListTablesRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_list_tables").await {
             return error;
@@ -1312,7 +1321,11 @@ impl DbxMcpServer {
         }
     }
 
-    #[tool(name = "dbx_describe_table", description = "Get column definitions for a table")]
+    #[tool(
+        name = "dbx_describe_table",
+        description = "Get column definitions for a table",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn describe_table(&self, Parameters(request): Parameters<DescribeTableRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_describe_table").await {
             return error;
@@ -1336,7 +1349,11 @@ impl DbxMcpServer {
         }
     }
 
-    #[tool(name = "dbx_list_routines", description = "List stored procedures and functions for a database schema")]
+    #[tool(
+        name = "dbx_list_routines",
+        description = "List stored procedures and functions for a database schema",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn list_routines(&self, Parameters(request): Parameters<ListRoutinesRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_list_routines").await {
             return error;
@@ -1367,7 +1384,11 @@ impl DbxMcpServer {
         }
     }
 
-    #[tool(name = "dbx_get_routine_source", description = "Get the full source text of a stored procedure or function")]
+    #[tool(
+        name = "dbx_get_routine_source",
+        description = "Get the full source text of a stored procedure or function",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn get_routine_source(&self, Parameters(request): Parameters<GetRoutineSourceRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_get_routine_source").await {
             return error;
@@ -1408,7 +1429,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_execute_query",
-        description = "Execute a SQL query on a database connection (default 100 rows; pass max_rows to return up to 1000 rows; larger values are clamped; MongoDB shell commands and multi-statement scripts routed through the batch executor stay at 100 rows). For backwards compatibility, multi-statement scripts and stored-procedure scripts are routed through the dialect-aware batch executor."
+        description = "Execute a SQL query on a database connection (default 100 rows; pass max_rows to return up to 1000 rows; larger values are clamped; MongoDB shell commands and multi-statement scripts routed through the batch executor stay at 100 rows). For backwards compatibility, multi-statement scripts and stored-procedure scripts are routed through the dialect-aware batch executor.",
+        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
     )]
     async fn execute_query_tool(
         &self,
@@ -1736,7 +1758,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_execute_batch",
-        description = "Execute a SQL script containing multiple statements in one call and return a result per statement. Statements are split with a database-dialect-aware parser, so semicolons inside strings, comments and stored procedures are handled. Stops at the first failing statement unless continue_on_error is true. Pass session_id (from dbx_open_session) when statements must share one connection (e.g. temporary tables, USE/SET). Pass cell_char_offset/cell_char_limit to expand long string cells in every statement's result, exactly like dbx_execute_query. When use_transaction is true and the script has multiple statements, the whole script runs in one transaction and the call returns a single merged result instead of one result per statement (single-statement scripts run normally and return that one result); use_transaction cannot be combined with session_id or continue_on_error, and is rejected when the backend cannot provide a rollbackable transaction or for MySQL-family DDL scripts (DDL implicitly commits and cannot be rolled back)."
+        description = "Execute a SQL script containing multiple statements in one call and return a result per statement. Statements are split with a database-dialect-aware parser, so semicolons inside strings, comments and stored procedures are handled. Stops at the first failing statement unless continue_on_error is true. Pass session_id (from dbx_open_session) when statements must share one connection (e.g. temporary tables, USE/SET). Pass cell_char_offset/cell_char_limit to expand long string cells in every statement's result, exactly like dbx_execute_query. When use_transaction is true and the script has multiple statements, the whole script runs in one transaction and the call returns a single merged result instead of one result per statement (single-statement scripts run normally and return that one result); use_transaction cannot be combined with session_id or continue_on_error, and is rejected when the backend cannot provide a rollbackable transaction or for MySQL-family DDL scripts (DDL implicitly commits and cannot be rolled back).",
+        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
     )]
     async fn execute_batch_tool(
         &self,
@@ -2127,7 +2150,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_open_session",
-        description = "Open a stateful query session pinned to a single backend connection. Returns a session ID for dbx_execute_query: USE, SET CATALOG, session variables and temporary tables persist across calls within the session. Close with dbx_close_session when done; idle sessions expire after 30 minutes by default (configurable with DBX_SESSION_IDLE_TTL_SECS)."
+        description = "Open a stateful query session pinned to a single backend connection. Returns a session ID for dbx_execute_query: USE, SET CATALOG, session variables and temporary tables persist across calls within the session. Close with dbx_close_session when done; idle sessions expire after 30 minutes by default (configurable with DBX_SESSION_IDLE_TTL_SECS).",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
     )]
     async fn open_session_tool(
         &self,
@@ -2210,7 +2234,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_begin_transaction",
-        description = "Begin a transaction on a transaction-enabled native MySQL session"
+        description = "Begin a transaction on a transaction-enabled native MySQL session",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
     )]
     async fn begin_transaction_tool(
         &self,
@@ -2253,7 +2278,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_commit_transaction",
-        description = "Commit the active transaction; committed is reported only after MySQL acknowledges COMMIT"
+        description = "Commit the active transaction; committed is reported only after MySQL acknowledges COMMIT",
+        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
     )]
     async fn commit_transaction_tool(
         &self,
@@ -2296,7 +2322,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_rollback_transaction",
-        description = "Roll back the active transaction. Cleanup remains available after write-policy revocation."
+        description = "Roll back the active transaction. Cleanup remains available after write-policy revocation.",
+        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
     )]
     async fn rollback_transaction_tool(
         &self,
@@ -2330,7 +2357,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_close_session",
-        description = "Close a stateful query session and release its pinned backend connection"
+        description = "Close a stateful query session and release its pinned backend connection",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn close_session_tool(
         &self,
@@ -2371,7 +2399,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_execute_redis_command",
-        description = "Execute a Redis command on a Redis connection. Use the db argument to select a logical database instead of sending SELECT. Use SCAN rather than KEYS when enumerating keys."
+        description = "Execute a Redis command on a Redis connection. Use the db argument to select a logical database instead of sending SELECT. Use SCAN rather than KEYS when enumerating keys.",
+        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
     )]
     async fn execute_redis_command(
         &self,
@@ -2461,7 +2490,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_peek_messages",
-        description = "Read up to 100 Kafka messages without committing consumer offsets. Defaults to the latest 20 messages. Returns JSON with base64 payloads, UTF-8 previews, metadata, incomplete (partial broker read), and outputTruncated (256 KiB message output budget). Only Kafka is supported."
+        description = "Read up to 100 Kafka messages without committing consumer offsets. Defaults to the latest 20 messages. Returns JSON with base64 payloads, UTF-8 previews, metadata, incomplete (partial broker read), and outputTruncated (256 KiB message output budget). Only Kafka is supported.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn peek_messages(&self, Parameters(request): Parameters<PeekMessagesRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_peek_messages").await {
@@ -2523,7 +2553,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_send_message",
-        description = "Send a base64-encoded message to a Kafka, RocketMQ, or RabbitMQ topic/queue"
+        description = "Send a base64-encoded message to a Kafka, RocketMQ, or RabbitMQ topic/queue",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = true)
     )]
     async fn send_message(&self, Parameters(request): Parameters<SendMessageRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_send_message").await {
@@ -2594,7 +2625,11 @@ impl DbxMcpServer {
         }
     }
 
-    #[tool(name = "dbx_get_schema_context", description = "Get compact table and column context for writing SQL")]
+    #[tool(
+        name = "dbx_get_schema_context",
+        description = "Get compact table and column context for writing SQL",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn get_schema_context(&self, Parameters(request): Parameters<SchemaContextRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_get_schema_context").await {
             return error;
@@ -2645,7 +2680,11 @@ impl DbxMcpServer {
         text(format_schema_context(&connection.name, &database, &schema, &tables, truncated))
     }
 
-    #[tool(name = "dbx_add_connection", description = "Add a new database connection to DBX")]
+    #[tool(
+        name = "dbx_add_connection",
+        description = "Add a new database connection to DBX",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
     async fn add_connection(&self, Parameters(request): Parameters<AddConnectionRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_add_connection").await {
             return error;
@@ -2698,7 +2737,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_duplicate_connection",
-        description = "Duplicate a DBX connection with its complete settings, credentials, tunnels, and sidebar group"
+        description = "Duplicate a DBX connection with its complete settings, credentials, tunnels, and sidebar group",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
     )]
     async fn duplicate_connection(
         &self,
@@ -2764,7 +2804,11 @@ impl DbxMcpServer {
         }
     }
 
-    #[tool(name = "dbx_remove_connection", description = "Remove a database connection from DBX")]
+    #[tool(
+        name = "dbx_remove_connection",
+        description = "Remove a database connection from DBX",
+        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+    )]
     async fn remove_connection(&self, Parameters(request): Parameters<RemoveConnectionRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_remove_connection").await {
             return error;
@@ -2829,7 +2873,11 @@ impl DbxMcpServer {
         }
     }
 
-    #[tool(name = "dbx_open_table", description = "Open a table in DBX desktop app. Requires DBX to be running.")]
+    #[tool(
+        name = "dbx_open_table",
+        description = "Open a table in DBX desktop app. Requires DBX to be running.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
     async fn open_table(&self, Parameters(request): Parameters<OpenTableRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_open_table").await {
             return error;
@@ -2868,7 +2916,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_execute_and_show",
-        description = "Execute a SQL query in DBX desktop app UI and show results there. Requires DBX to be running."
+        description = "Execute a SQL query in DBX desktop app UI and show results there. Requires DBX to be running.",
+        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
     )]
     async fn execute_and_show(&self, Parameters(request): Parameters<ExecuteAndShowRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_execute_and_show").await {
@@ -2950,7 +2999,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_salesforce_current_user",
-        description = "Show the Salesforce identity behind a DBX connection: the connected user, their profile, whether that profile holds \"Modify All Data\" (which bypasses field-level security and record sharing), and the org. Read-only. Call it before preparing a write so the user knows who the change will be attributed to, and to tell a permission failure apart from a bad record Id."
+        description = "Show the Salesforce identity behind a DBX connection: the connected user, their profile, whether that profile holds \"Modify All Data\" (which bypasses field-level security and record sharing), and the org. Read-only. Call it before preparing a write so the user knows who the change will be attributed to, and to tell a permission failure apart from a bad record Id.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn salesforce_current_user(
         &self,
@@ -2979,7 +3029,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_salesforce_prepare_write",
-        description = "Step 1 of 2 for a Salesforce write: prepare an insert, update or delete of exactly ONE record. Nothing is sent to Salesforce. The call validates the request against DBX MCP policy and returns a human-readable summary plus a single-use confirm_token. Show that summary to the user and wait for their approval, then call dbx_salesforce_apply_write with the token. Salesforce has no transactions, so an applied write cannot be rolled back. Reads never need this: use dbx_execute_query with SOQL."
+        description = "Step 1 of 2 for a Salesforce write: prepare an insert, update or delete of exactly ONE record. Nothing is sent to Salesforce. The call validates the request against DBX MCP policy and returns a human-readable summary plus a single-use confirm_token. Show that summary to the user and wait for their approval, then call dbx_salesforce_apply_write with the token. Salesforce has no transactions, so an applied write cannot be rolled back. Reads never need this: use dbx_execute_query with SOQL.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
     )]
     async fn salesforce_prepare_write(
         &self,
@@ -3065,7 +3116,8 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_salesforce_apply_write",
-        description = "Step 2 of 2 for a Salesforce write: execute exactly the write prepared by dbx_salesforce_prepare_write, identified by its confirm_token. The token is single-use, expires 5 minutes after it was issued, and is bound to that one statement — a changed write needs a new prepare. Call this only after the user has approved the summary they were shown. Returns the Salesforce result, or the org's own per-record error text."
+        description = "Step 2 of 2 for a Salesforce write: execute exactly the write prepared by dbx_salesforce_prepare_write, identified by its confirm_token. The token is single-use, expires 5 minutes after it was issued, and is bound to that one statement — a changed write needs a new prepare. Call this only after the user has approved the summary they were shown. Returns the Salesforce result, or the org's own per-record error text.",
+        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
     )]
     async fn salesforce_apply_write(
         &self,
@@ -6486,6 +6538,42 @@ mod tests {
         assert!(names.contains(&"dbx_close_session"));
         #[cfg(feature = "mq-admin")]
         assert!(names.contains(&"dbx_send_message"));
+    }
+
+    #[test]
+    fn every_static_tool_declares_annotations() {
+        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let tools = server.tool_router.list_all();
+        assert!(!tools.is_empty());
+        for tool in &tools {
+            assert!(tool.annotations.is_some(), "tool {} is missing annotations", tool.name);
+        }
+
+        let read_only_tools = [
+            "dbx_list_connections",
+            "dbx_list_databases",
+            "dbx_list_tables",
+            "dbx_describe_table",
+            "dbx_list_routines",
+            "dbx_get_routine_source",
+            "dbx_get_schema_context",
+            "dbx_salesforce_current_user",
+            #[cfg(feature = "mq-admin")]
+            "dbx_peek_messages",
+        ];
+        for name in read_only_tools {
+            let tool = tools.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("tool {name} not found"));
+            let annotations = tool.annotations.as_ref().unwrap();
+            assert_eq!(annotations.read_only_hint, Some(true), "{name} should be read-only");
+            assert_eq!(annotations.destructive_hint, Some(false), "{name} should not be destructive");
+        }
+
+        for name in ["dbx_remove_connection", "dbx_salesforce_apply_write", "dbx_commit_transaction"] {
+            let tool = tools.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("tool {name} not found"));
+            let annotations = tool.annotations.as_ref().unwrap();
+            assert_eq!(annotations.read_only_hint, Some(false), "{name} should not be read-only");
+            assert_eq!(annotations.destructive_hint, Some(true), "{name} should be destructive");
+        }
     }
 
     #[tokio::test]

@@ -81,6 +81,18 @@ describe("SQL function completion across dialects", () => {
     expect(functionItem("DATE_FORMAT", "goldendb")).toMatchObject({ type: "function" });
     expect(functionItem("GROUP_CONCAT", "goldendb")).toMatchObject({ type: "function" });
     expect(functionItem("IFNULL", "goldendb")).toMatchObject({ type: "function" });
+    expect(functionItem("DATE_FORMAT", "gbase")).toMatchObject({ type: "function" });
+    expect(functionItem("DATE_ADD", "gbase")).toMatchObject({ type: "function" });
+  });
+
+  it("inserts MySQL syntax-sensitive functions through their templates", () => {
+    expect(functionItem("DATE_ADD", "mysql")?.apply).toBe("DATE_ADD(${date}, INTERVAL ${expr} ${unit})");
+    expect(functionItem("DATE_SUB", "mysql")?.apply).toBe("DATE_SUB(${date}, INTERVAL ${expr} ${unit})");
+    expect(functionItem("ADDDATE", "mysql")?.apply).toBe("ADDDATE(${date}, INTERVAL ${expr} ${unit})");
+    expect(functionItem("POSITION", "mysql")?.apply).toBe("POSITION(${substring} IN ${string})");
+    expect(functionItem("EXTRACT", "mysql")?.apply).toBe("EXTRACT(${unit} FROM ${date})");
+    expect(functionItem("TIMESTAMPADD", "mysql")).toMatchObject({ type: "function" });
+    expect(functionItem("REGEXP_LIKE", "mysql")).toMatchObject({ type: "function" });
   });
 
   it("keeps dialect-specific functions out of other dialects", () => {
@@ -104,5 +116,64 @@ describe("SQL function completion across dialects", () => {
     const trinoFunctions = functionLabels("trino");
     expect(trinoFunctions).not.toContain("NVL");
     expect(trinoFunctions).not.toContain("GET_JSON_OBJECT");
+  });
+});
+
+describe("functionCompletionIncludeParams setting", () => {
+  it("includes parameter placeholders by default and when explicitly true", () => {
+    const itemsDefault = buildSqlCompletionItems("SELECT COUN", 11, { databaseType: "postgres", tables: [], columnsByTable: new Map() });
+    const countDefault = itemsDefault.find((item) => item.label === "COUNT");
+    expect(countDefault?.apply).toBe("COUNT(${expression})");
+
+    const itemsTrue = buildSqlCompletionItems("SELECT COUN", 11, { databaseType: "postgres", tables: [], columnsByTable: new Map(), functionCompletionIncludeParams: true });
+    const countTrue = itemsTrue.find((item) => item.label === "COUNT");
+    expect(countTrue?.apply).toBe("COUNT(${expression})");
+  });
+
+  it("omits parameter placeholders and places cursor inside parentheses when false", () => {
+    const items = buildSqlCompletionItems("SELECT COUN", 11, { databaseType: "postgres", tables: [], columnsByTable: new Map(), functionCompletionIncludeParams: false });
+    const count = items.find((item) => item.label === "COUNT");
+    expect(count?.apply).toBe("COUNT(${})");
+  });
+
+  it("omits parameter placeholders for templated functions when false", () => {
+    const itemsWith = buildSqlCompletionItems("SELECT POSI", 11, { databaseType: "postgres", tables: [], columnsByTable: new Map(), functionCompletionIncludeParams: true });
+    expect(itemsWith.find((item) => item.label === "POSITION")?.apply).toBe("POSITION(${substring} IN ${string})");
+
+    const itemsWithout = buildSqlCompletionItems("SELECT POSI", 11, { databaseType: "postgres", tables: [], columnsByTable: new Map(), functionCompletionIncludeParams: false });
+    expect(itemsWithout.find((item) => item.label === "POSITION")?.apply).toBe("POSITION(${})");
+  });
+
+  it("omits partition/order by parameter examples for window functions when false", () => {
+    const itemsWith = buildSqlCompletionItems("SELECT ROW_", 11, { databaseType: "postgres", tables: [], columnsByTable: new Map(), functionCompletionIncludeParams: true });
+    expect(itemsWith.find((item) => item.label === "ROW_NUMBER")?.apply).toBe("ROW_NUMBER() OVER (PARTITION BY ${col} ORDER BY ${col})");
+
+    const itemsWithout = buildSqlCompletionItems("SELECT ROW_", 11, { databaseType: "postgres", tables: [], columnsByTable: new Map(), functionCompletionIncludeParams: false });
+    expect(itemsWithout.find((item) => item.label === "ROW_NUMBER")?.apply).toBe("ROW_NUMBER() OVER (${})");
+  });
+
+  it("supports user routine completion without parameter placeholders", () => {
+    const routineObject = {
+      name: "calculate_total",
+      type: "function" as const,
+      signature: "p_price numeric, p_qty int",
+    };
+    const itemsWith = buildSqlCompletionItems("SELECT calc", 11, {
+      databaseType: "postgres",
+      tables: [],
+      columnsByTable: new Map(),
+      objects: [routineObject],
+      functionCompletionIncludeParams: true,
+    });
+    expect(itemsWith.find((item) => item.label === "calculate_total")?.apply).toBe("calculate_total(${1:p_price numeric}, ${2:p_qty int})");
+
+    const itemsWithout = buildSqlCompletionItems("SELECT calc", 11, {
+      databaseType: "postgres",
+      tables: [],
+      columnsByTable: new Map(),
+      objects: [routineObject],
+      functionCompletionIncludeParams: false,
+    });
+    expect(itemsWithout.find((item) => item.label === "calculate_total")?.apply).toBe("calculate_total(${})");
   });
 });

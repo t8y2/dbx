@@ -196,8 +196,8 @@ describe("sidebar connection deletion selection", () => {
     // removeConnections 已按「删除连接」策略处理页签，disconnect 必须跳过断开策略，
     // 否则会把刚保留下来的 SQL 页签又关掉。
     expect(store.disconnect.mock.calls).toEqual([
-      ["conn-1", { skipTabHandling: true }],
-      ["conn-2", { skipTabHandling: true }],
+      ["conn-1", { skipTabHandling: true, markClosedByUser: false }],
+      ["conn-2", { skipTabHandling: true, markClosedByUser: false }],
     ]);
     expect(mocks.toast).toHaveBeenCalledWith('connection.deletedSelected:{"count":2}', 2000);
   });
@@ -252,8 +252,8 @@ describe("sidebar connection group deletion selection", () => {
     expect(store.deleteConnectionGroups).toHaveBeenCalledWith(["group-1", "group-2"], true);
     // 页签已由 deleteConnectionGroups 按「删除连接」策略处理，disconnect 只清会话。
     expect(store.disconnect.mock.calls).toEqual([
-      ["conn-1", { skipTabHandling: true }],
-      ["conn-2", { skipTabHandling: true }],
+      ["conn-1", { skipTabHandling: true, markClosedByUser: false }],
+      ["conn-2", { skipTabHandling: true, markClosedByUser: false }],
     ]);
     expect(showDeleteGroupConfirm.value).toBe(false);
     expect(connectionGroupDeleteTargetSnapshot.value).toEqual([]);

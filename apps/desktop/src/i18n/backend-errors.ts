@@ -82,6 +82,13 @@ const taggedAiCliErrorKeys: Record<string, string> = {
 };
 
 const exactMessageKeys: Record<string, string> = {
+  "Folder name must not contain a path": "sqlFileTree.folderNameInvalid",
+  "This folder name is excluded from the SQL file browser": "sqlFileTree.folderNameExcluded",
+  "The maximum SQL folder depth has been reached": "sqlFileTree.folderDepthExceeded",
+  "A file or folder with this name already exists": "sqlFileTree.folderNameExists",
+  "Only directories can be managed here": "sqlFileTree.directoryRequired",
+  "The opened root folder cannot be renamed or deleted": "sqlFileTree.rootFolderProtected",
+  "SQL folder is outside the opened root folder": "sqlFileTree.folderOutsideRoot",
   "Plugin update is in progress. Please try again after it finishes.": "pluginPlatform.updateInProgress",
   "Plugin update blocked by active operations. Please wait for them to finish.": "pluginPlatform.updateBlockedByOperations",
   [PHOENIX_DRIVER_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
@@ -90,6 +97,8 @@ const exactMessageKeys: Record<string, string> = {
 
 const patterns: [RegExp, string][] = [
   [/^Plugin update blocked by active connections: ([\s\S]+)$/, "pluginPlatform.updateBlockedByConnections"],
+  // src-tauri/src/commands/plugins.rs and crates/dbx-web/src/routes/plugins.rs uninstall guard.
+  [/^Cannot uninstall plugin '(.+?)' while these connections still use it: ([\s\S]+)$/, "pluginPlatform.uninstallBlockedByConnections"],
   // crates/dbx-plugin-runtime provenance guard (installer.rs / marketplace.rs)
   [/^Plugin update source change requires confirmation:/, "pluginPlatform.updateSourceChangeRequired"],
   [/^Plugin downgrade to version .+ is not allowed/, "pluginPlatform.updateDowngradeRejected"],
@@ -165,12 +174,19 @@ const patterns: [RegExp, string][] = [
 
   // Web auth rate limiting (crates/dbx-web/src/auth.rs)
   [/^Please try again in (\d+)s$/, "auth.rateLimited"],
+
+  // Dameng native dexp/dimp dump (crates/dbx-core/src/data/dameng_dump.rs)
+  [/^\[damengToolNotFound\]/, "damengDump.errors.toolNotFound"],
+  [/^\[damengConnectionRequired\]/, "damengDump.errors.connectionRequired"],
+  [/^\[damengPasswordMissing\]/, "damengDump.errors.passwordMissing"],
+  [/^\[damengUseridInvalid\]/, "damengDump.errors.useridInvalid"],
 ];
 
 // Named placeholders for each pattern's capture groups, in capture order.
 // A bare string is shorthand for a single capture group.
 const paramNames: Record<string, string | string[]> = {
   "pluginPlatform.updateBlockedByConnections": "labels",
+  "pluginPlatform.uninstallBlockedByConnections": ["plugin", "labels"],
   "connection.driverNotInstalled": "driver",
   "connection.jreNotInstalled": "jre",
   "ai.configNameExists": "name",

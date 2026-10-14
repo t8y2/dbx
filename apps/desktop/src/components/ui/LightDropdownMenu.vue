@@ -260,7 +260,7 @@ watch(
     <div
       v-if="isOpen"
       ref="menuRef"
-      class="ring-foreground/10 fixed z-50 max-h-(--reka-dropdown-menu-content-available-height) min-w-32 overflow-x-hidden overflow-y-auto rounded-md p-1 ring-1 cn-menu-translucent text-popover-foreground"
+      class="ring-foreground/10 fixed z-(--dbx-floating-layer-z-index) max-h-(--reka-dropdown-menu-content-available-height) min-w-32 overflow-x-hidden overflow-y-auto rounded-md p-1 ring-1 cn-menu-translucent text-popover-foreground"
       :class="cn(matchTriggerWidth ? 'w-(--reka-dropdown-menu-trigger-width)' : '', contentClass)"
       :style="menuStyle"
       role="menu"

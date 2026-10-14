@@ -114,16 +114,19 @@ describe("connectionConfigTransfer", () => {
       transport_layers: [
         { type: "ssh", id: "ssh", host: "localhost", port: 22, user: "test", password: "ssh-secret", key_passphrase: "key-secret", profile_id: "tunnel-1" },
         { type: "proxy", id: "proxy", host: "localhost", port: 1080, password: "proxy-secret" },
+        { type: "http_tunnel", id: "http", url: "https://example.test/tunnel", token: "http-secret" },
       ],
     });
     const profile = { ...tunnel1, password: "profile-secret", key_passphrase: "profile-key-secret" } as TunnelProfile;
     const bundle = buildConnectionConfigBundle([source, conn("b", "Unselected")], layout, [profile, tunnel2], ["a"]);
     const before = JSON.stringify(bundle);
-    for (const optIn of [undefined, false]) {
-      const redacted = JSON.parse(serializePlaintextConnectionConfigBundle(bundle, optIn));
+    // Runtime callers must not turn truthy non-booleans into credential consent.
+    for (const optIn of [undefined, false, null, 0, 1, "true", "false", {}]) {
+      const redacted = JSON.parse(serializePlaintextConnectionConfigBundle(bundle, optIn as boolean));
       expect(redacted.connections).toHaveLength(1);
       expect(redacted.connections[0].password).toBe("");
       expect(redacted.connections[0].connection_secrets).toEqual({});
+      expect(redacted.connections[0].transport_layers).toMatchObject([{ password: "", key_passphrase: "" }, { password: "" }, { token: "" }]);
       expect(redacted.tunnelProfiles[0].password).toBe("");
       expect(JSON.stringify(bundle)).toBe(before);
     }
@@ -134,6 +137,33 @@ describe("connectionConfigTransfer", () => {
     expect(JSON.stringify(bundle)).toBe(before);
     // A subsequent redacted export cannot inherit the previous opt-in.
     expect(JSON.parse(serializePlaintextConnectionConfigBundle(bundle)).connections[0].password).toBe("");
+  });
+
+  it.each(["password", "plugin", "tunnel"])("never exports an opaque saved credential reference from %s as a plaintext credential", (location) => {
+    const reference = "__DBX_SAVED_CREDENTIAL__:synthetic-reference";
+    const source = conn("a", "Synthetic", {
+      password: location === "password" ? reference : "",
+      connection_secrets: location === "plugin" ? { token: reference } : {},
+    });
+    const bundle = { connections: [source], tunnelProfiles: [{ ...tunnel1, password: location === "tunnel" ? reference : "" }] };
+    expect(() => serializePlaintextConnectionConfigBundle(bundle, true)).toThrow("credential_export_unavailable");
+    expect(serializePlaintextConnectionConfigBundle(bundle)).not.toContain(reference);
+  });
+
+  it("removes opaque references from default exports at any depth while retaining ordinary strings and the source", () => {
+    const reference = "__DBX_SAVED_CREDENTIAL__:synthetic-reference";
+    const ordinary = "__DBX_SAVED_CREDENTIAL__ without the reserved colon";
+    const source = conn("references", "References", {
+      url_params: reference,
+      external_config: { safe: ordinary, nested: { value: reference }, items: [reference, "ordinary value", { value: reference }] },
+    });
+    const bundle = { connections: [source] };
+    const before = JSON.stringify(bundle);
+    const exported = JSON.parse(serializePlaintextConnectionConfigBundle(bundle));
+    expect(exported.connections[0].url_params).toBe("");
+    expect(exported.connections[0].external_config).toEqual({ safe: ordinary, nested: { value: "" }, items: ["", "ordinary value", { value: "" }] });
+    expect(() => serializePlaintextConnectionConfigBundle(bundle, true)).toThrow("credential_export_unavailable");
+    expect(JSON.stringify(bundle)).toBe(before);
   });
 
   it("keeps stable ids and removes secrets from plaintext exports", () => {
@@ -157,6 +187,48 @@ describe("connectionConfigTransfer", () => {
     expect(exported.url_params).toBe("applicationName=dbx&PASSWORD=&sslmode=require");
     expect(JSON.stringify(exported)).not.toContain("url-password");
     expect(scrubTunnelProfileForPlaintextExport({ type: "http_tunnel", id: "t", url: "https://example", token: "token" })).toMatchObject({ id: "t", token: "" });
+  });
+
+  it("redacts percent-encoded credential query keys without changing safe parameters or the source", () => {
+    // PostgreSQL URL parameters decode keys before applying credentials.
+    const urlParams = "application%5Fname=dbx&%70assword=encoded-password&p%61ssword=second-password&%61pi%5Fkey=encoded-api-key&%74oken=encoded-token&%63lient%73ecret=encoded-client-secret&sslmode=require&flag&safe=%25password";
+    const source = conn("encoded", "Encoded", { db_type: "postgres", url_params: urlParams });
+    const exported = scrubConnectionForPlaintextExport(source);
+    expect(exported.url_params).toBe("application%5Fname=dbx&%70assword=&p%61ssword=&%61pi%5Fkey=&%74oken=&%63lient%73ecret=&sslmode=require&flag&safe=%25password");
+    expect(source.url_params).toBe(urlParams);
+    expect(serializePlaintextConnectionConfigBundle({ connections: [source] })).not.toContain("encoded-password");
+    expect(JSON.parse(serializePlaintextConnectionConfigBundle({ connections: [source] }, true)).connections[0].url_params).toBe(urlParams);
+  });
+
+  it("redacts every repeated or mixed-case credential key and tolerates malformed percent escapes", () => {
+    const urlParams = "?PaSsWoRd=first&%50ASSword=second&password=third&%20%70assword%20=spaced&%70assword%ZZ=malformed-secret&safe%=one&safe%ZZ=two&safe%FF=three&safe%20key=four&pass+word=public&safe=%2B%26%3D&%2570assword=once-only";
+    const source = conn("malformed", "Malformed", { url_params: urlParams });
+    expect(scrubConnectionForPlaintextExport(source).url_params).toBe("?PaSsWoRd=&%50ASSword=&password=&%20%70assword%20=&%70assword%ZZ=&safe%=one&safe%ZZ=two&safe%FF=three&safe%20key=four&pass+word=public&safe=%2B%26%3D&%2570assword=once-only");
+    expect(source.url_params).toBe(urlParams);
+    expect(JSON.parse(serializePlaintextConnectionConfigBundle({ connections: [source] }, true)).connections[0].url_params).toBe(urlParams);
+  });
+
+  it("redacts SQL Server semicolon properties without splitting quoted values", () => {
+    const urlParams = "applicationName={DBX;password=public};password={jdbc-secret;part}}tail};PWD=duplicate-secret;encrypt=true";
+    const source = conn("jdbc", "SQL Server", { db_type: "sqlserver", url_params: urlParams });
+    expect(scrubConnectionForPlaintextExport(source).url_params).toBe("applicationName={DBX;password=public};password=;PWD=;encrypt=true");
+    expect(source.url_params).toBe(urlParams);
+    expect(JSON.parse(serializePlaintextConnectionConfigBundle({ connections: [source] }, true)).connections[0].url_params).toBe(urlParams);
+  });
+
+  it("preserves SQL Server separators and escaped braces while redacting encoded and alias keys", () => {
+    const urlParams = " ?PWD=first&applicationName={DBX;&Client}}demo};%70assword={second;&secret};  access_token = third&flag&encrypt=true";
+    const source = conn("jdbc", "SQL Server", { db_type: "sqlserver", url_params: urlParams });
+    expect(scrubConnectionForPlaintextExport(source).url_params).toBe(" ?PWD=&applicationName={DBX;&Client}}demo};%70assword=;  access_token =&flag&encrypt=true");
+    expect(source.url_params).toBe(urlParams);
+  });
+
+  it("fails closed for malformed SQL Server properties without changing other query grammars", () => {
+    const malformed = "applicationName={unclosed;password=synthetic-secret";
+    expect(scrubConnectionForPlaintextExport(conn("jdbc", "SQL Server", { db_type: "sqlserver", url_params: malformed })).url_params).toBe("");
+    const postgres = "application_name=safe;literal=public&sslmode=require";
+    expect(scrubConnectionForPlaintextExport(conn("pg", "Postgres", { db_type: "postgres", url_params: postgres })).url_params).toBe(postgres);
+    expect(scrubConnectionForPlaintextExport(conn("jdbc", "SQL Server", { db_type: "sqlserver", url_params: "applicationName={DBX; Client}}}&encrypt=true" })).url_params).toBe("applicationName={DBX; Client}}}&encrypt=true");
   });
 
   it("redacts structured API key auth without removing unrelated values or mutating the source", () => {

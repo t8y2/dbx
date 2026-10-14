@@ -33,9 +33,9 @@ function textWidthUnits(value: string): number {
 }
 
 export function getDataGridConditionSuggestionPreferredWidth(suggestions: readonly DataGridConditionSuggestionContent[]): number | undefined {
-  const hasComment = suggestions.some((suggestion) => suggestion.kind === "column" && !!suggestion.comment?.trim());
+  const hasComment = suggestions.some((suggestion) => (suggestion.kind === "column" || suggestion.kind === "keyword") && !!suggestion.comment?.trim());
   if (!hasComment) return undefined;
-  const longestFieldUnits = suggestions.reduce((longest, suggestion) => (suggestion.kind === "column" ? Math.max(longest, textWidthUnits(suggestion.value)) : longest), 0);
+  const longestFieldUnits = suggestions.reduce((longest, suggestion) => (suggestion.kind === "column" || suggestion.kind === "keyword" ? Math.max(longest, textWidthUnits(suggestion.value)) : longest), 0);
   return Math.min(COMMENTED_SUGGESTION_MAX_WIDTH, Math.max(COMMENTED_SUGGESTION_MIN_WIDTH, Math.ceil(longestFieldUnits * 7.5 + 208)));
 }
 

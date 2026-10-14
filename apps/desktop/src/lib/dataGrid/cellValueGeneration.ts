@@ -1,6 +1,6 @@
 import { uuid } from "@/lib/common/utils";
 
-export type CellValueGenerationKind = "empty" | "null" | "datetime" | "date" | "uuid" | "uuid-v7" | "increment" | "snowflake";
+export type CellValueGenerationKind = "empty" | "null" | "datetime" | "datetime-ms" | "date" | "uuid" | "uuid-v7" | "increment" | "snowflake";
 
 export interface SnowflakeIdGenerator {
   next(nowMs?: number): string;
@@ -38,16 +38,17 @@ export function createSnowflakeIdGenerator(options: { workerId?: number; now?: (
 
 const defaultSnowflakeIdGenerator = createSnowflakeIdGenerator();
 
-export function generateCellValues(
-  kind: CellValueGenerationKind,
-  count: number,
-  options: {
-    now?: Date;
-    startValue?: bigint;
-    uuidFactory?: () => string;
-    snowflakeGenerator?: SnowflakeIdGenerator;
-  } = {},
-): Array<string | null> {
+export interface CellValueGenerationOptions {
+  now?: Date;
+  startValue?: bigint;
+  padLength?: number;
+  prefix?: string;
+  suffix?: string;
+  uuidFactory?: () => string;
+  snowflakeGenerator?: SnowflakeIdGenerator;
+}
+
+export function generateCellValues(kind: CellValueGenerationKind, count: number, options: CellValueGenerationOptions = {}): Array<string | null> {
   const size = Math.max(0, Math.trunc(count));
   const now = options.now ?? new Date();
   const uuidFactory = options.uuidFactory ?? uuid;
@@ -57,6 +58,7 @@ export function generateCellValues(
     if (kind === "null") return null;
     if (kind === "empty") return "";
     if (kind === "datetime") return localDateTimeText(now);
+    if (kind === "datetime-ms") return localDateTimeMillisecondText(now);
     if (kind === "date") return localDateText(now);
     if (kind === "uuid") return uuidFactory();
     if (kind === "uuid-v7") {
@@ -65,7 +67,18 @@ export function generateCellValues(
       const timestamp = now.getTime().toString(16).padStart(12, "0");
       return `${timestamp.slice(0, 8)}-${timestamp.slice(8)}-7${uuidFactory().slice(15)}`;
     }
-    if (kind === "increment") return String((options.startValue ?? 1n) + BigInt(index));
+    if (kind === "increment") {
+      const num = (options.startValue ?? 1n) + BigInt(index);
+      const isNegative = num < 0n;
+      const absStr = (isNegative ? -num : num).toString();
+      const rawPad = options.padLength;
+      const padLength = typeof rawPad === "number" && Number.isFinite(rawPad) && rawPad > 0 ? Math.min(Math.trunc(rawPad), 64) : 0;
+      const padded = padLength > 0 ? absStr.padStart(padLength, "0") : absStr;
+      const numStr = isNegative ? `-${padded}` : padded;
+      const prefix = options.prefix ?? "";
+      const suffix = options.suffix ?? "";
+      return `${prefix}${numStr}${suffix}`;
+    }
     return snowflakeGenerator.next(now.getTime());
   });
 }
@@ -76,6 +89,14 @@ function padDatePart(value: number): string {
 
 function localDateTimeText(date: Date): string {
   return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())} ${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}:${padDatePart(date.getSeconds())}`;
+}
+
+/**
+ * 带毫秒的本地日期时间文本（issue #11602），例如 2026-07-16 09:08:07.123。
+ * 毫秒固定补足 3 位，避免 7 毫秒被写成 .7 而与存量数据的 3 位格式不一致。
+ */
+function localDateTimeMillisecondText(date: Date): string {
+  return `${localDateTimeText(date)}.${String(date.getMilliseconds()).padStart(3, "0")}`;
 }
 
 function localDateText(date: Date): string {

@@ -1,16 +1,22 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::sql_file_import::{
-    execute_sql_file_paths, execute_sql_file_zip_package_paths, mysql_like_sql_file_bootstrap_analysis,
-    read_sql_file_preview, sql_file_progress, SqlFileProgressEmitter,
+    execute_sql_file_paths, execute_sql_file_zip_package_paths, export_sql_file_failure_log as derive_failure_log_file,
+    mysql_like_sql_file_bootstrap_analysis, prune_sql_file_failure_logs, read_sql_file_preview,
+    sql_file_failure_log_text as derive_failure_log_text, sql_file_progress, start_sql_file_failure_log,
+    SqlFileFailureLogDeriveError, SqlFileFailureLogFileInfo, SqlFileFailureLogFormat, SqlFileFailureLogHandle,
+    SqlFileFailureLogInfo, SqlFileFailureLogKey, SqlFileFailureLogMeta, SqlFileFailureLogRegistry,
+    SqlFileFailureLogRunCounters, SqlFileProgressEmitter, SQL_FILE_FAILURE_LOG_CLIPBOARD_MAX_BYTES,
+    SQL_FILE_FAILURE_LOG_DIR,
 };
 
 pub use dbx_core::sql::{SqlFilePreview, SqlFileRequest, SqlFileStatus};
@@ -19,6 +25,17 @@ static SQL_FILE_EXECUTIONS: OnceLock<RwLock<HashMap<String, CancellationToken>>>
 
 fn sql_file_executions() -> &'static RwLock<HashMap<String, CancellationToken>> {
     SQL_FILE_EXECUTIONS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// The desktop runtime has no session concept, so every log it registers shares
+/// one owner. The Web runtime binds the authenticated session instead, which is
+/// why the registry is owner-scoped at all.
+const DESKTOP_FAILURE_LOG_OWNER: &str = "desktop";
+
+static SQL_FILE_FAILURE_LOGS: OnceLock<SqlFileFailureLogRegistry> = OnceLock::new();
+
+pub(crate) fn sql_file_failure_log_registry() -> &'static SqlFileFailureLogRegistry {
+    SQL_FILE_FAILURE_LOGS.get_or_init(SqlFileFailureLogRegistry::new)
 }
 
 #[cfg(test)]
@@ -150,13 +167,184 @@ pub async fn execute_sql_files(
 
     let started_at = Instant::now();
     let is_zip_package = execution_targets_zip_package(&file_paths);
-    let result = execute_sql_files_inner(&app, &state, &request, &file_paths, token, started_at, is_zip_package).await;
+
+    // Failure log (dbx#11619): created before the run so a mid-run export can
+    // already read what failed, registered under the execution id so the export
+    // and copy commands can find it, and finished on every exit path below.
+    let mut failure_log = start_execution_failure_log(&state, &request, &file_paths).await;
+    sql_file_failure_log_registry().register(
+        DESKTOP_FAILURE_LOG_OWNER,
+        &request.execution_id,
+        failure_log.path().map(Path::to_path_buf),
+        failure_log.status_probe(),
+    );
+    let mut counters = SqlFileFailureLogRunCounters::default();
+    let result = execute_sql_files_inner(
+        &app,
+        &state,
+        &request,
+        &file_paths,
+        token,
+        started_at,
+        is_zip_package,
+        &mut failure_log,
+        &mut counters,
+    )
+    .await;
+    failure_log.finish(counters.summary(started_at.elapsed().as_millis() as u64)).await;
+    // The log stays registered for later export, but stops shielding itself from
+    // retention now that nothing is writing to it.
+    sql_file_failure_log_registry().mark_finished(DESKTOP_FAILURE_LOG_OWNER, &request.execution_id);
+
     cleanup_sql_zip_package_paths(&file_paths);
     {
         let mut executions = sql_file_executions().write().await;
         remove_sql_file_execution(&mut executions, &request.execution_id);
     }
     result
+}
+
+/// Status of the failure log of one execution, for the export/copy controls.
+/// Returns `None` when this process never logged that execution (unknown id, or
+/// the run predates a restart: logs are not re-discoverable across restarts).
+#[tauri::command]
+pub async fn sql_file_failure_log_info(execution_id: String) -> Result<Option<SqlFileFailureLogInfo>, String> {
+    Ok(sql_file_failure_log_registry().info(DESKTOP_FAILURE_LOG_OWNER, &execution_id))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlFileFailureLogExportPayload {
+    pub records: u64,
+    pub bytes: u64,
+    pub format: String,
+}
+
+/// Clipboard payload. Being over the cap is a normal outcome the UI must handle
+/// by suggesting the file export, so it is a flag rather than an error.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlFileFailureLogTextPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub too_large: bool,
+    pub limit_bytes: u64,
+}
+
+/// Streams the failure log into a path the frontend already picked with the
+/// native save dialog. Derivation is blocking (a log can be large), so it runs
+/// off the async runtime.
+#[tauri::command]
+pub async fn export_sql_file_failure_log(
+    execution_id: String,
+    format: String,
+    target_path: String,
+    keys: Option<Vec<SqlFileFailureLogKey>>,
+) -> Result<SqlFileFailureLogExportPayload, String> {
+    let format = SqlFileFailureLogFormat::parse(&format).ok_or_else(|| format!("Unsupported log format: {format}"))?;
+    let log_path = resolve_failure_log_path(&execution_id)?;
+    let selection = failure_log_selection(keys);
+    let format_name = format.extension().to_string();
+    let summary = tokio::task::spawn_blocking(move || {
+        derive_failure_log_file(&log_path, Path::new(&target_path), format, selection.as_ref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    Ok(SqlFileFailureLogExportPayload { records: summary.records, bytes: summary.bytes, format: format_name })
+}
+
+/// Derived TXT/CSV text for the clipboard, capped so a huge log cannot be
+/// pushed into the clipboard (and into the frontend) by accident.
+#[tauri::command]
+pub async fn read_sql_file_failure_log_text(
+    execution_id: String,
+    format: Option<String>,
+    keys: Option<Vec<SqlFileFailureLogKey>>,
+) -> Result<SqlFileFailureLogTextPayload, String> {
+    let format = match format {
+        Some(value) => {
+            SqlFileFailureLogFormat::parse(&value).ok_or_else(|| format!("Unsupported log format: {value}"))?
+        }
+        None => SqlFileFailureLogFormat::Txt,
+    };
+    let log_path = resolve_failure_log_path(&execution_id)?;
+    let selection = failure_log_selection(keys);
+    let limit = SQL_FILE_FAILURE_LOG_CLIPBOARD_MAX_BYTES;
+    let derived =
+        tokio::task::spawn_blocking(move || derive_failure_log_text(&log_path, format, selection.as_ref(), limit))
+            .await
+            .map_err(|error| error.to_string())?;
+    match derived {
+        Ok(text) => Ok(SqlFileFailureLogTextPayload { text: Some(text), too_large: false, limit_bytes: limit }),
+        Err(SqlFileFailureLogDeriveError::TooLarge { limit }) => {
+            Ok(SqlFileFailureLogTextPayload { text: None, too_large: true, limit_bytes: limit })
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn resolve_failure_log_path(execution_id: &str) -> Result<PathBuf, String> {
+    sql_file_failure_log_registry().path(DESKTOP_FAILURE_LOG_OWNER, execution_id).ok_or_else(|| {
+        let reason =
+            sql_file_failure_log_registry().info(DESKTOP_FAILURE_LOG_OWNER, execution_id).and_then(|info| info.reason);
+        match reason {
+            Some(reason) => format!("No failure log to export for this execution: {reason}"),
+            None => "No failure log to export for this execution".to_string(),
+        }
+    })
+}
+
+fn failure_log_selection(keys: Option<Vec<SqlFileFailureLogKey>>) -> Option<HashSet<SqlFileFailureLogKey>> {
+    let keys = keys?;
+    if keys.is_empty() {
+        return None;
+    }
+    Some(keys.into_iter().collect())
+}
+
+/// Prunes the failure log directory down to its retention limits. Best effort:
+/// a failure to clean up must never block an import. Logs of executions that
+/// are still registered (i.e. possibly still running) are protected, so two
+/// parallel imports cannot delete each other's in-progress logs.
+pub(crate) fn prune_desktop_sql_file_failure_logs(data_dir: &Path) {
+    let dir = data_dir.join(SQL_FILE_FAILURE_LOG_DIR);
+    let protected = sql_file_failure_log_registry().active_paths();
+    if let Err(error) = prune_sql_file_failure_logs(&dir, &protected) {
+        log::warn!("Failed to prune SQL file failure logs: {error}");
+    }
+}
+
+async fn start_execution_failure_log(
+    state: &State<'_, Arc<AppState>>,
+    request: &SqlFileRequest,
+    file_paths: &[String],
+) -> SqlFileFailureLogHandle {
+    if !request.failure_log_enabled {
+        return SqlFileFailureLogHandle::unavailable("Failure log disabled for this execution".to_string());
+    }
+    let dir = state.storage.data_dir().join(SQL_FILE_FAILURE_LOG_DIR);
+    // Retention runs before the new file exists, so it can never delete the log
+    // this execution is about to write.
+    prune_desktop_sql_file_failure_logs(state.storage.data_dir());
+    let connection_name = state.configs.read().await.get(&request.connection_id).map(|config| config.name.clone());
+    let mut files = Vec::with_capacity(file_paths.len());
+    for (index, file_path) in file_paths.iter().enumerate() {
+        let path = PathBuf::from(file_path);
+        let size_bytes = tokio::fs::metadata(&path).await.ok().map(|metadata| metadata.len());
+        let name = path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+        files.push(SqlFileFailureLogFileInfo { index, name, path: file_path.clone(), size_bytes });
+    }
+    let meta = SqlFileFailureLogMeta {
+        execution_id: request.execution_id.clone(),
+        connection_id: request.connection_id.clone(),
+        connection_name,
+        database: request.database.clone(),
+        schema: request.schema.clone(),
+        files,
+        limits: Default::default(),
+    };
+    start_sql_file_failure_log(&dir, meta).await
 }
 
 fn cleanup_sql_zip_package_paths(file_paths: &[String]) {
@@ -216,8 +404,14 @@ async fn execute_sql_files_inner(
     token: CancellationToken,
     started_at: Instant,
     is_zip_package: bool,
+    failure_log: &mut SqlFileFailureLogHandle,
+    counters: &mut SqlFileFailureLogRunCounters,
 ) -> Result<(), String> {
     let mut progress_emitter = SqlFileProgressEmitter::new(|progress| {
+        // The sink only serializes and hands off to its writer task, so a slow or
+        // failing disk stays out of the execution path.
+        counters.observe(&progress);
+        failure_log.record(&progress);
         let _ = app.emit("sql-file-progress", progress);
     });
     progress_emitter.emit(sql_file_progress(
@@ -413,6 +607,49 @@ mod execution_tests {
         assert!(!extraction.exists());
         assert!(user_dir.exists());
         let _ = std::fs::remove_dir_all(&user_dir);
+    }
+
+    fn terminal_progress(
+        status: SqlFileStatus,
+        success: usize,
+        failures: usize,
+        affected: u64,
+    ) -> dbx_core::sql::SqlFileProgress {
+        dbx_core::sql::SqlFileProgress {
+            execution_id: "exec-1".to_string(),
+            status,
+            statement_index: 0,
+            success_count: success,
+            failure_count: failures,
+            affected_rows: affected,
+            elapsed_ms: 0,
+            statement_summary: String::new(),
+            error: None,
+            bytes_read: None,
+            total_bytes: None,
+            phase: None,
+            file_index: None,
+            file_name: None,
+            failure_sql: None,
+        }
+    }
+
+    #[test]
+    fn terminal_counters_only_follow_terminal_events() {
+        let mut counters = SqlFileFailureLogRunCounters::default();
+        // Intermediate (and failure) progress must not be mistaken for the final
+        // figures, otherwise the log summary would contradict the UI counters.
+        counters.observe(&terminal_progress(SqlFileStatus::Running, 5, 1, 2));
+        counters.observe(&terminal_progress(SqlFileStatus::StatementFailed, 5, 1, 2));
+        assert_eq!(counters.success_count, 0);
+
+        counters.observe(&terminal_progress(SqlFileStatus::Done, 4, 1, 7));
+        assert_eq!((counters.success_count, counters.failure_count, counters.affected_rows), (4, 1, 7));
+        assert!(!counters.cancelled);
+
+        counters.observe(&terminal_progress(SqlFileStatus::Cancelled, 2, 1, 3));
+        assert!(counters.cancelled);
+        assert_eq!(counters.success_count, 2);
     }
 
     #[test]

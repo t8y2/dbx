@@ -17,6 +17,7 @@ export interface RoutineParameter {
   ordinal: number;
   hasDefault?: boolean;
   defaultValue?: string | null;
+  nullable?: boolean | null;
 }
 
 export interface RoutineParameterValue extends RoutineParameter {

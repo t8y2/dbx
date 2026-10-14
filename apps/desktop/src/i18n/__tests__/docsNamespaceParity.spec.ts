@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import az from "../locales/docs/az";
 import en from "../locales/docs/en";
 import es from "../locales/docs/es";
+import id from "../locales/docs/id";
 import it_ from "../locales/docs/it";
 import ja from "../locales/docs/ja";
 import ko from "../locales/docs/ko";
@@ -21,6 +22,7 @@ import zhTW from "../locales/docs/zh-TW";
 const locales: Array<[string, Record<string, unknown>]> = [
   ["az", az],
   ["es", es],
+  ["id", id],
   ["it", it_],
   ["ja", ja],
   ["ko", ko],

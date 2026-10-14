@@ -16,6 +16,11 @@ import {
   draftColumnNameForSql,
   getDataTypeLengthUnitOptions,
   getDefaultLengthForType,
+  generateIndexName,
+  generateUniqueIndexName,
+  generateShortIndexName,
+  generateUniqueShortIndexName,
+  specialIndexColumnIssue,
   hasExistingColumnTypeChange,
   isDataTypeLengthDisabled,
   isDamengIdentityCompatibleDataType,
@@ -25,6 +30,7 @@ import {
   matchesCopySourceColumnSearch,
   mysqlEnumDataType,
   parseExtraToColumnExtra,
+  parseMysqlGeneratedColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   resolveInsertColumnIndex,
   restoreCharacterLengthUnitsAfterSave,
@@ -36,6 +42,74 @@ import {
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  describe("index naming", () => {
+    it("uses a lowercase type prefix and the initial field name", () => {
+      expect(generateShortIndexName("Prop_Code")).toBe("idx_prop_code");
+      expect(generateShortIndexName("email", { isUnique: true })).toBe("uk_email");
+      expect(generateShortIndexName("title", { indexType: "FULLTEXT" })).toBe("ft_title");
+      expect(generateShortIndexName("location", { indexType: "SPATIAL" })).toBe("sp_location");
+      expect(generateShortIndexName("id", { isPrimary: true })).toBe("PRIMARY");
+      expect(generateShortIndexName("")).toBe("");
+    });
+
+    it("keeps long names deterministic and distinguishes truncated column names", () => {
+      const name = generateShortIndexName("a".repeat(90));
+      expect(name).toHaveLength(63);
+      expect(name).toMatch(/^idx_.*_[0-9a-f]{8}$/);
+      expect(generateShortIndexName("a".repeat(90))).toBe(name);
+      expect(generateShortIndexName("a".repeat(89) + "b")).not.toBe(name);
+      expect(generateShortIndexName("a".repeat(90), { maxLength: 64 })).toHaveLength(64);
+    });
+
+    it("resolves case-insensitive collisions while retaining type prefixes and limits", () => {
+      expect(generateUniqueShortIndexName("email", ["IDX_EMAIL", "idx_email_2"])).toBe("idx_email_3");
+      expect(generateUniqueShortIndexName("email", ["UK_EMAIL"], { isUnique: true })).toBe("uk_email_2");
+      const base = generateShortIndexName("a".repeat(90));
+      const next = generateUniqueShortIndexName("a".repeat(90), [base]);
+      expect(next).toHaveLength(63);
+      expect(next).toMatch(/^idx_.*_[0-9a-f]{8}_2$/);
+    });
+
+    it("preserves legacy callers and table-qualified names for shared namespaces", () => {
+      expect(generateIndexName("users", ["email"])).toBe("USERS_EMAIL_IDX");
+      expect(generateIndexName("orders", ["email"])).toBe("ORDERS_EMAIL_IDX");
+      expect(generateIndexName("users", ["email", "region"])).toBe("USERS_EMAIL_REGION_IDX");
+      expect(generateUniqueIndexName("users", ["email"], ["USERS_EMAIL_IDX"])).toBe("USERS_EMAIL_IDX_2");
+    });
+
+    it("preserves Chinese field names and provides deterministic names for symbols", () => {
+      const field = "\u5c5e\u6027";
+      expect(generateShortIndexName(field)).toBe(`idx_${field}`);
+      expect(generateUniqueShortIndexName(field, [`uk_${field}`], { isUnique: true })).toBe(`uk_${field}_2`);
+      const longName = generateShortIndexName(field.repeat(40), { maxLength: 64 });
+      expect(longName).toHaveLength(64);
+      expect(longName).toMatch(/_[0-9a-f]{8}$/);
+      expect(generateShortIndexName("---")).toMatch(/^idx_column_[0-9a-f]{8}$/);
+      expect(generateShortIndexName("---")).not.toBe(generateShortIndexName("+++"));
+      expect(generateShortIndexName("\u{10400}")).toMatch(/^idx_column_[0-9a-f]{8}$/);
+    });
+  });
+
+  describe("special index columns", () => {
+    const field = (dataType: string, isNullable = false) => ({ dataType, isNullable });
+
+    it("allows composite text searches but rejects JSON, numbers, and unique fulltext", () => {
+      expect(specialIndexColumnIssue("mysql", "FULLTEXT", [field("varchar(255)"), field("longtext")])).toBeNull();
+      for (const type of ["json", "int", "blob"]) expect(specialIndexColumnIssue("mysql", "FULLTEXT", [field(type)])).toBe("fulltextIndexColumns");
+      expect(specialIndexColumnIssue("mysql", "FULLTEXT", [field("text")], true)).toBe("specialIndexUnique");
+    });
+
+    it("requires one non-null geometry for MySQL spatial indexes", () => {
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("point")])).toBeNull();
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("polygon", true)])).toBe("spatialIndexNullable");
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("point"), field("geometry")])).toBe("spatialIndexColumn");
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("varchar(64)")])).toBe("spatialIndexColumn");
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("geography")])).toBe("spatialIndexColumn");
+      expect(specialIndexColumnIssue("sqlserver", "SPATIAL", [field("geography", true)])).toBeNull();
+      expect(specialIndexColumnIssue("postgres", "GIST", [field("geometry", true)])).toBeNull();
+    });
+  });
+
   describe("DuckDB type parameters", () => {
     it.each([
       "TINYINT",
@@ -460,6 +534,33 @@ describe("tableStructureEditorState", () => {
     expect(parseExtraToColumnExtra("identity(1,1)", "postgres")).toEqual({});
   });
 
+  it("parses mysql generated-column metadata into the editable extra", () => {
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (`price` * `quantity`) STORED", "mysql")).toEqual({
+      generated: { expression: "`price` * `quantity`", storage: "STORED" },
+    });
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (lower(`name`)) VIRTUAL", "mysql")).toEqual({
+      generated: { expression: "lower(`name`)", storage: "VIRTUAL" },
+    });
+    // MariaDB PERSISTENT normalizes to STORED, matching the backend introspection.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (`a` + 1) PERSISTENT", "mysql")).toEqual({
+      generated: { expression: "`a` + 1", storage: "STORED" },
+    });
+    // Storage omitted: MySQL defaults to VIRTUAL.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (json_extract(`doc`, '$.x'))", "mysql")).toEqual({
+      generated: { expression: "json_extract(`doc`, '$.x')", storage: "VIRTUAL" },
+    });
+    // Plain columns and identity columns stay untouched.
+    expect(parseMysqlGeneratedColumnExtra("auto_increment")).toBeUndefined();
+    expect(parseMysqlGeneratedColumnExtra("GENERATED ALWAYS AS IDENTITY")).toBeUndefined();
+    expect(parseMysqlGeneratedColumnExtra("")).toBeUndefined();
+    // Identity extras for postgres must not leak into the mysql branch.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS IDENTITY", "postgres")).toEqual({
+      identity: { generation: "ALWAYS" },
+    });
+    // Other dialects never parse mysql generated columns.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (1) STORED", "sqlite")).toEqual({});
+  });
+
   it("keeps mysql unsigned attributes in the editable base type", () => {
     expect(splitDataType("int(11) unsigned")).toEqual({ baseType: "int unsigned", params: "11" });
     expect(splitDataType("bigint(20) unsigned zerofill")).toEqual({
@@ -569,10 +670,11 @@ describe("tableStructureEditorState", () => {
     expect(combineDataTypeForDatabaseWithLengthUnit("dameng", "varchar2", "255", "")).toBe("varchar2(255)");
   });
 
-  it("separates and reconstructs Oracle character length units", () => {
-    expect(dataTypeLengthInputValue("oracle", "VARCHAR2(255 CHAR)")).toBe("255");
-    expect(dataTypeLengthUnitValue("oracle", "VARCHAR2(255 CHAR)")).toBe("CHAR");
-    expect(combineDataTypeForDatabaseWithLengthUnit("oracle", "VARCHAR2", "64", "BYTE")).toBe("VARCHAR2(64 BYTE)");
+  it.each(["oracle", "oceanbase-oracle"] as const)("separates and reconstructs %s character length units", (databaseType) => {
+    expect(dataTypeLengthInputValue(databaseType, "VARCHAR2(255 CHAR)")).toBe("255");
+    expect(dataTypeLengthUnitValue(databaseType, "VARCHAR2(255 CHAR)")).toBe("CHAR");
+    expect(combineDataTypeForDatabaseWithLengthUnit(databaseType, "VARCHAR2", "64", "BYTE")).toBe("VARCHAR2(64 BYTE)");
+    expect(getDataTypeLengthUnitOptions(databaseType, "NVARCHAR2(10)")).toEqual([]);
   });
 
   it("does not reinterpret unsupported length parameters or dialects", () => {
@@ -624,10 +726,10 @@ describe("tableStructureEditorState", () => {
     expect(restored?.original?.data_type).toBe("VARCHAR2(255 BYTE)");
   });
 
-  it("keeps a saved Oracle length unit when refreshed metadata omits it", () => {
-    const [legacyAgentDraft] = createColumnDrafts([{ name: "DISPLAY_NAME", data_type: "VARCHAR2(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }], "oracle");
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps a saved %s length unit when refreshed metadata omits it", (databaseType) => {
+    const [legacyAgentDraft] = createColumnDrafts([{ name: "DISPLAY_NAME", data_type: "VARCHAR2(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }], databaseType);
 
-    const [restored] = restoreCharacterLengthUnitsAfterSave("oracle", [legacyAgentDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
+    const [restored] = restoreCharacterLengthUnitsAfterSave(databaseType, [legacyAgentDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
 
     expect(restored?.dataType).toBe("VARCHAR2(255 CHAR)");
     expect(restored?.original?.data_type).toBe("VARCHAR2(255 CHAR)");

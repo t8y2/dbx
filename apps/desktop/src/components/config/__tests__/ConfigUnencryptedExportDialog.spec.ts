@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import i18n from "@/i18n";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { passwordViewerEnabled } from "@/lib/security/passwordViewer";
+import i18n, { loadLocaleMessages, type Locale } from "@/i18n";
 
 vi.mock("@/components/ui/dialog", async () => {
   const { defineComponent, h } = await import("vue");
@@ -15,9 +16,19 @@ vi.mock("@/components/ui/dialog", async () => {
 import ConfigUnencryptedExportDialog from "../ConfigUnencryptedExportDialog.vue";
 
 const apps: App[] = [];
+const locales: Locale[] = ["az", "en", "es", "id", "it", "ja", "ko", "pt-BR", "ru", "tr", "zh-CN", "zh-TW"];
+const warningKeys = ["plaintextDefaultDescription", "credentialsUnavailable", "includeCredentials", "plaintextCredentialsWarning", "exportWithCredentials", "exportWithoutCredentials"];
+beforeAll(async () => {
+  await Promise.all(locales.map(loadLocaleMessages));
+}, 60_000);
+beforeEach(() => {
+  i18n.global.locale.value = "en";
+  passwordViewerEnabled.value = true;
+});
 afterEach(() => {
   apps.splice(0).forEach((app) => app.unmount());
   document.body.innerHTML = "";
+  passwordViewerEnabled.value = true;
 });
 
 async function mountDialog() {
@@ -50,6 +61,19 @@ async function mountDialog() {
 }
 
 describe("ConfigUnencryptedExportDialog", () => {
+  it.each(locales)("renders native safety warnings and both export choices in %s", async (locale) => {
+    i18n.global.locale.value = locale;
+    for (const key of warningKeys) expect(i18n.global.te(`configExport.${key}`, locale)).toBe(true);
+    const { root } = await mountDialog();
+    expect(root.textContent).toContain(i18n.global.t("configExport.plaintextDefaultDescription"));
+    expect(root.textContent).toContain(i18n.global.t("configExport.includeCredentials"));
+    expect(root.textContent).toContain(i18n.global.t("configExport.plaintextCredentialsWarning"));
+    expect(root.textContent).toContain(i18n.global.t("configExport.exportWithoutCredentials"));
+    root.querySelector("input")!.click();
+    await nextTick();
+    expect(root.textContent).toContain(i18n.global.t("configExport.exportWithCredentials"));
+  });
+
   it("starts unchecked, warns about readable credentials, and requires a separate confirm click", async () => {
     const { root, includeCredentials, confirm, cancel } = await mountDialog();
     const checkbox = root.querySelector("input")!;
@@ -66,6 +90,23 @@ describe("ConfigUnencryptedExportDialog", () => {
     expect(confirm).toHaveBeenCalledOnce();
     buttons.find((button) => button.textContent?.includes("Cancel"))!.click();
     expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("disables credential export when the server disallows password viewing and clears an existing choice", async () => {
+    const { root, includeCredentials } = await mountDialog();
+    root.querySelector("input")!.click();
+    await nextTick();
+    expect(includeCredentials.value).toBe(true);
+    passwordViewerEnabled.value = false;
+    await nextTick();
+    expect(includeCredentials.value).toBe(false);
+    const checkbox = root.querySelector("input")!;
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(true);
+    checkbox.click();
+    expect(includeCredentials.value).toBe(false);
+    expect(root.textContent).toContain("This server does not allow exporting credentials.");
+    expect(root.textContent).toContain("Export without credentials");
   });
 
   it("disables the choice and actions while saving", async () => {

@@ -8,6 +8,7 @@ import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { saveTextFile } from "@/lib/export/saveTextFile";
 import * as api from "@/lib/backend/api";
 import type { QueryResult } from "@/types/database";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS } from "@/lib/dataGrid/dataGridCopyExtractor";
 
 const mocks = vi.hoisted(() => ({ native: true, toast: vi.fn() }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => mocks.native }));
@@ -40,6 +41,8 @@ function createOptions(overrides: Partial<UseDataGridExportOptions> = {}): UseDa
       ],
     })),
     databaseType: computed(() => "postgres"),
+    includeDatabaseName: computed(() => false),
+    hasUniqueQueryInsertTarget: computed(() => true),
     connectionId: computed(() => "conn"),
     database: computed(() => "dbx"),
     context: computed(() => "results"),
@@ -86,12 +89,112 @@ describe("SQL export column selection across entrypoints", () => {
     expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ selectedColumns: [choices[2]!], exportColumnTypes: ["int", "text", "bigint"], insertMode: "single", keysetOptimizationEnabled: true, sql: "SELECT id, name FROM users" }), expect.any(Function));
   });
 
+  it("excludes only the exact PostgreSQL primary-key spelling", async () => {
+    const names = ["ID", "id", "name"];
+    const choices = sqlExportColumnChoices(names);
+    const state = useDataGridExport(
+      createOptions({
+        allColumns: computed(() => names),
+        tableMeta: computed(() => ({
+          tableName: "users",
+          primaryKeys: ["id"],
+          columns: [
+            { name: "ID", data_type: "int", extra: "identity" },
+            { name: "id", data_type: "int", is_primary_key: true },
+            { name: "name", data_type: "text" },
+          ],
+        })),
+        extractorOptions: computed(() => ({
+          dsv: { columnSeparator: ",", rowSeparator: "\\n", quote: '"', quoteMode: "minimal", nullText: "", includeHeader: true, includeRowHeader: false },
+          sql: { skipComputedColumns: true, skipGeneratedColumns: true, insertMode: "merged", primaryKeyMode: "exclude-all", includeDatabaseName: false, quoteIdentifiers: true, temporalFormat: "native" },
+          json: { camelCaseFieldNames: false },
+        })),
+      }),
+    );
+
+    await state.exportSql();
+
+    expect(showSqlInsertModeDialog).toHaveBeenCalledWith({ allowSplit: false, columns: choices.filter((column) => column.name !== "id") });
+  });
+
   it("preserves full table paging keys and split options in the backend request", async () => {
     const selectedColumns = [sqlExportColumnChoices(["id", "name"])[1]!];
     vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "batch", selectedColumns, splitMaxMb: 128 });
     await useDataGridExport(createOptions({ context: computed(() => "table-data") })).exportSql();
     expect(api.startTableExport).toHaveBeenCalledWith(expect.objectContaining({ columns: ["id", "name"], columnTypes: ["int4", "text"], selectedColumns, splitMaxMb: 128 }), expect.any(Function));
     expect(api.startQueryResultExport).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("keeps case-distinct generated metadata aligned in query exports (reverse=$reverse)", async (reverse) => {
+    const names = ["ID", "id", "name"];
+    const metadata = [
+      { name: "ID", data_type: "int", extra: "identity" },
+      { name: "id", data_type: "int", is_primary_key: true },
+      { name: "name", data_type: "text" },
+    ];
+    vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "batch", selectedColumns: sqlExportColumnChoices(names) });
+    await useDataGridExport(
+      createOptions({
+        allColumns: computed(() => names),
+        allColumnTypes: computed(() => ["int", "int", "text"]),
+        tableMeta: computed(() => ({ tableName: "users", primaryKeys: ["id"], columns: reverse ? [...metadata].reverse() : metadata })),
+        extractorOptions: computed(() => ({ ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-generated" } })),
+      }),
+    ).exportSql();
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ exportColumnExtras: ["identity", null, null], primaryKeys: ["id"], primaryKeyMode: "exclude-generated", selectedColumns: sqlExportColumnChoices(names) }), expect.any(Function));
+  });
+
+  it.each(["page", "selected", "web"] as const)("does not re-exclude a projected case-distinct non-key in the %s fallback", async (scope) => {
+    const names = ["ID", "id", "name"];
+    const selectedColumns = sqlExportColumnChoices(names).filter((column) => column.name !== "id");
+    const items = [{ id: 7, sourceIndex: 0, data: [91, 1, "Ada"], isNew: false, isDeleted: false, isDirtyCol: [], status: "" }];
+    mocks.native = scope !== "web";
+    vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "batch", selectedColumns });
+    const state = useDataGridExport(
+      createOptions({
+        columns: computed(() => names),
+        allColumns: computed(() => names),
+        sourceColumns: computed(() => names),
+        columnTypes: computed(() => ["int", "int", "text"]),
+        displayItems: computed(() => items),
+        getRowItem: () => items[0],
+        tableMeta: computed(() => ({
+          tableName: "users",
+          primaryKeys: ["id"],
+          columns: [
+            { name: "ID", data_type: "int" },
+            { name: "id", data_type: "int", is_primary_key: true },
+            { name: "name", data_type: "text" },
+          ],
+        })),
+        extractorOptions: computed(() => ({ ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-all" } })),
+        fullExportResult: vi.fn(async () => ({ columns: names, column_types: ["int", "int", "text"], rows: [[91, 1, "Ada"]] }) as QueryResult),
+      }),
+    );
+    if (scope === "page") await state.exportCurrentPageSql();
+    else await state.exportSql(scope === "selected" ? [7] : undefined);
+    expect(formatSqlInsert).toHaveBeenCalledWith(expect.objectContaining({ columns: ["ID", "name"], rows: [[91, "Ada"]], excludeColumns: undefined }));
+    expect(saveTextFile).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])("keeps case-distinct metadata aligned in page exports (reverse=$reverse)", async (reverse) => {
+    const names = ["ID", "id", "name"];
+    const metadata = [
+      { name: "ID", data_type: "int", extra: "identity" },
+      { name: "id", data_type: "int", is_primary_key: true },
+      { name: "name", data_type: "text" },
+    ];
+    vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "batch", selectedColumns: sqlExportColumnChoices(names) });
+    await useDataGridExport(
+      createOptions({
+        columns: computed(() => names),
+        sourceColumns: computed(() => names),
+        columnTypes: computed(() => ["int", "int", "text"]),
+        tableMeta: computed(() => ({ tableName: "users", primaryKeys: ["id"], columns: reverse ? [...metadata].reverse() : metadata })),
+        extractorOptions: computed(() => ({ ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-generated" } })),
+      }),
+    ).exportCurrentPageSql();
+    expect(formatSqlInsert).toHaveBeenCalledWith(expect.objectContaining({ columns: names, columnExtras: ["identity", null, null], excludeColumns: undefined }));
   });
 
   it.each(["page", "selected"] as const)("projects %s rows and types together without requerying", async (scope) => {
@@ -102,6 +205,34 @@ describe("SQL export column selection across entrypoints", () => {
     expect(api.startQueryResultExport).not.toHaveBeenCalled();
     expect(api.startTableExport).not.toHaveBeenCalled();
     expect(saveTextFile).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { includeDatabaseName: true, expectedSchema: "APP_OWNER" },
+    { includeDatabaseName: false, expectedSchema: undefined },
+  ])("uses the Oracle owner only when generated SQL includes database names ($includeDatabaseName)", async ({ includeDatabaseName, expectedSchema }) => {
+    await useDataGridExport(
+      createOptions({
+        databaseType: computed(() => "oracle"),
+        includeDatabaseName: computed(() => includeDatabaseName),
+        tableMeta: computed(() => ({ tableName: "USERS", schema: "APP_OWNER", primaryKeys: [], columns: [] })),
+      }),
+    ).exportSql([7]);
+
+    expect(formatSqlInsert).toHaveBeenCalledWith(expect.objectContaining({ schema: expectedSchema, tableName: "USERS" }));
+  });
+
+  it("does not infer an INSERT target from first-source metadata for a multi-source result", async () => {
+    await useDataGridExport(
+      createOptions({
+        databaseType: computed(() => "oracle"),
+        includeDatabaseName: computed(() => true),
+        hasUniqueQueryInsertTarget: computed(() => false),
+        tableMeta: computed(() => ({ tableName: "USERS", schema: "APP_OWNER", primaryKeys: [], columns: [] })),
+      }),
+    ).exportSql([7]);
+
+    expect(formatSqlInsert).toHaveBeenCalledWith(expect.objectContaining({ schema: undefined, tableName: "query_result" }));
   });
 
   it("keeps second duplicate, spatial metadata and raw types aligned after internal-key removal", async () => {
@@ -154,6 +285,40 @@ describe("SQL export column selection across entrypoints", () => {
     expect(showSqlInsertModeDialog).toHaveBeenCalledWith({ allowSplit: true, columns: sqlExportColumnChoices(names).filter((column) => column.name !== "generated") });
   });
 
+  it("prefers SQL Server table metadata types so non-insertable columns get filtered", async () => {
+    vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "batch" });
+    const names = ["id", "row_version", "total"];
+    const items = [{ id: 7, sourceIndex: 0, data: [7, "0x00000000000007D1", 42], isNew: false, isDeleted: false, isDirtyCol: [false, false, false], status: "" }];
+    await useDataGridExport(
+      createOptions({
+        displayItems: computed(() => items),
+        getRowItem: (id) => items.find((item) => item.id === id),
+        context: computed(() => "table-data"),
+        databaseType: computed(() => "sqlserver"),
+        columns: computed(() => names),
+        sourceColumns: computed(() => names),
+        columnTypes: computed(() => ["int4", "varbinary", "int4"]),
+        tableMeta: computed(() => ({
+          tableName: "sync_state",
+          primaryKeys: ["id"],
+          columns: [
+            { name: "id", data_type: "int" },
+            { name: "row_version", data_type: "timestamp" },
+            { name: "total", data_type: "int", extra: "computed" },
+          ],
+        })),
+      }),
+    ).exportCurrentPageSql();
+    expect(formatSqlInsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        columns: ["id", "row_version", "total"],
+        columnTypes: ["int", "timestamp", "int"],
+        columnExtras: [null, null, "computed"],
+        rows: [[7, "0x00000000000007D1", 42]],
+      }),
+    );
+  });
+
   it("omits PostgreSQL tsvector fields using query metadata", async () => {
     vi.mocked(showSqlInsertModeDialog).mockResolvedValue(null);
     await useDataGridExport(createOptions({ allColumns: computed(() => ["id", "search"]), allColumnTypes: computed(() => ["int", "pg_catalog.tsvector"]) })).exportSql();
@@ -170,6 +335,21 @@ describe("SQL export column selection across entrypoints", () => {
     expect(formatSqlInsert).not.toHaveBeenCalled();
     expect(saveTextFile).not.toHaveBeenCalled();
     expect(mocks.toast).toHaveBeenCalledWith("grid.exportFailed", 5000);
+  });
+
+  it("resolves subset type fallbacks by name instead of subset position", async () => {
+    const choices = sqlExportColumnChoices(["name"]);
+    vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "single", selectedColumns: [choices[0]!] });
+    const state = useDataGridExport(
+      createOptions({
+        columns: computed(() => ["name"]),
+        allColumns: computed(() => ["id", "name"]),
+        allColumnTypes: computed(() => ["tsvector", "text"]),
+        tableMeta: computed(() => ({ tableName: "users", primaryKeys: [], columns: [] })),
+      }),
+    );
+    await state.exportSql({ columnIndexes: [0] });
+    expect(showSqlInsertModeDialog).toHaveBeenCalledWith({ allowSplit: false, columns: choices });
   });
 
   it("keeps legacy omitted selection behavior", async () => {

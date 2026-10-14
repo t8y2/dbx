@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import { loadSqlParameterHistory, rememberSqlParameterValues } from "@/lib/sql/sqlParameterHistory";
 import { substituteSqlParameters, type SqlParameterDescriptor, type SqlParameterInput, type SqlParameterSyntax, type SqlParameterValueKind } from "@/lib/sql/sqlParameters";
+import { useDialogEditorFocusRestore } from "@/composables/useDialogEditorFocusRestore";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -36,6 +37,8 @@ const values = ref<Record<string, SqlParameterInput>>({});
 const histories = ref<Record<string, SqlParameterInput[]>>({});
 const activeHistoryName = ref("");
 let closeHistoryTimer: ReturnType<typeof setTimeout> | undefined;
+
+const { onCloseAutoFocus: onSqlParameterDialogCloseAutoFocus } = useDialogEditorFocusRestore(open);
 
 const parameterKinds: SqlParameterValueKind[] = ["string", "number", "boolean", "null", "raw"];
 
@@ -150,7 +153,7 @@ async function copyResolvedSql() {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="max-h-[86vh] border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[720px]">
+    <DialogContent class="max-h-[86vh] border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[720px]" @close-auto-focus="onSqlParameterDialogCloseAutoFocus">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <Braces class="h-5 w-5 text-primary" />

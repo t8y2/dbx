@@ -13,10 +13,16 @@ vi.mock("@/composables/useSqlHighlighter", () => ({
 
 const dialogHarness = vi.hoisted(() => {
   const pendingCloseAutoFocus: Array<() => Event> = [];
+  const pendingOpenAutoFocus: Array<() => Event> = [];
   return {
     pendingCloseAutoFocus,
+    pendingOpenAutoFocus,
     flushCloseAutoFocus: () => pendingCloseAutoFocus.shift()?.(),
-    reset: () => pendingCloseAutoFocus.splice(0),
+    flushOpenAutoFocus: () => pendingOpenAutoFocus.shift()?.(),
+    reset: () => {
+      pendingCloseAutoFocus.splice(0);
+      pendingOpenAutoFocus.splice(0);
+    },
   };
 });
 
@@ -44,12 +50,28 @@ vi.mock("@/components/ui/dialog", () => {
   });
 
   const DialogContent = defineComponent({
-    emits: ["closeAutoFocus"],
+    emits: ["openAutoFocus", "closeAutoFocus"],
     setup(_, { emit, slots }) {
       const context = inject<DialogContext>(dialogContextKey);
       if (!context) throw new Error("DialogContent must be nested in Dialog");
 
+      const queueOpenAutoFocus = () => {
+        dialogHarness.pendingOpenAutoFocus.push(() => {
+          const event = new Event("open-auto-focus", { cancelable: true });
+          emit("openAutoFocus", event);
+          return event;
+        });
+      };
+
+      if (context.open.value) {
+        queueOpenAutoFocus();
+      }
+
       watch(context.open, (isOpen, wasOpen) => {
+        if (isOpen && !wasOpen) {
+          queueOpenAutoFocus();
+          return;
+        }
         if (isOpen || !wasOpen) return;
         dialogHarness.pendingCloseAutoFocus.push(() => {
           const event = new Event("close-auto-focus", { cancelable: true });
@@ -85,7 +107,7 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-function mountDialog(state: { open: boolean }) {
+function mountDialog(state: { open: boolean }, extraProps: Record<string, unknown> = {}) {
   const dialogHost = document.createElement("div");
   document.body.append(dialogHost);
   const app = createApp(
@@ -95,6 +117,7 @@ function mountDialog(state: { open: boolean }) {
           open: state.open,
           sql: "UPDATE users SET active = 0;",
           confirmLabel: "Execute",
+          ...extraProps,
           "onUpdate:open": (open: boolean) => {
             state.open = open;
           },
@@ -105,6 +128,12 @@ function mountDialog(state: { open: boolean }) {
   app.use(i18n);
   app.mount(dialogHost);
   return dialogHost;
+}
+
+function findCancelButton(host: HTMLElement) {
+  const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.includes("Cancel"));
+  if (!button) throw new Error("Cancel button not found");
+  return button;
 }
 
 function createEditor() {
@@ -192,5 +221,67 @@ describe("DangerConfirmDialog focus restoration", () => {
     expect(finalClose?.defaultPrevented).toBe(true);
     await vi.waitFor(() => expect(document.activeElement).toBe(view.contentDOM));
     expect(view.state.selection.main.head).toBe(20);
+  });
+});
+
+describe("DangerConfirmDialog initial focus on open", () => {
+  it("defaults to focusing the confirm button on open", async () => {
+    const state = reactive({ open: true });
+    const dialogHost = mountDialog(state);
+    await nextTick();
+
+    const openEvent = dialogHarness.flushOpenAutoFocus();
+    expect(openEvent?.defaultPrevented).toBe(true);
+
+    const confirm = findConfirmButton(dialogHost);
+    expect(document.activeElement).toBe(confirm);
+  });
+
+  it("focuses the cancel button on open when initialFocus is 'cancel'", async () => {
+    const state = reactive({ open: true });
+    const dialogHost = mountDialog(state, { initialFocus: "cancel" });
+    await nextTick();
+
+    const openEvent = dialogHarness.flushOpenAutoFocus();
+    expect(openEvent?.defaultPrevented).toBe(true);
+
+    const cancel = findCancelButton(dialogHost);
+    expect(document.activeElement).toBe(cancel);
+  });
+
+  it("does not override default focus when initialFocus is 'default'", async () => {
+    const state = reactive({ open: true });
+    const dialogHost = mountDialog(state, { initialFocus: "default" });
+    await nextTick();
+
+    const openEvent = dialogHarness.flushOpenAutoFocus();
+    expect(openEvent?.defaultPrevented).toBe(false);
+
+    const confirm = findConfirmButton(dialogHost);
+    expect(document.activeElement).not.toBe(confirm);
+  });
+
+  it("does not override default focus when confirmDisabled is true", async () => {
+    const state = reactive({ open: true });
+    const dialogHost = mountDialog(state, { confirmDisabled: true });
+    await nextTick();
+
+    const openEvent = dialogHarness.flushOpenAutoFocus();
+    expect(openEvent?.defaultPrevented).toBe(false);
+
+    const confirm = findConfirmButton(dialogHost);
+    expect(document.activeElement).not.toBe(confirm);
+  });
+
+  it("does not override default focus when loading is true", async () => {
+    const state = reactive({ open: true });
+    const dialogHost = mountDialog(state, { loading: true });
+    await nextTick();
+
+    const openEvent = dialogHarness.flushOpenAutoFocus();
+    expect(openEvent?.defaultPrevented).toBe(false);
+
+    const confirm = findConfirmButton(dialogHost);
+    expect(document.activeElement).not.toBe(confirm);
   });
 });

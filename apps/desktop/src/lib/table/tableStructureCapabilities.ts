@@ -213,6 +213,11 @@ const oracleCapabilities = capabilities({
   addPrimaryKey: true,
 });
 
+const oceanbaseOracleCapabilities = capabilities({
+  ...oracleCompatibleCapabilities,
+  addPrimaryKey: true,
+});
+
 // Dameng (DM8): ALTER TABLE ... DROP PRIMARY KEY / ADD PRIMARY KEY is official DDL.
 // Keep separate from Oracle-compatible engines so UI cannot enable PK edits without verified DDL.
 const damengCapabilities = capabilities({
@@ -269,6 +274,17 @@ const informixCapabilities = capabilities({
   createIndex: true,
   dropIndex: true,
   rebuildIndex: true,
+});
+
+const sapHanaCapabilities = capabilities({
+  dialect: "oracle",
+  addColumn: true,
+  dropColumn: true,
+  renameColumn: true,
+  alterExistingColumn: true,
+  alterType: true,
+  alterNullability: true,
+  alterDefault: true,
 });
 
 // Inceptor accepts ADD COLUMNS and CHANGE. DROP COLUMN and index/constraint DDL
@@ -368,7 +384,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   sqlserver: sqlserverCapabilities,
   oracle: oracleCapabilities,
   dameng: damengCapabilities,
-  "oceanbase-oracle": oracleCompatibleCapabilities,
+  "oceanbase-oracle": oceanbaseOracleCapabilities,
   iris: irisCapabilities,
   yashandb: oracleCompatibleCapabilities,
   xugu: oracleCompatibleCapabilities,
@@ -376,6 +392,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   access: accessCapabilities,
   clickhouse: clickhouseCapabilities,
   informix: informixCapabilities,
+  saphana: sapHanaCapabilities,
   transwarp: transwarpCapabilities,
   influxdb: influxdbCapabilities,
   manticoresearch: manticoreSearchCapabilities,

@@ -771,6 +771,7 @@ mod tests {
             (DatabaseType::Questdb, GeneratedSql),
             (DatabaseType::Dameng, DriverNative),
             (DatabaseType::Oracle, DriverNative),
+            (DatabaseType::Db2, DriverNative),
             (DatabaseType::OceanbaseOracle, GeneratedSql),
             (DatabaseType::SqlServer, SqlServerShowPlanSession),
         ] {

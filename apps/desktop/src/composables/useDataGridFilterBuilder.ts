@@ -88,8 +88,10 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
   function ensureRule() {
     if (!rules.value.length && toValue(options.columns).length) rules.value = [defaultRule()];
   }
-  function addRule() {
-    rules.value = [...rules.value, defaultRule()];
+  function addRule(patch?: Partial<Omit<DataGridStructuredFilterRule, "id">>): DataGridStructuredFilterRule {
+    const rule = { ...defaultRule(), ...patch };
+    rules.value = [...rules.value, rule];
+    return rule;
   }
   function removeRule(id: string) {
     rules.value = rules.value.filter((rule) => rule.id !== id);

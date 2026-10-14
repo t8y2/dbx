@@ -79,6 +79,18 @@ function repositoryResult(repositoryId: string, repositoryName: string, latestVe
 }
 
 describe("plugin marketplace listings", () => {
+  it("uses the catalog repository homepage without falling back to its JSON URL", () => {
+    const catalog = structuredClone(result);
+    catalog.repository.catalogUrl = "https://plugins.example.com/catalog.json";
+    catalog.catalog!.repository.homepage = "https://plugins.example.com/";
+    expect(buildMarketplacePluginListings([catalog], [], "en")[0].repositoryHomepage).toBe("https://plugins.example.com/");
+
+    delete catalog.catalog!.repository.homepage;
+    expect(buildMarketplacePluginListings([catalog], [], "en")[0].repositoryHomepage).toBeUndefined();
+    catalog.catalog!.repository.homepage = "   ";
+    expect(buildMarketplacePluginListings([catalog], [], "en")[0].repositoryHomepage).toBeUndefined();
+  });
+
   it("localizes, detects updates, and filters by repository", () => {
     const listings = buildMarketplacePluginListings([result], [installed("1.0.0")], "zh-CN");
 

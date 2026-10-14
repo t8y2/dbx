@@ -1,19 +1,27 @@
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 
-export type SqlSelectionCaseMode = "upper" | "lower";
+export type SqlSelectionCaseMode = "upper" | "lower" | "toggle";
 
 type SqlSelectionRange = {
   from: number;
   to: number;
 };
 
-function convertCase(text: string, mode: SqlSelectionCaseMode): string {
+function convertCase(text: string, mode: "upper" | "lower"): string {
   return mode === "upper" ? text.toUpperCase() : text.toLowerCase();
 }
 
 export function convertSqlSelectionCase(sql: string, range: SqlSelectionRange, mode: SqlSelectionCaseMode, dialectId?: "mysql" | "postgres" | "sqlserver"): string {
   const from = Math.max(0, Math.min(range.from, sql.length));
   const to = Math.max(from, Math.min(range.to, sql.length));
+  if (mode === "toggle") {
+    const upperResult = convertSqlSelectionCase(sql, range, "upper", dialectId);
+    const currentText = sql.slice(from, to);
+    if (upperResult !== currentText) {
+      return upperResult;
+    }
+    return convertSqlSelectionCase(sql, range, "lower", dialectId);
+  }
   const protectedTokens = tokenizeSqlSemantic(sql, dialectId).filter((item) => {
     if (item.span.end <= from || item.span.start >= to) return false;
     if (item.kind === "string") return true;

@@ -77,6 +77,7 @@ describe("connectionDatabaseInfo", () => {
     expect(connectionConfigFingerprint({ ...original, note: "Production reporting" })).toBe(connectionConfigFingerprint(original));
     expect(connectionConfigFingerprint({ ...original, default_schema: "archive" })).toBe(connectionConfigFingerprint(original));
     expect(connectionConfigFingerprint({ ...original, sidebar_auto_load_all_tables: true })).toBe(connectionConfigFingerprint(original));
+    expect(connectionConfigFingerprint({ ...original, show_database_links: false })).toBe(connectionConfigFingerprint(original));
   });
 
   it("formats only database metadata for rows and copied text", () => {

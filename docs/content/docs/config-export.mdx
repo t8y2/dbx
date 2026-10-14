@@ -23,7 +23,7 @@ description: Export database connections with AES-256-GCM encrypted passwords. M
 <Step>
     ### Choose Export Protection
 
-    Enter a passphrase to encrypt your passwords. For a one-time migration in a trusted environment, you may instead choose **Export without encryption** and confirm the warning. Plaintext export excludes credentials by default. To retain them, explicitly check **Include passwords and other credentials (plaintext)** before confirming.
+    Enter a passphrase to encrypt your passwords. For a one-time migration in a trusted environment, you may instead choose **Export without encryption** and confirm the warning. Plaintext export excludes credentials by default. Servers that disable password viewing do not allow the credential opt-in. To retain them, explicitly check **Include passwords and other credentials (plaintext)** before confirming.
   </Step>
 <Step>
     ### Save File
@@ -62,6 +62,7 @@ description: Export database connections with AES-256-GCM encrypted passwords. M
 - Passwords are encrypted using **AES-256-GCM** with **PBKDF2** key derivation
 - Without the passphrase, an encrypted file cannot be decrypted
 - Plaintext export excludes passwords and other credentials by default. The optional **Include passwords and other credentials (plaintext)** setting writes them in readable form; use it only for temporary migration in a trusted environment, protect the file, and delete it when finished
+- Credential-free exports also redact percent-encoded credential parameter names. SQL Server parameters follow its semicolon/brace property grammar; if that field is malformed and cannot be safely parsed, the entire `url_params` field is cleared in the export. The saved connection is unchanged.
 - The export file is standard JSON, transferable via USB drive, cloud storage, etc.
 - DBX stores ordinary connection fields separately from secrets such as database passwords, SSH passwords, SSH key passphrases, and full connection strings. Encrypted export protects the combined data; plaintext export writes those secrets as readable JSON only when explicitly selected for that export. The choice resets when cancelling or leaving the plaintext confirmation, and after a completed export.
 - Treat the passphrase like a secret. Anyone with both the export file and passphrase can restore the saved connections.

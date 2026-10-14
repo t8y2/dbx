@@ -107,6 +107,7 @@ export function sqlSemanticReferencedTables(model: SqlSemanticModel): SqlComplet
         database: source.metadataTarget?.database,
         schema: source.qualifierParts[source.qualifierParts.length - 1],
         schemaQuoted: source.qualifierParts.length > 0 ? !!identifierParts[identifierParts.length - 2]?.quote : undefined,
+        kind: source.kind === "cte" ? ("cte" as const) : undefined,
         alias: source.alias,
         aliasSql: source.aliasSpan ? model.sql.slice(source.aliasSpan.start, source.aliasSpan.end) : source.alias,
         columns: source.columns,

@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 
+mod webdav_snapshot;
+
 use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
     plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
@@ -69,6 +71,10 @@ const DESKTOP_DEVICE_LOCAL_SETTINGS: &[&str] = &[
     "agent_store_dir",
     "custom_ai_skill_root_enabled",
     "custom_ai_skill_root",
+    // Device-local like the two above: it gates which of *this* device's skill
+    // files reach the prompt, so a synced "on" would inject another machine's
+    // catalog here.
+    "custom_ai_skill_auto_enabled",
 ];
 const NON_SYNCABLE_DESKTOP_SETTINGS: &[&str] = &["debug_logging_enabled"];
 const NON_SYNCABLE_EDITOR_SETTINGS: &[&str] = &[
@@ -90,6 +96,11 @@ pub struct WebDavConfig {
     pub username: Option<String>,
     pub password: Option<String>,
     pub remote_path: Option<String>,
+    /// Optional User-Agent override for WebDAV gateways that only allow
+    /// specific client applications. When empty no User-Agent is sent,
+    /// matching the long-standing default behavior.
+    #[serde(default)]
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -436,7 +447,23 @@ pub async fn describe_local_sync_state(
     )
     .await?;
     let mut catalog = describe_sync_snapshot(&snapshot, None)?;
-    catalog.connection_secrets = catalog.connections.iter().map(|item| item.id.clone()).collect();
+    // Snapshot connections are already scrubbed, so reload the hydrated rows
+    // and count only connections that would actually carry a secret into the
+    // encrypted payload.  Otherwise the export dialog lists every connection
+    // as a credential candidate while a restore of that backup reports fewer.
+    let source_connections = storage.load_connections().await?;
+    let mut connection_secret_ids = Vec::new();
+    for config in &source_connections {
+        let mut secrets = Vec::new();
+        // `true` mirrors every real export path: the Tauri/web commands tie
+        // include_plugin_secrets to include_secrets, so the catalog must count
+        // plugin-secret-only connections as credential candidates too.
+        collect_connection_secrets(&mut secrets, config, true)?;
+        if !secrets.is_empty() {
+            connection_secret_ids.push(config.id.clone());
+        }
+    }
+    catalog.connection_secrets = connection_secret_ids;
     catalog.tunnel_secrets = catalog.tunnel_profiles.iter().map(|item| item.id.clone()).collect();
     catalog.ai_configs = storage
         .load_ai_configs()
@@ -954,6 +981,7 @@ fn syncable_desktop_settings(mut settings: DesktopSettings) -> DesktopSettings {
     settings.agent_store_dir = None;
     settings.custom_ai_skill_root_enabled = false;
     settings.custom_ai_skill_root = None;
+    settings.custom_ai_skill_auto_enabled = false;
     settings.debug_logging_enabled = false;
     settings
 }
@@ -1784,6 +1812,10 @@ impl WebDavClient {
         let builder = Client::builder();
         let builder =
             if webdav_endpoint_uses_direct_connection(&config.endpoint) { builder.no_proxy() } else { builder };
+        let builder = match config.user_agent.as_deref().map(str::trim).filter(|ua| !ua.is_empty()) {
+            Some(user_agent) => builder.user_agent(user_agent),
+            None => builder,
+        };
         let http = builder.build().expect("failed to build WebDAV HTTP client");
         Self { http, config }
     }
@@ -1805,22 +1837,23 @@ impl WebDavClient {
 
     pub async fn put_snapshot(&self, snapshot: &SyncSnapshot) -> Result<WebDavSyncSummary, String> {
         let remote_path = self.remote_path();
+        let (bytes, content_type) = webdav_snapshot::encode(snapshot, &remote_path)?;
+        let byte_count = bytes.len();
         self.ensure_parent_collections(&remote_path).await?;
-        let bytes = serde_json::to_vec_pretty(snapshot).map_err(|e| e.to_string())?;
         let response = self
             .request(Method::PUT, &remote_path)?
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(bytes.clone())
+            .header(header::CONTENT_TYPE, content_type)
+            .body(bytes)
             .send()
             .await
             .map_err(|e| e.to_string())?;
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("WebDAV upload failed with HTTP {status}"));
+            return Err(webdav_snapshot::upload_error(status, content_type));
         }
         Ok(WebDavSyncSummary {
             remote_path,
-            bytes: bytes.len(),
+            bytes: byte_count,
             exported_at: Some(snapshot.exported_at.clone()),
             app_version: Some(snapshot.app_version.clone()),
         })
@@ -1833,8 +1866,8 @@ impl WebDavClient {
         if !status.is_success() {
             return Err(format!("WebDAV download failed with HTTP {status}"));
         }
-        let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-        let snapshot: SyncSnapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let bytes = webdav_snapshot::read_response(response).await?;
+        let snapshot = webdav_snapshot::decode(&bytes)?;
         let summary = WebDavSyncSummary {
             remote_path,
             bytes: bytes.len(),
@@ -1915,6 +1948,17 @@ impl SnippetSyncClient {
         } else {
             Ok(format!("{}/{path}", self.api_base))
         }
+    }
+
+    fn gitlab_raw_file_url(&self, snippet_id: &str, reference: &str) -> Result<Url, String> {
+        let mut url = Url::parse(&self.snippet_url(Some(snippet_id))?).map_err(|e| e.to_string())?;
+        url.path_segments_mut().map_err(|_| "GitLab snippet URL cannot be a base URL".to_string())?.extend([
+            "files",
+            reference,
+            DEFAULT_SNIPPET_FILE_NAME,
+            "raw",
+        ]);
+        Ok(url)
     }
 
     pub async fn test(&self) -> Result<(), String> {
@@ -2075,20 +2119,19 @@ impl SnippetSyncClient {
                 .iter()
                 .find(|file| file.get("path").and_then(serde_json::Value::as_str) == Some(DEFAULT_SNIPPET_FILE_NAME))
                 .ok_or_else(|| format!("Snippet does not contain {DEFAULT_SNIPPET_FILE_NAME}"))?;
-            // Snippet repositories default to `main` on current instances but
-            // `master` on older ones; the per-file `raw_url` always carries the
-            // snippet's actual default branch, so prefer it over guessing.
-            let constructed_main = format!("{url}/files/main/{DEFAULT_SNIPPET_FILE_NAME}/raw");
-            let raw_url = file
+            // raw_url is a browser route and can use a different scheme or host.
+            // Read its ref, but send the token only to the configured instance API.
+            let reference = file
                 .get("raw_url")
                 .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| constructed_main.clone());
-            let response = self.request(Method::GET, &raw_url)?.send().await.map_err(|e| e.to_string())?;
-            if response.status() == StatusCode::NOT_FOUND && raw_url == constructed_main {
-                let master_url = format!("{url}/files/master/{DEFAULT_SNIPPET_FILE_NAME}/raw");
-                let response = self.request(Method::GET, &master_url)?.send().await.map_err(|e| e.to_string())?;
+                .and_then(|raw_url| gitlab_snippet_raw_ref(raw_url, snippet_id))
+                .unwrap_or_else(|| "main".to_string());
+            let raw_url = self.gitlab_raw_file_url(snippet_id, &reference)?;
+            let response = self.request(Method::GET, raw_url.as_str())?.send().await.map_err(|e| e.to_string())?;
+            if response.status() == StatusCode::NOT_FOUND && reference == "main" {
+                let master_url = self.gitlab_raw_file_url(snippet_id, "master")?;
+                let response =
+                    self.request(Method::GET, master_url.as_str())?.send().await.map_err(|e| e.to_string())?;
                 ensure_snippet_success(response.status(), "raw download")?;
                 return response.text().await.map_err(|e| e.to_string());
             }
@@ -2374,6 +2417,60 @@ async fn build_sensitive_payload(
     .await
 }
 
+/// Collects every secret a real export would place in the encrypted payload
+/// for a single connection. Shared with the export catalog so its credential
+/// counts match what a restore of that backup will report.
+fn collect_connection_secrets(
+    secrets: &mut Vec<ConnectionSecretSnapshot>,
+    config: &ConnectionConfig,
+    include_plugin_secrets: bool,
+) -> Result<(), String> {
+    // A transient password must not become durable through a sync snapshot.
+    if config.save_password {
+        push_secret(secrets, &config.id, "password", &config.password);
+    }
+    push_secret(secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
+    push_secret(secrets, &config.id, "url_params", config.url_params.as_deref().unwrap_or(""));
+    for (index, layer) in config.transport_layers.iter().enumerate() {
+        match layer {
+            TransportLayerConfig::Ssh(ssh) => {
+                push_secret(secrets, &config.id, &transport_layer_ssh_password_key(index, layer), &ssh.password);
+                push_secret(
+                    secrets,
+                    &config.id,
+                    &transport_layer_ssh_key_passphrase_key(index, layer),
+                    &ssh.key_passphrase,
+                );
+            }
+            TransportLayerConfig::Proxy(proxy) => {
+                push_secret(secrets, &config.id, &transport_layer_proxy_password_key(index, layer), &proxy.password);
+            }
+            TransportLayerConfig::HttpTunnel(http) => {
+                push_secret(secrets, &config.id, &transport_layer_http_tunnel_token_key(index, layer), &http.token);
+            }
+        }
+    }
+    push_secret(secrets, &config.id, "redis_sentinel_password", &config.redis_sentinel_password);
+    if let Some(connection_string) = &config.connection_string {
+        push_secret(secrets, &config.id, "connection_string", connection_string);
+    }
+    push_mq_external_config_secrets(secrets, config);
+    push_mqtt_external_config_secret(secrets, config);
+    push_cassandra_tls_secrets(secrets, config);
+    if config.save_password {
+        push_nacos_external_config_secrets(secrets, config);
+    }
+    // Plugin secrets are independent of the primary connection password.
+    // A plugin may persist a token while `save_password` is disabled, so
+    // gate these values only on the explicit plugin export option.
+    if include_plugin_secrets {
+        for (key, secret) in &config.connection_secrets {
+            push_secret(secrets, &config.id, &plugin_connection_secret_key(key)?, secret);
+        }
+    }
+    Ok(())
+}
+
 async fn build_sensitive_payload_with_options(
     storage: &Storage,
     connections: &[ConnectionConfig],
@@ -2382,64 +2479,7 @@ async fn build_sensitive_payload_with_options(
 ) -> Result<SensitiveSyncPayload, String> {
     let mut connection_secrets = Vec::new();
     for config in connections {
-        // A transient password must not become durable through a sync snapshot.
-        if config.save_password {
-            push_secret(&mut connection_secrets, &config.id, "password", &config.password);
-        }
-        push_secret(&mut connection_secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
-        push_secret(&mut connection_secrets, &config.id, "url_params", config.url_params.as_deref().unwrap_or(""));
-        for (index, layer) in config.transport_layers.iter().enumerate() {
-            match layer {
-                TransportLayerConfig::Ssh(ssh) => {
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_ssh_password_key(index, layer),
-                        &ssh.password,
-                    );
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_ssh_key_passphrase_key(index, layer),
-                        &ssh.key_passphrase,
-                    );
-                }
-                TransportLayerConfig::Proxy(proxy) => {
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_proxy_password_key(index, layer),
-                        &proxy.password,
-                    );
-                }
-                TransportLayerConfig::HttpTunnel(http) => {
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_http_tunnel_token_key(index, layer),
-                        &http.token,
-                    );
-                }
-            }
-        }
-        push_secret(&mut connection_secrets, &config.id, "redis_sentinel_password", &config.redis_sentinel_password);
-        if let Some(connection_string) = &config.connection_string {
-            push_secret(&mut connection_secrets, &config.id, "connection_string", connection_string);
-        }
-        push_mq_external_config_secrets(&mut connection_secrets, config);
-        push_mqtt_external_config_secret(&mut connection_secrets, config);
-        push_cassandra_tls_secrets(&mut connection_secrets, config);
-        if config.save_password {
-            push_nacos_external_config_secrets(&mut connection_secrets, config);
-        }
-        // Plugin secrets are independent of the primary connection password.
-        // A plugin may persist a token while `save_password` is disabled, so
-        // gate these values only on the explicit plugin export option.
-        if options.include_plugin_secrets {
-            for (key, secret) in &config.connection_secrets {
-                push_secret(&mut connection_secrets, &config.id, &plugin_connection_secret_key(key)?, secret);
-            }
-        }
+        collect_connection_secrets(&mut connection_secrets, config, options.include_plugin_secrets)?;
     }
 
     // Loading AI configurations includes decrypting their secret blobs.  A
@@ -3037,6 +3077,21 @@ fn required_sync_passphrase(passphrase: Option<&str>) -> Result<&str, String> {
     normalized_passphrase(passphrase).ok_or_else(|| "A sync password is required for snippet sync.".to_string())
 }
 
+fn gitlab_snippet_raw_ref(raw_url: &str, snippet_id: &str) -> Option<String> {
+    let url = Url::parse(raw_url).ok()?;
+    let segments: Vec<_> = url.path_segments()?.collect();
+    let reference = match segments.as_slice() {
+        [.., "snippets", id, "raw", reference, DEFAULT_SNIPPET_FILE_NAME] if *id == snippet_id => *reference,
+        [.., "snippets", id, "files", reference, DEFAULT_SNIPPET_FILE_NAME, "raw"] if *id == snippet_id => *reference,
+        _ => return None,
+    };
+    percent_encoding::percent_decode_str(reference)
+        .decode_utf8()
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| value.into_owned())
+}
+
 fn gitlab_instance_url(value: Option<&str>) -> Result<String, String> {
     let value = value.unwrap_or(GITLAB_DEFAULT_INSTANCE).trim();
     let url = Url::parse(value).map_err(|_| "Enter a valid GitLab HTTPS instance URL".to_string())?;
@@ -3221,7 +3276,7 @@ mod tests {
     use super::{
         apply_sensitive_payload, apply_sync_snapshot, build_sensitive_payload, build_sync_snapshot,
         build_sync_snapshot_with_options, build_sync_snapshot_with_saved_secrets, decrypt_sensitive_payload,
-        encrypt_sensitive_payload, encrypt_snippet_snapshot, finalize_snippet_migration,
+        describe_local_sync_state, encrypt_sensitive_payload, encrypt_snippet_snapshot, finalize_snippet_migration,
         forget_webdav_sync_secrets_passphrase, gitee_snippet_payload, gitlab_instance_url, is_legacy_dbx_snapshot,
         normalized_remote_path, parent_collection_paths, parse_legacy_dbx_snapshot, parse_snippet_snapshot,
         prepare_legacy_snippet_snapshot, resolve_snippet_token, resolve_webdav_password,
@@ -3422,6 +3477,29 @@ mod tests {
         (format!("http://{address}/"), server)
     }
 
+    /// Single-request WebDAV server that returns the complete request head
+    /// (request line plus headers) instead of just the request line.
+    async fn spawn_webdav_request_capture_server() -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let response = "HTTP/1.1 207 Multi-Status\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (format!("http://{address}/"), server)
+    }
+
     fn github_snippet_response(content: &str) -> String {
         serde_json::json!({
             "files": { DEFAULT_SNIPPET_FILE_NAME: { "content": content } }
@@ -3440,6 +3518,8 @@ mod tests {
 
     fn postgres_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: "Postgres".to_string(),
@@ -3460,6 +3540,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3486,6 +3567,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -3502,6 +3584,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }
@@ -3524,6 +3607,8 @@ mod tests {
 
     fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: "Nacos".to_string(),
@@ -3544,6 +3629,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3570,6 +3656,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -3594,6 +3681,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }
@@ -3671,6 +3759,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.put_snapshot(&snapshot).await.unwrap();
@@ -3696,6 +3785,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.put_snapshot(&snapshot).await.unwrap();
@@ -3721,6 +3811,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         let error = client.put_snapshot(&snapshot).await.unwrap_err();
@@ -3739,6 +3830,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.put_snapshot(&snapshot).await.unwrap();
@@ -3754,6 +3846,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.test().await.unwrap();
@@ -3761,9 +3854,46 @@ mod tests {
         assert_eq!(server.await.unwrap(), vec!["PROPFIND / HTTP/1.1"]);
     }
 
+    #[tokio::test]
+    async fn webdav_requests_send_configured_user_agent() {
+        let (endpoint, server) = spawn_webdav_request_capture_server().await;
+        let client = WebDavClient::new(WebDavConfig {
+            endpoint,
+            username: None,
+            password: None,
+            remote_path: None,
+            user_agent: Some("Zotero/7.0.15".to_string()),
+        });
+
+        client.test().await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("PROPFIND / "));
+        assert!(request.lines().any(|line| line.eq_ignore_ascii_case("user-agent: Zotero/7.0.15")));
+    }
+
+    #[tokio::test]
+    async fn webdav_requests_omit_user_agent_by_default() {
+        let (endpoint, server) = spawn_webdav_request_capture_server().await;
+        let client = WebDavClient::new(WebDavConfig {
+            endpoint,
+            username: None,
+            password: None,
+            remote_path: None,
+            user_agent: None,
+        });
+
+        client.test().await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(!request.to_ascii_lowercase().contains("user-agent:"));
+    }
+
     #[test]
     fn scrubs_connection_secret_fields() {
         let mut config = ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "id".to_string(),
             name: "name".to_string(),
@@ -3783,6 +3913,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');".to_string()),
             color: None,
@@ -3804,6 +3935,7 @@ mod tests {
                     ssh_agent_sock_path: String::new(),
                     auth_method: "password".to_string(),
                     allow_exec_channel_proxy: false,
+                    proxy_command: String::new(),
                 }),
                 TransportLayerConfig::HttpTunnel(crate::models::connection::HttpTunnelConfig {
                     profile_id: String::new(),
@@ -3838,6 +3970,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -3854,6 +3987,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         };
         config.connection_secrets.insert("api_token".to_string(), "plugin-secret".to_string());
@@ -4409,6 +4543,56 @@ mod tests {
         assert!(requests[1].starts_with("GET /api/v4/snippets/42/files/master/dbx-sync.json/raw HTTP/1.1"));
     }
 
+    #[test]
+    fn gitlab_raw_file_url_keeps_configured_https_instance() {
+        let client = SnippetSyncClient::new(SnippetSyncConfig {
+            provider: SnippetProvider::GitLab,
+            instance_url: Some("https://gitlab.example.com/gitlab".to_string()),
+            token: Some("test-token".to_string()),
+            snippet_id: Some("42".to_string()),
+            replace_legacy_snippet: false,
+        })
+        .unwrap();
+        assert_eq!(
+            client.gitlab_raw_file_url("42", "feature/sync").unwrap().as_str(),
+            "https://gitlab.example.com/gitlab/api/v4/snippets/42/files/feature%2Fsync/dbx-sync.json/raw"
+        );
+    }
+
+    #[tokio::test]
+    async fn gitlab_download_uses_instance_api_for_web_raw_urls() {
+        let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-web-raw-url")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
+        for (raw_url, reference) in [
+            ("{SERVER_BASE}/-/snippets/42/raw/master/dbx-sync.json", "master"),
+            ("http://127.0.0.1:9/-/snippets/42/raw/custom/dbx-sync.json", "custom"),
+            ("{SERVER_BASE}/gitlab/-/snippets/42/raw/feature%2Fsync/dbx-sync.json", "feature%2Fsync"),
+            ("not-a-url", "main"),
+        ] {
+            let (base, server) = spawn_gitlab_server(vec![
+                serde_json::json!({"files": [{"path": "dbx-sync.json", "raw_url": raw_url}]}).to_string(),
+                encrypted.clone(),
+            ])
+            .await;
+            let client = SnippetSyncClient::new(SnippetSyncConfig {
+                provider: SnippetProvider::GitLab,
+                instance_url: Some(base.strip_suffix("/api/v4").unwrap().to_string()),
+                token: Some("test-token".to_string()),
+                snippet_id: Some("42".to_string()),
+                replace_legacy_snippet: false,
+            })
+            .unwrap();
+            let (restored, _) = client.get_snapshot(Some("password")).await.unwrap();
+            assert_eq!(restored.app_version, snapshot.app_version);
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1]
+                .starts_with(&format!("GET /api/v4/snippets/42/files/{reference}/dbx-sync.json/raw HTTP/1.1")));
+            assert!(requests[1].to_ascii_lowercase().contains("private-token: test-token"));
+        }
+    }
+
     #[tokio::test]
     async fn gitlab_download_falls_back_to_master_when_main_raw_file_is_missing() {
         let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-master-fallback")).await.unwrap();
@@ -4655,6 +4839,7 @@ mod tests {
             username: Some("alice".to_string()),
             password: None,
             remote_path: None,
+            user_agent: None,
         };
         let snippet = SnippetSyncConfig {
             provider: SnippetProvider::GitHub,
@@ -4833,6 +5018,7 @@ mod tests {
             username: Some("alice".to_string()),
             password: None,
             remote_path: Some("DBX/sync/snapshot.json".to_string()),
+            user_agent: None,
         };
         save_webdav_password(&source, &webdav, "webdav-secret").await.unwrap();
         let snippet = SnippetSyncConfig {
@@ -5027,6 +5213,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_sync_catalog_lists_only_connections_with_exportable_secrets() {
+        let storage = crate::persistence::test_storage::open(&temp_db_path("sync-catalog-secret-count")).await.unwrap();
+        let mut unsaved = postgres_connection("unsaved", "transient-secret");
+        unsaved.save_password = false;
+        storage
+            .save_connections(&[
+                postgres_connection("with-secret", "db-secret"),
+                postgres_connection("no-secret", ""),
+                unsaved,
+            ])
+            .await
+            .unwrap();
+
+        let catalog = describe_local_sync_state(&storage, None, None).await.unwrap();
+
+        assert_eq!(catalog.connections.len(), 3);
+        assert_eq!(catalog.connection_secrets, vec!["with-secret".to_string()]);
+    }
+
+    #[tokio::test]
     async fn wrong_sync_passphrase_does_not_modify_the_destination() {
         let source = crate::persistence::test_storage::open(&temp_db_path("sync-wrong-pass-source")).await.unwrap();
         source.save_connections(&[postgres_connection("remote", "remote-secret")]).await.unwrap();
@@ -5157,6 +5363,243 @@ mod tests {
         assert_eq!(source.get_secret("nacos", NACOS_RNACOS_CONSOLE_PASSWORD_KEY).await.unwrap(), None);
     }
 
+    fn ssh_profile_defaults() -> SshTunnelConfig {
+        serde_json::from_value(serde_json::json!({})).unwrap()
+    }
+
+    #[tokio::test]
+    async fn selected_tunnel_restore_updates_existing_id_and_is_repeatable() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
+        let profile = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "same-id".to_string(),
+            name: "Bastion".to_string(),
+            host: "bastion.example.com".to_string(),
+            ..ssh_profile_defaults()
+        });
+        storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        assert!(snapshot.connections.is_empty());
+        let selection = super::SyncSelection {
+            connections: Some(vec![]),
+            tunnel_profiles: Some(vec!["same-id".to_string()]),
+            ..Default::default()
+        };
+
+        for _ in 0..2 {
+            super::apply_sync_snapshot_with_selection(
+                &storage,
+                &snapshot,
+                ApplySnapshotOptions { secrets_passphrase: None, restore_secrets: false },
+                Some(&selection),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(storage.load_tunnel_profiles().await.unwrap(), vec![profile.clone()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_tunnel_restore_preserves_unselected_profiles_and_local_paths() {
+        for restore_secrets in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let source = crate::persistence::test_storage::open(&directory.path().join("source.db")).await.unwrap();
+            let target = crate::persistence::test_storage::open(&directory.path().join("target.db")).await.unwrap();
+            let remote = TransportLayerConfig::Ssh(SshTunnelConfig {
+                id: "same-id".to_string(),
+                name: "Remote bastion".to_string(),
+                host: "remote.example.com".to_string(),
+                password: "remote-secret".to_string(),
+                ..ssh_profile_defaults()
+            });
+            let local = TransportLayerConfig::Ssh(SshTunnelConfig {
+                id: "same-id".to_string(),
+                name: "Local bastion".to_string(),
+                password: "local-secret".to_string(),
+                key_path: "C:\\keys\\bastion.pem".to_string(),
+                ssh_agent_sock_path: "local-agent".to_string(),
+                ..ssh_profile_defaults()
+            });
+            let untouched = TransportLayerConfig::Ssh(SshTunnelConfig {
+                id: "local-only".to_string(),
+                password: "untouched-secret".to_string(),
+                ..ssh_profile_defaults()
+            });
+            source.save_tunnel_profiles(std::slice::from_ref(&remote)).await.unwrap();
+            target.save_tunnel_profiles(&[local, untouched.clone()]).await.unwrap();
+            let mut snapshot = build_sync_snapshot(&source, "test-version", None, Some("sync-pass")).await.unwrap();
+            snapshot.selection = Some(super::SyncSelection {
+                connections: Some(vec![]),
+                tunnel_profiles: Some(vec!["same-id".to_string()]),
+                include_secrets: restore_secrets,
+                ..Default::default()
+            });
+            for _ in 0..2 {
+                apply_sync_snapshot(
+                    &target,
+                    &snapshot,
+                    ApplySnapshotOptions { secrets_passphrase: Some("sync-pass"), restore_secrets },
+                )
+                .await
+                .unwrap();
+                let profiles = target.load_tunnel_profiles().await.unwrap();
+                assert_eq!(profiles.len(), 2);
+                assert!(profiles.contains(&untouched));
+                let TransportLayerConfig::Ssh(restored) = profiles.iter().find(|p| p.id() == "same-id").unwrap() else {
+                    panic!("expected SSH profile");
+                };
+                assert_eq!(restored.name, "Remote bastion");
+                assert_eq!(restored.host, "remote.example.com");
+                assert_eq!(restored.key_path, "C:\\keys\\bastion.pem");
+                assert_eq!(restored.ssh_agent_sock_path, "local-agent");
+                assert_eq!(restored.password, if restore_secrets { "remote-secret" } else { "local-secret" });
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_tunnel_restore_after_webdav_upload_and_download_is_repeatable() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
+        let profile = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "same-id".to_string(),
+            host: "bastion.example.com".to_string(),
+            ..ssh_profile_defaults()
+        });
+        storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        assert!(snapshot.connections.is_empty());
+        let body = serde_json::to_string_pretty(&snapshot).unwrap();
+        // Reuse the HTTP fixture, which captures complete request bodies.
+        let (endpoint, server) = spawn_gitlab_server(vec![String::new(), body.clone()]).await;
+        let client = WebDavClient::new(WebDavConfig {
+            endpoint: format!("{endpoint}/"),
+            username: None,
+            password: None,
+            remote_path: Some("snapshot.json".to_string()),
+            user_agent: None,
+        });
+        client.put_snapshot(&snapshot).await.unwrap();
+        let (downloaded, _) = client.get_snapshot().await.unwrap();
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("PUT /api/v4/snapshot.json "));
+        assert_eq!(requests[0].split_once("\r\n\r\n").unwrap().1, body);
+        assert!(requests[1].starts_with("GET /api/v4/snapshot.json "));
+        let selection = super::SyncSelection {
+            connections: Some(vec![]),
+            tunnel_profiles: Some(vec!["same-id".to_string()]),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            super::apply_sync_snapshot_with_selection(
+                &storage,
+                &downloaded,
+                ApplySnapshotOptions { secrets_passphrase: None, restore_secrets: false },
+                Some(&selection),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(storage.load_tunnel_profiles().await.unwrap(), vec![profile.clone()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_tunnel_restore_empty_selection_and_new_id_preserve_local_profiles() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = crate::persistence::test_storage::open(&directory.path().join("source.db")).await.unwrap();
+        let target = crate::persistence::test_storage::open(&directory.path().join("target.db")).await.unwrap();
+        let local = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "local-only".to_string(),
+            password: "local-secret".to_string(),
+            ..ssh_profile_defaults()
+        });
+        let remote = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "new-id".to_string(),
+            host: "new.example.com".to_string(),
+            ..ssh_profile_defaults()
+        });
+        target.save_tunnel_profiles(std::slice::from_ref(&local)).await.unwrap();
+        source.save_tunnel_profiles(std::slice::from_ref(&remote)).await.unwrap();
+        let snapshot = build_sync_snapshot(&source, "test-version", None, None).await.unwrap();
+        let mut selection =
+            super::SyncSelection { connections: Some(vec![]), tunnel_profiles: Some(vec![]), ..Default::default() };
+        for selected_ids in [vec![], vec!["new-id".to_string()]] {
+            selection.tunnel_profiles = Some(selected_ids);
+            super::apply_sync_snapshot_with_selection(
+                &target,
+                &snapshot,
+                ApplySnapshotOptions { secrets_passphrase: None, restore_secrets: false },
+                Some(&selection),
+                None,
+            )
+            .await
+            .unwrap();
+            let profiles = target.load_tunnel_profiles().await.unwrap();
+            assert!(profiles.contains(&local));
+            assert_eq!(profiles.contains(&remote), !selection.tunnel_profiles.as_ref().unwrap().is_empty());
+        }
+        // No selection means replacement rather than merge.
+        apply_sync_snapshot(
+            &target,
+            &snapshot,
+            ApplySnapshotOptions { secrets_passphrase: None, restore_secrets: false },
+        )
+        .await
+        .unwrap();
+        assert_eq!(target.load_tunnel_profiles().await.unwrap(), vec![remote]);
+        assert_eq!(target.get_secret("tunnel_profile.local-only", "config").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn selected_tunnel_restore_rolls_back_metadata_and_secrets_on_later_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = crate::persistence::test_storage::open(&directory.path().join("source.db")).await.unwrap();
+        let target = crate::persistence::test_storage::open(&directory.path().join("target.db")).await.unwrap();
+        let local = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "same-id".to_string(),
+            host: "local.example.com".to_string(),
+            password: "local-secret".to_string(),
+            ..ssh_profile_defaults()
+        });
+        let remote = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "same-id".to_string(),
+            host: "remote.example.com".to_string(),
+            password: "remote-secret".to_string(),
+            ..ssh_profile_defaults()
+        });
+        target.save_tunnel_profiles(std::slice::from_ref(&local)).await.unwrap();
+        source.save_tunnel_profiles(std::slice::from_ref(&remote)).await.unwrap();
+        let mut snapshot = build_sync_snapshot(&source, "test-version", None, Some("sync-pass")).await.unwrap();
+        snapshot.selection = Some(super::SyncSelection {
+            connections: Some(vec![]),
+            tunnel_profiles: Some(vec!["same-id".to_string()]),
+            include_secrets: true,
+            ..Default::default()
+        });
+        let folder = crate::saved_sql::SavedSqlFolder {
+            id: "duplicate-folder".to_string(),
+            connection_id: String::new(),
+            parent_folder_id: None,
+            name: "test".to_string(),
+            order_index: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        // Saved SQL is written after tunnel metadata and secrets in the same transaction.
+        snapshot.saved_sql.folders = vec![folder.clone(), folder];
+        let error = apply_sync_snapshot(
+            &target,
+            &snapshot,
+            ApplySnapshotOptions { secrets_passphrase: Some("sync-pass"), restore_secrets: true },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("duplicate saved SQL folder id"), "unexpected failure: {error}");
+        assert_eq!(target.load_tunnel_profiles().await.unwrap(), vec![local]);
+    }
+
     #[tokio::test]
     async fn sync_snapshot_round_trips_tunnel_profiles() {
         let storage = crate::persistence::test_storage::open(&temp_db_path("tunnel-profiles-src")).await.unwrap();
@@ -5176,6 +5619,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
             profile_id: String::new(),
         });
         storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();

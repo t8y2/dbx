@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { passwordViewerEnabled } from "@/lib/security/passwordViewer";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
@@ -13,11 +14,19 @@ const emit = defineEmits<{
 }>();
 const { t } = useI18n();
 const includeCredentials = computed({
-  get: () => props.includeCredentials,
+  get: () => props.includeCredentials && passwordViewerEnabled.value,
   set: (value) => {
-    if (!props.busy) emit("update:includeCredentials", value);
+    if (!props.busy && passwordViewerEnabled.value) emit("update:includeCredentials", value);
   },
 });
+// A backend capability change invalidates an earlier opt-in immediately.
+watch(
+  passwordViewerEnabled,
+  (enabled) => {
+    if (!enabled) emit("update:includeCredentials", false);
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -28,9 +37,10 @@ const includeCredentials = computed({
       </DialogHeader>
       <p class="text-sm text-muted-foreground">{{ t("configExport.plaintextDefaultDescription") }}</p>
       <label class="flex items-start gap-2 text-sm">
-        <input v-model="includeCredentials" type="checkbox" class="mt-1" :disabled="busy" aria-describedby="plaintext-credentials-warning" />
+        <input v-model="includeCredentials" type="checkbox" class="mt-1" :disabled="busy || !passwordViewerEnabled" aria-describedby="plaintext-credentials-warning" />
         <span>{{ t("configExport.includeCredentials") }}</span>
       </label>
+      <p v-if="!passwordViewerEnabled" class="text-sm text-muted-foreground">{{ t("configExport.credentialsUnavailable") }}</p>
       <p id="plaintext-credentials-warning" class="text-sm" :class="includeCredentials ? 'text-destructive' : 'text-muted-foreground'">
         {{ t("configExport.plaintextCredentialsWarning") }}
       </p>

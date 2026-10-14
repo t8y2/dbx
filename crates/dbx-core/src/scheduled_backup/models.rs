@@ -5,6 +5,14 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_DIRECTORY: &str = "dbx-backup__{schedule}__{timestamp}__{runId}";
 pub const DEFAULT_FILE: &str = "dbx-backup__{schedule}__{timestamp}__{database}__{runId}";
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupTableTarget {
+    pub database: String,
+    pub schema: String,
+    pub table: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupConfig {
@@ -15,6 +23,8 @@ pub struct BackupConfig {
     pub table_filter_mode: String,
     #[serde(default)]
     pub table_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_tables: Vec<BackupTableTarget>,
     pub destination_directory: String,
     pub include_structure: bool,
     pub include_data: bool,
@@ -145,7 +155,7 @@ impl BackupConfig {
         if !matches!(self.output_compression.as_str(), "none" | "gzip") {
             return Err("Unsupported backup compression".into());
         }
-        if !matches!(self.table_filter_mode.as_str(), "all" | "include" | "exclude") {
+        if !matches!(self.table_filter_mode.as_str(), "all" | "include" | "exclude" | "selected") {
             return Err("Unsupported backup table filter".into());
         }
         if self.databases.len() > 10_000 || self.table_patterns.len() > 1000 {
@@ -154,8 +164,24 @@ impl BackupConfig {
         for value in self.databases.iter().chain(self.table_patterns.iter()) {
             bounded_text(value, 1024, "Backup target")?;
         }
-        if self.table_filter_mode != "all" && self.table_patterns.is_empty() {
+        if matches!(self.table_filter_mode.as_str(), "include" | "exclude") && self.table_patterns.is_empty() {
             return Err("Select backup table patterns".into());
+        }
+        if self.table_filter_mode == "selected" {
+            if self.databases.is_empty() || self.selected_tables.is_empty() {
+                return Err("Select backup databases and tables".into());
+            }
+            if self.selected_tables.len() > 10_000 {
+                return Err("Too many selected backup tables".into());
+            }
+            for target in &self.selected_tables {
+                bounded_text(&target.database, 1024, "Backup table database")?;
+                bounded_text(&target.schema, 1024, "Backup table schema")?;
+                bounded_text(&target.table, 1024, "Backup table name")?;
+                if !self.databases.contains(&target.database) {
+                    return Err("Selected backup table is outside the database scope".into());
+                }
+            }
         }
         validate_template(self.file_name_pattern.as_deref().unwrap_or(DEFAULT_FILE), false)
     }

@@ -48,6 +48,8 @@ pub enum AgentEvent {
     /// stdout). Non-terminal: the frontend may stop the reply animation on it,
     /// but must keep listening for the real `AgentEnd` / `Error`.
     ResponseComplete,
+    /// The provider stopped because its output limit was reached.
+    OutputTruncated { finish_reason: String },
     /// The agent loop has finished successfully.
     AgentEnd { input_tokens: Option<u32>, output_tokens: Option<u32> },
     /// Context was compacted to stay within context window limits.

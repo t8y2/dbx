@@ -83,6 +83,8 @@ export function tableVGroupKindOfContainerNode(node: Pick<TreeNode, "type" | "ta
     case "group-procedures":
       return "procedures";
     case "group-functions":
+    case "group-internal-functions":
+    case "group-udf-functions":
       return "functions";
     case "group-triggers":
       // 双栖 type：库级触发器列表与表结构子组共用；表子级带 tableName。
@@ -338,9 +340,30 @@ export function deleteTableVGroups(layout: TableVGroupLayout, groupIds: Iterable
 }
 
 export function toggleTableVGroupCollapsed(layout: TableVGroupLayout, groupId: string): TableVGroupLayout {
+  const targetGroup = layout.groups.find((group) => group.id === groupId);
+  const willCollapse = targetGroup ? !targetGroup.collapsed : false;
+  if (!willCollapse) {
+    return {
+      ...layout,
+      groups: layout.groups.map((group) => (group.id === groupId ? { ...group, collapsed: false } : group)),
+    };
+  }
+
+  const groupEntry = findGroupEntry(layout.order, groupId);
+  const descendantGroupIds = new Set<string>();
+  const collectDescendants = (entry: TableVGroupEntry) => {
+    for (const child of entryChildren(entry)) {
+      if (child.type === "group") {
+        descendantGroupIds.add(child.id);
+        collectDescendants(child);
+      }
+    }
+  };
+  if (groupEntry && groupEntry.type === "group") collectDescendants(groupEntry);
+
   return {
     ...layout,
-    groups: layout.groups.map((group) => (group.id === groupId ? { ...group, collapsed: !group.collapsed } : group)),
+    groups: layout.groups.map((group) => (group.id === groupId || descendantGroupIds.has(group.id) ? { ...group, collapsed: true } : group)),
   };
 }
 

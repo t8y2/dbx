@@ -1,11 +1,12 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { diagramExportDialogFilter, type DiagramExportFormat } from "./diagramFormats";
+import { promptExportSavePath } from "./exportPath";
 
 export async function saveDiagramTextExport(defaultPath: string, content: string, format: DiagramExportFormat): Promise<boolean> {
   if (isTauriRuntime()) {
-    const [{ save }, { writeTextFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
-    const path = await save({
-      defaultPath,
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    const path = await promptExportSavePath({
+      defaultFileName: defaultPath,
       filters: [diagramExportDialogFilter(format)],
     });
     if (!path) return false;
@@ -26,9 +27,9 @@ export async function saveDiagramTextExport(defaultPath: string, content: string
 
 export async function saveDiagramBinaryExport(defaultPath: string, data: Blob, format: DiagramExportFormat): Promise<boolean> {
   if (isTauriRuntime()) {
-    const [{ save }, { writeFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
-    const path = await save({
-      defaultPath,
+    const { writeFile } = await import("@tauri-apps/plugin-fs");
+    const path = await promptExportSavePath({
+      defaultFileName: defaultPath,
       filters: [diagramExportDialogFilter(format)],
     });
     if (!path) return false;

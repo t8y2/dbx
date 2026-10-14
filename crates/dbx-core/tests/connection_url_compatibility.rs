@@ -6,6 +6,8 @@ use std::str::FromStr;
 
 fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
     ConnectionConfig {
+        oracle_oci_nls_lang: None,
+        oracle_oci_tns_admin: None,
         docs_notes_path: None,
         id: "id".to_string(),
         name: "name".to_string(),
@@ -26,6 +28,7 @@ fn mysql_config(username: &str, password: &str, database: Option<&str>) -> Conne
         visible_schemas: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
+        show_database_links: None,
         attached_databases: Vec::new(),
         init_script: None,
         color: None,
@@ -52,6 +55,7 @@ fn mysql_config(username: &str, password: &str, database: Option<&str>) -> Conne
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
         redis_key_templates: Vec::new(),
+        redis_key_filter: None,
         redis_key_grouping: None,
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
@@ -68,6 +72,7 @@ fn mysql_config(username: &str, password: &str, database: Option<&str>) -> Conne
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         database_info: None,
     }
 }

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const runtimeHostSource = readFileSync(new URL("../SidebarTreeRuntimeHost.vue", import.meta.url), "utf8");
-const connectionTreeSource = readFileSync(new URL("../ConnectionTree.vue", import.meta.url), "utf8");
+const dangerDialogHostSource = readFileSync(new URL("../SidebarDangerDialogHost.vue", import.meta.url), "utf8");
 const dangerDialogSource = readFileSync(new URL("../../editor/DangerConfirmDialog.vue", import.meta.url), "utf8");
 
 /**
@@ -50,7 +50,7 @@ describe("Elasticsearch clear-index wildcard guard wiring", () => {
   });
 
   it("forwards confirmDisabled from the sidebar request to the shared danger dialog", () => {
-    expect(connectionTreeSource).toContain(':confirm-disabled="sidebarDangerDialogRequest.confirmDisabled"');
+    expect(dangerDialogHostSource).toContain(':confirm-disabled="sidebarDangerDialogRequest.confirmDisabled"');
   });
 
   it("honours confirmDisabled on both the button and the confirm handler", () => {

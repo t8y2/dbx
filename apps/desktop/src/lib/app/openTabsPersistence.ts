@@ -27,6 +27,8 @@ export interface SavedOpenTab {
   createdAt?: number;
   title: string;
   customTitle?: boolean;
+  /** 用户自定义的标签后缀，取代自动编号 */
+  titleSuffix?: string;
   connectionId: string;
   database: string;
   /** 原连接已被删除但页签被保留时记录的原连接名，用于新建同名连接后重新绑定。 */
@@ -50,6 +52,7 @@ export interface SavedOpenTab {
   resultSortDirection?: QueryTab["resultSortDirection"];
   resultSortMode?: QueryTab["resultSortMode"];
   orderByInput?: string;
+  structuredOrderByInput?: string;
   resultPageLimit?: number;
   resultPageOffset?: number;
   whereInput?: string;
@@ -64,6 +67,7 @@ export interface SavedOpenTab {
   nacosNamespaceName?: string;
   structureTableName?: string;
   structureDraft?: QueryTab["structureDraft"];
+  databaseSearchState?: QueryTab["databaseSearchState"];
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
   sourceView?: boolean;
@@ -149,7 +153,7 @@ function restoredEditorViewport(tab: SavedOpenTab): QueryTab["editorViewport"] {
   };
 }
 
-const TAB_OUTPUT_VIEWS = new Set<TabOutputView>(["result", "summary", "explain", "chart", "messages", "profile"]);
+const TAB_OUTPUT_VIEWS = new Set<TabOutputView>(["result", "graph", "summary", "explain", "chart", "messages", "profile"]);
 
 function restoredTabUiState(tab: SavedOpenTab): QueryTab["uiState"] {
   const activeOutputView = tab.uiState?.activeOutputView;
@@ -172,6 +176,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(typeof tab.createdAt === "number" ? { createdAt: tab.createdAt } : {}),
     title: tab.title,
     ...(tab.customTitle ? { customTitle: true } : {}),
+    ...(tab.titleSuffix?.trim() ? { titleSuffix: tab.titleSuffix.trim() } : {}),
     connectionId: tab.connectionId,
     database: tab.database,
     ...(tab.detachedConnectionName ? { detachedConnectionName: tab.detachedConnectionName } : {}),
@@ -196,6 +201,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.resultSortDirection !== undefined ? { resultSortDirection: tab.resultSortDirection } : {}),
     ...(tab.resultSortMode !== undefined ? { resultSortMode: tab.resultSortMode } : {}),
     ...(tab.orderByInput !== undefined ? { orderByInput: tab.orderByInput } : {}),
+    ...(tab.structuredOrderByInput !== undefined ? { structuredOrderByInput: tab.structuredOrderByInput } : {}),
     ...(tab.resultPageLimit !== undefined ? { resultPageLimit: tab.resultPageLimit } : {}),
     ...(tab.resultPageOffset !== undefined ? { resultPageOffset: tab.resultPageOffset } : {}),
     ...(tab.whereInput !== undefined ? { whereInput: tab.whereInput } : {}),
@@ -210,6 +216,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.nacosNamespaceName !== undefined ? { nacosNamespaceName: tab.nacosNamespaceName } : {}),
     ...(tab.structureTableName !== undefined ? { structureTableName: tab.structureTableName } : {}),
     ...(tab.structureDraft ? { structureDraft: JSON.parse(JSON.stringify(tab.structureDraft)) } : {}),
+    ...(tab.databaseSearchState ? { databaseSearchState: tab.databaseSearchState } : {}),
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,
     ...(tab.sourceView ? { sourceView: true } : {}),

@@ -98,4 +98,51 @@ describe("convertSqlSelectionCase", () => {
 
     expect(convertSqlSelectionCase(sql, { from, to: sql.length }, "upper")).toBe("> 60 AND GRADE = 'AbC'");
   });
+
+  describe("toggle mode (#5085)", () => {
+    it("converts lowercase text to uppercase", () => {
+      const sql = "select id, name from users";
+      expect(convertSqlSelectionCase(sql, { from: 0, to: sql.length }, "toggle")).toBe("SELECT ID, NAME FROM USERS");
+    });
+
+    it("defaults mixed case to uppercase first", () => {
+      const sql = "Select id, userName From Users";
+      expect(convertSqlSelectionCase(sql, { from: 0, to: sql.length }, "toggle")).toBe("SELECT ID, USERNAME FROM USERS");
+    });
+
+    it("converts all-uppercase text to lowercase", () => {
+      const sql = "SELECT ID, NAME FROM USERS";
+      expect(convertSqlSelectionCase(sql, { from: 0, to: sql.length }, "toggle")).toBe("select id, name from users");
+    });
+
+    it("cycles between uppercase and lowercase on repeated toggles", () => {
+      const initial = "Select Name From Users";
+      const first = convertSqlSelectionCase(initial, { from: 0, to: initial.length }, "toggle");
+      expect(first).toBe("SELECT NAME FROM USERS");
+
+      const second = convertSqlSelectionCase(first, { from: 0, to: first.length }, "toggle");
+      expect(second).toBe("select name from users");
+
+      const third = convertSqlSelectionCase(second, { from: 0, to: second.length }, "toggle");
+      expect(third).toBe("SELECT NAME FROM USERS");
+    });
+
+    it("protects string literals when toggling case", () => {
+      const sql = "select name from users where status = 'active'";
+      const upper = convertSqlSelectionCase(sql, { from: 0, to: sql.length }, "toggle");
+      expect(upper).toBe("SELECT NAME FROM USERS WHERE STATUS = 'active'");
+
+      const lower = convertSqlSelectionCase(upper, { from: 0, to: upper.length }, "toggle");
+      expect(lower).toBe("select name from users where status = 'active'");
+    });
+
+    it("toggles bare string literals when selected directly", () => {
+      const sql = "('first', 'second')";
+      const upper = convertSqlSelectionCase(sql, { from: 0, to: sql.length }, "toggle");
+      expect(upper).toBe("('FIRST', 'SECOND')");
+
+      const lower = convertSqlSelectionCase(upper, { from: 0, to: upper.length }, "toggle");
+      expect(lower).toBe("('first', 'second')");
+    });
+  });
 });

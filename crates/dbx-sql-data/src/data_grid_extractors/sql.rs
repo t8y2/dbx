@@ -1,18 +1,24 @@
 use super::{
     estimated_value_bytes, normalized_name_eq, write_bytes, DataGridExtractError, DataGridExtractErrorCode,
-    DataGridExtractWarning, DataGridExtractWarningCode, ExtractContext, WriteMetadata,
+    DataGridExtractWarning, DataGridExtractWarningCode, DataGridTemporalFormat, ExtractContext, WriteMetadata,
     DATA_GRID_EXTRACTOR_MAX_OUTPUT_BYTES,
 };
 use crate::data_grid_sql::{
-    build_column_predicate, build_data_grid_copy_insert_statement, build_data_grid_copy_update_statements,
-    data_grid_generated_table_name, format_grid_sql_literal_with_identifier_quote, is_auto_generated_column,
-    is_grid_insert_omitted_column, is_non_identity_generated_column, supports_relational_copy_predicates,
-    DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridTableMeta,
+    build_column_predicate, build_data_grid_copy_insert_statement_with_formatters,
+    build_data_grid_copy_update_statements, data_grid_generated_table_name, format_grid_copy_insert_sql_literal,
+    format_grid_sql_literal_with_identifier_quote, is_auto_generated_column, is_grid_insert_omitted_column,
+    is_non_identity_generated_column, is_primary_key_column, supports_relational_copy_predicates, DataGridColumnInfo,
+    DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridPrimaryKeyMode, DataGridTableMeta,
 };
+use crate::models::connection::DatabaseType;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
 use dbx_types::types::is_opaque_aggregate_state_type;
 use serde_json::Value;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::io::Write;
+
+#[path = "sql_identifiers.rs"]
+mod identifiers;
 
 pub(super) fn write_sql_in_list(
     context: &ExtractContext<'_>,
@@ -64,19 +70,40 @@ pub(super) fn write_sql_inserts(
     ensure_sql_builder_budget(context)?;
     reject_selected_opaque_aggregate_states(context)?;
     let data = sql_selected_data(context, false)?;
-    let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
-        database_type: context.request.database_type,
-        identifier_quote: context.request.identifier_quote.clone(),
-        table_meta: context.request.table_meta.clone(),
-        columns: data.columns,
-        column_types: Some(data.column_types),
-        source_columns: Some(data.source_columns),
-        rows: data.rows,
-        exclude_primary_keys: context.request.options.sql.exclude_primary_keys_from_insert,
-        include_computed_columns: !context.request.options.sql.skip_computed_columns,
-        include_database_name: context.request.options.sql.include_database_name,
-        insert_mode: context.request.options.sql.insert_mode,
-    })
+    let statement = build_data_grid_copy_insert_statement_with_formatters(
+        DataGridCopyInsertStatementOptions {
+            database_type: context.request.database_type,
+            identifier_quote: context.request.identifier_quote.clone(),
+            table_meta: context.request.table_meta.clone(),
+            columns: data.columns,
+            column_types: Some(data.column_types),
+            source_columns: Some(data.source_columns),
+            rows: data.rows,
+            primary_key_mode: context.request.options.sql.primary_key_mode,
+            include_computed_columns: !context.request.options.sql.skip_computed_columns,
+            include_database_name: context.request.options.sql.include_database_name,
+            insert_mode: context.request.options.sql.insert_mode,
+        },
+        |reference| {
+            if context.request.options.sql.quote_identifiers {
+                reference
+            } else {
+                identifiers::unquote_optional_identifiers(
+                    reference,
+                    context.request.database_type,
+                    context.request.identifier_quote.as_deref(),
+                )
+            }
+        },
+        |value, database_type, info, identifier_quote| {
+            if context.request.options.sql.temporal_format == DataGridTemporalFormat::String {
+                if let Some(literal) = portable_temporal_literal(value, database_type, info) {
+                    return literal;
+                }
+            }
+            format_grid_copy_insert_sql_literal(value, database_type, info, identifier_quote)
+        },
+    )
     .ok_or_else(|| {
         DataGridExtractError::new(
             DataGridExtractErrorCode::NoWritableColumns,
@@ -85,6 +112,50 @@ pub(super) fn write_sql_inserts(
     })?;
     write_bytes(output, statement.as_bytes())?;
     Ok(sql_metadata(data.omitted_columns))
+}
+
+fn portable_temporal_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    info: Option<&DataGridColumnInfo>,
+) -> Option<String> {
+    let data_type = info?.data_type.trim().to_ascii_lowercase();
+    let kind = data_type.split(['(', ':', ' ']).next()?;
+    if database_type == Some(DatabaseType::SqlServer) && kind == "timestamp" {
+        return None;
+    }
+    if !matches!(
+        kind,
+        "date"
+            | "time"
+            | "timetz"
+            | "timestamp"
+            | "timestamptz"
+            | "datetime"
+            | "datetime2"
+            | "datetimeoffset"
+            | "smalldatetime"
+    ) {
+        return None;
+    }
+    let text = value.as_str()?;
+    if database_type == Some(DatabaseType::Iotdb) && kind == "timestamp" && text.parse::<i64>().is_ok() {
+        return None;
+    }
+    let normalized = DateTime::parse_from_rfc3339(text)
+        .map(|datetime| datetime.naive_local())
+        .ok()
+        .or_else(|| NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f").ok())
+        .or_else(|| NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").ok())
+        .or_else(|| NaiveDate::parse_from_str(text, "%Y-%m-%d").ok().and_then(|date| date.and_hms_opt(0, 0, 0)))
+        .map(|datetime| {
+            datetime
+                .format(if matches!(kind, "time" | "timetz") { "%H:%M:%S" } else { "%Y-%m-%d %H:%M:%S" })
+                .to_string()
+        })
+        .or_else(|| NaiveTime::parse_from_str(text, "%H:%M:%S%.f").ok().map(|time| time.format("%H:%M:%S").to_string()))
+        .unwrap_or_else(|| text.to_string());
+    Some(format!("'{}'", normalized.replace('\'', "''")))
 }
 
 pub(super) fn write_sql_updates(
@@ -252,12 +323,22 @@ fn sql_selected_data(context: &ExtractContext<'_>, for_update: bool) -> Result<S
     let mut included = Vec::new();
     let mut omitted = Vec::new();
     let mut included_indexes = Vec::new();
+    let known_columns: Vec<String> = context
+        .selected_columns
+        .iter()
+        .map(|column| column.source_name.as_deref().unwrap_or(&column.display_name).to_string())
+        .collect();
+    let table_meta = context.request.table_meta.as_ref();
+    let primary_keys = table_meta.map(|meta| meta.primary_keys.as_slice()).unwrap_or_default();
+    let column_info = table_meta.and_then(|meta| meta.columns.as_deref()).unwrap_or_default();
     for (index, column) in context.selected_columns.iter().enumerate() {
         let source_name = column.source_name.as_deref().unwrap_or(&column.display_name);
         let info = context.selected_column_info[index];
-        let is_primary_key = context.request.table_meta.as_ref().is_some_and(|meta| {
-            meta.primary_keys.iter().any(|primary_key| normalized_name_eq(primary_key, source_name))
-        });
+        let is_primary_key = if for_update {
+            primary_keys.iter().any(|primary_key| normalized_name_eq(primary_key, source_name))
+        } else {
+            is_primary_key_column(context.request.database_type, primary_keys, source_name, column_info, &known_columns)
+        };
         let omit = (!for_update
             && is_grid_insert_omitted_column(
                 context.request.database_type,
@@ -272,13 +353,14 @@ fn sql_selected_data(context: &ExtractContext<'_>, for_update: bool) -> Result<S
                 && info.is_some_and(is_auto_generated_column)
                 && !is_primary_key)
             || (for_update && is_primary_key)
-            // Exclude only auto-generated primary keys; manually-assigned key
-            // columns must survive "without primary keys" INSERT copies
-            // (composite keys would otherwise lose NOT NULL data).
             || (!for_update
-                && context.request.options.sql.exclude_primary_keys_from_insert
-                && is_primary_key
-                && info.is_some_and(is_auto_generated_column));
+                && match context.request.options.sql.primary_key_mode {
+                    DataGridPrimaryKeyMode::Include => false,
+                    DataGridPrimaryKeyMode::ExcludeGenerated => {
+                        is_primary_key && info.is_some_and(is_auto_generated_column)
+                    }
+                    DataGridPrimaryKeyMode::ExcludeAll => is_primary_key,
+                });
         if omit {
             omitted.push(source_name.to_string());
         } else {
@@ -299,7 +381,11 @@ fn sql_selected_data(context: &ExtractContext<'_>, for_update: bool) -> Result<S
         .collect();
     let column_types = included_indexes
         .iter()
-        .map(|index| context.selected_column_info[*index].map(|info| info.data_type.clone()))
+        .map(|index| {
+            context.selected_column_info[*index]
+                .map(|info| info.data_type.clone())
+                .or_else(|| context.selected_columns[*index].data_type.clone())
+        })
         .collect();
     let rows = context
         .request

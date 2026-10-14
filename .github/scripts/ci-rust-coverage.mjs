@@ -6,11 +6,17 @@ import { rustGroups } from "./ci-config.mjs";
 import { rustCommand } from "./ci-rust.mjs";
 
 export function parseCoverage(output) {
-  return Object.fromEntries(output.trim().split("\n").filter(Boolean).map((line) => {
-    const [name, features] = line.split("|");
-    assert.ok(features !== undefined, `Invalid Cargo tree output: ${line}`);
-    return [name.split(" ")[0], features.split(",").filter(Boolean)];
-  }));
+  return Object.fromEntries(
+    output
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [name, features] = line.split("|");
+        assert.ok(features !== undefined, `Invalid Cargo tree output: ${line}`);
+        return [name.split(" ")[0], features.split(",").filter(Boolean)];
+      }),
+  );
 }
 
 export function assertCoverage(coverage) {

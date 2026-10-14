@@ -18,7 +18,10 @@ import {
   type PluginWorkbenchContext,
   type PluginAiRecommendationHostUpdate,
 } from "@/lib/plugins/pluginHostBridge";
-import { getCachedPluginUiHtml, getOrLoadPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
+import { getCachedPluginUiHtml, getOrLoadPluginUiHtml, pluginUiAssetBaseUrl } from "@/lib/plugins/pluginUiHtmlCache";
+import { isPluginGraphicsEngineEnabled } from "@/lib/plugins/pluginGraphicsEngine";
+import { beginFloatingWindowDrag, closeFloatingWindows, endFloatingWindowDrag, openFloatingWindow, setFloatingWindowSize } from "@/lib/plugins/pluginFloatingWindow";
+import { isFloatingPluginWindow } from "@/lib/app/windowContext";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
@@ -28,7 +31,7 @@ import { useI18n } from "vue-i18n";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { createPluginAiCompletion } from "@/lib/plugins/pluginAiCompletion";
+import { createPluginAiCompletion, type PluginAiConfirmDecision, type PluginAiPromptPreview } from "@/lib/plugins/pluginAiCompletion";
 import { useQueryStore } from "@/stores/queryStore";
 import { OPEN_PLUGIN_AI_CONVERSATION } from "@/lib/ai/aiPluginConversation";
 
@@ -54,16 +57,90 @@ const { t, locale: appLocale } = useI18n();
 const { isDark, themeRevision } = useTheme();
 const settingsStore = useSettingsStore();
 const openAiConversation = inject(OPEN_PLUGIN_AI_CONVERSATION, undefined);
+// Per-plugin grant for `script-src 'unsafe-eval'`; flipping it rebuilds the
+// sandbox document (and must not reuse a doc cached under the other setting).
+const graphicsEngineEnabled = computed(() => isPluginGraphicsEngineEnabled(settingsStore.editorSettings.pluginGraphicsEngineIds, props.plugin.manifest.id));
+
+// --- Plugin AI generation consent (E2) --------------------------------------
+// Every host.ai.generateText send is consented through this in-app dialog: it
+// names the destination model, previews the outgoing text (first line, byte
+// size, workbench context) and offers a workbench-session "don't ask again"
+// memory. The memory itself lives inside the aiCompletion instance (in-memory
+// only, never persisted) — the checkbox here just reports the user's choice.
+interface PluginAiConfirmDialogState {
+  title: string;
+  message: string;
+  preview: PluginAiPromptPreview;
+  previewHeading: string;
+  sizeLabel: string;
+  contextLabel: string;
+  rememberLabel: string;
+  continueLabel: string;
+  cancelLabel: string;
+}
+const aiConfirmDialog = ref<PluginAiConfirmDialogState | null>(null);
+const aiConfirmRemember = ref(false);
+let aiConfirmResolve: ((decision: PluginAiConfirmDecision) => void) | undefined;
+
+function formatPluginAiContextLabel(): string {
+  const zh = appLocale.value.startsWith("zh");
+  const parts: string[] = [];
+  const connectionId = typeof props.context?.connectionId === "string" ? props.context.connectionId : "";
+  if (connectionId) {
+    const connectionName = useConnectionStore().getConfig(connectionId)?.name || connectionId;
+    parts.push(`${zh ? "连接" : "Connection"}: ${connectionName}`);
+  }
+  for (const key of ["database", "schema"] as const) {
+    const value = props.context?.[key];
+    if (typeof value === "string" && value.trim()) parts.push(`${zh ? (key === "database" ? "数据库" : "模式") : key === "database" ? "Database" : "Schema"}: ${value.trim()}`);
+  }
+  return parts.join(" · ");
+}
+
+function resolveAiGenerationConfirm(allowed: boolean): void {
+  const resolve = aiConfirmResolve;
+  aiConfirmResolve = undefined;
+  const remember = aiConfirmRemember.value;
+  aiConfirmDialog.value = null;
+  aiConfirmRemember.value = false;
+  // A denial is never remembered: the plugin may legitimately retry, and the
+  // memory option only takes effect together with an explicit allow.
+  resolve?.(allowed ? { allowed: true, remember } : false);
+}
+
 const aiCompletion = createPluginAiCompletion({
   load: () => import("@/lib/backend/tauri").then((api) => api.loadAiConfigs()),
   discover: (config) => import("@/lib/backend/tauri").then((api) => api.aiListModels(config)),
   complete: (request) => import("@/lib/backend/tauri").then((api) => api.aiComplete(request)),
-  confirm: async (pluginName, model) => {
-    const { ask } = await import("@tauri-apps/plugin-dialog");
+  // E1: ride the desktop streaming pipeline (ai_stream + per-session cancel
+  // registry). Only wired here, so the bridge advertises aiCompletionStream
+  // on desktop hosts and leaves it off elsewhere.
+  stream: async (sessionId, request, onChunk) => {
+    const { aiStream } = await tauriFileApi();
+    await aiStream(sessionId, request, onChunk);
+  },
+  cancel: async (sessionId) => {
+    const { aiCancelStream } = await tauriFileApi();
+    return await aiCancelStream(sessionId);
+  },
+  confirm: async (pluginName, model, preview) => {
     const zh = appLocale.value.startsWith("zh");
-    return ask(zh ? `插件「${pluginName}」将把准备的文本发送给「${model.name} / ${model.model}」，并读取生成结果。是否继续？` : `Plugin "${pluginName}" will send its prepared text to "${model.name} / ${model.model}" and receive the generated result. Continue?`, {
-      title: zh ? "插件 AI 生成" : "Plugin AI generation",
-      kind: "info",
+    const message = zh ? `插件「${pluginName}」将把准备的文本发送给「${model.name} / ${model.model}」，并读取生成结果。` : `Plugin "${pluginName}" will send its prepared text to "${model.name} / ${model.model}" and receive the generated result.`;
+    const contextLabel = formatPluginAiContextLabel();
+    return await new Promise<PluginAiConfirmDecision>((resolve) => {
+      aiConfirmResolve = resolve;
+      aiConfirmRemember.value = false;
+      aiConfirmDialog.value = {
+        title: zh ? "插件 AI 生成" : "Plugin AI generation",
+        message,
+        preview,
+        previewHeading: zh ? "将发送的内容（首行）" : "Content to send (first line)",
+        sizeLabel: zh ? `全文 ${preview.bytes} 字节` : `${preview.bytes} bytes total`,
+        contextLabel: contextLabel ? `${zh ? "上下文" : "Context"}: ${contextLabel}` : "",
+        rememberLabel: zh ? "本工作台内不再询问" : "Don't ask again in this workbench",
+        continueLabel: zh ? "继续" : "Continue",
+        cancelLabel: zh ? "取消" : "Cancel",
+      };
     });
   },
 });
@@ -398,6 +475,19 @@ function onHostFileDrop(event: Event): void {
 
 const title = computed(() => `${props.plugin.manifest.name} · ${props.contribution.label}`);
 
+/**
+ * The §8.3 surface this host renders on. The tab surface keeps a minimum height
+ * (a workbench needs room to be usable); the dock and floating-window surfaces
+ * are sized by their own container, where a floor would make the frame taller
+ * than the visible area and swallow clicks near its bottom edge. The floating
+ * surface is transparent: the widget paints its own shape.
+ */
+const surface = computed(() => (typeof props.context?.surface === "string" ? props.context.surface : "tab"));
+const hostSurfaceClass = computed(() => (surface.value === "tab" ? "min-h-40 bg-background" : surface.value === "window" ? "min-h-0 bg-transparent" : "min-h-0 bg-background"));
+/** The loading overlays must not paint an opaque box inside a transparent floating window. */
+const overlayClass = computed(() => (surface.value === "window" ? "bg-transparent" : "bg-background"));
+const isFloatingSurface = isFloatingPluginWindow();
+
 /** Collect resolved DBX design tokens so the sandbox can theme itself with the same values. */
 function currentBridgeTheme(): PluginBridgeTheme {
   const tokens: Record<string, string> = {};
@@ -438,8 +528,12 @@ function createBridge() {
       // the single-plugin registry is equivalent here because findCommand /
       // findWorkbench / enablement never cross plugins. Panel commands dock,
       // tab commands open tabs, §4.1 reuse with `instance_key` placeholder
-      // scoping — identical to menu execution.
-      executeCommand: (pluginId, commandId, context) => executePluginCommand(createFrontendPluginRegistry([props.plugin], appLocale.value), useQueryStore(), pluginId, commandId, context),
+      // scoping — identical to menu execution. Not offered on the floating
+      // surface: every command action opens a shell surface (a dock entry or a
+      // workbench tab) that a floating widget window does not have, so it would
+      // resolve successfully and show nothing. There, plugins navigate with
+      // openWorkbench / floating.open, which the host routes to the main window.
+      ...(isFloatingSurface ? {} : { executeCommand: (pluginId: string, commandId: string, context?: Record<string, unknown>) => executePluginCommand(createFrontendPluginRegistry([props.plugin], appLocale.value), useQueryStore(), pluginId, commandId, context) }),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
       reopenConnection: (pluginId, connectionId) => useConnectionStore().reopenPluginConnection(connectionId, pluginId),
       // PR-A4 generic extension point: a read-only, secret-free, plugin-scoped connection list (for in-panel connection switching).
@@ -470,6 +564,16 @@ function createBridge() {
         await api.setPluginDataGrant(pluginId, connectionId, true);
       },
       closeTab: () => emit("closeTab"),
+      // Floating widget windows (§8.3 surface "window"). Desktop-only: the web
+      // host omits them so capabilities.floating stays false and the plugin can
+      // fall back to an in-shell surface. Opening and closing work from any
+      // window; the geometry calls act on the window that hosts the caller and
+      // reject elsewhere, so a tab can never move a window it is not inside.
+      openFloatingWindow: isTauriRuntime() ? (request) => openFloatingWindow(request) : undefined,
+      closeFloatingWindows: isTauriRuntime() ? (labels) => closeFloatingWindows(labels) : undefined,
+      beginFloatingDrag: isTauriRuntime() ? () => beginFloatingWindowDrag() : undefined,
+      endFloatingDrag: isTauriRuntime() ? (snap) => endFloatingWindowDrag(snap) : undefined,
+      setFloatingSize: isTauriRuntime() ? (width, height) => setFloatingWindowSize(width, height) : undefined,
       saveFile: (_pluginId, request, data) => savePluginFile(request, data),
       downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,
       cancelDownload: isTauriRuntime() ? cancelPluginDownload : undefined,
@@ -569,18 +673,6 @@ async function savePluginFile(request: PluginSaveFileRequest, data: Uint8Array):
   return { path: fileName };
 }
 
-/**
- * Base URL prefix for lazy-loaded plugin UI assets. wry serves custom schemes
- * natively on WKWebView/webkit2gtk but maps them onto http(s) subdomains on
- * WebView2, so the host page's own protocol picks the form the webview will
- * actually request. The web host has no plugin asset protocol.
- */
-function pluginUiBaseUrl(pluginId: string, entryDirectory: string): string | undefined {
-  if (!isTauriRuntime()) return undefined;
-  const origin = location.protocol === "http:" || location.protocol === "https:" ? `${location.protocol}//dbx-plugin.localhost/${pluginId}/` : `dbx-plugin://localhost/${pluginId}/`;
-  return entryDirectory ? `${origin}${entryDirectory}/` : origin;
-}
-
 async function loadWorkbench() {
   const generation = ++loadGeneration;
   // An identity rebuild swaps the plugin this component serves; retire the
@@ -611,12 +703,17 @@ async function loadWorkbench() {
     const { html, entryDirectory } = cachedHtml;
     // The final sandbox document is cached alongside the html: generating it
     // re-runs megabyte-scale string surgery on every boot.
-    if (!cachedHtml.sandboxDoc) {
-      cachedHtml.sandboxDoc = pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
-        baseUrl: pluginUiBaseUrl(props.plugin.manifest.id, entryDirectory),
-      });
+    const allowUnsafeEval = graphicsEngineEnabled.value;
+    if (!cachedHtml.sandboxDoc || cachedHtml.sandboxDoc.allowUnsafeEval !== allowUnsafeEval) {
+      cachedHtml.sandboxDoc = {
+        allowUnsafeEval,
+        doc: pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
+          baseUrl: pluginUiAssetBaseUrl(props.plugin.manifest.id, entryDirectory),
+          allowUnsafeEval,
+        }),
+      };
     }
-    source.value = cachedHtml.sandboxDoc;
+    source.value = cachedHtml.sandboxDoc.doc;
     await nextTick();
     if (disposed || generation !== loadGeneration) return;
     createBridge();
@@ -673,7 +770,7 @@ onMounted(async () => {
 // Identity changes require rebuilding the sandbox document; context and locale
 // changes are pushed through the bridge so plugin UI state survives them.
 watch(
-  () => [props.plugin.manifest.id, props.plugin.manifest.version, props.contribution.id] as const,
+  () => [props.plugin.manifest.id, props.plugin.manifest.version, props.contribution.id, graphicsEngineEnabled.value] as const,
   () => void loadWorkbench(),
 );
 watch(
@@ -706,6 +803,9 @@ defineExpose({ requestClose });
 onBeforeUnmount(() => {
   disposed = true;
   loadGeneration += 1;
+  // An unanswered consent dialog must not leave the plugin's generation
+  // request (and its busy lock) hanging on a dead workbench.
+  resolveAiGenerationConfirm(false);
   // Best-effort §8.3 close notice for teardown paths that never called
   // requestClose (tab closes, plugin reload): the message still goes out, but
   // delivery of the plugin's cleanup is not guaranteed once the iframe dies.
@@ -720,8 +820,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="relative flex size-full min-h-40 overflow-hidden bg-background">
-    <div v-if="loading" class="absolute inset-0 z-10 flex items-center justify-center bg-background text-sm text-muted-foreground">
+  <div class="relative flex size-full overflow-hidden" :class="hostSurfaceClass">
+    <div v-if="loading" class="absolute inset-0 z-10 flex items-center justify-center text-sm text-muted-foreground" :class="overlayClass">
       <Loader2 class="mr-2 size-4 animate-spin" />
       {{ t("pluginPlatform.loadingTitle", { title }) }}
     </div>
@@ -730,16 +830,43 @@ onBeforeUnmount(() => {
       <span>{{ error }}</span>
     </div>
     <template v-else>
-      <iframe ref="iframe" :title="title" :srcdoc="source" sandbox="allow-scripts" allow="clipboard-write" referrerpolicy="no-referrer" class="size-full border-0 bg-transparent" @load="onFrameLoad" />
+      <!-- `allow` delegates fullscreen into the sandboxed frame: without the
+           Permissions-Policy entry, requestFullscreen() rejects there no matter
+           which sandbox tokens are set (the legacy `allow-fullscreen` sandbox
+           flag was removed from the platform and logs an error when present). -->
+      <iframe ref="iframe" :title="title" :srcdoc="source" sandbox="allow-scripts" allow="clipboard-write; fullscreen" referrerpolicy="no-referrer" class="size-full border-0 bg-transparent" @load="onFrameLoad" />
       <!-- Cover until the frame has actually painted: the iframe stays mounted
            underneath so its load event can fire (v-else on the overlay would
            deadlock), it just isn't visible yet. Fully opaque so the covered
            phase is visually identical to the host background, and faded out
            instead of removed so the reveal is never a hard swap. -->
-      <div class="absolute inset-0 z-10 flex items-center justify-center bg-background text-sm text-muted-foreground transition-opacity duration-150 ease-out" :class="frameReady ? 'pointer-events-none opacity-0' : 'opacity-100'">
+      <div class="absolute inset-0 z-10 flex items-center justify-center text-sm text-muted-foreground transition-opacity duration-150 ease-out" :class="[overlayClass, frameReady ? 'pointer-events-none opacity-0' : 'opacity-100']">
         <Loader2 class="mr-2 size-4 animate-spin" />
         {{ t("pluginPlatform.loadingTitle", { title }) }}
       </div>
     </template>
+    <!-- Plugin AI generation consent (E2): destination, outgoing-text preview
+         (first line + byte size + workbench context) and a workbench-session
+         "don't ask again" option. -->
+    <div v-if="aiConfirmDialog" class="absolute inset-0 z-20 flex items-center justify-center bg-black/40 p-4">
+      <div class="w-full max-w-md rounded-xl border border-border bg-background p-4 shadow-lg">
+        <h3 class="text-sm font-semibold text-foreground">{{ aiConfirmDialog.title }}</h3>
+        <p class="mt-2 text-sm text-muted-foreground">{{ aiConfirmDialog.message }}</p>
+        <div class="mt-3 rounded-lg border border-border bg-muted/40 p-3">
+          <p class="text-xs font-medium text-muted-foreground">{{ aiConfirmDialog.previewHeading }}</p>
+          <pre data-testid="plugin-ai-confirm-preview" class="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-foreground">{{ aiConfirmDialog.preview.firstLine || "…" }}</pre>
+          <p class="mt-1 text-xs text-muted-foreground">{{ aiConfirmDialog.sizeLabel }}</p>
+          <p v-if="aiConfirmDialog.contextLabel" class="mt-0.5 text-xs text-muted-foreground">{{ aiConfirmDialog.contextLabel }}</p>
+        </div>
+        <label class="mt-3 flex cursor-pointer items-center gap-2 text-sm text-foreground">
+          <input v-model="aiConfirmRemember" type="checkbox" data-testid="plugin-ai-confirm-remember" class="size-4 accent-[var(--color-primary)]" />
+          {{ aiConfirmDialog.rememberLabel }}
+        </label>
+        <div class="mt-4 flex justify-end gap-2">
+          <button data-testid="plugin-ai-confirm-cancel" class="rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted" @click="resolveAiGenerationConfirm(false)">{{ aiConfirmDialog.cancelLabel }}</button>
+          <button data-testid="plugin-ai-confirm-continue" class="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground hover:opacity-90" @click="resolveAiGenerationConfirm(true)">{{ aiConfirmDialog.continueLabel }}</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

@@ -65,6 +65,15 @@ public final class StandardJdbcMetadata {
                 } catch (Exception | AbstractMethodError ignored) {
                 }
             }
+            // HANA's databaseName (for example HXE) is not a JDBC catalog.
+            // Its driver returns no rows, rather than throwing, for that catalog.
+            // Retry without it before falling back to only the current schema.
+            if (names.isEmpty() && catalog != null && profile.getCatalogFallbackEnabled()) {
+                try {
+                    appendSchemas(names, meta.getSchemas(null, null));
+                } catch (Exception | AbstractMethodError ignored) {
+                }
+            }
             try {
                 addNonBlank(names, conn.getSchema());
             } catch (Exception | AbstractMethodError ignored) {
@@ -640,6 +649,10 @@ public final class StandardJdbcMetadata {
         String normalized = type.toUpperCase(Locale.ROOT);
         if ("BASE TABLE".equals(normalized) || "COLUMN TABLE".equals(normalized) || "ROW TABLE".equals(normalized)) {
             return "TABLE";
+        }
+        if ("CALC VIEW".equals(normalized) || "JOIN VIEW".equals(normalized)
+            || "OLAP VIEW".equals(normalized) || "HIERARCHY VIEW".equals(normalized)) {
+            return "VIEW";
         }
         return type;
     }

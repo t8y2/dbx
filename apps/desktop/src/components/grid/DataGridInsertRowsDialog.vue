@@ -1,17 +1,15 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { DATA_GRID_MAX_BATCH_INSERT_ROWS } from "@/composables/useDataGridEditor";
 import { type GridInsertRowPosition } from "@/lib/dataGrid/gridNewRowPlacement";
+import { dataGridPendingRowLimit } from "@/lib/dataGrid/dataGridRowPreparation";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 
-const MAX_INSERT_ROWS = DATA_GRID_MAX_BATCH_INSERT_ROWS;
-
 const { t } = useI18n();
 const open = defineModel<boolean>("open", { default: false });
-const props = defineProps<{ canPlaceAtSelection?: boolean; initialPosition?: GridInsertRowPosition }>();
+const props = withDefaults(defineProps<{ canPlaceAtSelection?: boolean; initialPosition?: GridInsertRowPosition; maxRows?: number }>(), { maxRows: dataGridPendingRowLimit(1) });
 const emit = defineEmits<{ insert: [count: number, position: GridInsertRowPosition] }>();
 
 const canUsePosition = computed(() => props.canPlaceAtSelection !== false);
@@ -40,19 +38,17 @@ function parseIntegerOrNull(raw: string | number): number | null {
   const trimmed = String(raw).trim();
   if (!/^\d+$/.test(trimmed)) return null;
   const value = Number(trimmed);
-  return Number.isInteger(value) && value >= 1 ? value : null;
+  return Number.isSafeInteger(value) && value >= 1 ? value : null;
 }
 
-const parsedCount = computed<number | null>(() => {
-  const parsed = parseIntegerOrNull(rowCount.value);
-  if (parsed === null) return null;
-  return Math.min(parsed, MAX_INSERT_ROWS);
-});
+const requestedCount = computed(() => parseIntegerOrNull(rowCount.value));
+const capacityExceeded = computed(() => requestedCount.value !== null && requestedCount.value > props.maxRows);
+const parsedCount = computed(() => (capacityExceeded.value ? null : requestedCount.value));
 
 const inputInvalid = computed(() => {
   const raw = String(rowCount.value).trim();
   if (raw === "") return false;
-  return parseIntegerOrNull(raw) === null;
+  return parsedCount.value === null;
 });
 
 function confirmInsert() {
@@ -73,9 +69,10 @@ function confirmInsert() {
       <div class="space-y-3">
         <div class="space-y-2">
           <label for="insert-rows-count" class="text-sm font-medium">{{ t("grid.insertRowCountLabel") }}</label>
-          <Input id="insert-rows-count" v-model="rowCount" type="number" min="1" :max="MAX_INSERT_ROWS" :aria-invalid="inputInvalid" class="w-40" @keydown.enter.prevent="confirmInsert" />
-          <p v-if="inputInvalid" class="text-sm text-destructive">{{ t("grid.insertRowCountInvalid") }}</p>
-          <p class="text-xs text-muted-foreground">{{ t("grid.insertRowsMaxHint", { max: MAX_INSERT_ROWS }) }}</p>
+          <Input id="insert-rows-count" v-model="rowCount" type="number" min="1" step="1" :max="maxRows" :aria-invalid="inputInvalid" class="w-40" @keydown.enter.prevent="confirmInsert" />
+          <p v-if="capacityExceeded" class="text-sm text-destructive">{{ t("grid.insertRowsCapacityExceeded", { max: maxRows }) }}</p>
+          <p v-else-if="inputInvalid" class="text-sm text-destructive">{{ t("grid.insertRowCountInvalid") }}</p>
+          <p class="text-xs text-muted-foreground">{{ t("grid.insertRowsMaxHint", { max: maxRows }) }}</p>
         </div>
         <div class="space-y-1.5">
           <span class="text-sm font-medium">{{ t("grid.insertRowPositionLabel") }}</span>

@@ -4,10 +4,15 @@ use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, NaiveDate, Naive
 use chrono_tz::Tz;
 use duckdb::core::LogicalTypeId;
 use duckdb::types::{TimeUnit, Value, ValueRef};
+use duckdb::OptionalExt;
 
 use crate::wire as db;
 
 const MAX_ROWS: usize = 10000;
+
+#[cfg(test)]
+#[path = "query_timezone_tests.rs"]
+mod timezone_tests;
 
 fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(MAX_ROWS).max(1)
@@ -459,9 +464,12 @@ fn parse_fixed_utc_offset(value: &str) -> Option<FixedOffset> {
     FixedOffset::east_opt(sign * (hours * 3600 + minutes * 60))
 }
 
-fn duckdb_session_timezone(con: &duckdb::Connection) -> Option<DuckDbSessionTimezone> {
-    let name: String = con.query_row("SELECT current_setting('TimeZone')", [], |row| row.get(0)).ok()?;
-    DuckDbSessionTimezone::parse(&name)
+fn duckdb_session_timezone(con: &duckdb::Connection) -> Result<Option<DuckDbSessionTimezone>, String> {
+    let name: Option<String> = con
+        .query_row("SELECT value FROM duckdb_settings() WHERE lower(name) = 'timezone'", [], |row| row.get(0))
+        .optional()
+        .map_err(|error| error.to_string())?;
+    Ok(name.as_deref().and_then(DuckDbSessionTimezone::parse))
 }
 
 fn duckdb_timestamptz_to_string(
@@ -537,9 +545,9 @@ pub fn duckdb_execute_with_max_rows(
     let sql = sql.as_ref();
 
     if crate::sql::starts_with_duckdb_result_sql_keyword(sql) {
-        // DuckDB cannot answer another query while a result set is being streamed.
-        let session_timezone = duckdb_session_timezone(con);
         let mut stmt = con.prepare(sql).map_err(|e| e.to_string())?;
+        // DuckDB cannot answer another query while a result set is being streamed.
+        let session_timezone = duckdb_session_timezone(con)?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         let stmt_ref = rows.as_ref().ok_or("DuckDB statement unavailable")?;
         let col_count = stmt_ref.column_count();

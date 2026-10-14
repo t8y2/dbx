@@ -43,6 +43,7 @@ define_registry![
     list_reference_key_columns,
     list_reference_keys,
     list_foreign_keys,
+    list_foreign_keys_for_database,
     list_triggers,
     list_constraints,
     list_partitions,
@@ -84,7 +85,7 @@ mod tests {
 
     #[test]
     fn handles_only_schema_commands() {
-        assert_eq!(COMMANDS.len(), 48);
+        assert_eq!(COMMANDS.len(), 49);
         assert!(handles("list_databases"));
         assert!(handles("list_event_triggers"));
         assert!(!handles("prepare_schema_diff"));

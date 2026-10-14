@@ -40,8 +40,14 @@ export function editableRowIdentifierColumns(databaseType: DatabaseType | undefi
   const primaryKeys = editablePrimaryKeys(databaseType, columns, tableType);
   const oracleRowIdFallback = getDatabaseCapability(databaseType).syntheticKey === "oracle-rowid" && primaryKeys.length === 1 && primaryKeys[0]?.toUpperCase() === DBX_ROWID_COLUMN;
   if (primaryKeys.length > 0 && !oracleRowIdFallback) return primaryKeys;
-  const uniqueIndex = indexes?.filter((index) => !index.filter && index.columns.length > 0 && (index.is_primary || index.is_unique)).sort((left, right) => Number(right.is_primary) - Number(left.is_primary) || left.columns.length - right.columns.length)[0];
-  return uniqueIndex?.columns ?? primaryKeys;
+  const columnByName = new Map(columns.map((column) => [column.name.toLowerCase(), column]));
+  const uniqueIndex = indexes
+    ?.filter((index) => {
+      if (index.filter?.trim() || index.columns.length === 0 || (!index.is_primary && !index.is_unique) || index.key_is_expression?.some(Boolean)) return false;
+      return index.columns.every((name) => columnByName.get(name.toLowerCase())?.is_nullable === false);
+    })
+    .sort((left, right) => Number(right.is_primary) - Number(left.is_primary) || left.columns.length - right.columns.length)[0];
+  return uniqueIndex?.columns.map((name) => columnByName.get(name.toLowerCase())!.name) ?? primaryKeys;
 }
 
 export function isTableDataEditable(databaseType: DatabaseType | undefined, primaryKeys: string[], tableType?: string): boolean {

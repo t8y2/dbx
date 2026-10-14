@@ -1,5 +1,4 @@
-import type { ReadUserSkill, UserSkillMeta } from "@/types/userSkills";
-import { promptTemplateCharacterCount } from "@/types/promptTemplate";
+import type { UserSkillMeta } from "@/types/userSkills";
 
 /** A selected skill rendered as a chip, whether or not it is still discoverable. */
 export interface SelectedSkillChip {
@@ -9,6 +8,12 @@ export interface SelectedSkillChip {
   source: "custom" | "default";
   /** True when the catalog no longer lists this id (deleted, or its root went away). */
   unavailable: boolean;
+  /**
+   * True once this conversation has had the skill loaded — by the model through
+   * `use_skill`, or by the user forcing the load (prd 09-30 Req 13). A persistent
+   * per-conversation signal, never a per-turn one.
+   */
+  loaded: boolean;
 }
 
 /**
@@ -24,8 +29,12 @@ export function userSkillSourceOfId(id: string): "custom" | "default" {
  * Every selected id keeps a chip: a skill that vanished from discovery would
  * otherwise lose its only remove affordance and block every later send. The
  * fallback label is the opaque id, paired with `unavailable` for styling.
+ *
+ * `loadedIds` is the conversation's loaded set; an omitted one leaves every chip
+ * in its default state, which is what a caller with no conversation state wants.
  */
-export function buildSelectedSkillChips(ids: readonly string[], lookup: (id: string) => UserSkillMeta | undefined): SelectedSkillChip[] {
+export function buildSelectedSkillChips(ids: readonly string[], lookup: (id: string) => UserSkillMeta | undefined, loadedIds: Iterable<string> = []): SelectedSkillChip[] {
+  const loaded = new Set(loadedIds);
   return ids.map((id) => {
     const meta = lookup(id);
     return {
@@ -34,34 +43,37 @@ export function buildSelectedSkillChips(ids: readonly string[], lookup: (id: str
       description: meta?.description ?? "",
       source: userSkillSourceOfId(id),
       unavailable: !meta,
+      loaded: loaded.has(id),
     };
   });
+}
+
+/**
+ * Display names appearing more than once inside one source/root.
+ *
+ * Skill discovery is flat (`<root>/<dir>/SKILL.md`, `crates/dbx-core/src/skills.rs`),
+ * so every entry in a root already has its own directory — a collision inside one
+ * root is therefore always two directories declaring the same frontmatter `name`.
+ * The model addresses skills by name + source (ADR Decision 6), so `use_skill`
+ * can only answer "ambiguous" for these; `source` cannot separate two entries of
+ * the same root. The badge in the selector exists to tell the user that, because
+ * only changing one of the two frontmatter `name` values can resolve it — the
+ * collision key is that field, not the directory name, so renaming a folder
+ * changes nothing. The same name in *different* roots is normal and is not
+ * reported here.
+ */
+export function duplicateSkillNames(skills: readonly UserSkillMeta[]): Set<string> {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const skill of skills) {
+    if (seen.has(skill.name)) duplicates.add(skill.name);
+    else seen.add(skill.name);
+  }
+  return duplicates;
 }
 
 /** Order-preserving removal, shared by the chip close button and the failure banner. */
 export function removeSkillIds(ids: readonly string[], removed: Iterable<string>): string[] {
   const dropped = new Set(removed);
   return ids.filter((id) => !dropped.has(id));
-}
-
-/**
- * Keep the leading skills that fit the combined character budget for one
- * request. A skill whose content would push the total past maxTotal is
- * skipped, but a later smaller skill still fits (same budget semantics as
- * capTemplateIdsToCharLimit for templates). Selection order is preserved so
- * the injected set matches the chips top to bottom.
- */
-export function capSkillsToCharLimit(skills: readonly ReadUserSkill[], maxTotal: number): ReadUserSkill[] {
-  const kept: ReadUserSkill[] = [];
-  const seen = new Set<string>();
-  let total = 0;
-  for (const skill of skills) {
-    if (seen.has(skill.id)) continue;
-    seen.add(skill.id);
-    const size = promptTemplateCharacterCount(skill.content);
-    if (total + size > maxTotal) continue;
-    total += size;
-    kept.push(skill);
-  }
-  return kept;
 }

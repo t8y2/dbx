@@ -19,6 +19,7 @@ const NUMERIC_LEFT_ALIGN_STYLE: usize = 5;
 const MAX_NUMERIC_SCALE_FORMAT: usize = 15;
 const NUMERIC_SCALE_STYLE_BASE: usize = 6;
 const SCALE_NUMFMT_ID_BASE: usize = 166;
+pub const XLSX_WRAP_TEXT_STYLE: usize = NUMERIC_SCALE_STYLE_BASE + MAX_NUMERIC_SCALE_FORMAT * 2;
 
 fn numeric_scale_style(scale: usize, right_align: bool) -> Option<usize> {
     if scale == 0 || scale > MAX_NUMERIC_SCALE_FORMAT {
@@ -38,7 +39,7 @@ fn decimal_fraction_digits(value: &str) -> usize {
     trimmed.split_once('.').map_or(0, |(_, fraction)| fraction.chars().filter(|ch| ch.is_ascii_digit()).count())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XlsxWorksheetData {
     pub sheet_name: Option<String>,
@@ -50,6 +51,27 @@ pub struct XlsxWorksheetData {
     pub rows: Vec<Vec<Value>>,
     #[serde(default)]
     pub numeric_column_right_align: bool,
+    #[serde(default)]
+    pub auto_filter: Option<bool>,
+    /// Render column comments as a second header row (names on row 1, comments
+    /// on row 2, data from row 3) instead of overriding the header text.
+    #[serde(default)]
+    pub header_comment_rows: bool,
+}
+
+impl XlsxWorksheetData {
+    pub fn new(sheet_name: Option<String>, columns: Vec<String>, rows: Vec<Vec<Value>>) -> Self {
+        Self {
+            sheet_name,
+            columns,
+            column_types: Vec::new(),
+            column_comments: Vec::new(),
+            rows,
+            numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
+        }
+    }
 }
 
 fn normalize_sheet_name(input: Option<&str>) -> String {
@@ -156,6 +178,7 @@ pub struct StreamingXlsxWriter<W: Write + Seek> {
     trailing_sheets: Vec<XlsxWorksheetData>,
     width_cache: Vec<usize>,
     column_comments: Vec<Option<String>>,
+    header_comment_rows: bool,
     date_time_format: Option<String>,
     numeric_right_align: bool,
     auto_filter: bool,
@@ -165,13 +188,35 @@ pub struct StreamingXlsxWriter<W: Write + Seek> {
 /// Estimate column widths from header names only (used by the streaming path
 /// where full row data is not available up-front).  Each width is clamped to
 /// [10, 60] to stay within reasonable bounds.
-fn estimate_header_widths(columns: &[String], column_comments: &[Option<String>]) -> Vec<usize> {
+fn estimate_header_widths(
+    columns: &[String],
+    column_comments: &[Option<String>],
+    header_comment_rows: bool,
+) -> Vec<usize> {
     columns
         .iter()
         .enumerate()
         .map(|(index, col)| {
-            let header_text = column_comments.get(index).and_then(|c| c.as_deref()).unwrap_or(col.as_str());
-            (header_text.chars().count() + 2).clamp(10, 60)
+            let is_sql_col = col.eq_ignore_ascii_case("sql");
+            // With a separate comment row both texts are visible, so the column
+            // must fit the wider of the two; otherwise the comment overrides
+            // the header text outright.
+            let header_text = if header_comment_rows {
+                col.as_str()
+            } else {
+                column_comments.get(index).and_then(|c| c.as_deref()).unwrap_or(col.as_str())
+            };
+            let comment_len = if header_comment_rows {
+                column_comments.get(index).and_then(|c| c.as_deref()).map(str::chars).map(Iterator::count).unwrap_or(0)
+            } else {
+                0
+            };
+            let width = header_text.chars().count().max(comment_len) + 2;
+            if is_sql_col {
+                width.clamp(40, 100)
+            } else {
+                width.clamp(10, 60)
+            }
         })
         .collect()
 }
@@ -193,19 +238,48 @@ fn effective_header<'a>(column: &'a str, comment: Option<&'a str>) -> &'a str {
     comment.filter(|c| !c.is_empty()).unwrap_or(column)
 }
 
-/// Build a single `<row>` XML fragment for the header row (row 1).
-pub fn header_row_xml(columns: &[String], column_comments: &[Option<String>]) -> String {
-    format!(
+/// Number of header rows a sheet renders: 2 when the comments are shown on
+/// their own row below the column names, 1 otherwise. Returns 1 even when the
+/// flag is set but every comment is empty — an all-empty second row would
+/// just shift the data down for nothing.
+pub fn header_row_count(column_comments: &[Option<String>], header_comment_rows: bool) -> usize {
+    let has_comments = column_comments.iter().any(|comment| comment.as_deref().is_some_and(|c| !c.is_empty()));
+    usize::from(header_comment_rows && has_comments) + 1
+}
+
+/// Build the `<row>` XML fragment(s) for the header. With `header_comment_rows`
+/// the column names stay on row 1 and the comments move to row 2; without it a
+/// non-empty comment overrides the header text in row 1 (legacy behavior).
+pub fn header_row_xml(columns: &[String], column_comments: &[Option<String>], header_comment_rows: bool) -> String {
+    let mut output = format!(
         "<row r=\"1\">{}</row>",
         columns
             .iter()
             .enumerate()
             .map(|(index, col)| {
-                let header = effective_header(col, column_comments.get(index).and_then(|c| c.as_deref()));
+                let header = if header_comment_rows {
+                    col.as_str()
+                } else {
+                    effective_header(col, column_comments.get(index).and_then(|c| c.as_deref()))
+                };
                 cell_xml(Some(&Value::String(header.to_string())), 0, index, Some(1))
             })
             .collect::<String>()
-    )
+    );
+    if header_row_count(column_comments, header_comment_rows) > 1 {
+        output.push_str(&format!(
+            "<row r=\"2\">{}</row>",
+            columns
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    let comment = column_comments.get(index).and_then(|c| c.as_deref()).filter(|c| !c.is_empty());
+                    cell_xml(comment.map(|c| Value::String(c.to_string())).as_ref(), 1, index, Some(1))
+                })
+                .collect::<String>()
+        ));
+    }
+    output
 }
 
 fn push_data_row_xml(
@@ -218,18 +292,17 @@ fn push_data_row_xml(
     numeric_right_align: bool,
 ) {
     write!(output, "<row r=\"{row_number}\">").expect("writing XLSX XML into a String cannot fail");
-    for (col_index, _) in columns.iter().enumerate() {
+    for (col_index, col) in columns.iter().enumerate() {
         let col_type = column_types.get(col_index);
         let align_style = numeric_column_style(col_type, numeric_right_align);
-        push_typed_cell_xml(
-            output,
-            row.get(col_index),
-            col_type,
-            row_number - 1,
-            col_index,
-            align_style,
-            date_time_format,
-        );
+        let val = row.get(col_index);
+        let is_sql_col = col.eq_ignore_ascii_case("sql");
+        let is_multiline = match val {
+            Some(Value::String(s)) => s.contains('\n') || s.contains('\r'),
+            _ => false,
+        };
+        let style = if is_sql_col || is_multiline { Some(XLSX_WRAP_TEXT_STYLE) } else { align_style };
+        push_typed_cell_xml(output, val, col_type, row_number - 1, col_index, style, date_time_format);
     }
     output.push_str("</row>");
 }
@@ -260,7 +333,18 @@ pub fn start_streaming_xlsx_workbook<W: Write + Seek>(
     columns: &[String],
     column_types: &[String],
 ) -> Result<StreamingXlsxWriter<W>, String> {
-    start_streaming_xlsx_workbook_with_options(writer, sheet_name, columns, column_types, &[], &[], None, false, true)
+    start_streaming_xlsx_workbook_with_options(
+        writer,
+        sheet_name,
+        columns,
+        column_types,
+        &[],
+        &[],
+        None,
+        false,
+        true,
+        false,
+    )
 }
 
 #[cfg(test)]
@@ -281,7 +365,21 @@ pub fn start_streaming_xlsx_workbook_with_trailing_sheets<W: Write + Seek>(
         None,
         false,
         true,
+        false,
     )
+}
+
+/// Sheet-level rendering options shared by the streaming writer and the
+/// in-memory worksheet writer.
+#[derive(Debug, Clone, Default)]
+struct XlsxSheetRenderOptions {
+    date_time_format: Option<String>,
+    numeric_right_align: bool,
+    auto_filter: bool,
+    max_data_rows_per_sheet: usize,
+    /// Render comments as a second header row (names row 1, comments row 2,
+    /// data from row 3) instead of overriding the header text.
+    header_comment_rows: bool,
 }
 
 /// Start a new streaming XLSX workbook with full options. Metadata files
@@ -295,12 +393,19 @@ fn start_xlsx_writer_inner<W: Write + Seek>(
     column_types: &[String],
     column_comments: &[Option<String>],
     trailing_sheets: &[XlsxWorksheetData],
-    date_time_format: Option<&str>,
-    numeric_right_align: bool,
-    auto_filter: bool,
-    max_data_rows_per_sheet: usize,
+    render_options: XlsxSheetRenderOptions,
 ) -> Result<StreamingXlsxWriter<W>, String> {
-    let width_cache = estimate_header_widths(columns, column_comments);
+    let XlsxSheetRenderOptions {
+        date_time_format,
+        numeric_right_align,
+        auto_filter,
+        max_data_rows_per_sheet,
+        header_comment_rows,
+    } = render_options;
+    // The comment row only renders when at least one comment is non-empty; an
+    // all-empty second row would shift the data down for nothing.
+    let header_comment_rows = header_comment_rows && header_row_count(column_comments, true) > 1;
+    let width_cache = estimate_header_widths(columns, column_comments, header_comment_rows);
     let sheet_name_allocator = SheetNameAllocator::new(sheet_name, trailing_sheets);
 
     let mut zip = zip::ZipWriter::new(writer);
@@ -309,27 +414,32 @@ fn start_xlsx_writer_inner<W: Write + Seek>(
     let options = xlsx_zip_options();
     zip.start_file("xl/worksheets/sheet1.xml", options).map_err(|err| err.to_string())?;
 
+    let header_rows = header_row_count(column_comments, header_comment_rows);
+    let top_left_cell = format!("A{}", header_rows + 1);
     let sheet_header = format!(
         concat!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
             "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
             "<sheetViews><sheetView workbookViewId=\"0\">",
-            "<pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/>",
+            "<pane ySplit=\"{y_split}\" topLeftCell=\"{top_left}\" activePane=\"bottomLeft\" state=\"frozen\"/>",
             "</sheetView></sheetViews>",
             "<sheetFormatPr defaultRowHeight=\"15\"/>",
             "<cols>{cols}</cols>",
             "<sheetData>"
         ),
+        y_split = header_rows,
+        top_left = top_left_cell,
         cols = cols_xml(&width_cache),
     );
     zip.write_all(sheet_header.as_bytes()).map_err(|err| err.to_string())?;
-    zip.write_all(header_row_xml(columns, column_comments).as_bytes()).map_err(|err| err.to_string())?;
+    zip.write_all(header_row_xml(columns, column_comments, header_comment_rows).as_bytes())
+        .map_err(|err| err.to_string())?;
 
     Ok(StreamingXlsxWriter {
         zip,
         columns: columns.to_vec(),
         column_types: column_types.to_vec(),
-        next_row_number: 2,
+        next_row_number: header_rows + 1,
         current_data_rows: 0,
         max_data_rows_per_sheet,
         current_sheet_number: 1,
@@ -337,7 +447,8 @@ fn start_xlsx_writer_inner<W: Write + Seek>(
         trailing_sheets: trailing_sheets.to_vec(),
         width_cache,
         column_comments: column_comments.to_vec(),
-        date_time_format: date_time_format.map(str::to_string),
+        header_comment_rows,
+        date_time_format,
         numeric_right_align,
         auto_filter,
         row_buffer: String::with_capacity(columns.len().saturating_mul(48)),
@@ -354,6 +465,7 @@ pub fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
     date_time_format: Option<&str>,
     numeric_right_align: bool,
     auto_filter: bool,
+    header_comment_rows: bool,
 ) -> Result<StreamingXlsxWriter<W>, String> {
     start_xlsx_writer_inner(
         writer,
@@ -362,10 +474,13 @@ pub fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
         column_types,
         column_comments,
         trailing_sheets,
-        date_time_format,
-        numeric_right_align,
-        auto_filter,
-        XLSX_MAX_DATA_ROWS,
+        XlsxSheetRenderOptions {
+            date_time_format: date_time_format.map(str::to_string),
+            numeric_right_align,
+            auto_filter,
+            max_data_rows_per_sheet: XLSX_MAX_DATA_ROWS,
+            header_comment_rows,
+        },
     )
 }
 
@@ -385,10 +500,7 @@ pub fn start_streaming_xlsx_workbook_with_max_rows<W: Write + Seek>(
         column_types,
         &[],
         trailing_sheets,
-        None,
-        false,
-        true,
-        max_data_rows_per_sheet,
+        XlsxSheetRenderOptions { max_data_rows_per_sheet, auto_filter: true, ..XlsxSheetRenderOptions::default() },
     )
 }
 
@@ -436,26 +548,30 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
             .start_file(format!("xl/worksheets/sheet{}.xml", self.current_sheet_number), options)
             .map_err(|err| err.to_string())?;
 
+        let header_rows = header_row_count(&self.column_comments, self.header_comment_rows);
+        let top_left_cell = format!("A{}", header_rows + 1);
         let sheet_header = format!(
             concat!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
                 "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
                 "<sheetViews><sheetView workbookViewId=\"0\">",
-                "<pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/>",
+                "<pane ySplit=\"{y_split}\" topLeftCell=\"{top_left}\" activePane=\"bottomLeft\" state=\"frozen\"/>",
                 "</sheetView></sheetViews>",
                 "<sheetFormatPr defaultRowHeight=\"15\"/>",
                 "<cols>{cols}</cols>",
                 "<sheetData>"
             ),
+            y_split = header_rows,
+            top_left = top_left_cell,
             cols = cols_xml(&self.width_cache),
         );
         self.zip.write_all(sheet_header.as_bytes()).map_err(|err| err.to_string())?;
         self.zip
-            .write_all(header_row_xml(&self.columns, &self.column_comments).as_bytes())
+            .write_all(header_row_xml(&self.columns, &self.column_comments, self.header_comment_rows).as_bytes())
             .map_err(|err| err.to_string())?;
 
         // Reset row counters for the new sheet.
-        self.next_row_number = 2;
+        self.next_row_number = header_rows + 1;
         self.current_data_rows = 0;
         Ok(())
     }
@@ -480,6 +596,9 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
                 column_comments: &sheet.column_comments,
                 rows: &sheet.rows,
                 numeric_column_right_align: sheet.numeric_column_right_align,
+                auto_filter: sheet.auto_filter,
+                // Trailing sheets (SQL previews) keep the single-row header.
+                header_comment_rows: false,
             };
             write_worksheet_xml(&mut self.zip, &segment, self.auto_filter, self.date_time_format.as_deref())?;
         }
@@ -578,18 +697,49 @@ fn value_text(value: Option<&Value>) -> String {
     }
 }
 
-fn estimate_column_widths(columns: &[String], column_comments: &[Option<String>], rows: &[Vec<Value>]) -> Vec<usize> {
+fn estimate_column_widths(
+    columns: &[String],
+    column_comments: &[Option<String>],
+    rows: &[Vec<Value>],
+    header_comment_rows: bool,
+) -> Vec<usize> {
     columns
         .iter()
         .enumerate()
         .map(|(col_index, col)| {
-            let header_text = effective_header(col, column_comments.get(col_index).and_then(|c| c.as_deref()));
-            let max_len = std::iter::once(header_text.chars().count().min(60))
-                .chain(rows.iter().take(100).map(|row| value_text(row.get(col_index)).chars().count().min(60)))
+            let is_sql_col = col.eq_ignore_ascii_case("sql");
+            let max_clamp = if is_sql_col { 100 } else { 60 };
+            let comment = column_comments.get(col_index).and_then(|c| c.as_deref());
+            // With a separate comment row both texts are visible, so the column
+            // must fit the wider of the two; otherwise the comment overrides
+            // the header text outright.
+            let header_text = if header_comment_rows { col.as_str() } else { effective_header(col, comment) };
+            let header_len = header_text.chars().count().max(if header_comment_rows {
+                comment.map(str::chars).map(Iterator::count).unwrap_or(0)
+            } else {
+                0
+            });
+            let max_len = std::iter::once(header_len.min(max_clamp))
+                .chain(rows.iter().take(100).map(|row| {
+                    let text = value_text(row.get(col_index));
+                    if is_sql_col {
+                        text.lines().map(|line| line.chars().count()).max().unwrap_or(0).min(max_clamp)
+                    } else {
+                        text.chars().count().min(max_clamp)
+                    }
+                }))
                 .fold(8usize, usize::max);
-            (max_len + 2).clamp(10, 60)
+            (max_len + 2).clamp(if is_sql_col { 40 } else { 10 }, max_clamp)
         })
         .collect()
+}
+
+fn needs_xml_space_preserve(text: &str) -> bool {
+    text.starts_with(char::is_whitespace)
+        || text.ends_with(char::is_whitespace)
+        || text.contains('\n')
+        || text.contains('\r')
+        || text.contains('\t')
 }
 
 fn cell_xml(value: Option<&Value>, row_index: usize, col_index: usize, style: Option<usize>) -> String {
@@ -612,12 +762,20 @@ fn cell_xml(value: Option<&Value>, row_index: usize, col_index: usize, style: Op
             }
         }
         Some(Value::String(s)) => {
-            format!("<c r=\"{reference}\" t=\"inlineStr\"{style_attr}><is><t>{}</t></is></c>", escape_xml(s))
+            let space_attr = if needs_xml_space_preserve(s) { " xml:space=\"preserve\"" } else { "" };
+            format!(
+                "<c r=\"{reference}\" t=\"inlineStr\"{style_attr}><is><t{space_attr}>{}</t></is></c>",
+                escape_xml(s)
+            )
         }
-        Some(other) => format!(
-            "<c r=\"{reference}\" t=\"inlineStr\"{style_attr}><is><t>{}</t></is></c>",
-            escape_xml(&other.to_string())
-        ),
+        Some(other) => {
+            let text = other.to_string();
+            let space_attr = if needs_xml_space_preserve(&text) { " xml:space=\"preserve\"" } else { "" };
+            format!(
+                "<c r=\"{reference}\" t=\"inlineStr\"{style_attr}><is><t{space_attr}>{}</t></is></c>",
+                escape_xml(&text)
+            )
+        }
     }
 }
 
@@ -657,15 +815,24 @@ fn push_cell_xml(output: &mut String, value: Option<&Value>, row_index: usize, c
         Some(Value::String(value)) => {
             output.push_str(" t=\"inlineStr\"");
             push_cell_style(output, style);
-            output.push_str("><is><t>");
+            if needs_xml_space_preserve(value) {
+                output.push_str("><is><t xml:space=\"preserve\">");
+            } else {
+                output.push_str("><is><t>");
+            }
             push_xml_escaped(output, value);
             output.push_str("</t></is></c>");
         }
         Some(value) => {
+            let text = value.to_string();
             output.push_str(" t=\"inlineStr\"");
             push_cell_style(output, style);
-            output.push_str("><is><t>");
-            push_xml_escaped(output, &value.to_string());
+            if needs_xml_space_preserve(&text) {
+                output.push_str("><is><t xml:space=\"preserve\">");
+            } else {
+                output.push_str("><is><t>");
+            }
+            push_xml_escaped(output, &text);
             output.push_str("</t></is></c>");
         }
     }
@@ -691,6 +858,12 @@ fn is_numeric_column_type(column_type: Option<&String>) -> bool {
             | "int"
             | "integer"
             | "bigint"
+            | "hugeint"
+            | "uhugeint"
+            | "utinyint"
+            | "usmallint"
+            | "uinteger"
+            | "ubigint"
             | "serial"
             | "smallserial"
             | "bigserial"
@@ -835,10 +1008,13 @@ fn write_worksheet_xml<W: Write>(
     auto_filter: bool,
     date_time_format: Option<&str>,
 ) -> Result<(), String> {
-    let total_rows = segment.rows.len() + 1;
+    let header_rows = header_row_count(segment.column_comments, segment.header_comment_rows);
+    let total_rows = segment.rows.len() + header_rows;
     let range = sheet_range(segment.columns.len(), total_rows);
-    let widths = estimate_column_widths(segment.columns, segment.column_comments, segment.rows);
+    let widths =
+        estimate_column_widths(segment.columns, segment.column_comments, segment.rows, segment.header_comment_rows);
 
+    let top_left_cell = format!("A{}", header_rows + 1);
     writer
         .write_all(
             format!(
@@ -846,24 +1022,26 @@ fn write_worksheet_xml<W: Write>(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
             "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
             "<dimension ref=\"{range}\"/>",
-            "<sheetViews><sheetView workbookViewId=\"0\"><pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/></sheetView></sheetViews>",
+            "<sheetViews><sheetView workbookViewId=\"0\"><pane ySplit=\"{y_split}\" topLeftCell=\"{top_left}\" activePane=\"bottomLeft\" state=\"frozen\"/></sheetView></sheetViews>",
             "<sheetFormatPr defaultRowHeight=\"15\"/>",
             "<cols>{cols}</cols>",
             "<sheetData>"
         ),
         range = range,
+        y_split = header_rows,
+        top_left = top_left_cell,
         cols = cols_xml(&widths),
     )
             .as_bytes(),
         )
         .map_err(|err| err.to_string())?;
     writer
-        .write_all(header_row_xml(segment.columns, segment.column_comments).as_bytes())
+        .write_all(header_row_xml(segment.columns, segment.column_comments, segment.header_comment_rows).as_bytes())
         .map_err(|err| err.to_string())?;
 
     let mut row_buffer = String::with_capacity(segment.columns.len().saturating_mul(48));
     for (row_index, row) in segment.rows.iter().enumerate() {
-        let excel_row = row_index + 2;
+        let excel_row = row_index + header_rows + 1;
         row_buffer.clear();
         push_data_row_xml(
             &mut row_buffer,
@@ -877,7 +1055,8 @@ fn write_worksheet_xml<W: Write>(
         writer.write_all(row_buffer.as_bytes()).map_err(|err| err.to_string())?;
     }
 
-    let auto_filter = if auto_filter { format!("<autoFilter ref=\"{range}\"/>") } else { String::new() };
+    let effective_auto_filter = segment.auto_filter.unwrap_or(auto_filter);
+    let auto_filter = if effective_auto_filter { format!("<autoFilter ref=\"{range}\"/>") } else { String::new() };
     writer.write_all(format!("</sheetData>{auto_filter}</worksheet>").as_bytes()).map_err(|err| err.to_string())
 }
 
@@ -1056,7 +1235,7 @@ fn styles_xml(date_time_format: Option<&str>) -> String {
             "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills>",
             "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>",
             "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>",
-            "<cellXfs count=\"{}\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/><xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/><xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"165\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"right\"/></xf><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"left\"/></xf>{}</cellXfs>",
+            "<cellXfs count=\"{}\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/><xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/><xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"165\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"right\"/></xf><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"left\"/></xf>{}<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment wrapText=\"1\" vertical=\"top\"/></xf></cellXfs>",
             "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>",
             "</styleSheet>"
         ),
@@ -1064,7 +1243,7 @@ fn styles_xml(date_time_format: Option<&str>) -> String {
         escape_xml(&date_format),
         escape_xml(&datetime_format),
         scale_numfmts,
-        6 + MAX_NUMERIC_SCALE_FORMAT * 2,
+        7 + MAX_NUMERIC_SCALE_FORMAT * 2,
         scale_xfs
     )
 }
@@ -1084,6 +1263,8 @@ struct WorksheetSegment<'a> {
     column_comments: &'a [Option<String>],
     rows: &'a [Vec<Value>],
     numeric_column_right_align: bool,
+    auto_filter: Option<bool>,
+    header_comment_rows: bool,
 }
 
 fn normalize_unique_sheet_names(segments: &[WorksheetSegment]) -> Vec<String> {
@@ -1127,6 +1308,8 @@ fn split_sheets_for_max_rows<'a>(
                 column_comments: &sheet.column_comments,
                 rows: &sheet.rows,
                 numeric_column_right_align: sheet.numeric_column_right_align,
+                auto_filter: sheet.auto_filter,
+                header_comment_rows: sheet.header_comment_rows,
             });
             continue;
         }
@@ -1151,6 +1334,8 @@ fn split_sheets_for_max_rows<'a>(
                 column_comments: &sheet.column_comments,
                 rows: chunk,
                 numeric_column_right_align: sheet.numeric_column_right_align,
+                auto_filter: sheet.auto_filter,
+                header_comment_rows: sheet.header_comment_rows,
             });
         }
     }
@@ -1313,6 +1498,8 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!(1), json!("Ada & Bob"), json!(true)], vec![json!(2), json!(null), json!(false)]],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
 
@@ -1339,10 +1526,26 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!(1)]],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         };
         let workbook = build_xlsx_workbook_multi_with_auto_filter(&[worksheet], false, None).expect("build workbook");
 
         assert!(!read_zip_entry(&workbook, "xl/worksheets/sheet1.xml").contains("<autoFilter"));
+    }
+
+    #[test]
+    fn per_sheet_auto_filter_overrides_the_workbook_flag() {
+        let data = XlsxWorksheetData::new(Some("Data".to_string()), vec!["id".to_string()], vec![vec![json!(1)]]);
+        let sql = XlsxWorksheetData {
+            auto_filter: Some(false),
+            header_comment_rows: false,
+            ..XlsxWorksheetData::new(Some("SQL".to_string()), vec!["SQL".to_string()], vec![vec![json!("SELECT 1")]])
+        };
+        let workbook = build_xlsx_workbook_multi_with_auto_filter(&[data, sql], true, None).expect("build workbook");
+
+        assert!(read_zip_entry(&workbook, "xl/worksheets/sheet1.xml").contains("<autoFilter"));
+        assert!(!read_zip_entry(&workbook, "xl/worksheets/sheet2.xml").contains("<autoFilter"));
     }
 
     #[test]
@@ -1354,6 +1557,8 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("1.00000"), json!("2800.000000"), json!("00123")]],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
 
@@ -1372,13 +1577,16 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("5.0000"), json!("0.3500000"), json!("1.23E-5")]],
             numeric_column_right_align: true,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
 
         let styles = read_zip_entry(&workbook, "xl/styles.xml");
         assert!(styles.contains("numFmtId=\"169\" formatCode=\"0.0000\""));
         assert!(styles.contains("numFmtId=\"172\" formatCode=\"0.0000000\""));
-        assert!(styles.contains("<cellXfs count=\"36\">"));
+        assert!(styles.contains("<cellXfs count=\"37\">"));
+        assert!(styles.contains("wrapText=\"1\" vertical=\"top\""));
 
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
         assert!(sheet.contains("<c r=\"A2\" s=\"12\"><v>5.0000</v></c>"));
@@ -1396,6 +1604,8 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("5.0000"), json!("7")]],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
 
@@ -1413,6 +1623,8 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("0.00000000000000000001")]],
             numeric_column_right_align: true,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
 
@@ -1443,6 +1655,8 @@ mod tests {
                 json!("not-a-number"),
             ]],
             numeric_column_right_align: true,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
 
@@ -1485,6 +1699,8 @@ mod tests {
                 json!("2024-02-25T13:02:15+08:00"),
             ]],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
 
@@ -1513,6 +1729,8 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("2026-07-25 13:02:15.456")]],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         };
 
         let workbook =
@@ -1564,6 +1782,8 @@ mod tests {
                 json!("2800.000000"),
             ]],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
 
@@ -1591,6 +1811,8 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("9223372036854775807"), json!("123456789012345.6789000000")]],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
 
@@ -1624,6 +1846,8 @@ mod tests {
                 json!(12345678901234567.89_f64),
             ]],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
 
@@ -1663,6 +1887,8 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("ok")]],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
         let workbook_xml = read_zip_entry(&workbook, "xl/workbook.xml");
@@ -1680,6 +1906,8 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!(1)]],
                 numeric_column_right_align: false,
+                auto_filter: None,
+                header_comment_rows: false,
             },
             XlsxWorksheetData {
                 sheet_name: Some("Result 2".to_string()),
@@ -1688,6 +1916,8 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!("Ada")]],
                 numeric_column_right_align: false,
+                auto_filter: None,
+                header_comment_rows: false,
             },
         ])
         .expect("build multi-sheet workbook");
@@ -1762,6 +1992,7 @@ mod tests {
                 Some("YYYY/MM/DD HH:mm:ss.SSS"),
                 false,
                 true,
+                false,
             )
             .expect("start workbook");
             writer.write_row(&[json!("2024/02/25 13:02:15.125")]).expect("write temporal row");
@@ -1788,6 +2019,8 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!("SELECT id, name FROM users")]],
                 numeric_column_right_align: false,
+                auto_filter: Some(false),
+                header_comment_rows: false,
             };
             let mut writer = start_streaming_xlsx_workbook_with_trailing_sheets(
                 file,
@@ -1819,6 +2052,8 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!(1.5), json!("row")]],
             numeric_column_right_align: true,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
@@ -1836,6 +2071,8 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!(1.5), json!("row")]],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
@@ -1876,6 +2113,8 @@ mod tests {
             column_comments: vec![],
             rows: vec![row],
             numeric_column_right_align: true,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
@@ -1901,6 +2140,26 @@ mod tests {
         for fixture in fixtures["nonNumeric"].as_array().expect("non-numeric fixtures") {
             let column_type = fixture["type"].as_str().expect("non-numeric fixture type").to_string();
             assert!(!is_numeric_column_type(Some(&column_type)), "expected non-numeric backend type: {column_type}");
+        }
+    }
+
+    #[test]
+    fn duckdb_numeric_types_recognized_by_classifier() {
+        for duckdb_type in [
+            "DECIMAL(18, 3)",
+            "decimal",
+            "NUMERIC(10, 2)",
+            "hugeint",
+            "uhugeint",
+            "utinyint",
+            "usmallint",
+            "uinteger",
+            "ubigint",
+        ] {
+            assert!(
+                is_numeric_column_type(Some(&duckdb_type.to_string())),
+                "expected DuckDB numeric type: {duckdb_type}"
+            );
         }
     }
 
@@ -1986,6 +2245,8 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!("SELECT 1")]],
                 numeric_column_right_align: false,
+                auto_filter: Some(false),
+                header_comment_rows: false,
             };
             let mut writer = start_streaming_xlsx_workbook_with_max_rows(
                 file,
@@ -2070,6 +2331,8 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!("SELECT 1")]],
                 numeric_column_right_align: false,
+                auto_filter: Some(false),
+                header_comment_rows: false,
             };
             let sql_sheet_b = XlsxWorksheetData {
                 sheet_name: Some("SQL".to_string()),
@@ -2078,6 +2341,8 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!("SELECT 2")]],
                 numeric_column_right_align: false,
+                auto_filter: Some(false),
+                header_comment_rows: false,
             };
             let mut writer = start_streaming_xlsx_workbook_with_max_rows(
                 file,
@@ -2118,6 +2383,8 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!("SELECT 1")]],
                 numeric_column_right_align: false,
+                auto_filter: Some(false),
+                header_comment_rows: false,
             };
             let mut writer = start_streaming_xlsx_workbook_with_max_rows(
                 file,
@@ -2157,6 +2424,8 @@ mod tests {
                 column_comments: vec![],
                 rows,
                 numeric_column_right_align: false,
+                auto_filter: None,
+                header_comment_rows: false,
             }],
             2,
             None,
@@ -2220,6 +2489,8 @@ mod tests {
             column_comments: vec![],
             rows,
             numeric_column_right_align: true,
+            auto_filter: None,
+            header_comment_rows: false,
         };
         let segment = WorksheetSegment {
             name: worksheet.sheet_name.clone(),
@@ -2228,6 +2499,8 @@ mod tests {
             column_comments: &worksheet.column_comments,
             rows: &worksheet.rows,
             numeric_column_right_align: worksheet.numeric_column_right_align,
+            auto_filter: worksheet.auto_filter,
+            header_comment_rows: worksheet.header_comment_rows,
         };
         let mut stats = WriteStats::default();
 
@@ -2253,6 +2526,8 @@ mod tests {
             column_comments: vec![],
             rows: (0..7).map(|i| vec![json!(i)]).collect(),
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         };
         let sheet_b = XlsxWorksheetData {
             sheet_name: Some("B".to_string()),
@@ -2261,6 +2536,8 @@ mod tests {
             column_comments: vec![],
             rows: (100..102).map(|i| vec![json!(i)]).collect(),
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         };
         let data = build_xlsx_workbook_multi_with_max_rows(&[sheet_a, sheet_b], 3, None).expect("build workbook");
 
@@ -2294,6 +2571,8 @@ mod tests {
                 column_comments: vec![],
                 rows,
                 numeric_column_right_align: false,
+                auto_filter: None,
+                header_comment_rows: false,
             }],
             100,
             None,
@@ -2321,6 +2600,8 @@ mod tests {
             column_comments: vec![],
             rows: vec![],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .expect("build workbook");
 
@@ -2350,6 +2631,53 @@ mod tests {
     }
 
     #[test]
+    fn sql_worksheet_disables_auto_filter_and_preserves_multiline_whitespace() {
+        let data_sheet = XlsxWorksheetData {
+            sheet_name: Some("Users".to_string()),
+            columns: vec!["id".to_string(), "name".to_string()],
+            column_types: vec!["int".to_string(), "varchar".to_string()],
+            column_comments: vec![],
+            rows: vec![vec![json!(1), json!("Ada")]],
+            numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
+        };
+        let multiline_sql = "SELECT id, name\n  FROM users\n WHERE active = 1\n ORDER BY id ASC";
+        let sql_sheet = XlsxWorksheetData {
+            sheet_name: Some("SQL".to_string()),
+            columns: vec!["SQL".to_string()],
+            column_types: vec![],
+            column_comments: vec![],
+            rows: vec![vec![json!(multiline_sql)]],
+            numeric_column_right_align: false,
+            auto_filter: Some(false),
+            header_comment_rows: false,
+        };
+
+        let workbook = build_xlsx_workbook_multi_with_auto_filter(&[data_sheet, sql_sheet], true, None)
+            .expect("build multi workbook with sql");
+
+        // Sheet 1 (Users) should have autoFilter enabled
+        let sheet1 = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        assert!(sheet1.contains("<autoFilter ref=\"A1:B2\"/>"), "data sheet must have autoFilter: {sheet1}");
+
+        // Sheet 2 (SQL) must NOT have autoFilter
+        let sheet2 = read_zip_entry(&workbook, "xl/worksheets/sheet2.xml");
+        assert!(!sheet2.contains("<autoFilter"), "sql sheet must not have autoFilter: {sheet2}");
+
+        // SQL cell must preserve whitespace using xml:space="preserve"
+        assert!(
+            sheet2.contains("<t xml:space=\"preserve\">"),
+            "multiline indented sql cell must have xml:space=\"preserve\": {sheet2}"
+        );
+        assert!(sheet2.contains("FROM users"), "sql content preserved: {sheet2}");
+        assert!(sheet2.contains("s=\"36\""), "sql sheet cell must have wrapText style s=36: {sheet2}");
+
+        // Column width for SQL column should be expanded beyond the default 10/60
+        assert!(sheet2.contains("<col min=\"1\" max=\"1\" width=\""), "sql sheet has custom column width: {sheet2}");
+    }
+
+    #[test]
     fn reusable_cell_buffer_matches_reference_xml() {
         let values = [Value::Null, json!(true), json!(42.5), json!("a<&\"b"), json!({"key": "value"})];
         for (index, value) in values.iter().enumerate() {
@@ -2360,5 +2688,81 @@ mod tests {
                 assert_eq!(actual, expected, "value={value:?}, style={style:?}");
             }
         }
+    }
+
+    #[test]
+    fn header_row_xml_keeps_override_semantics_without_comment_rows() {
+        let columns = vec!["id".to_string(), "name".to_string()];
+        let comments = vec![Some("Identifier".to_string()), None];
+
+        let single = super::header_row_xml(&columns, &comments, false);
+        assert!(single.starts_with("<row r=\"1\">"));
+        assert!(single.contains(">Identifier<"), "comment overrides header: {single}");
+        assert!(!single.contains("<row r=\"2\">"), "no second row by default: {single}");
+        assert_eq!(super::header_row_count(&comments, false), 1);
+    }
+
+    #[test]
+    fn header_row_xml_emits_names_and_comment_rows() {
+        let columns = vec!["id".to_string(), "name".to_string()];
+        let comments = vec![Some("Identifier".to_string()), Some(String::new())];
+
+        let rows = super::header_row_xml(&columns, &comments, true);
+        assert!(rows.contains("<row r=\"1\">"), "{rows}");
+        assert!(rows.contains("<row r=\"2\">"), "{rows}");
+        // Row 1 keeps the plain column names; row 2 carries the comments.
+        let row1_end = rows.find("<row r=\"2\">").expect("second row");
+        let row1 = &rows[..row1_end];
+        assert!(row1.contains(">id<") && row1.contains(">name<"), "names on row 1: {row1}");
+        assert!(!row1.contains(">Identifier<"), "comment must not override the name: {row1}");
+        let row2 = &rows[row1_end..];
+        assert!(row2.contains(">Identifier<"), "comment on row 2: {row2}");
+        assert_eq!(super::header_row_count(&comments, true), 2);
+    }
+
+    #[test]
+    fn header_row_count_skips_the_comment_row_when_every_comment_is_empty() {
+        let empty = vec![Some(String::new()), None];
+        assert_eq!(super::header_row_count(&empty, true), 1);
+        assert_eq!(super::header_row_count(&[], true), 1);
+        let comments = vec![Some("note".to_string())];
+        assert_eq!(super::header_row_count(&comments, true), 2);
+    }
+
+    #[test]
+    fn streaming_workbook_with_comment_rows_offsets_data_and_freezes_both_headers() {
+        let path = std::env::temp_dir().join(format!("dbx-comment-rows-{}.xlsx", uuid::Uuid::new_v4()));
+        {
+            let file = std::fs::File::create(&path).expect("create temp xlsx");
+            let columns = vec!["id".to_string()];
+            let types = vec![String::new()];
+            let comments = vec![Some("Identifier".to_string())];
+            let mut writer = super::start_streaming_xlsx_workbook_with_options(
+                file,
+                Some("Result"),
+                &columns,
+                &types,
+                &comments,
+                &[],
+                None,
+                false,
+                true,
+                true,
+            )
+            .expect("start workbook");
+            writer.write_row(&[json!(1)]).expect("write row");
+            drop(writer.finish().expect("finish workbook"));
+        }
+
+        let bytes = std::fs::read(&path).expect("read workbook");
+        let sheet = read_zip_entry(&bytes, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("ySplit=\"2\" topLeftCell=\"A3\""), "freeze both header rows: {sheet}");
+        assert!(sheet.contains("<row r=\"1\">"), "{sheet}");
+        assert!(sheet.contains("<row r=\"2\">"), "{sheet}");
+        assert!(sheet.contains("<row r=\"3\">"), "data starts on row 3: {sheet}");
+        let row3 = sheet.split("<row r=\"3\">").nth(1).expect("row 3 cells");
+        assert!(row3.starts_with("<c r=\"A3\"><v>1</v></c>"), "row 3 is the data row: {row3}");
+        assert!(sheet.contains("<autoFilter ref=\"A1:A3\"/>"), "filter covers both header rows and data: {sheet}");
+        std::fs::remove_file(&path).ok();
     }
 }

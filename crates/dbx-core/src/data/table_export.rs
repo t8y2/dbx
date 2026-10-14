@@ -18,11 +18,12 @@ use crate::csv_export::{
     csv_null_literal, format_csv_with_options, format_tsv, push_table_csv_row, push_table_csv_row_with_options,
     push_tsv_row, CsvQuoteMode,
 };
-use crate::data_grid_sql::extra_is_auto_generated;
+use crate::data_grid_sql::DataGridPrimaryKeyMode;
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
     build_export_insert_statements_excluding_with_dialect, is_export_cancelled, is_internal_export_column,
-    BuildExportInsertStatementsOptions, SqlExportProjection, SqlInsertDialect, SqlInsertMode,
+    sql_export_excluded_primary_keys, BuildExportInsertStatementsOptions, SqlExportProjection, SqlInsertDialect,
+    SqlInsertMode,
 };
 use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::models::connection::DatabaseType;
@@ -41,31 +42,6 @@ const SQL_INSERT_BATCH_SIZE: usize = 100;
 
 pub fn table_export_client_session_id(export_id: &str) -> String {
     task_client_session_id("table-export", export_id)
-}
-
-/// SQL 导出时需要排除的列名：用户选择了“不含主键”时，与 copy-as-INSERT
-/// 一致只剔除自增/identity 主键；手动赋值的主键保留，否则回放 INSERT 缺值。
-fn sql_export_excluded_columns(
-    request: &TableExportRequest,
-    primary_keys: &[String],
-    col_names: &[String],
-    column_extras: &[Option<String>],
-) -> Vec<String> {
-    if !request.exclude_primary_keys {
-        return Vec::new();
-    }
-    primary_keys
-        .iter()
-        .filter(|pk| {
-            col_names
-                .iter()
-                .position(|name| name.eq_ignore_ascii_case(pk))
-                .and_then(|index| column_extras.get(index))
-                .and_then(|extra| extra.as_deref())
-                .is_some_and(extra_is_auto_generated)
-        })
-        .cloned()
-        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,9 +81,9 @@ pub struct TableExportRequest {
     pub column_extras: Option<Vec<Option<String>>>,
     #[serde(default)]
     pub primary_keys: Option<Vec<String>>,
-    /// 导出 SQL 时是否排除主键列（对应前端数据提取设置里的“排除主键”）。
+    /// SQL INSERT 导出使用的数据提取器主键模式。
     #[serde(default)]
-    pub exclude_primary_keys: bool,
+    pub primary_key_mode: DataGridPrimaryKeyMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_input: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,6 +100,10 @@ pub struct TableExportRequest {
     pub numeric_column_right_align: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_comments: Option<Vec<Option<String>>>,
+    /// Render `column_comments` as a second header row (names on row 1,
+    /// comments on row 2, data from row 3) instead of overriding headers.
+    #[serde(default)]
+    pub header_comment_rows: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_filter: Option<bool>,
     /// SQL format only: when set, the export is packaged as a `.zip` archive
@@ -246,8 +226,12 @@ fn resolve_requested_export_columns(
     (resolved_columns, resolved_column_types, resolved_primary_keys)
 }
 
-fn requested_mysql_sql_export_needs_column_metadata(database_type: DatabaseType, format: &str) -> bool {
-    database_type == DatabaseType::Mysql && format.eq_ignore_ascii_case("sql")
+/// A data-grid SQL export must resolve column metadata from the table when the
+/// result-set types cannot drive the INSERT-omission rules: MySQL (generated
+/// column extras) and SQL Server (TDS reports `rowversion` as `varbinary`,
+/// never as `timestamp`).
+fn requested_sql_export_needs_column_metadata(database_type: DatabaseType, format: &str) -> bool {
+    matches!(database_type, DatabaseType::Mysql | DatabaseType::SqlServer) && format.eq_ignore_ascii_case("sql")
 }
 
 fn ensure_sql_insert_export_types_supported(format: &str, column_types: &[Option<String>]) -> Result<(), String> {
@@ -280,7 +264,14 @@ fn resolve_requested_column_extras_by_position(
         .collect()
 }
 
+/// Resolve the column types used by a SQL export. The data grid supplies the
+/// types it read from the result set; SQL Server reports `timestamp`/
+/// `rowversion` there as `varbinary`/`binary` (TDS), so the INSERT-omission
+/// rules would never see it. SQL Server therefore prefers the table metadata
+/// (sys.columns) types; other engines keep the result-set types for literal
+/// formatting and only fall back to metadata for missing entries.
 fn resolve_requested_export_column_types(
+    database_type: DatabaseType,
     requested_columns: &[String],
     requested_column_types: &[Option<String>],
     table_columns: &[crate::db::ColumnInfo],
@@ -290,14 +281,18 @@ fn resolve_requested_export_column_types(
         .iter()
         .enumerate()
         .map(|(index, requested)| {
-            requested_column_types
+            let requested_type = requested_column_types
                 .get(index)
                 .cloned()
                 .flatten()
-                .filter(|column_type| !column_type.trim().is_empty())
-                .or_else(|| {
-                    table_columns_by_name.get(&requested.to_ascii_lowercase()).map(|column| column.data_type.clone())
-                })
+                .filter(|column_type| !column_type.trim().is_empty());
+            let metadata_type =
+                table_columns_by_name.get(&requested.to_ascii_lowercase()).map(|column| column.data_type.clone());
+            if database_type == DatabaseType::SqlServer {
+                metadata_type.filter(|column_type| !column_type.trim().is_empty()).or(requested_type)
+            } else {
+                requested_type.or(metadata_type)
+            }
         })
         .collect()
 }
@@ -690,7 +685,13 @@ async fn execute_table_export_count(
     cancel_token: CancellationToken,
 ) -> Result<QueryResult, String> {
     if table_export_cursor_kind(state, pool_key).await != Some(TableExportCursorKind::ExternalDriver) {
-        return execute_read_on_pool(state, pool_key, sql).await;
+        // execute_read_on_pool 不接受取消令牌；用 select! 让导出在取消时不必等待大表
+        // COUNT(*) 跑完（否则点“停止”在 COUNT 阶段毫无反应）。取消时返回 Err，调用方
+        // 会将其视作 total_rows=None 并继续，由后续 is_export_cancelled 收尾为已取消。
+        return tokio::select! {
+            result = execute_read_on_pool(state, pool_key, sql) => result,
+            _ = cancel_token.cancelled() => Err("table export count cancelled".to_string()),
+        };
     }
 
     let timeout_secs = table_export_query_timeout_secs(state, pool_key).await;
@@ -1298,6 +1299,7 @@ async fn try_export_native_table_stream(
                 request.date_time_format.as_deref(),
                 request.numeric_column_right_align,
                 request.auto_filter.unwrap_or(true),
+                request.header_comment_rows,
             )?;
             let result = stream_native_table_rows(
                 state,
@@ -1465,8 +1467,18 @@ async fn try_export_native_table_stream(
                             spatial_values: Vec::new(),
                             rows: std::mem::take(pending_rows),
                             batch_size: Some(request.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
+                            preserve_original_language: false,
                         }),
-                        &sql_export_excluded_columns(request, primary_keys, col_names, column_extras),
+                        &projection.project_excluded_columns(
+                            col_names,
+                            &sql_export_excluded_primary_keys(
+                                Some(*db_type),
+                                request.primary_key_mode,
+                                primary_keys,
+                                col_names,
+                                column_extras,
+                            ),
+                        ),
                         request.insert_dialect,
                     )?;
                     write_sql_export_statements(file, statements, &mut wrote_statements)?;
@@ -1626,30 +1638,29 @@ async fn export_table_data_core_inner(
             request.column_types.as_deref(),
             request.primary_keys.as_deref(),
         );
-        let (column_types, column_extras) =
-            if requested_mysql_sql_export_needs_column_metadata(db_type, &request.format) {
-                let table_columns = crate::schema::get_columns_core(
-                    state,
-                    &request.connection_id,
-                    &request.database,
-                    request.schema.as_deref().unwrap_or(""),
-                    &request.table_name,
-                )
-                .await?;
-                (
-                    resolve_requested_export_column_types(&col_names, &requested_column_types, &table_columns),
-                    resolve_requested_export_column_extras(&col_names, &table_columns),
-                )
-            } else {
-                (
-                    requested_column_types,
-                    resolve_requested_column_extras_by_position(
-                        db_type,
-                        requested_columns,
-                        request.column_extras.as_deref(),
-                    ),
-                )
-            };
+        let (column_types, column_extras) = if requested_sql_export_needs_column_metadata(db_type, &request.format) {
+            let table_columns = crate::schema::get_columns_core(
+                state,
+                &request.connection_id,
+                &request.database,
+                request.schema.as_deref().unwrap_or(""),
+                &request.table_name,
+            )
+            .await?;
+            (
+                resolve_requested_export_column_types(db_type, &col_names, &requested_column_types, &table_columns),
+                resolve_requested_export_column_extras(&col_names, &table_columns),
+            )
+        } else {
+            (
+                requested_column_types,
+                resolve_requested_column_extras_by_position(
+                    db_type,
+                    requested_columns,
+                    request.column_extras.as_deref(),
+                ),
+            )
+        };
         (col_names, column_types, column_extras, primary_keys)
     } else {
         let columns = crate::schema::get_columns_core(
@@ -1999,6 +2010,7 @@ async fn export_table_data_core_inner(
                 request.date_time_format.as_deref(),
                 request.numeric_column_right_align,
                 request.auto_filter.unwrap_or(true),
+                request.header_comment_rows,
             )?;
 
             loop {
@@ -2324,8 +2336,18 @@ async fn export_table_data_core_inner(
                         spatial_values: result.spatial_values.clone(),
                         rows: result.rows.clone(),
                         batch_size: Some(request.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
+                        preserve_original_language: false,
                     }),
-                    &sql_export_excluded_columns(request, &primary_keys, &col_names, &column_extras),
+                    &projection.project_excluded_columns(
+                        &col_names,
+                        &sql_export_excluded_primary_keys(
+                            Some(db_type),
+                            request.primary_key_mode,
+                            &primary_keys,
+                            &col_names,
+                            &column_extras,
+                        ),
+                    ),
                     request.insert_dialect,
                 )?;
                 write_sql_export_statements(&mut file, statements, &mut wrote_statements)?;
@@ -2392,6 +2414,125 @@ mod tests {
     use std::io::Read;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn sql_export_primary_key_modes_keep_manual_keys_or_exclude_all_keys() {
+        let primary_keys = vec!["id".to_string(), "stat_date".to_string()];
+        let columns = vec!["id".to_string(), "stat_date".to_string()];
+        let extras = vec![Some("auto_increment".to_string()), None];
+
+        assert_eq!(
+            sql_export_excluded_primary_keys(
+                Some(DatabaseType::Mysql),
+                DataGridPrimaryKeyMode::ExcludeGenerated,
+                &primary_keys,
+                &columns,
+                &extras,
+            ),
+            vec!["id"]
+        );
+        assert_eq!(
+            sql_export_excluded_primary_keys(
+                Some(DatabaseType::Mysql),
+                DataGridPrimaryKeyMode::ExcludeAll,
+                &primary_keys,
+                &columns,
+                &extras,
+            ),
+            primary_keys
+        );
+        assert!(sql_export_excluded_primary_keys(
+            Some(DatabaseType::Mysql),
+            DataGridPrimaryKeyMode::Include,
+            &primary_keys,
+            &columns,
+            &extras
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn generated_key_export_matches_case_distinct_column_names_exactly() {
+        assert!(sql_export_excluded_primary_keys(
+            Some(DatabaseType::Postgres),
+            DataGridPrimaryKeyMode::ExcludeGenerated,
+            &["id".to_string()],
+            &["ID".to_string(), "id".to_string()],
+            &[Some("identity".to_string()), None],
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn sql_export_primary_key_exclusions_resolve_before_projection() {
+        let columns = vec!["ID".into(), "id".into(), "name".into()];
+        let projection = SqlExportProjection::resolve(
+            &columns,
+            Some(&[
+                crate::types::SqlExportColumnSelection { source_index: 0, name: "ID".into(), name_occurrence: 0 },
+                crate::types::SqlExportColumnSelection { source_index: 2, name: "name".into(), name_occurrence: 0 },
+            ]),
+        )
+        .unwrap();
+        let excluded = sql_export_excluded_primary_keys(
+            Some(DatabaseType::Postgres),
+            DataGridPrimaryKeyMode::ExcludeAll,
+            &["id".into()],
+            &columns,
+            &[],
+        );
+        let statements = build_export_insert_statements_excluding_with_dialect(
+            projection.project_insert_options(BuildExportInsertStatementsOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                schema: Some("public".into()),
+                table_name: Some("users".into()),
+                qualified_table_name: None,
+                columns: columns.clone(),
+                column_types: vec![Some("integer".into()), Some("integer".into()), Some("text".into())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(91), json!(1), json!("Ada")]],
+                batch_size: Some(100),
+                preserve_original_language: false,
+            }),
+            &projection.project_excluded_columns(&columns, &excluded),
+            SqlInsertDialect::Source,
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("users.sql");
+        let mut writer = TableExportSqlWriter::Plain(std::io::BufWriter::new(std::fs::File::create(&output).unwrap()));
+        write_sql_export_statements(&mut writer, statements, &mut false).unwrap();
+        writer.finish("users.sql").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap(),
+            "INSERT INTO \"public\".\"users\" (\"ID\", \"name\") VALUES (91, 'Ada');"
+        );
+    }
+
+    #[test]
+    fn sql_export_primary_key_exclusions_preserve_unique_case_fallback() {
+        assert_eq!(
+            sql_export_excluded_primary_keys(
+                Some(DatabaseType::Mysql),
+                DataGridPrimaryKeyMode::ExcludeAll,
+                &["ID".into()],
+                &["id".into(), "name".into()],
+                &[],
+            ),
+            vec!["id"]
+        );
+        assert!(sql_export_excluded_primary_keys(
+            Some(DatabaseType::Mysql),
+            DataGridPrimaryKeyMode::ExcludeAll,
+            &["Id".into()],
+            &["id".into(), "ID".into()],
+            &[],
+        )
+        .is_empty());
+    }
 
     #[test]
     fn split_zip_sql_export_writes_batch_statements_separately() {
@@ -2559,7 +2700,7 @@ mod tests {
             column_types: Some(vec![Some("INTEGER".to_string()), Some("VARCHAR".to_string())]),
             column_extras: None,
             primary_keys: Some(vec!["id".to_string()]),
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: None,
             order_by: None,
             skip_count,
@@ -2571,6 +2712,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -2725,7 +2867,7 @@ mod tests {
             insert_dialect: Default::default(),
             csv_quote_mode: CsvQuoteMode::All,
             null_literal: String::new(),
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             columns: None,
             selected_columns: None,
             column_types: None,
@@ -2740,6 +2882,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -2900,7 +3043,7 @@ mod tests {
             column_types: None,
             column_extras: None,
             primary_keys: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: Some("WHERE temperature > 1".to_string()),
             order_by: Some("Time DESC".to_string()),
             skip_count: true,
@@ -2912,6 +3055,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -2940,6 +3084,8 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!(1_700_000_000_000_i64), json!(21.5)]],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         })
         .unwrap();
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
@@ -2965,7 +3111,7 @@ mod tests {
             column_types: None,
             column_extras: None,
             primary_keys: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: None,
             order_by: None,
             skip_count: true,
@@ -2977,6 +3123,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -3008,7 +3155,7 @@ mod tests {
             column_types: None,
             column_extras: None,
             primary_keys: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: None,
             order_by: None,
             skip_count: true,
@@ -3020,6 +3167,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -3046,7 +3194,7 @@ mod tests {
             column_types: None,
             column_extras: None,
             primary_keys: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: None,
             order_by: None,
             skip_count: true,
@@ -3058,6 +3206,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -3092,7 +3241,7 @@ mod tests {
             column_types: None,
             column_extras: None,
             primary_keys: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: None,
             order_by: None,
             skip_count: true,
@@ -3104,6 +3253,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -3150,7 +3300,7 @@ mod tests {
             column_types: None,
             column_extras: None,
             primary_keys: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: Some("WHERE status = 'active'".to_string()),
             order_by: None,
             skip_count: false,
@@ -3162,6 +3312,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -3202,7 +3353,7 @@ mod tests {
             column_types: None,
             column_extras: None,
             primary_keys: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: None,
             order_by: None,
             skip_count: false,
@@ -3214,6 +3365,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -3282,7 +3434,7 @@ mod tests {
             column_types: None,
             column_extras: None,
             primary_keys: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: None,
             order_by: None,
             skip_count: false,
@@ -3294,6 +3446,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -3344,7 +3497,7 @@ mod tests {
             column_types: None,
             column_extras: None,
             primary_keys: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: None,
             order_by: None,
             skip_count: true,
@@ -3356,6 +3509,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -3408,7 +3562,7 @@ mod tests {
             column_types: None,
             column_extras: None,
             primary_keys: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: None,
             order_by: None,
             skip_count: false,
@@ -3420,6 +3574,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -3440,6 +3595,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
         assert_eq!(statements, vec!["INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');"]);
@@ -3465,7 +3621,7 @@ mod tests {
             column_types: None,
             column_extras: None,
             primary_keys: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: None,
             order_by: None,
             skip_count: true,
@@ -3475,6 +3631,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
         };
@@ -3510,7 +3667,7 @@ mod tests {
             column_types: None,
             column_extras: None,
             primary_keys: None,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             where_input: None,
             order_by: None,
             skip_count: true,
@@ -3520,6 +3677,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: Some(true),
         };
@@ -3538,6 +3696,7 @@ mod tests {
                 spatial_values: Vec::new(),
                 rows: vec![vec![json!(1)]],
                 batch_size: Some(100),
+                preserve_original_language: false,
             })
             .unwrap()
         };
@@ -3561,7 +3720,7 @@ mod tests {
     }
 
     #[test]
-    fn requested_mysql_sql_export_resolves_column_metadata_only_for_sql() {
+    fn requested_sql_exports_resolve_column_metadata_for_mysql_and_sqlserver() {
         let table_columns = vec![
             crate::db::ColumnInfo {
                 name: "ID".to_string(),
@@ -3578,13 +3737,16 @@ mod tests {
         ];
         let requested_columns = vec!["virtual_total".to_string(), "id".to_string(), "missing".to_string()];
 
-        assert!(requested_mysql_sql_export_needs_column_metadata(DatabaseType::Mysql, "SQL"));
+        assert!(requested_sql_export_needs_column_metadata(DatabaseType::Mysql, "SQL"));
+        assert!(requested_sql_export_needs_column_metadata(DatabaseType::SqlServer, "sql"));
         for format in ["csv", "json", "xlsx"] {
-            assert!(!requested_mysql_sql_export_needs_column_metadata(DatabaseType::Mysql, format));
+            assert!(!requested_sql_export_needs_column_metadata(DatabaseType::Mysql, format));
         }
-        assert!(!requested_mysql_sql_export_needs_column_metadata(DatabaseType::Postgres, "sql"));
+        assert!(!requested_sql_export_needs_column_metadata(DatabaseType::Postgres, "sql"));
+        assert!(!requested_sql_export_needs_column_metadata(DatabaseType::SqlServer, "csv"));
         assert_eq!(
             resolve_requested_export_column_types(
+                DatabaseType::Mysql,
                 &requested_columns,
                 &[Some("".to_string()), Some("bigint".to_string())],
                 &table_columns,
@@ -3594,6 +3756,38 @@ mod tests {
         assert_eq!(
             resolve_requested_export_column_extras(&requested_columns, &table_columns),
             vec![Some("VIRTUAL GENERATED".to_string()), Some("auto_increment".to_string()), None]
+        );
+
+        // SQL Server: result-set types report `rowversion` as `varbinary`, so the
+        // table metadata types must win — this is what makes the `timestamp` /
+        // `computed` omission rules hit on grid SQL exports.
+        let sqlserver_columns = vec![
+            crate::db::ColumnInfo { name: "id".to_string(), data_type: "int".to_string(), ..Default::default() },
+            crate::db::ColumnInfo {
+                name: "row_version".to_string(),
+                data_type: "timestamp".to_string(),
+                ..Default::default()
+            },
+            crate::db::ColumnInfo {
+                name: "total".to_string(),
+                data_type: "int".to_string(),
+                extra: Some("computed".to_string()),
+                ..Default::default()
+            },
+        ];
+        let sqlserver_requested = vec!["id".to_string(), "row_version".to_string(), "total".to_string()];
+        assert_eq!(
+            resolve_requested_export_column_types(
+                DatabaseType::SqlServer,
+                &sqlserver_requested,
+                &[Some("int4".to_string()), Some("varbinary".to_string()), Some("int4".to_string())],
+                &sqlserver_columns,
+            ),
+            vec![Some("int".to_string()), Some("timestamp".to_string()), Some("int".to_string())]
+        );
+        assert_eq!(
+            resolve_requested_export_column_extras(&sqlserver_requested, &sqlserver_columns),
+            vec![None, None, Some("computed".to_string())]
         );
     }
 
@@ -4157,6 +4351,8 @@ esac"#,
                 vec![json!(3), Value::Null, json!(0)],
             ],
             numeric_column_right_align: false,
+            auto_filter: None,
+            header_comment_rows: false,
         };
         let workbook = build_xlsx_workbook(&data).expect("XLSX build should succeed");
 

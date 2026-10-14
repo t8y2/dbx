@@ -75,6 +75,42 @@ describe("settings search", () => {
     expect(searchSettings(entries, "line number", "en").map((entry) => entry.id)).toEqual(["editor-line-numbers"]);
   });
 
+  it("indexes the query editor caret-browsing preference (#11827)", () => {
+    const definition = SETTINGS_SEARCH_DEFINITIONS.find((entry) => entry.id === "editor-caret-browsing");
+    expect(definition).toEqual({
+      id: "editor-caret-browsing",
+      category: "editor",
+      titleKey: "settings.caretBrowsing",
+      descriptionKey: "settings.caretBrowsingDescription",
+      targetId: "editor",
+    });
+
+    const entries = resolveSettingsSearchEntries(
+      [definition!],
+      { isWeb: false, visibleCategories: new Set<SettingsCategory>(["editor"]) },
+      (key) =>
+        ({
+          "settings.caretBrowsing": "光标浏览 (F7)",
+          "settings.caretBrowsingDescription": "允许按 F7 切换浏览器的插入光标浏览模式",
+        })[key] ?? key,
+      categoryLabels,
+    );
+    expect(searchSettings(entries, "光标", "zh-CN")).toEqual([
+      expect.objectContaining({
+        id: "editor-caret-browsing",
+        category: "editor",
+        targetId: "editor",
+      }),
+    ]);
+    expect(searchSettings(entries, "F7", "zh-CN")).toEqual([
+      expect.objectContaining({
+        id: "editor-caret-browsing",
+        category: "editor",
+        targetId: "editor",
+      }),
+    ]);
+  });
+
   it("indexes SQL Server space confirmation when SQL Server exists or an exported setting is enabled", () => {
     const definition = SETTINGS_SEARCH_DEFINITIONS.find((entry) => entry.id === "editor-sqlserver-space-completion");
     expect(definition).toEqual(
@@ -110,6 +146,16 @@ describe("settings search", () => {
       titleKey: "settings.multiStatementDefaultView",
       descriptionKey: "settings.multiStatementDefaultViewDescription",
       targetId: "multi-statement-default-view",
+    });
+  });
+
+  it("indexes the default explain view and its settings control", () => {
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
+      id: "default-explain-view",
+      category: "data",
+      titleKey: "settings.defaultExplainView",
+      descriptionKey: "settings.defaultExplainViewDescription",
+      targetId: "default-explain-view",
     });
   });
 
@@ -184,7 +230,7 @@ describe("settings search", () => {
   it("exposes WebDAV sync in Web settings without exposing snippet sync", () => {
     const webEntries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: true, visibleCategories: new Set<SettingsCategory>(["sync"]) }, translate, categoryLabels);
 
-    expect(webEntries.map((entry) => entry.id)).toEqual(["sync-webdav", "sync-webdav-endpoint", "sync-webdav-username", "sync-webdav-password", "sync-webdav-remote-path", "sync-webdav-auto-upload", "sync-secrets", "sync-secrets-passphrase"]);
+    expect(webEntries.map((entry) => entry.id)).toEqual(["sync-webdav", "sync-webdav-endpoint", "sync-webdav-username", "sync-webdav-password", "sync-webdav-remote-path", "sync-webdav-user-agent", "sync-webdav-auto-upload", "sync-secrets", "sync-secrets-passphrase"]);
   });
 
   it("matches Chinese text as a Unicode substring", () => {
@@ -297,8 +343,10 @@ describe("settings search", () => {
       { titleKey: "transfer.dataTransfer", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.driverManager", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.theme", category: "appearance", targetId: "appearance" },
+      { titleKey: "settings.webLogoPosition", category: "appearance", targetId: "appearance-web-logo-position" },
       { titleKey: "settings.sidebarObjectInfoMode", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.insertSpaceAfterCompletion", category: "editor", targetId: "editor" },
+      { titleKey: "settings.functionCompletionIncludeParams", category: "editor", targetId: "editor" },
       { titleKey: "settings.completionTriggerMode", category: "editor", targetId: "editor" },
       { titleKey: "settings.tableCompletionSchemaQualification", category: "editor", targetId: "editor" },
       { titleKey: "settings.autoAliasTables", category: "editor", targetId: "editor" },
@@ -315,7 +363,10 @@ describe("settings search", () => {
       { titleKey: "settings.sqlFormatterIndent", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterTabWidth", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterIndentStyle", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterLayoutStyle", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterLogicalOperatorNewline", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterCommaPosition", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterFromClauseLayout", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterExpressionWidth", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterLinesBetweenQueries", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterPreserveEmptyLines", category: "formatter", targetId: "formatter" },

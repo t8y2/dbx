@@ -35,6 +35,8 @@ For a backup that should run only once, use **Back up now** in Settings instead 
 
     Select a MySQL or PostgreSQL connection, destination directory, database scope, table scope, and backup contents. A one-shot backup has no schedule name, frequency, retention, or enabled state.
 
+    You can tick several connections in the connection list to back them all up in one go; each connection becomes its own run in **Backup history** and the runs execute one after another. With more than one connection, every connection backs up all of its databases, exact table selection is unavailable, and the file name template must contain `{runId}` so files from different connections never collide.
+
   </Step>
   <Step>
     ### Start and verify

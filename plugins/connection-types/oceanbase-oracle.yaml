@@ -1,6 +1,9 @@
 schemaVersion: 1
 order: 440
 dbType: oceanbase-oracle
+compareModes: [schema, data]
+transferSupportLevel: family-compatible
+transferObjectFamily: oracle
 rustVariant: OceanbaseOracle
 label: OceanBase Oracle Mode
 dialect: OceanBase

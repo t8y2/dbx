@@ -225,6 +225,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -239,6 +240,8 @@ mod tests {
             client_key_path: String::new(),
             sysdba: false,
             oracle_connection_type: None,
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             connection_string: None,
             redis_connection_mode: None,
             redis_sentinel_master: String::new(),
@@ -251,6 +254,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -267,6 +271,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }

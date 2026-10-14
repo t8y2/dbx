@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createConcurrencyLimiter,
   loadSchemaDetails,
@@ -17,6 +17,46 @@ import type { TableInfo } from "../../../types/database";
 function wait(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
+
+it("stops queued metadata after cancellation and waits for every issued request", async () => {
+  const controller = new AbortController();
+  const finish: Array<() => void> = [];
+  const request = vi.fn(() => new Promise<never[]>((resolve) => finish.push(() => resolve([]))));
+  const api: SchemaDiffMetadataApi = {
+    getTableDdl: async () => {
+      await request();
+      return "";
+    },
+    getColumns: request,
+    listIndexes: request,
+    listForeignKeys: request,
+    listTriggers: request,
+  };
+  const loading = loadSchemaDetails(
+    Array.from({ length: 40 }, (_, i) => ({ name: `t${i}`, table_type: "BASE TABLE" }) as TableInfo),
+    { connectionId: "cancelled", database: "app", schema: "", dbType: "mysql", options: DEFAULT_MYSQL_OPTIONS, signal: controller.signal },
+    api,
+  );
+  const rejection = expect(loading).rejects.toThrow("disconnected");
+  await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+  let settled = false;
+  void loading.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  controller.abort(new Error("disconnected"));
+  finish[0]();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(settled).toBe(false);
+  finish[1]();
+  await rejection;
+  expect(schemaDiffMetadataLaneCountForTests()).toBe(0);
+});
 
 const METADATA_POOL_BUSY = "DBX metadata pool is busy; please retry";
 

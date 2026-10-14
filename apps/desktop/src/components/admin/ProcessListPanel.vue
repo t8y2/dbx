@@ -295,7 +295,7 @@ async function load(options: { silent?: boolean } = {}) {
   if (!options.silent) loading.value = true;
   loadError.value = "";
   try {
-    await connectionStore.ensureConnected(connectionId);
+    await connectionStore.ensureConnected(connectionId, { skipIfClosedByUser: true });
     if (!isCurrent()) return;
     if (ownSessionId.value === null) {
       try {

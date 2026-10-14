@@ -72,6 +72,35 @@ describe("connectionStore one_time runtime cleanup", () => {
     vi.restoreAllMocks();
   });
 
+  it("cancels source and target schema compares and drains metadata before disconnecting pools", async () => {
+    installApiMocks();
+    const { registerSchemaDiffTask } = await import("@/lib/schema/schemaDiffCancellation");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { disconnectDb } = await import("@/lib/backend/api");
+    const store = useConnectionStore();
+    store.connections = [previewConnection({ id: "saved-1", one_time: false })];
+    const controllers = [new AbortController(), new AbortController(), new AbortController()];
+    const finish: Array<() => void> = [];
+    for (const [i, ids] of [
+      ["saved-1", "target"],
+      ["source", "saved-1"],
+      ["other", "target"],
+    ].entries()) {
+      registerSchemaDiffTask(ids, controllers[i], new Promise<void>((resolve) => finish.push(resolve)));
+    }
+    const disconnecting = store.disconnect("saved-1");
+    expect(controllers.map((controller) => controller.signal.aborted)).toEqual([true, true, false]);
+    expect(disconnectDb).not.toHaveBeenCalled();
+    finish[0]();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(disconnectDb).not.toHaveBeenCalled();
+    finish[1]();
+    await disconnecting;
+    expect(disconnectDb).toHaveBeenCalledOnce();
+    expect(disconnectDb).toHaveBeenCalledWith("saved-1", undefined);
+    finish[2]();
+  });
+
   // One-time connections are never persisted, so the backend's save_connections
   // sync never reclaims them; disconnect_db is the only reclaim point, which makes
   // an explicit disconnect on removal mandatory.

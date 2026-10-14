@@ -41,3 +41,9 @@ export function resolveHistoryActivityKind(entry: HistoryActivitySource): Histor
 
   return entry.sql ? classifySqlActivityKind(entry.sql) : "query";
 }
+
+export function primarySqlOperation(sql: string): string {
+  const statements = statementsFor(sql);
+  const first = statements[0];
+  return first?.match(/^([a-z]+)/i)?.[1]?.toUpperCase() || "SQL";
+}

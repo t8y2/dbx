@@ -306,14 +306,18 @@ export function binaryCellClipboardText(value: unknown, columnType?: string, dat
   return printableGbkText(binaryPreviewBytes(bytes, columnType));
 }
 
-// MySQL BLOB 的文本预览必须与编辑写回路径（coerceMysqlBlobTextValue，仅 mysql）走同一闸门：
+export function isBlobTextPreviewDatabase(databaseType?: DatabaseType): boolean {
+  return databaseType === "mysql" || databaseType === "oracle" || databaseType === "oceanbase-oracle";
+}
+
+// MySQL 与 Oracle（含 OceanBase-Oracle）BLOB 的文本预览必须与编辑写回路径（coerceBlobTextValue）走同一闸门：
 // SQLite/DuckDB/H2/Firebird 等库同样暴露 `blob` 列，若一律按文本预览会出现
-// “显示是文本、编辑器却是十六进制”的不一致，故 blob 文本预览仅在 mysql 连接开启。
+// “显示是文本、编辑器却是十六进制”的不一致，故 blob 文本预览仅在支持的连接开启。
 // binary/varbinary 的文本预览早于该特性存在（如 TDengine BINARY 文本），保持全库通用。
 function isBinaryCellTextPreviewColumn(columnType: string | undefined, databaseType: DatabaseType | undefined): boolean {
   if (isOpaqueAggregateStateColumnType(columnType)) return false;
   if (BINARY_STRING_TYPE_RE.test((columnType ?? "").trim())) return true;
-  return isBlobCellColumnType(columnType) && databaseType === "mysql";
+  return isBlobCellColumnType(columnType) && isBlobTextPreviewDatabase(databaseType);
 }
 
 // 显示/复制路径的解码链：先严格 UTF-8，仅 MySQL 连接的 binary/varbinary 再回退严格

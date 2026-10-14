@@ -40,14 +40,7 @@ function loadAssetManifest(path) {
 }
 
 function resolveBundle(resolver, coordinate, localRepository, repositories) {
-  const javaToolOptions = [
-    process.env.JAVA_TOOL_OPTIONS,
-    "-Djava.net.preferIPv4Stack=true",
-    "-Daether.connector.connectTimeout=30000",
-    "-Daether.connector.requestTimeout=300000",
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const javaToolOptions = [process.env.JAVA_TOOL_OPTIONS, "-Djava.net.preferIPv4Stack=true", "-Daether.connector.connectTimeout=30000", "-Daether.connector.requestTimeout=300000"].filter(Boolean).join(" ");
   const args = ["resolve", "--coordinate", coordinate, "--local-repo", localRepository];
   for (const repository of repositories) args.push("--repo", repository);
   const result = spawnSync(resolver, args, {
@@ -178,14 +171,8 @@ async function main() {
     if (workDir) rmSync(workDir, { recursive: true, force: true });
   }
 
-  writeFileSync(
-    join(payloadDir, "third-party-notices.json"),
-    `${JSON.stringify({ format_version: 1, bundles: notices }, null, 2)}\n`,
-  );
-  writeFileSync(
-    join(payloadDir, "offline-manifest.json"),
-    `${JSON.stringify({ format_version: 1, plugin_entry: "jdbc/plugin.zip", third_party_entry: "jdbc/third-party-notices.json", bundles: manifestBundles }, null, 2)}\n`,
-  );
+  writeFileSync(join(payloadDir, "third-party-notices.json"), `${JSON.stringify({ format_version: 1, bundles: notices }, null, 2)}\n`);
+  writeFileSync(join(payloadDir, "offline-manifest.json"), `${JSON.stringify({ format_version: 1, plugin_entry: "jdbc/plugin.zip", third_party_entry: "jdbc/third-party-notices.json", bundles: manifestBundles }, null, 2)}\n`);
   console.log(`Prepared offline JDBC payload in ${payloadDir}`);
 }
 

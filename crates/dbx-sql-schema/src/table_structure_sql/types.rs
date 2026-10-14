@@ -39,6 +39,13 @@ pub struct ColumnExtra {
     pub on_update_current_timestamp: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<ColumnIdentity>,
+    /// MySQL generated column. Tri-state: `None` inherits the original
+    /// definition (legacy payloads), `Some` with an empty `expression`
+    /// removes the generated-column attribute, otherwise the clause is
+    /// rendered from these values. MariaDB `PERSISTENT` is reported by
+    /// introspection as `STORED`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<ColumnGenerated>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manticore_indexed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,6 +54,18 @@ pub struct ColumnExtra {
     pub manticore_attribute: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manticore_secondary_index: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnGenerated {
+    /// Generation expression without the surrounding parentheses. An empty
+    /// (or whitespace-only) value means the column is not generated.
+    #[serde(default)]
+    pub expression: String,
+    /// `VIRTUAL` or `STORED`; `None` renders as the MySQL default `VIRTUAL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -238,6 +257,8 @@ pub struct TableStructureSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mysql_engine: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql_auto_increment_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transwarp_create: Option<TranswarpCreateTableOptions>,
     /// MySQL only: the table's current default collation
     /// (`information_schema.TABLES.TABLE_COLLATION`). A column whose collation
@@ -254,11 +275,23 @@ pub struct TableStructureSqlOptions {
     /// will reject or downgrading to a blocking `CREATE INDEX`.
     #[serde(default)]
     pub partitioned: bool,
+    /// Whether the target table is a PostgreSQL foreign table (`relkind = 'f'`).
+    /// PostgreSQL rejects `COMMENT ON TABLE` for foreign tables
+    /// (`"<name>" is not a table`), so the table-comment statement must use
+    /// `COMMENT ON FOREIGN TABLE` when this is set.
+    #[serde(default)]
+    pub foreign_table: bool,
     /// When true, the connection is GaussDB M-mode which uses MySQL-compatible
     /// SQL dialect with backtick quoting. The structure editor maps this to
     /// `StructureDialect::Mysql` so that DDL is generated with MySQL syntax.
     #[serde(default)]
     pub is_gaussdb_m_mode: bool,
+    /// Optional constraint name for a **newly created** primary key. Empty or
+    /// `None` keeps the anonymous `PRIMARY KEY (...)` form and lets the server
+    /// auto-name the constraint. Only applied when the draft adds a primary key
+    /// that did not exist before; replacing an existing key never renames it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

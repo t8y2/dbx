@@ -36,6 +36,7 @@ vi.mock("@/stores/settingsStore", () => ({
     editorSettings: {
       exportBatchSize: 1000,
       globalDateTimeExportFormat: "",
+      generateSqlIncludeDatabaseName: false,
       numericColumnRightAlign: true,
     },
   }),
@@ -63,6 +64,8 @@ function createOptions(overrides: Partial<UseDataGridExportOptions> = {}): UseDa
       ],
     })),
     databaseType: computed(() => "postgres"),
+    includeDatabaseName: computed(() => false),
+    hasUniqueQueryInsertTarget: computed(() => true),
     connectionId: computed(() => "connection-1"),
     database: computed(() => "dbx"),
     context: computed(() => "results"),
@@ -140,6 +143,59 @@ describe("query result SQL export progress", () => {
     expect(progressState.value.finishedAt).toEqual(expect.any(Number));
     expect(cancelHandler.value).toBeNull();
     expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", exportTableName: "users", exportColumnTypes: ["int4", "text"] }), expect.any(Function));
+  });
+
+  it("passes a resolved Oracle owner as the INSERT target without changing query execution schema", async () => {
+    const queryResultExportRequest = vi.fn(async (request) => ({
+      ...request,
+      connectionId: "connection-1",
+      database: "ORCLPDB1",
+      databaseType: "oracle" as const,
+      schema: "CURRENT_USER",
+      queryBaseSql: "SELECT id, name FROM APP_OWNER.users",
+      sql: "SELECT id, name FROM APP_OWNER.users",
+      executionId: "execution-1",
+    }));
+    const state = useDataGridExport(
+      createOptions({
+        databaseType: computed(() => "oracle"),
+        includeDatabaseName: computed(() => true),
+        tableMeta: computed(() => ({ tableName: "USERS", schema: "APP_OWNER", primaryKeys: [], columns: [] })),
+        queryResultExportRequest,
+      }),
+    );
+
+    await state.exportSql();
+
+    expect(queryResultExportRequest).toHaveBeenCalledWith(expect.objectContaining({ exportTableName: "USERS", exportSchema: "APP_OWNER" }));
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ schema: "CURRENT_USER", exportSchema: "APP_OWNER", exportTableName: "USERS" }), expect.any(Function));
+  });
+
+  it("does not infer a target table for query results without a unique source", async () => {
+    const queryResultExportRequest = vi.fn(async (request) => ({
+      ...request,
+      connectionId: "connection-1",
+      database: "dbx",
+      databaseType: "oracle" as const,
+      schema: "CURRENT_USER",
+      queryBaseSql: "SELECT users.id FROM users JOIN orders ON orders.user_id = users.id",
+      sql: "SELECT users.id FROM users JOIN orders ON orders.user_id = users.id",
+      executionId: "execution-1",
+    }));
+    const state = useDataGridExport(
+      createOptions({
+        databaseType: computed(() => "oracle"),
+        includeDatabaseName: computed(() => true),
+        hasUniqueQueryInsertTarget: computed(() => false),
+        tableMeta: computed(() => ({ tableName: "USERS", schema: "APP_OWNER", primaryKeys: [], columns: [] })),
+        queryResultExportRequest,
+      }),
+    );
+
+    await state.exportSql();
+
+    expect(queryResultExportRequest).toHaveBeenCalledWith(expect.objectContaining({ exportTableName: undefined, exportSchema: undefined }));
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ exportTableName: undefined, exportSchema: undefined }), expect.any(Function));
   });
 
   it("forwards result column EXTRA metadata so identity INSERT exports can be replayed", async () => {

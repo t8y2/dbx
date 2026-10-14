@@ -135,6 +135,63 @@ function click(row: HTMLElement, detail: number) {
 }
 
 describe("ObjectBrowser routine double click", () => {
+  it("keeps a reopened source panel independent of the previous late response", async () => {
+    const host = await mountBrowser();
+    vi.useFakeTimers();
+    let release!: (value: { source: string; editable: boolean }) => void;
+    mocks.getObjectSource
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({ source: "FRESH_SOURCE", editable: true });
+    const row = rowFor(host, "sp_daily_report");
+    click(row, 1);
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY);
+    click(row, 1);
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY);
+    click(row, 1);
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY);
+    expect(mocks.getObjectSource).toHaveBeenCalledTimes(2);
+    release({ source: "STALE_SOURCE", editable: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.buildEditableObjectSource).toHaveBeenCalledTimes(1);
+    expect(mocks.buildEditableObjectSource).toHaveBeenCalledWith(expect.objectContaining({ source: "FRESH_SOURCE" }));
+  });
+  it("releases a pending source timer on unmount and discards a late source response", async () => {
+    const host = await mountBrowser();
+    vi.useFakeTimers();
+    let release!: (value: { source: string; editable: boolean }) => void;
+    mocks.getObjectSource.mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    click(rowFor(host, "sp_daily_report"), 1);
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY);
+    expect(mocks.getObjectSource).toHaveBeenCalledTimes(1);
+    const mounted = mountedApps.splice(
+      mountedApps.findIndex((item) => item.host === host),
+      1,
+    )[0];
+    mounted.app.unmount();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
+    release({ source: "LATE_SOURCE", editable: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.buildEditableObjectSource).not.toHaveBeenCalled();
+    expect(host.textContent).not.toContain("LATE_SOURCE");
+    host.remove();
+  });
+  it("ends the source-panel wait when the backend never returns", async () => {
+    const host = await mountBrowser();
+    vi.useFakeTimers();
+    mocks.getObjectSource.mockReturnValueOnce(new Promise(() => undefined));
+    click(rowFor(host, "sp_daily_report"), 1);
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY + 35_001);
+    expect(host.textContent).toContain("Metadata loading timed out");
+  });
   it("opens an editable source tab for a double-clicked PROCEDURE", async () => {
     const host = await mountBrowser();
     vi.useFakeTimers();

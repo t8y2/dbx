@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { computed, defineComponent, h, nextTick, ref, shallowRef, watch, type VNodeChild } from "vue";
+import { computed, defineComponent, h, nextTick, onBeforeUnmount, ref, shallowRef, watch, type VNodeChild } from "vue";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
 import { ChevronDown, ChevronRight } from "@lucide/vue";
 import { createJsonTreeRoot, getJsonTreeChildren, getVisibleJsonTreeNodes, isJsonTreeClosingNode, isJsonTreeContainer, isJsonTreeInitiallyExpanded, jsonTreeContainerKind, jsonTreeContainerSummary, type JsonTreeNode } from "@/lib/common/jsonTree";
 import { isLosslessJsonNumber } from "@/lib/common/safeJsonFormat";
+import { jsonTreeKeyText, jsonTreeScalarText, type JsonTreeSearchMatch } from "@/lib/common/jsonTreeSearch";
+import { renderTextContentMatchesHtml } from "@/lib/common/textContentSearch";
 
 defineOptions({ name: "JsonTree" });
 
 const props = withDefaults(
   defineProps<{
     value: unknown;
+    searchMatches?: JsonTreeSearchMatch[];
+    activeSearchIndex?: number;
     wordWrap?: boolean;
     /** Optional Shiki-style inline highlighter retained for Redis value views. */
     highlightJson?: (json: string) => string;
@@ -29,9 +33,11 @@ const props = withDefaults(
 type ExpansionMode = "default" | "all" | "none";
 type DynamicScrollerHandle = {
   forceUpdate: (clear?: boolean) => void;
+  scrollToItem?: (index: number) => void;
   scrollToPosition?: (position: number) => void;
 };
 
+const treeRoot = ref<HTMLElement>();
 const expansionMode = ref<ExpansionMode>("default");
 const expansionOverrides = shallowRef(new Map<string, boolean>());
 const virtualScroller = ref<DynamicScrollerHandle>();
@@ -80,15 +86,77 @@ function scalarClass(value: unknown): string {
   return "json-tree-string";
 }
 
-function scalarText(value: unknown): string {
-  if (isLosslessJsonNumber(value)) return value.raw;
-  if (typeof value === "string") return JSON.stringify(value);
-  if (value === null) return "null";
-  return String(value);
+const scalarText = jsonTreeScalarText;
+
+const searchParts = computed(() => {
+  const parts = new Map<string, { matches: JsonTreeSearchMatch[]; active: number }>();
+  for (const [index, match] of (props.searchMatches ?? []).entries()) {
+    const key = JSON.stringify([match.path, match.part]);
+    const entry = parts.get(key) ?? { matches: [], active: -1 };
+    if (index === props.activeSearchIndex) entry.active = entry.matches.length;
+    entry.matches.push(match);
+    parts.set(key, entry);
+  }
+  return parts;
+});
+
+function highlightedJson(value: string, node: JsonTreeNode, part: "key" | "value"): string {
+  const entry = searchParts.value.get(JSON.stringify([node.path, part]));
+  if (entry) return renderTextContentMatchesHtml(value, entry.matches, { activeMatchIndex: entry.active });
+  return props.highlightJson?.(value) ?? escapeHtml(value);
 }
 
-function highlightedJson(value: string): string {
-  return props.highlightJson?.(value) ?? escapeHtml(value);
+let searchNavigationRevision = 0;
+const pendingSearchFrames = new Map<number, () => void>();
+onBeforeUnmount(() => {
+  searchNavigationRevision++;
+  for (const [frame, resolve] of pendingSearchFrames) {
+    cancelAnimationFrame(frame);
+    resolve();
+  }
+  pendingSearchFrames.clear();
+});
+
+function nextSearchFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    const frame = requestAnimationFrame(() => {
+      pendingSearchFrames.delete(frame);
+      resolve();
+    });
+    pendingSearchFrames.set(frame, resolve);
+  });
+}
+
+async function revealSearchMatch() {
+  const revision = ++searchNavigationRevision;
+  const match = props.searchMatches?.[props.activeSearchIndex ?? -1];
+  if (!match) return;
+  const overrides = new Map(expansionOverrides.value);
+  overrides.set("", true);
+  const segments = match.path.split("/");
+  for (let i = 1; i < segments.length; i++) overrides.set(segments.slice(0, i).join("/"), true);
+  expansionOverrides.value = overrides;
+  await nextTick();
+  if (revision !== searchNavigationRevision) return;
+  const index = visibleNodes.value.findIndex((node) => node.path === match.path);
+  if (props.virtualized && index >= 0) virtualScroller.value?.scrollToItem?.(index);
+  // Virtual rows are published on animation frames, after scroll events and size
+  // measurements. A Vue tick alone can still observe the old recycled rows.
+  let visibleFrames = 0;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await nextSearchFrame();
+    await nextTick();
+    if (revision !== searchNavigationRevision) return;
+    const target = treeRoot.value?.querySelector<HTMLElement>('[data-document-search-active="true"]');
+    if (target && target.closest<HTMLElement>("[data-json-path]")?.dataset.jsonPath === match.path && target.getClientRects().length) {
+      target.scrollIntoView({ block: "nearest", inline: "nearest" });
+      // Correct again after dynamic row measurement has had time to settle.
+      if (++visibleFrames >= 3) return;
+    } else {
+      visibleFrames = 0;
+      if (props.virtualized && index >= 0) virtualScroller.value?.scrollToItem?.(index);
+    }
+  }
 }
 
 function escapeHtml(value: string): string {
@@ -100,9 +168,8 @@ function nodeAccessibleLabel(node: JsonTreeNode): string {
   return node.path || "$";
 }
 
-function highlightedJsonSpan(className: string, json: string): VNodeChild {
-  if (!props.highlightJson) return h("span", { class: className }, json);
-  return h("span", { class: className, innerHTML: props.highlightJson(json) });
+function highlightedJsonSpan(className: string, text: string, node: JsonTreeNode, part: "key" | "value"): VNodeChild {
+  return h("span", { class: className, innerHTML: highlightedJson(text, node, part) });
 }
 
 function renderJsonNode(node: JsonTreeNode): VNodeChild {
@@ -132,7 +199,7 @@ function renderJsonNode(node: JsonTreeNode): VNodeChild {
   }
 
   if (node.parentKind !== "root") {
-    rowChildren.push(node.parentKind === "array" ? h("span", { class: "json-tree-index" }, `[${node.label}]`) : highlightedJsonSpan("json-tree-key", JSON.stringify(node.label)), h("span", { class: "json-tree-punctuation" }, ":"));
+    rowChildren.push(highlightedJsonSpan(node.parentKind === "array" ? "json-tree-index" : "json-tree-key", jsonTreeKeyText(node), node, "key"), h("span", { class: "json-tree-punctuation" }, ":"));
   }
 
   if (containerValue !== undefined) {
@@ -142,7 +209,7 @@ function renderJsonNode(node: JsonTreeNode): VNodeChild {
       rowChildren.push(h("span", { class: "json-tree-summary" }, jsonTreeContainerSummary(containerValue)), h("span", { class: `json-tree-bracket is-${kind}` }, kind === "array" ? "]" : "}"));
     }
   } else {
-    rowChildren.push(highlightedJsonSpan(scalarClass(node.value), scalarText(node.value)));
+    rowChildren.push(highlightedJsonSpan(scalarClass(node.value), scalarText(node.value), node, "value"));
   }
 
   const children =
@@ -178,15 +245,17 @@ watch([() => props.value, () => props.initialExpandedDepth], () => {
   refresh(true);
 });
 
-defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
+watch([() => props.searchMatches, () => props.activeSearchIndex], revealSearchMatch, { flush: "post", immediate: true });
+
+defineExpose({ expandAll, collapseAll, resetExpansion, refresh, revealSearchMatch });
 </script>
 
 <template>
-  <div class="json-tree" :class="{ 'is-nowrap': !wordWrap, 'is-virtualized': virtualized }">
+  <div ref="treeRoot" class="json-tree" :class="{ 'is-nowrap': !wordWrap, 'is-virtualized': virtualized }">
     <!-- Virtual rows keep a fully expanded response responsive even when it has thousands of nodes. -->
     <DynamicScroller v-if="virtualized" ref="virtualScroller" :items="visibleNodes" :min-item-size="24" :buffer="600" key-field="path" class="json-tree-scroller">
       <template #default="{ item: node, active, index }">
-        <DynamicScrollerItem :item="node" :active="active" :size-dependencies="[wordWrap, node.path, node.label, scalarText(node.value), isNodeExpanded(node)]" :data-index="index">
+        <DynamicScrollerItem :item="node" :active="active" :size-dependencies="[wordWrap, node.path, node.label, scalarText(node.value), isNodeExpanded(node), searchMatches, activeSearchIndex]" :data-index="index">
           <div class="json-tree-node" :data-json-path="node.path">
             <div class="json-tree-row" :style="{ paddingInlineStart: `${node.depth * 16}px` }">
               <template v-if="isJsonTreeClosingNode(node)">
@@ -200,8 +269,7 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
                 <span v-else class="json-tree-spacer" aria-hidden="true" />
 
                 <template v-if="node.parentKind !== 'root'">
-                  <span v-if="node.parentKind === 'array'" class="json-tree-index">[{{ node.label }}]</span>
-                  <span v-else class="json-tree-key" v-html="highlightedJson(JSON.stringify(node.label))" />
+                  <span :class="node.parentKind === 'array' ? 'json-tree-index' : 'json-tree-key'" v-html="highlightedJson(jsonTreeKeyText(node), node, 'key')" />
                   <span class="json-tree-punctuation">:</span>
                 </template>
 
@@ -212,7 +280,7 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
                     <span class="json-tree-bracket" :class="`is-${jsonTreeContainerKind(node.value)}`">{{ jsonTreeContainerKind(node.value) === "array" ? "]" : "}" }}</span>
                   </template>
                 </template>
-                <span v-else :class="scalarClass(node.value)" v-html="highlightedJson(scalarText(node.value))" />
+                <span v-else :class="scalarClass(node.value)" v-html="highlightedJson(scalarText(node.value), node, 'value')" />
               </template>
             </div>
           </div>

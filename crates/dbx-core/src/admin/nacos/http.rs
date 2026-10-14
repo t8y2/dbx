@@ -356,8 +356,9 @@ impl NacosOpenApiAdmin {
             .or_else(|| token_source.get("access_token"))
             .or_else(|| token_source.get("token"))
             .and_then(Value::as_str)
-            .ok_or_else(|| format!("Nacos auth response did not include an access token: {value}"))?
-            .to_string();
+            .map(str::to_string)
+            .or_else(|| Self::string_wrapped_bearer_token(&value))
+            .ok_or_else(|| format!("Nacos auth response did not include an access token: {value}"))?;
         let ttl = token_source
             .get("tokenTtl")
             .or_else(|| token_source.get("expiresIn"))
@@ -374,6 +375,20 @@ impl NacosOpenApiAdmin {
             expires_at: Instant::now() + Duration::from_secs(ttl.saturating_sub(30).max(60)),
         });
         Ok(Some(token))
+    }
+
+    /// Some gateways terminate the login call behind a uniform response
+    /// envelope whose `data` field carries the token as a plain string, e.g.
+    /// `{"code":200,"message":null,"data":"Bearer <jwt>"}` (custom Nacos auth
+    /// plugins deployed in front of the server). Accept that shape too: use
+    /// the string as the token, dropping a leading `Bearer ` scheme prefix.
+    fn string_wrapped_bearer_token(value: &Value) -> Option<String> {
+        let raw = value.get("data")?.as_str()?.trim();
+        let token = match raw.get(..7) {
+            Some(prefix) if prefix.eq_ignore_ascii_case("bearer ") => raw.get(7..).unwrap_or("").trim(),
+            _ => raw,
+        };
+        (!token.is_empty()).then(|| token.to_string())
     }
 
     async fn request(
@@ -4732,6 +4747,48 @@ mod tests {
             let target = request.split_whitespace().nth(1).unwrap();
             assert!(target.starts_with("/nacos/v1/console/namespaces?"));
             assert!(target.contains("accessToken=ordinary-token"));
+            assert!(!request.to_ascii_lowercase().contains("\r\naccesstoken:"));
+            write_json_response(&mut socket, r#"{"code":403,"message":"authorization failed","data":"access denied"}"#)
+                .await;
+        });
+
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        let error = NacosOpenApiAdmin::new(config).unwrap().list_namespaces().await.unwrap_err();
+
+        assert!(error.contains("NACOS_ERROR[managedNamespacesRequired]"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_login_accepts_string_wrapped_bearer_token() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/auth/user/login");
+            write_json_response(&mut socket, r#"{"code":200,"message":null,"data":"Bearer wrapped-token"}"#).await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert_eq!(request.split_whitespace().nth(1).unwrap(), "/nacos/v3/admin/core/namespace/list");
+            assert!(
+                request.to_ascii_lowercase().contains("accesstoken: wrapped-token"),
+                "string-wrapped token must be used as the V3 accessToken header: {request}"
+            );
+            write_json_response(
+                &mut socket,
+                r#"{"code":10001,"message":"access denied","data":"Code: 403, Message: authorization failed!."}"#,
+            )
+            .await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let target = request.split_whitespace().nth(1).unwrap();
+            assert!(target.starts_with("/nacos/v1/console/namespaces?"));
+            assert!(target.contains("accessToken=wrapped-token"));
             assert!(!request.to_ascii_lowercase().contains("\r\naccesstoken:"));
             write_json_response(&mut socket, r#"{"code":403,"message":"authorization failed","data":"access denied"}"#)
                 .await;

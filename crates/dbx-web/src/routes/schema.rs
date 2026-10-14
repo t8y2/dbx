@@ -27,8 +27,30 @@ pub struct SchemaQuery {
     pub table_name_filter: Option<String>,
     pub apply_visible_filter: Option<bool>,
     pub client_session_id: Option<String>,
+    pub current_schema: Option<String>,
     pub include_postgres_access: Option<bool>,
     pub portable: Option<bool>,
+    pub execution_id: Option<String>,
+}
+
+async fn run_cancellable<T, F>(state: &Arc<WebState>, execution_id: Option<String>, future: F) -> Result<T, AppError>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    let registered = execution_id
+        .as_ref()
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| state.app.running_queries.register(id.clone()));
+    if let Some(query) = registered.as_ref() {
+        let token = query.token();
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(AppError::from(dbx_core::query::canceled_error())),
+            result = future => result.map_err(AppError::from),
+        }
+    } else {
+        future.await.map_err(AppError::from)
+    }
 }
 
 #[derive(Deserialize)]
@@ -257,8 +279,12 @@ pub async fn list_objects(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let database = q.database.as_deref().unwrap_or("");
-    let schema = q.schema.as_deref().unwrap_or("");
+    let database = q.database.unwrap_or_default();
+    let schema = q.schema.unwrap_or_default();
+    let connection_id = q.connection_id;
+    let filter = q.filter;
+    let catalog = q.catalog;
+    let execution_id = q.execution_id;
     let object_types = q.object_types.as_ref().map(|value| {
         value.split(',').map(str::trim).filter(|value| !value.is_empty()).map(str::to_string).collect::<Vec<_>>()
     });
@@ -266,54 +292,55 @@ pub async fn list_objects(
         .table_name_filter
         .as_deref()
         .and_then(|value| serde_json::from_str::<dbx_core::schema::TableNameFilter>(value).ok());
-    let result = if let Some(catalog) = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await {
-        let tables = dbx_core::schema::list_doris_catalog_tables_core(
-            &state.app,
-            &q.connection_id,
-            &catalog,
-            database,
-            q.filter.as_deref(),
-            q.limit,
-            q.offset,
-            object_types.as_deref(),
-            table_name_filter.as_ref(),
-        )
-        .await
-        .map_err(AppError::from)?;
-        tables
-            .into_iter()
-            .map(|table| dbx_core::db::ObjectInfo {
-                name: table.name,
-                object_type: table.table_type,
-                schema: Some(database.to_string()),
-                valid: None,
-                signature: None,
-                custom_type_kind: None,
-                has_members: None,
-                comment: table.comment,
-                created_at: None,
-                updated_at: None,
-                parent_schema: table.parent_schema,
-                parent_name: table.parent_name,
-                trigger: None,
-                xugu_type_members_expandable: None,
-            })
-            .collect::<Vec<_>>()
-    } else {
-        dbx_core::schema::list_objects_core(
-            &state.app,
-            &q.connection_id,
-            database,
-            schema,
-            q.filter.as_deref(),
-            q.limit,
-            q.offset,
-            object_types.as_deref(),
-            table_name_filter.as_ref(),
-        )
-        .await
-        .map_err(AppError::from)?
-    };
+    let result = run_cancellable(&state, execution_id, async {
+        if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+            let tables = dbx_core::schema::list_doris_catalog_tables_core(
+                &state.app,
+                &connection_id,
+                &catalog,
+                &database,
+                filter.as_deref(),
+                q.limit,
+                q.offset,
+                object_types.as_deref(),
+                table_name_filter.as_ref(),
+            )
+            .await?;
+            Ok(tables
+                .into_iter()
+                .map(|table| dbx_core::db::ObjectInfo {
+                    name: table.name,
+                    object_type: table.table_type,
+                    schema: Some(database.clone()),
+                    valid: None,
+                    signature: None,
+                    custom_type_kind: None,
+                    has_members: None,
+                    comment: table.comment,
+                    created_at: None,
+                    updated_at: None,
+                    parent_schema: table.parent_schema,
+                    parent_name: table.parent_name,
+                    trigger: None,
+                    xugu_type_members_expandable: None,
+                })
+                .collect::<Vec<_>>())
+        } else {
+            dbx_core::schema::list_objects_core(
+                &state.app,
+                &connection_id,
+                &database,
+                &schema,
+                filter.as_deref(),
+                q.limit,
+                q.offset,
+                object_types.as_deref(),
+                table_name_filter.as_ref(),
+            )
+            .await
+        }
+    })
+    .await?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
@@ -458,8 +485,8 @@ where
     Ok(value)
 }
 
-fn should_cache_columns(client_session_id: Option<&str>) -> bool {
-    client_session_id.is_none()
+fn should_cache_columns(client_session_id: Option<&str>, current_schema: Option<&str>) -> bool {
+    client_session_id.is_none() && current_schema.is_none()
 }
 
 pub async fn get_plugin_table_metadata(
@@ -485,19 +512,20 @@ pub async fn list_columns(
                 .await
                 .map_err(AppError::from)
         } else {
-            dbx_core::schema::get_columns_core_for_session(
+            dbx_core::schema::get_columns_core_for_session_in_context(
                 &state.app,
                 &q.connection_id,
                 database,
                 schema,
                 table,
                 q.client_session_id.as_deref(),
+                q.current_schema.as_deref(),
             )
             .await
             .map_err(AppError::from)
         }
     };
-    let result = if should_cache_columns(q.client_session_id.as_deref()) {
+    let result = if should_cache_columns(q.client_session_id.as_deref(), q.current_schema.as_deref()) {
         cached_metadata(
             &state.app,
             &q.connection_id,
@@ -648,6 +676,21 @@ pub async fn list_foreign_keys(
                     .map_err(AppError::from)
             }
         },
+    )
+    .await?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+pub async fn list_foreign_keys_for_database(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let result = run_cancellable(
+        &state,
+        q.execution_id,
+        dbx_core::schema::list_foreign_keys_for_database_core(&state.app, &q.connection_id, database, schema),
     )
     .await?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
@@ -938,9 +981,21 @@ mod tests {
 
     #[test]
     fn session_scoped_columns_bypass_persistent_cache() {
-        assert!(should_cache_columns(None));
-        assert!(!should_cache_columns(Some("oracle-session")));
-        assert!(!should_cache_columns(Some("")));
+        assert!(should_cache_columns(None, None));
+        assert!(!should_cache_columns(Some("oracle-session"), None));
+        assert!(!should_cache_columns(Some(""), None));
+    }
+
+    #[test]
+    fn current_schema_columns_bypass_cache_without_changing_explicit_schema() {
+        let query: SchemaQuery = serde_json::from_value(serde_json::json!({
+            "connection_id": "ob", "database": "LOGIN", "schema": "", "table": "ORDERS_ALIAS",
+            "current_schema": "SelectedOwner"
+        }))
+        .unwrap();
+        assert_eq!(query.schema.as_deref(), Some(""));
+        assert_eq!(query.current_schema.as_deref(), Some("SelectedOwner"));
+        assert!(!should_cache_columns(query.client_session_id.as_deref(), query.current_schema.as_deref()));
     }
 
     #[test]

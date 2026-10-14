@@ -13,7 +13,7 @@ export function supportsDatabaseSchemaQualifier(dbType?: DatabaseType): boolean 
 }
 
 export function supportsDatabaseNameCompletion(dbType?: DatabaseType): boolean {
-  return !!dbType && ((!isSchemaAware(dbType) && !isSingleDatabase(dbType)) || dbType === "sqlserver");
+  return !!dbType && ((!isSchemaAware(dbType) && !isSingleDatabase(dbType)) || dbType === "sqlserver" || dbType === "snowflake");
 }
 
 /**
@@ -268,6 +268,7 @@ export function supportsTableTruncate(dbType?: DatabaseType): boolean {
     dbType !== "victoriametrics" &&
     dbType !== "manticoresearch" &&
     dbType !== "salesforce" &&
+    dbType !== "neo4j" &&
     dbType !== "nebula"
   );
 }
@@ -280,7 +281,7 @@ export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {
   return !!dbType && PG_LIKE_STRUCTURE_TYPES.has(dbType);
 }
 
-const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle", "jdbc", "oceanbase-oracle", "dameng"];
+const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "gaussdb", "opengauss", "mysql", "oracle", "jdbc", "oceanbase-oracle", "dameng", "sqlserver"];
 
 /** Oracle-family databases, kept ONLY for the Oracle-specific ALTER SESSION SET
  *  CURRENT_SCHEMA compensation in queryStore. Do not use for toolbar/dirty-bit
@@ -293,9 +294,10 @@ const ORACLE_STICKY_TRANSACTION_TYPES: ReadonlySet<string> = new Set(["oracle", 
  *  (crates/dbx-core/src/query/mod.rs + sql_risk.rs `prove_read_only_for_database`).
  *  Every member must also be in TRANSACTION_SUPPORTED_TYPES above: a database
  *  cannot reach manual mode (and this UX) without explicit transaction control
- *  (#9018). Family members like doris/kingbase join only when their transaction
- *  support lands. */
-const PROVEN_READ_ONLY_STICKY_TYPES: ReadonlySet<string> = new Set(["oracle", "oceanbase-oracle", "mysql", "postgres"]);
+ *  (#9018). The PostgreSQL family (PostgreSQL, GaussDB, openGauss) and MySQL use
+ *  the strict `sql_risk` proof; Oracle keeps its lexical classifier. Family
+ *  members like doris/kingbase join only when their transaction support lands. */
+const PROVEN_READ_ONLY_STICKY_TYPES: ReadonlySet<string> = new Set(["oracle", "oceanbase-oracle", "mysql", "postgres", "gaussdb", "opengauss"]);
 
 /**
  * Returns true if the given database type supports explicit transaction control

@@ -574,4 +574,124 @@ describe("EditorToolbar mount contract", () => {
     app.unmount();
     host.remove();
   });
+
+  it("emits foldAll and unfoldAll when clicking the fold/unfold toolbar buttons", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "conn-1",
+        name: "conn",
+        db_type: "mysql",
+        color: "",
+      } as never,
+    ];
+
+    const host = createHost();
+    const onFoldAll = vi.fn();
+    const onUnfoldAll = vi.fn();
+    const app = createApp(EditorToolbar, {
+      activeTab: {
+        id: "tab-1",
+        title: "SQL",
+        connectionId: "conn-1",
+        database: "db",
+        sql: "SELECT 1;\nSELECT 2;",
+        mode: "query",
+        isExecuting: false,
+        isCancelling: false,
+        isExplaining: false,
+      },
+      activeConnection: connectionStore.getConfig("conn-1"),
+      executableSql: "SELECT 1;\nSELECT 2;",
+      explainMode: "explain",
+      blockDangerousRedisCommands: false,
+      sqlKeywordCase: "preserve",
+      databaseRequiredSignal: 0,
+      autoCommit: true,
+      txnSessionId: undefined,
+      txnAutoRolledBack: false,
+      txnPossiblyDirty: false,
+      stickyProvenReadOnlyState: false,
+      onFoldAll,
+      onUnfoldAll,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    const foldAllButton = host.querySelector<HTMLButtonElement>('button[aria-label="toolbar.foldAll"]');
+    expect(foldAllButton).not.toBeNull();
+    foldAllButton?.dispatchEvent(new MouseEvent("click", { detail: 1, bubbles: true }));
+    await nextTick();
+    expect(onFoldAll).toHaveBeenCalledTimes(1);
+
+    const unfoldAllButton = host.querySelector<HTMLButtonElement>('button[aria-label="toolbar.unfoldAll"]');
+    expect(unfoldAllButton).not.toBeNull();
+    unfoldAllButton?.dispatchEvent(new MouseEvent("click", { detail: 1, bubbles: true }));
+    await nextTick();
+    expect(onUnfoldAll).toHaveBeenCalledTimes(1);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("renders shortcut hints on button hover tooltips", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "conn-shortcut",
+        name: "test",
+        db_type: "mysql",
+        color: "",
+      } as never,
+    ];
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({
+      shortcuts: {
+        ...settingsStore.editorSettings.shortcuts,
+        explainSql: "Mod+E",
+        formatSql: "Shift+Mod+F",
+        saveSql: "Mod+S",
+      },
+    });
+
+    const host = createHost();
+    const app = createApp(EditorToolbar, {
+      activeTab: {
+        id: "tab-shortcut",
+        title: "SQL",
+        connectionId: "conn-shortcut",
+        sql: "SELECT 1",
+        mode: "query",
+        isExecuting: false,
+        isCancelling: false,
+        isExplaining: false,
+      },
+      activeConnection: connectionStore.getConfig("conn-shortcut"),
+      executableSql: "SELECT 1",
+      explainMode: "explain",
+      blockDangerousRedisCommands: false,
+      sqlKeywordCase: "preserve",
+      databaseRequiredSignal: 0,
+      autoCommit: true,
+      txnSessionId: undefined,
+      txnAutoRolledBack: false,
+      txnPossiblyDirty: false,
+      stickyProvenReadOnlyState: false,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+    await nextTick();
+
+    const tooltips = [...host.querySelectorAll(".app-editor-toolbar span")].map((el) => el.textContent?.trim() ?? "");
+    expect(tooltips.some((text) => text.includes("toolbar.explainPlan (") && text.includes("E)"))).toBe(true);
+    expect(tooltips.some((text) => text.includes("toolbar.formatSql (") && text.includes("F)"))).toBe(true);
+    expect(tooltips.some((text) => text.includes("toolbar.saveSql (") && text.includes("S)"))).toBe(true);
+
+    app.unmount();
+    host.remove();
+  });
 });

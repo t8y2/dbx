@@ -59,13 +59,15 @@ export function stripDownloadSection(body) {
 // 剥离 release notes 里的 issue 引用 (closes #xxx)，保留贡献者署名 (contributed by @xxx)。
 // 同时处理纯 closes 括号和混在 contributed by 括号里的 closes 片段。
 function stripIssueRefs(text) {
-  return text
-    // 纯 closes 括号整体去掉，如 (closes #123) 或 (closes #123, closes #456)
-    .replace(/\s*\(closes #\d+(?:,\s*closes #\d+)*\)/g, "")
-    // closes 在前、contributed by 在后，如 (closes #88, contributed by @xxx) → (contributed by @xxx)
-    .replace(/\(closes #\d+,\s*/g, "(")
-    // contributed by 在前、closes 在后，如 (contributed by @xxx, closes #123) → (contributed by @xxx)
-    .replace(/,\s*closes #\d+/g, "");
+  return (
+    text
+      // 纯 closes 括号整体去掉，如 (closes #123) 或 (closes #123, closes #456)
+      .replace(/\s*\(closes #\d+(?:,\s*closes #\d+)*\)/g, "")
+      // closes 在前、contributed by 在后，如 (closes #88, contributed by @xxx) → (contributed by @xxx)
+      .replace(/\(closes #\d+,\s*/g, "(")
+      // contributed by 在前、closes 在后，如 (contributed by @xxx, closes #123) → (contributed by @xxx)
+      .replace(/,\s*closes #\d+/g, "")
+  );
 }
 
 // 对整份 releases JSON 统一剥离 closes # 引用。cache 复用的英文翻译来自 R2，
@@ -187,9 +189,7 @@ function buildLatestEnNotes(enReleasesJson) {
 }
 
 export function buildLatestReleaseNotes(releases) {
-  const latest = releases
-    .filter(isAppRelease)
-    .sort((a, b) => new Date(b.published_at) - new Date(a.published_at))[0];
+  const latest = releases.filter(isAppRelease).sort((a, b) => new Date(b.published_at) - new Date(a.published_at))[0];
   if (!latest) return null;
   return { version: latest.tag_name, notes: latest.body || "" };
 }

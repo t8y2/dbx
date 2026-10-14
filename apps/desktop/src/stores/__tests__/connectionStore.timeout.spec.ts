@@ -558,6 +558,8 @@ describe("connectionStore timeout recovery", () => {
       saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
     }));
     const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { passwordViewerEnabled } = await import("@/lib/security/passwordViewer");
+    passwordViewerEnabled.value = includeCredentials === true;
     const store = useConnectionStore();
     await store.initFromDisk();
     await expect(store.exportConnectionsToFile({ mode: "plaintext", includeCredentials }, ["selected"])).resolves.toBe("saved");
@@ -568,6 +570,46 @@ describe("connectionStore timeout recovery", () => {
     expect(exported.connections[0].password).toBe(includeCredentials ? "synthetic-db-secret" : "");
     expect(exported.tunnelProfiles[0].password).toBe(includeCredentials ? "synthetic-profile-secret" : "");
     expect(store.connections[0].password).toBe("synthetic-db-secret");
+  });
+
+  it("rejects explicit credential export when password viewing is disabled before opening a save dialog", async () => {
+    const save = vi.fn();
+    const writeTextFile = vi.fn();
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+    vi.doMock("@tauri-apps/plugin-dialog", () => ({ save }));
+    vi.doMock("@tauri-apps/plugin-fs", () => ({ writeTextFile }));
+    const { passwordViewerEnabled } = await import("@/lib/security/passwordViewer");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    passwordViewerEnabled.value = false;
+    const store = useConnectionStore();
+    await expect(store.exportConnectionsToFile({ mode: "plaintext", includeCredentials: true })).rejects.toThrow("credential_export_disabled");
+    expect(save).not.toHaveBeenCalled();
+    expect(writeTextFile).not.toHaveBeenCalled();
+  });
+
+  it("does not write credentials if permission is revoked while the native save picker is open", async () => {
+    let finishSave!: (path: string) => void;
+    const save = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          finishSave = resolve;
+        }),
+    );
+    const writeTextFile = vi.fn();
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+    vi.doMock("@tauri-apps/plugin-dialog", () => ({ save }));
+    vi.doMock("@tauri-apps/plugin-fs", () => ({ writeTextFile }));
+    vi.doMock("@/lib/backend/api", () => ({ loadTunnelProfiles: vi.fn().mockResolvedValue([]) }));
+    const { passwordViewerEnabled } = await import("@/lib/security/passwordViewer");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection({ password: "synthetic-secret" })];
+    const result = expect(store.exportConnectionsToFile({ mode: "plaintext", includeCredentials: true })).rejects.toThrow("credential_export_disabled");
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    passwordViewerEnabled.value = false;
+    finishSave("/tmp/synthetic-revoked-export.json");
+    await result;
+    expect(writeTextFile).not.toHaveBeenCalled();
   });
 
   it("reports cancellation when the native export save dialog is dismissed", async () => {

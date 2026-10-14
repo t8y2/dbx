@@ -2,7 +2,7 @@ import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { isSchemaAware, spannerObjectTreeSchema, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 
-type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "url_params" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config" | "username">>;
+export type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "url_params" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config" | "username">>;
 
 export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
 export type GaussdbConnectionMode = "native" | "m-jdbc";
@@ -119,6 +119,11 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
  * would drop them from the connection list and disable every non-table kind.
  */
 export function transferDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
+  // GBase connections are mapped to the MySQL dialect for SQL generation, but
+  // the GBase driver manifest explicitly disables data transfer. Keep that
+  // capability restriction attached to the raw connection type instead of
+  // exposing the mapped MySQL type to transfer callers.
+  if (connection?.db_type === "gbase") return undefined;
   const effective = effectiveDatabaseTypeForConnection(connection);
   if (effective === "doris" || effective === "starrocks") return connection?.db_type;
   return effective;
@@ -278,6 +283,9 @@ function databaseNameIsNotASchema(type: DatabaseType | undefined): boolean {
 }
 
 export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
+  // Unknown JDBC drivers default to a flat tree, but can discover schemas.
+  // Keep that explicit scope: an empty JDBC metadata schema is unrestricted.
+  if (schema && connection?.db_type === "jdbc" && !inferJdbcDialect(connection)) return schema;
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return "";
   const type = effectiveDatabaseTypeForConnection(connection);
@@ -325,6 +333,8 @@ export function metadataSchemaForConnection(connection: JdbcDialectConnection | 
 }
 
 export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string | undefined {
+  // Child nodes and cache identities must retain the metadata request's scope.
+  if (schema && connection?.db_type === "jdbc" && !inferJdbcDialect(connection)) return schema;
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
   const type = effectiveDatabaseTypeForConnection(connection);

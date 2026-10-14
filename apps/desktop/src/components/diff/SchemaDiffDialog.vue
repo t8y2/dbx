@@ -9,6 +9,7 @@ import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, Alert
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
+import { supportsDatabaseCompare } from "@/lib/database/databaseCompareCapabilities";
 import { useSchemaDiffConfig } from "@/composables/useSchemaDiffConfig";
 import SchemaDiffConfigStep from "@/components/diff/SchemaDiffConfigStep.vue";
 import SchemaDiffConfigSelector from "@/components/diff/SchemaDiffConfigSelector.vue";
@@ -198,6 +199,22 @@ const showRenamePanel = ref(true);
 
 // Rollback / forward SQL mode in deploy step
 const deploySqlMode = ref<"forward" | "rollback">("forward");
+
+// Deploy review: bracket the deploy script with MySQL's FOREIGN_KEY_CHECKS toggle.
+// Only MySQL honours the session variable, so the option is offered — and sent to
+// the backend — for MySQL targets alone; the backend re-checks the target type and
+// returns every other engine's script unchanged.
+const ignoreForeignKeyChecks = ref(false);
+const isMysqlDeployTarget = computed(() => targetEngineDbType.value === "mysql");
+const effectiveIgnoreForeignKeyChecks = computed(() => ignoreForeignKeyChecks.value && isMysqlDeployTarget.value);
+
+// Ticking the box rewrites the script through the plan generator, so the header
+// and trailer come from the same backend implementation the copy, export and
+// deploy paths all read from, and unticking restores the plain script.
+watch(ignoreForeignKeyChecks, () => {
+  if (step.value !== "deploy-review" || !lastDiffResult.value) return;
+  void regenerateSelectedDeploySql();
+});
 
 // Dialog size memory (width + height + splitpanes ratio)
 const DIALOG_SIZE_KEY = "dbx-schema-diff-size";
@@ -419,6 +436,7 @@ function resetComparisonResultState() {
   permissionDiffs.value = [];
   dependencyGraph.value = null;
   deploySqlMode.value = "forward";
+  ignoreForeignKeyChecks.value = false;
   showConfirmDialog.value = false;
   showResultDialog.value = false;
   deployResult.value = null;
@@ -587,6 +605,14 @@ function runWithoutTargetIdentityReset(action: () => void): void {
   }
 }
 
+function handleSourceConnectionChange(connectionId: string): void {
+  if (connectionId === sourceConnectionId.value) return;
+  sourceConnectionId.value = connectionId;
+  sourceDatabase.value = "";
+  sourceSchema.value = "";
+  clearCompareObjectSelection();
+}
+
 function clearCompareObjectSelection(): void {
   if (!activeConfig.value) return;
   updateActiveConfigOptions(
@@ -729,6 +755,7 @@ function handleFieldMappingsUpdate(mappings: FieldMappingEntry[]) {
 function handleCompare(): void {
   const sourceConfig = store.getConfig(sourceConnectionId.value);
   const targetConfig = store.getConfig(targetConnectionId.value);
+  if (!supportsDatabaseCompare(sourceConfig, "schema") || !supportsDatabaseCompare(targetConfig, "schema")) return;
   const targetDbType = (targetConfig?.db_type || "mysql") as DatabaseType;
   const sourceDbType = sourceConfig?.db_type || targetDbType;
   const options = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, targetDbType);
@@ -817,6 +844,7 @@ function buildSchemaSyncPlanOptions(options: SchemaDiffCompareOptions) {
     sourceDialect: options.sourceDialect ? normalizeDialectKind(options.sourceDialect) : sourceEngineDbType.value ? databaseTypeToDialectKind(sourceEngineDbType.value) : undefined,
     fieldMappings: options.fieldMappings,
     enableRollback: options.enableRollback,
+    ignoreForeignKeyChecks: effectiveIgnoreForeignKeyChecks.value,
   };
 }
 
@@ -1193,6 +1221,7 @@ function handleDeleteHistoryConfig(configId: string) {
 }
 
 async function fetchDbVersion(connectionId: string, database: string, schema: string) {
+  if (!supportsDatabaseCompare(store.getConfig(connectionId), "schema")) return;
   try {
     await store.ensureConnected(connectionId);
     const config = store.getConfig(connectionId);
@@ -1307,7 +1336,8 @@ const targetConnectionInfo = computed(() => {
         <SchemaDiffConfigStep
           v-if="step === 'config'"
           class="shrink-0"
-          v-model:source-connection-id="sourceConnectionId"
+          :source-connection-id="sourceConnectionId"
+          @update:source-connection-id="handleSourceConnectionChange"
           v-model:source-database="sourceDatabase"
           v-model:source-schema="sourceSchema"
           v-model:target-connection-id="targetConnectionId"
@@ -1495,6 +1525,8 @@ const targetConnectionInfo = computed(() => {
         <template v-else-if="step === 'deploy-review'">
           <SchemaDiffDeployStep
             v-model:deploy-sql="selectedDeploySql"
+            v-model:ignore-foreign-key-checks="ignoreForeignKeyChecks"
+            :show-ignore-foreign-key-checks="isMysqlDeployTarget"
             :selected-objects="currentTabDiffObjects"
             :target-connection-id="targetConnectionId"
             :target-database="targetDatabase"

@@ -21,4 +21,23 @@ describe("TableStructureEditor selected-row styles", () => {
     const gridControlRule = rules.find(({ selectors }) => selectors.includes(".structure-edit-grid :deep(.structure-grid-control)"));
     expect(gridControlRule?.declarations).toContain("background-color: transparent;");
   });
+
+  it("keeps HeidiSQL-style column type and key tone hooks wired", () => {
+    expect(source).toContain("structureDataTypeToneClass(column.dataType)");
+    expect(source).toContain("structure-column-primary-key");
+    expect(source).toContain("structure-column-unique-key");
+
+    for (const className of ["structure-data-type-numeric", "structure-data-type-text", "structure-data-type-temporal", "structure-data-type-json", "structure-data-type-binary", "structure-data-type-boolean", "structure-data-type-enum", "structure-data-type-spatial"]) {
+      expect(scopedStyle).toContain(className);
+    }
+  });
+
+  it("guards index column options and column issues against hot-path recalculations (#11637)", () => {
+    expect(source).toContain("canIndexTypeHaveSpecialIssue(structureDialect.value, indexType)");
+    expect(source).toContain("canIndexTypeHaveSpecialIssue(structureDialect.value, index.indexType)");
+    expect(source).toContain("defaultIndexColumnOptions = computed");
+    expect(source).toContain("activeColumnByName = computed");
+    expect(source).toContain("activeColumnByComparisonKey = computed");
+    expect(source).toContain("indexesByColumnComparisonKey = computed");
+  });
 });

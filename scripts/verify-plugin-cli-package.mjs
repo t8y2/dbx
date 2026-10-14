@@ -1,16 +1,5 @@
 import { spawnSync, spawn } from "node:child_process";
-import {
-  chmodSync,
-  copyFileSync,
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -36,17 +25,7 @@ const installDirectory = join(temporaryRoot, "install");
 const stagedPlatformDirectory = join(temporaryRoot, platformPackage[0]);
 
 try {
-  run(
-    "cargo",
-    [
-      "build",
-      "--locked",
-      "--release",
-      "--manifest-path",
-      join(repositoryRoot, "plugins/sdk/cli/Cargo.toml"),
-    ],
-    { env: { ...process.env, CARGO_TARGET_DIR: cargoTarget } },
-  );
+  run("cargo", ["build", "--locked", "--release", "--manifest-path", join(repositoryRoot, "plugins/sdk/cli/Cargo.toml")], { env: { ...process.env, CARGO_TARGET_DIR: cargoTarget } });
 
   cpSync(join(repositoryRoot, "packages", platformPackage[0]), stagedPlatformDirectory, { recursive: true });
   const stagedBinaryDirectory = join(stagedPlatformDirectory, "bin");
@@ -68,18 +47,10 @@ try {
   }
 
   mkdirSync(installDirectory, { recursive: true });
-  writeFileSync(
-    join(installDirectory, "package.json"),
-    `${JSON.stringify({ name: "dbx-plugin-cli-package-smoke", private: true }, null, 2)}\n`,
-  );
+  writeFileSync(join(installDirectory, "package.json"), `${JSON.stringify({ name: "dbx-plugin-cli-package-smoke", private: true }, null, 2)}\n`);
   run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", ...tarballs], { cwd: installDirectory });
 
-  const command = join(
-    installDirectory,
-    "node_modules",
-    ".bin",
-    process.platform === "win32" ? "dbx-plugin.cmd" : "dbx-plugin",
-  );
+  const command = join(installDirectory, "node_modules", ".bin", process.platform === "win32" ? "dbx-plugin.cmd" : "dbx-plugin");
   const version = run(command, ["--version"], { cwd: installDirectory, capture: true });
   const expectedVersion = JSON.parse(readFileSync(join(repositoryRoot, "packages/plugin-cli/package.json"), "utf8")).version;
   if (version.stdout.trim() !== `dbx-plugin ${expectedVersion}`) {
@@ -92,9 +63,7 @@ try {
     if (commandAvailable("go")) await verifyTemplate(command, installDirectory, "go");
   }
 
-  const installedManifest = JSON.parse(
-    readFileSync(join(installDirectory, "node_modules/@dbx-app/plugin-cli/package.json"), "utf8"),
-  );
+  const installedManifest = JSON.parse(readFileSync(join(installDirectory, "node_modules/@dbx-app/plugin-cli/package.json"), "utf8"));
   if (installedManifest.name !== "@dbx-app/plugin-cli") {
     throw new Error(`Installed unexpected npm package ${installedManifest.name}.`);
   }
@@ -106,21 +75,7 @@ try {
 
 async function verifyTemplate(command, workingDirectory, template) {
   const project = join(workingDirectory, `${template}-plugin`);
-  run(command, [
-    "create",
-    project,
-    "--template",
-    template,
-    "--yes",
-    "--id",
-    `com.example.npm-${template}`,
-    "--name",
-    `NPM ${template} smoke`,
-    "--publisher",
-    "example",
-    "--description",
-    `NPM ${template} package smoke`,
-  ]);
+  run(command, ["create", project, "--template", template, "--yes", "--id", `com.example.npm-${template}`, "--name", `NPM ${template} smoke`, "--publisher", "example", "--description", `NPM ${template} package smoke`]);
   run(command, ["package", project]);
   const packages = readdirSync(join(project, "dist")).filter((file) => file.endsWith(".dbxp"));
   if (packages.length !== 1 || !existsSync(join(project, "dist", packages[0]))) {
@@ -130,53 +85,85 @@ async function verifyTemplate(command, workingDirectory, template) {
 }
 
 async function verifyDev(workingDirectory, project, template) {
-  const packageRoot = join(workingDirectory, 'node_modules/@dbx-app/plugin-cli');
-  if (!existsSync(join(packageRoot, 'dev-runtime/runtime.mjs')) || !existsSync(join(packageRoot, 'dev-runtime/ui/index.html'))) throw new Error('Packed CLI has no dev runtime');
-  const child = spawn(process.execPath, [join(packageRoot, 'bin/dbx-plugin.js'), 'dev', '--path', project, '--port', '0'], {
-    cwd: workingDirectory, env: { ...process.env, DBX_PLUGIN_DEV_RUNTIME: '', DBX_PLUGIN_NODE: '', DBX_PLUGIN_SDK_ROOT: '' },
-    stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32',
+  const packageRoot = join(workingDirectory, "node_modules/@dbx-app/plugin-cli");
+  if (!existsSync(join(packageRoot, "dev-runtime/runtime.mjs")) || !existsSync(join(packageRoot, "dev-runtime/ui/index.html"))) throw new Error("Packed CLI has no dev runtime");
+  const child = spawn(process.execPath, [join(packageRoot, "bin/dbx-plugin.js"), "dev", "--path", project, "--port", "0"], {
+    cwd: workingDirectory,
+    env: { ...process.env, DBX_PLUGIN_DEV_RUNTIME: "", DBX_PLUGIN_NODE: "", DBX_PLUGIN_SDK_ROOT: "" },
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32",
   });
-  let output = '';
-  child.stderr.on('data', chunk => { output = (output + chunk).slice(-64000); });
+  let output = "";
+  child.stderr.on("data", (chunk) => {
+    output = (output + chunk).slice(-64000);
+  });
   try {
     const origin = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Installed dev runtime did not start')), 180000);
-      child.on('error', error => { clearTimeout(timer); reject(error); });
-      child.on('exit', code => { clearTimeout(timer); reject(new Error(`Installed dev exited ${code}: ${output}`)); });
-      child.stdout.on('data', chunk => { output = (output + chunk).slice(-64000); const url = /Plugin dev host: (http:\/\/127\.0\.0\.1:\d+)/.exec(output)?.[1]; if (url) { clearTimeout(timer); resolve(url); } });
+      const timer = setTimeout(() => reject(new Error("Installed dev runtime did not start")), 180000);
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.on("exit", (code) => {
+        clearTimeout(timer);
+        reject(new Error(`Installed dev exited ${code}: ${output}`));
+      });
+      child.stdout.on("data", (chunk) => {
+        output = (output + chunk).slice(-64000);
+        const url = /Plugin dev host: (http:\/\/127\.0\.0\.1:\d+)/.exec(output)?.[1];
+        if (url) {
+          clearTimeout(timer);
+          resolve(url);
+        }
+      });
     });
-    const bootstrap = await fetch(`${origin}/api/bootstrap`), boot = await bootstrap.json();
-    const cookie = bootstrap.headers.get('set-cookie').split(';')[0];
+    const bootstrap = await fetch(`${origin}/api/bootstrap`),
+      boot = await bootstrap.json();
+    const cookie = bootstrap.headers.get("set-cookie").split(";")[0];
     const post = async (path, body) => {
-      const response = await fetch(`${origin}/api/${path}`, { method: 'POST', headers: { Cookie: cookie, Origin: origin, 'Content-Type': 'application/json', 'X-Mock-Csrf': boot.csrf }, body: JSON.stringify(body) });
-      const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result.value;
+      const response = await fetch(`${origin}/api/${path}`, { method: "POST", headers: { Cookie: cookie, Origin: origin, "Content-Type": "application/json", "X-Mock-Csrf": boot.csrf }, body: JSON.stringify(body) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(JSON.stringify(result));
+      return result.value;
     };
-    const workbench = boot.manifest.contributions.find(c => c.type === 'workbench');
+    const workbench = boot.manifest.contributions.find((c) => c.type === "workbench");
     let opened;
-    if (template === 'frontend') opened = await post('workbenches/open', { contributionId: workbench.id });
+    if (template === "frontend") opened = await post("workbenches/open", { contributionId: workbench.id });
     else {
-      const provider = boot.manifest.contributions.find(c => c.type === 'connection-provider');
-      const record = { providerId: provider.id, values: Object.fromEntries(provider.fields.filter(f => f.default !== undefined).map(f => [f.key, f.default])) };
-      await post('connections/test', record);
-      const saved = await post('connections/save', record); opened = await post('connections/connect', { id: saved.id });
+      const provider = boot.manifest.contributions.find((c) => c.type === "connection-provider");
+      const record = { providerId: provider.id, values: Object.fromEntries(provider.fields.filter((f) => f.default !== undefined).map((f) => [f.key, f.default])) };
+      await post("connections/test", record);
+      const saved = await post("connections/save", record);
+      opened = await post("connections/connect", { id: saved.id });
     }
-    const frame = await post('frame-document', { frameId: opened.frame.id });
-    const call = (method, params) => post('bridge', { frameId: frame.id, channel: frame.channel, method, params });
-    await call('host.getContext', {});
-    if (template !== 'frontend') {
-      const method = readFileSync(join(project, 'ui/index.html'), 'utf8').match(/\.invoke\("([^\"]+)"/)?.[1];
-      if (!method) throw new Error('Native template has no invoke example');
-      const result = await call('backend.invoke', { method, params: { connectionId: frame.context.connectionId } });
-      if (result.language !== template || !result.ok) throw new Error('Native dev RPC returned unexpected result');
+    const frame = await post("frame-document", { frameId: opened.frame.id });
+    const call = (method, params) => post("bridge", { frameId: frame.id, channel: frame.channel, method, params });
+    await call("host.getContext", {});
+    if (template !== "frontend") {
+      const method = readFileSync(join(project, "ui/index.html"), "utf8").match(/\.invoke\("([^\"]+)"/)?.[1];
+      if (!method) throw new Error("Native template has no invoke example");
+      const result = await call("backend.invoke", { method, params: { connectionId: frame.context.connectionId } });
+      if (result.language !== template || !result.ok) throw new Error("Native dev RPC returned unexpected result");
     }
-    await post('frames/close', { id: frame.id });
+    await post("frames/close", { id: frame.id });
     console.log(`Verified installed ${template} dev runtime without source-tree dependencies.`);
   } finally {
     if (child.exitCode === null && !child.signalCode) {
-      await new Promise(resolve => {
-        const timer = setTimeout(() => { if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F']); else { try { process.kill(-child.pid, 'SIGKILL'); } catch {} } }, 7000);
-        child.once('close', () => { clearTimeout(timer); resolve(); });
-        if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F']); else process.kill(-child.pid, 'SIGTERM');
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+          else {
+            try {
+              process.kill(-child.pid, "SIGKILL");
+            } catch {}
+          }
+        }, 7000);
+        child.once("close", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        if (process.platform === "win32") spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+        else process.kill(-child.pid, "SIGTERM");
       });
     }
   }

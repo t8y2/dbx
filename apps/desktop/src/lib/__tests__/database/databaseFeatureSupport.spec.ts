@@ -43,6 +43,17 @@ describe("schema awareness", () => {
     expect(usesTreeSchemaMode("spanner")).toBe(true);
   });
 
+  it("keeps SunDB on a schema tree so the database name is never used as the schema", () => {
+    // SUNDB reports a real schema level (its driver implements SET SCHEMA and
+    // DatabaseMetaData.getSchemas()), while the database in the JDBC URL is a
+    // catalog. Without both traits the sidebar expanded the database node with
+    // loadTables(database, undefined) and the agent sent the catalog name as the
+    // getTables schemaPattern; the driver matched `TABLE_SCHEMA LIKE '<catalog>'`
+    // and the tree showed "表 0" (issue #11360).
+    expect(isSchemaAware("sundb")).toBe(true);
+    expect(usesTreeSchemaMode("sundb")).toBe(true);
+  });
+
   it("treats Cloud Spanner's blank schema as a loadable node name", () => {
     // The GoogleSQL default schema node carries "", so a truthiness check would render an
     // expandable node that never loads its tables. Other types keep the truthiness test, which is
@@ -145,19 +156,19 @@ describe("zookeeper query capabilities", () => {
 });
 
 describe("database and schema qualifiers", () => {
-  it.each(["sqlserver", "trino", "prestosql"] as const)("supports three-part object names for %s", (databaseType) => {
+  it.each(["sqlserver", "trino", "prestosql", "snowflake"] as const)("supports three-part object names for %s", (databaseType) => {
     expect(supportsDatabaseSchemaQualifier(databaseType)).toBe(true);
   });
 
-  it.each(["mysql", "postgres", "oracle", "snowflake"] as const)("does not widen unverified three-part completion for %s", (databaseType) => {
+  it.each(["mysql", "postgres", "oracle"] as const)("does not widen unverified three-part completion for %s", (databaseType) => {
     expect(supportsDatabaseSchemaQualifier(databaseType)).toBe(false);
   });
 
-  it.each(["mysql", "sqlite", "sqlserver"] as const)("suggests database names for %s", (databaseType) => {
+  it.each(["mysql", "sqlite", "sqlserver", "snowflake"] as const)("suggests database names for %s", (databaseType) => {
     expect(supportsDatabaseNameCompletion(databaseType)).toBe(true);
   });
 
-  it.each(["postgres", "oracle", "snowflake", "trino", "prestosql"] as const)("does not add database name completion for %s", (databaseType) => {
+  it.each(["postgres", "oracle", "trino", "prestosql"] as const)("does not add database name completion for %s", (databaseType) => {
     expect(supportsDatabaseNameCompletion(databaseType)).toBe(false);
   });
 });
@@ -165,6 +176,8 @@ describe("database and schema qualifiers", () => {
 describe("supportsTransaction", () => {
   it("returns true for supported database types", () => {
     expect(supportsTransaction("postgres")).toBe(true);
+    expect(supportsTransaction("gaussdb")).toBe(true);
+    expect(supportsTransaction("opengauss")).toBe(true);
     expect(supportsTransaction("mysql")).toBe(true);
     expect(supportsTransaction("oracle")).toBe(true);
     expect(supportsTransaction("jdbc")).toBe(true);
@@ -181,7 +194,7 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("cloudflare-d1")).toBe(false);
     expect(supportsTransaction("sqlite")).toBe(false);
     expect(supportsTransaction("clickhouse")).toBe(false);
-    expect(supportsTransaction("sqlserver")).toBe(false);
+    expect(supportsTransaction("sqlserver")).toBe(true);
     expect(supportsTransaction("rqlite")).toBe(false);
     expect(supportsTransaction("agent")).toBe(false);
   });
@@ -204,6 +217,10 @@ describe("defaultAutoCommitForDbType", () => {
   it("honors the configured default transaction mode", () => {
     expect(defaultAutoCommitForDbType("mysql", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("postgres", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("gaussdb", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("opengauss", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("sqlserver", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("sqlserver", "auto")).toBe(true);
     expect(defaultAutoCommitForDbType("oracle", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("jdbc", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("oceanbase-oracle", "manual")).toBe(false);
@@ -236,11 +253,13 @@ describe("usesOracleStickyTransactionState", () => {
 });
 
 describe("usesProvenReadOnlyStickyTransactionState", () => {
-  it("enables the sticky toolbar for the Oracle family, MySQL and PostgreSQL", () => {
+  it("enables the sticky toolbar for the Oracle family, MySQL and the PostgreSQL family", () => {
     expect(usesProvenReadOnlyStickyTransactionState("oracle")).toBe(true);
     expect(usesProvenReadOnlyStickyTransactionState("oceanbase-oracle")).toBe(true);
     expect(usesProvenReadOnlyStickyTransactionState("mysql")).toBe(true);
     expect(usesProvenReadOnlyStickyTransactionState("postgres")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("gaussdb")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("opengauss")).toBe(true);
   });
 
   it("keeps databases without manual-transaction support on the legacy toolbar", () => {
@@ -254,7 +273,7 @@ describe("usesProvenReadOnlyStickyTransactionState", () => {
   it("only enables sticky state where manual mode is reachable", () => {
     // The sticky UX gates commit/rollback in manual mode; a member without
     // transaction support could never reach it. Guards against drift.
-    for (const dbType of ["oracle", "oceanbase-oracle", "mysql", "postgres"]) {
+    for (const dbType of ["oracle", "oceanbase-oracle", "mysql", "postgres", "gaussdb", "opengauss"]) {
       expect(supportsTransaction(dbType)).toBe(true);
     }
   });
@@ -339,8 +358,10 @@ describe("supportsTableImport", () => {
 });
 
 describe("supportsFieldLineage", () => {
-  it("enables DB2 field lineage", () => {
+  it("enables field lineage only for databases that advertise support", () => {
     expect(supportsFieldLineage("db2")).toBe(true);
+    expect(supportsFieldLineage("xugu")).toBe(true);
+    expect(supportsFieldLineage("redis")).toBe(false);
   });
 });
 

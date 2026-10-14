@@ -411,6 +411,7 @@ pub async fn connect_and_authenticate(
     auth_method: &str,
     connect_timeout_secs: u64,
     known_hosts_path: &Path,
+    proxy_command: &str,
 ) -> Result<Handle<SshClient>, String> {
     let config = Arc::new(ssh_client_config());
     let connect_timeout = Duration::from_secs(connect_timeout_secs);
@@ -422,16 +423,33 @@ pub async fn connect_and_authenticate(
     let host_key_verifier = Arc::new(HostKeyVerifier::new(known_hosts_path.to_path_buf()));
 
     let (started_tx, mut started_rx) = mpsc::channel::<Instant>(1);
-    let connect_fut = client::connect(
-        config,
-        (connect_host, connect_port),
-        SshClient {
-            host_key_verifier: host_key_verifier.clone(),
-            host: host_key_host.to_string(),
-            port: host_key_port,
-            prompt_started_tx: Some(started_tx),
-        },
-    );
+    let handler = SshClient {
+        host_key_verifier: host_key_verifier.clone(),
+        host: host_key_host.to_string(),
+        port: host_key_port,
+        prompt_started_tx: Some(started_tx),
+    };
+    // A ProxyCommand swaps the direct TCP connection for a helper process
+    // (`nc`, `cloudflared`, ...) whose stdio carries the SSH handshake. Tokens
+    // expand from the logical host/port so a forwarded jump hop still names
+    // the host it is reaching rather than the previous hop's local endpoint.
+    let proxy_stream = if proxy_command.trim().is_empty() {
+        None
+    } else {
+        Some(crate::db::ssh_proxy_command::spawn_proxy_command_stream(
+            proxy_command,
+            host_key_host,
+            host_key_port,
+            ssh_user,
+        )?)
+    };
+    let direct_host = connect_host.to_string();
+    let connect_fut = async move {
+        match proxy_stream {
+            Some(stream) => client::connect_stream(config, stream, handler).await,
+            None => client::connect(config, (direct_host.as_str(), connect_port), handler).await,
+        }
+    };
     tokio::pin!(connect_fut);
 
     // `connect_timeout` is meant to bound the *network* portion of the
@@ -1251,6 +1269,7 @@ async fn tunnel_reconnect_loop(
     target: TunnelTarget,
     allow_exec_channel_proxy: bool,
     status: Arc<TunnelStatus>,
+    proxy_command: String,
 ) {
     loop {
         // Reaching the top of the loop means a live session: either the initial
@@ -1291,6 +1310,7 @@ async fn tunnel_reconnect_loop(
                 &auth_method,
                 connect_timeout_secs,
                 &known_hosts_path,
+                &proxy_command,
             )
             .await
             {
@@ -1473,6 +1493,7 @@ impl TunnelManager {
         remote_port: u16,
         expose_to_lan: bool,
         allow_exec_channel_proxy: bool,
+        proxy_command: &str,
     ) -> Result<u16, String> {
         self.start_tunnel_on_local_port(
             connection_id,
@@ -1493,6 +1514,7 @@ impl TunnelManager {
             expose_to_lan,
             allow_exec_channel_proxy,
             None,
+            proxy_command,
         )
         .await
     }
@@ -1518,6 +1540,7 @@ impl TunnelManager {
         expose_to_lan: bool,
         allow_exec_channel_proxy: bool,
         requested_local_port: Option<u16>,
+        proxy_command: &str,
     ) -> Result<u16, String> {
         {
             let mut tunnels = self.tunnels.lock().await;
@@ -1564,6 +1587,7 @@ impl TunnelManager {
             expose_to_lan,
             allow_exec_channel_proxy,
             requested_local_port,
+            proxy_command,
         )
         .await?;
 
@@ -1591,6 +1615,7 @@ impl TunnelManager {
         auth_method: &str,
         connect_timeout_secs: u64,
         allow_exec_channel_proxy: bool,
+        proxy_command: &str,
     ) -> Result<u16, String> {
         {
             let mut tunnels = self.tunnels.lock().await;
@@ -1628,6 +1653,7 @@ impl TunnelManager {
             connect_timeout_secs,
             &self.known_hosts_path,
             allow_exec_channel_proxy,
+            proxy_command,
         )
         .await?;
 
@@ -1741,6 +1767,7 @@ impl TunnelManager {
                 is_last && hop.expose_lan,
                 hop.allow_exec_channel_proxy,
                 None,
+                &hop.proxy_command,
             )
             .await
             .map_err(|err| format!("SSH hop {} failed: {err}", index + 1))?;
@@ -1839,6 +1866,7 @@ async fn spawn_tunnel(
     expose_to_lan: bool,
     allow_exec_channel_proxy: bool,
     requested_local_port: Option<u16>,
+    proxy_command: &str,
 ) -> Result<(JoinHandle<()>, u16, Arc<TunnelStatus>), String> {
     spawn_tunnel_target(
         connect_host,
@@ -1858,6 +1886,7 @@ async fn spawn_tunnel(
         expose_to_lan,
         allow_exec_channel_proxy,
         requested_local_port,
+        proxy_command,
     )
     .await
 }
@@ -1878,6 +1907,7 @@ async fn spawn_socks5_proxy(
     connect_timeout_secs: u64,
     known_hosts_path: &Path,
     allow_exec_channel_proxy: bool,
+    proxy_command: &str,
 ) -> Result<(JoinHandle<()>, u16, Arc<TunnelStatus>), String> {
     spawn_tunnel_target(
         connect_host,
@@ -1897,6 +1927,7 @@ async fn spawn_socks5_proxy(
         false,
         allow_exec_channel_proxy,
         None,
+        proxy_command,
     )
     .await
 }
@@ -1920,6 +1951,7 @@ async fn spawn_tunnel_target(
     expose_to_lan: bool,
     allow_exec_channel_proxy: bool,
     requested_local_port: Option<u16>,
+    proxy_command: &str,
 ) -> Result<(JoinHandle<()>, u16, Arc<TunnelStatus>), String> {
     let (listener, local_port) = bind_tunnel_listener(expose_to_lan, requested_local_port).await?;
 
@@ -1938,6 +1970,7 @@ async fn spawn_tunnel_target(
         auth_method,
         connect_timeout_secs,
         known_hosts_path,
+        proxy_command,
     )
     .await?;
 
@@ -1961,6 +1994,7 @@ async fn spawn_tunnel_target(
         target,
         allow_exec_channel_proxy,
         status.clone(),
+        proxy_command.to_string(),
     ));
 
     Ok((handle, local_port, status))
@@ -2208,6 +2242,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
         }
     }
 
@@ -2969,6 +3004,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             "password",
             5,
             &known_hosts_path,
+            "",
         )
         .await
         .expect("password + TOTP authentication should succeed");
@@ -3015,6 +3051,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             "key",
             5,
             &known_hosts_path,
+            "",
         )
         .await
         .expect("public key + TOTP authentication should succeed");
@@ -3137,6 +3174,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 "none",
                 5,
                 false,
+                "",
             )
             .await
             .unwrap();
@@ -3156,6 +3194,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 "none",
                 5,
                 false,
+                "",
             )
             .await
             .unwrap();
@@ -3291,6 +3330,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 5432,
                 false,
                 true,
+                "",
             )
             .await
             .expect("start fallback tunnel");
@@ -3346,6 +3386,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 5432,
                 false,
                 false,
+                "",
             )
             .await
             .expect("start tunnel");
@@ -3389,6 +3430,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             "none",
             5,
             &known_hosts_path,
+            "",
         )
         .await
         .expect("forwarded SSH connection should authenticate");
@@ -3438,6 +3480,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             "none",
             1,
             &known_hosts_path,
+            "",
         )
         .await
         .expect("accepting the host key after the network timeout window should still succeed");
@@ -3487,6 +3530,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             5432,
             false,
             false,
+            "",
         );
         let second = manager.start_tunnel(
             "shared-layer",
@@ -3506,6 +3550,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             5432,
             false,
             false,
+            "",
         );
         let (first_port, second_port) = tokio::join!(first, second);
 
@@ -3716,6 +3761,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 3306,
                 false,
                 false,
+                "",
             )
             .await
             .expect("initial tunnel start should succeed");
@@ -3760,6 +3806,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 3306,
                 false,
                 false,
+                "",
             )
             .await;
 
@@ -3806,6 +3853,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             "key",
             5,
             &known_hosts_path,
+            "",
         )
         .await
         {

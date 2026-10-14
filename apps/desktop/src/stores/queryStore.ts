@@ -63,6 +63,7 @@ import {
   describeMongoCommandParseFailure,
   mongoDroppedIndexesToQueryResult,
   mongoFindLogicalTotal,
+  mongoFindPageCoversLogicalLimit,
   mongoIndexesToQueryResult,
   planMongoFindPagination,
   mongoUseToQueryResult,
@@ -7704,6 +7705,10 @@ export const useQueryStore = defineStore("query", () => {
                 const paginationSource = siblingPrefix ? `db${siblingPrefix.rest}` : sourceStatement;
                 const pagePlan = planMongoFindPagination(paginationSource, mongoCommand, options?.pagination?.offset ?? 0, normalizeResultPageSize(options?.pagination?.limit ?? settingsStore.editorSettings.pageSize));
                 if (!pagePlan) throw new Error(describeMongoCommandParseFailure(sourceStatement));
+                // An explicit .limit() that fits in the first page returns every
+                // logical row at once, so the page itself is the exact total and
+                // counting every match would only add latency (#10121).
+                const totalFromPage = mongoFindPageCoversLogicalLimit(pagePlan);
                 // A stale request can point past an explicit .limit() bound. Keep
                 // the backend call bounded so limit(0) cannot become unbounded.
                 const result = await commandTiming.run(
@@ -7718,10 +7723,11 @@ export const useQueryStore = defineStore("query", () => {
                   mongoCommand.sort,
                   mongoCommand.collation,
                   executionId,
+                  !totalFromPage,
                 );
                 const documents = pagePlan.requestLimit === 0 ? [] : result.documents;
                 const extendedDocuments = pagePlan.requestLimit === 0 ? [] : result.extended_documents;
-                const totalIsExact = result.total_is_exact !== false;
+                const totalIsExact = totalFromPage || result.total_is_exact !== false;
                 const reportedTotal = mongoFindLogicalTotal(result.total, pagePlan);
                 const loadedLowerBound = pagePlan.pageOffset + documents.length;
                 const total = totalIsExact ? reportedTotal : Math.max(reportedTotal, loadedLowerBound);

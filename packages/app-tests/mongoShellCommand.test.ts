@@ -33,6 +33,7 @@ import {
   parseMongoGetIndexesCommand,
   parseMongoVersionCommand,
   planMongoFindPagination,
+  mongoFindPageCoversLogicalLimit,
   parseMongoWriteCommand,
   splitMongoCommands,
   splitMongoCommandRanges,
@@ -253,6 +254,23 @@ test("planMongoFindPagination preserves explicit skip and limit bounds", () => {
     logicalLimit: 150,
   });
   assert.equal(mongoFindLogicalTotal(824, plan!), 150);
+});
+
+test("mongoFindPageCoversLogicalLimit only skips counting when the first page holds every limited row", () => {
+  const plan = (source: string, pageOffset: number, pageLimit = 100) => {
+    const command = parseMongoFindCommand(source);
+    assert.ok(command);
+    const result = planMongoFindPagination(source, command, pageOffset, pageLimit);
+    assert.ok(result);
+    return result;
+  };
+
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({ type: 0 }).sort({ eventTime: -1 }).limit(50)", 0)), true);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({}).skip(20).limit(100)", 0)), true);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({}).limit(150)", 0)), false);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({}).limit(150)", 100)), false);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({})", 0)), false);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({}).limit(0)", 0)), false);
 });
 
 test("parseMongoFindCommand accepts line breaks before find and chained calls", () => {

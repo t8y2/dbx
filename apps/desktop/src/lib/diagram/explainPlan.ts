@@ -414,23 +414,21 @@ function parseSqlServerExplain(result: QueryResult): ParsedExplainPlan {
   if (!raw) throw new Error("SQL Server did not return ShowPlan XML");
   if (typeof DOMParser === "undefined") throw new Error("XML parser is unavailable");
 
+  if (!hasBalancedXmlTags(raw)) throw new Error("Invalid SQL Server ShowPlan XML");
   const parserIssues: string[] = [];
-  type XmlParserConstructor = new (options?: {
-    errorHandler?: {
-      warning: (message: string) => void;
-      error: (message: string) => void;
-      fatalError: (message: string) => void;
-    };
-  }) => DOMParser;
+  type XmlParserConstructor = new (options?: { onError?: (level: string, message: string) => void }) => DOMParser;
   const Parser = DOMParser as unknown as XmlParserConstructor;
-  const recordParserIssue = (message: string) => parserIssues.push(message);
-  const document = new Parser({
-    errorHandler: {
-      warning: recordParserIssue,
-      error: recordParserIssue,
-      fatalError: recordParserIssue,
-    },
-  }).parseFromString(raw, "application/xml");
+  const recordParserIssue = (_level: string, message: string) => parserIssues.push(message);
+  let document: Document;
+  try {
+    document = new Parser({
+      onError: recordParserIssue,
+    }).parseFromString(raw, "application/xml");
+  } catch {
+    // xmldom 0.9 throws ParseError on fatal issues even with onError set; the
+    // recorded issues are non-fatal warnings at this point.
+    throw new Error("Invalid SQL Server ShowPlan XML");
+  }
   if (parserIssues.length > 0 || xmlElements(document, "parsererror").length > 0 || !document.documentElement) {
     throw new Error("Invalid SQL Server ShowPlan XML");
   }
@@ -447,6 +445,23 @@ function parseSqlServerExplain(result: QueryResult): ParsedExplainPlan {
     raw,
     nodes: roots.map(parseSqlServerRelOp),
   };
+}
+
+function hasBalancedXmlTags(xml: string): boolean {
+  const stack: string[] = [];
+  const tokens = xml.match(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[^>]*\?>|<!DOCTYPE[^>]*>|<\/?[A-Za-z_][\w:.-]*(?:\s[^<>]*?)?\/?>/gi);
+  if (!tokens || xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[^>]*\?>|<!DOCTYPE[^>]*>|<\/?[A-Za-z_][\w:.-]*(?:\s[^<>]*?)?\/?>/gi, "").includes("<")) return false;
+  for (const token of tokens) {
+    if (token.startsWith("<!--") || token.startsWith("<![CDATA[") || token.startsWith("<?") || /^<!DOCTYPE/i.test(token)) continue;
+    const closing = /^<\//.test(token);
+    const selfClosing = /\/\s*>$/.test(token);
+    const name = token.match(/^<\/?([A-Za-z_][\w:.-]*)/)?.[1];
+    if (!name) return false;
+    if (closing) {
+      if (stack.pop() !== name) return false;
+    } else if (!selfClosing) stack.push(name);
+  }
+  return stack.length === 0;
 }
 
 function firstSqlServerShowplanXml(result: QueryResult): string | undefined {

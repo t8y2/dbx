@@ -18,29 +18,36 @@ function job(name, content = workflow) {
 function concurrencySettings(github) {
   const block = workflow.match(/^concurrency:\n((?:  [^\n]+\n)+)/m)?.[1];
   assert.ok(block, "missing workflow concurrency");
-  const format = (template, value) => template.replace("{0}", String(value));
-  return Object.fromEntries(block.trim().split("\n").map((line) => {
-    const [, setting, value] = line.match(/^\s*([\w-]+):\s*(.+)$/);
-    const evaluate = (expression) => new Function("github", "format", `return (${expression});`)(github, format);
-    const expressions = [...value.matchAll(/\$\{\{\s*(.*?)\s*\}\}/g)];
-    return [setting, expressions.length === 1 && expressions[0][0] === value
-      ? evaluate(expressions[0][1]) : value.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, expression) => evaluate(expression))];
-  }));
+  const format = (template, ...values) => template.replace(/\{(\d+)\}/g, (_, index) => String(values[Number(index)]));
+  const endsWith = (search, value) => String(search).toLowerCase().endsWith(String(value).toLowerCase());
+  return Object.fromEntries(
+    block
+      .trim()
+      .split("\n")
+      .map((line) => {
+        const [, setting, value] = line.match(/^\s*([\w-]+):\s*(.+)$/);
+        const evaluate = (expression) => new Function("github", "format", "endsWith", `return (${expression});`)(github, format, endsWith);
+        const expressions = [...value.matchAll(/\$\{\{\s*(.*?)\s*\}\}/g)];
+        return [setting, expressions.length === 1 && expressions[0][0] === value ? evaluate(expressions[0][1]) : value.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, expression) => evaluate(expression))];
+      }),
+  );
 }
 
-function concurrencyContext({ authorId = 101, author = "contributor", actor = author, ref = "refs/pull/100/merge", eventName = "pull_request" } = {}) {
-  return { workflow: "CI", repository_owner: "t8y2", actor, ref, event_name: eventName,
-    event: eventName === "pull_request" ? { pull_request: { user: { id: authorId, login: author } } } : {} };
+function concurrencyContext({ authorId = 101, author = "contributor", actor = author, number = 100, ref = `refs/pull/${number}/merge`, eventName = "pull_request" } = {}) {
+  return { workflow: "CI", repository_owner: "t8y2", actor, ref, event_name: eventName, event: eventName === "pull_request" ? { pull_request: { number, user: { id: authorId, login: author } } } : {} };
 }
 
-test("a contributor shares one main CI queue across all PRs regardless of trigger actor", () => {
-  const settings = concurrencySettings(concurrencyContext());
-  assert.deepEqual(settings, { group: "CI-pr-author-101", "cancel-in-progress": false, queue: "max" });
-  for (const context of [concurrencyContext({ ref: "refs/pull/200/merge" }), concurrencyContext({ actor: "t8y2" }),
-    concurrencyContext({ actor: "github-actions[bot]" }), concurrencyContext({ author: "renamed-contributor" })]) {
-    assert.deepEqual(concurrencySettings(context), settings);
+test("a contributor's PRs share two main CI queues split by PR number parity, regardless of trigger actor", () => {
+  const even = concurrencySettings(concurrencyContext());
+  assert.deepEqual(even, { group: "CI-pr-author-101-even", "cancel-in-progress": false, queue: "max" });
+  for (const context of [concurrencyContext({ number: 202 }), concurrencyContext({ actor: "t8y2" }), concurrencyContext({ actor: "github-actions[bot]" }), concurrencyContext({ author: "renamed-contributor" })]) {
+    assert.deepEqual(concurrencySettings(context), even);
   }
-  assert.notEqual(concurrencySettings(concurrencyContext({ authorId: 102, author: "another-contributor" })).group, settings.group);
+  for (const number of [101, 11849, 11853, 7]) {
+    assert.deepEqual(concurrencySettings(concurrencyContext({ number })), { ...even, group: "CI-pr-author-101-odd" }, String(number));
+  }
+  for (const number of [2, 4, 6, 8, 11850]) assert.equal(concurrencySettings(concurrencyContext({ number })).group, even.group);
+  assert.notEqual(concurrencySettings(concurrencyContext({ authorId: 102, author: "another-contributor" })).group, even.group);
 });
 
 test("repository-owner PRs remain independent and superseded runs are cancelled only within a PR", () => {
@@ -58,8 +65,7 @@ test("main pushes retain their independent cancellation group without PR context
 });
 
 test("expanded author queues never combine max queuing with in-progress cancellation", () => {
-  for (const context of [concurrencyContext(), concurrencyContext({ author: "t8y2" }),
-    concurrencyContext({ eventName: "push", ref: "refs/heads/main" })]) {
+  for (const context of [concurrencyContext(), concurrencyContext({ author: "t8y2" }), concurrencyContext({ eventName: "push", ref: "refs/heads/main" })]) {
     const settings = concurrencySettings(context);
     assert.ok(settings.queue === "single" || settings.queue === "max");
     assert.equal(settings.queue === "max" && settings["cancel-in-progress"], false);
@@ -196,7 +202,11 @@ test("S3 and secretless Rust jobs export identical compiler wrappers", (context)
     const setup = job(name).match(/- name: Configure sccache\n([\s\S]*?)(?=\n      - name: Rust cache)/)?.[1];
     assert.ok(setup, name);
     assert.doesNotMatch(setup, /^\s+if:/m);
-    const script = setup.match(/        run: \|\n([\s\S]*)/)[1].split("\n").map((line) => line.slice(10)).join("\n");
+    const script = setup
+      .match(/        run: \|\n([\s\S]*)/)[1]
+      .split("\n")
+      .map((line) => line.slice(10))
+      .join("\n");
     for (const remote of [true, false]) {
       const output = path.join(directory, `${name}-${remote}.env`);
       const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], {
@@ -215,16 +225,25 @@ test("S3 and secretless Rust jobs export identical compiler wrappers", (context)
       });
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stdout, "");
-      const exported = Object.fromEntries(readFileSync(output, "utf8").trim().split("\n").map((line) => {
-        const separator = line.indexOf("=");
-        return [line.slice(0, separator), line.slice(separator + 1)];
-      }));
-      assert.deepEqual(exported, {
-        ...(remote ? backend : {}),
-        SCCACHE_IDLE_TIMEOUT: "0",
-        CC: `${compiler} cc`,
-        CXX: `${compiler} c++`,
-      }, `${name}: ${remote ? "S3" : "local"}`);
+      const exported = Object.fromEntries(
+        readFileSync(output, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => {
+            const separator = line.indexOf("=");
+            return [line.slice(0, separator), line.slice(separator + 1)];
+          }),
+      );
+      assert.deepEqual(
+        exported,
+        {
+          ...(remote ? backend : {}),
+          SCCACHE_IDLE_TIMEOUT: "0",
+          CC: `${compiler} cc`,
+          CXX: `${compiler} c++`,
+        },
+        `${name}: ${remote ? "S3" : "local"}`,
+      );
     }
   }
 });
@@ -260,7 +279,7 @@ test("Rust test jobs install pinned nextest and retain separate doctests", () =>
   const pluginRelease = readFileSync(new URL("../workflows/plugin-cli-release.yml", import.meta.url), "utf8");
   const consumers = [job("packages"), job("rust-test"), job("agent-rust"), job("agent-integration"), job("test", pluginDevHost), job("prepare", pluginRelease)];
   for (const content of consumers) {
-    assert.ok(content.includes("uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3"));
+    assert.ok(content.includes("uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b"));
     assert.ok(content.includes("tool: cargo-nextest@0.9.137"));
     assert.doesNotMatch(content, /cargo test (?!.*--doc)/);
     const testCommand = content.indexOf("cargo nextest run") >= 0 ? "cargo nextest run" : content.includes("pnpm test:packages") ? "pnpm test:packages" : content.includes("ci-rust.mjs test") ? "ci-rust.mjs test" : "ci-agent-integration.sh";
@@ -317,7 +336,7 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   assert.ok(win7.includes("--config .github/fixtures/win7-host-repro-config.toml"));
   const hostConfig = readFileSync(new URL("../fixtures/win7-host-repro-config.toml", import.meta.url), "utf8");
   assert.ok(hostConfig.includes("target-applies-to-host = false"));
-  assert.ok(hostConfig.includes('[host.x86_64-pc-windows-msvc]'));
+  assert.ok(hostConfig.includes("[host.x86_64-pc-windows-msvc]"));
   assert.ok(hostConfig.includes('rustflags = ["-Clink-arg=/Brepro"]'));
   assert.ok(win7.includes("--timings"));
   assert.ok(win7.includes("name: DBX-win7-cargo-timings"));
@@ -360,8 +379,7 @@ test("path filtering and the planner use the exact test merge first parent", () 
   assert.ok(changes.includes("node .github/scripts/ci-plan.mjs"));
   assert.doesNotMatch(changes, /fetch-depth:\s*0/);
   assert.doesNotMatch(changes, /dtolnay\/rust-toolchain/);
-  for (const flag of ["rust", "rust_full", "rust_matrix", "agents", "agent_go", "agent_rust", "agent_integration",
-    "windows_standard", "windows_win7_bundle", "windows_win7_candidate", "windows_win7_affected_packages", "windows_win7_reasons", "plan"]) {
+  for (const flag of ["rust", "rust_full", "rust_matrix", "agents", "agent_go", "agent_rust", "agent_integration", "windows_standard", "windows_win7_bundle", "windows_win7_candidate", "windows_win7_affected_packages", "windows_win7_reasons", "plan"]) {
     assert.ok(changes.includes(`steps.plan.outputs.${flag}`));
   }
   assert.doesNotMatch(changes, /steps\.filter\.outputs\.windows_win7_bundle|github\.event\.pull_request\.base\.sha|WIN7_CURRENT/);

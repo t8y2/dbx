@@ -1311,6 +1311,7 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 	precision := 10
 	scale := 2
 	zeroScale := 0
+	negativeScale := -2
 	byteUnit := "B"
 	charUnit := "C"
 
@@ -1325,6 +1326,17 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 		{name: "national character type ignores unit", column: columnInfo{DataType: "NVARCHAR2", CharacterMaximumLength: &charLen, CharacterLengthUnit: &charUnit}, want: "NVARCHAR2(64)"},
 		{name: "number scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &scale}, want: "NUMBER(10,2)"},
 		{name: "number zero scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &zeroScale}, want: "NUMBER(10)"},
+		{name: "number star scale", column: columnInfo{DataType: "NUMBER", NumericScale: &scale}, want: "NUMBER(*,2)"},
+		{name: "number star negative scale", column: columnInfo{DataType: "NUMBER", NumericScale: &negativeScale}, want: "NUMBER(*,-2)"},
+		{name: "number star zero scale", column: columnInfo{DataType: "NUMBER", NumericScale: &zeroScale}, want: "NUMBER(*,0)"},
+		{name: "number unknown", column: columnInfo{DataType: "NUMBER"}, want: "NUMBER"},
+		{name: "number negative scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &negativeScale}, want: "NUMBER(10,-2)"},
+		{name: "explicit number parameters", column: columnInfo{DataType: "NUMBER(12,-2)", NumericPrecision: &precision, NumericScale: &scale}, want: "NUMBER(12,-2)"},
+		{name: "explicit float parameters", column: columnInfo{DataType: "FLOAT(63)", NumericPrecision: &precision}, want: "FLOAT(63)"},
+		{name: "float precision", column: columnInfo{DataType: "FLOAT", NumericPrecision: &precision}, want: "FLOAT(10)"},
+		{name: "float unknown", column: columnInfo{DataType: "FLOAT"}, want: "FLOAT"},
+		{name: "binary float fixed precision", column: columnInfo{DataType: "BINARY_FLOAT", NumericPrecision: &precision}, want: "BINARY_FLOAT"},
+		{name: "binary double fixed precision", column: columnInfo{DataType: "BINARY_DOUBLE", NumericPrecision: &precision}, want: "BINARY_DOUBLE"},
 		{name: "timestamp preserves precision", column: columnInfo{DataType: "TIMESTAMP(6)"}, want: "TIMESTAMP(6)"},
 	}
 	for _, tt := range tests {

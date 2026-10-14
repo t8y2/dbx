@@ -1,7 +1,9 @@
 import { computed, type ComputedRef, type Ref } from "vue";
+import { getActivePinia } from "pinia";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
 import { useToast } from "@/composables/useToast";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { dedupeColumnIndexes, type CellSelectionMatrix, type SelectionData } from "@/lib/dataGrid/gridSelection";
 import {
   DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS,
@@ -25,6 +27,8 @@ import { formatError } from "@/lib/backend/errorUtils";
 import { parseJsonPreservingLargeNumbers, stringifyJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import { tableMetaWithoutOptionalDatabaseQualifier } from "@/lib/table/tableSelectSql";
 import { isPartiallyLoadedCopy, partialLoadCopyHintKey, type PartialLoadCopyInfo } from "@/lib/dataGrid/copyPartialLoadHint";
+import { isTemporalColumnType } from "@/lib/dataGrid/columnFormatter";
+import type { CellValue } from "@/lib/dataGrid/cellValue";
 import type { DatabaseType } from "@/types/database";
 
 interface ExtractorRowItem {
@@ -74,6 +78,9 @@ interface UseDataGridExtractorOptions {
   contextCell: ComputedRef<{ rowId: number; rowIndex: number; col: number } | null> | Ref<{ rowId: number; rowIndex: number; col: number } | null>;
   contextSelectionIsSynthetic: ComputedRef<boolean> | Ref<boolean>;
   copyText: (text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }) => Promise<boolean>;
+  displayValue?: (value: CellValue, columnIndex: number) => string;
+  hasColumnFormatter?: (columnIndex: number) => boolean;
+  applyColumnFormattersOnExport?: ComputedRef<boolean>;
   externalCellValue?: (value: unknown, columnIndex: number) => unknown;
   /** Present when the grid cannot guarantee the whole result set is loaded; drives the partial-copy hint. */
   partialLoadInfo?: ComputedRef<PartialLoadCopyInfo | null>;
@@ -101,16 +108,36 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     }
   }
 
-  // 除 SQL 外的剪贴板展示格式都可把文本型 MySQL VARBINARY 从 `0x<hex>` 还原为原始字符串。
-  // SQL 必须继续持有 hex 才能保证 round-trip；rawRows 则始终保存原值，供 DBX 内部网格回粘使用。
-  function extractorCellValue(value: unknown, columnType: string | undefined, normalizeValues: boolean, keepUnsafeJsonText: boolean, presentBinaryText: boolean, columnIndex: number): unknown {
+  function isOracleTemporal(columnType: string | undefined): boolean {
+    const dbType = options.databaseType.value;
+    return (dbType === "oracle" || dbType === "oceanbase-oracle") && isTemporalColumnType(columnType);
+  }
+
+  function shouldApplyColumnFormatter(columnIndex: number): boolean {
+    if (!options.hasColumnFormatter?.(columnIndex)) return false;
+    if (options.applyColumnFormattersOnExport?.value !== undefined) {
+      return options.applyColumnFormattersOnExport.value;
+    }
+    return getActivePinia() ? useSettingsStore().editorSettings.applyColumnFormattersOnExport : true;
+  }
+
+  // 除 SQL 外的剪贴板展示格式都可把文本型 MySQL VARBINARY 从 `0x<hex>` 还原为原始字符串，
+  // 并把 Oracle temporal 单元格及配置了列格式化的单元格渲染为与网格一致的显示文本；SQL 必须继续持有 hex / 原始时间值
+  // （display 格式化会丢时区与高精度小数秒）才能保证 round-trip；rawRows 则始终保存原值，供 DBX 内部网格回粘使用。
+  function extractorCellValue(value: unknown, columnType: string | undefined, normalizeValues: boolean, keepUnsafeJsonText: boolean, presentBinaryText: boolean, columnIndex: number, sourceIndex?: number): unknown {
     if (presentBinaryText) {
       const text = binaryCellClipboardText(value, columnType, options.databaseType.value);
       if (text !== null) return text;
     }
     const normalized = normalizeValues ? normalizeCellValue(value, columnType, keepUnsafeJsonText) : value;
     const externalValue = options.externalCellValue?.(normalized, columnIndex);
-    return externalValue === undefined ? normalized : externalValue;
+    const resolvedValue = externalValue === undefined ? normalized : externalValue;
+    const resolvedSourceIndex = sourceIndex ?? columnIndex;
+    const shouldFormat = isOracleTemporal(columnType) || shouldApplyColumnFormatter(resolvedSourceIndex);
+    if (presentBinaryText && resolvedValue !== null && resolvedValue !== undefined && options.displayValue && shouldFormat) {
+      return options.displayValue(resolvedValue as CellValue, resolvedSourceIndex);
+    }
+    return resolvedValue;
   }
 
   function selectionData(): SelectionData | null {
@@ -235,7 +262,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const keepUnsafeJsonText = descriptor.category === "sql";
     const presentBinaryText = descriptor.category !== "sql";
     const rawRows = sourceRows.map((row) => requiredSourceIndexes.map((sourceIndex) => row[sourceIndex]));
-    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, columnTypes[index], normalizeValues, keepUnsafeJsonText, presentBinaryText, index)));
+    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, columnTypes[index], normalizeValues, keepUnsafeJsonText, presentBinaryText, index, requiredSourceIndexes[index])));
     // 「包含数据库名称」：复制/导出 SQL 时，提取器自身的勾选框与编辑器全局设置
     // （`generateSqlIncludeDatabaseName`）任一开启都保留库名/模式名；后者还会影响
     // 保存 SQL、侧栏导出等其它路径，因此这里取“或”，不覆盖全局偏好。
@@ -308,7 +335,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
         return sourceIndex !== undefined && values.has(sourceIndex) ? values.get(sourceIndex) : value;
       });
     });
-    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, limitedSource.columnTypes[index], limitedSource.normalizeValues, limitedSource.keepUnsafeJsonText, limitedSource.presentBinaryText, index)));
+    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, limitedSource.columnTypes[index], limitedSource.normalizeValues, limitedSource.keepUnsafeJsonText, limitedSource.presentBinaryText, index, limitedSource.sourceColumnIndexes[index])));
     const resolvedRequest = { ...request, rows };
     requestSources.set(resolvedRequest, { ...limitedSource, rawRows });
     return resolvedRequest;

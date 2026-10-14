@@ -12,9 +12,12 @@ execute the gate and report cancelled prerequisites as a failure.
 
 ## Contributor concurrency
 
-PRs from anyone other than the repository owner share a main `CI` concurrency
-group keyed by the PR author's stable numeric user ID. Only one run in that
-author's group executes at a time; other authors have independent groups.
+PRs from anyone other than the repository owner share main `CI` concurrency
+groups keyed by the PR author's stable numeric user ID and the parity of the PR
+number (`pr-author-<id>-even` / `pr-author-<id>-odd`). At most two runs per author
+execute at a time — one per parity group — and other authors have independent
+groups. Actions expressions have no modulo, so parity is read from the PR number's
+last digit with `endsWith`. Two PRs of the same parity still queue behind each other.
 The PR author, not the trigger actor or author association, determines this
 policy, so a maintainer retrigger cannot bypass contributor limits.
 `cancel-in-progress: false` preserves the executing PR, and `queue: max` retains

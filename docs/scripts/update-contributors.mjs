@@ -74,11 +74,7 @@ function ensureContributor(contributors, user) {
   return contributor;
 }
 
-const [repositoryInfo, commitContributors, pullRequests] = await Promise.all([
-  request(`${apiBase}/repos/${repository}`).then((response) => response.json()),
-  fetchAll(`/repos/${repository}/contributors?anon=0`),
-  fetchAll(`/repos/${repository}/pulls?state=closed&sort=created&direction=desc`),
-]);
+const [repositoryInfo, commitContributors, pullRequests] = await Promise.all([request(`${apiBase}/repos/${repository}`).then((response) => response.json()), fetchAll(`/repos/${repository}/contributors?anon=0`), fetchAll(`/repos/${repository}/pulls?state=closed&sort=created&direction=desc`)]);
 
 const contributors = new Map();
 
@@ -97,9 +93,11 @@ for (const entry of commitContributors) {
   if (contributor) contributor.commits = entry.contributions || 0;
 }
 
-const rankedContributors = [...contributors.values()].filter((contributor) => contributor.mergedPullRequests > 0).sort((left, right) => {
-  return right.commits - left.commits || right.mergedPullRequests - left.mergedPullRequests || left.login.localeCompare(right.login);
-});
+const rankedContributors = [...contributors.values()]
+  .filter((contributor) => contributor.mergedPullRequests > 0)
+  .sort((left, right) => {
+    return right.commits - left.commits || right.mergedPullRequests - left.mergedPullRequests || left.login.localeCompare(right.login);
+  });
 
 const output = {
   repository,

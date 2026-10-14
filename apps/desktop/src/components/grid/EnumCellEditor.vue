@@ -29,7 +29,7 @@ const { t } = useI18n();
 
 const open = ref(true);
 const triggerRef = ref<HTMLButtonElement | null>(null);
-let closeHandled = false;
+const closeHandled = ref(false);
 
 const triggerClass = computed(() => ["cell-edit-input absolute inset-0 z-10 flex items-center gap-1 border-2 border-primary bg-background py-0 text-left text-xs outline-none", props.cellLayout === "transpose" ? "px-1.5" : "px-2.5"].join(" "));
 
@@ -48,12 +48,12 @@ function selectValue(value: string | null) {
 }
 
 function finishCommit(value?: string | null) {
-  closeHandled = true;
+  closeHandled.value = true;
   emit("commit", value);
 }
 
 function finishCancel() {
-  closeHandled = true;
+  closeHandled.value = true;
   emit("cancel");
 }
 

@@ -1,5 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 import { supportsTransfer } from "@/lib/database/databaseFeatureSupport";
+import { databaseTransferObjectFamily } from "@/lib/database/databaseDriverManifest";
 
 export enum TransferObjectFamily {
   Mysql = "mysql",
@@ -15,22 +16,8 @@ const POSTGRES_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIE
 const ORACLE_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE"];
 const SQLSERVER_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE"];
 
-const FAMILY_BY_DB = new Map<DatabaseType, TransferObjectFamily>([
-  ["mysql", TransferObjectFamily.Mysql],
-  ["gbase", TransferObjectFamily.Mysql],
-  ["postgres", TransferObjectFamily.Postgres],
-  ["kingbase", TransferObjectFamily.Postgres],
-  ["gaussdb", TransferObjectFamily.Postgres],
-  ["kwdb", TransferObjectFamily.Postgres],
-  ["opengauss", TransferObjectFamily.Postgres],
-  ["oracle", TransferObjectFamily.Oracle],
-  ["dameng", TransferObjectFamily.Oracle],
-  ["oceanbase-oracle", TransferObjectFamily.Oracle],
-  ["sqlserver", TransferObjectFamily.SqlServer],
-]);
-
 export function transferObjectFamily(dbType?: DatabaseType): TransferObjectFamily | undefined {
-  return dbType ? FAMILY_BY_DB.get(dbType) : undefined;
+  return databaseTransferObjectFamily(dbType) as TransferObjectFamily | undefined;
 }
 
 export function isSameTransferFamily(a?: DatabaseType, b?: DatabaseType): boolean {

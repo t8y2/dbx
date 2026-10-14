@@ -99,6 +99,9 @@ import {
   supportsTruncateTableCascade,
   type TableAdminSqlOptions,
 } from "@/lib/database/dbAdminSql";
+import type { DuplicateTableStructurePlan } from "@/lib/database/dbAdminSql";
+import { executeOceanbaseTableClone, executeOceanbaseTableCloneData, oceanbaseCloneDataPreparationError, OceanbaseTableCloneError, type OceanbaseTableClone } from "@/lib/database/oceanbaseTableClone";
+import { useOceanbaseCloneDialog } from "@/composables/useOceanbaseCloneDialog";
 import { useToast } from "@/composables/useToast";
 import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
@@ -216,6 +219,8 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const cloneDialog = useOceanbaseCloneDialog(t);
+const { state: cloneDialogState, open: cloneDialogOpen } = cloneDialog;
 const { toast } = useToast();
 const { highlight } = useSqlHighlighter();
 const connectionStore = useConnectionStore();
@@ -2673,39 +2678,77 @@ function requestDuplicateStructure(row: ObjectBrowserRow) {
   showDuplicateDialog.value = true;
 }
 
-async function buildDuplicateStructurePlan(sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, sourceColumns?: ColumnInfo[]) {
-  return buildSharedDuplicateTableStructurePlan({
-    connectionId: props.connection.id,
+function captureTableCopyContext() {
+  return {
+    connection: { ...props.connection },
     database: props.database,
     catalog: props.catalog,
+    schema: selectedSchema.value,
     databaseType: effectiveDatabaseType.value,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+  };
+}
+
+type TableCopyContext = ReturnType<typeof captureTableCopyContext>;
+
+function reloadTableCopyContext(context: TableCopyContext) {
+  if (props.connection.id === context.connection.id && props.database === context.database && props.catalog === context.catalog && selectedSchema.value === context.schema) return reload();
+  return Promise.resolve();
+}
+
+async function buildDuplicateStructurePlan(context: TableCopyContext, sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, sourceColumns?: ColumnInfo[]) {
+  return buildSharedDuplicateTableStructurePlan({
+    connectionId: context.connection.id,
+    database: context.database,
+    catalog: context.catalog,
+    databaseType: context.databaseType,
     schema,
     sourceName,
     targetName,
     tableComment,
     sourceColumns,
-    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+    identifierQuote: context.identifierQuote,
   });
 }
 
-function executeDuplicateStructurePlan(plan: { sql: string; executeAsScript: boolean }, schema: string | undefined) {
-  return plan.executeAsScript ? api.executeScript(props.connection.id, props.database, plan.sql, schema) : api.executeQuery(props.connection.id, props.database, plan.sql, schema);
+function executeDuplicateStructurePlan(context: TableCopyContext, plan: DuplicateTableStructurePlan, schema: string | undefined) {
+  if (plan.oceanbaseClone) return executeOceanbaseTableClone(plan.oceanbaseClone, (sql) => api.executeQuery(context.connection.id, context.database, sql, plan.oceanbaseClone!.targetSchema));
+  return plan.executeAsScript ? api.executeScript(context.connection.id, context.database, plan.sql, schema) : api.executeQuery(context.connection.id, context.database, plan.sql, schema);
 }
 
 async function confirmDuplicateStructure() {
+  return effectiveDatabaseType.value === "oceanbase-oracle" ? cloneDialog.run(confirmDuplicateStructureImpl) : confirmDuplicateStructureImpl();
+}
+
+async function confirmDuplicateStructureImpl() {
   const row = duplicateTarget.value;
   const newName = duplicateTableName.value.trim();
   if (!row || !newName) return;
+  const context = captureTableCopyContext();
   showDuplicateDialog.value = false;
   try {
-    const schema = row.schema || selectedSchema.value;
-    const plan = await buildDuplicateStructurePlan(row.name, newName, schema, row.comment);
-    const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
+    const schema = row.schema || context.schema;
+    const plan = await buildDuplicateStructurePlan(context, row.name, newName, schema, row.comment);
+    if (!(await cloneDialog.request([{ plan, scope: [context.connection.id, context.database, context.catalog || ""] }]))) return;
+    const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(context, plan, schema), context);
     if (!executed) return;
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }));
-    await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
+    await reloadTableCopyContext(context);
+    await connectionStore.refreshObjectListTreeNode(context.connection.id, context.database, schema);
   } catch (e: any) {
+    if (e instanceof OceanbaseTableCloneError) {
+      const refreshed = await Promise.allSettled([reloadTableCopyContext(context), connectionStore.refreshObjectListTreeNode(context.connection.id, context.database, e.targetSchema)]);
+      cloneDialog.showFailure(
+        e,
+        [],
+        refreshed.flatMap((result) => (result.status === "rejected" ? [result.reason] : [])),
+      );
+      return;
+    }
+    if (context.databaseType === "oceanbase-oracle") {
+      cloneDialog.showFailure(e);
+      return;
+    }
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
 }
@@ -2863,8 +2906,13 @@ function onObjectBrowserKeydown(event: KeyboardEvent) {
 }
 
 async function confirmPasteTable() {
-  const entries = pasteTableEntries.value.filter((entry) => entry.targetName.trim());
+  return effectiveDatabaseType.value === "oceanbase-oracle" ? cloneDialog.run(confirmPasteTableImpl) : confirmPasteTableImpl();
+}
+
+async function confirmPasteTableImpl() {
+  const entries = pasteTableEntries.value.filter((entry) => entry.targetName.trim()).map((entry) => ({ ...entry }));
   if (entries.length === 0) return;
+  const context = captureTableCopyContext();
   const clipboardAtPasteStart = connectionStore.treeClipboard;
   const mode = pasteTableMode.value;
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
@@ -2874,37 +2922,60 @@ async function confirmPasteTable() {
   let firstPasteError: unknown;
   let pasteCancelled = false;
   let hasMutatedTable = false;
+  const preparedClones = new Map<(typeof entries)[number], DuplicateTableStructurePlan>();
+  if (context.databaseType === "oceanbase-oracle" && mode !== "data-only") {
+    try {
+      for (const entry of entries) preparedClones.set(entry, await buildDuplicateStructurePlan(context, entry.sourceName, entry.targetName.trim(), entry.schema || context.schema, entry.tableComment));
+      if (!(await cloneDialog.request([...preparedClones.values()].map((plan) => ({ plan, scope: [context.connection.id, context.database, context.catalog || ""] }))))) return;
+    } catch (error) {
+      cloneDialog.showFailure(
+        error,
+        entries.map((entry) => `${entry.schema || context.schema || ""}.${entry.targetName}`),
+      );
+      return;
+    }
+  }
+  let cloneFailure: { error: unknown; remaining: string[]; refreshErrors: unknown[] } | undefined;
+  const completedCloneTargets: string[] = [];
   for (const entry of entries) {
-    const targetName = entry.targetName.trim();
-    const schema = entry.schema || selectedSchema.value;
+    let targetName = entry.targetName.trim();
+    let schema = entry.schema || context.schema;
+    let completedClone: OceanbaseTableClone | undefined;
     try {
       let sourceColumns: ColumnInfo[] | undefined;
       if (mode === "structure-and-data" || mode === "structure-only") {
-        const plan = await buildDuplicateStructurePlan(entry.sourceName, targetName, schema, entry.tableComment, sourceColumns);
+        const plan = preparedClones.get(entry) || (await buildDuplicateStructurePlan(context, entry.sourceName, targetName, schema, entry.tableComment, sourceColumns));
         sourceColumns = plan.sourceColumns;
-        const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
+        if (plan.oceanbaseClone) {
+          targetName = plan.oceanbaseClone.targetName;
+          schema = plan.oceanbaseClone.targetSchema;
+        }
+        const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(context, plan, schema), context);
         if (!executed) {
           pasteCancelled = true;
           break;
         }
         hasMutatedTable = true;
+        completedClone = plan.oceanbaseClone;
       }
       if (copyData) {
-        sourceColumns ??= await api.getColumns(props.connection.id, props.database, schema || "", entry.sourceName, props.catalog);
-        const dataCopyColumnOptions = tableDataCopyColumnOptions(effectiveDatabaseType.value, sourceColumns);
+        sourceColumns ??= await api.getColumns(context.connection.id, context.database, schema || "", entry.sourceName, context.catalog);
+        const dataCopyColumnOptions = tableDataCopyColumnOptions(context.databaseType, sourceColumns);
         if (dataCopyColumnOptions.columns.length === 0) {
           throw new Error("No writable columns available for table data copy.");
         }
         const dataSql = await buildCopyTableDataSql({
-          databaseType: effectiveDatabaseType.value,
+          databaseType: context.databaseType,
           schema,
           sourceName: entry.sourceName,
           targetName,
-          normalizeNewTargetName: mode === "structure-and-data",
-          identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+          normalizeNewTargetName: mode === "structure-and-data" && context.databaseType !== "oceanbase-oracle",
+          identifierQuote: context.identifierQuote,
           ...dataCopyColumnOptions,
         });
-        const executed = await executeObjectBrowserSqlWithProductionGuard(dataSql, () => api.executeQuery(props.connection.id, props.database, dataSql, schema, undefined, { timeoutSecs: 0 }));
+        const clone = preparedClones.get(entry)?.oceanbaseClone;
+        const execute = (sql: string) => api.executeQuery(context.connection.id, context.database, sql, schema, undefined, { timeoutSecs: 0 });
+        const executed = await executeObjectBrowserSqlWithProductionGuard(dataSql, () => (clone ? executeOceanbaseTableCloneData(clone, dataSql, execute) : execute(dataSql)), context);
         if (!executed) {
           pasteCancelled = true;
           break;
@@ -2912,17 +2983,35 @@ async function confirmPasteTable() {
         hasMutatedTable = true;
       }
       successCount++;
+      if (preparedClones.has(entry)) completedCloneTargets.push(`${schema}.${targetName}`);
     } catch (e: any) {
+      if (context.databaseType === "oceanbase-oracle" && preparedClones.size) {
+        if (completedClone && !(e instanceof OceanbaseTableCloneError)) e = oceanbaseCloneDataPreparationError(completedClone, e);
+        const refreshed = await Promise.allSettled([reloadTableCopyContext(context), connectionStore.refreshObjectListTreeNode(context.connection.id, context.database, schema)]);
+        cloneFailure = {
+          error: e,
+          remaining: entries.slice(entries.indexOf(entry) + 1).map((pending) => {
+            const clone = preparedClones.get(pending)!.oceanbaseClone!;
+            return `${clone.targetSchema}.${clone.targetName}`;
+          }),
+          refreshErrors: refreshed.flatMap((result) => (result.status === "rejected" ? [result.reason] : [])),
+        };
+        break;
+      }
       pasteFailCount++;
       firstPasteError ??= e;
       console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
     }
   }
+  if (cloneFailure) {
+    cloneDialog.showFailure(cloneFailure.error, cloneFailure.remaining, cloneFailure.refreshErrors, completedCloneTargets);
+    return;
+  }
   if (pasteCancelled) {
     if (hasMutatedTable) {
       try {
-        await reload();
-        await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+        await reloadTableCopyContext(context);
+        await connectionStore.refreshObjectListTreeNode(context.connection.id, context.database, context.schema);
         toast(t("contextMenu.pasteTableCancelledAfterPartial"), 5000);
       } catch (e: any) {
         toast(t("contextMenu.pasteTableRefreshFailed", { message: translateBackendError(t, e) }), 5000);
@@ -2939,8 +3028,8 @@ async function confirmPasteTable() {
   } else {
     toast(`${t("contextMenu.batchPastePartialFail", { success: pasteFeedback.successCount, failed: pasteFeedback.failedCount })}\n${t("contextMenu.tableOperationFailed", { message: translateBackendError(t, pasteFeedback.firstError) })}`, 5000);
   }
-  await reload();
-  await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+  await reloadTableCopyContext(context);
+  await connectionStore.refreshObjectListTreeNode(context.connection.id, context.database, context.schema);
 }
 
 function tableAdminSqlOptions(row: ObjectBrowserRow, options?: { cascade?: boolean }): TableAdminSqlOptions {
@@ -2960,10 +3049,10 @@ function tableAdminSqlOptions(row: ObjectBrowserRow, options?: { cascade?: boole
  * assessed before the callback runs so generated DDL cannot bypass protection
  * via executable comments, EXPLAIN ANALYZE, or qualified production targets.
  */
-async function executeObjectBrowserSqlWithProductionGuard<T>(sql: string, execute: () => Promise<T>): Promise<T | undefined> {
+async function executeObjectBrowserSqlWithProductionGuard<T>(sql: string, execute: () => Promise<T>, context: Pick<TableCopyContext, "connection" | "database"> = props): Promise<T | undefined> {
   return executeWithProductionSqlGuard({
-    connection: props.connection,
-    database: props.database,
+    connection: context.connection,
+    database: context.database,
     sql,
     source: t("production.sourceObjectBrowser"),
     execute,
@@ -3995,6 +4084,18 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 </script>
 
 <template>
+  <DangerConfirmDialog
+    v-model:open="cloneDialogOpen"
+    :title="t(cloneDialogState?.failure ? 'oceanbaseCloneDialog.failed' : 'oceanbaseCloneDialog.title')"
+    :message="t(cloneDialogState?.failure ? 'oceanbaseCloneDialog.failedMessage' : 'oceanbaseCloneDialog.message')"
+    :details-text="cloneDialogState?.summary"
+    :details="cloneDialogState?.details"
+    :details-label="t('oceanbaseCloneDialog.details')"
+    :show-cancel="!cloneDialogState?.failure"
+    :confirm-label="cloneDialogState?.failure ? t('oceanbaseCloneDialog.close') : undefined"
+    :close-on-confirm="false"
+    @confirm="cloneDialog.confirm"
+  />
   <FirebirdObjectManager v-if="effectiveDatabaseType === 'firebird'" v-model:open="firebirdManagerOpen" :connection-id="connection.id" :database="database" />
   <div ref="rootRef" data-object-browser-root class="flex h-full min-h-0 min-w-0 flex-col bg-background outline-none" tabindex="0" @keydown="onObjectBrowserKeydown">
     <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />

@@ -1,4 +1,5 @@
 import { computed, type ComputedRef, type Ref, createApp, watch, getCurrentScope, onScopeDispose } from "vue";
+import { getActivePinia } from "pinia";
 import { useI18n } from "vue-i18n";
 import { useDataGridExtractor } from "@/composables/useDataGridExtractor";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -115,6 +116,8 @@ export interface UseDataGridExportOptions {
   mongoUpdateTarget?: ComputedRef<MongoCopyUpdateTarget | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
   displayValue?: (value: CellValue, columnIndex: number) => string;
+  hasColumnFormatter?: (columnIndex: number) => boolean;
+  applyColumnFormattersOnExport?: ComputedRef<boolean>;
   cellClipboardText?: (value: CellValue, columnIndex: number) => string | undefined;
   externalCellValue?: (value: CellValue, columnIndex: number) => CellValue;
   identifierQuote?: ComputedRef<string | undefined>;
@@ -349,9 +352,26 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
   }
 
-  function applyGlobalDateTimeExportFormat(result: { columns: string[]; columnTypes: string[]; rows: CellValue[][] }, enabled: boolean) {
+  function shouldApplyColumnFormatter(columnIndex: number): boolean {
+    if (!options.hasColumnFormatter?.(columnIndex)) return false;
+    if (options.applyColumnFormattersOnExport?.value !== undefined) {
+      return options.applyColumnFormattersOnExport.value;
+    }
+    return getActivePinia() ? useSettingsStore().editorSettings.applyColumnFormattersOnExport : true;
+  }
+
+  function applyGlobalDateTimeExportFormat(result: { columns: string[]; columnTypes: string[]; rows: CellValue[][] }, enabled: boolean, sourceIndexes?: number[]) {
     const pattern = enabled ? useSettingsStore().editorSettings.globalDateTimeExportFormat : "";
-    return pattern ? { ...result, rows: formatTemporalRowsForExport(result.rows, result.columnTypes, pattern) } : result;
+    if (!pattern) return result;
+    const applyFormatters = options.applyColumnFormattersOnExport?.value ?? (getActivePinia() ? useSettingsStore().editorSettings.applyColumnFormattersOnExport : true);
+    const effectiveTypes = result.columnTypes.map((type, colIdx) => {
+      const sourceIdx = sourceIndexes ? sourceIndexes[colIdx] : (visibleColumnIndexesOption?.value?.[colIdx] ?? colIdx);
+      if (applyFormatters && sourceIdx !== undefined && options.hasColumnFormatter?.(sourceIdx)) {
+        return undefined;
+      }
+      return type;
+    });
+    return { ...result, rows: formatTemporalRowsForExport(result.rows, effectiveTypes, pattern) };
   }
 
   function tableCommentsForColumns(targetColumns: readonly string[]): Array<string | undefined> {
@@ -502,12 +522,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  function externalizeRows(rows: CellValue[][], columnIndexes?: number[]): CellValue[][] {
+  function externalizeRows(rows: CellValue[][], columnIndexes?: number[], applyFormatters = true, sourceIndexes?: number[]): CellValue[][] {
     if (columnIndexes) {
-      return rows.map((row) => columnIndexes.map((colIdx) => (options.externalCellValue ? options.externalCellValue(row[colIdx], colIdx) : row[colIdx])));
+      return rows.map((row) => columnIndexes.map((colIdx, i) => externalCellValue(row[colIdx], colIdx, sourceIndexes?.[i], applyFormatters)));
     }
-    if (!options.externalCellValue) return rows;
-    return rows.map((row) => row.map((value, columnIndex) => options.externalCellValue!(value, columnIndex)));
+    if (sourceIndexes) {
+      return rows.map((row) => row.map((value, colIdx) => externalCellValue(value, colIdx, sourceIndexes[colIdx], applyFormatters)));
+    }
+    return rows.map((row) => row.map((value, columnIndex) => externalCellValue(value, columnIndex, undefined, applyFormatters)));
   }
 
   async function resultToExport(
@@ -546,15 +568,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         const exportedSpatialColumns = projected?.spatialColumns ?? result.spatial_columns;
         const exportedSpatialValues = projected?.spatialValues ?? result.spatial_values;
         const columnComments = buildXlsxHeaderOverrides(exportedColumns, commentsForExportColumns(exportedColumns), headerMode);
+        // fullExportResult returns source rows, not the collection grid's
+        // marker-encoded rows. Applying the Mongo externalCellValue decode here would
+        // mistake a real BSON string in the reserved namespace for a grid marker and
+        // corrupt the exported value — only the formatter-gated displayValue may run.
+        const resolvedRows = preserveMongoExtendedJson ? mongoDocumentRowsForJson(exportedColumns, exportedRows, result.mongo_copy_documents) : exportedRows.map((row) => row.map((value, colIdx) => externalCellValue(value, colIdx, projectionSourceIndexes?.[colIdx] ?? colIdx, formatDateTime, true)));
         return {
-          ...applyGlobalDateTimeExportFormat(
-            // fullExportResult returns source rows, not the collection grid's
-            // marker-encoded rows. Applying externalCellValue here would
-            // mistake a real BSON string in the reserved namespace for a grid
-            // marker and corrupt the exported value.
-            { columns: exportedColumns, columnTypes: exportedColumnTypes, rows: preserveMongoExtendedJson ? mongoDocumentRowsForJson(exportedColumns, exportedRows, result.mongo_copy_documents) : exportedRows },
-            formatDateTime && !preserveMongoExtendedJson,
-          ),
+          ...applyGlobalDateTimeExportFormat({ columns: exportedColumns, columnTypes: exportedColumnTypes, rows: resolvedRows }, formatDateTime && !preserveMongoExtendedJson, projectionSourceIndexes),
           columnComments,
           spatialColumns: exportedSpatialColumns,
           spatialValues: exportedSpatialValues,
@@ -581,8 +601,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       const columnComments = buildXlsxHeaderOverrides(normalized.columns, normalized.columnComments, headerMode);
       return {
         ...applyGlobalDateTimeExportFormat(
-          { columns: normalized.columns, columnTypes: normalized.columnTypes, rows: preserveMongoExtendedJson ? mongoDocumentRowsForJson(normalized.columns, normalized.rows, normalized.mongoCopyDocuments) : externalizeRows(normalized.rows) },
+          {
+            columns: normalized.columns,
+            columnTypes: normalized.columnTypes,
+            rows: preserveMongoExtendedJson ? mongoDocumentRowsForJson(normalized.columns, normalized.rows, normalized.mongoCopyDocuments) : externalizeRows(normalized.rows, undefined, formatDateTime, sourceIndexes),
+          },
           formatDateTime && !preserveMongoExtendedJson,
+          sourceIndexes,
         ),
         columnComments,
         spatialColumns: normalized.spatialColumns,
@@ -616,9 +641,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
               : externalizeRows(
                   exportItems.map((item) => item.data),
                   validColumnIndexes,
+                  formatDateTime,
+                  targetSourceIndexes,
                 ),
         },
         formatDateTime && !preserveMongoExtendedJson,
+        targetSourceIndexes,
       ),
       columnComments: commentHeader,
       ...(spatialColumns?.length ? { spatialColumns } : {}),
@@ -743,9 +771,29 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return binaryCellClipboardText(value, columnTypes.value?.[columnIndex], databaseType.value) ?? value;
   }
 
-  function externalCellValue(value: CellValue, columnIndex: number): CellValue {
-    const externalValue = options.externalCellValue?.(value, columnIndex);
-    return externalValue === undefined ? value : externalValue;
+  function isOracleTemporalColumn(columnIndex: number, sourceIndex?: number): boolean {
+    const dbType = options.databaseType.value;
+    if (dbType !== "oracle" && dbType !== "oceanbase-oracle") return false;
+    const colType = options.columnTypes.value?.[columnIndex] ?? (sourceIndex !== undefined ? options.allColumnTypes?.value?.[sourceIndex] : undefined);
+    return isTemporalColumnType(colType);
+  }
+
+  function externalCellValue(value: CellValue, columnIndex: number, sourceIndex?: number, applyFormatters = true, skipExternal = false): CellValue {
+    // skipExternal serves source-row exports (full-result snapshot): those rows never
+    // went through the grid's marker encoding, so decoding would mistake a real BSON
+    // string in the reserved namespace for a marker (see the warning in resultToExport).
+    const externalValue = skipExternal ? undefined : options.externalCellValue?.(value, columnIndex);
+    const resolvedValue = externalValue === undefined ? value : externalValue;
+    if (resolvedValue !== null && resolvedValue !== undefined && options.displayValue) {
+      const resolvedSourceIndex = sourceIndex ?? visibleColumnIndexes.value[columnIndex] ?? columnIndex;
+      if (applyFormatters && isOracleTemporalColumn(columnIndex, resolvedSourceIndex)) {
+        return options.displayValue(resolvedValue, resolvedSourceIndex);
+      }
+      if (applyFormatters && shouldApplyColumnFormatter(resolvedSourceIndex)) {
+        return options.displayValue(resolvedValue, resolvedSourceIndex);
+      }
+    }
+    return resolvedValue;
   }
 
   function rowToJsonObject(item: RowItem): Record<string, unknown> {
@@ -791,7 +839,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const val = resolvedItem?.data[columnIndex] ?? null;
     // 外部剪贴板呈现文本型 MySQL VARBINARY（NULL 也按空串输出）；内部网格副本仍保留原 hex，保证回粘无损。
     const rawValue = options.cellClipboardText?.(val, sourceIndex) ?? clipboardCellValue(binaryClipboardCellValue(val, columnIndex));
-    const copyValue = options.databaseType.value === "oracle" && isTemporalColumnType(options.columnTypes.value?.[columnIndex]) ? (options.displayValue?.(val, sourceIndex) ?? rawValue) : rawValue;
+    const shouldFormat = isOracleTemporalColumn(columnIndex, sourceIndex) || shouldApplyColumnFormatter(sourceIndex);
+    const copyValue = shouldFormat ? (options.displayValue?.(val, sourceIndex) ?? rawValue) : rawValue;
     await copyText(copyValue, { rows: [[val]] });
   }
 
@@ -936,6 +985,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     buildMongoUpdate: buildMongoExtractorUpdate,
     partialLoadInfo: partialLoadCopyInfo,
     canBuildMongoUpdate: canBuildMongoExtractorUpdate,
+    displayValue: options.displayValue,
+    hasColumnFormatter: options.hasColumnFormatter,
+    applyColumnFormattersOnExport: options.applyColumnFormattersOnExport,
     externalCellValue: (value, columnIndex) => {
       const externalValue = options.externalCellValue?.(value as CellValue, columnIndex);
       return externalValue === undefined ? value : externalValue;
@@ -1016,13 +1068,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       : rowsToExport(rowIds).map((item) => ({
           sourceIndex: item.sourceIndex,
           isNew: item.isNew,
-          data: externalizeRows([item.data], indexes)[0]!,
+          data: (indexes ?? columns.value.map((_, index) => index)).map((index) => item.data[index]),
           isDirtyCol: (indexes ?? columns.value.map((_, index) => index)).map((index) => item.isDirtyCol[index] ?? false),
         }));
     const selected = snapshotExportSelection(original, names, sourceIndexes, items);
     if (!selected) return false;
     const types = sourceIndexes.map((index) => original.column_types?.[index] ?? "");
-    selected.rows = applyGlobalDateTimeExportFormat({ columns: names, columnTypes: types, rows: selected.rows as CellValue[][] }, true).rows;
     let outputPath = exportFileName(full ? "export" : "export-page", format, { page: !full });
     if (isTauriRuntime()) {
       const path = await promptExportSavePath({ defaultFileName: outputPath, filters: [{ name: FORMAT_META[format]!.label, extensions: [format] }], preferredPath: useSettingsStore().editorSettings.preferredExportPath });
@@ -1064,6 +1115,24 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       },
     );
     try {
+      const formattedCells = selected.cells.filter((cell) => shouldApplyColumnFormatter(sourceIndexes[cell.columnIndex]!));
+      if (formattedCells.length) {
+        selected.rows = await materializeSnapshotResultRows(
+          {
+            ...original,
+            rows: selected.rows as CellValue[][],
+            large_value_cells: formattedCells.map((cell) => ({ ...original.large_value_cells!.find((source) => source.value_ref === cell.valueRef)!, row_index: cell.rowIndex, column_index: cell.columnIndex })),
+          },
+          isCurrent,
+          controller.signal,
+          executionId,
+        );
+        selected.cells = selected.cells.filter((cell) => !formattedCells.includes(cell));
+      }
+      selected.rows = selected.rows.map((row) => row.map((value, columnIndex) => externalCellValue(value as CellValue, exportAll ? sourceIndexes[columnIndex]! : (indexes?.[columnIndex] ?? columnIndex), sourceIndexes[columnIndex], true, !!exportAll)));
+      selected.rows = applyGlobalDateTimeExportFormat({ columns: names, columnTypes: types, rows: selected.rows as CellValue[][] }, true, sourceIndexes).rows;
+      controller.signal.throwIfAborted();
+      if (!isCurrent()) throw new Error("LOB result context changed");
       await waitForLargeValueSnapshot(
         api.exportSnapshotResult({ ...selected, context: { ...selected.context, executionId }, format, quoteMode: useSettingsStore().editorSettings.csvQuoteMode, nullLiteral: csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode) }, outputPath, controller.signal),
         controller.signal,
@@ -1611,11 +1680,32 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     };
   }
 
+  function hasActiveColumnFormatters(columnIndexes?: number[]): boolean {
+    if (!options.hasColumnFormatter) return false;
+    const applyFormatters = options.applyColumnFormattersOnExport?.value ?? (getActivePinia() ? useSettingsStore().editorSettings.applyColumnFormattersOnExport : true);
+    if (!applyFormatters) return false;
+    const allCount = options.allColumns?.value?.length ?? options.columns.value.length;
+    if (columnIndexes && columnIndexes.length > 0) {
+      const visibleIndexes = visibleColumnIndexesOption?.value;
+      return columnIndexes.some((index) => {
+        const sourceIndex = visibleIndexes ? (visibleIndexes[index] ?? index) : index;
+        return options.hasColumnFormatter!(sourceIndex);
+      });
+    }
+    for (let i = 0; i < allCount; i++) {
+      if (options.hasColumnFormatter(i)) return true;
+    }
+    return false;
+  }
+
   async function exportFullTableDataViaBackend(format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt", rowIds?: number[], headerMode: XlsxHeaderMode = "name", autoFilter = true, sqlExportOptions?: SqlExportOptions, openAfterExport = false, columnIndexes?: number[]): Promise<boolean> {
     const meta = tableMeta.value;
     // The backend table exporter currently builds two-part table names. External
     // Doris/StarRocks catalogs need the data-tab paginator's three-part SQL.
     if (rowIds !== undefined || columnIndexes !== undefined || context.value !== "table-data" || !meta || meta.catalog || !connectionId.value || !database.value) {
+      return false;
+    }
+    if (format !== "sql" && hasActiveColumnFormatters(columnIndexes)) {
       return false;
     }
 
@@ -1737,6 +1827,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     columnIndexes?: number[],
   ): Promise<boolean> {
     if (rowIds !== undefined || columnIndexes !== undefined || context.value !== "results" || !queryResultExportRequest) {
+      return false;
+    }
+    if (format !== "sql" && hasActiveColumnFormatters(columnIndexes)) {
       return false;
     }
     if (databaseType.value === "mongodb") return false;

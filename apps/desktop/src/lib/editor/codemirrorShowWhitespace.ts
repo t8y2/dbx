@@ -38,7 +38,7 @@ export function createShowWhitespaceExtension(view: Pick<ViewModule, "highlightW
     const ranges = [];
     let lastLine = -1;
     for (const { from, to } of editorView.visibleRanges) {
-      for (let pos = from; pos <= to; ) {
+      for (let pos = from; pos <= to;) {
         const line = doc.lineAt(pos);
         if (line.number !== lastLine) {
           lastLine = line.number;

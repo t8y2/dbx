@@ -16,22 +16,7 @@ const signed = path.join(temporary, `dbx.example.hello-1.0.0-${target}.signed.db
 
 try {
   run(process.execPath, [path.join(root, "package.mjs")], { DBX_PLUGIN_OUTPUT_DIR: candidateDirectory });
-  run(
-    "cargo",
-    [
-      "run",
-      "--quiet",
-      "--locked",
-      "--manifest-path",
-      path.join(repositoryRoot, "plugins", "sdk", "cli", "Cargo.toml"),
-      "--",
-      "keygen",
-      "example-repository-smoke",
-      "--output",
-      keyFile,
-    ],
-    { CARGO_TARGET_DIR: path.join(temporary, "cli-target") },
-  );
+  run("cargo", ["run", "--quiet", "--locked", "--manifest-path", path.join(repositoryRoot, "plugins", "sdk", "cli", "Cargo.toml"), "--", "keygen", "example-repository-smoke", "--output", keyFile], { CARGO_TARGET_DIR: path.join(temporary, "cli-target") });
   const signingEnvironment = await readEnvironmentFile(keyFile);
   run(process.execPath, [path.join(root, "repository-sign.mjs"), candidate, signed], {
     ...signingEnvironment,

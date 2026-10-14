@@ -62,6 +62,7 @@ const surfaceProps = computed<ContentAreaSurfaceProps>(() => ({
   activeOutputView: props.activeOutputView,
   formatSqlRequest: props.formatSqlRequest,
   compressSqlRequest: props.compressSqlRequest,
+  keywordCaseRequest: props.keywordCaseRequest,
   selectedSql: props.selectedSql,
   cursorPos: props.cursorPos,
   blockDangerousRedisCommands: props.blockDangerousRedisCommands,
@@ -243,7 +244,7 @@ const groupExecutableSql = computed(() => {
         @compress-sql="activeTab && toolbar.compressSql(activeTab.id)"
         @fold-all="activeSurfaceRef?.foldAll?.()"
         @unfold-all="activeSurfaceRef?.unfoldAll?.()"
-        @toggle-sql-keyword-case="toolbar.toggleSqlKeywordCase()"
+        @toggle-sql-keyword-case="activeTab && toolbar.toggleSqlKeywordCase(activeTab.id)"
         @save-sql="(tabId: string) => toolbar.saveSql(tabId)"
         @change-encoding="changeExternalSqlEncoding"
         @open-sql="toolbar.openSqlFile()"

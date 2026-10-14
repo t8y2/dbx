@@ -89,7 +89,8 @@ import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { parseTabDragPayload, serializeTabDragPayload } from "@/lib/tabs/tabDrag";
-import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems } from "@/lib/tabs/tabMenu";
+import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems, createReopenClosedTabMenuItem } from "@/lib/tabs/tabMenu";
+import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { findTabWithSameTitleSuffix, joinTabTitleParts, TAB_TITLE_SUFFIX_MAX_LENGTH, tabConnectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabDisplayTitleParts, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import "./appTabBar.css";
@@ -1103,6 +1104,11 @@ function tabColorStyle(tab: QueryTab): CSSProperties | undefined {
         : { borderColor: hexToRgba(color, 0.18) }),
     } as CSSProperties;
   }
+  // Keep horizontal tabs quiet by default; group headers and rails already
+  // provide the connection identity, while the selected tab gets the wash.
+  if (!isTabActive(tab)) {
+    return undefined;
+  }
   return sharedTabColorStyle(tab, isTabActive(tab), isClassicLayout.value);
 }
 
@@ -1507,6 +1513,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
     createCloseTabMenuItem({
       label: t("contextMenu.closeTab"),
       onClose: () => closeTab(tab),
+    }),
+    createReopenClosedTabMenuItem({
+      label: t("contextMenu.reopenClosedTab"),
+      disabled: !queryStore.canReopenClosedTab,
+      shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.reopenClosedTab ?? "Shift+Mod+T"),
+      onReopen: () => queryStore.reopenClosedTab(),
     }),
   ];
   return items;

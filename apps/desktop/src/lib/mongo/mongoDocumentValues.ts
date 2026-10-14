@@ -404,7 +404,42 @@ function parseMongoExistingFieldInputValue(raw: Exclude<MongoInputValue, null>, 
   if (typeof originalValue === "string") {
     return typeof raw === "string" ? raw : String(raw);
   }
+  const typedNumber = mongoTypedNumberInputValue(raw, mongoDocumentNumericValueType(originalValue));
+  if (typedNumber !== undefined) return typedNumber;
   return parseMongoDocumentInputValue(raw);
+}
+
+const MONGO_DECIMAL_INPUT_PATTERN = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+const MIN_BSON_INT32 = -2147483648n;
+const MAX_BSON_INT32 = 2147483647n;
+
+/**
+ * Re-wraps a number typed over an existing typed BSON number in the original
+ * wrapper. A bare JSON number is always saved as Int64, so without this an
+ * edited Int32 or Double silently changes type. Input the original type cannot
+ * hold (a fraction for Int32, an Int32 overflow) falls back to normal parsing.
+ */
+function mongoTypedNumberInputValue(raw: Exclude<MongoInputValue, null>, numericType: string | undefined): unknown {
+  if (!numericType || numericType === "number" || typeof raw === "boolean") return undefined;
+  const text = String(raw).trim();
+  if (!MONGO_DECIMAL_INPUT_PATTERN.test(text)) return undefined;
+  switch (numericType) {
+    case "int32":
+    case "int64": {
+      if (!MONGO_INTEGER_PATTERN.test(text)) return undefined;
+      const integer = BigInt(text);
+      if (numericType === "int32") return integer >= MIN_BSON_INT32 && integer <= MAX_BSON_INT32 ? { $numberInt: integer.toString() } : undefined;
+      return integer >= MIN_BSON_INT64 && integer <= MAX_BSON_INT64 ? { $numberLong: integer.toString() } : undefined;
+    }
+    case "double": {
+      const double = Number(text);
+      return Number.isFinite(double) ? { $numberDouble: String(double) } : undefined;
+    }
+    case "decimal128":
+      return { $numberDecimal: text };
+    default:
+      return undefined;
+  }
 }
 
 function mongoDocumentFieldValue(document: unknown, field: string): unknown {

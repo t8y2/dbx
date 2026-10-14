@@ -53,6 +53,7 @@ export type ShortcutActionId =
   | "newQuery"
   | "openSettings"
   | "closeTab"
+  | "reopenClosedTab"
   | "closeOtherTabs"
   | "closeAllTabs"
   | "closeWindow"
@@ -93,6 +94,7 @@ export type ShortcutActionId =
   | "disconnectAllActiveConnections"
   | "openDataInNewTab"
   | "viewTableDdl"
+  | "editSidebarTableStructure"
   | "sendSelectionToAi"
   | "sqlIntentionActions";
 
@@ -487,6 +489,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+W",
   },
   {
+    id: "reopenClosedTab",
+    labelKey: "settings.shortcutReopenClosedTab",
+    scope: "global",
+    defaultShortcut: "Shift+Mod+T",
+  },
+  {
     id: "closeOtherTabs",
     labelKey: "contextMenu.closeOtherTabs",
     scope: "global",
@@ -730,6 +738,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutViewTableDdl",
     scope: "sidebar",
     defaultShortcut: "Shift+Mod+D",
+  },
+  {
+    id: "editSidebarTableStructure",
+    labelKey: "settings.shortcutEditSidebarTableStructure",
+    scope: "sidebar",
+    defaultShortcut: "F4",
   },
   {
     id: "sendSelectionToAi",

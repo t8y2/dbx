@@ -115,7 +115,7 @@ import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { uuid } from "@/lib/common/utils";
-import { generateCellValues, type CellValueGenerationKind } from "@/lib/dataGrid/cellValueGeneration";
+import { generateCellValues, type CellValueGenerationKind, type CellValueGenerationOptions } from "@/lib/dataGrid/cellValueGeneration";
 import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridClipboardText, mongoDocumentGridDisplayText, mongoDocumentGridEditorText, mongoDocumentGridExternalValue, mongoDocumentGridInputValue, mongoDocumentGridNumericValue, mongoDocumentRelaxedExtendedJson } from "@/lib/mongo/mongoDocumentValues";
 import { compactHeaderColumnType, formatMetadataColumnTypeLabel, isNumericColumnType, resolveDataGridTypeVisualKind, resolveHeaderColumnType, resolveResultColumnType } from "@/lib/dataGrid/dataGridColumnType";
 import { dataGridCellTextClass, dataGridTypeVisualClass } from "@/lib/dataGrid/dataGridCellTextVisual";
@@ -1085,6 +1085,9 @@ const insertRowsDialogOpen = ref(false);
 const insertPosition = ref<GridInsertRowPosition>("below");
 const generateIncrementDialogOpen = ref(false);
 const generateIncrementStartValue = ref("1");
+const generateIncrementPadLength = ref("");
+const generateIncrementPrefix = ref("");
+const generateIncrementSuffix = ref("");
 const generateIncrementTarget = ref<"selection" | "detail">("selection");
 const gridSnapshotOpen = ref(false);
 const gridSnapshotSource = ref<GridSnapshotSource | null>(null);
@@ -1340,6 +1343,7 @@ watch([conditionalBulkEditConditionSource, conditionalBulkEditCurrentWhereInput,
 
 const structuredFilterRules = filterBuilder.rules;
 const filterBuilderOpen = filterBuilder.open;
+const filterWorkbenchRef = ref<{ focusRuleValue: (ruleId: string) => void }>();
 const filterBuilderColumnSearch = filterBuilder.columnSearch;
 const filteredFilterBuilderColumnOptions = filterBuilder.filteredColumns;
 const appliedStructuredWhereInput = filterBuilder.appliedWhereInput;
@@ -2372,6 +2376,7 @@ const {
   // Existing tab snapshots may still carry this field; new changes persist in the internal layout store.
   initialHiddenColumnKeys: computed(() => props.result.local_hidden_column_keys),
   hideNullColumns,
+  freezeFirstColumn: () => settingsStore.editorSettings.dataGridFreezeFirstColumn,
   onHideNullColumnsChange: (value) => settingsStore.updateEditorSettings({ dataGridHideNullColumns: value }),
   onRefreshMetrics: scheduleColumnLayoutRefresh,
 });
@@ -2482,7 +2487,6 @@ function actualColumnIndex(visibleColumnIndex: number): number {
   return visibleColumnIndexes.value[visibleColumnIndex] ?? visibleColumnIndex;
 }
 function scrollToColumn(columnIndex: number) {
-  goToColumnSearch.value = "";
   scrollToColumnIndex(columnIndex);
   gridRef.value?.focus();
 }
@@ -2501,8 +2505,10 @@ function openGoToColumn(): boolean {
   if (!displayableColumnIndexes.value.length) return false;
 
   const alreadyOpen = goToColumnOpen.value;
-  goToColumnSearch.value = "";
-  goToColumnSelectedIndex.value = 0;
+  if (!alreadyOpen) {
+    goToColumnSearch.value = "";
+    goToColumnSelectedIndex.value = 0;
+  }
   goToColumnOpen.value = true;
   if (alreadyOpen) void nextTick(focusGoToColumnSearch);
   return true;
@@ -7294,6 +7300,24 @@ async function applyContextFilter(mode: FilterMode) {
   }
 }
 
+async function openContextCustomFilter() {
+  if (!canUseWhereSearch.value) return;
+  const target = contextFilterTarget.value;
+  if (!target) return;
+  const rule = filterBuilder.addRule({
+    columnName: target.columnName,
+    rawValue: target.requiresHydration ? "" : formatFilterRawValue(target.sourceValue),
+  });
+  // The quick and text views only expose a raw WHERE string, so a hand-tuned
+  // condition needs the rule builder; select it and open its panel.
+  settingsStore.updateEditorSettings({ dataGridFilterEditorView: "conditions" });
+  await nextTick();
+  filterBuilderOpen.value = true;
+  await nextTick();
+  filterWorkbenchRef.value?.focusRuleValue(rule.id);
+  if (contextFilterTarget.value?.id === target.id) contextFilterTarget.value = null;
+}
+
 async function clearContextFilter() {
   await clearAllFilters();
 }
@@ -8778,7 +8802,9 @@ const {
   sourceColumns: visibleSourceColumns,
   columnComments: visibleColumnComments,
   allColumnComments,
-  displayValue: formatCellCached,
+  displayValue: (value, index) => formatCell(value, index, undefined, false),
+  hasColumnFormatter: (index: number) => Boolean(resolvedColumnFormatters.value[index]),
+  applyColumnFormattersOnExport: computed(() => settingsStore.editorSettings.applyColumnFormattersOnExport),
   cellClipboardText: (value) => (usesMongoDocumentGridValues.value ? mongoDocumentGridClipboardText(value) : undefined),
   externalCellValue: (value) => (usesMongoDocumentGridValues.value ? mongoDocumentGridExternalValue(value) : value),
   mongoDocuments: computed(() => props.result.mongo_copy_documents ?? props.result.mongo_documents),
@@ -9926,11 +9952,12 @@ function beginInlineBulkEdit(initialValue: string): boolean {
   return true;
 }
 
-function applyGeneratedSelectionValue(kind: CellValueGenerationKind, startValue = 1n): boolean {
+function applyGeneratedSelectionValue(kind: CellValueGenerationKind, generationOptions?: CellValueGenerationOptions | bigint): boolean {
   if (!props.editable) return false;
   const cells = editableSelectionCells();
   if (!cells.length) return false;
-  const values = generateCellValues(kind, cells.length, { startValue });
+  const options = typeof generationOptions === "bigint" ? { startValue: generationOptions } : (generationOptions ?? {});
+  const values = generateCellValues(kind, cells.length, options);
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
   let applied = false;
   beginBatch();
@@ -9948,10 +9975,11 @@ function applyGeneratedSelectionValue(kind: CellValueGenerationKind, startValue 
   return applied;
 }
 
-function applyGeneratedDetailValue(kind: CellValueGenerationKind, startValue = 1n): boolean {
+function applyGeneratedDetailValue(kind: CellValueGenerationKind, generationOptions?: CellValueGenerationOptions | bigint): boolean {
   const detail = activeCellDetail.value;
   if (!detail?.isEditable) return false;
-  const value = generatedGridValue(kind, generateCellValues(kind, 1, { startValue })[0] ?? null);
+  const options = typeof generationOptions === "bigint" ? { startValue: generationOptions } : (generationOptions ?? {});
+  const value = generatedGridValue(kind, generateCellValues(kind, 1, options)[0] ?? null);
   applyCellValue(detail.rowId, detail.colIndex, value, {
     preserveEmptyString: kind === "empty",
   });
@@ -9974,8 +10002,41 @@ function openGenerateIncrementDialog(target: "selection" | "detail") {
   if (target === "detail" && !activeCellDetail.value?.isEditable) return;
   generateIncrementTarget.value = target;
   generateIncrementStartValue.value = "1";
+  generateIncrementPadLength.value = "";
+  generateIncrementPrefix.value = "";
+  generateIncrementSuffix.value = "";
   generateIncrementDialogOpen.value = true;
 }
+
+const generateIncrementPreview = computed(() => {
+  try {
+    const rawStart = generateIncrementStartValue.value.trim();
+    const startValue = BigInt(rawStart || "1");
+    let padLength: number | undefined;
+    const trimmedPad = generateIncrementPadLength.value.trim();
+    if (trimmedPad) {
+      const parsed = Number(trimmedPad);
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 64) {
+        return "";
+      }
+      padLength = parsed;
+    }
+    const totalCount = generateIncrementTarget.value === "detail" ? 1 : editableSelectionCells().length;
+    const count = Math.min(Math.max(1, totalCount), 3);
+    const values = generateCellValues("increment", count, {
+      startValue,
+      padLength,
+      prefix: generateIncrementPrefix.value,
+      suffix: generateIncrementSuffix.value,
+    });
+    if (totalCount > 3) {
+      return `${values.slice(0, 2).join(", ")}, … (${totalCount})`;
+    }
+    return values.join(", ");
+  } catch {
+    return "";
+  }
+});
 
 function applyGenerateIncrementValue() {
   let startValue: bigint;
@@ -9985,7 +10046,23 @@ function applyGenerateIncrementValue() {
     toast(t("grid.generateStartInvalid"));
     return;
   }
-  const applied = generateIncrementTarget.value === "detail" ? applyGeneratedDetailValue("increment", startValue) : applyGeneratedSelectionValue("increment", startValue);
+  let padLength: number | undefined;
+  const trimmedPad = generateIncrementPadLength.value.trim();
+  if (trimmedPad) {
+    const parsed = Number(trimmedPad);
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 64) {
+      toast(t("grid.generatePadLengthInvalid"));
+      return;
+    }
+    padLength = parsed;
+  }
+  const options: CellValueGenerationOptions = {
+    startValue,
+    padLength,
+    prefix: generateIncrementPrefix.value,
+    suffix: generateIncrementSuffix.value,
+  };
+  const applied = generateIncrementTarget.value === "detail" ? applyGeneratedDetailValue("increment", options) : applyGeneratedSelectionValue("increment", options);
   if (applied) generateIncrementDialogOpen.value = false;
 }
 
@@ -13165,11 +13242,13 @@ function filterSubmenu(): ContextMenuItem {
       notLike: t("grid.filterNotLike"),
       lessThan: t("grid.filterLessThan"),
       greaterThan: t("grid.filterGreaterThan"),
+      custom: t("grid.filterCustom"),
       isNull: t("grid.filterIsNull"),
       isNotNull: t("grid.filterIsNotNull"),
       clear: t("grid.clearFilter"),
     },
     apply: applyContextFilter,
+    applyCustom: openContextCustomFilter,
     clear: clearContextFilter,
   });
 }
@@ -13542,8 +13621,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         freezeToColumn: t("grid.freezeToColumn"),
         freezeSelectedColumns: t("grid.freezeSelectedColumns", { count: selectedColumnCount }),
         freezeCurrentColumn: t("grid.freezeCurrentColumn"),
-        unfreezeCurrentColumn: t("grid.unfreezeCurrentColumn"),
-        unfreezeColumns: t("grid.unfreezeColumns", { count: frozenColumnCount.value }),
+        unfreezeCurrentColumn: t("grid.unfreezeCurrentColumn") + (settingsStore.editorSettings.dataGridFreezeFirstColumn ? ` (${t("grid.globalFirstColumnRemainsFrozen")})` : ""),
+        unfreezeColumns: t("grid.unfreezeColumns", { count: frozenColumnCount.value }) + (settingsStore.editorSettings.dataGridFreezeFirstColumn ? ` (${t("grid.globalFirstColumnRemainsFrozen")})` : ""),
         hideColumn: t("grid.hideColumn"),
         hideSelectedColumns: t("grid.hideSelectedColumns", { count: selectedColumnCount }),
         hideIdenticalColumns: identicalColumnCount > 0 ? t("grid.hideIdenticalColumnsCount", { count: identicalColumnCount }) : t("grid.hideIdenticalColumns"),
@@ -13735,7 +13814,14 @@ function openGridSnapshot() {
       return type ? shortTypeName(compactHeaderColumnType(type)) : undefined;
     }),
     columnDetails: columnIndexes.map((index) => visibleColumnComments.value[index]),
-    rows: selection.rows.map((row) => row.slice()),
+    rows: selection.rows.map((row) =>
+      row.map((val, cellIdx) => {
+        if (val === null || val === undefined) return null;
+        const visibleColIdx = columnIndexes[cellIdx];
+        const actualColIdx = visibleColIdx !== undefined ? visibleColumnIndexes.value[visibleColIdx] : undefined;
+        return formatCellCached(val, actualColIdx);
+      }),
+    ),
     title: props.exportFileBaseName || props.result.sourceLabel || undefined,
   };
   gridSnapshotOpen.value = true;
@@ -13943,6 +14029,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         </div>
         <DataGridFilterWorkbench
           v-if="canUseWhereSearch && filterEditorView === 'conditions' && filterBuilderOpen"
+          ref="filterWorkbenchRef"
           :sql-preview="filterSqlPreview"
           :rules="structuredFilterRules"
           :columns="filterBuilderColumnOptions"
@@ -15924,11 +16011,11 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     </Dialog>
 
     <Dialog v-model:open="generateIncrementDialogOpen">
-      <DialogContent class="sm:max-w-[380px]">
+      <DialogContent class="sm:max-w-[420px]">
         <DialogHeader>
           <DialogTitle>{{ t("grid.generateIncrementId") }}</DialogTitle>
         </DialogHeader>
-        <div class="space-y-2">
+        <div class="space-y-3">
           <p class="text-sm text-muted-foreground">
             {{
               t("grid.generateSequenceDescription", {
@@ -15936,7 +16023,28 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               })
             }}
           </p>
-          <Input v-model="generateIncrementStartValue" inputmode="numeric" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="1" @keydown.enter.prevent="applyGenerateIncrementValue" />
+          <div class="space-y-1.5">
+            <label class="text-xs font-medium text-foreground">{{ t("grid.generateStartValue") }}</label>
+            <Input v-model="generateIncrementStartValue" inputmode="numeric" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="1" @keydown.enter.prevent="applyGenerateIncrementValue" />
+          </div>
+          <div class="space-y-1.5">
+            <label class="text-xs font-medium text-foreground">{{ t("grid.generatePadLength") }}</label>
+            <Input v-model="generateIncrementPadLength" inputmode="numeric" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" :placeholder="t('grid.generatePadLengthPlaceholder')" @keydown.enter.prevent="applyGenerateIncrementValue" />
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div class="space-y-1.5">
+              <label class="text-xs font-medium text-foreground">{{ t("grid.generatePrefix") }}</label>
+              <Input v-model="generateIncrementPrefix" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" :placeholder="t('grid.generatePrefixPlaceholder')" @keydown.enter.prevent="applyGenerateIncrementValue" />
+            </div>
+            <div class="space-y-1.5">
+              <label class="text-xs font-medium text-foreground">{{ t("grid.generateSuffix") }}</label>
+              <Input v-model="generateIncrementSuffix" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" :placeholder="t('grid.generateSuffixPlaceholder')" @keydown.enter.prevent="applyGenerateIncrementValue" />
+            </div>
+          </div>
+          <div v-if="generateIncrementPreview" class="rounded-md border bg-muted/50 p-2.5 text-xs">
+            <span class="font-medium text-muted-foreground">{{ t("grid.generatePreview") }}: </span>
+            <span class="font-mono select-all">{{ generateIncrementPreview }}</span>
+          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" @click="generateIncrementDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>

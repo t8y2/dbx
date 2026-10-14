@@ -77,6 +77,7 @@ import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarAct
 import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
 import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
+import DataGridFreezeFirstColumnControl from "@/components/grid/DataGridFreezeFirstColumnControl.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
 import DataGridColumnWidthModeControl from "@/components/grid/DataGridColumnWidthModeControl.vue";
@@ -2013,6 +2014,8 @@ defineExpose({
               :format-dialect="activeSqlFormatDialect"
               :format-request-id="formatSqlRequest?.tabId === activeTab.id ? formatSqlRequest.id : undefined"
               :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
+              :keyword-case-request-id="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.id : undefined"
+              :keyword-case-request-mode="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.mode : undefined"
               :execution-error="activeQueryError"
               :execution-error-sql="activeTab.lastExecutedSql"
               :execution-error-result="activeQueryError ? activeTab.result : undefined"
@@ -2474,6 +2477,7 @@ defineExpose({
                       <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
                     </div>
                     <DataGridEmptyColumnsControl :count="dataGridRef?.allEmptyColumnCount" :column-count="dataGridRef?.displayableColumnCount" />
+                    <DataGridFreezeFirstColumnControl />
                     <DataGridCopyFormatControl
                       :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
                       :current-value="dataGridRef?.defaultCopyPreference ?? ''"
@@ -3176,6 +3180,7 @@ defineExpose({
                 <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
               </div>
               <DataGridEmptyColumnsControl :count="dataGridRef?.allEmptyColumnCount" :column-count="dataGridRef?.displayableColumnCount" />
+              <DataGridFreezeFirstColumnControl />
               <DataGridCopyFormatControl
                 :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
                 :current-value="dataGridRef?.defaultCopyPreference ?? ''"

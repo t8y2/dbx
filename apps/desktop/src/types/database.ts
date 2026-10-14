@@ -182,9 +182,13 @@ export interface ConnectionConfig {
   is_production?: boolean;
   /** Database-level production markers for multi-database connections. */
   production_databases?: string[];
+  /** Sidebar presentation only; absent means database/schema rows plus sticky context. */
+  production_badge_scope?: ProductionBadgeScope;
   /** Metadata captured from the latest successful connection test for the saved config. */
   database_info?: DatabaseConnectionInfo;
 }
+
+export type ProductionBadgeScope = "connection" | "database" | "table";
 
 export type IdentifierCase = "lower" | "upper" | "mixed";
 
@@ -327,6 +331,12 @@ export interface PluginDriverManifest {
   label: string;
   kind: string;
   database_type?: string;
+}
+
+export interface PluginCapabilityManifest {
+  id: string;
+  label: string;
+  kind?: string;
 }
 
 export type PluginFormFieldType = "text" | "password" | "number" | "boolean" | "select" | "radio" | "textarea";
@@ -720,6 +730,7 @@ export interface PluginManifest {
   homepage?: string;
   executable?: string;
   drivers: PluginDriverManifest[];
+  capabilities?: PluginCapabilityManifest[];
   contributions?: PluginContribution[];
   localizations?: Record<string, PluginManifestLocalization>;
 }

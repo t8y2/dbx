@@ -322,6 +322,14 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         return buildUrl(params);
     }
 
+    @Override
+    protected java.util.Properties buildConnectionProperties(ConnectParams params) {
+        java.util.Properties properties = super.buildConnectionProperties(params);
+        // Connector/J must stop after a failed or timed-out batch item.
+        properties.setProperty("continueBatchOnError", "false");
+        return properties;
+    }
+
     static String buildUrl(ConnectParams params) {
         return appendDefaultCompatibilityOption(OCEANBASE_ORACLE_PROFILE.buildUrl(params));
     }
@@ -2067,6 +2075,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 yield len == null ? base : base + "(" + len + ")";
             }
             case "NUMBER" -> {
+                if (numPrec == null && numScale != null) {
+                    yield base + "(*," + numScale + ")";
+                }
                 if (numPrec != null && numScale != null && numScale != 0) {
                     yield base + "(" + numPrec + "," + numScale + ")";
                 }
@@ -2075,6 +2086,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 }
                 yield base;
             }
+            case "FLOAT" -> numPrec != null && numPrec > 0 ? base + "(" + numPrec + ")" : base;
             case "RAW" -> dataLen == null ? "RAW" : "RAW(" + dataLen + ")";
             default -> base;
         };

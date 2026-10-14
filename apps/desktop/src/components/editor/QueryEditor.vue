@@ -11,6 +11,7 @@
 // (delivery is same-tick), never a pending undelivered one.
 let lastHandledFormatRequestId = 0;
 let lastHandledCompressRequestId = 0;
+let lastHandledKeywordCaseRequestId = 0;
 let vimMappingsApplied = false;
 let vimClipboardConfigured = false;
 </script>
@@ -70,6 +71,7 @@ import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, 
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 
 import { canFormatSqlForDatabaseType, formatSqlText, compressSqlText } from "@/lib/sql/sqlFormatter";
+import { applySqlKeywordCase, loadSqlKeywordSpans } from "@/lib/sql/sqlKeywordCase";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { restoreSqlFromSourcePaste } from "@/lib/sql/sqlSourcePaste";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
@@ -1786,6 +1788,50 @@ function compressCurrentSql() {
   });
 }
 
+/**
+ * Toolbar `a`/`A`: re-case only the keywords of the selection, or of the whole
+ * document when there is none (issue #11828).
+ *
+ * The toolbar flips `keywordCase` at the same time, so this must agree with
+ * what a later 格式化 would produce for keywords — hence the keyword spans come
+ * from sql-formatter's own lexer ({@link loadSqlKeywordSpans}) rather than a
+ * word list. When the input cannot be classified the document is left as-is:
+ * `convertSqlSelectionCase` remains the explicit "convert everything" command
+ * in the context menu.
+ */
+async function convertCurrentSqlKeywordCase(mode: "upper" | "lower") {
+  if (props.readOnly) return;
+  // Mongo/Elasticsearch/Redis documents are not SQL. Their text can still look
+  // enough like a statement for the lexer to accept it — an ES request line
+  // `GET /_search` lexes as `GET` + path — so gate on the tab's real language
+  // rather than on whether tokenizing happens to succeed.
+  if (queryEditorSelectionLanguage() !== "sql") return;
+  const currentView = view.value;
+  if (!currentView) return;
+
+  const originalState = currentView.state;
+  const selection = originalState.selection.main;
+  const convertsSelection = !selection.empty;
+  const from = convertsSelection ? selection.from : 0;
+  const to = convertsSelection ? selection.to : originalState.doc.length;
+  const source = originalState.sliceDoc(from, to);
+  if (!source.trim()) return;
+
+  const formatDialect = props.formatDialect ?? props.dialect ?? "generic";
+  const spans = await loadSqlKeywordSpans(source, formatDialect);
+  // Edit races the await: the user may have typed, or switched tabs, since the
+  // request arrived. Re-check everything before dispatching.
+  if (!spans || currentView !== view.value || currentView.state !== originalState || originalState.sliceDoc(from, to) !== source) return;
+
+  const converted = applySqlKeywordCase(source, { from: 0, to: source.length }, mode, spans);
+  if (converted === source) return;
+
+  currentView.dispatch({
+    changes: { from, to, insert: converted },
+    selection: convertsSelection ? { anchor: from, head: from + converted.length } : { anchor: from + converted.length },
+  });
+}
+
 const batchSelection = useQueryEditorBatchSelection({
   view,
   settingsStore,
@@ -2414,6 +2460,19 @@ watch(
       lastHandledCompressRequestId = val;
       compressCurrentSql();
     }
+  },
+);
+
+watch(
+  () => props.keywordCaseRequestId,
+  (val) => {
+    if (!val || val <= lastHandledKeywordCaseRequestId) return;
+    lastHandledKeywordCaseRequestId = val;
+    // The direction travels with the request: the id alone says "a click
+    // happened", but the mode is what the toggle switched to, and reading it
+    // back from settings could race a second click.
+    const mode = props.keywordCaseRequestMode;
+    if (mode) void convertCurrentSqlKeywordCase(mode);
   },
 );
 

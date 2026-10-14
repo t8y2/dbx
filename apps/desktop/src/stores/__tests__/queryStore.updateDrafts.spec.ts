@@ -25,7 +25,10 @@ describe("update draft recovery", () => {
     const { UPDATE_RESTORE_KEY } = await import("@/lib/app/updatePreparation");
     const store = useQueryStore();
     const id = store.createTab("conn", "db");
-    Object.assign(store.tabs.find((tab) => tab.id === id)!, { savedSqlId: "saved", sql, originalSql: "SELECT 1;" });
+    Object.assign(
+      store.tabs.find((tab) => tab.id === id)!,
+      { savedSqlId: "saved", sql, originalSql: "SELECT 1;" },
+    );
     await store.flushPendingPersist();
     localStorage.setItem(UPDATE_RESTORE_KEY, "1");
     setActivePinia(createPinia());

@@ -17,7 +17,9 @@ const appSource = readFileSync(new URL("../../../App.vue", import.meta.url), "ut
 function bodyOf(fnSignature: string): string {
   const start = appSource.indexOf(fnSignature);
   expect(start, `expected to find "${fnSignature}" in App.vue`).toBeGreaterThanOrEqual(0);
-  const braceStart = appSource.indexOf("{", start);
+  const closingParen = appSource.indexOf(")", start);
+  const searchStart = closingParen >= 0 ? closingParen : start;
+  const braceStart = appSource.indexOf("{", searchStart);
   let depth = 0;
   for (let i = braceStart; i < appSource.length; i++) {
     if (appSource[i] === "{") depth++;
@@ -35,21 +37,30 @@ describe("new query entry context wiring", () => {
   });
 
   it("resolves the shared new-query entry from the active tab and unique online SQL connection", () => {
-    const body = bodyOf("async function newQuery()");
-    // Without an explicit source the resolver defaults to the active tab first
-    // and the selected sidebar node second, so all ad-hoc entries agree.
-    expect(body).not.toContain("preferredSource");
+    const body = bodyOf("async function newQuery");
     expect(body).toContain('quickConnectionOpenTarget(connection).kind === "query"');
     expect(body).toContain("connectedSqlConnectionIds,");
+    expect(body).toContain("preferredSource: options.preferredSource");
   });
 
   it("creates an unbound editor for manual SQL connection selection when the target is ambiguous", () => {
-    const body = bodyOf("async function newQuery()");
+    const body = bodyOf("async function newQuery");
     expect(body).toContain("if (sqlConnections.length > 0)");
     expect(body).toContain('queryStore.createTab("", "", undefined, "query")');
   });
 
-  it("keeps the editor-group entry focused on its own group", () => {
-    expect(bodyOf("newQuery: (groupId: string) =>")).toContain("queryStore.focusGroup(groupId)");
+  it("keeps the editor-group entry focused on its own group and tab context", () => {
+    const body = bodyOf("newQuery: (groupId: string) =>");
+    expect(body).toContain("queryStore.focusGroup(groupId)");
+    expect(body).toContain('preferredSource: "tab"');
+  });
+
+  it("routes keyboard shortcut with sidebar context when the sidebar is focused (#11801)", () => {
+    const body = bodyOf("async function handleKeydown");
+    expect(body).toContain('sidebarFocused ? "sidebar" : undefined');
+  });
+
+  it("clears lastFocusedSidebarSurface when editor content is clicked", () => {
+    expect(appSource).toContain("rememberEditorContentSurface");
   });
 });

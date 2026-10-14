@@ -51,7 +51,7 @@ describe("shortcutRegistry editor actions", () => {
     "foldAll",
     "unfoldAll",
   ];
-  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl"];
+  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl", "editSidebarTableStructure"];
 
   it("registers pagination navigation as unassigned grid shortcuts", () => {
     const paginationActions = [
@@ -278,6 +278,20 @@ describe("shortcutRegistry editor actions", () => {
     expect(normalizeShortcutSettings({ closeTab: "" }).closeTab).toBe("");
   });
 
+  it("registers reopenClosedTab as a global shortcut with Shift+Mod+T default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "reopenClosedTab");
+    expect(definition).toMatchObject({
+      id: "reopenClosedTab",
+      labelKey: "settings.shortcutReopenClosedTab",
+      scope: "global",
+      defaultShortcut: "Shift+Mod+T",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab).toBe("Shift+Mod+T");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab, "Win32")).toBe("Ctrl+Shift+T");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab, "MacIntel")).toBe("Shift+Cmd+T");
+    expect(findShortcutConflict("reopenClosedTab", DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("registers closeWindow as a global shortcut with Shift+Mod+W default", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "closeWindow");
     expect(definition).toMatchObject({
@@ -445,6 +459,13 @@ describe("shortcutRegistry editor actions", () => {
       expect(definition?.scope).toBe("sidebar");
       expect(DEFAULT_SHORTCUT_SETTINGS[actionId]).toBe(definition?.defaultShortcut);
     }
+  });
+
+  it("registers editSidebarTableStructure F4 as a conflict-free sidebar default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "editSidebarTableStructure");
+    expect(definition).toMatchObject({ scope: "sidebar", defaultShortcut: "F4", labelKey: "settings.shortcutEditSidebarTableStructure" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.editSidebarTableStructure).toBe("F4");
+    expect(findShortcutConflict("editSidebarTableStructure", DEFAULT_SHORTCUT_SETTINGS.editSidebarTableStructure, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
   it("detects conflicts only within sidebar shortcuts", () => {

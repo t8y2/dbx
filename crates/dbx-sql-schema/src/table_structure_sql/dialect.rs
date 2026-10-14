@@ -9,6 +9,7 @@ pub(super) enum StructureDialect {
     #[cfg(feature = "duckdb-sidecar")]
     DuckDb,
     SqlServer,
+    SapHana,
     Oracle,
     Dameng,
     // 神通 Oscar：Oracle 兼容方言，且支持 ALTER TABLE DROP/ADD PRIMARY KEY（与 Dameng 一致，
@@ -283,6 +284,14 @@ pub(super) fn capabilities_for(
             alter_primary_key: true,
             ..base
         },
+        Some(DatabaseType::SapHana) => TableStructureCapabilities {
+            dialect: StructureDialect::SapHana,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            ..base
+        },
         Some(DatabaseType::Dameng) => TableStructureCapabilities {
             dialect: StructureDialect::Dameng,
             add_column: true,
@@ -436,6 +445,7 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
         #[cfg(feature = "duckdb-sidecar")]
         StructureDialect::DuckDb => "duckdb",
         StructureDialect::SqlServer => "sqlserver",
+        StructureDialect::SapHana => "saphana",
         StructureDialect::Oracle => "oracle",
         StructureDialect::Dameng => "dameng",
         StructureDialect::Oscar => "oscar",
@@ -459,6 +469,7 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         #[cfg(feature = "duckdb-sidecar")]
         StructureDialect::DuckDb => Some(DatabaseType::DuckDb),
         StructureDialect::SqlServer => Some(DatabaseType::SqlServer),
+        StructureDialect::SapHana => Some(DatabaseType::SapHana),
         StructureDialect::Oracle => Some(DatabaseType::Oracle),
         StructureDialect::Dameng => Some(DatabaseType::Dameng),
         StructureDialect::Oscar => Some(DatabaseType::Oscar),

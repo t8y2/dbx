@@ -75,6 +75,42 @@ describe("settings search", () => {
     expect(searchSettings(entries, "line number", "en").map((entry) => entry.id)).toEqual(["editor-line-numbers"]);
   });
 
+  it("indexes the query editor caret-browsing preference (#11827)", () => {
+    const definition = SETTINGS_SEARCH_DEFINITIONS.find((entry) => entry.id === "editor-caret-browsing");
+    expect(definition).toEqual({
+      id: "editor-caret-browsing",
+      category: "editor",
+      titleKey: "settings.caretBrowsing",
+      descriptionKey: "settings.caretBrowsingDescription",
+      targetId: "editor",
+    });
+
+    const entries = resolveSettingsSearchEntries(
+      [definition!],
+      { isWeb: false, visibleCategories: new Set<SettingsCategory>(["editor"]) },
+      (key) =>
+        ({
+          "settings.caretBrowsing": "光标浏览 (F7)",
+          "settings.caretBrowsingDescription": "允许按 F7 切换浏览器的插入光标浏览模式",
+        })[key] ?? key,
+      categoryLabels,
+    );
+    expect(searchSettings(entries, "光标", "zh-CN")).toEqual([
+      expect.objectContaining({
+        id: "editor-caret-browsing",
+        category: "editor",
+        targetId: "editor",
+      }),
+    ]);
+    expect(searchSettings(entries, "F7", "zh-CN")).toEqual([
+      expect.objectContaining({
+        id: "editor-caret-browsing",
+        category: "editor",
+        targetId: "editor",
+      }),
+    ]);
+  });
+
   it("indexes SQL Server space confirmation when SQL Server exists or an exported setting is enabled", () => {
     const definition = SETTINGS_SEARCH_DEFINITIONS.find((entry) => entry.id === "editor-sqlserver-space-completion");
     expect(definition).toEqual(

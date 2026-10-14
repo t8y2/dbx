@@ -96,7 +96,7 @@ import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectName
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { isWindows } from "@/lib/backend/platform";
 import { flattenTree } from "@/composables/useFlatTree";
-import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { showSidebarRowProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
@@ -203,6 +203,8 @@ const props = defineProps<{
   pendingRename?: boolean;
   highlighted?: boolean;
   commentLabelWidth?: number;
+  /** This row is rendered as the fixed database/schema context. */
+  isStickyContext?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -230,9 +232,8 @@ const activeNode = shallowRef<TreeNode>(props.node);
 const isDisabledTrigger = computed(() => activeNode.value.type === "trigger" && (activeNode.value.meta as TriggerInfo | undefined)?.enabled === false);
 
 const showProductionBadge = computed(() => {
-  const connectionId = activeNode.value.connectionId;
-  const context = productionContextForDatabase(connectionId ? connectionStore.getConfig(connectionId) : undefined, activeNode.value.database);
-  return context.active && ["connection", "database", "redis-db", "mongo-db"].includes(activeNode.value.type);
+  const node = activeNode.value;
+  return showSidebarRowProductionBadge(node, node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined, props.isStickyContext);
 });
 
 function currentDatabaseType(): DatabaseType | undefined {
@@ -1027,7 +1028,7 @@ const rowStyle = computed(() => {
   const backgroundColor = hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08);
   return {
     paddingLeft: paddingLeft.value,
-    paddingRight: trailingComment.value ? "12px" : undefined,
+    paddingRight: props.isStickyContext && !showProductionBadge.value ? "72px" : trailingComment.value ? "12px" : undefined,
     "--tree-connection-row-bg": backgroundColor,
     "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.2 : 0.16),
     "--tree-connection-active-bg": hexToRgba(color, 0.18),

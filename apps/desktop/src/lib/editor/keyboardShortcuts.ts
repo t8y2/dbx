@@ -184,6 +184,10 @@ export function isCloseTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial
   return matchesShortcut(event, actionShortcut("closeTab", shortcuts));
 }
 
+export function isReopenClosedTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("reopenClosedTab", shortcuts));
+}
+
 export function isCloseOtherTabsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
   return matchesShortcut(event, actionShortcut("closeOtherTabs", shortcuts), platform);
 }
@@ -345,6 +349,10 @@ export function isViewTableDdlShortcut(event: ShortcutLikeEvent, shortcuts?: Par
   return matchesShortcut(event, actionShortcut("viewTableDdl", shortcuts));
 }
 
+export function isEditSidebarTableStructureShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("editSidebarTableStructure", shortcuts, platform), platform);
+}
+
 export function isQuickOpenShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("quickOpen", shortcuts));
 }
@@ -404,4 +412,27 @@ export function isBrowserTaskManagerShortcut(event: ShortcutLikeEvent): boolean 
   if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return false;
   if (!event.shiftKey) return false;
   return event.key === "Escape" || event.key === "Esc" || event.code === "Escape";
+}
+
+export function isCaretBrowsingShortcut(event: ShortcutLikeEvent): boolean {
+  if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+  return event.key === "F7" || event.code === "F7";
+}
+
+export function isConfiguredShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  if (!shortcuts) return false;
+  const normalized = normalizeShortcutSettings(shortcuts, platform);
+  return Object.values(normalized).some((shortcut) => matchesShortcut(event, shortcut, platform));
+}
+
+export interface CaretBrowsingBlockOptions {
+  caretBrowsingEnabled?: boolean;
+  shortcuts?: Partial<ShortcutSettings>;
+}
+
+export function shouldBlockCaretBrowsing(event: ShortcutLikeEvent, options?: CaretBrowsingBlockOptions, platform = globalThis.navigator?.platform || ""): boolean {
+  if (options?.caretBrowsingEnabled) return false;
+  if (!isCaretBrowsingShortcut(event)) return false;
+  if (options?.shortcuts && isConfiguredShortcut(event, options.shortcuts, platform)) return false;
+  return true;
 }

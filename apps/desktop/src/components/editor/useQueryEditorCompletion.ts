@@ -11,6 +11,7 @@ import {
   getSqlCompletionContext,
   getSqlCompletionResultValidFor,
   isSqlLikeCompletionStatement,
+  normalizeIdentifierPart,
   prepareSqlCompletionReplacement,
   recordCompletionSelection,
   shouldAutoOpenSqlCompletion,
@@ -933,7 +934,12 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       if (localResult) {
         scheduleCompletionMetadataRefresh(completionContext, fullDoc, position, completionScope);
         const hasLocalColumnResult = localResult.options.some((option) => option.type === "column");
-        if ((!explicit || typedActivation) && (!shouldResolveColumnCompletion || hasLocalColumnResult)) return localResult;
+        // A local snippet hit may skip the async column fetch, but not for on-demand-only
+        // column metadata (trino/presto): their fetch is never re-triggered from the
+        // metadata cache, so short-circuiting here would suppress column suggestions
+        // for as long as the typed prefix keeps matching the snippet prefix.
+        const hasLocalSnippetResult = !usesOnDemandOnlyCompletionColumns() && localResult.options.some((option) => option.type === "snippet");
+        if ((!explicit || typedActivation) && (!shouldResolveColumnCompletion || hasLocalColumnResult || hasLocalSnippetResult)) return localResult;
       }
       if ((!explicit || typedActivation) && !shouldResolveAsyncCompletion) {
         scheduleCompletionMetadataRefresh(completionContext, fullDoc, position, completionScope);
@@ -1415,11 +1421,28 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       const list = (schema: string | undefined, parentName?: string, globalSearch = false) =>
         connectionStore.listCompletionObjects(props.connectionId!, scope.database, completionContext.prefix, MAX_COMPLETION_TABLES, schema, parentName, globalSearch, scope.schema, objectKinds, !!completionContext.prefixQuoted);
       if (parts.length === 0) return list(scope.schema, undefined, true);
-      if (parts.length === 2) return list(parts[0], parts[1]);
+      if (parts.length === 2) {
+        let packageMembers: SqlCompletionObject[] = [];
+        try {
+          packageMembers = await list(parts[0], parts[1]);
+        } catch (error) {
+          if (/Package is not visible:/i.test(String(error)) && objectKinds.includes("sequence")) {
+            const schemaObjects = await list(parts[0]);
+            return schemaObjects.filter((obj) => obj.type === "sequence");
+          }
+          throw error;
+        }
+        if (packageMembers.length > 0) return packageMembers;
+        if (objectKinds.includes("sequence")) {
+          const schemaObjects = await list(parts[0]);
+          return schemaObjects.filter((obj) => obj.type === "sequence");
+        }
+        return [];
+      }
       if (parts.length > 2) return [];
       // One qualifier can name a schema or a package in the current schema.
-      const groups = await Promise.allSettled([list(parts[0]), list(scope.schema, parts[0])]);
-      if (groups[0].status === "rejected" && groups[1].status === "rejected") throw groups[0].reason;
+      const groups = await Promise.allSettled([list(parts[0]), list(scope.schema, parts[0]), ...(objectKinds.includes("sequence") && scope.schema && normalizeIdentifierPart(scope.schema) !== normalizeIdentifierPart(parts[0]) ? [list(scope.schema)] : [])]);
+      if (groups.every((g) => g.status === "rejected")) throw groups[0].status === "rejected" ? groups[0].reason : undefined;
       let objects: SqlCompletionObject[] = [];
       for (const group of groups) {
         if (group.status === "fulfilled") objects = mergeCompletionObjects(objects, group.value);

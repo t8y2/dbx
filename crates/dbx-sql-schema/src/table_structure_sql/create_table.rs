@@ -77,7 +77,10 @@ fn build_create_table_sql_impl(
         capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
         dialect = capabilities.dialect;
     }
-    options.table_name = clean(&options.table_name);
+    // OceanBase callers supply decoded identifiers, including quoted clone targets.
+    if options.database_type != Some(DatabaseType::OceanbaseOracle) {
+        options.table_name = clean(&options.table_name);
+    }
     strip_inherited_mysql_column_charsets(&mut options);
     let mut warnings = Vec::new();
     warnings.extend(validate_mysql_engine(&options));
@@ -216,7 +219,7 @@ fn build_create_table_sql_impl(
         if transwarp::is_partition_column(&options, column) {
             continue;
         }
-        let mut data_type = column_data_type(dialect, column);
+        let mut data_type = column_data_type(dialect, column, options.database_type);
         // SQLite accepts AUTOINCREMENT only on an exact INTEGER PRIMARY KEY,
         // so integer-family aliases are normalized when auto-increment is on.
         if dialect == StructureDialect::Sqlite

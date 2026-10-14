@@ -122,6 +122,15 @@ pub struct RedisKeyGrouping {
     pub rules: Vec<RedisKeyGroupRule>,
 }
 
+/// Sidebar marker presentation only; never changes production safety assessment.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionBadgeScope {
+    Connection,
+    Database,
+    Table,
+}
+
 #[derive(Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -284,6 +293,8 @@ pub struct ConnectionConfig {
     /// Database-level production markers for multi-database connections.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub production_databases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_badge_scope: Option<ProductionBadgeScope>,
     /// Metadata captured from the latest successful connection test for this saved config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_info: Option<DatabaseConnectionInfo>,
@@ -739,6 +750,8 @@ struct ConnectionConfigData {
     pub is_production: bool,
     #[serde(default)]
     pub production_databases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_badge_scope: Option<ProductionBadgeScope>,
     #[serde(default)]
     pub database_info: Option<DatabaseConnectionInfo>,
 }
@@ -812,6 +825,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             read_only: data.read_only,
             is_production: data.is_production,
             production_databases: data.production_databases,
+            production_badge_scope: data.production_badge_scope,
             database_info: data.database_info,
         }
     }
@@ -3001,7 +3015,7 @@ mod tests {
         database_info_from_protocol_value, default_query_timeout_secs, default_redis_key_separator,
         default_ssh_connect_timeout_secs, sqlserver_legacy_compatibility_param,
         without_sqlserver_legacy_compatibility_param, ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo,
-        DatabaseType, IdentifierCase, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
+        DatabaseType, IdentifierCase, ProductionBadgeScope, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
     };
 
     #[test]
@@ -3096,6 +3110,33 @@ mod tests {
     }
 
     #[test]
+    fn production_badge_scope_legacy_and_all_options_round_trip() {
+        let mut value = serde_json::to_value(mysql_config("root", "", Some("app"))).unwrap();
+        value["is_production"] = serde_json::json!(true);
+        value["production_databases"] = serde_json::json!(["app"]);
+        let legacy: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(legacy.production_badge_scope, None);
+        assert!(serde_json::to_value(legacy).unwrap().get("production_badge_scope").is_none());
+        for (name, expected) in [
+            ("connection", ProductionBadgeScope::Connection),
+            ("database", ProductionBadgeScope::Database),
+            ("table", ProductionBadgeScope::Table),
+        ] {
+            value["production_badge_scope"] = serde_json::json!(name);
+            let config: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(config.production_badge_scope, Some(expected));
+            assert!(config.is_production);
+            assert_eq!(config.production_databases, vec!["app"]);
+            let serialized = serde_json::to_value(&config).unwrap();
+            assert_eq!(serialized["production_badge_scope"], name);
+            assert_eq!(
+                serde_json::from_value::<ConnectionConfig>(serialized).unwrap().production_badge_scope,
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn show_database_links_opt_out_round_trips() {
         let mut value = serde_json::json!({
             "id": "id",
@@ -3183,6 +3224,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }

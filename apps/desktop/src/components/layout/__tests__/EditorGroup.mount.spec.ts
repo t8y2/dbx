@@ -113,6 +113,7 @@ describe("EditorGroup mount contract", () => {
             activeOutputView: "result",
             formatSqlRequest: null,
             compressSqlRequest: null,
+            keywordCaseRequest: null,
             selectedSql: "",
             cursorPos: 0,
             blockDangerousRedisCommands: false,
@@ -174,6 +175,7 @@ describe("EditorGroup mount contract", () => {
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
+      keywordCaseRequest: null,
       selectedSql: "",
       cursorPos: 0,
       blockDangerousRedisCommands: false,
@@ -204,6 +206,7 @@ describe("EditorGroup mount contract", () => {
       cancelExecution: vi.fn(),
       explain: vi.fn(),
       saveSql: vi.fn(),
+      toggleSqlKeywordCase: vi.fn(),
     };
 
     const host = createHost();
@@ -217,6 +220,7 @@ describe("EditorGroup mount contract", () => {
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
+      keywordCaseRequest: null,
       selectedSql: "",
       cursorPos: 0,
       blockDangerousRedisCommands: false,
@@ -238,6 +242,9 @@ describe("EditorGroup mount contract", () => {
     (toolbar as any).__vueParentComponent.emit("cancel");
     (toolbar as any).__vueParentComponent.emit("explain");
     (toolbar as any).__vueParentComponent.emit("saveSql", queryId);
+    // #11828: the keyword-case toggle must carry the acting tab, otherwise App
+    // cannot tell which editor to re-case (the button used to take no tab).
+    (toolbar as any).__vueParentComponent.emit("toggleSqlKeywordCase");
     await nextTick();
     expect(actions.captureExecutionSnapshot).toHaveBeenCalledWith(queryId);
     expect(actions.toolbarExecute).toHaveBeenCalledWith("pointer", queryId);
@@ -245,6 +252,7 @@ describe("EditorGroup mount contract", () => {
     expect(actions.cancelExecution).toHaveBeenCalledWith(queryId);
     expect(actions.explain).toHaveBeenCalledWith(queryId);
     expect(actions.saveSql).toHaveBeenCalledWith(queryId);
+    expect(actions.toggleSqlKeywordCase).toHaveBeenCalledWith(queryId);
 
     // Data tab: no SQL toolbar — the data grid carries its own built-in bar.
     app.unmount();
@@ -258,6 +266,7 @@ describe("EditorGroup mount contract", () => {
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
+      keywordCaseRequest: null,
       selectedSql: "",
       cursorPos: 0,
       blockDangerousRedisCommands: false,

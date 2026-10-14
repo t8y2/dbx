@@ -833,6 +833,7 @@ function toggleShowAll(table: DataCompareTableResult, kind: DiffKind) {
 function setDiffSelection(kind: DiffKind, selected: boolean) {
   if (executionLocked.value) return;
   batchResults.value.forEach((table) => {
+    if (!table.syncEligible) return;
     table.diff[kind].forEach((row) => {
       row.selected = selected;
     });
@@ -841,7 +842,7 @@ function setDiffSelection(kind: DiffKind, selected: boolean) {
 }
 
 function setTableDiffSelection(table: DataCompareTableResult, kind: DiffKind, selected: boolean) {
-  if (executionLocked.value) return;
+  if (executionLocked.value || !table.syncEligible) return;
   table.diff[kind].forEach((row) => {
     row.selected = selected;
   });
@@ -860,8 +861,8 @@ function clearAllSelections() {
   rebuildSyncPlan().catch((e) => toast(String(e), 5000));
 }
 
-function toggleRowSelection(row: SelectableDataCompareRow | SelectableDataCompareModifiedRow) {
-  if (executionLocked.value) return;
+function toggleRowSelection(table: DataCompareTableResult, row: SelectableDataCompareRow | SelectableDataCompareModifiedRow) {
+  if (executionLocked.value || !table.syncEligible) return;
   row.selected = !row.selected;
   rebuildSyncPlan().catch((e) => toast(String(e), 5000));
 }
@@ -1631,10 +1632,10 @@ onBeforeUnmount(() => {
                       <span class="font-medium">{{ t(`diff.${kind}`) }}</span>
                       <span class="text-muted-foreground">{{ selectedRows(item, kind) }}/{{ item.diff[kind].length }}</span>
                       <span class="flex-1" />
-                      <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="setTableDiffSelection(item, kind, true)">
+                      <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" :disabled="!item.syncEligible" @click="setTableDiffSelection(item, kind, true)">
                         {{ t("dataCompare.selectAllKind", { kind: t(`diff.${kind}`) }) }}
                       </Button>
-                      <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="setTableDiffSelection(item, kind, false)">
+                      <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" :disabled="!item.syncEligible" @click="setTableDiffSelection(item, kind, false)">
                         {{ t("dataCompare.clearKind", { kind: t(`diff.${kind}`) }) }}
                       </Button>
                       <Button v-if="item.diff[kind].length > detailPreviewLimitNumber" size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="toggleShowAll(item, kind)">
@@ -1643,7 +1644,14 @@ onBeforeUnmount(() => {
                     </div>
 
                     <div class="max-h-72 overflow-auto divide-y">
-                      <button v-for="row in rowsForDisplay(item, kind)" :key="`${item.sourceTable}:${kind}:${row.key}`" type="button" class="flex w-full items-start gap-3 px-3 py-2 text-left text-xs hover:bg-muted/40" @click="toggleRowSelection(row)">
+                      <button
+                        v-for="row in rowsForDisplay(item, kind)"
+                        :key="`${item.sourceTable}:${kind}:${row.key}`"
+                        type="button"
+                        class="flex w-full items-start gap-3 px-3 py-2 text-left text-xs hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-60"
+                        :disabled="!item.syncEligible"
+                        @click="toggleRowSelection(item, row)"
+                      >
                         <CheckSquare v-if="row.selected" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
                         <Square v-else class="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/40" />
                         <div class="min-w-0 flex-1">

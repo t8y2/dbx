@@ -379,6 +379,7 @@ export const loadAiConfigs = forward("loadAiConfigs");
 export const setDefaultAiConfig = forward("setDefaultAiConfig");
 export const saveAiConfigItem = forward("saveAiConfigItem");
 export const deleteAiConfig = forward("deleteAiConfig");
+export const loadCcSwitchAiConfigs = forward("loadCcSwitchAiConfigs");
 export const saveAiProviderConfig = forward("saveAiProviderConfig");
 export const loadAiProviderConfigs = forward("loadAiProviderConfigs");
 export const loadDesktopSettings = forward("loadDesktopSettings");
@@ -397,6 +398,7 @@ export const loadMaxRetries = forward("loadMaxRetries");
 export const saveMaxRetries = forward("saveMaxRetries");
 export const completeAppClose = forward("completeAppClose");
 export const requestAppClose = forward("requestAppClose");
+export const setShortcutRecording = forward("setShortcutRecording");
 export const setDriverStoreDir = forward("setDriverStoreDir");
 export const setPluginStoreDir = forward("setPluginStoreDir");
 export const setAgentStoreDir = forward("setAgentStoreDir");
@@ -499,6 +501,9 @@ export const saveGlobalSearchSettings = forward("saveGlobalSearchSettings");
 export const createSqlFileInFolder = forward("createSqlFileInFolder");
 export const renameSqlFileInFolder = forward("renameSqlFileInFolder");
 export const deleteSqlFileInFolder = forward("deleteSqlFileInFolder");
+export const createSqlFolderInFolder = forward("createSqlFolderInFolder");
+export const renameSqlFolderInFolder = forward("renameSqlFolderInFolder");
+export const deleteSqlFolderInFolder = forward("deleteSqlFolderInFolder");
 
 // Nacos
 export const nacosTestConnection = forward("nacosTestConnection");
@@ -592,6 +597,12 @@ export const startQueryResultExport = forward("startQueryResultExport");
 export const cancelQueryResultExport = forward("cancelQueryResultExport");
 export const openQueryResultTempFile = forward("openQueryResultTempFile");
 export const createQueryResultTempFile = forward("createQueryResultTempFile");
+
+// Dameng native .dmp dump (dexp/dimp)
+export const startDamengDump = forward("startDamengDump");
+export const cancelDamengDump = forward("cancelDamengDump");
+export const resolveDamengDumpTool = forward("resolveDamengDumpTool");
+export type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
 
 // Redis
 export const redisListDatabases = forward("redisListDatabases");
@@ -964,6 +975,7 @@ export const rotateMcpHttpServerToken = forward("rotateMcpHttpServerToken");
 export const loadWebMcpHttpStatus = forward("loadWebMcpHttpStatus");
 export const saveWebMcpHttpSettings = forward("saveWebMcpHttpSettings");
 export const rotateWebMcpToken = forward("rotateWebMcpToken");
+export const loadWebCapabilities = forward("loadWebCapabilities");
 export const checkForUpdates = forward("checkForUpdates");
 export const fetchChangelog = forward("fetchChangelog");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
@@ -1044,6 +1056,7 @@ export type {
   McpHttpServerStatus,
   WebMcpHttpStatus,
   WebMcpHttpSettings,
+  WebCapabilities,
   UpdateInfo,
   DownloadedUpdate,
   RedisBlob,
@@ -1187,3 +1200,4 @@ export const mqttListSavedTopicConfigs = forward("mqttListSavedTopicConfigs");
 export const mqttGetTopicTree = forward("mqttGetTopicTree");
 export const mqttGetMessages = forward("mqttGetMessages");
 export const mqttClearMessages = forward("mqttClearMessages");
+export const mqttDeleteMessage = forward("mqttDeleteMessage");

@@ -1,4 +1,4 @@
-import { Copy, Crosshair, Pencil, Pin, X } from "@lucide/vue";
+import { Copy, Crosshair, Pencil, Pin, RotateCcw, X } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/customContextMenuRegistry";
 import type { QueryTab } from "@/types/database";
 
@@ -42,6 +42,16 @@ export function createPinTabMenuItem(options: { label: string; iconClass?: strin
 
 export function createCloseTabMenuItem(options: { label: string; onClose: () => void }): ContextMenuItem {
   return { label: options.label, action: options.onClose, icon: X };
+}
+
+export function createReopenClosedTabMenuItem(options: { label: string; disabled?: boolean; shortcut?: string; onReopen: () => void }): ContextMenuItem {
+  return {
+    label: options.label,
+    action: options.onReopen,
+    ...(options.disabled !== undefined ? { disabled: options.disabled } : {}),
+    ...(options.shortcut ? { shortcut: options.shortcut } : {}),
+    icon: RotateCcw,
+  };
 }
 
 export function createCloseOtherTabMenuItem(options: { label: string; disabled?: boolean; shortcut?: string; onClose: () => void }): ContextMenuItem {

@@ -32,7 +32,7 @@ import { needsSidebarObjectGroupDiscovery } from "@/lib/sidebar/sidebarSearchDis
 import { isSidebarSearchPrunedDatabaseNode, resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 import { createSidebarSearchExpansionState } from "@/lib/sidebar/sidebarSearchExpansionState";
 import { createSidebarSearchLoadingTracker } from "@/lib/sidebar/sidebarSearchLoadingTracker";
-import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isEditSidebarTableStructureShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
 import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
@@ -65,6 +65,9 @@ import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } fro
 import { createSidebarTableSearchDebouncer, invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex, scheduleExclusiveSidebarTableSearchDebounce } from "@/lib/sidebar/sidebarTableSearchIndex";
 import { runSidebarSearchTasks, type SidebarSearchTask } from "./sidebarSearchTaskRunner";
 import TreeItem from "./TreeItem.vue";
+import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
+import { showSidebarStickyProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
+import { resolvePlainStickyContainerIndex } from "@/lib/sidebar/sidebarStickyProductionContext";
 import ActiveConnectionFilterButton from "./ActiveConnectionFilterButton.vue";
 import SidebarListOptionsIcon from "./SidebarListOptionsIcon.vue";
 import SidebarLocateButton from "./SidebarLocateButton.vue";
@@ -1102,6 +1105,7 @@ watch(
 // individual rows. A shared overlay can be pushed out by the next connection
 // boundary, while native sticky rows would cover that non-sticky connection.
 const stickyScrollTop = ref(0);
+const plainStickyContainerIndex = ref(-1);
 const sidebarScrollMetrics = ref({ scrollTop: 0, scrollLeft: 0, clientHeight: 0, clientWidth: 0, scrollHeight: 0, scrollWidth: 0 });
 const isScrollingSidebar = ref(false);
 const isDraggingSidebarScrollbar = ref(false);
@@ -1120,6 +1124,13 @@ function updateSidebarScrollMetrics() {
   }
 
   stickyScrollTop.value = scroller.scrollTop;
+  if (useVirtualTree.value || isTreeSearchFiltering.value) {
+    plainStickyContainerIndex.value = -1;
+  } else {
+    const scrollerTop = scroller.getBoundingClientRect().top + scroller.clientTop;
+    const rows = Array.from(scroller.querySelectorAll<HTMLElement>("[data-node-id]")).map((row) => ({ nodeId: row.dataset.nodeId ?? "", top: row.getBoundingClientRect().top }));
+    plainStickyContainerIndex.value = resolvePlainStickyContainerIndex(flatNodes.value, flatTreeIndex.value, rows, scrollerTop);
+  }
   sidebarScrollMetrics.value = {
     scrollTop: scroller.scrollTop,
     scrollLeft: scroller.scrollLeft,
@@ -1182,6 +1193,7 @@ watch(
 
 const stickyContainerIndex = computed(() => {
   if (isTreeSearchFiltering.value) return -1;
+  if (!useVirtualTree.value) return plainStickyContainerIndex.value;
   const nodes = flatNodes.value;
   const len = nodes.length;
   if (len === 0) return -1;
@@ -1243,11 +1255,24 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
   const nextBoundaryIndex = flatTreeIndex.value.nextBoundaryIndexByIndex[currentIndex] ?? -1;
   const nextCollisionIndex = nextContainerIndex < 0 ? nextBoundaryIndex : nextBoundaryIndex < 0 ? nextContainerIndex : Math.min(nextContainerIndex, nextBoundaryIndex);
   if (nextCollisionIndex < 0) return {};
-  const distanceToNext = nextCollisionIndex * sidebarTreeRowHeight.value - stickyScrollTop.value;
+  let distanceToNext = nextCollisionIndex * sidebarTreeRowHeight.value - stickyScrollTop.value;
+  if (!useVirtualTree.value) {
+    const scroller = plainTreeScrollerRef.value;
+    const nextNodeId = flatNodes.value[nextCollisionIndex]?.id;
+    const nextRow = nextNodeId ? Array.from(scroller?.querySelectorAll<HTMLElement>("[data-node-id]") ?? []).find((row) => row.dataset.nodeId === nextNodeId) : undefined;
+    if (scroller && nextRow) distanceToNext = nextRow.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+  }
   if (distanceToNext >= stickyHeaderHeight.value) return {};
   return {
     transform: `translateY(${Math.min(0, distanceToNext - stickyHeaderHeight.value)}px)`,
   };
+});
+
+// Keep the badge outside the translated header so production-to-production
+// handovers do not cover or remount it. Both tree renderers share this context.
+const stickyProductionContext = computed(() => {
+  const node = stickyNode.value?.node;
+  return showSidebarStickyProductionBadge(node, node?.connectionId ? store.getConfig(node.connectionId) : undefined);
 });
 
 // Clamp tracking when the tree rebuilds, preserving the search input in the
@@ -2179,6 +2204,13 @@ function openSidebarDdlForSelection(): boolean {
   return true;
 }
 
+function openSidebarTableStructureForSelection(): boolean {
+  const selectedNodeId = store.selectedTreeNodeId;
+  const node = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : null;
+  if (!node) return false;
+  return sidebarTreeRuntimeHostRef.value?.openStructureEditorForSelection?.(node) ?? false;
+}
+
 function openSidebarElasticsearchIndexMetadata(node: TreeNode, kind: ElasticsearchIndexMetadataKind) {
   if (!node.connectionId) return;
   beginSidebarAction();
@@ -2498,6 +2530,13 @@ function onWindowKeydown(event: KeyboardEvent) {
       }
       return;
     }
+    if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isEditSidebarTableStructureShortcut(event, settingsStore.editorSettings.shortcuts)) {
+      if (openSidebarTableStructureForSelection()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
   }
 
   if (!pointerInsideTree.value || isEditableSidebarTypeSearchTarget(event.target) || isEditableSidebarTypeSearchTarget(document.activeElement)) return;
@@ -2666,7 +2705,7 @@ onUnmounted(() => {
   if (sidebarTreeContentMeasureFrame) window.cancelAnimationFrame(sidebarTreeContentMeasureFrame);
 });
 
-defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSidebar, disconnectAllActiveConnections });
+defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSidebar, disconnectAllActiveConnections, openTableStructureForSelection: openSidebarTableStructureForSelection });
 </script>
 
 <template>
@@ -2801,9 +2840,13 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
             :reorder-disabled="true"
             :reference-drag-disabled="true"
             :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
+            :is-sticky-context="stickyProductionContext"
             @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
           />
           <TreeItem v-if="stickyTableSearchNode" :key="stickyTableSearchNode.renderKey" :node="stickyTableSearchNode.node" :depth="stickyTableSearchNode.depth" :reorder-disabled="true" :reference-drag-disabled="true" />
+        </div>
+        <div v-if="stickyProductionContext" class="sidebar-sticky-production" :style="{ height: `${sidebarTreeRowHeight}px` }">
+          <ProductionContextBadge compact />
         </div>
         <div
           v-if="hasSidebarVerticalOverflow"
@@ -2850,9 +2893,13 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
             :reorder-disabled="true"
             :reference-drag-disabled="true"
             :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
+            :is-sticky-context="stickyProductionContext"
             @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
           />
           <TreeItem v-if="stickyTableSearchNode" :key="stickyTableSearchNode.renderKey" :node="stickyTableSearchNode.node" :depth="stickyTableSearchNode.depth" :reorder-disabled="true" :reference-drag-disabled="true" />
+        </div>
+        <div v-if="stickyProductionContext" class="sidebar-sticky-production" :style="{ height: `${sidebarTreeRowHeight}px` }">
+          <ProductionContextBadge compact />
         </div>
         <div
           v-if="hasSidebarVerticalOverflow"
@@ -2993,6 +3040,16 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
 </template>
 
 <style scoped>
+.sidebar-sticky-production {
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  right: 8px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+}
+
 .sticky-database-header {
   background-color: var(--sidebar);
   container-type: inline-size;

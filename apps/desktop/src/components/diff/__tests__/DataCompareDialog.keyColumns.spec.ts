@@ -206,6 +206,7 @@ function preparationFor(table: string) {
     sourceTruncated: false,
     targetTruncated: false,
     rowBudget: 100_000,
+    syncEligible: true,
   };
 }
 

@@ -5,10 +5,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 const VERSIONS_PATH = "agents/versions.json";
 const VERSION_SYNC_SUBJECT = "chore: bump module versions [skip ci]";
 const JRE_BUILD_PATHS = new Set([".github/workflows/agents-release.yml"]);
-const NATIVE_RELEASE_PACKAGING_PATHS = new Set([
-  ".github/scripts/reuse-agent-release-assets.mjs",
-  "agents/scripts/version_agent_artifacts.py",
-]);
+const NATIVE_RELEASE_PACKAGING_PATHS = new Set([".github/scripts/reuse-agent-release-assets.mjs", "agents/scripts/version_agent_artifacts.py"]);
 
 function bumpPatchVersion(version) {
   const match = /^(\d+)\.(\d+)\.(\d+)(.*)$/.exec(version);
@@ -35,11 +32,7 @@ export function parseLegacyStandaloneProjects(buildGradle) {
   const match = /legacyStandaloneProjects\s*=\s*\[([^\]]*)\]/m.exec(buildGradle);
   if (!match) return new Set();
 
-  return new Set(
-    [...match[1].matchAll(/['"]([^'"]+)['"]/g)]
-      .map((entry) => entry[1])
-      .filter(Boolean),
-  );
+  return new Set([...match[1].matchAll(/['"]([^'"]+)['"]/g)].map((entry) => entry[1]).filter(Boolean));
 }
 
 function fileContainsCommonDependency(path, moduleExists, readModuleFile) {
@@ -72,23 +65,10 @@ const crateNativeDriverDirectories = {
 };
 const nativeDriverModules = new Set(["cassandra", "duckdb", "hive", "argo", "oracle", "oracle-oci", "xugu", "kingbase", "iotdb", "neo4j", "nebula", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "etcd", "etcd2", "sqlite-worker"]);
 const nativeDriverSharedPaths = {
-  hive: [
-    "agents/go-common/go-gssapi",
-    "agents/go-common/gohive",
-    "agents/go-common/gosasl",
-  ],
-  argo: [
-    "agents/go-common/go-gssapi",
-    "agents/go-common/gohive",
-    "agents/go-common/gosasl",
-  ],
-  zookeeper: [
-    "agents/go-common/go-gssapi",
-    "agents/go-common/gosasl",
-  ],
-  etcd: [
-    "agents/go-common/go-semver",
-  ],
+  hive: ["agents/go-common/go-gssapi", "agents/go-common/gohive", "agents/go-common/gosasl"],
+  argo: ["agents/go-common/go-gssapi", "agents/go-common/gohive", "agents/go-common/gosasl"],
+  zookeeper: ["agents/go-common/go-gssapi", "agents/go-common/gosasl"],
+  etcd: ["agents/go-common/go-semver"],
 };
 
 function resolveAgentModule(moduleName, { legacyStandaloneModules, moduleExists, readModuleFile }) {
@@ -137,16 +117,7 @@ function classifyModules(versions, options) {
     .filter(({ module }) => module);
 }
 
-export function evaluateAgentVersionBump({
-  versions,
-  prevVersions = versions,
-  changedFiles,
-  legacyStandaloneModules = new Set(),
-  moduleExists = existsSync,
-  readModuleFile = (path) => readFileSync(path, "utf8"),
-  skipBump = false,
-  manualVersionsChanged = changedFiles.includes(VERSIONS_PATH),
-}) {
+export function evaluateAgentVersionBump({ versions, prevVersions = versions, changedFiles, legacyStandaloneModules = new Set(), moduleExists = existsSync, readModuleFile = (path) => readFileSync(path, "utf8"), skipBump = false, manualVersionsChanged = changedFiles.includes(VERSIONS_PATH) }) {
   const nextVersions = { ...versions };
   const logs = [];
   let changed = false;
@@ -180,8 +151,7 @@ export function evaluateAgentVersionBump({
   }
 
   for (const { moduleName, module } of resolvedModules) {
-    const moduleChanged = [module.modulePath, ...module.sharedPaths]
-      .some((path) => pathChanged(changedFiles, path));
+    const moduleChanged = [module.modulePath, ...module.sharedPaths].some((path) => pathChanged(changedFiles, path));
     // Only modules that package agents/common need installer-visible updates
     // for shared Java runtime changes; native and standalone agents do not.
     const commonAffectsModule = commonChanged && module.commonDependent;
@@ -233,22 +203,15 @@ function git(args) {
 }
 
 function lines(value) {
-  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 export function resolveAgentReleaseBaseline({ prevTag, headRef = "HEAD", gitOutput = git }) {
   const allChangedFiles = lines(gitOutput(["diff", "--name-only", `${prevTag}..${headRef}`]));
-  const versionCommits = lines(
-    gitOutput([
-      "log",
-      "--reverse",
-      "--ancestry-path",
-      "--format=%H%x09%s",
-      `${prevTag}..${headRef}`,
-      "--",
-      VERSIONS_PATH,
-    ]),
-  );
+  const versionCommits = lines(gitOutput(["log", "--reverse", "--ancestry-path", "--format=%H%x09%s", `${prevTag}..${headRef}`, "--", VERSIONS_PATH]));
 
   let syncCommit = "";
   for (const entry of versionCommits) {
@@ -266,12 +229,8 @@ export function resolveAgentReleaseBaseline({ prevTag, headRef = "HEAD", gitOutp
 
   const versionsRef = syncCommit || prevTag;
   const versions = JSON.parse(gitOutput(["show", `${versionsRef}:${VERSIONS_PATH}`]));
-  const versionsChangedAfterSync = syncCommit
-    ? lines(gitOutput(["log", "--format=%H", `${syncCommit}..${headRef}`, "--", VERSIONS_PATH])).length > 0
-    : false;
-  const changedFiles = syncCommit && !versionsChangedAfterSync
-    ? allChangedFiles.filter((file) => file !== VERSIONS_PATH)
-    : allChangedFiles;
+  const versionsChangedAfterSync = syncCommit ? lines(gitOutput(["log", "--format=%H", `${syncCommit}..${headRef}`, "--", VERSIONS_PATH])).length > 0 : false;
+  const changedFiles = syncCommit && !versionsChangedAfterSync ? allChangedFiles.filter((file) => file !== VERSIONS_PATH) : allChangedFiles;
 
   return {
     prevTag,

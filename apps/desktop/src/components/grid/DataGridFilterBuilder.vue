@@ -379,7 +379,7 @@ async function openFirstEmptyRuleColumnSearch() {
   if (rule) await handleColumnSelectOpen(rule, true);
 }
 
-defineExpose({ openFirstEmptyRuleColumnSearch });
+defineExpose({ openFirstEmptyRuleColumnSearch, focusFilterRuleValue });
 
 function handleColumnCloseAutoFocus(id: string, event: Event) {
   if (pendingKeyboardAddFocus.delete(id)) {

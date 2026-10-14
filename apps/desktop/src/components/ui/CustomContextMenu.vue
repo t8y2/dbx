@@ -372,7 +372,7 @@ onBeforeUnmount(() => {
           >
             <span v-if="child.checkedStyle !== 'switch'" class="flex size-4 shrink-0 items-center justify-center">
               <Check v-if="child.checked" class="size-4 text-primary" />
-              <component :is="child.icon" v-else-if="child.icon" :class="['size-4', child.iconClass]" />
+              <component :is="child.icon ?? activeItems[activeSubIndex]!.icon" v-else-if="child.icon || activeItems[activeSubIndex]!.icon" :class="['size-4', child.iconClass ?? (child.icon ? undefined : activeItems[activeSubIndex]!.iconClass)]" />
             </span>
             <span class="flex-1 whitespace-nowrap">{{ child.label }}</span>
             <span v-if="child.checkedStyle === 'switch'" aria-hidden="true" class="ml-3 flex h-3.5 w-6 shrink-0 items-center rounded-full p-0.5 transition-colors" :class="child.checked ? 'bg-primary' : 'bg-input'">

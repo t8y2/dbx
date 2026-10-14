@@ -20,6 +20,7 @@ mod webview2_recovery;
 mod window_state_guard;
 
 use commands::connection::AppState;
+use dbx_core::persistence::secret_codec::SecretKeyPolicy;
 use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
 use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::{maybe_import_user_data_db, DesktopIconTheme, DesktopSettings, Storage};
@@ -952,10 +953,14 @@ fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
 }
 
 #[cfg(target_os = "macos")]
-fn apply_macos_app_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+fn apply_macos_app_icon_theme(
+    app: &tauri::AppHandle,
+    icon_theme: DesktopIconTheme,
+    persist_bundle_icon: bool,
+) -> tauri::Result<()> {
     use objc2::{AllocAnyThread, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSImage};
-    use objc2_foundation::NSData;
+    use objc2_app_kit::{NSApplication, NSImage, NSWorkspace, NSWorkspaceIconCreationOptions};
+    use objc2_foundation::{NSBundle, NSData, NSString};
 
     let icon_bytes = match icon_theme {
         DesktopIconTheme::Default => MACOS_DEFAULT_APP_ICON,
@@ -966,9 +971,31 @@ fn apply_macos_app_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconThe
         // app switcher reflect the selected theme immediately.
         let marker = unsafe { MainThreadMarker::new_unchecked() };
         let application = NSApplication::sharedApplication(marker);
+        let workspace = NSWorkspace::sharedWorkspace();
+        let app_bundle_path = NSBundle::mainBundle().bundlePath();
         let data = NSData::with_bytes(icon_bytes);
         if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
             unsafe { application.setApplicationIconImage(Some(&icon)) };
+
+            // NSApplication only changes the icon for this process lifetime.
+            // Persist the selected icon on the app bundle so Finder and the
+            // Dock keep showing it after DBX exits. A nil image removes the
+            // custom icon and restores the bundle's packaged default.
+            if persist_bundle_icon {
+                let persistent_icon = match icon_theme {
+                    DesktopIconTheme::Default => None,
+                    DesktopIconTheme::Black => Some(&*icon),
+                };
+                if app_bundle_path.hasSuffix(&NSString::from_str(".app"))
+                    && !workspace.setIcon_forFile_options(
+                        persistent_icon,
+                        &app_bundle_path,
+                        NSWorkspaceIconCreationOptions::empty(),
+                    )
+                {
+                    log::warn!("Failed to persist the selected macOS app icon; the app bundle may not be writable");
+                }
+            }
         } else {
             log::warn!("Failed to decode the selected macOS application icon");
         }
@@ -990,10 +1017,10 @@ fn apply_macos_development_dock_badge(app: &tauri::AppHandle) -> tauri::Result<(
     })
 }
 
-fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+pub(crate) fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        apply_macos_app_icon_theme(app, icon_theme)
+        apply_macos_app_icon_theme(app, icon_theme, true)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1597,6 +1624,7 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
+                .skip_initial_state("main")
                 .build(),
         );
 
@@ -1634,6 +1662,7 @@ pub fn run() {
             create_linux_main_window(app)?;
             eprintln!("[STARTUP] plugins registered in {:?}", startup_begin.elapsed());
             append_startup_probe(format!("setup entered after {:?}", startup_begin.elapsed()));
+            window_state_guard::restore_main_window_state(app.handle());
 
             if should_show_main_window_before_setup_tasks() {
                 prepare_main_window_for_display(app.handle());
@@ -1649,6 +1678,7 @@ pub fn run() {
                 app.path().app_data_dir().map_err(|e| e.to_string()).expect("Failed to resolve app data dir");
             let data_dir_resolution = data_dir::resolve_data_dir_with_mode(default_data_dir);
             let data_dir = data_dir_resolution.data_dir.clone();
+            let portable_mode = data_dir_resolution.is_portable_mode();
             std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
             let data_dir_mode = startup_data_dir_mode(&data_dir_resolution.mode);
             append_startup_probe(format!("data dir ready mode={data_dir_mode}"));
@@ -1667,7 +1697,18 @@ pub fn run() {
             let t = Instant::now();
             append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
-                let s = Storage::open_unmigrated(&db_path).await.expect("Failed to open storage");
+                let mut s = Storage::open_unmigrated(&db_path).await.expect("Failed to open storage");
+                if portable_mode {
+                    s = s.with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+                    match s.prepare_portable_secret_key().await {
+                        Ok(true) => append_startup_probe("portable key copied from the platform credential store"),
+                        Ok(false) => {}
+                        Err(error) => {
+                            log::warn!("[STARTUP] portable key preparation failed: {error}");
+                            append_startup_probe(format!("portable key preparation failed: {error}"));
+                        }
+                    }
+                }
                 eprintln!("[STARTUP]   Storage::open in {:?}", t.elapsed());
                 append_startup_probe(format!("storage opened in {:?}", t.elapsed()));
                 let t2 = Instant::now();
@@ -1941,6 +1982,7 @@ pub fn run() {
             commands::ai_multi_config::set_default_ai_config,
             commands::ai_multi_config::save_ai_config_item,
             commands::ai_multi_config::delete_ai_config,
+            commands::cc_switch::load_cc_switch_ai_configs,
             commands::prompt_template::load_prompt_templates,
             commands::prompt_template::save_prompt_template,
             commands::prompt_template::delete_prompt_template,
@@ -2238,6 +2280,9 @@ pub fn run() {
             commands::list_sql_files::create_sql_file_in_folder,
             commands::list_sql_files::rename_sql_file_in_folder,
             commands::list_sql_files::delete_sql_file_in_folder,
+            commands::list_sql_files::create_sql_folder_in_folder,
+            commands::list_sql_files::rename_sql_folder_in_folder,
+            commands::list_sql_files::delete_sql_folder_in_folder,
             commands::global_search::global_search,
             commands::external_db::pending_open_db_files,
             commands::keychain::read_keychain_password,
@@ -2378,6 +2423,7 @@ pub fn run() {
             commands::saved_sql::saved_sql_storage_dir,
             commands::saved_sql::open_saved_sql_storage_dir,
             commands::saved_sql::sync_saved_sql_directory,
+            commands::shortcut_recording::set_shortcut_recording,
             commands::fs_open::reveal_path_in_file_manager,
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,
@@ -2645,6 +2691,8 @@ pub fn run() {
             commands::mqtt_cmd::mqtt_get_messages,
             #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_clear_messages,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_delete_message,
             commands::history::save_history,
             commands::history::load_history,
             commands::history::search_history,
@@ -2680,6 +2728,9 @@ pub fn run() {
             commands::database_export::record_database_export_destination,
             commands::table_export::start_table_export,
             commands::table_export::cancel_table_export,
+            commands::dameng_dump::start_dameng_dump,
+            commands::dameng_dump::cancel_dameng_dump,
+            commands::dameng_dump::resolve_dameng_dump_tool,
             commands::query_result_export::start_query_result_export,
             commands::query_result_export::create_query_result_temp_file,
             commands::query_result_export::open_query_result_temp_file,

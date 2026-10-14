@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 590
 dbType: spanner
+compareModes: [schema, data]
 rustVariant: Spanner
 label: Google Cloud Spanner
 runtimeMode: agent

@@ -1133,14 +1133,17 @@ const POSTGRES_PROOF_SAFE_FUNCTIONS: &[&str] = &[
 ];
 
 /// Prove that a single SQL statement is, by DBX's strict heuristic, an
-/// ordinary read. Only MySQL/PostgreSQL take part in this proof; every other
-/// database type is Unproven so its manual-transaction toolbar keeps the
-/// legacy behavior. Oracle keeps its own lexical classifier
-/// (`is_oracle_proven_read_only_statement`) — do not reroute it here.
+/// ordinary read. Only MySQL and the PostgreSQL family (PostgreSQL, GaussDB,
+/// openGauss) take part in this proof; every other database type is Unproven so
+/// its manual-transaction toolbar keeps the legacy behavior. Oracle keeps its
+/// own lexical classifier (`is_oracle_proven_read_only_statement`) — do not
+/// reroute it here.
 pub fn prove_read_only_for_database(sql: &str, database_type: DatabaseType) -> ReadProof {
     match database_type {
         DatabaseType::Mysql => prove_read_only_statement(sql, "mysql", MYSQL_PROOF_SAFE_FUNCTIONS),
-        DatabaseType::Postgres => prove_read_only_statement(sql, "postgres", POSTGRES_PROOF_SAFE_FUNCTIONS),
+        DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::OpenGauss => {
+            prove_read_only_statement(sql, "postgres", POSTGRES_PROOF_SAFE_FUNCTIONS)
+        }
         _ => ReadProof::Unproven,
     }
 }
@@ -1372,6 +1375,24 @@ mod tests {
             prove_read_only_for_database("SELECT * FROM (SELECT 1) AS x ORDER BY md5(id)", DatabaseType::Postgres),
             ReadProof::ProvenReadOnly
         );
+    }
+
+    #[test]
+    fn proof_maps_gaussdb_family_to_postgres_proof() {
+        // GaussDB/openGauss are PostgreSQL-family engines: they share the PG
+        // proof so their sticky manual-transaction toolbar behaves like PG.
+        for sql in ["SELECT 1", "SELECT * FROM users", "EXPLAIN SELECT * FROM t"] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Gaussdb),
+                ReadProof::ProvenReadOnly,
+                "expected proven for Gaussdb: {sql}"
+            );
+        }
+        assert_eq!(
+            prove_read_only_for_database("UPDATE users SET x = 1", DatabaseType::OpenGauss),
+            ReadProof::Unproven
+        );
+        assert_eq!(prove_read_only_for_database("SELECT nextval('seq')", DatabaseType::Gaussdb), ReadProof::Unproven);
     }
 
     #[test]

@@ -28,17 +28,27 @@ const publishPanelRef = ref<HTMLElement | null>(null);
 const payloadTextareaRef = ref<HTMLTextAreaElement | null>(null);
 const payloadHeight = ref(80);
 const resizing = ref(false);
+const formVersion = ref(0);
 
 const MQTT_PAYLOAD_MIN_HEIGHT_PX = 60;
 const MQTT_PAYLOAD_MAX_PANEL_RATIO = 0.5;
 const MQTT_PAYLOAD_KEYBOARD_STEP_PX = 10;
 const MQTT_PAYLOAD_HEIGHT_STORAGE_KEY = "dbx-mqtt-payload-height";
+const MQTT_LAST_PUBLISHED_MESSAGE_KEY_PREFIX = "dbx-mqtt-last-published-message:";
 let resizeStartY = 0;
 let resizeStartHeight = 0;
 let panelResizeObserver: ResizeObserver | undefined;
 
 const qosLabels = ["QoS 0", "QoS 1", "QoS 2"];
 const qosHints = computed(() => [t("connection.mqttQosAtMostOnce"), t("connection.mqttQosAtLeastOnce"), t("connection.mqttQosExactlyOnce")]);
+
+watch(
+  () => [topic.value, qos.value, retain.value, payloadText.value, encoding.value],
+  () => {
+    formVersion.value += 1;
+  },
+  { flush: "sync" },
+);
 
 /* 根据编码格式调整输入提示和占位符 */
 const payloadPlaceholder = computed(() => {
@@ -61,11 +71,91 @@ const payloadPlaceholder = computed(() => {
 watch(
   () => props.initialTopic,
   (val) => {
-    if (val !== undefined && val !== topic.value) {
+    if (val !== undefined && val !== topic.value && !hasStoredPublishForm()) {
       topic.value = val;
     }
   },
 );
+
+watch(
+  () => props.connectionId,
+  () => {
+    restoreLastPublishedMessage();
+  },
+);
+
+function lastPublishedMessageStorageKey() {
+  return `${MQTT_LAST_PUBLISHED_MESSAGE_KEY_PREFIX}${encodeURIComponent(props.connectionId)}`;
+}
+
+function hasStoredPublishForm() {
+  try {
+    return localStorage.getItem(lastPublishedMessageStorageKey()) !== null;
+  } catch {
+    return false;
+  }
+}
+
+function restoreLastPublishedMessage(): boolean {
+  try {
+    const raw = localStorage.getItem(lastPublishedMessageStorageKey());
+    if (!raw) {
+      topic.value = props.initialTopic || "";
+      qos.value = 0;
+      retain.value = false;
+      payloadText.value = "";
+      encoding.value = "plaintext";
+      return false;
+    }
+    const saved = JSON.parse(raw) as Partial<{
+      cleared: boolean;
+      topic: string;
+      qos: 0 | 1 | 2;
+      retain: boolean;
+      payloadText: string;
+      encoding: PayloadEncoding;
+    }>;
+    if (saved.cleared === true) {
+      topic.value = "";
+      qos.value = 0;
+      retain.value = false;
+      payloadText.value = "";
+      encoding.value = "plaintext";
+      return true;
+    }
+    if (typeof saved.topic === "string") topic.value = saved.topic;
+    if (saved.qos === 0 || saved.qos === 1 || saved.qos === 2) qos.value = saved.qos;
+    if (typeof saved.retain === "boolean") retain.value = saved.retain;
+    if (typeof saved.payloadText === "string") payloadText.value = saved.payloadText;
+    if (saved.encoding && PAYLOAD_ENCODINGS.includes(saved.encoding)) encoding.value = saved.encoding;
+    return true;
+  } catch {
+    // Keep the default form usable if local browser storage is unavailable or invalid.
+    topic.value = props.initialTopic || "";
+    qos.value = 0;
+    retain.value = false;
+    payloadText.value = "";
+    encoding.value = "plaintext";
+    return false;
+  }
+}
+
+function rememberLastPublishedMessage() {
+  try {
+    localStorage.setItem(
+      lastPublishedMessageStorageKey(),
+      JSON.stringify({
+        topic: topic.value.trim(),
+        qos: qos.value,
+        retain: retain.value,
+        payloadText: payloadText.value,
+        encoding: encoding.value,
+      }),
+    );
+  } catch {
+    // The publish itself has succeeded; a storage failure must not report it as failed.
+  }
+}
 
 /** 计算消息输入框允许使用的最大高度，避免挤占全部消息列表区域 */
 function maxPayloadHeight() {
@@ -129,6 +219,7 @@ function stopResize() {
 }
 
 onMounted(() => {
+  restoreLastPublishedMessage();
   const savedHeight = Number.parseInt(localStorage.getItem(MQTT_PAYLOAD_HEIGHT_STORAGE_KEY) ?? "", 10);
   if (Number.isFinite(savedHeight)) payloadHeight.value = clampPayloadHeight(savedHeight);
 
@@ -173,6 +264,7 @@ async function publish() {
       retain: retain.value,
     });
     success.value = true;
+    rememberLastPublishedMessage();
     emit("published");
     /* 成功后保留表单内容便于连续测试，1.5 秒后清除成功提示 */
     setTimeout(() => {
@@ -193,6 +285,12 @@ function clearForm() {
   encoding.value = "plaintext";
   error.value = null;
   success.value = false;
+  try {
+    localStorage.setItem(lastPublishedMessageStorageKey(), JSON.stringify({ cleared: true }));
+  } catch {
+    // The form is still cleared for this session if browser storage is unavailable.
+  }
+  formVersion.value += 1;
 }
 </script>
 

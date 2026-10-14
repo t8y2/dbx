@@ -3403,6 +3403,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }
@@ -7658,22 +7659,17 @@ fn filter_completion_objects(objects: Vec<db::ObjectInfo>) -> Vec<db::ObjectInfo
         .into_iter()
         .filter(|object| {
             let object_type = object.object_type.to_ascii_uppercase();
-            object_type.contains("PROCEDURE") || object_type.contains("FUNCTION") || object_type.contains("TRIGGER")
+            object_type.contains("PROCEDURE")
+                || object_type.contains("FUNCTION")
+                || object_type.contains("TRIGGER")
+                || object_type.contains("PACKAGE")
+                || object_type.contains("SEQUENCE")
         })
         .collect()
 }
 
 fn filter_completion_objects_with_packages(objects: Vec<db::ObjectInfo>) -> Vec<db::ObjectInfo> {
-    objects
-        .into_iter()
-        .filter(|object| {
-            let object_type = object.object_type.to_ascii_uppercase();
-            object_type.contains("PROCEDURE")
-                || object_type.contains("FUNCTION")
-                || object_type.contains("TRIGGER")
-                || object_type == "PACKAGE"
-        })
-        .collect()
+    filter_completion_objects(objects)
 }
 
 fn is_agent_postgres_metadata_fallback_config(config: &ConnectionConfig) -> bool {
@@ -10111,7 +10107,7 @@ fn mysql_external_driver_url(config: &ConnectionConfig) -> Option<bool> {
         .map(|value| value.to_ascii_lowercase().starts_with("jdbc:mysql:"))
 }
 
-fn is_oracle_external_driver_config(config: &ConnectionConfig) -> bool {
+pub(crate) fn is_oracle_external_driver_config(config: &ConnectionConfig) -> bool {
     if config.db_type != DatabaseType::Jdbc {
         return false;
     }

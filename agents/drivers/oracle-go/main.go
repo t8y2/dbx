@@ -3644,6 +3644,9 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		return fmt.Sprintf("%s(%d)", dataType, *column.CharacterMaximumLength)
 	}
 	if dataType == "NUMBER" {
+		if column.NumericPrecision == nil && column.NumericScale != nil {
+			return fmt.Sprintf("NUMBER(*,%d)", *column.NumericScale)
+		}
 		if column.NumericPrecision != nil && *column.NumericPrecision > 0 {
 			if column.NumericScale != nil && *column.NumericScale != 0 {
 				return fmt.Sprintf("NUMBER(%d,%d)", *column.NumericPrecision, *column.NumericScale)
@@ -3652,7 +3655,7 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		}
 		return "NUMBER"
 	}
-	if (dataType == "FLOAT" || dataType == "BINARY_FLOAT" || dataType == "BINARY_DOUBLE") &&
+	if dataType == "FLOAT" &&
 		column.NumericPrecision != nil && *column.NumericPrecision > 0 {
 		return fmt.Sprintf("%s(%d)", dataType, *column.NumericPrecision)
 	}

@@ -1400,7 +1400,12 @@ const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(da
 const structureDialect = computed(() => structureCapabilities.value.dialect);
 const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment || (!isCreateMode.value && databaseType.value === "starrocks" && !getStarRocksCapabilities(connection.value?.database_info?.productVersion).tableComment));
 const dynamicDataTypeOptions = ref<string[]>([]);
-const dataTypeOptions = computed(() => getDataTypeOptions(databaseType.value, dynamicDataTypeOptions.value, connection.value?.database_info?.productVersion));
+const dataTypeOptions = computed(() => {
+  const options = getDataTypeOptions(databaseType.value, dynamicDataTypeOptions.value, connection.value?.database_info?.productVersion);
+  if (databaseType.value !== "oceanbase-oracle") return options;
+  // JDBC may advertise Oracle types that OceanBase rejects.
+  return options.filter((type) => !/^(?:nclob|long(?:\s+raw)?|bfile|boolean|vector)\s*(?:\(|$)/i.test(type.trim()));
+});
 const columnEditorControls = computed(() => getColumnEditorControls(databaseType.value));
 
 const indexTypesByDb: Record<string, string[]> = {
@@ -4573,38 +4578,34 @@ function columnIndexContextMenuItems(targets: EditableStructureColumn[]): Contex
       disabled: () => disabled() || primaryColumns.length > 0 || targets.some(isPrimaryKeyDisabled),
       action: () => setColumnsPrimaryKey(targets),
     },
-    ...([false, true] as const).map(
-      (unique): ContextMenuItem => ({
-        label: t(unique ? "structureEditor.createUniqueIndex" : "structureEditor.createNormalIndex"),
-        icon: KeyRound,
-        iconClass: indexIconClass(unique ? "unique" : "index"),
-        disabled: () =>
-          disabled() ||
-          !structureCapabilities.value.createIndex ||
-          indexes.value.some(
-            (index) =>
-              !index.markedForDrop &&
-              !index.isPrimary &&
-              index.isUnique === unique &&
-              !index.filter &&
-              (!index.indexType || index.indexType.toUpperCase() === "BTREE") &&
-              index.columns.length === targets.length &&
-              index.columns.every((name, position) => structureColumnComparisonKey(name) === structureColumnComparisonKey(targets[position].name)),
-          ),
-        action: () => createIndexFromColumns(targets, unique),
-      }),
-    ),
+    ...([false, true] as const).map((unique): ContextMenuItem => ({
+      label: t(unique ? "structureEditor.createUniqueIndex" : "structureEditor.createNormalIndex"),
+      icon: KeyRound,
+      iconClass: indexIconClass(unique ? "unique" : "index"),
+      disabled: () =>
+        disabled() ||
+        !structureCapabilities.value.createIndex ||
+        indexes.value.some(
+          (index) =>
+            !index.markedForDrop &&
+            !index.isPrimary &&
+            index.isUnique === unique &&
+            !index.filter &&
+            (!index.indexType || index.indexType.toUpperCase() === "BTREE") &&
+            index.columns.length === targets.length &&
+            index.columns.every((name, position) => structureColumnComparisonKey(name) === structureColumnComparisonKey(targets[position].name)),
+        ),
+      action: () => createIndexFromColumns(targets, unique),
+    })),
     ...["FULLTEXT", "SPATIAL"]
       .filter((type) => indexTypeOptions.value.includes(type))
-      .map(
-        (type): ContextMenuItem => ({
-          label: t(type === "FULLTEXT" ? "structureEditor.createFulltextIndex" : "structureEditor.createSpatialIndex"),
-          icon: KeyRound,
-          iconClass: indexIconClass(type === "FULLTEXT" ? "fulltext" : "spatial"),
-          disabled: () => disabled() || !structureCapabilities.value.createIndex || !!specialIndexColumnIssue(structureDialect.value, type, targets),
-          action: () => createIndexFromColumns(targets, false, type),
-        }),
-      ),
+      .map((type): ContextMenuItem => ({
+        label: t(type === "FULLTEXT" ? "structureEditor.createFulltextIndex" : "structureEditor.createSpatialIndex"),
+        icon: KeyRound,
+        iconClass: indexIconClass(type === "FULLTEXT" ? "fulltext" : "spatial"),
+        disabled: () => disabled() || !structureCapabilities.value.createIndex || !!specialIndexColumnIssue(structureDialect.value, type, targets),
+        action: () => createIndexFromColumns(targets, false, type),
+      })),
   ];
   const addItems: ContextMenuItem[] = indexes.value
     .filter((index) => !index.markedForDrop && !index.isPrimary)
@@ -5328,6 +5329,10 @@ function isShiftEnterShortcut(event: KeyboardEvent): boolean {
   return !event.isComposing && event.key === "Enter" && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
 }
 
+function isPlainStructureRefreshShortcut(event: KeyboardEvent): boolean {
+  return !event.isComposing && !event.repeat && event.key === "F5" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+}
+
 function isPlainModDeleteShortcut(event: KeyboardEvent): boolean {
   if (isPlainModShortcut(event, "delete")) return true;
   if (!event.metaKey || event.ctrlKey || !isPlainModShortcut(event, "backspace")) return false;
@@ -5338,6 +5343,22 @@ function isPlainModDeleteShortcut(event: KeyboardEvent): boolean {
 }
 
 function onStructureEditorKeydown(event: KeyboardEvent) {
+  // Desktop blocks F5 before this bubble listener and marks it defaultPrevented.
+  // Handle the shortcut first so that guard still refreshes the open table (#11850).
+  if (isPlainStructureRefreshShortcut(event)) {
+    // Only react when the keypress originates inside this editor: the listener is
+    // window-level and every activated structure editor registers one, so without
+    // this check a plain F5 typed into another editor group (where F5 is the global
+    // refresh-data shortcut) would silently discard THIS editor's unsaved drafts.
+    const target = event.target;
+    if (!(target instanceof Element) || !rootRef.value?.contains(target)) return;
+    if (target.closest('[role="dialog"], [role="alertdialog"]')) return;
+    if (isCreateMode.value) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!loading.value && !saving.value && !ddlLoading.value) void reloadStructureFromDatabase();
+    return;
+  }
   if (event.defaultPrevented) return;
   if (activeTab.value === "columns" && !eventTargetUsesNativeClipboard(event)) {
     if (isPlainClipboardShortcut(event, "a")) {
@@ -5774,7 +5795,7 @@ watch(
       <Database :class="[structureIconClass, 'text-muted-foreground']" />
       <span class="min-w-0 flex-1 truncate font-medium">{{ targetLabel || t("editor.noDatabase") }}</span>
       <Badge variant="outline">{{ connection?.driver_label || databaseType }}</Badge>
-      <Button v-if="!isCreateMode" variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="loading || saving || ddlLoading" @click="reloadStructureFromDatabase">
+      <Button v-if="!isCreateMode" variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="loading || saving || ddlLoading" :title="t('structureEditor.refresh') + ' (F5)'" aria-keyshortcuts="F5" data-refresh-structure-shortcut @click="reloadStructureFromDatabase">
         <RefreshCw :class="structureIconClass" />
         {{ t("structureEditor.refresh") }}
       </Button>

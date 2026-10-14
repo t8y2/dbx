@@ -203,7 +203,11 @@ function confirmCreateSelectedGroup() {
   showCreateSelectedGroupDialog.value = false;
 }
 
-defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections });
+function openTableStructureForSelection(): boolean {
+  return connectionTreeRef.value?.openTableStructureForSelection?.() ?? false;
+}
+
+defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, openTableStructureForSelection });
 </script>
 
 <template>

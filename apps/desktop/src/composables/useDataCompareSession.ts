@@ -59,8 +59,9 @@ export interface DataCompareTableResult {
   targetRowCount: number;
   sourceTruncated: boolean;
   targetTruncated: boolean;
-  /** Rows the backend was allowed to read per side; the diff only covers this many rows when a side is truncated. */
+  /** Rows the backend was allowed to inspect per side; incomplete results are never synchronization-eligible. */
   rowBudget: number;
+  syncEligible: boolean;
   databaseType?: DatabaseType;
   preSyncStatements?: string[];
   diff: SelectableDataCompareResult;
@@ -179,17 +180,17 @@ function compareErrorMessage(dependencies: DataCompareSessionDependencies, kind:
   return dependencies.formatError?.(kind, columns) ?? fallbackCompareErrorMessage(kind, columns);
 }
 
-function toSelectableDiff(diff: DataCompareResult): SelectableDataCompareResult {
+function toSelectableDiff(diff: DataCompareResult, selected: boolean): SelectableDataCompareResult {
   return {
-    added: diff.added.map((row) => ({ ...row, selected: true })),
-    removed: diff.removed.map((row) => ({ ...row, selected: true })),
-    modified: diff.modified.map((row) => ({ ...row, selected: true })),
+    added: diff.added.map((row) => ({ ...row, selected })),
+    removed: diff.removed.map((row) => ({ ...row, selected })),
+    modified: diff.modified.map((row) => ({ ...row, selected })),
   };
 }
 
 export function buildDataCompareSyncPlanTables(results: DataCompareTableResult[], targetSchema: string): DataCompareSyncPlanTableOptions[] {
   return results
-    .filter((table) => table.status === "different")
+    .filter((table) => table.status === "different" && table.syncEligible)
     .map((table) => ({
       tableName: table.targetTable,
       schema: targetSchema,
@@ -203,6 +204,7 @@ export function buildDataCompareSyncPlanTables(results: DataCompareTableResult[]
       },
       databaseType: table.databaseType,
       preSyncStatements: table.preSyncStatements ?? [],
+      syncEligible: true,
     }))
     .filter((table) => table.preSyncStatements.length > 0 || table.diff.added.length > 0 || table.diff.removed.length > 0 || table.diff.modified.length > 0);
 }
@@ -267,9 +269,10 @@ function buildTableResult(task: DataCompareTableTask, preparation: DataCompareFr
     sourceTruncated: preparation.sourceTruncated,
     targetTruncated: preparation.targetTruncated,
     rowBudget: preparation.rowBudget,
+    syncEligible: preparation.syncEligible,
     databaseType,
     preSyncStatements: preparation.preSyncStatements,
-    diff: toSelectableDiff(preparation.result),
+    diff: toSelectableDiff(preparation.result, preparation.syncEligible),
     expanded: status === "different",
     showAll: { added: false, removed: false, modified: false },
   };
@@ -291,9 +294,10 @@ function buildMissingTargetResult(task: DataCompareTableTask, preparation: DataC
     sourceTruncated: preparation.sourceTruncated,
     targetTruncated: false,
     rowBudget: preparation.rowBudget,
+    syncEligible: preparation.syncEligible,
     databaseType,
     preSyncStatements: preparation.preSyncStatements,
-    diff: toSelectableDiff(preparation.result),
+    diff: toSelectableDiff(preparation.result, preparation.syncEligible),
     expanded: preparation.result.added.length > 0,
     showAll: { added: false, removed: false, modified: false },
   };
@@ -315,6 +319,7 @@ function buildErrorResult(task: DataCompareTableTask, keyColumns: string[], data
     sourceTruncated: false,
     targetTruncated: false,
     rowBudget: 0,
+    syncEligible: false,
     databaseType,
     preSyncStatements: [],
     diff: { added: [], removed: [], modified: [] },

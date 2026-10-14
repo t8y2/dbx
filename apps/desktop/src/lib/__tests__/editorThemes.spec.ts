@@ -318,6 +318,24 @@ describe("editor gutters", () => {
       justifyContent: "flex-end",
     });
   });
+
+  it("styles the fold gutter and SVG fold markers consistently (#11834)", () => {
+    const rules = buildEditorFontThemeRules();
+
+    expect(rules[".cm-foldGutter"]).toMatchObject({
+      width: "16px",
+    });
+    expect(rules[".cm-foldGutter .cm-gutterElement"]).toMatchObject({
+      alignItems: "center",
+      display: "flex",
+      justifyContent: "center",
+    });
+    expect(rules[".cm-foldMarker-svg"]).toMatchObject({
+      display: "inline-flex",
+      width: "16px",
+      height: "16px",
+    });
+  });
 });
 
 describe("editor font theme", () => {

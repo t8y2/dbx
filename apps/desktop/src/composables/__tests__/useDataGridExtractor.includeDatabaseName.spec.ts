@@ -127,4 +127,44 @@ describe("useDataGridExtractor includeDatabaseName payload", () => {
       ["D", "DATE"],
     ]);
   });
+
+  it("formats cells with active column formatters for non-SQL extractors and keeps raw values for SQL extractors", async () => {
+    const state = useDataGridExtractor({
+      columns: computed(() => ["id", "amount"]),
+      allColumns: computed(() => ["id", "amount"]),
+      displayItems: computed(() => [{ id: 1, data: [1, 100], isDraft: false }]),
+      allDisplayItems: computed(() => [{ id: 1, data: [1, 100], isDraft: false }]),
+      allSourceColumns: computed(() => undefined),
+      visibleColumnIndexes: computed(() => [0, 1]),
+      columnTypes: computed(() => ["int", "decimal"]),
+      allColumnTypes: computed(() => ["int", "decimal"]),
+      extractorOptions: computed(() => DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
+      databaseType: computed(() => "postgres"),
+      identifierQuote: computed(() => undefined),
+      tableMeta: computed(() => qualifiedMeta()),
+      includeDatabaseName: computed(() => false),
+      hasCellSelection: computed(() => false),
+      selectedCells: computed(() => ({ columns: [], rows: [] })),
+      selectedCellMatrix: computed(() => null),
+      hasRowSelection: computed(() => true),
+      hasColumnSelection: computed(() => false),
+      selectedRowIds: ref(new Set<number>([1])),
+      contextCell: ref(null),
+      contextSelectionIsSynthetic: ref(false),
+      copyText: vi.fn(async () => true),
+      canCopySqlInsert: () => true,
+      buildMongoInsert: vi.fn(async () => undefined),
+      hasColumnFormatter: (idx) => idx === 1,
+      displayValue: (val, idx) => (idx === 1 ? `$${val}` : String(val)),
+      applyColumnFormattersOnExport: computed(() => true),
+    });
+
+    await state.extractWithExtractor("csv");
+    const csvRequest = mocks.extract.mock.calls.at(-1)![0];
+    expect(csvRequest.rows).toEqual([[1, "$100"]]);
+
+    await state.extractWithExtractor("sql-inserts");
+    const sqlRequest = mocks.extract.mock.calls.at(-1)![0];
+    expect(sqlRequest.rows).toEqual([[1, 100]]);
+  });
 });

@@ -7,6 +7,7 @@ import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcIdentifiers;
+import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.ObjectInfo;
@@ -357,28 +358,37 @@ public final class TranswarpAgent extends AbstractJdbcAgent {
             long started = System.currentTimeMillis();
             long affected = 0;
             Connection connection = requireConnected();
-            applySchemaContext(connection, schema);
-            try (Statement statement = connection.createStatement()) {
-                if (connection instanceof HiveConnection) {
-                    statement.execute("SET transaction.type = inceptor");
-                }
-                statement.execute("BEGIN TRANSACTION");
-                try {
-                    for (String sql : statements) {
-                        if (sql != null && !sql.isBlank()) {
-                            statement.execute(sql);
-                            affected += Math.max(statement.getUpdateCount(), 0);
-                        }
+            try (JdbcExecutor.NativeOperation operation = JdbcExecutor.current().beginNativeOperation()) {
+                operation.checkCancelled();
+                applySchemaContext(connection, schema);
+                try (var tracked = JdbcExecutor.current().trackStatement(connection.createStatement())) {
+                    Statement statement = tracked.statement();
+                    JdbcExecutor.current().applyStatementTimeout(statement);
+                    operation.checkCancelled();
+                    if (connection instanceof HiveConnection) {
+                        statement.execute("SET transaction.type = inceptor");
                     }
-                    statement.execute("COMMIT");
-                } catch (Exception error) {
+                    operation.checkCancelled();
                     try {
-                        statement.execute("ROLLBACK");
-                    } catch (Exception rollbackError) {
-                        transactionStateUnknown = true;
-                        error.addSuppressed(rollbackError);
+                        statement.execute("BEGIN TRANSACTION");
+                        for (String sql : statements) {
+                            operation.checkCancelled();
+                            if (sql != null && !sql.isBlank()) {
+                                statement.execute(sql);
+                                affected += Math.max(statement.getUpdateCount(), 0);
+                            }
+                        }
+                        operation.checkCancelled();
+                        statement.execute("COMMIT");
+                    } catch (Exception error) {
+                        try {
+                            statement.execute("ROLLBACK");
+                        } catch (Exception rollbackError) {
+                            transactionStateUnknown = true;
+                            error.addSuppressed(rollbackError);
+                        }
+                        throw error;
                     }
-                    throw error;
                 }
             }
             return new QueryResult(List.of(), List.of(), affected, System.currentTimeMillis() - started);

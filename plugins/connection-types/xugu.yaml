@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 660
 dbType: xugu
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Xugu
 label: 虚谷 XuguDB
 dialect: Xugu
@@ -30,7 +32,7 @@ capabilities:
   dataTransfer: true
   sqlFileExecution: true
   databaseCreate: false
-  fieldLineage: false
+  fieldLineage: true
   sqlExplain: true
   userAdmin: true
   driverManagement: true

@@ -195,6 +195,7 @@ pub fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,

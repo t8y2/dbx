@@ -479,6 +479,16 @@ together with `dbx.db`. Persisting `/app/data` is therefore sufficient for a
 normal Docker deployment. This key protects the database contents, but cannot
 protect the whole data volume if the volume itself is copied or exposed.
 
+Windows portable builds are the exception to the desktop platform-key rule.
+To remain portable across computers, they keep the local storage key at
+`data/.dbx/secret.key`; move and back up the complete `data` directory. If an
+older portable profile already contains ciphertext protected by Windows
+Credential Manager, launch the new build once on the original computer so DBX
+can verify and copy that key to the USB drive. If the original computer or key
+is gone, the ciphertext cannot be recovered automatically; restore the original
+key or a pre-migration backup. Keeping the key beside the database means anyone
+who obtains or copies the whole drive can also decrypt its credentials.
+
 For production deployments, replace the managed key with a Docker/Kubernetes
 Secret by setting `DBX_SECRET_KEY_FILE`, or provide `DBX_SECRET_KEY` through a
 secret manager. Explicit keys take precedence and must never be rotated while
@@ -508,9 +518,10 @@ directory in Desktop or Web and complete its upgrade wizard. For headless
 hosts without a platform credential store, configure the persistent key.
 
 Cross-device exports use a separate sync passphrase and never contain the
-local storage key. A direct `dbx.db` copy is not a cross-platform sync method:
-platform keys do not move with the database. Use encrypted export/import so
-the target device stores credentials using its own local key.
+local storage key. For installed builds, or when copying only `dbx.db`, platform
+keys do not move with the database; use encrypted export/import instead. A
+Windows portable build must move the complete `data` directory containing both
+`dbx.db` and `.dbx/secret.key`.
 
 For the complete design, migration state machine, implementation map,
 troubleshooting, and test plan, see

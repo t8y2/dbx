@@ -861,6 +861,22 @@ async fn connection_database_type(state: &AppState, connection_id: &str) -> Opti
     configs.get(connection_id).map(|config| config.db_type)
 }
 
+async fn connection_statement_split_database_type(state: &AppState, connection_id: &str) -> Option<DatabaseType> {
+    let configs = state.configs.read().await;
+    configs.get(connection_id).map(statement_split_database_type)
+}
+
+/// A generic JDBC connection to Oracle runs PL/SQL through the JDBC plugin, so its
+/// script is split with the Oracle rules. The plain `Jdbc` profile would cut every
+/// routine body at its first inner semicolon and replace the object with the fragment.
+fn statement_split_database_type(config: &ConnectionConfig) -> DatabaseType {
+    if crate::schema::is_oracle_external_driver_config(config) {
+        DatabaseType::Oracle
+    } else {
+        config.db_type
+    }
+}
+
 async fn connection_sql_compatibility_mode(
     state: &AppState,
     pool_key: &str,
@@ -3559,8 +3575,9 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
     let compatibility_mode = connection_sql_compatibility_mode(state, &pool_key, db_type).await;
     let complete_sqlserver_agent_batch =
         is_sqlserver_agent && sqlserver_agent_batch::requires_complete_results(sql, &options);
+    let split_db_type = connection_statement_split_database_type(state, connection_id).await;
     let execution_plan =
-        query_execution_plan_with_compatibility(sql, db_type, is_sqlserver_agent, compatibility_mode.as_deref());
+        query_execution_plan_with_compatibility(sql, split_db_type, is_sqlserver_agent, compatibility_mode.as_deref());
     let continue_on_error = options.continue_on_error && !execution_plan.stop_on_error;
     let statements = execution_plan.statements;
     if statements.is_empty() {
@@ -6063,11 +6080,12 @@ fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
 }
 
 /// Compute per-execution-statement proven-read-only markers for the sticky
-/// manual-transaction UX (#7122 Oracle, #9018 MySQL/PostgreSQL). The user-facing
-/// classification SQL is split with the same dialect-aware splitter as the
-/// execution SQL and paired by count/position; any mismatch is fail-closed (no
-/// markers). Oracle/OceanBase-Oracle keep the lexical classifier, MySQL and
-/// PostgreSQL use the strict `sql_risk` proof; every other dialect is unproven.
+/// manual-transaction UX (#7122 Oracle, #9018 MySQL/PostgreSQL, ... GaussDB).
+/// The user-facing classification SQL is split with the same dialect-aware
+/// splitter as the execution SQL and paired by count/position; any mismatch is
+/// fail-closed (no markers). Oracle/OceanBase-Oracle keep the lexical
+/// classifier, the PostgreSQL family (MySQL is separate) use the strict
+/// `sql_risk` proof; every other dialect is unproven.
 fn classify_manual_transaction_statements(
     database_type: Option<DatabaseType>,
     execution_statement_count: usize,
@@ -6076,7 +6094,12 @@ fn classify_manual_transaction_statements(
     let Some(database_type) = database_type.filter(|database_type| {
         matches!(
             database_type,
-            DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Mysql | DatabaseType::Postgres
+            DatabaseType::Oracle
+                | DatabaseType::OceanbaseOracle
+                | DatabaseType::Mysql
+                | DatabaseType::Postgres
+                | DatabaseType::Gaussdb
+                | DatabaseType::OpenGauss
         )
     }) else {
         return Vec::new();
@@ -6092,7 +6115,7 @@ fn classify_manual_transaction_statements(
     user_statements
         .iter()
         .map(|statement| match database_type {
-            DatabaseType::Mysql | DatabaseType::Postgres => {
+            DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::OpenGauss => {
                 crate::sql_risk::prove_read_only_for_database(statement, database_type)
                     == crate::sql_risk::ReadProof::ProvenReadOnly
             }
@@ -6447,7 +6470,14 @@ pub async fn execute_in_manual_transaction_with_options(
         );
         if matches!(
             db_type,
-            Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Mysql | DatabaseType::Postgres)
+            Some(
+                DatabaseType::Oracle
+                    | DatabaseType::OceanbaseOracle
+                    | DatabaseType::Mysql
+                    | DatabaseType::Postgres
+                    | DatabaseType::Gaussdb
+                    | DatabaseType::OpenGauss
+            )
         ) {
             result = result.with_manual_transaction_no_statement();
         }
@@ -8550,6 +8580,7 @@ for line in sys.stdin:
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }
@@ -10363,6 +10394,22 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn jdbc_oracle_execution_plan_keeps_plsql_units_whole() {
+        let mut oracle = test_connection_config(DatabaseType::Jdbc);
+        oracle.connection_string = Some("jdbc:oracle:thin:@//127.0.0.1:1521/FREEPDB1".to_string());
+        let function = "CREATE OR REPLACE EDITIONABLE FUNCTION \"APP\".\"F\" (p VARCHAR2) RETURN VARCHAR2 IS\n\
+                        l_ret VARCHAR2(200);\nBEGIN\n  SELECT p INTO l_ret FROM dual;\n  RETURN l_ret;\nEND;";
+
+        let plan = query_execution_plan(function, Some(statement_split_database_type(&oracle)), false);
+
+        assert_eq!(plan.statements, vec![function]);
+
+        let mut other = test_connection_config(DatabaseType::Jdbc);
+        other.connection_string = Some("jdbc:h2:mem:test".to_string());
+        assert_eq!(statement_split_database_type(&other), DatabaseType::Jdbc);
+    }
+
+    #[test]
     fn ordinary_agent_execution_plan_still_splits_semicolon_statements() {
         let plan = query_execution_plan("SELECT 1; SELECT 2;", Some(DatabaseType::Dameng), false);
 
@@ -11657,6 +11704,7 @@ for line in sys.stdin:
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         };
 
@@ -12094,6 +12142,15 @@ for line in sys.stdin:
         assert_eq!(
             classify_manual_transaction_statements(Some(DatabaseType::Postgres), 1, Some("SELECT * FROM users")),
             vec![true]
+        );
+        // GaussDB/openGauss share the PostgreSQL-family proof.
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Gaussdb), 1, Some("SELECT * FROM users")),
+            vec![true]
+        );
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::OpenGauss), 1, Some("UPDATE users SET x = 1")),
+            vec![false]
         );
         // Mixed script: every statement is classified individually.
         assert_eq!(

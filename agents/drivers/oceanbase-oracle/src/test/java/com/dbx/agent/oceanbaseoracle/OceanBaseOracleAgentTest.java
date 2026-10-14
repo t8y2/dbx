@@ -1023,6 +1023,23 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void getColumnsPreservesFloatPrecisionAndNumberStarScale() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, columnResultSet(new Object[][]{
+            {"F", "FLOAT", "Y", 63, null, 22, 0, null, null, 0, null},
+            {"FU", "FLOAT", "Y", null, null, 22, 0, null, null, 0, null},
+            {"NS", "NUMBER", "Y", null, 3, 22, 0, null, null, 0, null},
+            {"NN", "NUMBER", "Y", null, -2, 22, 0, null, null, 0, null},
+            {"NZ", "NUMBER", "Y", null, 0, 22, 0, null, null, 0, null},
+            {"NU", "NUMBER", "Y", null, null, 22, 0, null, null, 0, null}
+        })));
+        List<ColumnInfo> columns = agent.getColumns("APP", "NUMERIC_COLUMNS");
+        Assertions.assertEquals(List.of("FLOAT(63)", "FLOAT", "NUMBER(*,3)", "NUMBER(*,-2)", "NUMBER(*,0)", "NUMBER"),
+            columns.stream().map(ColumnInfo::getData_type).toList());
+    }
+
+    @Test
     void getColumnsResolvesTheCurrentSchemaWhenSchemaIsEmpty() {
         List<String> sql = new ArrayList<>();
         List<String> params = new ArrayList<>();

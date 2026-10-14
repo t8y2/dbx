@@ -3,7 +3,7 @@ import { safeJsonFormat } from "@/lib/common/safeJsonFormat";
 export type CellDetailTab = "details" | "hexViewer" | "valueEditor";
 export type ValueEditorAction = "formatJson" | "compactJson" | "setNull" | "restoreOriginal";
 
-export const CELL_DETAIL_JSON_FORMAT_MAX_LENGTH = 50_000;
+export const CELL_DETAIL_JSON_FORMAT_MAX_LENGTH = 500_000;
 
 export interface CellDetailPresentationOptions {
   isEditable: boolean;

@@ -35,7 +35,8 @@ export interface EditorToolbarActions {
   explain(tabId: string): void;
   formatSql(tabId: string): void;
   compressSql(tabId: string): void;
-  toggleSqlKeywordCase(): void;
+  /** Flips the keyword-case preference and re-cases the acting tab's editor to match. */
+  toggleSqlKeywordCase(tabId: string): void;
   saveSql(tabId: string): void;
   openSqlFile(): void;
   importResultArchive(): void;

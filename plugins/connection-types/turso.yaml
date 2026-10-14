@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 50
 dbType: turso
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Turso
 label: Turso
 dialect: Turso

@@ -47,6 +47,7 @@ describe("sidebar tree item layout", () => {
     expect(canTreeNodeShowExpander({ type: "etcd-dashboard", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "etcd-access-control", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "consul-overview", childCount: 0 })).toBe(false);
+    expect(canTreeNodeShowExpander({ type: "mqtt-topic", childCount: 0 })).toBe(false);
   });
 
   it("shows an expander only for package nodes explicitly marked as containers", () => {

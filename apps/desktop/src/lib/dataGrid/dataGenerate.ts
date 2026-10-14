@@ -1,5 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { generateRegexValue } from "@/lib/dataGrid/regexGenerate";
 
 export interface GeneratorNode {
   key: string;
@@ -1765,6 +1766,10 @@ export function generateValue(columnName: string, dataType: string, generatorKey
     return randInt(params?.min ?? 1, params?.max ?? 500);
   }
   if (key === "image") return `0x${Array.from({ length: 16 }, () => randInt(0, 255).toString(16).padStart(2, "0")).join("")}`;
+  if (key === "regex") {
+    const generated = generateRegexValue(params?.pattern, params?.rawPattern);
+    if (generated.status === "ok") return generated.value;
+  }
 
   const fn = GeneratorFunctions[key];
   if (fn) return fn(params);

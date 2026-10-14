@@ -1,4 +1,4 @@
-export type SqlCompletionItemType = "keyword" | "table" | "column" | "snippet" | "function" | "schema" | "variable" | "property" | "text";
+export type SqlCompletionItemType = "keyword" | "table" | "column" | "snippet" | "function" | "schema" | "variable" | "sequence" | "property" | "text";
 
 // `;` is deliberately absent: a statement terminator is never glued to the token
 // in front of it, and accepting `BETWEEN` before an existing `;` used to insert
@@ -6,7 +6,7 @@ export type SqlCompletionItemType = "keyword" | "table" | "column" | "snippet" |
 const COMPLETION_SPACE_BLOCKING_CHARACTERS = new Set([",", ":", ")", "]", "}", "'", '"']);
 
 export function appendSqlCompletionSpace(insertText: string, options: { enabled: boolean; itemType: SqlCompletionItemType; nextCharacter?: string }): string {
-  if (!options.enabled || options.itemType === "property" || options.itemType === "text" || options.itemType === "schema" || options.itemType === "variable" || options.itemType === "snippet" || options.itemType === "function") return insertText;
+  if (!options.enabled || options.itemType === "property" || options.itemType === "text" || options.itemType === "schema" || options.itemType === "variable" || options.itemType === "sequence" || options.itemType === "snippet" || options.itemType === "function") return insertText;
   if (!insertText || /\s$/.test(insertText) || insertText.endsWith(".")) return insertText;
 
   const nextCharacter = options.nextCharacter ?? "";

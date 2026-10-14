@@ -2233,6 +2233,17 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function releaseReplacedResultLargeValues(tab: QueryTab, ...previousResults: Array<QueryResult | undefined>) {
+    const retainedResults = [tab.result, ...(tab.results ?? []), ...(tab.resultRuns ?? []).flatMap((run) => [run.result, ...(run.results ?? [])])];
+    const retainedRefs = new Set(retainedResults.flatMap((result) => resultLargeValueKeys(result)));
+    const discardedResults = previousResults.map((result) => {
+      if (!result) return undefined;
+      const refs = [...(result.large_value_refs ?? []), ...(result.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []))];
+      return { ...result, large_value_cells: [], large_value_refs: refs.filter((valueRef) => !retainedRefs.has(resultLargeValueKey(result, valueRef))) };
+    });
+    void releaseResultLargeValues(...discardedResults);
+  }
+
   async function closeResultRunSession(tab: QueryTab, run: NonNullable<QueryTab["resultRuns"]>[number]) {
     if (!run.resultSessionId) return;
     const target = run.multiDbExecution?.target;
@@ -2483,14 +2494,7 @@ export const useQueryStore = defineStore("query", () => {
     };
     void persistResultRun(tab, run);
     tab.resultRuns[index] = run;
-    const retainedResults = [tab.result, ...(tab.results ?? []), ...tab.resultRuns.flatMap((item) => [item.result, ...(item.results ?? [])])];
-    const retainedRefs = new Set(retainedResults.flatMap((result) => resultLargeValueKeys(result)));
-    const discardedResults = [previousRun.result, ...(previousRun.results ?? [])].map((result) => {
-      if (!result) return undefined;
-      const refs = [...(result.large_value_refs ?? []), ...(result.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []))];
-      return { ...result, large_value_cells: [], large_value_refs: refs.filter((valueRef) => !retainedRefs.has(resultLargeValueKey(result, valueRef))) };
-    });
-    void releaseResultLargeValues(...discardedResults);
+    releaseReplacedResultLargeValues(tab, previousRun.result, ...(previousRun.results ?? []));
   }
 
   function syncDisplayedResultRun(tab: QueryTab, sql: string, captureNewRun = false, options: ResultRunCaptureOptions = {}) {
@@ -6203,9 +6207,13 @@ export const useQueryStore = defineStore("query", () => {
   function setErrorResult(id: string, e: any) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
+    const previousDisplayedResults = [tab.result, ...(tab.results ?? [])];
     tab.result = toErrorResult(e);
     tab.results = undefined;
     tab.activeResultIndex = undefined;
+    if (previousDisplayedResults.some(Boolean)) {
+      releaseReplacedResultLargeValues(tab, ...previousDisplayedResults);
+    }
     // An error result is a replacement, not the previous dataset.
     publishResultGeneration(tab, "execute");
     tab.resultSessionId = undefined;
@@ -7346,7 +7354,11 @@ export const useQueryStore = defineStore("query", () => {
     const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
     const batchResume = options?.batchResume;
     const continueOnBatchError = batchResume?.continueOnError ?? settingsStore.editorSettings.continueOnErrorOnBatch;
-    const preserveResultDuringExecution = batchResume !== undefined || options?.preserveResultDuringExecution === true || captureAutoSavedResultRun || (tab.mode === "query" && !!tab.activeResultRunId && !tab.resultAutoSave && !captureResultRun);
+    // Keep the last query result mounted while a replacement query is running.
+    // Clearing it first unmounts DataGrid and its toolbar, so a slow query makes
+    // the result actions disappear until the new response arrives (issue #10008).
+    const preserveQueryResultDuringExecution = tab.mode === "query" && !!tab.result && !captureResultRun;
+    const preserveResultDuringExecution = batchResume !== undefined || options?.preserveResultDuringExecution === true || captureAutoSavedResultRun || preserveQueryResultDuringExecution;
     const updateActiveResultRun = !!tab.activeResultRunId && preserveResultDuringExecution;
     tab.isExecuting = true;
     tab.executingResultRunId = !captureResultRun && updateActiveResultRun ? tab.activeResultRunId : null;
@@ -8032,6 +8044,7 @@ export const useQueryStore = defineStore("query", () => {
           if (captureResultRun && current.isCancelling && restorePendingResultRun(current, executionId)) return false;
           const activeGroupIndex = current.activeResultIndex;
           const activeGroupResults = current.results;
+          const previousDisplayedResults = [current.result, ...(current.results ?? [])];
           const findPageState = mongoFindPageState;
           const shouldAppendResult = !!findPageState && !!options?.appendResult && !!current.result && allResults.length === 1;
           const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && allResults.length === 1 && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
@@ -8061,6 +8074,9 @@ export const useQueryStore = defineStore("query", () => {
             current.results = undefined;
             current.activeResultIndex = undefined;
             current.result = allResults[0];
+          }
+          if (!captureResultRun && previousDisplayedResults.some(Boolean)) {
+            releaseReplacedResultLargeValues(current, ...previousDisplayedResults);
           }
           publishResultGeneration(current, shouldAppendResult ? "append" : "execute");
           producedResult = current.result !== undefined;
@@ -8581,6 +8597,7 @@ export const useQueryStore = defineStore("query", () => {
         }
         const activeGroupIndex = current.activeResultIndex;
         const activeGroupResults = current.results;
+        const previousDisplayedResults = [current.result, ...(current.results ?? [])];
         const shouldAppendResult = !!options?.appendResult && !!current.result;
         const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && results.length === 1 && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
         const retainedPaginationResult = options?.retainDisplayedResult === true && results.length === 1 && !isQueryExecutionErrorResult(results[0]!) ? results[0] : undefined;
@@ -8625,6 +8642,9 @@ export const useQueryStore = defineStore("query", () => {
           current.results = undefined;
           current.activeResultIndex = undefined;
           current.result = results[0];
+        }
+        if (!captureResultRun && previousDisplayedResults.some(Boolean)) {
+          releaseReplacedResultLargeValues(current, ...previousDisplayedResults);
         }
         // Logical-result identity for the view-snapshot cache. An append extends
         // the same dataset; every other branch above replaces it.
@@ -8802,6 +8822,7 @@ export const useQueryStore = defineStore("query", () => {
         annotateSingleStatementErrorResult(errorResult, queryBaseSql, errorLocateContext?.databaseType, errorLocateContext?.sourceOffset, errorLocateContext?.parameterOptions, errorLocateContext?.executedSql);
         const activeGroupIndex = current.activeResultIndex;
         const activeGroupResults = current.results;
+        const previousDisplayedResults = [current.result, ...(current.results ?? [])];
         const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
         if (shouldReplaceActiveResultInGroup) {
           current.results = activeGroupResults.slice();
@@ -8811,6 +8832,9 @@ export const useQueryStore = defineStore("query", () => {
           current.result = errorResult;
           current.results = undefined;
           current.activeResultIndex = undefined;
+        }
+        if (!captureResultRun && previousDisplayedResults.some(Boolean)) {
+          releaseReplacedResultLargeValues(current, ...previousDisplayedResults);
         }
         current.queryAnalysis = undefined;
         current.querySourceColumns = undefined;

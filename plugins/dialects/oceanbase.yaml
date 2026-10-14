@@ -159,6 +159,9 @@ metadata_queries:
   list_triggers:
     sql: "SELECT TRIGGER_NAME, TRIGGER_TYPE, TRIGGERING_EVENT FROM ALL_TRIGGERS WHERE OWNER = '{schema}' AND TABLE_NAME = '{table}'"
     performance_profile: "MEDIUM"
+  list_sequences:
+    sql: "SELECT SEQUENCE_NAME FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER = '{schema}'"
+    performance_profile: "LIGHT"
   dependencies:
     sql: "SELECT a.TABLE_NAME, c_pk.TABLE_NAME AS R_TABLE_NAME FROM ALL_CONS_COLUMNS a JOIN ALL_CONSTRAINTS c ON a.CONSTRAINT_NAME = c.CONSTRAINT_NAME JOIN ALL_CONSTRAINTS c_pk ON c.R_CONSTRAINT_NAME = c_pk.CONSTRAINT_NAME WHERE c.CONSTRAINT_TYPE = 'R' AND a.OWNER = '{schema}'"
     depth_support: 2

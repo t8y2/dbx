@@ -1893,9 +1893,9 @@ describe("connectionStore completion assistant", () => {
   });
 
   it.each([
-    ["empty", vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false })],
-    ["permission error", vi.fn().mockRejectedValue(new Error("permission denied for sequence"))],
-  ])("returns an empty sequence fallback for %s metadata", async (_caseName, completionAssistantSearch) => {
+    ["empty", vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false }), false],
+    ["permission error", vi.fn().mockRejectedValue(new Error("permission denied for sequence")), true],
+  ])("returns an empty sequence fallback for %s metadata", async (_caseName, completionAssistantSearch, expectMetadataCall) => {
     const listCompletionObjects = vi.fn().mockResolvedValue([{ name: "not_a_sequence", object_type: "FUNCTION" }]);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
@@ -1903,6 +1903,7 @@ describe("connectionStore completion assistant", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       completionAssistantSearch,
       listCompletionObjects,
+      listSchemas: vi.fn().mockResolvedValue(["public"]),
     }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
@@ -1911,7 +1912,11 @@ describe("connectionStore completion assistant", () => {
     store.connectedIds.add("pg-1");
 
     await expect(store.listCompletionObjects("pg-1", "app", "missing", 20, undefined, undefined, false, undefined, ["sequence"])).resolves.toEqual([]);
-    expect(listCompletionObjects).not.toHaveBeenCalled();
+    // The sequence-only error fallback loads schema-level objects (filtered to
+    // sequences), so the metadata call goes through on permission errors; the
+    // empty-metadata case returns [] without touching the metadata API.
+    if (expectMetadataCall) expect(listCompletionObjects).toHaveBeenCalled();
+    else expect(listCompletionObjects).not.toHaveBeenCalled();
   });
 
   it("searches the server-reported SQL Server default schema without treating the username as a schema", async () => {

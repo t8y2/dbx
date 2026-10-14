@@ -643,6 +643,21 @@ const DATABASE_LINK_ICON: LucideIconNode = [
 
 const SCHEMA_ICON: LucideIconNode = [["path", { d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z" }]];
 
+const SEQUENCE_ICON: LucideIconNode = [
+  ["path", { d: "M8 5h13" }],
+  ["path", { d: "M13 12h8" }],
+  ["path", { d: "M13 19h8" }],
+  ["path", { d: "M3 10a2 2 0 0 0 2 2h3" }],
+  ["path", { d: "M3 5v12a2 2 0 0 0 2 2h3" }],
+];
+
+const VARIABLE_ICON: LucideIconNode = [
+  ["path", { d: "M8 21s-4-3-4-9 4-9 4-9" }],
+  ["path", { d: "M16 3s4 3 4 9-4 9-4 9" }],
+  ["line", { x1: "15", x2: "9", y1: "9", y2: "15" }],
+  ["line", { x1: "9", x2: "15", y1: "9", y2: "15" }],
+];
+
 function encodeSvgIcon(iconNode: LucideIconNode): string {
   const body = iconNode
     .map(
@@ -1124,6 +1139,16 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
     ".cm-completionIcon-schema": {
       color: colorMixValue("var(--amber-500, #f59e0b)", "color-mix(in oklch, var(--amber-500, #f59e0b) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(SCHEMA_ICON),
+    },
+    // Sequences previously reused "variable" without any icon mask, which
+    // rendered a blank slot (#12099). Match the sidebar's emerald ListTree.
+    ".cm-completionIcon-sequence": {
+      color: colorMixValue("var(--emerald-500, #10b981)", "color-mix(in oklch, var(--emerald-500, #10b981) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(SEQUENCE_ICON),
+    },
+    ".cm-completionIcon-variable": {
+      color: colorMixValue("var(--rose-500, #f43f5e)", "color-mix(in oklch, var(--rose-500, #f43f5e) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(VARIABLE_ICON),
     },
     // Reuse the table glyph for aliases instead of CodeMirror's default text
     // icon, which is rendered as a solid black square in some themes.

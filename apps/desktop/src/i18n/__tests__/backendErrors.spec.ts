@@ -13,6 +13,7 @@ import ko from "@/i18n/locales/ko";
 import ptBR from "@/i18n/locales/pt-BR";
 import ru from "@/i18n/locales/ru";
 import tr from "@/i18n/locales/tr";
+import th from "@/i18n/locales/th";
 import zhCN from "@/i18n/locales/zh-CN";
 import zhTW from "@/i18n/locales/zh-TW";
 import { PHOENIX_DRIVER_NOT_INSTALLED_ERROR, PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR } from "@/lib/database/phoenixConnection";
@@ -27,6 +28,7 @@ const LOCALES = {
   ko,
   "pt-BR": ptBR,
   ru,
+  th,
   tr,
   "zh-CN": zhCN,
   "zh-TW": zhTW,

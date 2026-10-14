@@ -533,7 +533,7 @@ describe("PostgreSQL sequence literal completion", () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: "ORDER_SEQ",
-          type: "variable",
+          type: "sequence",
           detail: "sequence in APP",
           apply: "ORDER_SEQ",
         }),
@@ -552,7 +552,7 @@ describe("PostgreSQL sequence literal completion", () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: "ORDER_SEQ",
-          type: "variable",
+          type: "sequence",
           detail: "sequence in APP",
           apply: "APP.ORDER_SEQ",
         }),
@@ -574,7 +574,7 @@ describe("PostgreSQL sequence literal completion", () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: "ORDER_SEQ",
-          type: "variable",
+          type: "sequence",
           apply: "ORDER_SEQ",
         }),
       ]),
@@ -661,6 +661,163 @@ describe("PostgreSQL sequence literal completion", () => {
       objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
       columnsByTable: new Map([["APP.orders", [{ name: "id" }, { name: "name" }]]]),
       databaseType: "oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests OceanBase-Oracle sequences in SQL expressions and select lists", () => {
+    const sql = "SELECT ord";
+    const unqualifiedItems = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+      currentSchema: "APP",
+    });
+
+    expect(unqualifiedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          detail: "sequence in APP",
+          apply: "ORDER_SEQ",
+        }),
+      ]),
+    );
+
+    const qualifiedItems = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(qualifiedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          detail: "sequence in APP",
+          apply: "APP.ORDER_SEQ",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests OceanBase-Oracle sequences under schema qualifier", () => {
+    const sql = "SELECT app.ord";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          apply: "ORDER_SEQ",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests NEXTVAL and CURRVAL pseudo-columns for OceanBase-Oracle sequences", () => {
+    const sql = "SELECT ORDER_SEQ.";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+        expect.objectContaining({
+          label: "CURRVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests NEXTVAL and CURRVAL pseudo-columns for schema-qualified OceanBase-Oracle sequences", () => {
+    const sql = "SELECT APP.ORDER_SEQ.";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+        expect.objectContaining({
+          label: "CURRVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("respects keyword case for OceanBase-Oracle sequence pseudo-columns", () => {
+    const sql = "SELECT ORDER_SEQ.n";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+      keywordCase: "lower",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "nextval",
+          apply: "nextval",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests OceanBase-Oracle sequence pseudo-columns in INSERT VALUES clause", () => {
+    const sql = "INSERT INTO orders (id, name) VALUES (ORDER_SEQ.";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "orders", schema: "APP" }],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map([["APP.orders", [{ name: "id" }, { name: "name" }]]]),
+      databaseType: "oceanbase-oracle",
       dialect: "oracle",
     });
 

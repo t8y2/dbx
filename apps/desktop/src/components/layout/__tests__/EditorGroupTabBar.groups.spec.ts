@@ -186,6 +186,41 @@ describe("EditorGroupTabBar group behavior", () => {
     },
   );
 
+  it.each(["classic", "separated"] as const)("keeps only the active horizontal grouped tab tinted across placement changes in %s layout", async (layout) => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "pg-1", name: "Postgres", db_type: "postgres", driver_profile: "postgres", color: "#3b82f6" } as ConnectionConfig];
+    settings.editorSettings.appLayout = layout;
+    settings.editorSettings.tabGroupMode = "connection";
+    settings.editorSettings.tabPlacement = "top";
+    const activeTabId = store.createTab("pg-1", "app", "PG 1", "query");
+    const inactiveTabId = store.createTab("pg-1", "app", "PG 2", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), activeTabId, pinia);
+
+    try {
+      for (const placement of ["top", "bottom"] as const) {
+        settings.editorSettings.tabPlacement = placement;
+        await settle();
+        // Changing placement may replace the strip's nodes; inspect the
+        // currently rendered tabs instead of retaining horizontal elements.
+        const activeTab = host.querySelector<HTMLElement>(`[data-tab-id="${activeTabId}"]`)!;
+        const inactiveTab = host.querySelector<HTMLElement>(`[data-tab-id="${inactiveTabId}"]`)!;
+        expect(activeTab.getAttribute("data-active-tab")).toBe("true");
+        expect(activeTab.style.getPropertyValue("--app-tab-background")).not.toBe("");
+        expect(inactiveTab.getAttribute("data-active-tab")).toBe("false");
+        expect(inactiveTab.style.getPropertyValue("--app-tab-background")).toBe("");
+        // Vertical grouped selection can be painted by CSS instead of an
+        // inline background. Returning to horizontal must restore its wash.
+        settings.editorSettings.tabPlacement = "left";
+        await settle();
+      }
+    } finally {
+      app.unmount();
+      host.remove();
+    }
+  });
+
   it("renders one header per connection cluster and collapses it to a count badge", async () => {
     const store = useQueryStore();
     const settings = useSettingsStore();

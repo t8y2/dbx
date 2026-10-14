@@ -116,6 +116,71 @@ describe("queryStore query result export", () => {
     expect(queryResultTransferIncomplete(result!)).toBe(false);
   });
 
+  it.each(["SELECT * FROM events", "SELECT t.* FROM events t"])("exports every wildcard page and its real __dbx_row_num column: %s", async (sql) => {
+    mocks.getConfig.mockReturnValue({ id: "ob-1", db_type: "oceanbase-oracle", database: "app" });
+    mocks.prepareQueryPaginationExecutionPlan.mockImplementation(async (request) => ({
+      sqlToExecute: request.sql,
+      pageLimit: 2,
+      pageOffset: request.pagination.offset,
+      useAgentResultSession: true,
+    }));
+    let row = 0;
+    mocks.executeMulti.mockImplementation(async () => [
+      {
+        columns: ["ID", "__dbx_row_num"],
+        column_types: ["NUMBER", "VARCHAR2"],
+        rows: Array.from({ length: 2 }, () => [++row, `user-${row}`]),
+        has_more: row < 6,
+        session_id: "ob-export-cursor",
+        execution_time_ms: 0,
+        affected_rows: 0,
+      },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("ob-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === id)!;
+    tab.lastExecutedSql = sql;
+    tab.result = { columns: ["ID", "__dbx_row_num"], rows: [[1, "user-1"]], has_more: true, execution_time_ms: 0, affected_rows: 0 };
+    const result = await store.fetchTabResultForExport(id, undefined, true);
+    expect(result?.columns).toEqual(["ID", "__dbx_row_num"]);
+    expect(result?.rows).toEqual(Array.from({ length: 6 }, (_, index) => [index + 1, `user-${index + 1}`]));
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(3);
+    for (const [index, call] of mocks.executeMulti.mock.calls.entries()) {
+      expect(call[2]).toBe(sql);
+      expect(call[5]).toEqual(expect.objectContaining({ pageSize: 2, fetchSize: 2, resultSessionId: index ? "ob-export-cursor" : undefined }));
+    }
+    expect(mocks.closeQuerySession).toHaveBeenCalledWith("ob-1", "app", "ob-export-cursor", id, undefined);
+  });
+
+  it.each(["SELECT * FROM events", "SELECT t.* FROM events t"])("releases the wildcard export cursor when a later fetch fails: %s", async (sql) => {
+    mocks.getConfig.mockReturnValue({ id: "ob-1", db_type: "oceanbase-oracle", database: "app" });
+    mocks.prepareQueryPaginationExecutionPlan.mockResolvedValue({ sqlToExecute: sql, pageLimit: 2, pageOffset: 0, useAgentResultSession: true });
+    mocks.executeMulti.mockResolvedValueOnce([
+      {
+        columns: ["ID", "__dbx_row_num"],
+        rows: [
+          [1, "user-1"],
+          [2, "user-2"],
+        ],
+        has_more: true,
+        session_id: "ob-export-cursor",
+        execution_time_ms: 0,
+        affected_rows: 0,
+      },
+    ]);
+    mocks.executeMulti.mockRejectedValueOnce(new Error("Query cancelled"));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("ob-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === id)!;
+    tab.lastExecutedSql = sql;
+    tab.result = { columns: ["ID", "__dbx_row_num"], rows: [[1, "user-1"]], has_more: true, execution_time_ms: 0, affected_rows: 0 };
+    await expect(store.fetchTabResultForExport(id, undefined, true)).rejects.toThrow("Query cancelled");
+    expect(mocks.executeMulti.mock.calls[1]![5].resultSessionId).toBe("ob-export-cursor");
+    expect(mocks.closeQuerySession).toHaveBeenCalledWith("ob-1", "app", "ob-export-cursor", id, undefined);
+  });
+
   it.each(["CALL update_and_list_items()", "INSERT INTO items VALUES (1) RETURNING id", "WITH changed AS (DELETE FROM items RETURNING id) SELECT * FROM changed"])("does not replay a result-producing mutation during transfer: %s", async (sql) => {
     mocks.getConfig.mockReturnValue({ id: "oracle-1", db_type: "oracle", database: "app" });
     const { useQueryStore } = await import("@/stores/queryStore");
@@ -402,6 +467,27 @@ describe("queryStore query result export", () => {
 
     expect(request?.identifierQuote).toBe("[");
     expect(mocks.connectionIdentifierQuote).toHaveBeenCalledWith("kingbase-1");
+  });
+
+  it.each([
+    [false, "txn-1", "txn-1"],
+    [true, "txn-1", undefined],
+    [false, undefined, undefined],
+  ])("passes the open manual transaction to the backend export (autoCommit=%s, txn=%s)", async (autoCommit, txnSessionId, expected) => {
+    mocks.getConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql", database: "app" });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.autoCommit = autoCommit;
+    tab.txnSessionId = txnSessionId;
+    tab.sql = "SELECT id FROM items";
+    tab.lastExecutedSql = tab.sql;
+    tab.result = { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+
+    const request = await store.buildQueryResultExportRequest(tabId, { exportId: "export-txn", filePath: "items.csv", format: "csv" });
+
+    expect(request?.txnSessionId).toBe(expected);
   });
 
   it("passes the selected SQL INSERT mode to the backend request", async () => {

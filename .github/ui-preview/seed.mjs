@@ -31,14 +31,22 @@ const DBS = [
     name: "商店 Shop (SQLite)",
     note: "订单、商品与客户示例库",
     tables: "customers · products · orders · audit_log（含视图 v_daily_revenue、外键与触发器）",
-    warm: ["SELECT * FROM orders ORDER BY created_at DESC LIMIT 50", "SELECT c.city, COUNT(*) AS orders, SUM(o.amount) AS revenue\nFROM orders o JOIN customers c ON c.id = o.customer_id\nGROUP BY c.city ORDER BY revenue DESC", "SELECT category, COUNT(*) AS n, ROUND(AVG(price), 2) AS avg_price\nFROM products WHERE listed = 1 GROUP BY category ORDER BY n DESC"],
+    warm: [
+      "SELECT * FROM orders ORDER BY created_at DESC LIMIT 50",
+      "SELECT c.city, COUNT(*) AS orders, SUM(o.amount) AS revenue\nFROM orders o JOIN customers c ON c.id = o.customer_id\nGROUP BY c.city ORDER BY revenue DESC",
+      "SELECT category, COUNT(*) AS n, ROUND(AVG(price), 2) AS avg_price\nFROM products WHERE listed = 1 GROUP BY category ORDER BY n DESC",
+    ],
   },
   {
     file: "dbx-analytics.sqlite",
     name: "分析 Analytics (SQLite)",
     note: "事件流与每日指标",
     tables: "events（5000 行，看分页）· daily_stats（90 天）",
-    warm: ["SELECT event_type, COUNT(*) AS n, ROUND(AVG(duration_ms)) AS avg_ms\nFROM events GROUP BY event_type ORDER BY n DESC", "SELECT date(ts) AS day, COUNT(DISTINCT user_id) AS dau\nFROM events GROUP BY day ORDER BY day DESC LIMIT 14", "SELECT * FROM daily_stats ORDER BY stat_date DESC LIMIT 30"],
+    warm: [
+      "SELECT event_type, COUNT(*) AS n, ROUND(AVG(duration_ms)) AS avg_ms\nFROM events GROUP BY event_type ORDER BY n DESC",
+      "SELECT date(ts) AS day, COUNT(DISTINCT user_id) AS dau\nFROM events GROUP BY day ORDER BY day DESC LIMIT 14",
+      "SELECT * FROM daily_stats ORDER BY stat_date DESC LIMIT 30",
+    ],
   },
 ];
 
@@ -112,7 +120,11 @@ async function api(base, p, init = {}) {
   });
   const text = await res.text();
   if (!res.ok) throw new Error(`${init.method || "GET"} ${p}: ${res.status} ${text.slice(0, 300)}`);
-  try { return JSON.parse(text); } catch { return text; }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }
 
 async function seedApi() {
@@ -166,8 +178,14 @@ async function seedApi() {
     await api(base, "/api/saved-sql", {
       method: "POST",
       body: JSON.stringify({
-        ...s, connectionId: conns[i % conns.length].id, folderId: folder?.id || "seed-folder-daily",
-        database: "main", orderIndex: i, openCount: 3 + i, createdAt: iso(36e5 * (70 - i)), updatedAt: iso(36e5 * (24 - i * 6)),
+        ...s,
+        connectionId: conns[i % conns.length].id,
+        folderId: folder?.id || "seed-folder-daily",
+        database: "main",
+        orderIndex: i,
+        openCount: 3 + i,
+        createdAt: iso(36e5 * (70 - i)),
+        updatedAt: iso(36e5 * (24 - i * 6)),
       }),
     }).catch((e) => console.log("[ui-preview] saved-sql:", e.message));
   }
@@ -188,9 +206,17 @@ async function seedApi() {
       method: "POST",
       body: JSON.stringify({
         entry: {
-          id: `seed-h-${Math.random().toString(36).slice(2, 10)}`, connection_id: c.id, connection_name: c.name,
-          database: "main", sql, executed_at: iso(36e5 * (2 + Math.random() * 60)), execution_time_ms: ms, success: ok,
-          error: ok ? null : "demo entry: would have modified rows (not really run)", activity_kind: "query", source: "editor",
+          id: `seed-h-${Math.random().toString(36).slice(2, 10)}`,
+          connection_id: c.id,
+          connection_name: c.name,
+          database: "main",
+          sql,
+          executed_at: iso(36e5 * (2 + Math.random() * 60)),
+          execution_time_ms: ms,
+          success: ok,
+          error: ok ? null : "demo entry: would have modified rows (not really run)",
+          activity_kind: "query",
+          source: "editor",
         },
       }),
     }).catch((e) => console.log("[ui-preview] history:", e.message));
@@ -205,12 +231,13 @@ if (cmd === "dbs") {
   python(dir);
   // a small importable file, for import/mapping dialogs (record.mjs's
   // "upload" step resolves names inside this directory)
-  fs.writeFileSync(path.join(dir, "sample.csv"),
-    "name,category,price,stock\n" +
-    Array.from({ length: 8 }, (_, i) => `键盘 K${i + 100},键盘,${(199 + i * 23).toFixed(2)},${40 - i * 3}`).join("\n") + "\n");
+  fs.writeFileSync(path.join(dir, "sample.csv"), "name,category,price,stock\n" + Array.from({ length: 8 }, (_, i) => `键盘 K${i + 100},键盘,${(199 + i * 23).toFixed(2)},${40 - i * 3}`).join("\n") + "\n");
   console.log("[ui-preview] databases written to", dir);
 } else if (cmd === "api") {
-  seedApi().catch((e) => { console.error(e); process.exit(1); });
+  seedApi().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
 } else {
   console.error("usage: seed.mjs dbs <dir> | seed.mjs api <base-url> <dir> [--as <server path>]");
   process.exit(1);

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const MAX_SCAN_DEPTH: usize = 10;
-const DEFAULT_FILE_FILTER: &str = "*.sql";
+const DEFAULT_FILE_FILTER: &str = r"(?i)\.(sql|ddl)$";
 
 /// Directories that are never interesting for SQL file browsing but are huge
 /// (often tens of thousands of entries), which makes a recursive scan take
@@ -41,6 +41,41 @@ fn validate_file_name(file_name: &str) -> Result<&str, String> {
         return Err("File name must not contain a path".to_string());
     }
     Ok(file_name)
+}
+
+fn validate_directory_name(directory_name: &str) -> Result<&str, String> {
+    let directory_name = directory_name.trim();
+    if directory_name.is_empty()
+        || directory_name == "."
+        || directory_name == ".."
+        || directory_name.contains(['/', '\\', '\0'])
+    {
+        return Err("Folder name must not contain a path".to_string());
+    }
+    let mut components = Path::new(directory_name).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_))) || components.next().is_some() {
+        return Err("Folder name must not contain a path".to_string());
+    }
+    if is_pruned_dir(directory_name) {
+        return Err("This folder name is excluded from the SQL file browser".to_string());
+    }
+    Ok(directory_name)
+}
+
+// A directory entry itself must not be a symlink: canonicalizing one would
+// rename/delete its target instead of the entry the user selected.
+fn managed_child_directory(root_path: &str, folder_path: &str) -> Result<PathBuf, String> {
+    let metadata =
+        std::fs::symlink_metadata(folder_path).map_err(|error| format!("Failed to inspect SQL folder: {error}"))?;
+    if !metadata.file_type().is_dir() {
+        return Err("Only directories can be managed here".to_string());
+    }
+    let root = canonical_directory(Path::new(root_path), "SQL root folder")?;
+    let folder = managed_directory(root_path, folder_path)?;
+    if folder == root {
+        return Err("The opened root folder cannot be renamed or deleted".to_string());
+    }
+    Ok(folder)
 }
 
 fn validate_sql_file_name(file_name: &str) -> Result<&str, String> {
@@ -126,17 +161,22 @@ fn is_glob_filter(file_filter: &str) -> bool {
 
 fn compile_file_filter(file_filter: &str) -> Result<Regex, String> {
     let file_filter = file_filter.trim();
-    let pattern = if file_filter.is_empty() {
-        glob_to_regex(DEFAULT_FILE_FILTER)
-    } else if is_glob_filter(file_filter) {
-        glob_to_regex(file_filter)
-    } else {
-        file_filter.to_string()
-    };
+    let file_filter = if file_filter.is_empty() { DEFAULT_FILE_FILTER } else { file_filter };
+    let pattern = if is_glob_filter(file_filter) { glob_to_regex(file_filter) } else { file_filter.to_string() };
     Regex::new(&pattern).map_err(|error| format!("Invalid file filter regular expression: {error}"))
 }
 
 fn scan_sql_files(dir: &Path, depth: usize, visited: &mut HashSet<String>, file_filter: &Regex) -> Vec<SqlFileEntry> {
+    scan_sql_files_with_directories(dir, depth, visited, file_filter, false)
+}
+
+fn scan_sql_files_with_directories(
+    dir: &Path,
+    depth: usize,
+    visited: &mut HashSet<String>,
+    file_filter: &Regex,
+    include_empty_directories: bool,
+) -> Vec<SqlFileEntry> {
     if depth > MAX_SCAN_DEPTH {
         return vec![];
     }
@@ -172,8 +212,9 @@ fn scan_sql_files(dir: &Path, depth: usize, visited: &mut HashSet<String>, file_
             if is_pruned_dir(&name) {
                 continue;
             }
-            let children = scan_sql_files(&path, depth + 1, visited, file_filter);
-            if !children.is_empty() {
+            let children =
+                scan_sql_files_with_directories(&path, depth + 1, visited, file_filter, include_empty_directories);
+            if include_empty_directories || !children.is_empty() {
                 entries.push(SqlFileEntry { name, path: path.to_string_lossy().to_string(), is_dir: true, children });
             }
         } else if file_type.is_file() && file_filter.is_match(&name) {
@@ -201,6 +242,7 @@ fn scan_sql_files(dir: &Path, depth: usize, visited: &mut HashSet<String>, file_
 pub async fn list_sql_files_in_folder(
     folder_path: String,
     file_filter: Option<String>,
+    include_empty_directories: Option<bool>,
 ) -> Result<Vec<SqlFileEntry>, String> {
     let path = Path::new(&folder_path).to_path_buf();
     let file_filter = compile_file_filter(file_filter.as_deref().unwrap_or(DEFAULT_FILE_FILTER))?;
@@ -212,7 +254,11 @@ pub async fn list_sql_files_in_folder(
             return Err(format!("Path is not a directory: {}", folder_path));
         }
         let mut visited = HashSet::new();
-        Ok(scan_sql_files(&path, 0, &mut visited, &file_filter))
+        Ok(if include_empty_directories.unwrap_or(false) {
+            scan_sql_files_with_directories(&path, 0, &mut visited, &file_filter, true)
+        } else {
+            scan_sql_files(&path, 0, &mut visited, &file_filter)
+        })
     })
     .await
     .map_err(|e| format!("Failed to scan folder: {e}"))?
@@ -275,6 +321,77 @@ pub async fn delete_sql_file_in_folder(root_path: String, file_path: String) -> 
     })
     .await
     .map_err(|error| format!("Failed to delete SQL file: {error}"))?
+}
+
+#[tauri::command]
+pub async fn create_sql_folder_in_folder(
+    root_path: String,
+    directory_path: String,
+    folder_name: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let folder_name = validate_directory_name(&folder_name)?.to_owned();
+        let directory = managed_directory(&root_path, &directory_path)?;
+        let root = canonical_directory(Path::new(&root_path), "SQL root folder")?;
+        if directory.strip_prefix(&root).map_err(|error| error.to_string())?.components().count() >= MAX_SCAN_DEPTH {
+            return Err("The maximum SQL folder depth has been reached".to_string());
+        }
+        let path = directory.join(&folder_name);
+        std::fs::create_dir(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                "A file or folder with this name already exists".to_string()
+            } else {
+                format!("Failed to create SQL folder: {error}")
+            }
+        })?;
+        Ok(Path::new(&directory_path).join(folder_name).to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| format!("Failed to create SQL folder: {error}"))?
+}
+
+#[tauri::command]
+pub async fn rename_sql_folder_in_folder(
+    root_path: String,
+    folder_path: String,
+    folder_name: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let folder_name = validate_directory_name(&folder_name)?.to_owned();
+        let folder = managed_child_directory(&root_path, &folder_path)?;
+        let parent = folder.parent().ok_or_else(|| "Failed to resolve SQL folder parent".to_string())?;
+        let target = parent.join(&folder_name);
+        // symlink_metadata also detects dangling links; never overwrite those.
+        match std::fs::symlink_metadata(&target) {
+            Ok(metadata) => {
+                if target == folder {
+                    return Ok(folder_path);
+                }
+                // Permit case-only renames on case-insensitive filesystems,
+                // but never replace another directory or a symlink.
+                if !metadata.file_type().is_dir() || std::fs::canonicalize(&target).ok().as_ref() != Some(&folder) {
+                    return Err("A file or folder with this name already exists".to_string());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Failed to inspect SQL folder target: {error}")),
+        }
+        std::fs::rename(&folder, &target).map_err(|error| format!("Failed to rename SQL folder: {error}"))?;
+        let parent_display = Path::new(&folder_path).parent().map(Path::to_path_buf).unwrap_or_default();
+        Ok(parent_display.join(folder_name).to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| format!("Failed to rename SQL folder: {error}"))?
+}
+
+#[tauri::command]
+pub async fn delete_sql_folder_in_folder(root_path: String, folder_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let folder = managed_child_directory(&root_path, &folder_path)?;
+        std::fs::remove_dir_all(&folder).map_err(|error| format!("Failed to delete SQL folder: {error}"))
+    })
+    .await
+    .map_err(|error| format!("Failed to delete SQL folder: {error}"))?
 }
 
 #[cfg(test)]

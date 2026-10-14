@@ -95,6 +95,16 @@ test("focused table context is not presented as a complete table list", () => {
   assert.doesNotMatch(prompt, /Schema context is complete\./);
 });
 
+// #11660: with several databases selected a mention names its own database, so
+// the prompt has to document that form and scope the "prioritized" claim to the
+// databases this request may actually read.
+test("prompt documents database-qualified table mentions within the run scope", () => {
+  const prompt = buildSystemPrompt("generate", context(), "ask");
+
+  assert.match(prompt, /@table、@schema\.table 或 @database\.schema\.table/);
+  assert.match(prompt, /在本次可选数据库范围内的这些表已优先放入 Schema 上下文/);
+});
+
 test("prompt enforces database dialect and single executable statement safety", () => {
   const prompt = buildSystemPrompt("generate", context({ databaseType: "sqlserver" }), "agent");
 

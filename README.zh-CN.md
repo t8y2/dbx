@@ -131,7 +131,7 @@
       </a>
     </td>
     <td>
-      HiAPI 是面向开发者的图片、视频、音频及文本模型 API 平台——GPT Image 2.5（Flare 与 Sunburst）、OpenAI 兼容文本接口，并可通过 Remote MCP/Agent Skills 接入 Claude Code、Cursor 等编程工具。按量付费、无最低消费；新用户注册赠送 200 Credits，首充最高加赠 12% 积分。
+      HiAPI 是面向开发者的图片、视频、音频及文本模型 API 平台——GPT Image 2.5（Flare 与 Sunburst）、OpenAI 兼容文本接口，并可通过 Remote MCP/Agent Skills 接入 Claude Code、Cursor 等编程工具。按量付费、无最低消费；新用户注册赠送 200 Credits，充值送 10% 积分。
       <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-zh" target="_blank">访问 HiAPI</a>
     </td>
   </tr>
@@ -144,6 +144,29 @@
     <td>
       UCloud 优刻得是国内首家公有云科创板上市公司，覆盖国内、亚洲、欧洲、北美等 28 个地域的云主机、数据库、CDN 等服务，注册享新客优惠 0.9 折起；星图 AstraFlow 大模型平台支持主流 200+ 大模型一键调用。
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">访问 UCloud 优刻得</a>
+    </td>
+  </tr>
+
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.packyapi.ai/register?aff=wyDA" target="_blank">
+        <img src="docs/public/sponsors/packyapi-card.png" alt="PackyCode" width="175" />
+      </a>
+    </td>
+    <td>
+      PackyCode 是一家稳定、高效的 API 中转服务商，一句话接入主流大模型。统一域名、统一密钥、智能容灾切换，97% 可用性；人民币 1:1 充值，无汇率无手续费坑，新用户首充立享折扣 + $1 免费体验额度，多分组折扣低至 2 折起，并提供专属 Codex/Claude Code 高速通道。
+      <a href="https://www.packyapi.ai/register?aff=wyDA" target="_blank">访问 PackyCode</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://mate.vip/ee/" target="_blank">
+        <img src="docs/public/sponsors/taiyi-card.png" alt="太一企业版" width="175" />
+      </a>
+    </td>
+    <td>
+      太一智能体企业版是面向央国企的私有化智能体平台，采用“1+N+N”架构：1 个平台、N 个终端、N 个场景。<strong>可信</strong>：Java 微服务架构，私有化部署，全程留痕可审计。<strong>可控</strong>：关键操作人工审批，资料按密级管理。<strong>可达</strong>：按单位模板直接生成公文、台账和汇报材料。<strong>可复制</strong>：场景方案包化交付，便于推广和二次开发。欢迎预约演示，或在 GitHub 搜索 MateClaw。
+      <a href="https://mate.vip/ee/" target="_blank">访问太一企业版</a>
     </td>
   </tr>
   <tr>
@@ -450,13 +473,15 @@ volumes:
 
 连接、插件、AI 和 Tunnel 凭据写入 `dbx.db` 前会加密。桌面端使用本机凭据存储（macOS Keychain、Windows Credential Manager 或 Linux Secret Service）。Web/Docker 与直接运行 `dbx-web` 默认使用同一套数据目录托管密钥：`${DBX_DATA_DIR}/.dbx/secret.key`。只有在开始迁移或第一次写入敏感字段时才创建密钥；普通 Docker 部署只需持久化 `/app/data`，并且必须将 `.dbx/secret.key` 与 `dbx.db` 一起备份。该密钥不能防护整个数据卷被复制或泄露。
 
+Windows 便携版例外：为保证 U 盘可跨电脑使用，本地存储密钥保存在便携数据目录的 `data/.dbx/secret.key`，必须与整个 `data` 目录一起移动和备份。已经由旧版使用 Windows Credential Manager 加密过的便携数据，需要先在原电脑启动一次新版；DBX 会验证旧密钥并将其复制到 U 盘。若原电脑或原密钥已经丢失，现有密文无法自动恢复，只能找回原密钥或恢复迁移前备份。密钥与数据库同行意味着复制或丢失整个 U 盘的人也能解密其中凭据，请妥善保护 U 盘。
+
 生产环境可以使用 Docker/Kubernetes Secret 覆盖托管策略：设置 `DBX_SECRET_KEY_FILE`，或由密钥管理系统提供 `DBX_SECRET_KEY`。显式密钥优先，已有密文使用期间不能轮换。密钥不可用时，业务 API 保持阻塞，浏览器显示数据安全升级页面。直接运行二进制时设置 `DBX_DATA_DIR=/var/lib/dbx`，即可使用 `/var/lib/dbx/.dbx/secret.key`。
 
 升级包含历史明文凭据的版本时，桌面端和 Web 会在进入主界面前显示 **数据安全升级向导**。点击 **开始迁移** 后，软件会创建权限受限的备份，迁移旧数据库和 JSON 凭据，并验证密文可读取。失败时保留原始数据和备份，根据向导提示修复后点击 **重试**。成功页面会显示备份路径。确认连接可用后，可点击 **删除迁移备份**，二次确认后删除迁移备份目录和本次迁移生成的旧 JSON `.bak` 文件；其他备份不会删除。没有历史数据的新用户检查后直接进入主界面。
 
 本机 CLI 和独立 MCP 可以复用同一设备已有的平台凭据存储，也可以读取显式配置的 `DBX_SECRET_KEY_FILE` 或 `DBX_SECRET_KEY`。它们不会在启动检查时创建密钥，也不会自动迁移历史数据。遇到 `DATA_MIGRATION_REQUIRED` 时，请先使用桌面端或 Web 打开同一数据目录，完成升级向导。没有平台凭据存储的无界面主机应配置持久化密钥。
 
-跨设备导出使用独立的同步口令，导出包不包含本地存储密钥。直接复制 `dbx.db` 不能作为跨平台同步方式，因为本机平台密钥不会随数据库移动。请使用加密导出/导入，让目标设备使用自己的本地密钥保存凭据。
+跨设备导出使用独立的同步口令，导出包不包含本地存储密钥。安装版或只复制 `dbx.db` 时，本机平台密钥不会随数据库移动，不能作为跨平台同步方式；请使用加密导出/导入。Windows 便携版则必须移动包含 `dbx.db` 和 `.dbx/secret.key` 的完整 `data` 目录。
 
 完整的设计、迁移状态、实现模块、排障和测试说明请参阅：[DBX 数据安全升级与迁移](docs/data-security-migration.zh-CN.md)。
 

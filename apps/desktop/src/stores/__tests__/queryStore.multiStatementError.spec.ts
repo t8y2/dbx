@@ -207,6 +207,30 @@ describe("queryStore multi-statement errors", () => {
     }
   });
 
+  it("keeps the previous query result mounted while a replacement query is slow", async () => {
+    const pendingExecution = deferred<QueryResult[]>();
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]).mockImplementationOnce(() => pendingExecution.promise);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query", "query", "app");
+
+    await store.executeTabSql(tabId, "SELECT 1 AS value");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.rows).toEqual([[1]]);
+
+    const execution = store.executeTabSql(tabId, "SELECT 2 AS value");
+    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(2));
+
+    expect(tab.isExecuting).toBe(true);
+    expect(tab.result?.rows).toEqual([[1]]);
+
+    pendingExecution.resolve([{ columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }]);
+    await execution;
+
+    expect(tab.isExecuting).toBe(false);
+    expect(tab.result?.rows).toEqual([[2]]);
+  });
+
   it("opens the first error result from a mixed result batch", async () => {
     const structuredError = structuredTimeoutError();
     mocks.executeMulti.mockResolvedValue([

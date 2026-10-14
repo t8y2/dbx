@@ -12,6 +12,7 @@ import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { selectLineEndsDefaultShortcut, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
@@ -56,6 +57,7 @@ const { t } = useI18n();
 const { toast } = useToast();
 const { isDark, themePalette } = useTheme();
 const settingsStore = useSettingsStore();
+const connectionStore = useConnectionStore();
 
 const originalDdlContent = ref("");
 const formattedDdlContent = ref("");
@@ -296,6 +298,7 @@ async function loadDdl(force = false) {
     const { ddl } = await loadObjectDdl(
       {
         connectionId: props.connectionId,
+        queryTimeoutSecs: connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
         database: props.database,
         schema,
         tableName: props.tableName,

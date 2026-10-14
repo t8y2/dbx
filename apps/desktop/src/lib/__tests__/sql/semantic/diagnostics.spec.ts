@@ -98,3 +98,80 @@ describe("buildSqlSemanticDiagnostics Oracle pseudo-columns", () => {
     expect(diagnostics.map((diagnostic) => diagnostic.message)).toEqual(["Unknown column ROWNUM"]);
   });
 });
+
+describe("buildSqlSemanticDiagnostics projection aliases in GROUP BY / ORDER BY (#11627)", () => {
+  it("accepts SELECT projection aliases in GROUP BY even when terminated with a semicolon", () => {
+    const sql = "SELECT CASE WHEN submitter_id IS NOT NULL THEN 'A' ELSE 'B' END AS repair_type, COUNT(*) AS row_cnt FROM ipu_quotation GROUP BY repair_type;";
+    const aliasStart = sql.indexOf("GROUP BY repair_type") + "GROUP BY ".length;
+    const aliasEnd = aliasStart + "repair_type".length;
+
+    const analysis: SqlReferenceAnalysis = {
+      tables: [{ name: "ipu_quotation", span: span(sql.indexOf("ipu_quotation") + 1, sql.indexOf("ipu_quotation") + "ipu_quotation".length) }],
+      columns: [
+        { name: "submitter_id", qualifier: null, span: span(sql.indexOf("submitter_id") + 1, sql.indexOf("submitter_id") + "submitter_id".length) },
+        // span from reference parser points to token including 1-based bounds before ';'
+        { name: "repair_type", qualifier: null, span: span(aliasStart + 1, aliasEnd + 1) },
+      ],
+    };
+
+    const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+      tables: [{ name: "ipu_quotation" }],
+      columnsByTable: new Map([["ipu_quotation", [{ name: "submitter_id" }]]]),
+      loadedColumnTables: new Set(["ipu_quotation"]),
+      sql,
+      databaseType: "mysql",
+    });
+
+    expect(diagnostics).toEqual([]);
+  });
+
+  it("accepts projection aliases in ORDER BY terminated with a semicolon", () => {
+    const sql = "SELECT id, name AS user_name FROM users ORDER BY user_name;";
+    const aliasStart = sql.indexOf("ORDER BY user_name") + "ORDER BY ".length;
+    const aliasEnd = aliasStart + "user_name".length;
+
+    const analysis: SqlReferenceAnalysis = {
+      tables: [{ name: "users", span: span(sql.indexOf("users") + 1, sql.indexOf("users") + "users".length) }],
+      columns: [
+        { name: "id", qualifier: null, span: span(sql.indexOf("id") + 1, sql.indexOf("id") + 2) },
+        { name: "name", qualifier: null, span: span(sql.indexOf("name") + 1, sql.indexOf("name") + 5) },
+        { name: "user_name", qualifier: null, span: span(aliasStart + 1, aliasEnd + 1) },
+      ],
+    };
+
+    const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+      tables: [{ name: "users" }],
+      columnsByTable: new Map([["users", [{ name: "id" }, { name: "name" }]]]),
+      loadedColumnTables: new Set(["users"]),
+      sql,
+      databaseType: "mysql",
+    });
+
+    expect(diagnostics).toEqual([]);
+  });
+
+  it("still reports genuinely unknown columns in GROUP BY", () => {
+    const sql = "SELECT id, name AS user_name FROM users GROUP BY missing_col;";
+    const colStart = sql.indexOf("missing_col");
+    const colEnd = colStart + "missing_col".length;
+
+    const analysis: SqlReferenceAnalysis = {
+      tables: [{ name: "users", span: span(sql.indexOf("users") + 1, sql.indexOf("users") + "users".length) }],
+      columns: [
+        { name: "id", qualifier: null, span: span(sql.indexOf("id") + 1, sql.indexOf("id") + 2) },
+        { name: "name", qualifier: null, span: span(sql.indexOf("name") + 1, sql.indexOf("name") + 5) },
+        { name: "missing_col", qualifier: null, span: span(colStart + 1, colEnd + 1) },
+      ],
+    };
+
+    const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+      tables: [{ name: "users" }],
+      columnsByTable: new Map([["users", [{ name: "id" }, { name: "name" }]]]),
+      loadedColumnTables: new Set(["users"]),
+      sql,
+      databaseType: "mysql",
+    });
+
+    expect(diagnostics.map((d) => d.message)).toEqual(["Unknown column missing_col"]);
+  });
+});

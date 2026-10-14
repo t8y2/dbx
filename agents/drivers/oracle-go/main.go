@@ -235,6 +235,9 @@ SELECT t.TRIGGER_NAME,
        t.TRIGGERING_EVENT,
        t.TRIGGER_TYPE,
        t.DESCRIPTION,
+       t.STATUS,
+       t.WHEN_CLAUSE,
+       t.REFERENCING_NAMES,
        s.LINE,
        s.TEXT
 FROM ALL_TRIGGERS t
@@ -523,6 +526,7 @@ type triggerInfo struct {
 	Event     string  `json:"event"`
 	Timing    string  `json:"timing"`
 	Statement *string `json:"statement,omitempty"`
+	Enabled   *bool   `json:"enabled,omitempty"`
 }
 
 // constraintInfo represents primary key, unique, and check constraints for a
@@ -2977,9 +2981,18 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	var result []triggerInfo
 	var currentName string
 	var currentDescription string
+	var currentStructured bool
 	var source strings.Builder
 	flush := func() {
 		if len(result) == 0 || currentName == "" {
+			return
+		}
+		if !currentStructured {
+			// Keep the declaration so callers can tell the source carries clauses the
+			// timing/event/body form cannot round-trip.
+			if body := strings.TrimSpace(strings.ReplaceAll(source.String(), "\r\n", "\n")); body != "" {
+				result[len(result)-1].Statement = &body
+			}
 			return
 		}
 		if body, ok := oracleTriggerBody(source.String(), currentDescription); ok {
@@ -2988,17 +3001,18 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	}
 	for rows.Next() {
 		var name, event, timing string
-		var description, lineText sql.NullString
+		var description, status, whenClause, referencingNames, lineText sql.NullString
 		var line sql.NullInt64
-		if err := rows.Scan(&name, &event, &timing, &description, &line, &lineText); err != nil {
+		if err := rows.Scan(&name, &event, &timing, &description, &status, &whenClause, &referencingNames, &line, &lineText); err != nil {
 			return nil, err
 		}
 		if name != currentName {
 			flush()
 			currentName = name
 			currentDescription = description.String
+			currentStructured = oracleTriggerIsStructured(description.String, whenClause.String, referencingNames.String)
 			source.Reset()
-			result = append(result, triggerInfo{Name: name, Event: event, Timing: timing})
+			result = append(result, triggerInfo{Name: name, Event: event, Timing: timing, Enabled: oracleTriggerEnabled(status)})
 		}
 		if line.Valid && lineText.Valid {
 			source.WriteString(lineText.String)
@@ -3006,6 +3020,33 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	}
 	flush()
 	return emptyIfNil(result), rows.Err()
+}
+
+var oracleTriggerUnstructuredClauseRegexp = regexp.MustCompile(`(?i)\b(?:FOLLOWS|PRECEDES|COMPOUND|CROSSEDITION)\b`)
+
+// oracleTriggerIsStructured reports whether a trigger is fully described by its timing, event and
+// PL/SQL body, so it can be rebuilt with CREATE OR REPLACE without dropping a WHEN condition,
+// custom REFERENCING names or FOLLOWS/PRECEDES ordering.
+func oracleTriggerIsStructured(description, whenClause, referencingNames string) bool {
+	if strings.TrimSpace(whenClause) != "" {
+		return false
+	}
+	if referencing := strings.Join(strings.Fields(strings.ToUpper(referencingNames)), " "); referencing != "" && referencing != "REFERENCING NEW AS NEW OLD AS OLD" {
+		return false
+	}
+	return !oracleTriggerUnstructuredClauseRegexp.MatchString(description)
+}
+
+func oracleTriggerEnabled(status sql.NullString) *bool {
+	switch strings.ToUpper(strings.TrimSpace(status.String)) {
+	case "ENABLED":
+		enabled := true
+		return &enabled
+	case "DISABLED":
+		enabled := false
+		return &enabled
+	}
+	return nil
 }
 
 func oracleTriggerBody(source, description string) (string, bool) {
@@ -3644,6 +3685,9 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		return fmt.Sprintf("%s(%d)", dataType, *column.CharacterMaximumLength)
 	}
 	if dataType == "NUMBER" {
+		if column.NumericPrecision == nil && column.NumericScale != nil {
+			return fmt.Sprintf("NUMBER(*,%d)", *column.NumericScale)
+		}
 		if column.NumericPrecision != nil && *column.NumericPrecision > 0 {
 			if column.NumericScale != nil && *column.NumericScale != 0 {
 				return fmt.Sprintf("NUMBER(%d,%d)", *column.NumericPrecision, *column.NumericScale)
@@ -3652,7 +3696,7 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		}
 		return "NUMBER"
 	}
-	if (dataType == "FLOAT" || dataType == "BINARY_FLOAT" || dataType == "BINARY_DOUBLE") &&
+	if dataType == "FLOAT" &&
 		column.NumericPrecision != nil && *column.NumericPrecision > 0 {
 		return fmt.Sprintf("%s(%d)", dataType, *column.NumericPrecision)
 	}

@@ -14,6 +14,7 @@ import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis } from "@/lib/sql/semantic/references";
 import { sqlServerUseDatabaseBeforeCursor } from "@/lib/sql/sqlCompletionLookupTarget";
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange, sqlErrorSqlMatchesEditor } from "@/lib/sql/sqlDiagnostics";
+import { scalarPositionToUtf16Offset, sqlErrorEditorOffset } from "@/lib/sql/errorPosition";
 import { analyzeMysqlRoutineSyntax, supportsMysqlRoutineSyntaxDiagnostics } from "@/lib/sql/mysqlRoutineSyntaxDiagnostics";
 import { buildOracleSyntaxDiagnostics } from "@/lib/sql/oracleSyntaxDiagnostics";
 import { buildSqlServerRoutineSyntaxDiagnostics } from "@/lib/sql/sqlServerRoutineSyntaxDiagnostics";
@@ -27,6 +28,7 @@ import {
   buildSqlSemanticDiagnostics,
   isSqlSemanticDiagnosticInputContext,
   isSqlVirtualTableReference,
+  oceanBaseDiagnosticTableReference,
   shouldRunSqlSemanticDiagnostics,
   sqlSemanticDiagnosticRangesForViewport,
   sqlServerRoutineDefinitionRangesForViewport,
@@ -90,6 +92,16 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
 
   function sqlErrorDecorationRange(currentState: import("@codemirror/state").EditorState) {
     if (!props.executionError) return [];
+    if (props.executionErrorResult?.sourceStatement) {
+      const sql = currentState.doc.toString();
+      const mapped = sqlErrorEditorOffset({ editorSql: sql, result: props.executionErrorResult, resultIndex: props.executionErrorResult.statement_index, databaseType: props.databaseType, parameterOptions: sqlStatementParameterOptions() });
+      if (!mapped || mapped.offset >= sql.length) return [];
+      const source = props.executionErrorResult.sourceStatement;
+      const sourceRange = source ? resolveSqlErrorDecorationRange(source, props.executionError) : null;
+      const sourceOffset = source ? scalarPositionToUtf16Offset(source, mapped.line, mapped.column) : undefined;
+      const width = sourceRange && sourceRange.from === sourceOffset ? sourceRange.to - sourceRange.from : (sql.codePointAt(mapped.offset) ?? 0) > 0xffff ? 2 : 1;
+      return [{ from: mapped.offset, to: Math.min(sql.length, mapped.offset + width), message: props.executionError }];
+    }
     if (!props.executionErrorSql || !sqlErrorSqlMatchesEditor(currentState.doc.toString(), props.executionErrorSql)) return [];
     const range = resolveSqlErrorDecorationRange(currentState.doc.toString(), props.executionError);
     if (!range) return [];
@@ -259,7 +271,8 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     };
   }
 
-  function semanticDiagnosticTablesForScope(tables: SqlTableReference[], scope: CompletionMetadataScope): SqlTableReference[] {
+  function semanticDiagnosticTablesForScope(tables: SqlTableReference[], scope: CompletionMetadataScope, sql: string): SqlTableReference[] {
+    if (props.databaseType === "oceanbase-oracle") return tables.map((table) => oceanBaseDiagnosticTableReference(table, sql));
     if (props.databaseType !== "sqlserver" || scope.database === props.database) return tables;
     return tables.map((table) => (table.database ? table : { ...table, database: scope.database, schema: table.schema ?? scope.schema }));
   }
@@ -274,7 +287,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
         enriched.push(table);
         continue;
       }
-      if (metadata.usesOracleSessionCompletionColumns(table.schema)) {
+      if ((props.databaseType === "oceanbase-oracle" && !table.schema) || metadata.usesOracleSessionCompletionColumns(table.schema)) {
         enriched.push(table);
         continue;
       }
@@ -448,7 +461,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
         const metadataScope = semanticDiagnosticMetadataScope(sql, range);
         const scopedAnalysis = {
           ...semanticAnalysis,
-          tables: semanticDiagnosticTablesForScope(semanticAnalysis.tables, metadataScope),
+          tables: semanticDiagnosticTablesForScope(semanticAnalysis.tables, metadataScope, range.sql),
         };
         const { tables, missingTables } = await enrichSemanticDiagnosticTables(scopedAnalysis.tables, metadataScope);
         const columnMetadataMissingTables = await ensureColumnsForSemanticDiagnostics(tables, metadataScope);
@@ -468,6 +481,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
               loadedColumnTables: metadata.loadedColumnsByTable,
               sql: range.sql,
               databaseType: props.databaseType,
+              currentSchema: metadataScope.schema,
             }),
             range,
             sql,
@@ -582,7 +596,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
         const metadataScope = semanticDiagnosticMetadataScope(sql, range);
         const scopedAnalysis = {
           ...semanticAnalysis,
-          tables: semanticDiagnosticTablesForScope(semanticAnalysis.tables, metadataScope),
+          tables: semanticDiagnosticTablesForScope(semanticAnalysis.tables, metadataScope, range.sql),
         };
         const { tables, missingTables } = await enrichSemanticDiagnosticTables(scopedAnalysis.tables, metadataScope);
         const loadedColumnsBefore = metadata.loadedColumnsByTable.size;
@@ -603,6 +617,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
               loadedColumnTables: metadata.loadedColumnsByTable,
               sql: range.sql,
               databaseType: props.databaseType,
+              currentSchema: metadataScope.schema,
             },
           ),
           range,

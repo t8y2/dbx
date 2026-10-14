@@ -17,9 +17,28 @@ import { clearMetadataRuntimeCache } from "@/lib/metadata/metadataRuntimeCache";
 const request = { connectionId: "c1", database: "app", schema: "public", tableName: "users", catalog: "analytics" } as const;
 
 describe("objectDdlCache", () => {
+  it.each(["remote", "disk"])("settles local waiting when cancellation retires a never-returning %s read", async (phase) => {
+    if (phase === "disk") mocks.loadSchemaCache.mockReturnValueOnce(new Promise(() => undefined));
+    mocks.getTableDisplayDdl.mockReturnValueOnce(new Promise(() => undefined));
+    let settled = false;
+    const result = loadObjectDdl(request).then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await vi.waitFor(() => expect(phase === "remote" ? mocks.getTableDisplayDdl.mock.calls.length : getObjectDdlCacheDebugStateForTests().activeReads).toBe(1));
+    cancelObjectDdlLoadsForConnection(request.connectionId);
+    await vi.waitFor(() => expect(settled).toBe(true));
+    await result;
+    expect(getObjectDdlCacheDebugStateForTests().activeReads).toBe(0);
+  });
   beforeEach(() => {
     clearMetadataRuntimeCache();
     vi.clearAllMocks();
+    mocks.getTableDisplayDdl.mockReset();
     mocks.persisted.clear();
     mocks.loadSchemaCache.mockImplementation(async (cacheKey: string) => mocks.persisted.get(cacheKey) ?? null);
     mocks.saveSchemaCache.mockImplementation(async (cacheKey: string, payload: unknown) => {
@@ -257,7 +276,7 @@ describe("objectDdlCache", () => {
     await vi.waitFor(() => expect(mocks.getTableDisplayDdl).toHaveBeenCalledTimes(1));
     cancelObjectDdlLoadsForConnection(request.connectionId);
     releaseOld("old session ddl");
-    await expect(oldLoad).resolves.toMatchObject({ ddl: "old session ddl" });
+    await expect(oldLoad).rejects.toThrow("Metadata waiting cancelled locally.");
 
     mocks.getTableDisplayDdl.mockResolvedValueOnce("new session ddl");
     await expect(loadObjectDdl(request)).resolves.toMatchObject({ ddl: "new session ddl", cacheStatus: "remote" });

@@ -10,6 +10,7 @@ import ko from "../locales/ko";
 import ptBR from "../locales/pt-BR";
 import ru from "../locales/ru";
 import tr from "../locales/tr";
+import th from "../locales/th";
 import zhCN from "../locales/zh-CN";
 import zhTW from "../locales/zh-TW";
 
@@ -21,9 +22,9 @@ import zhTW from "../locales/zh-TW";
 vi.mock("../locales/fallback", () => ({ withEnglishFallback: (messages: Record<string, unknown>) => messages }));
 
 type Messages = Record<string, unknown>;
-type Locale = "az" | "en" | "es" | "id" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "tr" | "zh-CN" | "zh-TW";
+type Locale = "az" | "en" | "es" | "id" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "th" | "tr" | "zh-CN" | "zh-TW";
 
-const declared: Record<Locale, Messages> = { az, en, es, id, it: itLocale, ja, ko, "pt-BR": ptBR, ru, tr, "zh-CN": zhCN, "zh-TW": zhTW };
+const declared: Record<Locale, Messages> = { az, en, es, id, it: itLocale, ja, ko, "pt-BR": ptBR, ru, th, tr, "zh-CN": zhCN, "zh-TW": zhTW };
 const ALL_LOCALES = Object.keys(declared) as Locale[];
 const EXCEPT_AZ_TR = ALL_LOCALES.filter((locale) => locale !== "az" && locale !== "tr");
 
@@ -52,7 +53,26 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "quick open", keys: ["quickOpen.*", "settings.shortcutGlobalSearch"] },
   {
     feature: "editor tab context menu",
-    keys: under("contextMenu", ["changeOrientation", "closeAllTabs", "closeLeftTabs", "closeOtherTabs", "closeRightTabs", "closeTab", "closeTabGroup", "compactTabTitle", "copyName", "editTabGroup", "fullTabTitle", "pinTab", "resetTabGroup", "splitDown", "splitRight", "unpinTab", "unsplit"]),
+    keys: under("contextMenu", [
+      "changeOrientation",
+      "closeAllTabs",
+      "closeLeftTabs",
+      "closeOtherTabs",
+      "closeRightTabs",
+      "closeTab",
+      "closeTabGroup",
+      "compactTabTitle",
+      "copyName",
+      "editTabGroup",
+      "fullTabTitle",
+      "pinTab",
+      "reopenClosedTab",
+      "resetTabGroup",
+      "splitDown",
+      "splitRight",
+      "unpinTab",
+      "unsplit",
+    ]),
   },
   { feature: "offline Agent export", keys: ["driverStore.offlineExport*"] },
   { feature: "offline Agent import", keys: ["driverStore.offlineImport*", "driverStore.offlineJreImport*"] },
@@ -70,6 +90,12 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "plugin batch actions", keys: ["pluginPlatform.batchDuplicateSources", "pluginPlatform.batchRefreshFailed"], locales: EXCEPT_AZ_TR },
   { feature: "plugin marketplace sorting (#10078)", keys: under("pluginPlatform", ["sortBy", "sortByName", "sortByRecentlyUpdated", "sortByRecentlyListed", "sortByUpdatesFirst"]), locales: EXCEPT_AZ_TR, translated: true },
   { feature: "shared refresh action (#8768)", keys: ["common.refresh"] },
+  {
+    feature: "Xugu field lineage scope and coverage",
+    keys: under("lineage", ["xuguScopeNotice", "xuguPartialCoverage"]),
+    locales: ["en", "es", "it", "ja", "ko", "pt-BR", "ru", "zh-CN", "zh-TW"],
+    translated: true,
+  },
   { feature: "transfer bulk select", keys: under("transfer", ["bulkSelectObjects", "bulkSelectTitle", "bulkSelectHint", "bulkSelectPlaceholder", "bulkSelectConfirm", "bulkSelectMatched", "bulkSelectUnmatched", "noMatchingObjects"]), translated: true },
   { feature: "transfer background acknowledgement (#8649)", keys: ["transfer.backgroundStarted"], translated: true },
   { feature: "table info pin", keys: ["grid.pinTableInfo", "grid.unpinTableInfo"], translated: true },
@@ -98,6 +124,12 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   },
   { feature: "Consul workspace", keys: ["consul.ui.*", "consul.tools.*"] },
   { feature: "MQTT max packet size", keys: ["connection.mqttMaxPacketSize"] },
+  {
+    feature: "MQTT message direction filter (#11848)",
+    keys: under("connection", ["mqttMessageDirectionFilterLabel", "mqttDirectionFilterAll", "mqttDirectionFilterReceived", "mqttDirectionFilterSent"]),
+    locales: ["en", "az", "es", "id", "it", "ja", "ko", "pt-BR", "ru", "tr", "zh-CN", "zh-TW"],
+    translated: true,
+  },
   { feature: "sidebar search skip hint", keys: ["sidebar.searchConnectionSkipped"] },
   { feature: "PostgreSQL legacy TLS", keys: ["connection.postgresLegacyTls", "connection.postgresLegacyTlsHint"] },
   { feature: "settings search sections", keys: ["settings.syncWebDavWebDescription", "settings.performanceSection"] },
@@ -109,6 +141,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     keys: ["pluginPlatform.dataAccessConsent", "pluginPlatform.dataAccessConsentTitle", "pluginPlatform.aiTools.*", "pluginPlatform.dataAccess.*", "ai.toolApproval.*"],
     translated: true,
   },
+  { feature: "schema diff deploy ignores foreign key checks", keys: under("diff", ["ignoreForeignKeyChecks", "ignoreForeignKeyChecksHint"]), translated: true },
 ];
 
 function lookup(messages: unknown, path: string): unknown {

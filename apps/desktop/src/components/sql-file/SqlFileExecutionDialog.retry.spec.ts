@@ -113,7 +113,7 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 vi.mock("@lucide/vue", () => {
   const Icon = passthrough("span");
-  return { Check: Icon, CheckSquare: Icon, ChevronRight: Icon, FileCode: Icon, FolderOpen: Icon, Loader2: Icon, Play: Icon, Square: Icon, X: Icon };
+  return { Check: Icon, CheckSquare: Icon, ChevronRight: Icon, Copy: Icon, FileCode: Icon, FolderOpen: Icon, Loader2: Icon, Play: Icon, Square: Icon, X: Icon };
 });
 vi.mock("@/components/ui/dialog", () => ({
   Dialog: defineComponent({

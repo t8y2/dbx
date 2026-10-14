@@ -12,6 +12,12 @@ describe("data-grid extractor options", () => {
     expect(normalizeDataGridExtractorOptions({ sql: { quoteIdentifiers: "false", temporalFormat: "custom" } }).sql).toMatchObject({ quoteIdentifiers: true, temporalFormat: "native" });
   });
 
+  it("migrates the legacy primary-key flag and normalizes the explicit mode", () => {
+    expect(normalizeDataGridExtractorOptions({}).sql.primaryKeyMode).toBe("include");
+    expect(normalizeDataGridExtractorOptions({ sql: { excludePrimaryKeysFromInsert: true } }).sql.primaryKeyMode).toBe("exclude-generated");
+    expect(normalizeDataGridExtractorOptions({ sql: { primaryKeyMode: "exclude-all" } }).sql.primaryKeyMode).toBe("exclude-all");
+  });
+
   it("defaults to dropping database qualification and keeps an explicit opt-in", () => {
     expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql.includeDatabaseName).toBe(false);
     expect(normalizeDataGridExtractorOptions({ sql: {} }).sql.includeDatabaseName).toBe(false);
@@ -48,6 +54,13 @@ describe("data-grid extractor options", () => {
     expect(normalizeDataGridExtractorOptions({ json: {} }).json.camelCaseFieldNames).toBe(false);
     expect(normalizeDataGridExtractorOptions({ json: { camelCaseFieldNames: true } }).json.camelCaseFieldNames).toBe(true);
     expect(normalizeDataGridExtractorOptions({ json: { camelCaseFieldNames: "true" } }).json.camelCaseFieldNames).toBe(false);
+  });
+
+  it("keeps values-only JSON arrays explicit and disabled by default", () => {
+    expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.json.valuesOnly).toBe(false);
+    expect(normalizeDataGridExtractorOptions({ json: {} }).json.valuesOnly).toBe(false);
+    expect(normalizeDataGridExtractorOptions({ json: { valuesOnly: true } }).json.valuesOnly).toBe(true);
+    expect(normalizeDataGridExtractorOptions({ json: { valuesOnly: "true" } }).json.valuesOnly).toBe(false);
   });
 
   it("rejects overlapping effective row and column separators", () => {

@@ -216,15 +216,19 @@ describe("SQL completion theme", () => {
     expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul > li"]).toMatchObject({ borderRadius: "var(--dbx-radius-sm)" });
   });
 
-  it("renders the info popup in the configured editor font", () => {
+  it("renders the info popup and completion list items in the configured editor font", () => {
     // The info popup is a sibling tooltip rather than a child of the
     // autocomplete tooltip, so it inherits nothing from it and needs the
-    // variable set on its own rule.
+    // variable set on its own rule. Autocomplete ul and completionDetail also
+    // need the variable set so details and items do not fall back to monospace.
     const rules = buildSqlCompletionThemeRules();
     const editorFont = `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`;
 
     expect(rules[".cm-tooltip.cm-completionInfo"]).toMatchObject({ fontFamily: editorFont });
+    expect(rules[".cm-tooltip.cm-completionInfo *"]).toMatchObject({ fontFamily: "inherit" });
     expect(rules[".cm-completionLabel"]).toMatchObject({ fontFamily: editorFont });
+    expect(rules[".cm-completionDetail"]).toMatchObject({ fontFamily: editorFont });
+    expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul"]).toMatchObject({ fontFamily: editorFont });
   });
 
   it("keeps completion labels ahead of long detail text", () => {
@@ -259,6 +263,18 @@ describe("SQL completion theme", () => {
       maskPosition: "center",
     });
     expect(rules[".cm-completionIcon"]).toMatchObject({ width: "15px", height: "15px", overflow: "hidden" });
+  });
+
+  // #12099: sequence completions were typed "variable" but no icon mask was
+  // defined for that kind, so the menu rendered a blank icon slot.
+  it("defines completion icon masks for sequence and variable kinds", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    for (const key of [".cm-completionIcon-sequence", ".cm-completionIcon-variable"]) {
+      expect(rules[key]).toMatchObject({
+        "--dbx-completion-icon-mask": expect.stringContaining("data:image/svg+xml"),
+      });
+    }
   });
 });
 
@@ -312,6 +328,24 @@ describe("editor gutters", () => {
       alignItems: "center",
       display: "flex",
       justifyContent: "flex-end",
+    });
+  });
+
+  it("styles the fold gutter and SVG fold markers consistently (#11834)", () => {
+    const rules = buildEditorFontThemeRules();
+
+    expect(rules[".cm-foldGutter"]).toMatchObject({
+      width: "16px",
+    });
+    expect(rules[".cm-foldGutter .cm-gutterElement"]).toMatchObject({
+      alignItems: "center",
+      display: "flex",
+      justifyContent: "center",
+    });
+    expect(rules[".cm-foldMarker-svg"]).toMatchObject({
+      display: "inline-flex",
+      width: "16px",
+      height: "16px",
     });
   });
 });

@@ -1,5 +1,6 @@
 import * as api from "@/lib/backend/api";
 import { ActiveCacheReadTracker } from "./activeCacheReadTracker";
+import { metadataLoadBudgetMs, waitForMetadata } from "./metadataLoadBudget";
 import type { MetadataCacheInvalidation } from "./metadataResultCache";
 import type { ObjectDdlRequest } from "./objectDdlCache";
 import { toObjectCacheInvalidationError, type ObjectCacheInvalidationOptions } from "./objectCacheInvalidationError";
@@ -23,6 +24,7 @@ interface InFlightLoad<T> {
 
 const inFlightLoads = new Map<string, InFlightLoad<unknown>>();
 const activeCacheReads = new ActiveCacheReadTracker();
+const activeLoads = new ActiveCacheReadTracker();
 const pendingInvalidations = new Map<string, Promise<void>>();
 const pendingWrites = new Map<string, Promise<void>>();
 
@@ -122,6 +124,18 @@ function invalidatePersistedPrefix(prefix: string): Promise<void> {
 }
 
 export async function loadObjectMetadataFacet<T>(request: ObjectDdlRequest, facet: ObjectMetadataFacet, loader: () => Promise<T>, options?: { force?: boolean }): Promise<{ value: T; cacheStatus: "memory" | "disk" | "remote" }> {
+  const token = activeLoads.begin(facetKey(request, facet));
+  try {
+    return await waitForMetadata(loadObjectMetadataFacetInternal(request, facet, loader, token.controller.signal, options), metadataLoadBudgetMs(request.queryTimeoutSecs), token.controller.signal);
+  } catch (error) {
+    token.controller.abort(error);
+    throw error;
+  } finally {
+    activeLoads.finish(token);
+  }
+}
+
+async function loadObjectMetadataFacetInternal<T>(request: ObjectDdlRequest, facet: ObjectMetadataFacet, loader: () => Promise<T>, signal: AbortSignal, options?: { force?: boolean }): Promise<{ value: T; cacheStatus: "memory" | "disk" | "remote" }> {
   const cacheKey = facetKey(request, facet);
   if (options?.force) {
     const existing = inFlightLoads.get(cacheKey);
@@ -137,18 +151,20 @@ export async function loadObjectMetadataFacet<T>(request: ObjectDdlRequest, face
     await waitForPendingInvalidations(cacheKey);
   }
 
+  signal.throwIfAborted();
   if (!options?.force) {
     const runtime = getMetadataRuntimeCache<T>(cacheKey);
     if (runtime) return { value: runtime.value, cacheStatus: "memory" };
     const readToken = activeCacheReads.begin(cacheKey);
     let cached: ReturnType<typeof decodeEnvelope<T>>;
     try {
-      cached = decodeEnvelope<T>(await loadSchemaCacheSafe<unknown>(cacheKey));
+      cached = decodeEnvelope<T>(await waitForMetadata(loadSchemaCacheSafe<unknown>(cacheKey), metadataLoadBudgetMs(request.queryTimeoutSecs), signal));
     } finally {
       activeCacheReads.finish(readToken);
     }
+    signal.throwIfAborted();
     if (readToken.invalidated) {
-      const value = await loadObjectMetadataFacet(request, facet, loader, { force: false });
+      const value = await loadObjectMetadataFacetInternal(request, facet, loader, signal, { force: false });
       return { value: value.value, cacheStatus: "remote" };
     }
     if (cached?.hit) {
@@ -158,14 +174,20 @@ export async function loadObjectMetadataFacet<T>(request: ObjectDdlRequest, face
     }
   }
 
+  signal.throwIfAborted();
   const existing = inFlightLoads.get(cacheKey);
   if (existing && (!options?.force || existing.force)) return { value: (await existing.promise) as T, cacheStatus: "remote" };
   if (existing) invalidateInFlightLoad(cacheKey);
 
   const entry: InFlightLoad<T> = { force: options?.force === true, invalidated: false, promise: Promise.resolve(undefined as T) };
+  const cancel = () => {
+    entry.invalidated = true;
+    if (inFlightLoads.get(cacheKey) === entry) inFlightLoads.delete(cacheKey);
+  };
+  signal.addEventListener("abort", cancel, { once: true });
   recordMetadataCacheRemoteMiss(cacheKey);
-  entry.promise = loader()
-    .then((value) => {
+  entry.promise = waitForMetadata(
+    loader().then((value) => {
       // Callers use undefined to signal that all metadata fallbacks failed.
       // Keep that result visible to the current request, but do not turn a
       // transient failure into a successful cache hit.
@@ -178,10 +200,13 @@ export async function loadObjectMetadataFacet<T>(request: ObjectDdlRequest, face
         persistSchemaCache(cacheKey, envelope, () => entry.invalidated);
       }
       return value;
-    })
-    .finally(() => {
-      if (inFlightLoads.get(cacheKey) === entry) inFlightLoads.delete(cacheKey);
-    });
+    }),
+    metadataLoadBudgetMs(request.queryTimeoutSecs),
+    signal,
+  ).finally(() => {
+    signal.removeEventListener("abort", cancel);
+    if (inFlightLoads.get(cacheKey) === entry) inFlightLoads.delete(cacheKey);
+  });
   inFlightLoads.set(cacheKey, entry as InFlightLoad<unknown>);
   return { value: await entry.promise, cacheStatus: "remote" };
 }
@@ -207,6 +232,7 @@ export async function invalidateObjectMetadataCache(match: MetadataCacheInvalida
 /** Invalidate active loads for a disconnected connection without deleting its persisted snapshot. */
 export function cancelObjectMetadataLoadsForConnection(connectionId: string): void {
   const prefix = `${OBJECT_METADATA_CACHE_PREFIX}:${cacheSegment(connectionId)}:`;
+  activeLoads.cancelPrefix(prefix);
   activeCacheReads.invalidatePrefix(prefix);
   for (const cacheKey of [...inFlightLoads.keys()]) if (cacheKey.startsWith(prefix)) invalidateInFlightLoad(cacheKey);
   invalidateMetadataRuntimeCachePrefix(prefix);
@@ -214,6 +240,7 @@ export function cancelObjectMetadataLoadsForConnection(connectionId: string): vo
 
 export function cancelObjectMetadataLoadsForDatabase(connectionId: string, database: string): void {
   const prefix = `${OBJECT_METADATA_CACHE_PREFIX}:${cacheSegment(connectionId)}:${cacheSegment(database)}:`;
+  activeLoads.cancelPrefix(prefix);
   activeCacheReads.invalidatePrefix(prefix);
   for (const cacheKey of [...inFlightLoads.keys()]) if (cacheKey.startsWith(prefix)) invalidateInFlightLoad(cacheKey);
   invalidateMetadataRuntimeCachePrefix(prefix);

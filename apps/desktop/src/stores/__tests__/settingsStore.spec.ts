@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isProxy } from "vue";
 import {
   AI_PROVIDER_PARTNER_PRESETS,
+  CC_SWITCH_PROVIDER_ID,
+  CC_SWITCH_PROVIDER_PRESET,
   AI_PROVIDER_PRESETS,
   DEFAULT_CUSTOM_THEMES,
   DEFAULT_CUSTOM_THEME_COLORS,
@@ -28,6 +30,12 @@ import { DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/da
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("keeps empty-column hiding opt-in and independent from NULL-only hiding", () => {
+    expect(normalizeEditorSettings({})).toMatchObject({ dataGridHideNullColumns: false, dataGridHideEmptyColumns: false });
+    expect(normalizeEditorSettings({ dataGridHideNullColumns: true })).toMatchObject({ dataGridHideNullColumns: true, dataGridHideEmptyColumns: false });
+    expect(normalizeEditorSettings({ dataGridHideEmptyColumns: true })).toMatchObject({ dataGridHideNullColumns: false, dataGridHideEmptyColumns: true });
+    expect(normalizeEditorSettings({ dataGridHideEmptyColumns: "true" } as any).dataGridHideEmptyColumns).toBe(false);
+  });
   it("preserves comment-first naming for existing settings and permits opting out", () => {
     expect(DEFAULT_EDITOR_SETTINGS.resultTabPreferComments).toBe(true);
     expect(normalizeEditorSettings({}).resultTabPreferComments).toBe(true);
@@ -42,6 +50,14 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ webLogoPosition: "hidden" }).webLogoPosition).toBe("hidden");
     expect(normalizeEditorSettings({ webLogoPosition: "invalid" as any }).webLogoPosition).toBe("left");
     expect(normalizeEditorSettings({ webLogoPosition: undefined }).webLogoPosition).toBe("left");
+  });
+
+  it("defaults caretBrowsingEnabled to false and normalizes boolean values (#11827)", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.caretBrowsingEnabled).toBe(false);
+    expect(normalizeEditorSettings({}).caretBrowsingEnabled).toBe(false);
+    expect(normalizeEditorSettings({ caretBrowsingEnabled: true }).caretBrowsingEnabled).toBe(true);
+    expect(normalizeEditorSettings({ caretBrowsingEnabled: false }).caretBrowsingEnabled).toBe(false);
+    expect(normalizeEditorSettings({ caretBrowsingEnabled: "true" as any }).caretBrowsingEnabled).toBe(false);
   });
 
   it("defaults the welcome page to the workspace overview and honors an explicitly saved intro mode", () => {
@@ -1159,6 +1175,23 @@ describe("normalizeEditorSettings - autoOpenExportFolder", () => {
   });
 });
 
+describe("normalizeEditorSettings - applyColumnFormattersOnExport", () => {
+  it("defaults applyColumnFormattersOnExport to true", () => {
+    expect(normalizeEditorSettings({}).applyColumnFormattersOnExport).toBe(true);
+  });
+
+  it("preserves boolean values", () => {
+    expect(normalizeEditorSettings({ applyColumnFormattersOnExport: true }).applyColumnFormattersOnExport).toBe(true);
+    expect(normalizeEditorSettings({ applyColumnFormattersOnExport: false }).applyColumnFormattersOnExport).toBe(false);
+  });
+
+  it("falls back to default for non-boolean values", () => {
+    expect(normalizeEditorSettings({ applyColumnFormattersOnExport: "false" } as any).applyColumnFormattersOnExport).toBe(true);
+    expect(normalizeEditorSettings({ applyColumnFormattersOnExport: null } as any).applyColumnFormattersOnExport).toBe(true);
+    expect(normalizeEditorSettings({ applyColumnFormattersOnExport: 0 } as any).applyColumnFormattersOnExport).toBe(true);
+  });
+});
+
 // --- Helpers for Pinia store tests ---
 
 function makeTestConfig(overrides: Partial<AiConfigItem> & { id: string }): AiConfigItem {
@@ -1256,7 +1289,7 @@ describe("settingsStore AI API key normalization", () => {
   it("appends AstraFlow as a partner preset without a default model", () => {
     const preset = getAiProviderPresetOption("astraflow");
 
-    expect(AI_PROVIDER_PARTNER_PRESETS.at(-1)).toBe(preset);
+    expect(AI_PROVIDER_PARTNER_PRESETS.find((candidate) => candidate.id === "astraflow")).toBe(preset);
     expect(preset).toMatchObject({
       id: "astraflow",
       label: "AstraFlow",
@@ -1315,6 +1348,31 @@ describe("settingsStore AI API key normalization", () => {
     expect(getAiProviderPresetId("openai-compatible", " HTTPS://API.HIAPI.AI/v1/ ")).toBe("hiapi");
   });
 
+  it("adds PackyAPI as a sponsored partner preset without a default model", () => {
+    const preset = getAiProviderPresetOption("packyapi");
+
+    expect(AI_PROVIDER_PARTNER_PRESETS.at(-1)).toBe(preset);
+    expect(preset).toMatchObject({
+      id: "packyapi",
+      label: "PackyCode",
+      iconPath: "/icons/ai/packyapi.png",
+      group: "partner",
+      provider: "openai-compatible",
+      endpoint: "https://www.packyapi.ai/v1",
+      model: "",
+      apiStyle: "completions",
+      authMethod: "bearer",
+      requiresApiKey: true,
+      websiteUrl: "https://www.packyapi.ai/register?aff=wyDA",
+      apiKeyUrl: "https://www.packyapi.ai/register?aff=wyDA",
+      descriptionKey: "ai.packyapiDescription",
+      badgeKey: "ai.packyapiSponsored",
+    });
+    expect(preset.models ?? []).toEqual([]);
+    expect(getAiProviderPreset("openai-compatible", "https://www.packyapi.ai/v1")).toBe(preset);
+    expect(getAiProviderPresetId("openai-compatible", " HTTPS://WWW.PACKYAPI.AI/v1/ ")).toBe("packyapi");
+  });
+
   it("uses the mainland MiniMax endpoint only for new zh-CN presets", () => {
     expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.minimax, "zh-CN")).toBe("https://api.minimaxi.com/v1");
     expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.minimax, "zh-TW")).toBe("https://api.minimax.io/v1");
@@ -1326,6 +1384,20 @@ describe("settingsStore AI API key normalization", () => {
     expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.zhipu, "zh-CN")).toBe("https://open.bigmodel.cn/api/paas/v4");
     expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.zhipu, "zh-TW")).toBe("https://api.z.ai/api/paas/v4");
     expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.zhipu, "en")).toBe("https://api.z.ai/api/paas/v4");
+  });
+
+  it("keeps the CC-SWITCH provider entry UI-only", () => {
+    const preset = getAiProviderPresetOption(CC_SWITCH_PROVIDER_ID);
+
+    expect(preset).toBe(CC_SWITCH_PROVIDER_PRESET);
+    expect(preset).toMatchObject({
+      id: CC_SWITCH_PROVIDER_ID,
+      label: "AI Config Importer",
+      provider: "custom",
+      group: "builtin",
+      requiresApiKey: false,
+    });
+    expect(AI_PROVIDER_PRESETS).not.toHaveProperty(CC_SWITCH_PROVIDER_ID);
   });
 
   it("preserves saved MiniMax endpoints during normalization", () => {

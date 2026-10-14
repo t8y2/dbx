@@ -3,9 +3,7 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::response::sse::{Event, Sse};
 use axum::Json;
-use dbx_core::persistence::task_history::{
-    TaskHistoryStorageError, TaskItemStatus, TaskLifecycleOwner, TransferTaskJournal,
-};
+use dbx_core::persistence::task_history::{TaskHistoryStorageError, TaskLifecycleOwner, TransferTaskJournal};
 use dbx_core::transfer::{self, TransferRequest, TransferStatus};
 use futures::stream::Stream;
 use serde::Deserialize;
@@ -147,10 +145,6 @@ pub async fn start_transfer(
     let state_clone = state.clone();
 
     tokio::spawn(async move {
-        // Cross-family object transfers are validated inside transfer_schema_objects:
-        // only mechanically rewriteable kinds (views, sequences) are allowed; any
-        // other selection fails with a descriptive error. Structure-only data
-        // transfer is unsupported for MongoDB.
         if matches!(req.content, transfer::TransferContent::StructureOnly)
             && (matches!(source_db_type, dbx_core::models::connection::DatabaseType::MongoDb)
                 || matches!(target_db_type, dbx_core::models::connection::DatabaseType::MongoDb))
@@ -163,8 +157,6 @@ pub async fn start_transfer(
             return;
         }
 
-        // External Doris/StarRocks catalogs: pool is created with `catalog=` URL
-        // setup (SET catalog) and without USE <external-db>. See ensure_transfer_pool.
         let source_pool_key = match transfer::ensure_transfer_pool(
             &app,
             &req.source_connection_id,
@@ -173,9 +165,9 @@ pub async fn start_transfer(
         )
         .await
         {
-            Ok(k) => k,
-            Err(e) => {
-                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
+            Ok(key) => key,
+            Err(error) => {
+                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, error));
                 finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                 return;
             }
@@ -188,491 +180,35 @@ pub async fn start_transfer(
         )
         .await
         {
-            Ok(k) => k,
-            Err(e) => {
-                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
+            Ok(key) => key,
+            Err(error) => {
+                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, error));
                 finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                 return;
             }
         };
 
-        if let Err(e) = transfer::ensure_transfer_source_types_supported(&app, &req, &source_pool_key).await {
-            send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
+        if let Err(error) = transfer::ensure_transfer_source_types_supported(&app, &req, &source_pool_key).await {
+            send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, error));
             finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
             return;
         }
 
-        let tables = req.tables.clone();
-        // Sort by FK dependency so referenced tables are transferred first, and
-        // keep the foreign key metadata fetched along the way — MySQL-family
-        // targets reuse it per table below instead of re-querying it.
-        // Skip for external Doris/StarRocks catalogs — the database name does
-        // not exist in the default catalog and sorting is unnecessary.
-        let (tables, known_foreign_keys) = {
-            let skip_fk_sort = {
-                let configs = app.configs.read().await;
-                configs
-                    .get(&req.source_connection_id)
-                    .and_then(|config| {
-                        transfer::resolve_external_transfer_catalog_for_config(req.source_catalog.as_deref(), config)
-                    })
-                    .is_some()
-            };
-            if skip_fk_sort {
-                (tables, std::collections::HashMap::new())
-            } else {
-                transfer::sort_tables_by_fk_dependency_with_foreign_keys(
-                    &app,
-                    &req.source_connection_id,
-                    &req.source_database,
-                    &req.source_schema,
-                    &tables,
-                    true,
-                )
-                .await
-                .unwrap_or_else(|e| {
-                    log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
-                    (tables, std::collections::HashMap::new())
-                })
-            }
-        };
-        let mut failed_tables: Vec<String> = Vec::new();
-        let mut pending_fk_alters: Vec<(String, String)> = Vec::new();
-
-        // When drop_target_before_create is true, perform a rename pre-pass in
-        // parents_first=false order (children first) so that foreign keys on the
-        // backup tables remain intact. The main create/insert pass then runs in
-        // parents_first=true order (parents first).
-        // Children-first order used by the rename pre-pass, kept for the post-loop backup
-        // cleanup: a backup can still be referenced by another backup, so the drops must
-        // follow the same order.
-        let mut backup_drop_order: Vec<String> = Vec::new();
-        let backup_names = if req.drop_target_before_create {
-            // Re-sort tables in children-first order for the rename pre-pass
-            let (tables_for_rename, _) = transfer::sort_tables_by_fk_dependency_with_foreign_keys(
-                &app,
-                &req.target_connection_id,
-                &req.target_database,
-                &req.target_schema,
-                &tables,
-                false, // parents_first=false: children first
-            )
-            .await
-            .unwrap_or_else(|e| {
-                log::warn!("[transfer] failed to sort tables for rename pre-pass, using original order: {e}");
-                (tables.clone(), std::collections::HashMap::new())
-            });
-            backup_drop_order = tables_for_rename.clone();
-
-            let progress_channel_clone = progress_channel.clone();
-            match transfer::rename_tables_to_backup(
-                &app,
-                &req,
-                &tables_for_rename,
-                target_db_type,
-                &target_pool_key,
-                |progress| {
-                    send_transfer_progress(&progress_channel_clone, &progress);
-                },
-            )
-            .await
-            {
-                Ok(names) => Some(names),
-                Err(e) if e == "Cancelled" => {
-                    let progress = transfer::TransferProgress {
-                        transfer_id: req.transfer_id.clone(),
-                        table: "rename pre-pass".to_string(),
-                        table_index: 0,
-                        total_tables: tables.len(),
-                        rows_transferred: 0,
-                        total_rows: None,
-                        status: TransferStatus::Cancelled,
-                        error: None,
-                        terminal: true,
-                    };
-                    send_transfer_progress(&progress_channel, &progress);
-                    finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                    return;
-                }
-                Err(e) => {
-                    let progress = transfer::TransferProgress {
-                        transfer_id: req.transfer_id.clone(),
-                        table: "rename pre-pass".to_string(),
-                        table_index: 0,
-                        total_tables: tables.len(),
-                        rows_transferred: 0,
-                        total_rows: None,
-                        status: TransferStatus::Error,
-                        error: Some(e),
-                        terminal: true,
-                    };
-                    send_transfer_progress(&progress_channel, &progress);
-                    finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                    return;
-                }
-            }
-        } else {
-            None
-        };
-
-        if matches!(source_db_type, dbx_core::models::connection::DatabaseType::Postgres)
-            && matches!(target_db_type, dbx_core::models::connection::DatabaseType::Postgres)
-        {
-            let progress_channel_clone = progress_channel.clone();
-            match transfer::transfer_postgres_schema_dependencies(
-                &app,
-                &req,
-                &source_pool_key,
-                &target_pool_key,
-                |progress| {
-                    send_transfer_progress(&progress_channel_clone, &progress);
-                },
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(e) if e == "Cancelled" => {
-                    let progress = transfer::TransferProgress {
-                        transfer_id: req.transfer_id.clone(),
-                        table: "schema dependencies".to_string(),
-                        table_index: 0,
-                        total_tables: tables.len(),
-                        rows_transferred: 0,
-                        total_rows: None,
-                        status: TransferStatus::Cancelled,
-                        error: None,
-                        terminal: true,
-                    };
-                    send_transfer_progress(&progress_channel, &progress);
-                    finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                    return;
-                }
-                Err(e) => {
-                    let progress = transfer::TransferProgress {
-                        transfer_id: req.transfer_id.clone(),
-                        table: "schema dependencies".to_string(),
-                        table_index: 0,
-                        total_tables: tables.len(),
-                        rows_transferred: 0,
-                        total_rows: None,
-                        status: TransferStatus::Error,
-                        error: Some(e),
-                        terminal: true,
-                    };
-                    send_transfer_progress(&progress_channel, &progress);
-                    finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                    return;
-                }
-            }
-        }
-
-        // Overwrite clears each target right before copying it, parents first, which cannot
-        // clear a table another selected table references. Empty those children first now.
-        let overwrite_cleared = match transfer::clear_foreign_key_linked_overwrite_targets(
-            &app,
-            &req,
-            &tables,
+        let task_transfer_id = req.transfer_id.clone();
+        let progress_channel_for_run = progress_channel.clone();
+        let terminal = dbx_core::transfer_runner::run_transfer(
+            app,
+            req,
+            source_db_type,
             target_db_type,
-            &target_pool_key,
+            source_pool_key,
+            target_pool_key,
+            history,
+            move |progress| send_transfer_progress(&progress_channel_for_run, &progress),
         )
-        .await
-        {
-            Ok(cleared) => cleared,
-            Err(e) => {
-                let progress = transfer::TransferProgress {
-                    transfer_id: req.transfer_id.clone(),
-                    table: "overwrite pre-pass".to_string(),
-                    table_index: 0,
-                    total_tables: tables.len(),
-                    rows_transferred: 0,
-                    total_rows: None,
-                    status: TransferStatus::Error,
-                    error: Some(e),
-                    terminal: true,
-                };
-                send_transfer_progress(&progress_channel, &progress);
-                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                return;
-            }
-        };
-
-        for (i, table) in tables.iter().enumerate() {
-            if transfer::is_cancelled(&req.transfer_id).await {
-                let progress = transfer::TransferProgress {
-                    transfer_id: req.transfer_id.clone(),
-                    table: table.clone(),
-                    table_index: i,
-                    total_tables: tables.len(),
-                    rows_transferred: 0,
-                    total_rows: None,
-                    status: TransferStatus::Cancelled,
-                    error: None,
-                    terminal: true,
-                };
-                send_transfer_progress(&progress_channel, &progress);
-                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                return;
-            }
-
-            let history_item_index =
-                history.as_ref().and_then(|journal| journal.item_index_for_table(table)).unwrap_or(i);
-            if let Some(journal) = history.as_ref() {
-                journal.start_table(history_item_index).await;
-            }
-            let progress_channel_clone = progress_channel.clone();
-            let mut last_rows_transferred = 0_u64;
-            let mut last_total_rows = None;
-            let mut source_row_count = None;
-            let mut moved_row_count = None;
-            let history_for_progress = history.as_ref();
-            let history_for_count = history.as_ref();
-            let result = transfer::transfer_table_with_result(
-                &app,
-                &req,
-                table,
-                i,
-                &source_db_type,
-                &target_db_type,
-                &source_pool_key,
-                &target_pool_key,
-                &known_foreign_keys,
-                &mut pending_fk_alters,
-                backup_names.as_ref(),
-                overwrite_cleared.contains(table),
-                |progress| {
-                    last_rows_transferred = progress.rows_transferred;
-                    last_total_rows = progress.total_rows;
-                    moved_row_count = Some(progress.rows_transferred);
-                    if let Some(journal) = history_for_progress {
-                        journal.observe_table_progress(history_item_index, progress.rows_transferred);
-                    }
-                    send_transfer_progress(&progress_channel_clone, &progress);
-                },
-                |source_count| {
-                    source_row_count = source_count;
-                    if let Some(journal) = history_for_count {
-                        journal.observe_source_count(history_item_index, source_count);
-                    }
-                },
-            )
-            .await;
-
-            match result {
-                Ok(result) => {
-                    if let Some(journal) = history.as_ref() {
-                        journal
-                            .finish_table(
-                                history_item_index,
-                                TaskItemStatus::Succeeded,
-                                result.source_row_count,
-                                Some(result.moved_rows),
-                            )
-                            .await;
-                    }
-                    let progress = transfer::TransferProgress {
-                        transfer_id: req.transfer_id.clone(),
-                        table: table.clone(),
-                        table_index: i,
-                        total_tables: tables.len(),
-                        rows_transferred: result.moved_rows,
-                        total_rows: last_total_rows.or(Some(result.moved_rows)),
-                        status: TransferStatus::TableDone,
-                        error: None,
-                        terminal: false,
-                    };
-                    send_transfer_progress(&progress_channel, &progress);
-                }
-                Err(e) => {
-                    if e == "Cancelled" {
-                        if let Some(journal) = history.as_ref() {
-                            journal
-                                .finish_table(
-                                    history_item_index,
-                                    TaskItemStatus::Cancelled,
-                                    source_row_count,
-                                    moved_row_count,
-                                )
-                                .await;
-                        }
-                        let progress = transfer::TransferProgress {
-                            transfer_id: req.transfer_id.clone(),
-                            table: table.clone(),
-                            table_index: i,
-                            total_tables: tables.len(),
-                            rows_transferred: 0,
-                            total_rows: None,
-                            status: TransferStatus::Cancelled,
-                            error: None,
-                            terminal: true,
-                        };
-                        send_transfer_progress(&progress_channel, &progress);
-                        finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                        return;
-                    }
-                    if let Some(journal) = history.as_ref() {
-                        journal
-                            .finish_table(history_item_index, TaskItemStatus::Failed, source_row_count, moved_row_count)
-                            .await;
-                    }
-                    failed_tables.push(table.clone());
-                    let progress = transfer::TransferProgress {
-                        transfer_id: req.transfer_id.clone(),
-                        table: table.clone(),
-                        table_index: i,
-                        total_tables: tables.len(),
-                        rows_transferred: last_rows_transferred,
-                        total_rows: last_total_rows,
-                        status: TransferStatus::Error,
-                        error: Some(e),
-                        terminal: false,
-                    };
-                    send_transfer_progress(&progress_channel, &progress);
-                }
-            }
-        }
-
-        // Add any foreign keys deferred during MySQL-family table creation now that
-        // every selected table exists — see transfer_table's use of
-        // strip_inline_foreign_key_constraint_lines for why these can't be created
-        // inline (a foreign key cycle has no valid CREATE TABLE order at all). The
-        // rename pre-pass already freed the backup constraint names, so these re-create
-        // the original names without colliding.
-        let mut failed_fk_tables: Vec<String> = Vec::new();
-        let mut failed_fk_count = 0usize;
-        for (table, alter_sql) in &pending_fk_alters {
-            if let Err(e) = transfer::execute_on_pool(&app, &target_pool_key, alter_sql).await {
-                log::warn!("[transfer] failed to add deferred foreign key constraint for {table}: {e}");
-                failed_fk_count += 1;
-                failed_fk_tables.push(table.clone());
-            }
-        }
-        if failed_fk_count > 0 {
-            failed_fk_tables.sort();
-            failed_fk_tables.dedup();
-            failed_tables.push(format!("{} foreign key(s) on: {}", failed_fk_count, failed_fk_tables.join(", ")));
-        }
-
-        // Transfer selected non-table objects (views, procedures, functions,
-        // triggers, sequences, events) after the per-table loop. The shared
-        // Core decision handles all content modes: DataOnly never
-        // transfers schema objects; PG→PG keeps the legacy empty-selection
-        // default only when structure participates in the transfer.
-        let mut object_outcome = transfer::TransferObjectOutcome::default();
-        let progress_channel_clone = progress_channel.clone();
-        match transfer::transfer_schema_objects(&app, &req, &source_pool_key, &target_pool_key, |progress| {
-            send_transfer_progress(&progress_channel_clone, &progress);
-        })
-        .await
-        {
-            Ok(outcome) => {
-                if let Some(journal) = history.as_ref() {
-                    journal.record_object_outcome(&outcome).await;
-                }
-                object_outcome = outcome;
-            }
-            Err(e) if e == "Cancelled" => {
-                if let Some(journal) = history.as_ref() {
-                    journal.record_schema_objects_error(true).await;
-                }
-                let progress = transfer::TransferProgress {
-                    transfer_id: req.transfer_id.clone(),
-                    table: "schema objects".to_string(),
-                    table_index: tables.len(),
-                    total_tables: tables.len(),
-                    rows_transferred: 0,
-                    total_rows: None,
-                    status: TransferStatus::Cancelled,
-                    error: None,
-                    terminal: true,
-                };
-                send_transfer_progress(&progress_channel, &progress);
-                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                return;
-            }
-            Err(e) => {
-                if let Some(journal) = history.as_ref() {
-                    journal.record_schema_objects_error(false).await;
-                }
-                failed_tables.push("schema objects".to_string());
-                let progress = transfer::TransferProgress {
-                    transfer_id: req.transfer_id.clone(),
-                    table: "schema objects".to_string(),
-                    table_index: tables.len(),
-                    total_tables: tables.len(),
-                    rows_transferred: 0,
-                    total_rows: None,
-                    status: TransferStatus::Error,
-                    error: Some(e),
-                    terminal: false,
-                };
-                send_transfer_progress(&progress_channel, &progress);
-            }
-        }
-
-        // Send done
-        if !object_outcome.failed.is_empty() {
-            failed_tables.push(format!("schema objects ({})", object_outcome.failed.len()));
-        }
-
-        // The rename pre-pass left one backup per rebuilt table. Drop them only now that
-        // every table, every deferred foreign key and every selected schema object has
-        // succeeded — a failure anywhere above keeps the originals recoverable under
-        // their backup names.
-        if let Some(backup_names) = backup_names.as_ref() {
-            if failed_tables.is_empty() {
-                if let Err(e) = transfer::drop_backup_tables(
-                    &app,
-                    &req,
-                    target_db_type,
-                    &target_pool_key,
-                    backup_names,
-                    &backup_drop_order,
-                )
-                .await
-                {
-                    failed_tables.push(e);
-                }
-            } else {
-                log::warn!(
-                    "[transfer] keeping {} backup table(s) because {} step(s) failed",
-                    backup_names.len(),
-                    failed_tables.len()
-                );
-            }
-        }
-        let skip_suffix = if !object_outcome.skipped.is_empty() && failed_tables.is_empty() {
-            format!("，跳过 {} 个已存在对象", object_outcome.skipped.len())
-        } else if !object_outcome.skipped.is_empty() {
-            format!("；跳过 {} 个已存在对象", object_outcome.skipped.len())
-        } else {
-            String::new()
-        };
-        let done = transfer::TransferProgress {
-            transfer_id: req.transfer_id.clone(),
-            table: String::new(),
-            table_index: tables.len(),
-            total_tables: tables.len(),
-            rows_transferred: 0,
-            total_rows: None,
-            status: if failed_tables.is_empty() { TransferStatus::Done } else { TransferStatus::Error },
-            error: if failed_tables.is_empty() {
-                if skip_suffix.is_empty() {
-                    None
-                } else {
-                    Some(skip_suffix.clone())
-                }
-            } else {
-                Some(format!(
-                    "{} table(s) failed: {}{}",
-                    failed_tables.len(),
-                    failed_tables.iter().take(5).cloned().collect::<Vec<_>>().join(", "),
-                    skip_suffix
-                ))
-            },
-            terminal: true,
-        };
-        send_transfer_progress(&progress_channel, &done);
-        finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+        .await;
+        send_transfer_progress(&progress_channel, &terminal);
+        finish_transfer_channel(&state_clone, &task_transfer_id, &progress_channel).await;
     });
 
     Ok(Json(serde_json::json!({ "transferId": transfer_id })))
@@ -845,6 +381,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }

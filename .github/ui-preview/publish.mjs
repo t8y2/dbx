@@ -55,7 +55,8 @@ async function files() {
 // the description with the block in place of the old one, or at its foot
 function withBlock(body, block) {
   body = body || "";
-  const a = body.indexOf(BEGIN), b = body.indexOf(END);
+  const a = body.indexOf(BEGIN),
+    b = body.indexOf(END);
   if (a >= 0 && b > a) return body.slice(0, a) + block + body.slice(b + END.length);
   return body.replace(/\s*$/, "") + "\n\n" + block;
 }
@@ -102,7 +103,9 @@ async function pushMedia(sha, dir) {
       git(["fetch", "-q", "--depth=1", remote, BRANCH], work);
       base = git(["rev-parse", "FETCH_HEAD"], work);
       git(["checkout", "-q", "-f", "--detach", "FETCH_HEAD"], work);
-    } catch { /* the first one */ }
+    } catch {
+      /* the first one */
+    }
     // this PR's latest run only, and no PR that's been closed
     for (const d of await fs.readdir(work).catch(() => [])) {
       const m = /^pr-(\d+)$/.exec(d);
@@ -153,8 +156,12 @@ ${shots.map((x) => `<figure${x.warn ? ' class="shaky"' : ""}><img src="${esc(x.f
 }
 
 async function pagesURL() {
-  try { return (await gh(`/repos/${repo}/pages`)).html_url.replace(/\/?$/, "/"); }
-  catch { const [o, n] = repo.split("/"); return `https://${o.toLowerCase()}.github.io/${n}/`; }
+  try {
+    return (await gh(`/repos/${repo}/pages`)).html_url.replace(/\/?$/, "/");
+  } catch {
+    const [o, n] = repo.split("/");
+    return `https://${o.toLowerCase()}.github.io/${n}/`;
+  }
 }
 
 async function publish() {
@@ -163,12 +170,12 @@ async function publish() {
   const dir = process.env.OUT_DIR;
   const result = process.env.RECORD_RESULT || "success";
   let m = null;
-  try { m = JSON.parse(await fs.readFile(path.join(dir, "manifest.json"), "utf8")); } catch {}
+  try {
+    m = JSON.parse(await fs.readFile(path.join(dir, "manifest.json"), "utf8"));
+  } catch {}
   if (result === "cancelled" && !m) return; // a newer commit took over
   if (!m || m.leak || (!m.scenes.some((s) => s.shots.length) && !m.video)) {
-    const why = m?.leak ? "录制时屏幕上出现了密钥，已全部丢弃，没有发布任何截图"
-      : m?.skipped === "no visible UI change found in the diff" ? "看了改动，没有找到用户能看到的界面变化，所以没有录制"
-      : `这次没录成（${result}）`;
+    const why = m?.leak ? "录制时屏幕上出现了密钥，已全部丢弃，没有发布任何截图" : m?.skipped === "no visible UI change found in the diff" ? "看了改动，没有找到用户能看到的界面变化，所以没有录制" : `这次没录成（${result}）`;
     const errs = m?.errors?.length ? `\n\n<details><summary>细节</summary>\n\n${m.errors.map((e) => "- " + e).join("\n")}\n</details>` : "";
     await setBlock(`${head(sha)}\n${m?.summary ? `**改动**（按代码）：${m.summary}\n\n` : ""}${m?.mismatch ? `> [!WARNING]\n> **描述与代码不符**：${m.mismatch}\n\n` : ""}${why}。${runURL ? `详见[运行记录](${runURL})。` : ""}${errs}`);
     return;
@@ -195,5 +202,7 @@ async function publish() {
 }
 
 const cmd = process.argv[2];
-(cmd === "detect" ? detect() : cmd === "publish" ? publish() : Promise.reject(new Error("detect | publish")))
-  .catch((e) => { console.error(e); process.exit(1); });
+(cmd === "detect" ? detect() : cmd === "publish" ? publish() : Promise.reject(new Error("detect | publish"))).catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

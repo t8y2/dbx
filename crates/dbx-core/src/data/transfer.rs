@@ -41,6 +41,10 @@ use crate::query::{
     StreamProgressClock, AGENT_PROTOCOL_MAX_ROWS,
 };
 use crate::sql::{split_sql_statements, split_sql_statements_for_database};
+use crate::sql_dialect::ddl_profile::{profile_for, AutoIncSyntax};
+use crate::sql_dialect::type_rewrite::{
+    apply_auto_inc_to_column_def, column_is_auto_increment, type_looks_integer, AutoIncColumnBuild,
+};
 use crate::sql_dialect::{
     build_iris_table_select_sql, normalize_len_params, qualified_transfer_table, quote_transfer_identifier,
     transfer_column_identifier,
@@ -113,6 +117,11 @@ fn ensure_transfer_columns_supported(
 static INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r#"(?i)^\s*(?:CONSTRAINT\s+(?:`[^`]*`|"[^"]*"|\S+)\s+)?FOREIGN\s+KEY\s*\("#)
         .expect("valid inline foreign key constraint line regex")
+});
+
+static ORACLE_TRIGGER_STATEMENT_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?|ALTER\s+)TRIGGER\s")
+        .expect("valid Oracle trigger statement regex")
 });
 
 // Upper bound for a single generated INSERT/upsert statement. Raised from
@@ -215,28 +224,15 @@ pub struct TransferObjectSelection {
     pub names: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransferObjectFamily {
-    Mysql,
-    Postgres,
-    Oracle,
-    SqlServer,
-}
+pub use dbx_types::database_manifest::DatabaseTransferObjectFamily as TransferObjectFamily;
+pub use dbx_types::database_manifest::DatabaseTransferSupportLevel as TransferSupportLevel;
 
 pub fn transfer_object_family(db_type: &DatabaseType) -> Option<TransferObjectFamily> {
-    match db_type {
-        DatabaseType::Mysql | DatabaseType::Gbase => Some(TransferObjectFamily::Mysql),
-        DatabaseType::Postgres
-        | DatabaseType::Kingbase
-        | DatabaseType::Gaussdb
-        | DatabaseType::Kwdb
-        | DatabaseType::OpenGauss => Some(TransferObjectFamily::Postgres),
-        DatabaseType::Oracle | DatabaseType::Dameng | DatabaseType::OceanbaseOracle => {
-            Some(TransferObjectFamily::Oracle)
-        }
-        DatabaseType::SqlServer => Some(TransferObjectFamily::SqlServer),
-        _ => None,
-    }
+    dbx_types::database_manifest::transfer_object_family(db_type)
+}
+
+pub fn transfer_support_level(db_type: &DatabaseType) -> Option<TransferSupportLevel> {
+    dbx_types::database_manifest::transfer_support_level(db_type)
 }
 
 pub fn is_same_transfer_family(a: &DatabaseType, b: &DatabaseType) -> bool {
@@ -1036,6 +1032,12 @@ pub fn validate_transfer_database_pair(
     source_db_type: &DatabaseType,
     target_db_type: &DatabaseType,
 ) -> Result<(), String> {
+    if transfer_support_level(source_db_type).is_none() {
+        return Err(format!("{} 暂未声明数据传输兼容级别", source_db_type.as_str()));
+    }
+    if transfer_support_level(target_db_type).is_none() {
+        return Err(format!("{} 暂未声明数据传输兼容级别", target_db_type.as_str()));
+    }
     if !matches!(source_db_type, DatabaseType::Xugu) && !matches!(target_db_type, DatabaseType::Xugu) {
         return Ok(());
     }
@@ -1702,7 +1704,11 @@ pub(crate) fn normalize_integer_literal(
     Some(integer.to_string())
 }
 
-fn is_postgres_numeric_family(data_type: &str) -> bool {
+/// Target types whose stored value is a plain number, so an en-US thousands
+/// separator in the source text is formatting rather than data. Covers the
+/// PostgreSQL/Oracle spellings and the MySQL-family ones (`int`, `tinyint`,
+/// `mediumint`); a type not listed here keeps its literal text.
+fn is_numeric_target_type(data_type: &str) -> bool {
     let normalized = data_type.trim().to_ascii_lowercase();
     let base = normalized.split(['(', ' ']).next().unwrap_or("");
     matches!(
@@ -1711,8 +1717,11 @@ fn is_postgres_numeric_family(data_type: &str) -> bool {
             | "int2"
             | "integer"
             | "int4"
+            | "int"
             | "bigint"
             | "int8"
+            | "tinyint"
+            | "mediumint"
             | "numeric"
             | "decimal"
             | "real"
@@ -1729,12 +1738,13 @@ fn is_postgres_numeric_family(data_type: &str) -> bool {
 /// grouping ("1,23,4", "1,,234") or any non-numeric character returns None so the original
 /// text reaches the database and keeps its existing validation error instead of being
 /// silently coerced. Values without a comma are left untouched.
-pub(crate) fn normalize_thousands_numeric_literal(
-    value: &str,
-    db_type: &DatabaseType,
-    column_type: Option<&str>,
-) -> Option<String> {
-    if !is_postgres_transfer_dialect(db_type) || !column_type.is_some_and(is_postgres_numeric_family) {
+///
+/// Keyed on the target column type rather than the dialect: `123,456` is a formatted
+/// number wherever the column stores a number, and a text column keeps the characters
+/// as written. This started PostgreSQL-only, which left MySQL/TiDB imports inserting
+/// `'123,456'` into a numeric column and failing (#11993).
+pub(crate) fn normalize_thousands_numeric_literal(value: &str, column_type: Option<&str>) -> Option<String> {
+    if !column_type.is_some_and(is_numeric_target_type) {
         return None;
     }
     let trimmed = value.trim();
@@ -2836,6 +2846,50 @@ fn generate_postgres_sequence_sync_sql(columns: &[db::ColumnInfo], table: &str, 
                 "SELECT setval(pg_get_serial_sequence({}, {})::regclass, GREATEST(COALESCE(MAX({quoted_column}::bigint), 0), 1), MAX({quoted_column}::bigint) IS NOT NULL) FROM {full_table}",
                 quote_string_literal(&full_table),
                 quote_string_literal(&column.name)
+            )
+        })
+        .collect()
+}
+
+/// `ALTER TABLE ... MODIFY <column> GENERATED BY DEFAULT AS IDENTITY (START WITH LIMIT VALUE)`
+/// statements for Oracle targets.
+///
+/// Oracle accepts explicit values in a `GENERATED BY DEFAULT AS IDENTITY` column but
+/// does not advance its sequence, so the first auto-generated insert after copying
+/// explicit ids can collide with a copied value. `START WITH LIMIT VALUE` makes Oracle
+/// lock the table and move the sequence past the maximum value in the column.
+///
+/// The filter mirrors the identity emission in
+/// `generate_create_table_ddl_with_column_quoting` (primary key, explicit
+/// auto-increment, integer-like mapped type), so the ALTER only targets a column the
+/// generated DDL created as an identity column.
+fn oracle_identity_reseed_statements(
+    columns: &[db::ColumnInfo],
+    table: &str,
+    schema: &str,
+    source_schema: &str,
+    source_db: &DatabaseType,
+    quote_target_column_names: bool,
+) -> Vec<String> {
+    let full_table = qualified_table(table, schema, &DatabaseType::Oracle, None);
+    columns
+        .iter()
+        .filter(|column| {
+            column.is_primary_key
+                && column_is_auto_increment(column)
+                && type_looks_integer(&postgres_column_type_sql(
+                    column,
+                    source_schema,
+                    schema,
+                    source_db,
+                    &DatabaseType::Oracle,
+                ))
+        })
+        .map(|column| {
+            let quoted_column =
+                transfer_column_identifier(&column.name, &DatabaseType::Oracle, quote_target_column_names);
+            format!(
+                "ALTER TABLE {full_table} MODIFY {quoted_column} GENERATED BY DEFAULT AS IDENTITY (START WITH LIMIT VALUE)"
             )
         })
         .collect()
@@ -4305,47 +4359,109 @@ fn generate_create_table_ddl_with_column_quoting(
             | DatabaseType::Sundb
     );
 
+    // Auto-increment beyond the MySQL family goes through the shared dialect
+    // profile (the same facility the structure-diff generator uses), so the target
+    // spells it natively: Dameng and SQL Server `IDENTITY(1,1)`, Oracle
+    // `GENERATED BY DEFAULT AS IDENTITY`, and so on.
+    //
+    // Only an explicit source auto-increment qualifies. A transfer must not invent
+    // identity the source never declared, and both MySQL (one AUTO_INCREMENT
+    // column per table) and DM8 (one identity column per table) cap the clause at
+    // one column, which the explicit-only rule keeps true for composite primary
+    // keys as well.
+    //
+    // MySQL-family targets keep the inline clause below. Targets that stay on the
+    // plain path:
+    // - The profile-level MySQL family beyond the transfer's own list (Databend,
+    //   Gbase, ManticoreSearch): they reject the `AUTO_INCREMENT` spelling.
+    // - Postgres family (`PostgresSequence`): the target needs a created sequence
+    //   plus `ALTER TABLE ... SET DEFAULT`, which this generator does not emit;
+    //   those transfers keep their own sequence handling.
+    // - SQLite family: `AUTOINCREMENT` is only valid as part of an inline
+    //   `INTEGER PRIMARY KEY`, and primary keys here are a table-level clause —
+    //   SQLite's rowid alias already generates ids for `INTEGER PRIMARY KEY`.
+    let target_profile = profile_for(*target_db);
+    let inline_identity = !is_mysql_family
+        && !matches!(
+            target_db,
+            DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1
+        )
+        && match target_profile.auto_inc {
+            // `profile_for` puts Databend/Gbase/ManticoreSearch in the MySQL family
+            // too, but their grammars reject MySQL's `AUTO_INCREMENT` spelling; only
+            // the transfer's own MySQL-family targets above keep it.
+            AutoIncSyntax::Suffix(suffix) => suffix != " AUTO_INCREMENT",
+            AutoIncSyntax::ReplaceTypeWith(_) => true,
+            _ => false,
+        };
+
     let mut col_lines = Vec::with_capacity(columns.len());
     for c in columns {
         col_lines.push({
             let mapped_type = postgres_column_type_sql(c, source_schema, schema, source_db, target_db);
-            let mut line = format!(
-                "  {} {}",
-                transfer_column_identifier(&c.name, target_db, quote_target_column_names),
-                mapped_type
-            );
-            if let Some(default_clause) = column_default_clause(c, source_schema, schema, source_db, target_db) {
-                line.push(' ');
-                line.push_str(&default_clause);
-            }
-            if !c.is_nullable
-                && !matches!(
-                    target_db,
-                    DatabaseType::Hive
-                        | DatabaseType::Kyuubi
-                        | DatabaseType::Impala
-                        | DatabaseType::Argo
-                        | DatabaseType::Transwarp
+            let column_name = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
+            let identity_build = if inline_identity && c.is_primary_key && column_is_auto_increment(c) {
+                apply_auto_inc_to_column_def(
+                    &target_profile,
+                    &column_name,
+                    &mapped_type,
+                    c,
+                    type_looks_integer(&mapped_type),
                 )
-            {
-                line.push_str(" NOT NULL");
-            }
-            if is_mysql_family {
-                let extra_clauses = parse_mysql_extra_clauses(c.extra.as_deref());
-                if extra_clauses.auto_increment {
-                    line.push_str(" AUTO_INCREMENT");
-                }
-                if let Some(on_update_expr) = extra_clauses.on_update {
-                    line.push_str(&format!(" ON UPDATE {on_update_expr}"));
-                }
-                if let Some(ref comment) = c.comment {
-                    let trimmed = comment.trim();
-                    if !trimmed.is_empty() {
-                        line.push_str(&format!(" COMMENT '{}'", trimmed.replace('\'', "''")));
+            } else {
+                AutoIncColumnBuild::Normal { skip_default: false }
+            };
+            match identity_build {
+                // Profiles that replace the whole definition (e.g. Access `COUNTER`)
+                // already include everything the column needs.
+                AutoIncColumnBuild::Complete { def, .. } => format!("  {def}"),
+                build => {
+                    let mut line = format!("  {column_name} {mapped_type}");
+                    let skip_default = match build {
+                        AutoIncColumnBuild::AppendSuffix { suffix, skip_default, .. } => {
+                            line.push_str(suffix);
+                            skip_default
+                        }
+                        _ => false,
+                    };
+                    if !skip_default {
+                        if let Some(default_clause) =
+                            column_default_clause(c, source_schema, schema, source_db, target_db)
+                        {
+                            line.push(' ');
+                            line.push_str(&default_clause);
+                        }
                     }
+                    if !c.is_nullable
+                        && !matches!(
+                            target_db,
+                            DatabaseType::Hive
+                                | DatabaseType::Kyuubi
+                                | DatabaseType::Impala
+                                | DatabaseType::Argo
+                                | DatabaseType::Transwarp
+                        )
+                    {
+                        line.push_str(" NOT NULL");
+                    }
+                    if is_mysql_family {
+                        let extra_clauses = parse_mysql_extra_clauses(c.extra.as_deref());
+                        if extra_clauses.auto_increment {
+                            line.push_str(" AUTO_INCREMENT");
+                        }
+                        if let Some(on_update_expr) = extra_clauses.on_update {
+                            line.push_str(&format!(" ON UPDATE {on_update_expr}"));
+                        }
+                        if let Some(ref comment) = c.comment {
+                            let trimmed = comment.trim();
+                            if !trimmed.is_empty() {
+                                line.push_str(&format!(" COMMENT '{}'", trimmed.replace('\'', "''")));
+                            }
+                        }
+                    }
+                    line
                 }
             }
-            line
         });
     }
 
@@ -5267,9 +5383,141 @@ fn rewrite_transfer_source_table_ddl(
         // and string literals remain untouched; table casing is validated as
         // Preserve for structure transfers.
         Some(rewrite_double_quoted_schema_qualifier(sql, source_schema, target_schema))
+    } else if matches!((source_db_type, target_db_type), (DatabaseType::SqlServer, DatabaseType::SqlServer)) {
+        // SQL Server's reused DDL brackets the schema qualifier in the CREATE
+        // TABLE head and in FOREIGN KEY ... REFERENCES; reusing it verbatim
+        // recreated the table in the source schema (or failed outright when
+        // the target had no schema of that name). Rewrite only the bracketed
+        // source qualifier — cross-schema references to third-party tables
+        // keep their own qualifier, exactly like the Oracle-family rewrite.
+        Some(rewrite_sqlserver_bracketed_schema_qualifier(sql, source_schema, target_schema))
     } else {
         Some(sql.to_string())
     }
+}
+
+fn rewrite_sqlserver_bracketed_schema_qualifier(ddl: &str, source_schema: &str, target_schema: &str) -> String {
+    if source_schema == target_schema || source_schema.is_empty() {
+        return ddl.to_string();
+    }
+    let source_identifier = format!("[{}]", source_schema.replace(']', "]]"));
+    let target_identifier = format!("[{}]", target_schema.replace(']', "]]"));
+    let source_literal = format!("N'{}'", source_schema.replace('\'', "''"));
+    let target_literal = format!("N'{}'", target_schema.replace('\'', "''"));
+    let tokens = sqlserver_ddl_tokens(ddl);
+    let token_text = |token: &(usize, usize)| &ddl[token.0..token.1];
+    let mut output = String::with_capacity(ddl.len());
+    let mut previous = 0;
+
+    for statement in tokens.split(|token| token_text(token) == ";") {
+        let has_argument = |name: &str, value: &str| {
+            statement.windows(3).any(|argument| {
+                token_text(&argument[0]).eq_ignore_ascii_case(name)
+                    && token_text(&argument[1]) == "="
+                    && token_text(&argument[2]).eq_ignore_ascii_case(value)
+            })
+        };
+        let generated_comment = statement.len() >= 4
+            && matches!(token_text(&statement[0]).to_ascii_uppercase().as_str(), "EXEC" | "EXECUTE")
+            && token_text(&statement[1]).eq_ignore_ascii_case("sys")
+            && token_text(&statement[2]) == "."
+            && token_text(&statement[3]).eq_ignore_ascii_case("sp_addextendedproperty")
+            && has_argument("@name", "N'MS_Description'")
+            && has_argument("@level0type", "N'SCHEMA'")
+            && has_argument("@level1type", "N'TABLE'");
+
+        for (index, token) in statement.iter().enumerate() {
+            let replacement = if token_text(token) == source_identifier
+                && statement.get(index + 1).is_some_and(|next| token_text(next) == ".")
+            {
+                &target_identifier
+            } else if generated_comment
+                && token_text(token) == source_literal
+                && index >= 2
+                && token_text(&statement[index - 2]).eq_ignore_ascii_case("@level0name")
+                && token_text(&statement[index - 1]) == "="
+            {
+                &target_literal
+            } else {
+                continue;
+            };
+            output.push_str(&ddl[previous..token.0]);
+            output.push_str(replacement);
+            previous = token.1;
+        }
+    }
+    output.push_str(&ddl[previous..]);
+    output
+}
+
+fn sqlserver_ddl_tokens(ddl: &str) -> Vec<(usize, usize)> {
+    let bytes = ddl.as_bytes();
+    let mut tokens = Vec::new();
+    let mut position = 0;
+    while position < bytes.len() {
+        if bytes[position].is_ascii_whitespace() {
+            position += 1;
+            continue;
+        }
+        if bytes[position..].starts_with(b"--") {
+            while position < bytes.len() && !matches!(bytes[position], b'\n' | b'\r') {
+                position += 1;
+            }
+            continue;
+        }
+        if bytes[position..].starts_with(b"/*") {
+            let mut depth = 1;
+            position += 2;
+            while position < bytes.len() && depth > 0 {
+                if bytes[position..].starts_with(b"/*") {
+                    depth += 1;
+                    position += 2;
+                } else if bytes[position..].starts_with(b"*/") {
+                    depth -= 1;
+                    position += 2;
+                } else {
+                    position += 1;
+                }
+            }
+            continue;
+        }
+
+        let start = position;
+        if matches!(bytes[position], b'N' | b'n') && bytes.get(position + 1) == Some(&b'\'') {
+            position += 1;
+        }
+        if matches!(bytes[position], b'\'' | b'"' | b'[') {
+            let delimiter = if bytes[position] == b'[' { b']' } else { bytes[position] };
+            position += 1;
+            while position < bytes.len() {
+                if bytes[position] == delimiter {
+                    position += 1;
+                    if bytes.get(position) == Some(&delimiter) {
+                        position += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    position += 1;
+                }
+            }
+        } else if bytes[position].is_ascii_alphanumeric()
+            || matches!(bytes[position], b'_' | b'@' | b'#' | b'$')
+            || !bytes[position].is_ascii()
+        {
+            while position < bytes.len()
+                && (bytes[position].is_ascii_alphanumeric()
+                    || matches!(bytes[position], b'_' | b'@' | b'#' | b'$')
+                    || !bytes[position].is_ascii())
+            {
+                position += 1;
+            }
+        } else {
+            position += 1;
+        }
+        tokens.push((start, position));
+    }
+    tokens
 }
 
 /// Rewrites the table identifier of the leading CREATE TABLE statement of a reused
@@ -7326,6 +7574,15 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
         } else {
             statements
         }
+    } else if matches!(db_type, DatabaseType::Oracle) {
+        // The Oracle agent appends index, trigger and comment DDL to the table
+        // DDL, which the target rejects as one statement with `ORA-03405`.
+        let statements = split_sql_statements_for_database(sql, *db_type);
+        if statements.is_empty() {
+            vec![sql.trim().to_string()]
+        } else {
+            statements.into_iter().filter(|statement| !is_oracle_trigger_statement(statement)).collect()
+        }
     } else {
         vec![sql.to_string()]
     }
@@ -7383,6 +7640,15 @@ fn is_postgres_post_table_index_statement(statement: &str) -> bool {
     normalized.starts_with("CREATE INDEX ")
         || normalized.starts_with("CREATE UNIQUE INDEX ")
         || normalized.starts_with("COMMENT ON INDEX ")
+}
+
+/// Trigger DDL is dropped from reused Oracle table DDL. Created together with the
+/// table, a trigger would fire while transfer copies the rows, and one that reads
+/// a sequence is still invalid then because sequences are transferred after
+/// tables, so every insert fails with `ORA-04098`. Selected triggers are created
+/// by the schema object phase instead, which runs after the data and the sequences.
+fn is_oracle_trigger_statement(statement: &str) -> bool {
+    ORACLE_TRIGGER_STATEMENT_RE.is_match(statement)
 }
 
 /// Standalone `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY` statements are
@@ -8536,6 +8802,7 @@ where
             transfer_oracle_schema_objects(
                 state,
                 &filtered_request,
+                &target_db_type,
                 source_pool_key,
                 target_pool_key,
                 progress_callback,
@@ -8631,6 +8898,7 @@ fn resolve_oracle_schema(schema: &str, database: &str) -> String {
 async fn transfer_oracle_schema_objects<F>(
     state: &AppState,
     request: &TransferRequest,
+    target_db_type: &DatabaseType,
     source_pool_key: &str,
     target_pool_key: &str,
     mut progress_callback: F,
@@ -8684,8 +8952,8 @@ where
                 .ok_or_else(|| format!("No DDL returned for Oracle {:?} {name}", kind))?
                 .to_string();
             let ddl = rewrite_oracle_schema_qualifier(&ddl, &source_schema, &target_schema);
-            match execute_on_pool(state, target_pool_key, &ddl).await {
-                Ok(_) => {
+            match execute_oracle_object_ddl_on_pool(state, target_pool_key, &ddl, &kind, target_db_type).await {
+                Ok(()) => {
                     outcome.transferred.push(format!("{kind:?}:{name}"));
                     progress(&mut outcome, TransferStatus::Running, None);
                 }
@@ -8697,6 +8965,38 @@ where
         }
     }
     Ok(outcome)
+}
+
+/// `DBMS_METADATA.GET_DDL('TRIGGER', ...)` returns the trigger body followed by an
+/// `ALTER TRIGGER ... ENABLE` statement. Sent as one statement, Oracle compiles the
+/// `ALTER` as part of the PL/SQL body and the trigger is created invalid with
+/// `PLS-00103`, so Oracle targets run each statement separately.
+async fn execute_oracle_object_ddl_on_pool(
+    state: &AppState,
+    pool_key: &str,
+    ddl: &str,
+    kind: &TransferObjectKind,
+    target_db_type: &DatabaseType,
+) -> Result<(), String> {
+    for statement in oracle_object_ddl_statements(ddl, kind, target_db_type) {
+        execute_on_pool(state, pool_key, &statement).await?;
+    }
+    Ok(())
+}
+
+fn oracle_object_ddl_statements(ddl: &str, kind: &TransferObjectKind, target_db_type: &DatabaseType) -> Vec<String> {
+    // Only trigger DDL carries a trailing statement. Every other object kind is a
+    // single CREATE statement and keeps being sent as returned, so a routine body or
+    // a `WITH FUNCTION` view is never cut at its inner semicolons.
+    if !matches!(target_db_type, DatabaseType::Oracle) || !matches!(kind, TransferObjectKind::Trigger) {
+        return vec![ddl.to_string()];
+    }
+    let statements = split_sql_statements_for_database(ddl, *target_db_type);
+    if statements.is_empty() {
+        vec![ddl.trim().to_string()]
+    } else {
+        statements
+    }
 }
 
 async fn transfer_sqlserver_schema_objects<F>(
@@ -11994,6 +12294,30 @@ where
         }
     }
 
+    // Oracle accepts explicit ids in a `GENERATED BY DEFAULT AS IDENTITY` column but
+    // does not advance the sequence, so move it past the copied values. Only for
+    // tables this run created — `START WITH LIMIT VALUE` requires the identity column
+    // the generated DDL just created, and a preexisting target may not have one.
+    // OceanBase Oracle and DM8 stay out until their behavior is verified.
+    if *target_db_type == DatabaseType::Oracle
+        && request.create_table
+        && !target_table_preexisting
+        && total_transferred > 0
+    {
+        for statement in oracle_identity_reseed_statements(
+            &columns,
+            &target_table,
+            &request.target_schema,
+            &request.source_schema,
+            source_db_type,
+            request.quote_target_column_names,
+        ) {
+            execute_on_pool(state, target_pool_key, &statement)
+                .await
+                .map_err(|e| format!("Failed to reseed the Oracle identity column for {target_table}: {e}"))?;
+        }
+    }
+
     if should_restore_postgres_table_schema {
         restore_postgres_table_schema_objects(
             state,
@@ -13344,6 +13668,7 @@ for line in sys.stdin:
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
             docs_notes_path: None,
         }
@@ -14037,6 +14362,14 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         }
 
         #[test]
+        fn transfer_pair_requires_declared_endpoint_compatibility() {
+            let request = base_request();
+            let error = validate_transfer_database_pair(&request, &DatabaseType::Gbase, &DatabaseType::Mysql)
+                .expect_err("GBase data transfer is disabled in the shared manifest");
+            assert!(error.contains("gbase"));
+        }
+
+        #[test]
         fn xugu_structure_transfer_rejects_renamed_tables_and_non_table_objects() {
             let request = TransferRequest { target_table_name_case: TransferTableNameCase::Upper, ..base_request() };
             assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Xugu)
@@ -14615,10 +14948,14 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
 
         #[test]
         fn deferred_mysql_foreign_keys_follow_target_ddl_capability() {
-            for target in [DatabaseType::Mysql, DatabaseType::StarRocks, DatabaseType::Goldendb, DatabaseType::Sundb] {
+            for target in [DatabaseType::Mysql, DatabaseType::Goldendb, DatabaseType::Sundb] {
                 assert!(supports_deferred_mysql_foreign_keys(&target), "{target:?}");
             }
-            assert!(!supports_deferred_mysql_foreign_keys(&DatabaseType::Doris));
+            // StarRocks uses foreign_key_constraints table properties, not MySQL-style
+            // ADD CONSTRAINT ... FOREIGN KEY statements generated by this transfer path.
+            for target in [DatabaseType::StarRocks, DatabaseType::Doris] {
+                assert!(!supports_deferred_mysql_foreign_keys(&target), "{target:?}");
+            }
         }
 
         #[test]
@@ -16491,6 +16828,109 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
     }
 
     #[test]
+    fn oracle_transfer_ddl_splits_reused_table_ddl_and_drops_triggers() {
+        let ddl = "\n  CREATE TABLE \"APP\".\"ORDERS\" (\"ID\" NUMBER, \"NOTE\" VARCHAR2(50));\n\n\
+                   CREATE INDEX \"APP\".\"ORDERS_NOTE_IX\" ON \"APP\".\"ORDERS\" (\"NOTE\");\n\n\
+                   CREATE OR REPLACE EDITIONABLE TRIGGER \"APP\".\"ORDERS_TRG\" BEFORE INSERT ON \"APP\".\"ORDERS\" FOR EACH ROW\n\
+                   BEGIN\n  IF :NEW.ID IS NULL THEN SELECT \"APP\".\"ORDERS_SEQ\".NEXTVAL INTO :NEW.ID FROM DUAL; END IF;\nEND;\n\
+                   ALTER TRIGGER \"APP\".\"ORDERS_TRG\" ENABLE;\n\n\
+                   COMMENT ON TABLE \"APP\".\"ORDERS\" IS 'trigger; orders';";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Oracle);
+
+        assert_eq!(
+            statements,
+            vec![
+                "CREATE TABLE \"APP\".\"ORDERS\" (\"ID\" NUMBER, \"NOTE\" VARCHAR2(50))".to_string(),
+                "CREATE INDEX \"APP\".\"ORDERS_NOTE_IX\" ON \"APP\".\"ORDERS\" (\"NOTE\")".to_string(),
+                "COMMENT ON TABLE \"APP\".\"ORDERS\" IS 'trigger; orders'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_trigger_statement_detection_ignores_other_ddl() {
+        assert!(is_oracle_trigger_statement("CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN NULL; END;"));
+        assert!(is_oracle_trigger_statement("create or replace noneditionable trigger \"T\" ..."));
+        assert!(is_oracle_trigger_statement("\n  ALTER TRIGGER \"APP\".\"T\" ENABLE"));
+        assert!(!is_oracle_trigger_statement("CREATE TABLE \"TRIGGER_LOG\" (\"ID\" NUMBER)"));
+        assert!(!is_oracle_trigger_statement("COMMENT ON TABLE \"T\" IS 'CREATE TRIGGER x'"));
+        assert!(!is_oracle_trigger_statement("ALTER TABLE \"T\" DISABLE ALL TRIGGERS"));
+    }
+
+    #[test]
+    fn oracle_object_ddl_splits_trigger_enable_statement_for_oracle_targets() {
+        let ddl = "\n  CREATE OR REPLACE EDITIONABLE TRIGGER \"APP\".\"ORDERS_TRG\" BEFORE INSERT ON \"APP\".\"ORDERS\" FOR EACH ROW\n\
+                   BEGIN\n  NULL;\nEND;\n\
+                   ALTER TRIGGER \"APP\".\"ORDERS_TRG\" ENABLE";
+
+        let statements = oracle_object_ddl_statements(ddl, &TransferObjectKind::Trigger, &DatabaseType::Oracle);
+
+        assert_eq!(statements.len(), 2, "{statements:#?}");
+        assert!(statements[0].starts_with("CREATE OR REPLACE EDITIONABLE TRIGGER"));
+        assert!(statements[0].ends_with("END;"));
+        assert_eq!(statements[1], "ALTER TRIGGER \"APP\".\"ORDERS_TRG\" ENABLE");
+        assert_eq!(
+            oracle_object_ddl_statements(ddl, &TransferObjectKind::Trigger, &DatabaseType::Dameng),
+            vec![ddl.to_string()]
+        );
+    }
+
+    // Only trigger DDL carries a trailing statement; other object DDL must reach the
+    // target exactly as `DBMS_METADATA` returned it, never cut at inner semicolons.
+    #[test]
+    fn oracle_object_ddl_keeps_non_trigger_objects_whole() {
+        let cases = [
+            (
+                TransferObjectKind::Procedure,
+                "\n  CREATE OR REPLACE EDITIONABLE PROCEDURE \"APP\".\"P\" AS\n  PROCEDURE inner_p IS BEGIN NULL; END;\nBEGIN\n  inner_p;\nEND;",
+            ),
+            (
+                TransferObjectKind::Function,
+                "\n  CREATE OR REPLACE EDITIONABLE FUNCTION \"APP\".\"F\" RETURN NUMBER AS\n  FUNCTION g RETURN NUMBER IS BEGIN RETURN 1; END g;\nBEGIN\n  RETURN g;\nEND;",
+            ),
+            (
+                TransferObjectKind::View,
+                "\n  CREATE OR REPLACE FORCE EDITIONABLE VIEW \"APP\".\"V\" AS WITH FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END; SELECT f FROM dual",
+            ),
+        ];
+
+        for (kind, ddl) in cases {
+            assert_eq!(
+                oracle_object_ddl_statements(ddl, &kind, &DatabaseType::Oracle),
+                vec![ddl.to_string()],
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn oracle_object_ddl_splits_compound_trigger_enable_statement() {
+        let trigger =
+            "CREATE OR REPLACE EDITIONABLE TRIGGER \"APP\".\"T\" FOR INSERT ON \"APP\".\"X\" COMPOUND TRIGGER\n  \
+                       BEFORE EACH ROW IS BEGIN NULL; END BEFORE EACH ROW;\nEND \"T\";";
+        let ddl = format!("\n  {trigger}\nALTER TRIGGER \"APP\".\"T\" ENABLE");
+
+        assert_eq!(
+            oracle_object_ddl_statements(&ddl, &TransferObjectKind::Trigger, &DatabaseType::Oracle),
+            vec![trigger.to_string(), "ALTER TRIGGER \"APP\".\"T\" ENABLE".to_string()]
+        );
+    }
+
+    #[test]
+    fn oracle_transfer_ddl_drops_compound_trigger_whole() {
+        let ddl = "\n  CREATE TABLE \"APP\".\"X\" (\"ID\" NUMBER);\n\n\
+                   CREATE OR REPLACE EDITIONABLE TRIGGER \"APP\".\"T\" FOR INSERT ON \"APP\".\"X\" COMPOUND TRIGGER\n  \
+                   BEFORE EACH ROW IS BEGIN NULL; END BEFORE EACH ROW;\nEND \"T\";\n\
+                   ALTER TRIGGER \"APP\".\"T\" ENABLE;";
+
+        assert_eq!(
+            transfer_ddl_statements(ddl, &DatabaseType::Oracle),
+            vec!["CREATE TABLE \"APP\".\"X\" (\"ID\" NUMBER)".to_string()]
+        );
+    }
+
+    #[test]
     fn xugu_transfer_ddl_splits_table_constraints_indexes_and_comments() {
         let ddl = "CREATE TABLE \"APP\".\"ITEMS\" (\"ID\" INTEGER, \"NOTE\" VARCHAR(100));\n\
                    ALTER TABLE \"APP\".\"ITEMS\" ADD CONSTRAINT \"ITEMS_PK\" PRIMARY KEY (\"ID\");\n\
@@ -16903,6 +17343,157 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
         assert!(rewritten.contains("PARTITION BY RANGE (TO_DAYS(`created_day`))"));
         assert!(rewritten.contains("ENGINE=InnoDB"));
         assert!(!rewritten.contains("`orders_plain`"));
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_rewrites_schema_qualifier_in_head_and_foreign_keys() {
+        // Issue #11533: the reused DDL kept `[src].` so the CREATE TABLE ran
+        // against the source schema — same-database transfers failed with 2714
+        // and cross-database ones either errored (2760) or silently created
+        // the table in a stray source-named schema.
+        let ddl = "CREATE TABLE [src].[DBXE_PARENT] (\n  [ID] int NOT NULL,\n  [NAME] nvarchar(50) NOT NULL,\n  CONSTRAINT [PK_DBXE_PARENT] PRIMARY KEY ([ID])\n);\nCREATE TABLE [src].[DBXE_CHILD] (\n  [ID] int NOT NULL,\n  [PARENT_ID] int NOT NULL,\n  CONSTRAINT [FK_DBXE_CHILD_PARENT] FOREIGN KEY ([PARENT_ID]) REFERENCES [src].[DBXE_PARENT]([ID])\n);";
+
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "src",
+            "dst",
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            "DBXE_PARENT",
+            "DBXE_PARENT",
+        )
+        .unwrap();
+
+        assert!(rewritten.contains("CREATE TABLE [dst].[DBXE_PARENT] ("), "head: {rewritten}");
+        assert!(rewritten.contains("CREATE TABLE [dst].[DBXE_CHILD] ("), "child head: {rewritten}");
+        assert!(rewritten.contains("REFERENCES [dst].[DBXE_PARENT]([ID])"), "fk: {rewritten}");
+        assert!(!rewritten.contains("[src]."), "no source qualifier may remain: {rewritten}");
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_keeps_cross_schema_references_and_literals() {
+        let ddl = "CREATE TABLE [src].[child] (\n  [note] nvarchar(50) NOT NULL DEFAULT 'mirrors [src].[keep]',\n  [ref_id] int NOT NULL,\n  CONSTRAINT [fk_other] FOREIGN KEY ([ref_id]) REFERENCES [other].[target]([id])\n);";
+
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "src",
+            "dst",
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            "child",
+            "child",
+        )
+        .unwrap();
+
+        assert!(rewritten.contains("CREATE TABLE [dst].[child] ("), "head: {rewritten}");
+        // A third-party table referenced from another schema must not be
+        // repointed at the target schema, where it does not exist.
+        assert!(rewritten.contains("REFERENCES [other].[target]([id])"), "cross-schema ref: {rewritten}");
+        // String literals keep their original text.
+        assert!(rewritten.contains("'mirrors [src].[keep]'"), "literal: {rewritten}");
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_preserves_identity_and_escaped_brackets() {
+        // Same schema on both sides: the DDL is reused verbatim.
+        assert_eq!(
+            rewrite_transfer_source_table_ddl(
+                "CREATE TABLE [dbo].[t] ([id] int);",
+                "dbo",
+                "dbo",
+                &DatabaseType::SqlServer,
+                &DatabaseType::SqlServer,
+                "t",
+                "t"
+            ),
+            Some("CREATE TABLE [dbo].[t] ([id] int);".to_string())
+        );
+        // A schema name containing `]` appears in the DDL with its escaped
+        // form (`]` doubled inside brackets) and is rewritten as a whole.
+        let rewritten = rewrite_transfer_source_table_ddl(
+            "CREATE TABLE [we]]ird].[t] ([id] int);",
+            "we]ird",
+            "plain",
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            "t",
+            "t",
+        )
+        .unwrap();
+        assert_eq!(rewritten, "CREATE TABLE [plain].[t] ([id] int);");
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_retargets_generated_table_and_column_comments() {
+        let columns = vec![db::ColumnInfo {
+            name: "src".into(),
+            data_type: "nvarchar(50)".into(),
+            comment: Some("column src [src]. C:\\".into()),
+            ..Default::default()
+        }];
+        let ddl =
+            crate::schema::render_sqlserver_table_ddl("src", "src", &columns, &[], &[], Some("table's src [src]."));
+        let rewritten = rewrite_sqlserver_bracketed_schema_qualifier(&ddl, "src", "dst'雪]");
+
+        assert!(rewritten.contains("CREATE TABLE [dst'雪]]].[src]"), "{rewritten}");
+        assert_eq!(rewritten.matches("@level0name=N'dst''雪]'").count(), 2, "{rewritten}");
+        assert!(rewritten.contains("@value=N'table''s src [src].'"), "{rewritten}");
+        assert!(rewritten.contains("@value=N'column src [src]. C:\\'"), "{rewritten}");
+        assert_eq!(rewritten.matches("@level1name=N'src'").count(), 2, "{rewritten}");
+        assert!(rewritten.contains("@level2name=N'src'"), "{rewritten}");
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_keeps_windows_defaults_and_rewrites_later_qualifiers() {
+        let ddl = "CREATE TABLE [src].[child] (\n  [path] nvarchar(50) DEFAULT ('C:\\'),\n  [note] nvarchar(50) DEFAULT (N'it''s [src]. C:\\'),\n  [id] int,\n  FOREIGN KEY ([id]) REFERENCES [src].[parent]([id])\n);\nCREATE INDEX [ix] ON [src].[child] ([id]);";
+        let expected = ddl
+            .replace("CREATE TABLE [src].", "CREATE TABLE [dst].")
+            .replace("REFERENCES [src].", "REFERENCES [dst].")
+            .replace("ON [src].", "ON [dst].");
+        assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(ddl, "src", "dst"), expected);
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_handles_schema_token_characters_and_comment_owners() {
+        for source_schema in ["sales#old", "o'connor", "we]ird", "other[src", "we--ird", "we/*ird", "雪#'[]"] {
+            let source_identifier = format!("[{}]", source_schema.replace(']', "]]"));
+            let source_literal = format!("N'{}'", source_schema.replace('\'', "''"));
+            let ddl = format!("CREATE TABLE {source_identifier}.[t] ([id] int);\nEXEC sys.sp_addextendedproperty @name=N'MS_Description', @value={source_literal}, @level0type=N'SCHEMA', @level0name={source_literal}, @level1type=N'TABLE', @level1name=N't';");
+            let rewritten = rewrite_sqlserver_bracketed_schema_qualifier(&ddl, source_schema, "dst");
+            let expected = ddl
+                .replace(&format!("CREATE TABLE {source_identifier}."), "CREATE TABLE [dst].")
+                .replace(&format!("@level0name={source_literal}"), "@level0name=N'dst'");
+            assert_eq!(rewritten, expected, "source schema: {source_schema}");
+        }
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_preserves_nested_comments_and_whole_third_party_identifiers() {
+        let ddl = "/* outer /* inner */ [src].[comment] ' # */\n-- [src].[line]\rCREATE TABLE [src] /* [src]. */ . [child] (\n  [name#'/*[src]]] int,\n  [other] int,\n  [note] nvarchar(50) DEFAULT '/* [src]. */',\n  FOREIGN KEY ([other]) REFERENCES [other[src].[parent]([id]),\n  FOREIGN KEY ([name#'/*[src]]]) REFERENCES [other]]src].[parent]([id])\n);";
+        let expected = ddl.replace("CREATE TABLE [src]", "CREATE TABLE [dst]");
+        assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(ddl, "src", "dst"), expected);
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_rewrites_only_generated_extended_property_schema_arguments() {
+        let generated = "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'src', @level0type=N'SCHEMA', @level0name=N'src', @level1type=N'TABLE', @level1name=N'src';";
+        for unrelated in [
+            generated.replace("sys.sp_addextendedproperty", "dbo.sp_addextendedproperty"),
+            generated.replace("sp_addextendedproperty", "sp_updateextendedproperty"),
+            generated.replace("N'MS_Description'", "N'OtherProperty'"),
+            generated.replace("N'SCHEMA'", "N'USER'"),
+            generated.replace("N'TABLE'", "N'VIEW'"),
+            format!("/* {generated} */"),
+            format!("SELECT N'{}';", generated.replace('\'', "''")),
+        ] {
+            assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(&unrelated, "src", "dst"), unrelated);
+        }
+        assert_eq!(
+            rewrite_sqlserver_bracketed_schema_qualifier(generated, "src", "dst"),
+            generated.replace("@level0name=N'src'", "@level0name=N'dst'")
+        );
+        assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(generated, "src", "src"), generated);
+        assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(generated, "", "dst"), generated);
     }
 
     #[test]
@@ -18502,6 +19093,31 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             vec![
                 "SELECT setval(pg_get_serial_sequence('\"public\".\"users\"', 'id')::regclass, GREATEST(COALESCE(MAX(\"id\"::bigint), 0), 1), MAX(\"id\"::bigint) IS NOT NULL) FROM \"public\".\"users\"".to_string(),
                 "SELECT setval(pg_get_serial_sequence('\"public\".\"users\"', 'identity_id')::regclass, GREATEST(COALESCE(MAX(\"identity_id\"::bigint), 0), 1), MAX(\"identity_id\"::bigint) IS NOT NULL) FROM \"public\".\"users\"".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_identity_reseed_targets_generated_identity_columns() {
+        let columns = vec![
+            db::ColumnInfo {
+                is_primary_key: true,
+                extra: Some("auto_increment".to_string()),
+                ..test_column("id", "int")
+            },
+            // Not a key on the source: the generated DDL keeps it a plain column.
+            db::ColumnInfo { extra: Some("auto_increment".to_string()), ..test_column("ticket", "int") },
+            // Plain integer primary key without an explicit auto-increment stays plain.
+            db::ColumnInfo { is_primary_key: true, ..test_column("tenant", "int") },
+        ];
+
+        let statements =
+            oracle_identity_reseed_statements(&columns, "users", "SALES", "source", &DatabaseType::Mysql, true);
+
+        assert_eq!(
+            statements,
+            vec![
+                "ALTER TABLE \"SALES\".\"users\" MODIFY \"id\" GENERATED BY DEFAULT AS IDENTITY (START WITH LIMIT VALUE)".to_string()
             ]
         );
     }
@@ -20240,6 +20856,7 @@ SELECT 1 FROM dual"#
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         };
         let mut gbase_jdbc = config.clone();
@@ -20747,6 +21364,165 @@ SELECT 1 FROM dual"#
             generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Sqlite, &DatabaseType::Mysql, None, None);
 
         assert!(!ddl.contains("AUTO_INCREMENT"), "non-mysql target should not emit AUTO_INCREMENT: {ddl}");
+        // SQLite's `AUTOINCREMENT` is only valid inside an inline
+        // `INTEGER PRIMARY KEY`, which this generator cannot emit (primary keys are
+        // a table-level clause); the rowid alias already generates ids.
+        assert!(!ddl.contains("AUTOINCREMENT"), "sqlite: {ddl}");
+    }
+
+    #[test]
+    fn transfer_create_table_preserves_explicit_auto_increment_for_dameng() {
+        let cols = vec![db::ColumnInfo {
+            is_primary_key: true,
+            is_nullable: false,
+            extra: Some("auto_increment".to_string()),
+            ..test_column("id", "int")
+        }];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+
+        assert!(ddl.contains("\"id\" INTEGER IDENTITY(1,1) NOT NULL"), "ddl: {ddl}");
+        assert!(ddl.contains("PRIMARY KEY (\"id\")"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn transfer_create_table_preserves_explicit_auto_increment_for_sqlserver_and_oracle() {
+        let cols = vec![db::ColumnInfo {
+            is_primary_key: true,
+            is_nullable: false,
+            extra: Some("auto_increment".to_string()),
+            ..test_column("id", "int")
+        }];
+
+        let sqlserver = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "dbo",
+            &DatabaseType::SqlServer,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+        assert!(sqlserver.contains("[id] INT IDENTITY(1,1) NOT NULL"), "ddl: {sqlserver}");
+
+        for target in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let ddl =
+                generate_create_table_ddl(&cols, "users", "source", "SALES", &target, &DatabaseType::Mysql, None, None);
+            assert!(ddl.contains("GENERATED BY DEFAULT AS IDENTITY"), "{target:?}: {ddl}");
+            assert!(!ddl.contains("IDENTITY(1,1)"), "{target:?} must keep the Oracle spelling: {ddl}");
+        }
+    }
+
+    #[test]
+    fn transfer_create_table_does_not_invent_identity_for_plain_integer_primary_keys() {
+        // A source column without an auto-increment flag keeps its plain definition,
+        // and since DM8 allows only one identity column per table, a composite
+        // integer primary key must not collect an implicit clause either.
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("tenant", "int") },
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("code", "int") },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+
+        assert!(!ddl.contains("IDENTITY"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn transfer_create_table_emits_at_most_one_identity_clause() {
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("tenant", "int") },
+            db::ColumnInfo {
+                is_primary_key: true,
+                is_nullable: false,
+                extra: Some("auto_increment".to_string()),
+                ..test_column("id", "int")
+            },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+
+        assert_eq!(ddl.matches("IDENTITY(").count(), 1, "ddl: {ddl}");
+    }
+
+    #[test]
+    fn transfer_create_table_keeps_postgres_and_sqlite_auto_increment_outs() {
+        let cols = vec![db::ColumnInfo {
+            is_primary_key: true,
+            is_nullable: false,
+            extra: Some("auto_increment".to_string()),
+            ..test_column("id", "int")
+        }];
+
+        for target in [DatabaseType::Postgres, DatabaseType::Kingbase] {
+            let ddl = generate_create_table_ddl(
+                &cols,
+                "users",
+                "source",
+                "public",
+                &target,
+                &DatabaseType::Mysql,
+                None,
+                None,
+            );
+            assert!(!ddl.contains("IDENTITY"), "{target:?}: {ddl}");
+            assert!(!ddl.contains("nextval"), "{target:?}: {ddl}");
+        }
+
+        let sqlite =
+            generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Sqlite, &DatabaseType::Mysql, None, None);
+        assert!(!sqlite.contains("AUTOINCREMENT"), "sqlite: {sqlite}");
+        assert!(!sqlite.contains("AUTO_INCREMENT"), "sqlite: {sqlite}");
+    }
+
+    #[test]
+    fn transfer_create_table_keeps_databend_gbase_and_manticore_auto_increment_outs() {
+        // Databend spells auto-increment `AUTOINCREMENT`/`IDENTITY` and rejects
+        // MySQL's `AUTO_INCREMENT`; Gbase and ManticoreSearch stay on the plain
+        // path until their transfer DDL is verified. Only the transfer's own
+        // MySQL-family targets keep the clause.
+        let cols = vec![db::ColumnInfo {
+            is_primary_key: true,
+            is_nullable: false,
+            extra: Some("auto_increment".to_string()),
+            ..test_column("id", "int")
+        }];
+
+        for target in [DatabaseType::Databend, DatabaseType::Gbase, DatabaseType::ManticoreSearch] {
+            let ddl =
+                generate_create_table_ddl(&cols, "users", "source", "app", &target, &DatabaseType::Mysql, None, None);
+            assert!(!ddl.contains("AUTO_INCREMENT"), "{target:?}: {ddl}");
+            assert!(!ddl.contains("AUTOINCREMENT"), "{target:?}: {ddl}");
+            assert!(!ddl.contains("IDENTITY"), "{target:?}: {ddl}");
+        }
     }
 
     #[test]

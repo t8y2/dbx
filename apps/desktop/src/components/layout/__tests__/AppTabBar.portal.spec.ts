@@ -98,7 +98,7 @@ function mountNavigation(placement: "top" | "bottom" | "left" | "right", empty =
           <div v-show="pages.driverActive" data-test="driver-page">Drivers</div>
         </AppTabBar>
         <div v-show="!active" data-test="editor-workspace-wrapper">
-          <SqlEditorWorkspace ref="workspace" :active-tab="store.tabs.find(tab => tab.id === store.activeTabId)" :show-tab-navigation="store.tabs.length > 0 || pages.settingsOpen || pages.driverOpen" active-output-view="result" executable-sql="SELECT 1" :format-sql-request="null" :compress-sql-request="null" selected-sql="" :cursor-pos="0" :block-dangerous-redis-commands="false" :tab-bar-width="navigation.width" :tab-bar-collapsed="navigation.collapsed">
+          <SqlEditorWorkspace ref="workspace" :active-tab="store.tabs.find(tab => tab.id === store.activeTabId)" :show-tab-navigation="store.tabs.length > 0 || pages.settingsOpen || pages.driverOpen" active-output-view="result" executable-sql="SELECT 1" :format-sql-request="null" :compress-sql-request="null" :keyword-case-request="null" selected-sql="" :cursor-pos="0" :block-dangerous-redis-commands="false" :tab-bar-width="navigation.width" :tab-bar-collapsed="navigation.collapsed">
             <template #empty><div data-test="welcome"><button @click="store.createTab('mysql-local', 'app', 'New query', 'query')">New query</button></div></template>
           </SqlEditorWorkspace>
         </div>

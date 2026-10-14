@@ -46,8 +46,9 @@ export type DataGridContextMenuIcons = {
 export function createDataGridFilterSubmenu(options: {
   label: string;
   icon: Component;
-  labels: Record<"equals" | "notEquals" | "like" | "notLike" | "lessThan" | "greaterThan" | "isNull" | "isNotNull" | "clear", string>;
+  labels: Record<"equals" | "notEquals" | "like" | "notLike" | "lessThan" | "greaterThan" | "custom" | "isNull" | "isNotNull" | "clear", string>;
   apply: (mode: "equals" | "not-equals" | "like" | "not-like" | "less-than" | "greater-than" | "is-null" | "is-not-null") => void;
+  applyCustom: () => void;
   clear: () => void;
 }): DataGridContextMenuItem {
   const { labels } = options;
@@ -61,6 +62,7 @@ export function createDataGridFilterSubmenu(options: {
       { label: labels.notLike, action: () => options.apply("not-like") },
       { label: labels.lessThan, action: () => options.apply("less-than") },
       { label: labels.greaterThan, action: () => options.apply("greater-than") },
+      { label: labels.custom, action: () => options.applyCustom() },
       { label: "", separator: true },
       { label: labels.isNull, action: () => options.apply("is-null") },
       { label: labels.isNotNull, action: () => options.apply("is-not-null") },

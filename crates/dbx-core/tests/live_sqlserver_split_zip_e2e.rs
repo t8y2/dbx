@@ -85,6 +85,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         show_system_schemas: false,
         database_info: None,
         sidebar_auto_load_all_tables: false,
@@ -226,6 +227,7 @@ async fn manual_e2e_sqlserver_default_split_zip_export_then_import_skip_relation
         // constraint bypass runs `ALTER TABLE ... NOCHECK CONSTRAINT ALL`
         // before the import and `WITH NOCHECK CHECK CONSTRAINT ALL` after.
         skip_relational_constraints: true,
+        failure_log_enabled: true,
     };
 
     let file_path_refs: Vec<&std::path::Path> = extracted_paths.iter().map(|path| path.as_path()).collect();

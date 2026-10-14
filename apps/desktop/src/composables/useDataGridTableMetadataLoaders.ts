@@ -113,6 +113,7 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
     if (!props.connectionId || !props.tableMeta) return undefined;
     return {
       connectionId: props.connectionId,
+      queryTimeoutSecs: options.connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
       database: props.database || "",
       schema: defaultSchema(),
       tableName: props.tableMeta.tableName,

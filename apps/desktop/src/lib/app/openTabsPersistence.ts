@@ -28,6 +28,8 @@ export interface SavedOpenTab {
   sqlUpdatedAt?: number;
   title: string;
   customTitle?: boolean;
+  /** 用户自定义的标签后缀，取代自动编号 */
+  titleSuffix?: string;
   connectionId: string;
   database: string;
   /** 原连接已被删除但页签被保留时记录的原连接名，用于新建同名连接后重新绑定。 */
@@ -176,6 +178,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(typeof tab.sqlUpdatedAt === "number" && Number.isFinite(tab.sqlUpdatedAt) ? { sqlUpdatedAt: tab.sqlUpdatedAt } : {}),
     title: tab.title,
     ...(tab.customTitle ? { customTitle: true } : {}),
+    ...(tab.titleSuffix?.trim() ? { titleSuffix: tab.titleSuffix.trim() } : {}),
     connectionId: tab.connectionId,
     database: tab.database,
     ...(tab.detachedConnectionName ? { detachedConnectionName: tab.detachedConnectionName } : {}),

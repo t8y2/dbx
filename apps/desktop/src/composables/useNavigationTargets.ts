@@ -26,6 +26,8 @@ export type NavigationTarget = {
   comment?: string | null;
   columnName?: string;
   whereInput?: string;
+  /** Database search: open the structure editor instead of a data preview. */
+  searchScope?: "data" | "structure";
 };
 
 export interface NavigationOpenOptions {
@@ -396,6 +398,11 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
 
   async function openDatabaseSearchTarget(target: NavigationTarget) {
     dialogs.showDatabaseSearchDialog.value = false;
+    if (target.searchScope === "structure" && target.tableName) {
+      const tableType = (target.tableType || "").toUpperCase() === "VIEW" ? "view" : "table";
+      queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, "columns", target.columnName ? { kind: "column", name: target.columnName } : undefined, target.catalog, tableType);
+      return;
+    }
     await openTableTarget(target);
   }
 

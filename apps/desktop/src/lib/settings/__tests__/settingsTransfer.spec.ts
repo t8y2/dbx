@@ -593,4 +593,12 @@ describe("settingsTransfer", () => {
     expect(result.value.editorSettings.dataGridCrosshairRowBg).toBe("#232323");
     expect(result.value.editorSettings.dataGridCrosshairColBg).toBe("#343434");
   });
+
+  it("round-trips caretBrowsingEnabled in editor category (#11827)", () => {
+    expect(transferCategoryForKey("caretBrowsingEnabled")).toBe("editor");
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, caretBrowsingEnabled: true });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.caretBrowsingEnabled).toBe(true);
+  });
 });

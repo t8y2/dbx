@@ -25,6 +25,7 @@ import {
   Globe,
   GripVertical,
   HardDrive,
+  Keyboard,
   Loader2,
   LogOut,
   Moon,
@@ -63,6 +64,8 @@ import {
   useSettingsStore,
   AI_PROVIDER_PRESETS,
   AI_PROVIDER_PARTNER_PRESETS,
+  CC_SWITCH_PROVIDER_ID,
+  CC_SWITCH_PROVIDER_PRESET,
   AI_OUTPUT_TOKENS_MAX,
   AI_OUTPUT_TOKENS_MIN,
   EDITOR_THEMES,
@@ -147,6 +150,7 @@ import { importClipboardApiKeyAfterConfirmation, type AiConfigDeepLinkDraft } fr
 import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/backend/debugLog";
 import {
   aiTestConnection,
+  loadCcSwitchAiConfigs,
   checkMcpServerStatus,
   installMcpServer,
   installNativeMcpServer,
@@ -172,6 +176,7 @@ import {
   saveBackgroundImage,
   loadMaxAgentTurns,
   saveMaxAgentTurns,
+  setShortcutRecording,
   loadMaxRetries,
   saveMaxRetries,
   loadSqlFileUploadMaxBytes,
@@ -194,6 +199,7 @@ import {
   webdavSyncTest,
   webdavSyncUpload,
   listInstalledAgentsLocal,
+  listPlugins,
   type AppSupportInfo,
   type McpHttpServerSettings,
   type McpHttpServerStatus,
@@ -206,19 +212,34 @@ import {
   type SyncSnapshotCatalog,
   type WebDavConfig,
 } from "@/lib/backend/api";
+import { createModifierDoubleTapShortcutController } from "@/lib/editor/modifierDoubleTapShortcut";
 import { eventToModifierOnlyShortcut, eventToShortcut } from "@/lib/editor/keyboardShortcuts";
-import { SHORTCUT_DEFINITIONS, countShortcutConflictPairs, findCrossScopeShortcutConflicts, findShortcutConflict, isReservedShortcut, normalizeShortcutSettings, resolveCapturedShortcutEdit, type ShortcutActionId, type ShortcutDefinition, type ShortcutScope } from "@/lib/editor/shortcutRegistry";
+import { shortcutRecorderAction } from "@/lib/editor/shortcutRecorder";
+import {
+  SHORTCUT_DEFINITIONS,
+  countShortcutConflictPairs,
+  filterShortcutConflictsByVisibleIds,
+  findCrossScopeShortcutConflicts,
+  findShortcutConflict,
+  isReservedShortcut,
+  normalizeShortcutSettings,
+  resolveCapturedShortcutEdit,
+  type ShortcutActionId,
+  type ShortcutDefinition,
+  type ShortcutScope,
+} from "@/lib/editor/shortcutRegistry";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
+import { formatShortcutDisplay, normalizeShortcutSearch } from "@/lib/editor/shortcutDisplay";
 import { COLUMN_NAME_COPY_SEPARATOR_LABELS, COLUMN_NAME_COPY_SEPARATOR_OPTIONS, isColumnNameCopySeparator, type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
+import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletions";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { REDIS_DATABASE_DISPLAY_LIMIT_MIN, REDIS_DATABASE_DISPLAY_LIMIT_MAX, REDIS_DATABASE_DISPLAY_LIMIT_OPTIONS } from "@/lib/redis/redisDatabaseAlias";
 import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
 import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
-import { validateConfigName, generateId, type AiConfigItem, type ConfigNameValidationResult } from "@/lib/ai/aiConfigList";
+import { prepareImportedAiConfigs, validateConfigName, generateId, type AiConfigItem, type ConfigNameValidationResult } from "@/lib/ai/aiConfigList";
 import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES, tableColumnTemplateRowsToSettings } from "@/lib/table/tableColumnTemplates";
@@ -264,7 +285,8 @@ import {
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
-import type { DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
+import type { InstalledPlugin, DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
+import { getCcSwitchPluginStatus, isCcSwitchPluginAvailable } from "@/lib/ai/ccSwitch";
 import { uuid } from "@/lib/common/utils";
 import { DEFAULT_SQL_SHORTCUT_SELECT_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
 import {
@@ -339,7 +361,22 @@ import {
 } from "@/lib/settings/settingsSearch";
 import { findSettingsSearchHighlightTarget } from "@/lib/settings/settingsSearchHighlight";
 import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
-import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, readSyncMethod, writeWebDavAutoUploadFields, writeWebDavBackupSelection, writeSyncMethod, type SyncMethod } from "@/lib/webdav/webdavAutoUploadConfig";
+import {
+  DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES,
+  DEFAULT_WEB_DAV_REMOTE_PATH,
+  MAX_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES,
+  formatWebDavAutoUploadInterval,
+  normalizedWebDavAutoUploadInterval,
+  readWebDavLastSuccessfulSync,
+  recordWebDavSyncSuccess,
+  readSyncMethod,
+  WEB_DAV_LAST_SUCCESSFUL_SYNC_STORAGE_KEY,
+  WEB_DAV_SYNC_SUCCESS_EVENT,
+  writeWebDavAutoUploadFields,
+  writeWebDavBackupSelection,
+  writeSyncMethod,
+  type SyncMethod,
+} from "@/lib/webdav/webdavAutoUploadConfig";
 import { apiUrl, webPath } from "@/lib/common/webPath";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, normalizeCustomFontFamilyInput, readableFontFamily, SYSTEM_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { buildFontFamilyOptions, displayFontFamily, isPresetFontFamily, loadSystemFontNames } from "@/lib/app/fontFamilyOptions";
@@ -447,13 +484,12 @@ function onLocaleOpenChange(open: boolean) {
   if (!open) restoreLocaleOptionPreview();
 }
 
-const appThemePaletteOptions = computed(
-  (): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
-    APP_THEME_PALETTES.map((palette) => ({
-      value: palette.value,
-      label: t(palette.labelKey),
-      previewColor: palette.previewColor,
-    })),
+const appThemePaletteOptions = computed((): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
+  APP_THEME_PALETTES.map((palette) => ({
+    value: palette.value,
+    label: t(palette.labelKey),
+    previewColor: palette.previewColor,
+  })),
 );
 const selectedThemePaletteOption = computed(() => appThemePaletteOptions.value.find((option) => option.value === themePalette.value) ?? appThemePaletteOptions.value[0]);
 const selectedLocaleOption = computed(() => LOCALE_OPTIONS.find((locale) => locale.value === currentLocale()) ?? LOCALE_OPTIONS[0]);
@@ -509,6 +545,7 @@ const emit = defineEmits<{
   "update-all": [];
   "open-driver-store": [target?: DriverStoreTab];
   "open-plugin-center": [];
+  "open-cc-switch-plugin-center": [];
   "open-mcp-settings": [];
   "open-update-center": [];
   "ai-config-deep-link-handled": [];
@@ -700,6 +737,7 @@ const showSqlServerSpaceConfirmsCompletion = computed(() => hasSqlServerConnecti
 const editSortCompletionColumnsAlphabetically = ref(settingsStore.editorSettings.sortCompletionColumnsAlphabetically);
 const editSelectFirstCompletionOnOpen = ref(settingsStore.editorSettings.selectFirstCompletionOnOpen);
 const editCompletionTriggerMode = ref<SqlCompletionTriggerMode>(settingsStore.editorSettings.completionTriggerMode);
+const editExcludedCompletionItems = ref(settingsStore.editorSettings.excludedCompletionItems.join("\n"));
 const completionTriggerModeDescription = computed(() => {
   const key = {
     manual: "settings.completionTriggerModeManualDescription",
@@ -712,6 +750,7 @@ const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editShowWhitespace = ref(settingsStore.editorSettings.showWhitespace);
 const editDdlOpenMode = ref<EditorSettings["ddlOpenMode"]>(settingsStore.editorSettings.ddlOpenMode);
 const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
+const editCaretBrowsingEnabled = ref(settingsStore.editorSettings.caretBrowsingEnabled);
 const editDoubleClickStringSelectionMode = ref<EditorSettings["doubleClickStringSelectionMode"]>(settingsStore.editorSettings.doubleClickStringSelectionMode);
 const editAutoCloseBrackets = ref(settingsStore.editorSettings.autoCloseBrackets);
 const editRestoreSqlFromSourcePasteEnabled = ref(settingsStore.editorSettings.restoreSqlFromSourcePasteEnabled);
@@ -859,6 +898,8 @@ let tableColumnTemplatePointerDragCleanup: (() => void) | null = null;
 const editSqlFormatter = ref<SqlFormatterSettings>(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter));
 const sqlFormatterConfigValid = ref(true);
 const editingShortcutId = ref<ShortcutActionId | null>(null);
+const modifierDoubleTapRecorder = createModifierDoubleTapShortcutController();
+watch(editingShortcutId, () => modifierDoubleTapRecorder.reset(), { flush: "sync" });
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
@@ -917,7 +958,9 @@ const editSidebarFontSize = ref(settingsStore.editorSettings.sidebarFontSize);
 const editSidebarDensity = ref<SidebarDensity>(settingsStore.editorSettings.sidebarDensity);
 const editExportBatchSize = ref(settingsStore.editorSettings.exportBatchSize);
 const editPreferredExportPath = ref(settingsStore.editorSettings.preferredExportPath);
+const editDamengClientBinDir = ref(settingsStore.editorSettings.damengClientBinDir);
 const editAutoOpenExportFolder = ref(settingsStore.editorSettings.autoOpenExportFolder);
+const editApplyColumnFormattersOnExport = ref(settingsStore.editorSettings.applyColumnFormattersOnExport);
 const editCsvQuoteMode = ref<CsvQuoteMode>(settingsStore.editorSettings.csvQuoteMode);
 const editCsvNullMode = ref<CsvNullMode>(settingsStore.editorSettings.csvNullMode);
 const editGlobalDateTimeDisplayFormat = ref(settingsStore.editorSettings.globalDateTimeDisplayFormat);
@@ -1096,10 +1139,12 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically.value,
     selectFirstCompletionOnOpen: editSelectFirstCompletionOnOpen.value,
     completionTriggerMode: editCompletionTriggerMode.value,
+    excludedCompletionItems: normalizeExcludedCompletionItems(editExcludedCompletionItems.value),
     wordWrap: editWordWrap.value,
     showWhitespace: editShowWhitespace.value,
     ddlOpenMode: editDdlOpenMode.value,
     vimModeEnabled: editVimModeEnabled.value,
+    caretBrowsingEnabled: editCaretBrowsingEnabled.value,
     doubleClickStringSelectionMode: editDoubleClickStringSelectionMode.value,
     autoCloseBrackets: editAutoCloseBrackets.value,
     restoreSqlFromSourcePasteEnabled: editRestoreSqlFromSourcePasteEnabled.value,
@@ -1206,7 +1251,9 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     redisDatabaseDisplayLimit: editRedisDatabaseDisplayLimit.value,
     exportBatchSize: editExportBatchSize.value,
     preferredExportPath: editPreferredExportPath.value,
+    damengClientBinDir: editDamengClientBinDir.value,
     autoOpenExportFolder: editAutoOpenExportFolder.value,
+    applyColumnFormattersOnExport: editApplyColumnFormattersOnExport.value,
     csvQuoteMode: editCsvQuoteMode.value,
     csvNullMode: editCsvNullMode.value,
     globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat.value,
@@ -1783,10 +1830,12 @@ function syncEditorSettingsDraftFromStore() {
   editSortCompletionColumnsAlphabetically.value = settingsStore.editorSettings.sortCompletionColumnsAlphabetically;
   editSelectFirstCompletionOnOpen.value = settingsStore.editorSettings.selectFirstCompletionOnOpen;
   editCompletionTriggerMode.value = settingsStore.editorSettings.completionTriggerMode;
+  editExcludedCompletionItems.value = settingsStore.editorSettings.excludedCompletionItems.join("\n");
   editWordWrap.value = settingsStore.editorSettings.wordWrap;
   editShowWhitespace.value = settingsStore.editorSettings.showWhitespace;
   editDdlOpenMode.value = settingsStore.editorSettings.ddlOpenMode;
   editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
+  editCaretBrowsingEnabled.value = settingsStore.editorSettings.caretBrowsingEnabled;
   editDoubleClickStringSelectionMode.value = settingsStore.editorSettings.doubleClickStringSelectionMode;
   editAutoCloseBrackets.value = settingsStore.editorSettings.autoCloseBrackets;
   editRestoreSqlFromSourcePasteEnabled.value = settingsStore.editorSettings.restoreSqlFromSourcePasteEnabled;
@@ -1894,7 +1943,9 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarDensity.value = settingsStore.editorSettings.sidebarDensity;
   editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
   editPreferredExportPath.value = settingsStore.editorSettings.preferredExportPath;
+  editDamengClientBinDir.value = settingsStore.editorSettings.damengClientBinDir;
   editAutoOpenExportFolder.value = settingsStore.editorSettings.autoOpenExportFolder;
+  editApplyColumnFormattersOnExport.value = settingsStore.editorSettings.applyColumnFormattersOnExport;
   editCsvQuoteMode.value = settingsStore.editorSettings.csvQuoteMode;
   editCsvNullMode.value = settingsStore.editorSettings.csvNullMode;
   editGlobalDateTimeDisplayFormat.value = settingsStore.editorSettings.globalDateTimeDisplayFormat;
@@ -1952,6 +2003,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showWhitespace: editShowWhitespace,
   ddlOpenMode: editDdlOpenMode,
   vimModeEnabled: editVimModeEnabled,
+  caretBrowsingEnabled: editCaretBrowsingEnabled,
   doubleClickStringSelectionMode: editDoubleClickStringSelectionMode,
   autoCloseBrackets: editAutoCloseBrackets,
   restoreSqlFromSourcePasteEnabled: editRestoreSqlFromSourcePasteEnabled,
@@ -2055,7 +2107,9 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   redisDatabaseDisplayLimit: editRedisDatabaseDisplayLimit,
   exportBatchSize: editExportBatchSize,
   preferredExportPath: editPreferredExportPath,
+  damengClientBinDir: editDamengClientBinDir,
   autoOpenExportFolder: editAutoOpenExportFolder,
+  applyColumnFormattersOnExport: editApplyColumnFormattersOnExport,
   csvQuoteMode: editCsvQuoteMode,
   csvNullMode: editCsvNullMode,
   exportRowLimitEnabled: editExportRowLimitEnabled,
@@ -2074,6 +2128,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   continueOnErrorOnBatch: editContinueOnErrorOnBatch,
   clickTableNavigationTarget: editClickTableNavigationTarget,
   completionTriggerMode: editCompletionTriggerMode,
+  excludedCompletionItems: editExcludedCompletionItems,
   defaultTransactionMode: editDefaultTransactionMode,
   keepExplicitTransactionInAutoCommit: editKeepExplicitTransactionInAutoCommit,
   tableColumnTemplateFields: editTableColumnTemplateRows,
@@ -2089,6 +2144,7 @@ function applyEditorSettingsKeysToRefs(draft: EditorSettingsDraft, keys: readonl
     shortcuts: (value) => normalizeShortcutSettings(value as Parameters<typeof normalizeShortcutSettings>[0]),
     sqlFormatter: (value) => normalizeSqlFormatterSettings(value as SqlFormatterSettings),
     sidebarHiddenTablePrefixes: (value) => (value as string[]).join("\n"),
+    excludedCompletionItems: (value) => (value as string[]).join("\n"),
     redisKeyTemplates: (value) => normalizeRedisKeyTemplates(value as string[]).join("\n"),
     toolbarItems: (value) => ({ ...(value as EditorSettings["toolbarItems"]) }),
     snippets: (value) => (value as SqlSnippet[]).map(editableSnippet),
@@ -2163,12 +2219,20 @@ const shortcutConflicts = computed(() => Object.keys(shortcutConflictMap.value) 
 // 有意的设计（find / focusSearch 默认都是 Mod+F，运行时按焦点路由），所以这里
 // 只用于展示；normalizeShortcutSettings 的占用判定依旧只看同作用域。
 const crossScopeShortcutConflicts = computed(() => findCrossScopeShortcutConflicts(editShortcuts.value));
-const crossScopeShortcutConflictIds = computed(() => Object.keys(crossScopeShortcutConflicts.value) as ShortcutActionId[]);
 const shortcutConflictPairCount = computed(() => countShortcutConflictPairs(shortcutConflictMap.value));
-const crossScopeShortcutPairCount = computed(() => countShortcutConflictPairs(crossScopeShortcutConflicts.value));
 const sqlShortcutConflicts = computed(() => findSqlShortcutConflicts(editSqlShortcuts.value, editShortcuts.value));
 const hasSqlShortcutConflicts = computed(() => sqlShortcutConflicts.value.length > 0);
 const shortcutSearchQuery = ref("");
+// #11787：快捷键页签的「键盘录入」态。录入结果写进上面同一个搜索框，因此过滤、
+// 冲突徽章、作用域分组、空态全部沿用既有管线，不新增第二套过滤口径。
+const shortcutRecording = ref(false);
+// 录入态下窗口是否处于激活状态。窗口不在前台时按下的键会被其它应用（或系统）先拿走，
+// DBX 收不到任何事件——提示行必须把这件事说出来，否则「静默待命」看起来就是功能失灵。
+const shortcutRecordingWindowActive = ref(true);
+// 录入态靠「焦点元素带 data-shortcut-recorder」让 App.vue 的两个 capture 阶段
+// 全局快捷键处理器让路（见 App.vue 的 handleGlobalSearchKeydownCapture）。属性只在
+// 录入态渲染：非录入时焦点停在这个按钮上的行为与普通按钮完全一致。
+const SHORTCUT_RECORDER_SELECTOR = '[data-settings-search-id="shortcuts"] [data-shortcut-recorder]';
 const collapsedShortcutScopes = ref<Set<ShortcutScope>>(new Set());
 const formatterEditorShortcutIds: ShortcutActionId[] = [
   "formatSql",
@@ -2201,12 +2265,29 @@ const formatterEditorShortcutDefinitions = computed(() => formatterEditorShortcu
 const filteredShortcutDefinitions = computed(() => {
   const query = shortcutSearchQuery.value.trim().toLowerCase();
   if (!query) return SHORTCUT_DEFINITIONS;
+  // #11632：组合键单独按“去空白”形式比较，用户写 Ctrl+T / Ctrl + T / ⌘T 都能命中。
+  // ID、功能名、作用域仍按原文匹配——把 query 整体去空白会让 "new query" 这类多词标签失配。
+  const shortcutQuery = normalizeShortcutSearch(shortcutSearchQuery.value);
   return SHORTCUT_DEFINITIONS.filter((definition) => {
     const scope = t(shortcutScopeLabelKey(definition.scope));
     const shortcut = formatShortcutPill(editShortcuts.value[definition.id]);
-    return [definition.id, t(definition.labelKey), scope, shortcut].some((value) => value.toLowerCase().includes(query));
+    if (normalizeShortcutSearch(shortcut).includes(shortcutQuery)) return true;
+    return [definition.id, t(definition.labelKey), scope].some((value) => value.toLowerCase().includes(query));
   });
 });
+
+// 搜索时顶部徽章与组头摘要要和列表同口径：冲突判定仍全局（上面两个 find* 的
+// 输入不变），展示层只统计“可见行或其冲突对方”参与的冲突，清空搜索即恢复
+// 全局。应用门禁（页脚“冲突阻止应用”与 Apply 禁用）刻意保持全局口径，不随
+// 搜索缩小——保存约束与当前视图无关。
+const shortcutSearchActive = computed(() => shortcutSearchQuery.value.trim().length > 0);
+const visibleShortcutIds = computed(() => new Set(filteredShortcutDefinitions.value.map((definition) => definition.id)));
+const visibleShortcutConflictMap = computed(() => (shortcutSearchActive.value ? filterShortcutConflictsByVisibleIds(shortcutConflictMap.value, visibleShortcutIds.value) : shortcutConflictMap.value));
+const visibleCrossScopeShortcutConflicts = computed(() => (shortcutSearchActive.value ? filterShortcutConflictsByVisibleIds(crossScopeShortcutConflicts.value, visibleShortcutIds.value) : crossScopeShortcutConflicts.value));
+const visibleShortcutConflictIds = computed(() => Object.keys(visibleShortcutConflictMap.value) as ShortcutActionId[]);
+const visibleCrossScopeShortcutConflictIds = computed(() => Object.keys(visibleCrossScopeShortcutConflicts.value) as ShortcutActionId[]);
+const visibleShortcutConflictPairCount = computed(() => countShortcutConflictPairs(visibleShortcutConflictMap.value));
+const visibleCrossScopeShortcutPairCount = computed(() => countShortcutConflictPairs(visibleCrossScopeShortcutConflicts.value));
 
 // 二级归类：快捷键页签按作用域分组展示。顺序即运行时优先级——越外层先响应，
 // 用户读到的顺序与事件实际分发顺序一致。
@@ -2243,6 +2324,8 @@ interface ShortcutScopeGroup {
   unboundCount: number;
   conflictCount: number;
   crossScopeCount: number;
+  conflictPairCount: number;
+  crossScopePairCount: number;
 }
 
 // 计数一律基于“当前可见行”（受搜索过滤影响）：组头是它下方那份列表的摘要，
@@ -2250,6 +2333,8 @@ interface ShortcutScopeGroup {
 const shortcutScopeGroups = computed<ShortcutScopeGroup[]>(() =>
   SHORTCUT_SCOPE_ORDER.map((scope) => {
     const definitions = filteredShortcutDefinitions.value.filter((definition) => definition.scope === scope);
+    // 组内“N 组重复”与上方徽章同口径：判定全局，统计只看“可见行或其冲突对方”。
+    const groupIds = new Set(definitions.map((definition) => definition.id));
     return {
       scope,
       label: t(shortcutScopeLabelKey(scope)),
@@ -2258,6 +2343,8 @@ const shortcutScopeGroups = computed<ShortcutScopeGroup[]>(() =>
       unboundCount: definitions.filter((definition) => !editShortcuts.value[definition.id]).length,
       conflictCount: definitions.filter((definition) => shortcutConflictMap.value[definition.id]).length,
       crossScopeCount: definitions.filter((definition) => (crossScopeShortcutConflicts.value[definition.id] ?? []).length > 0).length,
+      conflictPairCount: countShortcutConflictPairs(filterShortcutConflictsByVisibleIds(shortcutConflictMap.value, groupIds)),
+      crossScopePairCount: countShortcutConflictPairs(filterShortcutConflictsByVisibleIds(crossScopeShortcutConflicts.value, groupIds)),
     };
   }).filter((group) => group.definitions.length > 0),
 );
@@ -2388,6 +2475,7 @@ async function persistSettings() {
     // reporting unsaved changes after a successful apply.
     editRedisDatabaseDisplayLimit.value = settingsStore.editorSettings.redisDatabaseDisplayLimit;
     editPreferredExportPath.value = settingsStore.editorSettings.preferredExportPath;
+    editDamengClientBinDir.value = settingsStore.editorSettings.damengClientBinDir;
     // 同理：落盘口径可能改写键位（跨平台默认键、保留键回退），草稿要跟着回到
     // 落盘值，避免面板卡在“未保存”无法应用（#9881）。
     editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
@@ -2491,10 +2579,12 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
     editSelectFirstCompletionOnOpen.value = DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen;
     editCompletionTriggerMode.value = DEFAULT_EDITOR_SETTINGS.completionTriggerMode;
+    editExcludedCompletionItems.value = DEFAULT_EDITOR_SETTINGS.excludedCompletionItems.join("\n");
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
     editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
     editDdlOpenMode.value = DEFAULT_EDITOR_SETTINGS.ddlOpenMode;
     editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
+    editCaretBrowsingEnabled.value = DEFAULT_EDITOR_SETTINGS.caretBrowsingEnabled;
     editDoubleClickStringSelectionMode.value = DEFAULT_EDITOR_SETTINGS.doubleClickStringSelectionMode;
     editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
     editRestoreSqlFromSourcePasteEnabled.value = DEFAULT_EDITOR_SETTINGS.restoreSqlFromSourcePasteEnabled;
@@ -2621,7 +2711,9 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editRedisDatabaseDisplayLimit.value = DEFAULT_EDITOR_SETTINGS.redisDatabaseDisplayLimit;
     editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
     editPreferredExportPath.value = DEFAULT_EDITOR_SETTINGS.preferredExportPath;
+    editDamengClientBinDir.value = DEFAULT_EDITOR_SETTINGS.damengClientBinDir;
     editAutoOpenExportFolder.value = DEFAULT_EDITOR_SETTINGS.autoOpenExportFolder;
+    editApplyColumnFormattersOnExport.value = DEFAULT_EDITOR_SETTINGS.applyColumnFormattersOnExport;
     editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
     editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
     editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
@@ -2680,6 +2772,7 @@ function resetAllDefaults() {
   editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
   editDdlOpenMode.value = DEFAULT_EDITOR_SETTINGS.ddlOpenMode;
   editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
+  editCaretBrowsingEnabled.value = DEFAULT_EDITOR_SETTINGS.caretBrowsingEnabled;
   editDoubleClickStringSelectionMode.value = DEFAULT_EDITOR_SETTINGS.doubleClickStringSelectionMode;
   editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
   editRestoreSqlFromSourcePasteEnabled.value = DEFAULT_EDITOR_SETTINGS.restoreSqlFromSourcePasteEnabled;
@@ -2786,7 +2879,9 @@ function resetAllDefaults() {
   editRedisDatabaseDisplayLimit.value = DEFAULT_EDITOR_SETTINGS.redisDatabaseDisplayLimit;
   editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
   editPreferredExportPath.value = DEFAULT_EDITOR_SETTINGS.preferredExportPath;
+  editDamengClientBinDir.value = DEFAULT_EDITOR_SETTINGS.damengClientBinDir;
   editAutoOpenExportFolder.value = DEFAULT_EDITOR_SETTINGS.autoOpenExportFolder;
+  editApplyColumnFormattersOnExport.value = DEFAULT_EDITOR_SETTINGS.applyColumnFormattersOnExport;
   editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
   editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
   editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
@@ -3148,8 +3243,21 @@ function onShortcutKeydown(actionId: ShortcutActionId, event: KeyboardEvent) {
     return;
   }
   const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
+  if (definition?.supportsModifierDoubleTap) modifierDoubleTapRecorder.handleKeydown(event);
   const shortcut = definition?.inputKind === "modifier-only" ? eventToModifierOnlyShortcut(event) : eventToShortcut(event);
   if (!shortcut) return;
+  commitCapturedShortcut(actionId, shortcut);
+}
+
+function onShortcutKeyup(actionId: ShortcutActionId, event: KeyboardEvent) {
+  if (editingShortcutId.value !== actionId || !shortcutDefinitionById(actionId)?.supportsModifierDoubleTap) return;
+  event.stopPropagation();
+  const shortcut = modifierDoubleTapRecorder.handleKeyup(event);
+  if (shortcut) commitCapturedShortcut(actionId, shortcut);
+}
+
+function commitCapturedShortcut(actionId: ShortcutActionId, shortcut: string) {
+  modifierDoubleTapRecorder.reset();
   // macOS 上 ⌘H/⌥⌘H 由系统保留（Hide / Hide Others），配置层一旦绑定并在
   // CodeMirror 中 preventDefault，AppKit 菜单的 key equivalent 就无法触发
   // （#9068 的配置层复现），故此处输入时直接拒绝。
@@ -3209,6 +3317,7 @@ function cancelShortcutEdit() {
 }
 
 function resetShortcut(actionId: ShortcutActionId) {
+  modifierDoubleTapRecorder.reset();
   const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
   if (!definition) return;
   // The static definition default is the macOS literal for a few actions
@@ -3222,7 +3331,102 @@ function resetShortcut(actionId: ShortcutActionId) {
 }
 
 function clearShortcut(actionId: ShortcutActionId) {
+  modifierDoubleTapRecorder.reset();
   editShortcuts.value = { ...editShortcuts.value, [actionId]: "" };
+}
+
+/**
+ * #11787：把焦点交给录入按钮并返回是否成功。录入期间 App.vue 的三条 capture 阶段
+ * 分支只看**焦点元素**是否带 `data-shortcut-recorder` 才让路，而 macOS 的 WKWebView
+ * （沿用 Safari 规则）点击按钮不会给按钮焦点，所以进入录入态必须显式 focus，不能只
+ * 靠点击。
+ */
+async function focusShortcutRecorderButton(): Promise<boolean> {
+  await nextTick();
+  const button = document.querySelector<HTMLElement>(SHORTCUT_RECORDER_SELECTOR);
+  if (!button) return false;
+  button.focus();
+  return true;
+}
+
+/**
+ * 录入态的唯一写入口：本地状态与宿主侧开关一起变。桌面端要让宿主在录入期间放下 WebView2
+ * 的浏览器加速键（`F5`/`Ctrl+R`、`Ctrl+F`、`Ctrl+P`、`F12`……），否则那批键在页面之前就被
+ * 消费掉——既录不进搜索框，按下 `F5` 还会重载整个 webview 丢掉录入现场。幂等过滤避免重复 IPC。
+ */
+function applyShortcutRecording(recording: boolean) {
+  if (shortcutRecording.value === recording) return;
+  shortcutRecording.value = recording;
+  // 宿主侧是尽力而为的增强：失败只降级成「那批浏览器加速键仍录不进来」，错误由 api 层记录，
+  // 不再额外打扰用户。
+  void setShortcutRecording(recording).catch(() => undefined);
+}
+
+async function toggleShortcutRecording() {
+  if (shortcutRecording.value) {
+    applyShortcutRecording(false);
+    return;
+  }
+  applyShortcutRecording(true);
+  // 没有焦点就没有让路依据：宁可退回未录入态，也不要留下一个「显示正在录入、实际
+  // 吞不掉任何按键」的空转状态。
+  if (!(await focusShortcutRecorderButton())) applyShortcutRecording(false);
+}
+
+function stopShortcutRecording() {
+  applyShortcutRecording(false);
+}
+
+function onShortcutRecorderBlur() {
+  // 窗口失焦不算放弃录入：被系统抢占的组合（Win+*、Alt+Tab、系统保留热键）本来就
+  // 到不了页面，但按下它们会把焦点带走（#11787 的实测反馈），此时把录入态一起丢掉，
+  // 用户回到 DBX 后按的键就会被当普通快捷键执行。窗口重新获得焦点时再把焦点还给
+  // 录入按钮（见 onShortcutRecordingWindowFocus）。
+  if (!document.hasFocus()) return;
+  // 焦点转移到应用内的其它元素（点了搜索框、某一行……）才是真的放弃录入。
+  stopShortcutRecording();
+}
+
+function onShortcutRecordingWindowBlur() {
+  shortcutRecordingWindowActive.value = false;
+}
+
+function onShortcutRecordingWindowFocus() {
+  shortcutRecordingWindowActive.value = true;
+  if (!shortcutRecording.value) return;
+  void nextTick().then(() => {
+    if (!shortcutRecording.value) return;
+    // 别抢用户“一回来就点”的那个控件：窗口激活后焦点可能已经落到搜索框/某一行上，
+    // 此时把焦点抢回录入按钮会让这次点击白点一下（那种情况 blur 已经按应用内规则
+    // 结束录入）。只有焦点没有归属（body）或本来就还在录入按钮上时才恢复。
+    const active = document.activeElement;
+    const activeIsControl = active instanceof HTMLElement && active !== document.body && active !== document.documentElement && !active.closest(SHORTCUT_RECORDER_SELECTOR);
+    if (activeIsControl) return;
+    void focusShortcutRecorderButton().then((focused) => {
+      // 录入表面已不存在（换了页签、设置被关掉）时不保留空转的录入态。
+      if (!focused) applyShortcutRecording(false);
+    });
+  });
+}
+
+function onShortcutRecorderKeydown(event: KeyboardEvent) {
+  if (!shortcutRecording.value) return;
+  // 录入态必须吞掉这次按键：既不执行真实快捷键命令（App.vue 的 window keydown
+  // 以 defaultPrevented 让路），也不让 Space/Enter 再去触发按钮自身的 click
+  // 把录入态点掉。
+  event.preventDefault();
+  event.stopPropagation();
+  const action = shortcutRecorderAction(event);
+  if (!action) return;
+  if (action.type === "exit") {
+    stopShortcutRecording();
+    return;
+  }
+  if (action.type === "clear") {
+    shortcutSearchQuery.value = "";
+    return;
+  }
+  shortcutSearchQuery.value = action.query;
 }
 
 function setAppLayout(value: InterfaceLayout) {
@@ -3277,6 +3481,17 @@ async function pickPreferredExportPath() {
   });
   if (typeof selected !== "string" || !selected.trim()) return;
   editPreferredExportPath.value = selected.trim();
+}
+async function pickDamengClientBinDir() {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title: t("settings.damengClientBinDirChoose"),
+    defaultPath: editDamengClientBinDir.value.trim() || undefined,
+  });
+  if (typeof selected !== "string" || !selected.trim()) return;
+  editDamengClientBinDir.value = selected.trim();
 }
 
 async function pickCustomSkillRoot() {
@@ -3413,6 +3628,7 @@ function resetSettingsSearchState() {
   settingsSearchActiveIndex.value = 0;
   pendingSettingsSearchResult = null;
   shortcutSearchQuery.value = "";
+  applyShortcutRecording(false);
   mcpPermissionPreviewSearchQuery.value = "";
   clearSettingsSearchHighlight();
 }
@@ -4465,9 +4681,23 @@ const webdavSecretsPassphrase = ref("");
 const webdavHasSavedSecretsPassphrase = ref(false);
 const webdavAutoUploadEnabled = ref(localStorage.getItem("dbx-webdav-auto-upload-enabled") === "true");
 const webdavAutoUploadIntervalMinutes = ref(Number(localStorage.getItem("dbx-webdav-auto-upload-interval-minutes") || String(DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES)));
+const webdavAutoUploadIntervalHint = computed(() => {
+  const formatted = formatWebDavAutoUploadInterval(webdavAutoUploadIntervalMinutes.value, locale.value, {
+    minute: t("settings.syncAutoUploadUnitMinute"),
+    hour: t("settings.syncAutoUploadUnitHour"),
+    day: t("settings.syncAutoUploadUnitDay"),
+  });
+  const key = formatted.approximate ? "settings.syncAutoUploadScheduleHintApproximate" : "settings.syncAutoUploadScheduleHint";
+  return t(key, { interval: formatted.interval });
+});
 const webdavBusy = ref<"" | "test" | "upload" | "download">("");
 const webdavMessage = ref("");
 const webdavError = ref(false);
+const webdavLastSuccessfulSyncAt = ref<string | null>(null);
+const webdavLastSuccessfulSyncText = computed(() => {
+  if (!webdavLastSuccessfulSyncAt.value) return t("settings.syncNeverSuccessful");
+  return new Date(webdavLastSuccessfulSyncAt.value).toLocaleString(locale.value);
+});
 const localBackupSecretsPassphrase = ref("");
 const localBackupBusy = ref<"" | "export" | "import">("");
 const localBackupMessage = ref("");
@@ -4701,6 +4931,14 @@ function currentWebDavConfig(): WebDavConfig {
     remotePath: webdavRemotePath.value.trim() || DEFAULT_WEB_DAV_REMOTE_PATH,
     userAgent: webdavUserAgent.value.trim() || undefined,
   };
+}
+
+function refreshWebDavLastSuccessfulSync() {
+  webdavLastSuccessfulSyncAt.value = readWebDavLastSuccessfulSync(currentWebDavConfig());
+}
+
+function onWebDavSyncStatusStorage(event: StorageEvent) {
+  if (event.key === null || event.key === WEB_DAV_LAST_SUCCESSFUL_SYNC_STORAGE_KEY) refreshWebDavLastSuccessfulSync();
 }
 
 function currentWebDavAccountConfig(): WebDavConfig {
@@ -4966,7 +5204,9 @@ async function confirmSyncSelection(selection: SyncSelection) {
   webdavSyncSecrets.value = selection.includeSecrets;
   if (syncSelectionMode.value === "upload") {
     await runWebDavAction("upload", async () => {
-      const summary = await webdavSyncUpload(currentWebDavConfig(), settingsStore.editorSettings, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
+      const config = currentWebDavConfig();
+      const summary = await webdavSyncUpload(config, settingsStore.editorSettings, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
+      recordWebDavSyncSuccess(config);
       writeWebDavBackupSelection(selection);
       return t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.remotePath });
     });
@@ -4974,13 +5214,15 @@ async function confirmSyncSelection(selection: SyncSelection) {
   }
 
   await runWebDavAction("download", async () => {
-    const result = await webdavSyncDownload(currentWebDavConfig(), selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
+    const config = currentWebDavConfig();
+    const result = await webdavSyncDownload(config, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
     if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
     await settingsStore.updateDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
     await savedSqlStore.initFromStorage();
     await tunnelProfileStore.refresh();
     await settingsStore.reloadAiConfigs();
+    recordWebDavSyncSuccess(config);
     const message = t("settings.syncDownloadSuccess", { bytes: result.summary.bytes, path: result.summary.remotePath });
     if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) return `${message} ${t("settings.syncSecretsSkipped")}`;
     if (result.applySummary.secretsApplied) return `${message} ${t("settings.syncSecretsApplied")}`;
@@ -5121,6 +5363,7 @@ watch(
 watch([webdavEndpoint, webdavUsername], () => {
   void refreshWebDavPasswordStatus();
 });
+watch([webdavEndpoint, webdavUsername, webdavRemotePath], refreshWebDavLastSuccessfulSync);
 watch(webdavRememberPassword, (val) => {
   localStorage.setItem("dbx-webdav-remember-password", String(val));
 });
@@ -5142,8 +5385,12 @@ watch(snippetProvider, (provider) => {
 });
 
 watch(activeSettingsTab, async (tab) => {
+  // 离开快捷键页签会卸载录入按钮，而被移除的焦点元素不会再收到 blur：不在这里
+  // 复位的话，录入态会残留到下次回到该页签（届时按钮已不在焦点上，吞不掉快捷键）。
+  if (tab !== "shortcuts") applyShortcutRecording(false);
   void resetSettingsContentScroll();
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
+  if (tab === "ai" && !isWeb) void refreshCcSwitchPluginAvailability();
   if (tab === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
   if (tab === "ai") {
     void loadMaxAgentTurnsSetting();
@@ -5183,13 +5430,34 @@ watch(
 );
 
 onMounted(() => {
+  window.addEventListener("blur", modifierDoubleTapRecorder.reset);
+  document.addEventListener("visibilitychange", modifierDoubleTapRecorder.reset);
+  window.addEventListener("pointerdown", modifierDoubleTapRecorder.cancel, true);
+  window.addEventListener("compositionstart", modifierDoubleTapRecorder.cancel, true);
+  // #11787：系统快捷键（Win+*、Alt+Tab、系统保留热键）把窗口焦点带走后，录入态要
+  // 留着，回到 DBX 时再把焦点还给录入按钮；同时把「窗口不在前台」这件事显示出来。
+  window.addEventListener("focus", onShortcutRecordingWindowFocus);
+  window.addEventListener("blur", onShortcutRecordingWindowBlur);
+  window.addEventListener(WEB_DAV_SYNC_SUCCESS_EVENT, refreshWebDavLastSuccessfulSync);
+  window.addEventListener("storage", onWebDavSyncStatusStorage);
+  refreshWebDavLastSuccessfulSync();
   void refreshWebDavPasswordStatus();
+  if (!isWeb) void refreshCcSwitchPluginAvailability();
   checkLayoutDescTruncation();
   initTruncationObservers();
   void checkBackgroundImageFileExists();
 });
 
 onUnmounted(() => {
+  window.removeEventListener("blur", modifierDoubleTapRecorder.reset);
+  document.removeEventListener("visibilitychange", modifierDoubleTapRecorder.reset);
+  window.removeEventListener("pointerdown", modifierDoubleTapRecorder.cancel, true);
+  window.removeEventListener("compositionstart", modifierDoubleTapRecorder.cancel, true);
+  window.removeEventListener("focus", onShortcutRecordingWindowFocus);
+  window.removeEventListener("blur", onShortcutRecordingWindowBlur);
+  window.removeEventListener(WEB_DAV_SYNC_SUCCESS_EVENT, refreshWebDavLastSuccessfulSync);
+  window.removeEventListener("storage", onWebDavSyncStatusStorage);
+  modifierDoubleTapRecorder.reset();
   clearThemePaletteOptionPreview();
   clearUiFontOptionPreview();
   restoreLocaleOptionPreview();
@@ -5511,12 +5779,33 @@ async function saveWebSqlFileUploadMaxMbSetting() {
 // AI Config Delete Confirmation
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
+const aiCcSwitchImporting = ref(false);
+const aiCcSwitchPlugins = ref<InstalledPlugin[]>([]);
+const aiCcSwitchPluginLoading = ref(false);
+const aiCcSwitchPluginStatus = computed(() => getCcSwitchPluginStatus(aiCcSwitchPlugins.value));
+const aiCcSwitchPluginAvailable = computed(() => isCcSwitchPluginAvailable(aiCcSwitchPlugins.value));
+const aiCcSwitchPluginStatusText = computed(() => {
+  if (aiCcSwitchPluginLoading.value) return "ai.ccSwitchPluginChecking";
+  return aiCcSwitchPluginStatus.value === "incompatible" ? "ai.ccSwitchPluginIncompatible" : "ai.ccSwitchPluginNotInstalledStatus";
+});
 
 const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli", "qoder-cli"]);
 const OPENCODE_CONTROL_ENV = new Set(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_PERMISSION", "OPENCODE_DISABLE_PROJECT_CONFIG"]);
 const CURSOR_CONTROL_ENV = new Set(["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"]);
 const builtinAiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
 const partnerAiProviderOptions = computed(() => AI_PROVIDER_PARTNER_PRESETS.filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
+
+async function refreshCcSwitchPluginAvailability() {
+  if (isWeb || aiCcSwitchPluginLoading.value) return;
+  aiCcSwitchPluginLoading.value = true;
+  try {
+    aiCcSwitchPlugins.value = await listPlugins();
+  } catch {
+    aiCcSwitchPlugins.value = [];
+  } finally {
+    aiCcSwitchPluginLoading.value = false;
+  }
+}
 
 const aiEditProvider = ref<AiProvider>("claude");
 const aiEditProviderPresetId = ref("claude");
@@ -5554,6 +5843,7 @@ const aiEditQoderCliEnvRows = ref<AiEnvRow[]>([]);
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
 const selectedAiProviderPreset = computed(() => getAiProviderPresetOption(aiEditProviderPresetId.value));
 const selectedAiPartnerPreset = computed(() => (isAiPartnerProviderPreset(selectedAiProviderPreset.value) ? selectedAiProviderPreset.value : null));
+const aiIsCcSwitchProvider = computed(() => aiEditProviderPresetId.value === CC_SWITCH_PROVIDER_ID);
 
 const aiTesting = ref(false);
 const aiTestResult = ref<"" | "success" | "error">("");
@@ -5853,12 +6143,12 @@ function syncAiEditState() {
 function aiSelectProvider(presetId: string) {
   const preset = getAiProviderPresetOption(presetId);
   const provider = preset.provider;
-  if (isWeb && CLI_AI_PROVIDERS.has(provider)) return;
+  if (isWeb && (CLI_AI_PROVIDERS.has(provider) || presetId === CC_SWITCH_PROVIDER_ID)) return;
   if (presetId === aiEditProviderPresetId.value) return;
 
   syncAiEditState();
 
-  // Apply new provider's preset defaults to edit state
+  // CC-SWITCH is a UI-only preset; installation is initiated by its action buttons.
   aiEditProviderPresetId.value = presetId;
   aiEditProvider.value = provider;
   aiEditApiKey.value = "";
@@ -6067,6 +6357,51 @@ async function aiSetDefaultConfig(id: string) {
     await settingsStore.setDefaultAiConfig(id);
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
+  }
+}
+
+function ccSwitchImportErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "ccSwitchNotInstalled") return t("ai.ccSwitchNotInstalled");
+  if (message === "ccSwitchPluginNotInstalled") return t("ai.ccSwitchPluginNotInstalled");
+  if (message === "ccSwitchInvalidDatabase") return t("ai.ccSwitchInvalidDatabase");
+  if (message === "ccSwitchImportDesktopOnly") return t("ai.ccSwitchImportDesktopOnly");
+  if (message.startsWith("ccSwitchHomeDirectoryFailed:")) return t("ai.ccSwitchHomeDirectoryFailed");
+  if (message.startsWith("ccSwitchOpenFailed:")) return t("ai.ccSwitchOpenFailed");
+  if (message.startsWith("ccSwitchReadFailed:")) return t("ai.ccSwitchReadFailed");
+  return message;
+}
+
+async function aiImportCcSwitchConfigs() {
+  if (isWeb || aiCcSwitchImporting.value) return;
+  aiCcSwitchImporting.value = true;
+  try {
+    const result = await loadCcSwitchAiConfigs();
+    const prepared = prepareImportedAiConfigs(settingsStore.aiConfigs, result.configs);
+    if (prepared.length === 0) {
+      toast(t("ai.ccSwitchNoNewConfigs"), 4000);
+      return;
+    }
+
+    const hadConfigs = settingsStore.aiConfigs.length > 0;
+    for (const [index, config] of prepared.entries()) {
+      await settingsStore.createAiConfig({
+        ...config,
+        id: generateId(),
+        isDefault: !hadConfigs && index === 0,
+      });
+    }
+    toast(
+      t(result.skipped.length > 0 ? "ai.ccSwitchImportPartial" : "ai.ccSwitchImportSuccess", {
+        count: prepared.length,
+        skipped: result.skipped.length,
+      }),
+      4000,
+    );
+  } catch (error) {
+    toast(ccSwitchImportErrorMessage(error), 5000);
+  } finally {
+    aiCcSwitchImporting.value = false;
   }
 }
 
@@ -6901,6 +7236,19 @@ onUnmounted(() => {
                   </Select>
                 </div>
 
+                <div class="space-y-2 md:col-span-2" data-editor-excluded-completion-items>
+                  <Label for="editor-excluded-completion-items">{{ t("settings.excludedCompletionItems") }}</Label>
+                  <textarea
+                    id="editor-excluded-completion-items"
+                    v-model="editExcludedCompletionItems"
+                    class="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                    :placeholder="t('settings.excludedCompletionItemsPlaceholder')"
+                  />
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.excludedCompletionItemsDescription") }}
+                  </p>
+                </div>
+
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-select-first-completion-on-open">{{ t("settings.selectFirstCompletionOnOpen") }}</Label>
@@ -7076,6 +7424,16 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-vim-mode" v-model="editVimModeEnabled" class="mt-0.5" />
+                </div>
+
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-caret-browsing">{{ t("settings.caretBrowsing") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.caretBrowsingDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-caret-browsing" v-model="editCaretBrowsingEnabled" class="mt-0.5" />
                 </div>
 
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
@@ -7294,6 +7652,10 @@ onUnmounted(() => {
                           class="h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-background px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
                           :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
                           @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
+                          @keyup="(event: KeyboardEvent) => onShortcutKeyup(definition.id, event)"
+                          @blur="modifierDoubleTapRecorder.reset"
+                          @compositionstart="modifierDoubleTapRecorder.cancel"
+                          :title="definition.supportsModifierDoubleTap ? t('settings.shortcutModifierDoubleTapHint') : undefined"
                         />
                         <Button
                           v-if="editingShortcutId !== definition.id"
@@ -9253,6 +9615,19 @@ onUnmounted(() => {
                   </div>
                   <p class="text-xs text-muted-foreground">{{ t("settings.preferredExportPathDescription") }}</p>
                 </div>
+                <div v-if="!isWeb" data-settings-search-id="data-dameng-client-bin-dir" :class="['space-y-2', settingsSearchTargetClass('data-dameng-client-bin-dir')]">
+                  <Label for="dameng-client-bin-dir">{{ t("settings.damengClientBinDir") }}</Label>
+                  <div class="flex items-center gap-2">
+                    <Input id="dameng-client-bin-dir" v-model="editDamengClientBinDir" :placeholder="t('settings.damengClientBinDirPlaceholder')" class="h-9 flex-1 font-mono text-xs" />
+                    <Button v-if="!isWeb" type="button" variant="outline" size="sm" class="h-9 shrink-0 px-2.5" :title="t('settings.damengClientBinDirChoose')" :aria-label="t('settings.damengClientBinDirChoose')" @click="pickDamengClientBinDir">
+                      <FolderOpen class="h-4 w-4" />
+                    </Button>
+                    <Button v-if="editDamengClientBinDir" type="button" variant="ghost" size="sm" class="h-9 shrink-0 px-2" :title="t('settings.damengClientBinDirClear')" :aria-label="t('settings.damengClientBinDirClear')" @click="editDamengClientBinDir = ''">
+                      <X class="h-4 w-4" />
+                    </Button>
+                  </div>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.damengClientBinDirDescription") }}</p>
+                </div>
                 <div v-if="!isWeb" data-settings-search-id="data-export-auto-open-folder" :class="['flex items-start justify-between gap-3', settingsSearchTargetClass('data-export-auto-open-folder')]">
                   <div class="space-y-0.5">
                     <Label for="export-auto-open-folder">{{ t("settings.autoOpenExportFolder") }}</Label>
@@ -9261,6 +9636,15 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="export-auto-open-folder" v-model="editAutoOpenExportFolder" class="mt-0.5" />
+                </div>
+                <div data-settings-search-id="data-export-apply-column-formatters" :class="['flex items-start justify-between gap-3', settingsSearchTargetClass('data-export-apply-column-formatters')]">
+                  <div class="space-y-0.5">
+                    <Label for="export-apply-column-formatters">{{ t("settings.applyColumnFormattersOnExport") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.applyColumnFormattersOnExportDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="export-apply-column-formatters" v-model="editApplyColumnFormattersOnExport" class="mt-0.5" />
                 </div>
                 <div class="space-y-2">
                   <Label>{{ t("settings.exportBatchSize") }}</Label>
@@ -9474,20 +9858,50 @@ onUnmounted(() => {
                   <Search class="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input v-model="shortcutSearchQuery" autocomplete="off" :placeholder="t('settings.shortcutSearchPlaceholder')" class="h-9 pl-9 text-sm" />
                 </div>
-                <!-- 冲突摘只需计数，明细进浮层：不再用整条横幅占掉列表高度。 -->
-                <LightTooltip v-if="shortcutConflicts.length > 0" :text="t('settings.shortcutConflictSummaryTooltip', { count: shortcutConflicts.length, pairs: shortcutConflictPairCount })">
+                <!-- #11787：VS Code 式键盘录入。data-shortcut-recorder 只在录入态渲染：
+                     App.vue 的两个 capture 阶段全局快捷键处理器按「焦点元素是否带该属性」
+                     决定让路，非录入态焦点停在这个按钮上的行为与普通按钮一致。 -->
+                <LightTooltip :text="shortcutRecording ? t('settings.shortcutRecordKeysRecordingHint') : t('settings.shortcutRecordKeys')" :open-on-focus="false">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    class="h-9 w-9 shrink-0"
+                    :class="shortcutRecording ? 'bg-primary/10 text-primary ring-2 ring-primary/40' : ''"
+                    :aria-pressed="shortcutRecording"
+                    :aria-label="t('settings.shortcutRecordKeys')"
+                    :data-shortcut-recorder="shortcutRecording ? 'active' : undefined"
+                    @click="toggleShortcutRecording"
+                    @keydown="onShortcutRecorderKeydown"
+                    @blur="onShortcutRecorderBlur"
+                  >
+                    <Keyboard class="h-4 w-4" />
+                  </Button>
+                </LightTooltip>
+                <!-- 冲突摘要只需计数，明细进浮层：不再用整条横幅占掉列表高度。
+                     计数随搜索同口径（见 visibleShortcutConflict* computeds）；
+                     页脚的应用门禁保持全局，不受搜索影响。 -->
+                <LightTooltip v-if="visibleShortcutConflictIds.length > 0" :text="t('settings.shortcutConflictSummaryTooltip', { count: visibleShortcutConflictIds.length, pairs: visibleShortcutConflictPairCount })">
                   <span class="inline-flex h-9 shrink-0 cursor-help items-center gap-1.5 rounded-md border border-destructive/25 bg-destructive/10 px-2 text-[11.5px] font-medium tabular-nums text-destructive">
                     <span class="size-1.5 rounded-full bg-current" aria-hidden="true" />
-                    {{ t("settings.shortcutConflictBadge", { count: shortcutConflicts.length }) }}
+                    {{ t("settings.shortcutConflictBadge", { count: visibleShortcutConflictIds.length }) }}
                   </span>
                 </LightTooltip>
-                <LightTooltip v-if="crossScopeShortcutConflictIds.length > 0" :text="t('settings.shortcutCrossScopeSummaryTooltip', { count: crossScopeShortcutConflictIds.length, pairs: crossScopeShortcutPairCount })">
+                <LightTooltip v-if="visibleCrossScopeShortcutConflictIds.length > 0" :text="t('settings.shortcutCrossScopeSummaryTooltip', { count: visibleCrossScopeShortcutConflictIds.length, pairs: visibleCrossScopeShortcutPairCount })">
                   <span class="inline-flex h-9 shrink-0 cursor-help items-center gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 text-[11.5px] font-medium tabular-nums text-warning">
                     <span class="size-1.5 rounded-full bg-current" aria-hidden="true" />
-                    {{ t("settings.shortcutCrossScopeBadge", { count: crossScopeShortcutConflictIds.length }) }}
+                    <!-- 黄色徽章按“组”（pairs）计数，避免与行级绑定条目数混淆。 -->
+                    {{ t("settings.shortcutCrossScopeBadge", { count: visibleCrossScopeShortcutPairCount }) }}
                   </span>
                 </LightTooltip>
               </div>
+
+              <!-- 录入态的操作提示常驻一条：此时焦点在录入按钮上，tooltip 不可用，
+                   Esc/Backspace 这两个控制键必须让用户看得见；窗口不在前台时提示要换
+                   成「按键会被别的应用先抢走」，否则静默待命看起来就是功能失灵。 -->
+              <p v-if="shortcutRecording" class="rounded-md border px-3 py-1.5 text-xs" :class="shortcutRecordingWindowActive ? 'border-primary/30 bg-primary/5 text-muted-foreground' : 'border-warning/40 bg-warning/10 text-warning'" aria-live="polite">
+                {{ shortcutRecordingWindowActive ? t("settings.shortcutRecordKeysRecordingHint") : t("settings.shortcutRecordKeysWindowInactive") }}
+              </p>
 
               <div v-if="filteredShortcutDefinitions.length === 0" class="rounded-md border border-border/70 px-3 py-8 text-center text-sm text-muted-foreground">
                 {{ t("settings.shortcutSearchNoResults") }}
@@ -9518,10 +9932,10 @@ onUnmounted(() => {
                         {{ t("settings.shortcutGroupUnbound", { count: group.unboundCount }) }}
                       </span>
                     </LightTooltip>
-                    <LightTooltip v-if="group.conflictCount > 0" :text="t('settings.shortcutConflictSummaryTooltip', { count: group.conflictCount, pairs: shortcutConflictPairCount })">
+                    <LightTooltip v-if="group.conflictCount > 0" :text="t('settings.shortcutConflictSummaryTooltip', { count: group.conflictCount, pairs: group.conflictPairCount })">
                       <span class="inline-flex shrink-0 cursor-help items-center gap-1 text-[11px] font-medium tabular-nums text-destructive"> <span class="size-[5px] rounded-full bg-current" aria-hidden="true" />{{ group.conflictCount }} </span>
                     </LightTooltip>
-                    <LightTooltip v-if="group.crossScopeCount > 0" :text="t('settings.shortcutCrossScopeSummaryTooltip', { count: group.crossScopeCount, pairs: crossScopeShortcutPairCount })">
+                    <LightTooltip v-if="group.crossScopeCount > 0" :text="t('settings.shortcutCrossScopeSummaryTooltip', { count: group.crossScopeCount, pairs: group.crossScopePairCount })">
                       <span class="inline-flex shrink-0 cursor-help items-center gap-1 text-[11px] font-medium tabular-nums text-warning"> <span class="size-[5px] rounded-full bg-current" aria-hidden="true" />{{ group.crossScopeCount }} </span>
                     </LightTooltip>
                     <span class="ml-auto hidden truncate text-[11px] text-muted-foreground xl:block">{{ group.hint }}</span>
@@ -9565,6 +9979,10 @@ onUnmounted(() => {
                                 class="settings-shortcut-pill h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/55 aria-invalid:text-destructive"
                                 :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
                                 @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
+                                @keyup="(event: KeyboardEvent) => onShortcutKeyup(definition.id, event)"
+                                @blur="modifierDoubleTapRecorder.reset"
+                                @compositionstart="modifierDoubleTapRecorder.cancel"
+                                :title="definition.supportsModifierDoubleTap ? t('settings.shortcutModifierDoubleTapHint') : undefined"
                               />
                             </LightTooltip>
                             <Button
@@ -9724,8 +10142,7 @@ onUnmounted(() => {
 SELECT t.*
 FROM ${1:table} t
 WHERE t.del_flag = 0
-LIMIT 100;</pre
-                >
+LIMIT 100;</pre>
               </div>
 
               <div class="overflow-x-auto rounded-md border">
@@ -9870,15 +10287,21 @@ LIMIT 100;</pre
                       </label>
                       <div class="flex items-center gap-2">
                         <Label for="webdav-auto-upload-interval" class="text-xs text-muted-foreground">{{ t("settings.syncAutoUploadInterval") }}</Label>
-                        <Input id="webdav-auto-upload-interval" v-model.number="webdavAutoUploadIntervalMinutes" type="number" min="1" max="1440" step="1" class="h-7 w-24 text-xs" :disabled="!webdavAutoUploadEnabled" />
+                        <Input id="webdav-auto-upload-interval" v-model.number="webdavAutoUploadIntervalMinutes" type="number" min="1" :max="MAX_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES" step="1" class="h-7 w-24 text-xs" :disabled="!webdavAutoUploadEnabled" />
                         <span class="text-xs text-muted-foreground">{{ t("settings.syncAutoUploadMinutes") }}</span>
                       </div>
+                      <p class="text-xs text-muted-foreground" aria-live="polite">
+                        {{ webdavAutoUploadIntervalHint }}
+                      </p>
                       <p class="text-xs text-muted-foreground">
                         {{ t("settings.syncAutoUploadDescription") }}
                       </p>
                     </div>
                   </div>
 
+                  <p class="text-xs text-muted-foreground" aria-live="polite">
+                    {{ t("settings.syncLastSuccessful", { time: webdavLastSuccessfulSyncText }) }}
+                  </p>
                   <div v-if="webdavMessage" class="text-xs" :class="webdavError ? 'text-destructive' : 'text-green-600 dark:text-green-400'">
                     {{ webdavMessage }}
                   </div>
@@ -10116,12 +10539,14 @@ LIMIT 100;</pre
             <section v-else-if="activeSettingsTab === 'ai'" data-settings-search-id="ai" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('ai')]">
               <!-- Config List View -->
               <div v-if="aiConfigListMode === 'list'" class="space-y-4">
-                <div class="flex items-center justify-between">
+                <div class="flex flex-wrap items-center justify-between gap-2">
                   <h3 class="text-sm font-medium">{{ t("ai.configList") }}</h3>
-                  <Button type="button" size="sm" @click="aiEnterEditMode()">
-                    <Plus class="mr-1 h-3.5 w-3.5" />
-                    {{ t("ai.addConfig") }}
-                  </Button>
+                  <div class="flex flex-wrap items-center justify-end gap-2">
+                    <Button type="button" size="sm" @click="aiEnterEditMode()">
+                      <Plus class="mr-1 h-3.5 w-3.5" />
+                      {{ t("ai.addConfig") }}
+                    </Button>
+                  </div>
                 </div>
 
                 <div v-if="settingsStore.aiConfigs.length === 0" class="rounded-md border border-dashed p-6 text-center">
@@ -10237,6 +10662,20 @@ LIMIT 100;</pre
                     </div>
                   </div>
                 </div>
+              </div>
+
+              <div v-if="aiConfigListMode === 'list' && !isWeb && !aiCcSwitchPluginAvailable" class="flex flex-wrap items-center justify-between gap-3 rounded-md border border-dashed border-primary/30 bg-primary/5 px-3 py-3">
+                <div class="flex min-w-0 items-start gap-3">
+                  <PackageSearch class="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                  <div class="min-w-0 space-y-1">
+                    <p class="text-sm font-medium">{{ t("ai.ccSwitchProvider") }}</p>
+                    <p class="text-xs leading-relaxed text-muted-foreground">{{ t(aiCcSwitchPluginStatusText) }}</p>
+                  </div>
+                </div>
+                <Button type="button" size="sm" variant="outline" class="shrink-0" @click="emit('open-cc-switch-plugin-center')">
+                  <PackageSearch class="mr-1 h-3.5 w-3.5" />
+                  {{ t("toolbar.pluginCenter") }}
+                </Button>
               </div>
 
               <!-- Agent Turn Limit (list mode, global) -->
@@ -10544,7 +10983,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Config Name Input -->
-                <div class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.configName") }}</Label>
                   <Input v-model="aiEditConfigName" class="col-span-2 h-8 text-xs" :placeholder="t('ai.configNamePlaceholder')" />
                 </div>
@@ -10557,8 +10996,8 @@ LIMIT 100;</pre
                       <SelectTrigger inputClass="h-8 text-xs">
                         <SelectValue>
                           <span class="flex items-center gap-2">
-                            <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" :icon-path="selectedAiProviderPreset.iconPath" />
-                            <span>{{ selectedAiProviderPreset.label }}</span>
+                            <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="aiIsCcSwitchProvider ? t('ai.ccSwitchProvider') : selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" :icon-path="selectedAiProviderPreset.iconPath" />
+                            <span>{{ aiIsCcSwitchProvider ? t("ai.ccSwitchProvider") : selectedAiProviderPreset.label }}</span>
                           </span>
                         </SelectValue>
                       </SelectTrigger>
@@ -10570,6 +11009,12 @@ LIMIT 100;</pre
                               <span class="flex w-full min-w-0 items-center gap-2">
                                 <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" :icon-path="provider.iconPath" />
                                 <span class="truncate">{{ provider.label }}</span>
+                              </span>
+                            </SelectItem>
+                            <SelectItem v-if="!isWeb && aiCcSwitchPluginAvailable" :value="CC_SWITCH_PROVIDER_ID">
+                              <span class="flex w-full min-w-0 items-center gap-2">
+                                <AiProviderLogo :provider="CC_SWITCH_PROVIDER_PRESET.provider" :label="t('ai.ccSwitchProvider')" />
+                                <span class="truncate">{{ t("ai.ccSwitchProvider") }}</span>
                               </span>
                             </SelectItem>
                           </SelectGroup>
@@ -10597,8 +11042,44 @@ LIMIT 100;</pre
                   </div>
                 </div>
 
+                <div v-if="aiIsCcSwitchProvider && !isWeb && aiCcSwitchPluginAvailable" class="rounded-md border border-primary/20 bg-primary/5 px-3 py-3">
+                  <div class="flex items-start gap-3">
+                    <PackageSearch class="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                    <div class="min-w-0 space-y-1">
+                      <p class="text-sm font-medium">{{ t("ai.ccSwitchProvider") }}</p>
+                      <p class="text-xs leading-relaxed text-muted-foreground">{{ t("ai.ccSwitchProviderDescription") }}</p>
+                    </div>
+                  </div>
+                  <div class="mt-3 space-y-2 rounded-md border bg-background/70 px-3 py-2.5 text-xs">
+                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div class="flex min-w-0 items-center gap-2 font-medium">
+                        <Loader2 v-if="aiCcSwitchPluginLoading" class="h-3.5 w-3.5 shrink-0 animate-spin" />
+                        <CheckCircle2 v-else class="h-3.5 w-3.5 shrink-0 text-green-600 dark:text-green-400" />
+                        <span class="truncate">
+                          {{ aiCcSwitchPluginLoading ? t("ai.ccSwitchPluginChecking") : t("ai.ccSwitchPluginReady") }}
+                        </span>
+                      </div>
+                      <Button type="button" size="sm" variant="ghost" class="h-7 shrink-0 px-2 text-xs" :disabled="aiCcSwitchPluginLoading" :title="t('ai.ccSwitchPluginRefresh')" :aria-label="t('ai.ccSwitchPluginRefresh')" @click="refreshCcSwitchPluginAvailability">
+                        <RefreshCw class="mr-1 h-3.5 w-3.5" />
+                        {{ t("ai.ccSwitchPluginRefresh") }}
+                      </Button>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2">
+                      <Button type="button" size="sm" variant="outline" :disabled="aiCcSwitchImporting" @click="aiImportCcSwitchConfigs">
+                        <Loader2 v-if="aiCcSwitchImporting" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                        <Upload v-else class="mr-1 h-3.5 w-3.5" />
+                        {{ aiCcSwitchImporting ? t("ai.ccSwitchImporting") : t("ai.ccSwitchImport") }}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
                 <!-- CLI MCP Status -->
-                <div v-if="aiIsCliProvider && !isWeb" class="rounded-md border px-3 py-2.5 text-xs" :class="aiCliMcpNeedsInstall ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300' : 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300'">
+                <div
+                  v-if="!aiIsCcSwitchProvider && aiIsCliProvider && !isWeb"
+                  class="rounded-md border px-3 py-2.5 text-xs"
+                  :class="aiCliMcpNeedsInstall ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300' : 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300'"
+                >
                   <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                     <div class="min-w-0 space-y-1">
                       <div class="flex min-w-0 items-center gap-2 font-medium">
@@ -10636,7 +11117,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Authentication -->
-                <div v-if="!aiIsCliProvider && aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider && aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">Authentication</Label>
                   <Select v-model="aiEditAuthMethod">
                     <SelectTrigger class="col-span-2" inputClass="h-8 text-xs">
@@ -10650,7 +11131,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- API Key -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ aiCredentialLabel }}</Label>
                   <div class="col-span-2 flex min-w-0 items-center gap-2">
                     <PasswordInput v-model="aiEditApiKey" autocomplete="off" class="min-w-0 flex-1" inputClass="h-8 text-xs" :placeholder="aiCredentialPlaceholder" />
@@ -10662,7 +11143,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Endpoint -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">Endpoint</Label>
                   <div class="col-span-2 space-y-1.5">
                     <Input v-model="aiEditEndpoint" :placeholder="aiEndpointPlaceholder" autocomplete="off" class="h-8 text-xs" />
@@ -10673,7 +11154,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Custom HTTP headers for API gateways and tenant routing. -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">{{ t("ai.customHeaders") }}</Label>
                   <div class="col-span-2 space-y-2">
                     <div class="space-y-1.5">
@@ -10695,7 +11176,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- CLI Path -->
-                <div v-if="aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">{{ t("ai.cliPath", { provider: aiCliProviderLabel }) }}</Label>
                   <div class="col-span-2 space-y-1.5">
                     <Input v-model="aiEditCliPath" autocomplete="off" class="h-8 text-xs" :placeholder="aiCliCommandName" />
@@ -10714,7 +11195,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- CLI Env -->
-                <div v-if="aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">{{ t("ai.cliEnv") }}</Label>
                   <div class="col-span-2 space-y-2">
                     <div class="space-y-1.5">
@@ -10740,7 +11221,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- API Style -->
-                <div v-if="aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider && aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">API</Label>
                   <div class="col-span-2 flex gap-2">
                     <Button
@@ -10778,13 +11259,13 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Default Model -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.defaultModel") }}</Label>
                   <Input v-model="aiEditModel" autocomplete="off" class="col-span-2 h-8 text-xs" :placeholder="t('ai.manualModelPlaceholder')" />
                 </div>
 
                 <!-- Context Window -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="text-right text-xs">{{ t("ai.contextWindow") }}</Label>
                   <div class="col-span-2">
                     <Input v-model.number="aiEditContextWindow" type="number" min="1000" step="1000" class="h-8 text-xs" :placeholder="t('ai.contextWindowAuto')" />
@@ -10794,7 +11275,7 @@ LIMIT 100;</pre
                   </div>
                 </div>
                 <!-- Maximum Output Tokens -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="text-right text-xs">{{ t("ai.maxOutputTokens") }}</Label>
                   <div class="col-span-2">
                     <Input v-model.number="aiEditMaxOutputTokens" type="number" :min="AI_OUTPUT_TOKENS_MIN" :max="AI_OUTPUT_TOKENS_MAX" step="1000" class="h-8 text-xs" :placeholder="t('ai.maxOutputTokensAuto')" />
@@ -10805,7 +11286,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Proxy -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxy") }}</Label>
                   <label class="col-span-2 flex items-center gap-2 text-xs text-muted-foreground">
                     <input v-model="aiEditProxyEnabled" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
@@ -10814,13 +11295,13 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Proxy URL -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxyUrl") }}</Label>
                   <Input v-model="aiEditProxyUrl" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" placeholder="socks5://127.0.0.1:7890" :disabled="!aiEditProxyEnabled" />
                 </div>
 
                 <!-- Skip TLS Verify -->
-                <div v-if="aiSupportsSkipTlsVerify" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && aiSupportsSkipTlsVerify" class="grid grid-cols-3 items-start gap-3">
                   <Label class="text-right text-xs">{{ t("ai.sslVerification") }}</Label>
                   <div class="col-span-2">
                     <label class="flex items-center gap-2 text-xs text-muted-foreground">
@@ -11386,7 +11867,7 @@ LIMIT 100;</pre
                       <TabsList class="settings-mcp-config-tabs h-auto min-h-8 w-full min-w-0 max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden overscroll-x-contain group-data-horizontal/tabs:h-auto">
                         <TabsTrigger value="claude" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Claude Code</TabsTrigger>
                         <TabsTrigger value="cursor" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Cursor</TabsTrigger>
-                        <TabsTrigger value="codebuddy" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">CodeBuddy Code</TabsTrigger>
+                        <TabsTrigger value="codebuddy" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">CodeBuddy Code CLI</TabsTrigger>
                         <TabsTrigger value="zcode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">ZCode</TabsTrigger>
                         <TabsTrigger value="trae" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">TRAE</TabsTrigger>
                         <TabsTrigger value="vscode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">VS Code</TabsTrigger>
@@ -11938,36 +12419,42 @@ LIMIT 100;</pre
               <Button variant="outline" @click="closeSettings">{{ t("common.close") }}</Button>
             </template>
             <template v-else>
-              <div class="flex min-w-0 flex-1 items-center gap-2">
-                <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCliValidationError || !!aiHeadersValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCliProvider && !aiEditEndpoint?.trim())" @click="aiTestConn">
-                  <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
-                  {{ t("connection.test") }}
-                </Button>
-                <span v-if="aiTestResult === 'success'" class="text-xs text-green-500 flex items-center gap-1.5">
-                  <span>{{ t("connection.testSuccess") }}</span>
-                  <span v-if="aiTestLatency != null" class="text-green-500/70">{{ aiTestLatency }}ms</span>
-                </span>
-                <span v-else-if="aiTestResult === 'error'" class="flex min-w-0 max-w-lg items-center gap-1.5 text-xs text-destructive">
-                  <span class="min-w-0 select-text leading-4" :title="aiTestErrorDisplay">
-                    <span v-if="aiTestErrorPresentation.summary" class="block font-medium">{{ aiTestErrorPresentation.summary }}</span>
-                    <span class="block truncate text-destructive/80">{{ aiTestErrorPresentation.detail }}</span>
-                  </span>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    class="h-6 w-6 shrink-0 text-destructive/80 hover:text-destructive"
-                    :title="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
-                    :aria-label="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
-                    @click="copyAiTestError"
-                  >
-                    <CheckCircle2 v-if="aiTestErrorCopied" class="h-3.5 w-3.5" />
-                    <Copy v-else class="h-3.5 w-3.5" />
+              <template v-if="aiIsCcSwitchProvider">
+                <div class="flex-1" />
+                <Button variant="outline" @click="aiEnterListMode()">{{ t("common.cancel") }}</Button>
+              </template>
+              <template v-else>
+                <div class="flex min-w-0 flex-1 items-center gap-2">
+                  <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCliValidationError || !!aiHeadersValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCliProvider && !aiEditEndpoint?.trim())" @click="aiTestConn">
+                    <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
+                    {{ t("connection.test") }}
                   </Button>
-                </span>
-              </div>
-              <Button variant="outline" @click="aiEnterListMode()">{{ t("common.cancel") }}</Button>
-              <Button :disabled="!aiEditConfigName.trim() || !!aiCliValidationError" @click="aiSaveConfig">{{ t("settings.apply") }}</Button>
+                  <span v-if="aiTestResult === 'success'" class="text-xs text-green-500 flex items-center gap-1.5">
+                    <span>{{ t("connection.testSuccess") }}</span>
+                    <span v-if="aiTestLatency != null" class="text-green-500/70">{{ aiTestLatency }}ms</span>
+                  </span>
+                  <span v-else-if="aiTestResult === 'error'" class="flex min-w-0 max-w-lg items-center gap-1.5 text-xs text-destructive">
+                    <span class="min-w-0 select-text leading-4" :title="aiTestErrorDisplay">
+                      <span v-if="aiTestErrorPresentation.summary" class="block font-medium">{{ aiTestErrorPresentation.summary }}</span>
+                      <span class="block truncate text-destructive/80">{{ aiTestErrorPresentation.detail }}</span>
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      class="h-6 w-6 shrink-0 text-destructive/80 hover:text-destructive"
+                      :title="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
+                      :aria-label="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
+                      @click="copyAiTestError"
+                    >
+                      <CheckCircle2 v-if="aiTestErrorCopied" class="h-3.5 w-3.5" />
+                      <Copy v-else class="h-3.5 w-3.5" />
+                    </Button>
+                  </span>
+                </div>
+                <Button variant="outline" @click="aiEnterListMode()">{{ t("common.cancel") }}</Button>
+                <Button :disabled="!aiEditConfigName.trim() || !!aiCliValidationError" @click="aiSaveConfig">{{ t("settings.apply") }}</Button>
+              </template>
             </template>
           </DialogFooter>
 

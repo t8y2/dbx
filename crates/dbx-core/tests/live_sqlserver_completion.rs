@@ -81,6 +81,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,
@@ -530,6 +531,7 @@ async fn live_sqlserver_bulk_imports_zero_fraction_xlsx_numbers_into_bigint() {
         rows: vec![vec![serde_json::json!(1.0), serde_json::json!("xlsx")]],
         numeric_column_right_align: false,
         auto_filter: None,
+        header_comment_rows: false,
     })
     .expect("build SQL Server XLSX integer fixture");
     let path = dir.join("zero-fraction-integer.xlsx");
@@ -1028,6 +1030,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
     });
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 4);
@@ -1220,6 +1223,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         timeout_secs: Some(10),
         keyset_optimization_enabled: true,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-sqlserver-export-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
@@ -1231,9 +1235,10 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         export_column_extras: None,
         column_comments: None,
         auto_filter: None,
+        header_comment_rows: false,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
@@ -1316,6 +1321,7 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
     };
     let done_seen = AtomicBool::new(false);
 

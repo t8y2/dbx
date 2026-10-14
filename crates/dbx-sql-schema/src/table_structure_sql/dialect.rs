@@ -9,6 +9,7 @@ pub(super) enum StructureDialect {
     #[cfg(feature = "duckdb-sidecar")]
     DuckDb,
     SqlServer,
+    SapHana,
     Oracle,
     Dameng,
     // 神通 Oscar：Oracle 兼容方言，且支持 ALTER TABLE DROP/ADD PRIMARY KEY（与 Dameng 一致，
@@ -98,6 +99,20 @@ pub(super) fn capabilities_for(
     driver_profile: Option<&str>,
 ) -> TableStructureCapabilities {
     let base = TableStructureCapabilities::default();
+    if database_type == Some(DatabaseType::StarRocks)
+        || (database_type == Some(DatabaseType::Mysql)
+            && driver_profile.is_some_and(|p| p.eq_ignore_ascii_case("starrocks")))
+    {
+        return TableStructureCapabilities {
+            dialect: StructureDialect::Mysql,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
+            ..base
+        };
+    }
     match database_type {
         Some(
             DatabaseType::Mysql
@@ -269,6 +284,15 @@ pub(super) fn capabilities_for(
             alter_primary_key: true,
             ..base
         },
+        Some(DatabaseType::SapHana) => TableStructureCapabilities {
+            dialect: StructureDialect::SapHana,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
+            ..base
+        },
         Some(DatabaseType::Dameng) => TableStructureCapabilities {
             dialect: StructureDialect::Dameng,
             add_column: true,
@@ -422,6 +446,7 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
         #[cfg(feature = "duckdb-sidecar")]
         StructureDialect::DuckDb => "duckdb",
         StructureDialect::SqlServer => "sqlserver",
+        StructureDialect::SapHana => "saphana",
         StructureDialect::Oracle => "oracle",
         StructureDialect::Dameng => "dameng",
         StructureDialect::Oscar => "oscar",
@@ -445,6 +470,7 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         #[cfg(feature = "duckdb-sidecar")]
         StructureDialect::DuckDb => Some(DatabaseType::DuckDb),
         StructureDialect::SqlServer => Some(DatabaseType::SqlServer),
+        StructureDialect::SapHana => Some(DatabaseType::SapHana),
         StructureDialect::Oracle => Some(DatabaseType::Oracle),
         StructureDialect::Dameng => Some(DatabaseType::Dameng),
         StructureDialect::Oscar => Some(DatabaseType::Oscar),
@@ -456,4 +482,25 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         StructureDialect::GaussdbM => Some(DatabaseType::Mysql),
         StructureDialect::Unsupported => None,
     }
+}
+
+/// Whether the dialect persists a user-supplied primary key constraint name.
+///
+/// MySQL-family engines accept `CONSTRAINT name PRIMARY KEY` and store the
+/// symbol as the primary key index name; PostgreSQL, SQL Server, Oracle, Dameng
+/// and Oscar store real named constraints. Dialects outside this set either
+/// ignore the symbol (SQLite) or have no named PK constraint concept, so the
+/// builder keeps the anonymous form instead of emitting a no-op name.
+pub(super) fn supports_named_primary_key(dialect: StructureDialect) -> bool {
+    matches!(
+        dialect,
+        StructureDialect::Mysql
+            | StructureDialect::Doris
+            | StructureDialect::GaussdbM
+            | StructureDialect::Postgres
+            | StructureDialect::SqlServer
+            | StructureDialect::Oracle
+            | StructureDialect::Dameng
+            | StructureDialect::Oscar
+    )
 }

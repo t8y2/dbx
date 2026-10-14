@@ -2475,6 +2475,7 @@ pub async fn completion_assistant_search(
                 parent_name: row.get::<&str, _>(4).map(str::to_string),
                 comment: row.get::<&str, _>(5).filter(|s: &&str| !s.is_empty()).map(|s| (*s).to_string()),
                 data_type: row.get::<&str, _>(6).map(str::to_string),
+                routine_id: None,
                 signature: None,
             }
         })
@@ -2646,7 +2647,7 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
              CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, ep.value AS object_comment, {data_type} AS data_type \
              FROM sys.objects o \
              JOIN sys.schemas s ON s.schema_id = o.schema_id \
-             OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
+             OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
              WHERE o.type IN ({}) AND {object_visibility} {schema_filter} {object_like}",
             type_ids.join(",")
         ));
@@ -2762,7 +2763,7 @@ fn sqlserver_list_tables_sql_with_kind(
     let base_from = "FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep \
-           WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep";
+           WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep";
     let object_visibility = sqlserver_visible_object_predicate();
     let schema_filter = sqlserver_schema_name_predicate(schema, "s.name");
     let object_type_predicate = if table_objects_only { "o.type = 'U'" } else { "o.type IN ('U','V')" };
@@ -2897,7 +2898,7 @@ fn sqlserver_list_objects_sql(schema: &str) -> String {
          ep.value AS object_comment \
          FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
-         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
+         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
          WHERE s.name = '{s}' \
            AND o.type IN ('U','V','P','FN','IF','TF','FS','FT') \
            AND {object_visibility} \
@@ -2965,19 +2966,18 @@ pub async fn get_column_metadata(
     Ok(rows.iter().map(sqlserver_column_metadata_from_row).collect())
 }
 
-pub async fn get_temporal_table_metadata(
-    client: &mut SqlServerClient,
-    schema: &str,
-    table: &str,
-) -> Result<Option<SqlServerTemporalTableMetadata>, String> {
-    // Dynamic SQL keeps pre-2016 servers from binding the newer catalog columns.
-    // Retention metadata was added later, so it has its own feature check.
-    let sql = r#"IF OBJECT_ID(N'sys.periods') IS NOT NULL
+fn sqlserver_temporal_metadata_sql() -> String {
+    // `DECLARE @x <type> = <value>` is 2008+ syntax; SQL Server 2005 fails to
+    // parse the batch before the sys.periods guard can skip it, so keep the
+    // two-step DECLARE + SET form everywhere.
+    r#"IF OBJECT_ID(N'sys.periods') IS NOT NULL
 BEGIN
-    DECLARE @retention nvarchar(max) = N'CAST(NULL AS int), CAST(NULL AS nvarchar(30))';
+    DECLARE @retention nvarchar(max);
+    SET @retention = N'CAST(NULL AS int), CAST(NULL AS nvarchar(30))';
     IF COL_LENGTH(N'sys.tables', N'history_retention_period') IS NOT NULL
         SET @retention = N'CAST(t.history_retention_period AS int), t.history_retention_period_unit_desc';
-    DECLARE @sql nvarchar(max) = N'
+    DECLARE @sql nvarchar(max);
+    SET @sql = N'
         SELECT CAST(t.temporal_type AS int), cs.name, ce.name,
                hs.name, h.name, ps.name, parent.name, ' + @retention + N'
         FROM sys.tables t
@@ -2991,7 +2991,18 @@ BEGIN
         LEFT JOIN sys.schemas ps ON ps.schema_id = parent.schema_id
         WHERE s.name = COALESCE(NULLIF(@schema, N''''), SCHEMA_NAME()) AND t.name = @table';
     EXEC sys.sp_executesql @sql, N'@schema nvarchar(128), @table nvarchar(128)', @schema=@P1, @table=@P2;
-END"#;
+END"#
+        .to_string()
+}
+
+pub async fn get_temporal_table_metadata(
+    client: &mut SqlServerClient,
+    schema: &str,
+    table: &str,
+) -> Result<Option<SqlServerTemporalTableMetadata>, String> {
+    // Dynamic SQL keeps pre-2016 servers from binding the newer catalog columns.
+    // Retention metadata was added later, so it has its own feature check.
+    let sql = sqlserver_temporal_metadata_sql();
     let rows = client
         .query(sql, &[&schema, &table])
         .await
@@ -3181,7 +3192,7 @@ fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
            JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
            WHERE i.is_primary_key = 1 \
          ) pk ON pk.object_id = c.object_id AND pk.column_id = c.column_id \
-         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep \
+         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep \
          WHERE {schema_filter} AND o.name = '{t}' AND o.type IN ('U','V') \
          ORDER BY c.column_id"
     )
@@ -3233,7 +3244,14 @@ fn sqlserver_filter_definition_missing(error: &tiberius::error::Error) -> bool {
 }
 
 fn sqlserver_filter_definition_error(code: Option<u32>, message: &str) -> bool {
-    code == Some(207) && message.to_ascii_lowercase().contains("filter_definition")
+    if code != Some(207) {
+        return false;
+    }
+    // SQL Server 2005 (and other pre-2008 servers) lack both catalog columns
+    // referenced by the modern index SQL; the first invalid-column error is
+    // whichever appears earlier in the SELECT list (`has_filter` on 2008+).
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("filter_definition") || lowered.contains("has_filter")
 }
 
 fn sqlserver_indexes_sql(schema: &str, table: &str) -> String {
@@ -3371,7 +3389,8 @@ pub fn sqlserver_table_comment_sql(schema: &str, table: &str) -> String {
     format!(
         "SELECT CAST(ep.value AS NVARCHAR(MAX)) \
          FROM sys.extended_properties ep \
-         WHERE ep.major_id = OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')) \
+         WHERE ep.class = 1 \
+           AND ep.major_id = OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')) \
            AND ep.minor_id = 0 \
            AND ep.name = N'MS_Description'"
     )
@@ -4276,10 +4295,11 @@ mod tests {
         sqlserver_probe_explicit_alias, sqlserver_query_messages, sqlserver_query_transport_for_engine_edition,
         sqlserver_query_transport_for_request, sqlserver_referential_action, sqlserver_schema_name_predicate,
         sqlserver_spatial_marker, sqlserver_split_name_list, sqlserver_supports_session_database_switch,
-        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_triggers_sql,
-        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
-        SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet,
-        SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_temporal_metadata_sql,
+        sqlserver_triggers_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
+        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn,
+        SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL,
+        SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -5155,6 +5175,13 @@ mod tests {
             Some(207),
             "Token error: 列名 'filter_definition' 无效。 (code: 207)"
         ));
+        // SQL Server 2005 has neither filtered-index catalog column; the first
+        // invalid-column error is `has_filter`, which must also trigger fallback.
+        assert!(sqlserver_filter_definition_error(
+            Some(207),
+            "Token error: Column name 'has_filter' is invalid. (code: 207)"
+        ));
+        assert!(sqlserver_filter_definition_error(Some(207), "Invalid column name 'has_filter'."));
         assert!(!sqlserver_filter_definition_error(
             Some(207),
             "Token error: Column name 'other_column' is invalid. (code: 207)"
@@ -5166,13 +5193,24 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_temporal_metadata_sql_avoids_declare_inline_initialization() {
+        // `DECLARE @x <type> = <value>` is 2008+ syntax; on SQL Server 2005 the
+        // whole batch fails to parse before the sys.periods guard can skip it.
+        let sql = sqlserver_temporal_metadata_sql();
+        assert!(!sql.contains("DECLARE @retention nvarchar(max) ="));
+        assert!(!sql.contains("DECLARE @sql nvarchar(max) ="));
+        assert!(sql.contains("DECLARE @retention nvarchar(max);"));
+        assert!(sql.contains("DECLARE @sql nvarchar(max);"));
+    }
+
+    #[test]
     fn sqlserver_columns_sql_reads_column_comment_by_column_id() {
         let sql = sqlserver_columns_sql("dbo", "orders");
 
         assert!(sql.contains("FROM sys.objects o"));
         assert!(sql.contains("JOIN sys.columns c ON c.object_id = o.object_id"));
         assert!(sql.contains("sys.extended_properties ep"));
-        assert!(sql.contains("ep.major_id = c.object_id"));
+        assert!(sql.contains("ep.class = 1 AND ep.major_id = c.object_id"));
         assert!(sql.contains("ep.minor_id = c.column_id"));
         assert!(sql.contains("MS_Description"));
         assert!(sql.contains("c.is_computed = 1 THEN 'computed'"));
@@ -5221,6 +5259,7 @@ mod tests {
         let sql = sqlserver_table_comment_sql("dbo", "users");
 
         assert!(sql.contains("sys.extended_properties ep"));
+        assert!(sql.contains("ep.class = 1"));
         assert!(sql.contains("ep.minor_id = 0"));
         assert!(sql.contains("MS_Description"));
         assert!(sql.contains("QUOTENAME('dbo')"));
@@ -5667,6 +5706,7 @@ mod tests {
             parent_name: None,
             comment: None,
             data_type: None,
+            routine_id: None,
             signature: None,
         };
 
@@ -5696,6 +5736,7 @@ mod tests {
             parent_name: None,
             comment: None,
             data_type: None,
+            routine_id: None,
             signature: None,
         };
 

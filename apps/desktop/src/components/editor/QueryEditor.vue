@@ -11,6 +11,7 @@
 // (delivery is same-tick), never a pending undelivered one.
 let lastHandledFormatRequestId = 0;
 let lastHandledCompressRequestId = 0;
+let lastHandledKeywordCaseRequestId = 0;
 let vimMappingsApplied = false;
 let vimClipboardConfigured = false;
 </script>
@@ -69,7 +70,8 @@ import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, 
 
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 
-import { canFormatSqlForDatabaseType, formatSqlForEditing, compressSqlText } from "@/lib/sql/sqlFormatter";
+import { canFormatSqlForDatabaseType, formatSqlText, compressSqlText } from "@/lib/sql/sqlFormatter";
+import { applySqlKeywordCase, loadSqlKeywordSpans } from "@/lib/sql/sqlKeywordCase";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { restoreSqlFromSourcePaste } from "@/lib/sql/sqlSourcePaste";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
@@ -114,6 +116,7 @@ import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 import { applyVimConfig, isVimMappingCommand, loadVimConfig } from "@/lib/editor/vimConfig";
+import { createVimImeGuard } from "@/lib/editor/vimImeGuard";
 import { configureVimSystemClipboard } from "@/lib/editor/vimSystemClipboard";
 
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
@@ -131,6 +134,7 @@ import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCare
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
 import { addNextQueryEditorSelectionOccurrence, selectAllQueryEditorSelectionOccurrences } from "@/lib/editor/queryEditorOccurrenceSelection";
 import { selectLineEnds } from "@/lib/editor/selectLineEnds";
+import { scrollEditorLine } from "@/lib/editor/scrollEditorLine";
 import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
 import { createQueryEditorCompletionShortcutBindings } from "@/lib/editor/queryEditorCompletionShortcut";
 import { createQueryEditorSelectionCaseShortcutBindings } from "@/lib/editor/queryEditorSelectionCaseShortcut";
@@ -349,6 +353,7 @@ async function loadStructurePeekColumns(panelId: string, requestId: number, targ
   try {
     const objectMetadataRequest = {
       connectionId: props.connectionId,
+      queryTimeoutSecs: connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
       database,
       schema,
       tableName: target.name,
@@ -1407,6 +1412,8 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.deleteLine, (view) => codeMirrorRuntime.codeMirrorDeleteLine?.(view) ?? false),
         ...binding(shortcuts.moveLineUp, (view) => codeMirrorRuntime.codeMirrorMoveLineUp?.(view) ?? false),
         ...binding(shortcuts.moveLineDown, (view) => codeMirrorRuntime.codeMirrorMoveLineDown?.(view) ?? false),
+        ...binding(shortcuts.scrollLineUp, (view) => scrollEditorLine(view, "up")),
+        ...binding(shortcuts.scrollLineDown, (view) => scrollEditorLine(view, "down")),
         ...binding(shortcuts.copyLineUp, (view) => codeMirrorRuntime.codeMirrorCopyLineUp?.(view) ?? false),
         ...binding(shortcuts.copyLineDown, (view) => codeMirrorRuntime.codeMirrorCopyLineDown?.(view) ?? false),
         ...binding(shortcuts.undo, (view) => codeMirrorRuntime.codeMirrorUndo?.(view) ?? false),
@@ -1530,6 +1537,7 @@ function vimModeExtension(enabled = settingsStore.editorSettings.vimModeEnabled)
       },
     ]),
     vimExtension,
+    createVimImeGuard(codeMirrorRuntime.editorViewModule, codeMirrorRuntime.codeMirrorGetVimCm),
   ]);
 }
 
@@ -1732,7 +1740,12 @@ async function formatCurrentSql() {
           return;
         } else {
           formattedAsSql = true;
-          formatted = await formatSqlForEditing(source, formatDialect, settingsStore.editorSettings.sqlFormatter);
+          // The explicit Format command has to say why it did nothing:
+          // `formatSqlForEditing` returns unparseable input unchanged (the right
+          // contract for format-on-save, which must never fail), which turned
+          // this command into a silent no-op. A thrown error reaches the
+          // `formatError` toast below.
+          formatted = await formatSqlText(source, formatDialect, settingsStore.editorSettings.sqlFormatter);
         }
       }
     }
@@ -1774,6 +1787,50 @@ function compressCurrentSql() {
   currentView.dispatch({
     changes: { from, to, insert: compressed },
     selection: compressesSelection ? { anchor: from, head: from + compressed.length } : { anchor: from + compressed.length },
+  });
+}
+
+/**
+ * Toolbar `a`/`A`: re-case only the keywords of the selection, or of the whole
+ * document when there is none (issue #11828).
+ *
+ * The toolbar flips `keywordCase` at the same time, so this must agree with
+ * what a later 格式化 would produce for keywords — hence the keyword spans come
+ * from sql-formatter's own lexer ({@link loadSqlKeywordSpans}) rather than a
+ * word list. When the input cannot be classified the document is left as-is:
+ * `convertSqlSelectionCase` remains the explicit "convert everything" command
+ * in the context menu.
+ */
+async function convertCurrentSqlKeywordCase(mode: "upper" | "lower") {
+  if (props.readOnly) return;
+  // Mongo/Elasticsearch/Redis documents are not SQL. Their text can still look
+  // enough like a statement for the lexer to accept it — an ES request line
+  // `GET /_search` lexes as `GET` + path — so gate on the tab's real language
+  // rather than on whether tokenizing happens to succeed.
+  if (queryEditorSelectionLanguage() !== "sql") return;
+  const currentView = view.value;
+  if (!currentView) return;
+
+  const originalState = currentView.state;
+  const selection = originalState.selection.main;
+  const convertsSelection = !selection.empty;
+  const from = convertsSelection ? selection.from : 0;
+  const to = convertsSelection ? selection.to : originalState.doc.length;
+  const source = originalState.sliceDoc(from, to);
+  if (!source.trim()) return;
+
+  const formatDialect = props.formatDialect ?? props.dialect ?? "generic";
+  const spans = await loadSqlKeywordSpans(source, formatDialect);
+  // Edit races the await: the user may have typed, or switched tabs, since the
+  // request arrived. Re-check everything before dispatching.
+  if (!spans || currentView !== view.value || currentView.state !== originalState || originalState.sliceDoc(from, to) !== source) return;
+
+  const converted = applySqlKeywordCase(source, { from: 0, to: source.length }, mode, spans);
+  if (converted === source) return;
+
+  currentView.dispatch({
+    changes: { from, to, insert: converted },
+    selection: convertsSelection ? { anchor: from, head: from + converted.length } : { anchor: from + converted.length },
   });
 }
 
@@ -2409,11 +2466,21 @@ watch(
 );
 
 watch(
-  () => props.executionError,
-  () => {
-    reconfigureDiagnostics();
+  () => props.keywordCaseRequestId,
+  (val) => {
+    if (!val || val <= lastHandledKeywordCaseRequestId) return;
+    lastHandledKeywordCaseRequestId = val;
+    // The direction travels with the request: the id alone says "a click
+    // happened", but the mode is what the toggle switched to, and reading it
+    // back from settings could race a second click.
+    const mode = props.keywordCaseRequestMode;
+    if (mode) void convertCurrentSqlKeywordCase(mode);
   },
 );
+
+watch([() => props.executionError, () => props.executionErrorSql, () => props.executionErrorResult], () => {
+  reconfigureDiagnostics();
+});
 
 watch(
   () => props.statementExecutionMarkers ?? [],

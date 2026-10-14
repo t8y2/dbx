@@ -212,6 +212,7 @@ pub struct RedisListRequest {
     pub value: Option<String>,
     pub index: Option<i64>,
     pub ttl: Option<i64>,
+    pub side: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -651,6 +652,7 @@ pub async fn list_push(
 ) -> Result<Json<()>, AppError> {
     ensure_writable(&state.app, &req.connection_id, "LPUSH").await?;
     let value = req.value.as_deref().unwrap_or("");
+    let side = dbx_core::redis_ops::ListPushSide::from_str_lossy(req.side.as_deref());
     dbx_core::redis_ops::redis_list_push_in_db_core(
         &state.app,
         &req.connection_id,
@@ -658,6 +660,7 @@ pub async fn list_push(
         &req.key_raw,
         value,
         req.ttl,
+        side,
     )
     .await
     .map_err(AppError::from)?;

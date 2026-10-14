@@ -7,6 +7,7 @@ import type { QueryResult } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   exportQueryResultsXlsx: vi.fn(),
+  startQueryResultExport: vi.fn().mockResolvedValue({ exportId: "export-1", tableName: "Query Result", rowsExported: 1, totalRows: 1, status: "Done" }),
   toast: vi.fn(),
 }));
 
@@ -65,6 +66,8 @@ vi.mock("@/stores/settingsStore", () => ({
 
 vi.mock("@/lib/backend/api", () => ({
   exportQueryResultsXlsx: mocks.exportQueryResultsXlsx,
+  startQueryResultExport: mocks.startQueryResultExport,
+  cancelQueryResultExport: vi.fn(),
 }));
 
 function queryResult(columns: string[], rows: QueryResult["rows"]): QueryResult {
@@ -143,5 +146,33 @@ describe("useDataGridExport XLSX headers", () => {
     await state.exportAllResultsXlsx();
 
     expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Joined identifier)"], autoFilter: false })]), false, undefined);
+  });
+
+  it("passes exportColumnTypes for backend full xlsx query result export", async () => {
+    const options = createOptions();
+    options.allColumns = computed(() => ["id", "amount"]);
+    options.allColumnTypes = computed(() => ["int", "decimal(18, 3)"]);
+    options.queryResultExportRequest = vi.fn(async (request) => ({
+      ...request,
+      connectionId: "conn",
+      database: "dbx",
+      databaseType: "duckdb",
+      sql: "SELECT id, amount FROM tab1",
+      queryBaseSql: "SELECT id, amount FROM tab1",
+      useAgentCursor: false,
+      pageSize: 1000,
+      keysetOptimizationEnabled: true,
+    }));
+    const state = useDataGridExport(options);
+
+    await state.exportXlsx();
+
+    expect(mocks.startQueryResultExport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        format: "xlsx",
+        exportColumnTypes: ["int", "decimal(18, 3)"],
+      }),
+      expect.any(Function),
+    );
   });
 });

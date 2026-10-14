@@ -48,6 +48,16 @@ export function normalizeExternalSqlPath(path: string): string {
   return normalized.length > 1 ? normalized.replace(/\/$/, "") : normalized;
 }
 
+export function relocateExternalSqlPathWithinFolder(path: string, previousFolderPath: string, nextFolderPath: string): string | null {
+  const normalizedPath = normalizeExternalSqlPath(path);
+  const previous = normalizeExternalSqlPath(previousFolderPath);
+  const next = normalizeExternalSqlPath(nextFolderPath);
+  if (!normalizedPath || !previous || !next || (normalizedPath !== previous && !normalizedPath.startsWith(`${previous}/`))) return null;
+  const nextPrefix = nextFolderPath.trim().replace(/[\\/]+$/, "");
+  if (!nextPrefix) return null;
+  return `${nextPrefix}${normalizedPath.slice(previous.length)}`;
+}
+
 export function externalSqlFileDisplayTitles(paths: string[]): string[] {
   const segments = paths.map((path) => normalizeExternalSqlPath(path).split("/").filter(Boolean));
   const titles = segments.map((parts) => parts[parts.length - 1] || "script.sql");

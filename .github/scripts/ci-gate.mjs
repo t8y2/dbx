@@ -4,38 +4,61 @@ import { pathToFileURL } from "node:url";
 export function gateFailures(needs, mode) {
   if (needs.changes?.result !== "success") return ["changes did not succeed"];
   let plan;
-  try { plan = JSON.parse(needs.changes.outputs.plan); } catch { return ["missing or invalid CI plan"]; }
+  try {
+    plan = JSON.parse(needs.changes.outputs.plan);
+  } catch {
+    return ["missing or invalid CI plan"];
+  }
   if (!plan || typeof plan !== "object" || Array.isArray(plan)) return ["incomplete CI plan"];
   const flags = ["rust", "agents", "fast", "agent_java", "agent_go_changed", "agent_rust_changed", "agent_integration_changed"];
   if (!flags.every((flag) => typeof plan[flag] === "boolean")) return ["incomplete CI plan"];
-  const routedJobs = { frontend: "frontend", packages: "packages", "github-scripts": "github_scripts",
-    "windows-standard-check": "windows_win7_bundle", "windows-win7-bundle": "windows_win7_bundle",
-    "duckdb-windows-driver": "duckdb_windows", jdbc: "jdbc", "offline-jdbc-release": "offline_jdbc", "nix-packaging": "nix" };
-  // Draft PRs intentionally skip the heavy validation jobs; the gate may only
-  // demand them once ready_for_review re-triggers the workflow without draft.
-  const draft = needs.changes.outputs.draft === "true";
-  const draftSkippable = new Set(["rust-test", "frontend-test", "agent-java", "agent-go", "agent-rust", "agent-integration",
-    "packages", "windows-standard-check", "windows-win7-bundle", "duckdb-windows-driver", "jdbc", "offline-jdbc-release", "nix-packaging"]);
+  const routedJobs = {
+    frontend: "frontend",
+    packages: "packages",
+    "github-scripts": "github_scripts",
+    "windows-standard-check": "windows_standard",
+    "windows-win7-bundle": "windows_win7_bundle",
+    "duckdb-windows-driver": "duckdb_windows",
+    jdbc: "jdbc",
+    "offline-jdbc-release": "offline_jdbc",
+    "nix-packaging": "nix",
+  };
   if (mode === "all" && !Object.values(routedJobs).every((output) => ["true", "false"].includes(needs.changes.outputs[output]))) {
     return ["missing or invalid job selection outputs"];
   }
   if (mode === "frontend" && !["true", "false"].includes(needs.changes.outputs.frontend)) {
     return ["missing or invalid frontend selection output"];
   }
-  const expected = mode === "rust" ? {
-    "fast-checks": plan.fast, "rust-fmt-clippy": plan.rust, "rust-test": plan.rust && !draft,
-  } : mode === "agents" ? {
-    "fast-checks": plan.fast, "agent-checks": plan.agents, "agent-java": plan.agent_java && !draft, "agent-go": plan.agent_go_changed && !draft,
-    "agent-rust": plan.agent_rust_changed && !draft, "agent-integration": plan.agent_integration_changed && !draft,
-  } : mode === "frontend" ? {
-    "frontend-checks": needs.changes.outputs.frontend === "true",
-    "frontend-typecheck": needs.changes.outputs.frontend === "true",
-    "frontend-test": needs.changes.outputs.frontend === "true" && !draft,
-  } : mode === "all" ? {
-    rust: true, agents: true, "fast-checks": plan.fast,
-    ...Object.fromEntries(Object.entries(routedJobs)
-      .map(([job, output]) => [job, needs.changes.outputs[output] === "true" && !(draft && draftSkippable.has(job))])),
-  } : null;
+  const expected =
+    mode === "rust"
+      ? {
+          "fast-checks": plan.fast,
+          "rust-fmt-clippy": plan.rust,
+          "rust-test": plan.rust,
+        }
+      : mode === "agents"
+        ? {
+            "fast-checks": plan.fast,
+            "agent-checks": plan.agents,
+            "agent-java": plan.agent_java,
+            "agent-go": plan.agent_go_changed,
+            "agent-rust": plan.agent_rust_changed,
+            "agent-integration": plan.agent_integration_changed,
+          }
+        : mode === "frontend"
+          ? {
+              "frontend-checks": needs.changes.outputs.frontend === "true",
+              "frontend-typecheck": needs.changes.outputs.frontend === "true",
+              "frontend-test": needs.changes.outputs.frontend === "true",
+            }
+          : mode === "all"
+            ? {
+                rust: true,
+                agents: true,
+                "fast-checks": plan.fast,
+                ...Object.fromEntries(Object.entries(routedJobs).map(([job, output]) => [job, needs.changes.outputs[output] === "true"])),
+              }
+            : null;
   if (!expected) return [`unknown gate: ${mode}`];
   return Object.entries(expected).flatMap(([job, required]) => {
     const result = needs[job]?.result;
@@ -48,5 +71,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   if (failures.length) {
     console.error(failures.join("\n"));
     process.exitCode = 1;
-  } else console.log("All selected CI jobs succeeded; only unselected or draft-skipped jobs may be skipped.");
+  } else console.log("All selected CI jobs succeeded; only unselected jobs may be skipped.");
 }

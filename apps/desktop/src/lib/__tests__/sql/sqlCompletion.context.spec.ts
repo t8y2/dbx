@@ -14,6 +14,40 @@ import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion"
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts } from "@/lib/sql/sqlCompletionTriggerPolicy";
 
+describe("OceanBase quoted routine lookup context", () => {
+  it("does not trust a cached package owner when the current schema is unknown", () => {
+    const sql = "CALL PKG.R";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+      tables: [],
+      columnsByTable: new Map(),
+      objects: [{ name: "RUN", schema: "OTHER", parentSchema: "OTHER", parentName: "PKG", type: "procedure", signature: "P NUMBER", routineId: "other-run" }],
+    });
+    expect(items.some((item) => item.label === "RUN")).toBe(false);
+  });
+
+  it.each([
+    ["CALL PKG.R", "APP", "APP.PKG.RUN"],
+    ["CALL OTHER.PKG.R", "APP", "OTHER.PKG.RUN"],
+    ["CALL OTHER.R", "APP", "OTHER.RUN"],
+    ["CALL PKG.R", "OTHER", "OTHER.PKG.RUN"],
+  ])("keeps cached package owners scoped for %s in %s", (sql, currentSchema, expected) => {
+    const objects = [
+      { name: "RUN", schema: "APP", parentSchema: "APP", parentName: "PKG", type: "procedure" as const, signature: "P VARCHAR2", routineId: "app-run" },
+      { name: "RUN", schema: "OTHER", parentSchema: "OTHER", parentName: "PKG", type: "procedure" as const, signature: "P NUMBER", routineId: "other-run" },
+      { name: "RUN", schema: "OTHER", type: "procedure" as const, signature: "P DATE", routineId: "standalone-run" },
+    ];
+    const items = buildSqlCompletionItems(sql, sql.length, { databaseType: "oceanbase-oracle", dialect: "oracle", currentSchema, tables: [], columnsByTable: new Map(), objects });
+    expect(items.filter((item) => item.label === "RUN").map((item) => item.info?.split("\n")[0])).toEqual([expected]);
+  });
+
+  it.each(['CALL "Mixed.Owner"."Do', 'CALL "Mixed.Owner"."Do"'])("preserves quoted prefixes in %s", (sql) => {
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "oceanbase-oracle" });
+    expect(context).toMatchObject({ prefix: "Do", prefixQuoted: true, qualifierParts: ["Mixed.Owner"], qualifierQuoted: [true] });
+  });
+});
+
 describe("SQL completion replacement", () => {
   const columnItem = { label: "price", type: "column" as const, apply: "price", boost: 0 };
 
@@ -499,7 +533,7 @@ describe("PostgreSQL sequence literal completion", () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: "ORDER_SEQ",
-          type: "variable",
+          type: "sequence",
           detail: "sequence in APP",
           apply: "ORDER_SEQ",
         }),
@@ -518,7 +552,7 @@ describe("PostgreSQL sequence literal completion", () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: "ORDER_SEQ",
-          type: "variable",
+          type: "sequence",
           detail: "sequence in APP",
           apply: "APP.ORDER_SEQ",
         }),
@@ -540,7 +574,7 @@ describe("PostgreSQL sequence literal completion", () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: "ORDER_SEQ",
-          type: "variable",
+          type: "sequence",
           apply: "ORDER_SEQ",
         }),
       ]),
@@ -599,6 +633,64 @@ describe("PostgreSQL sequence literal completion", () => {
     );
   });
 
+  it("suggests Dameng sequences like Oracle sequences", () => {
+    const unqualifiedItems = buildSqlCompletionItems("SELECT ord", "SELECT ord".length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "dameng",
+      dialect: "oracle",
+      currentSchema: "APP",
+    });
+
+    expect(unqualifiedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          detail: "sequence in APP",
+          apply: "ORDER_SEQ",
+        }),
+      ]),
+    );
+
+    const pseudoColumnSql = "SELECT ORDER_SEQ.";
+    const pseudoColumnItems = buildSqlCompletionItems(pseudoColumnSql, pseudoColumnSql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "dameng",
+      dialect: "oracle",
+    });
+
+    expect(pseudoColumnItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+        expect.objectContaining({
+          label: "CURRVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("does not suggest sequences for databases without Oracle-style sequences", () => {
+    const items = buildSqlCompletionItems("SELECT ord", "SELECT ord".length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "mysql",
+      dialect: "mysql",
+    });
+
+    expect(items).not.toEqual(expect.arrayContaining([expect.objectContaining({ label: "ORDER_SEQ", type: "sequence" })]));
+  });
+
   it("respects keyword case for Oracle sequence pseudo-columns", () => {
     const sql = "SELECT ORDER_SEQ.n";
     const items = buildSqlCompletionItems(sql, sql.length, {
@@ -627,6 +719,163 @@ describe("PostgreSQL sequence literal completion", () => {
       objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
       columnsByTable: new Map([["APP.orders", [{ name: "id" }, { name: "name" }]]]),
       databaseType: "oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests OceanBase-Oracle sequences in SQL expressions and select lists", () => {
+    const sql = "SELECT ord";
+    const unqualifiedItems = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+      currentSchema: "APP",
+    });
+
+    expect(unqualifiedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          detail: "sequence in APP",
+          apply: "ORDER_SEQ",
+        }),
+      ]),
+    );
+
+    const qualifiedItems = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(qualifiedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          detail: "sequence in APP",
+          apply: "APP.ORDER_SEQ",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests OceanBase-Oracle sequences under schema qualifier", () => {
+    const sql = "SELECT app.ord";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          apply: "ORDER_SEQ",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests NEXTVAL and CURRVAL pseudo-columns for OceanBase-Oracle sequences", () => {
+    const sql = "SELECT ORDER_SEQ.";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+        expect.objectContaining({
+          label: "CURRVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests NEXTVAL and CURRVAL pseudo-columns for schema-qualified OceanBase-Oracle sequences", () => {
+    const sql = "SELECT APP.ORDER_SEQ.";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+        expect.objectContaining({
+          label: "CURRVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("respects keyword case for OceanBase-Oracle sequence pseudo-columns", () => {
+    const sql = "SELECT ORDER_SEQ.n";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+      keywordCase: "lower",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "nextval",
+          apply: "nextval",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests OceanBase-Oracle sequence pseudo-columns in INSERT VALUES clause", () => {
+    const sql = "INSERT INTO orders (id, name) VALUES (ORDER_SEQ.";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "orders", schema: "APP" }],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map([["APP.orders", [{ name: "id" }, { name: "name" }]]]),
+      databaseType: "oceanbase-oracle",
       dialect: "oracle",
     });
 
@@ -1740,6 +1989,67 @@ describe("sqlCompletion scoped context classification", () => {
     expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["orders", "cte"]));
   });
 
+  it("expands nested CTE columns when selecting alias.* from preceding CTE (#11479)", () => {
+    const sql = `with test_a as (
+    select '1' as 字段
+)
+, test_b as (
+    select ta.*
+        , '2' as 追加字段
+    from test_a ta
+)
+select tb.
+from test_b tb`;
+    const cursor = sql.indexOf("select tb.") + "select tb.".length;
+    const context = getSqlCompletionContext(sql, cursor);
+    const tbRef = context.referencedTables.find((t) => t.alias === "tb" || t.name === "test_b");
+    expect(tbRef).toBeDefined();
+    expect(tbRef?.columns).toEqual(["字段", "追加字段"]);
+
+    // ta from inside test_b must not leak as a referenced table in outer query
+    expect(context.referencedTables.some((t) => t.alias === "ta")).toBe(false);
+
+    const items = buildSqlCompletionItems(sql, cursor, {
+      tables: [],
+      columnsByTable: new Map(),
+    });
+    const labels = items.map((item) => item.label);
+    expect(labels).toContain("字段");
+    expect(labels).toContain("追加字段");
+  });
+
+  it("expands multi-level chained CTEs with bare and qualified wildcards (#11479)", () => {
+    const sql = `with c1 as (
+    select 1 as id, 'alice' as name
+)
+, c2 as (
+    select *
+        , true as is_active
+    from c1
+)
+, c3 as (
+    select c2.*
+        , 99 as score
+    from c2
+)
+select c3.
+from c3`;
+    const cursor = sql.indexOf("select c3.") + "select c3.".length;
+    const context = getSqlCompletionContext(sql, cursor);
+    const c3Ref = context.referencedTables.find((t) => t.name === "c3");
+    expect(c3Ref?.columns).toEqual(["id", "name", "is_active", "score"]);
+
+    const items = buildSqlCompletionItems(sql, cursor, {
+      tables: [],
+      columnsByTable: new Map(),
+    });
+    const labels = items.map((item) => item.label);
+    expect(labels).toContain("id");
+    expect(labels).toContain("name");
+    expect(labels).toContain("is_active");
+    expect(labels).toContain("score");
+  });
+
   it("extracts subquery aliases and projected columns", () => {
     const sql = "SELECT * FROM (SELECT id, name AS user_name FROM users) sq WHERE sq.";
     const context = getSqlCompletionContext(sql, sql.length);
@@ -2248,6 +2558,24 @@ describe("line block statement boundary", () => {
     const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
 
     expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["users"]));
+  });
+
+  it("keeps WITH clause in scope when cursor is in the following top-level main query", () => {
+    const sql = "with cte as (\n  select id, name from users\n)\nselect c.\nfrom cte c\n\nselect * from other_table";
+    const cursor = sql.indexOf("select c.") + "select c.".length;
+    const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+    expect(context.referencedTables.some((t) => t.name === "cte" || t.alias === "c")).toBe(true);
+    expect(context.referencedTables.some((t) => t.name === "other_table")).toBe(false);
+  });
+
+  it("stops line block before following statement when completing in a separate query after WITH", () => {
+    const sql = "with cte as (\n  select id, name from users\n)\nselect * from cte c\n\nselect * from other_table ot where ot.";
+    const cursor = sql.length;
+    const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+    expect(context.referencedTables.some((t) => t.name === "other_table" || t.alias === "ot")).toBe(true);
+    expect(context.referencedTables.some((t) => t.name === "cte")).toBe(false);
   });
 });
 

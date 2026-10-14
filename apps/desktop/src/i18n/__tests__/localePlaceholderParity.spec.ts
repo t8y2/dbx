@@ -9,6 +9,7 @@ import ko from "../locales/ko";
 import ptBR from "../locales/pt-BR";
 import ru from "../locales/ru";
 import tr from "../locales/tr";
+import th from "../locales/th";
 import zhCN from "../locales/zh-CN";
 import zhTW from "../locales/zh-TW";
 
@@ -32,6 +33,7 @@ const locales: Array<[string, Record<string, unknown>]> = [
   ["pt-BR", ptBR as Record<string, unknown>],
   ["ru", ru as Record<string, unknown>],
   ["tr", tr as Record<string, unknown>],
+  ["th", th as Record<string, unknown>],
   ["zh-CN", zhCN as Record<string, unknown>],
   ["zh-TW", zhTW as Record<string, unknown>],
 ];

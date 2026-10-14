@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 220
 dbType: doris
+compareModes: [schema, data]
 rustVariant: Doris
 label: Doris
 dialect: Doris

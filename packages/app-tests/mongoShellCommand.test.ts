@@ -33,6 +33,7 @@ import {
   parseMongoGetIndexesCommand,
   parseMongoVersionCommand,
   planMongoFindPagination,
+  mongoFindPageCoversLogicalLimit,
   parseMongoWriteCommand,
   splitMongoCommands,
   splitMongoCommandRanges,
@@ -253,6 +254,23 @@ test("planMongoFindPagination preserves explicit skip and limit bounds", () => {
     logicalLimit: 150,
   });
   assert.equal(mongoFindLogicalTotal(824, plan!), 150);
+});
+
+test("mongoFindPageCoversLogicalLimit only skips counting when the first page holds every limited row", () => {
+  const plan = (source: string, pageOffset: number, pageLimit = 100) => {
+    const command = parseMongoFindCommand(source);
+    assert.ok(command);
+    const result = planMongoFindPagination(source, command, pageOffset, pageLimit);
+    assert.ok(result);
+    return result;
+  };
+
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({ type: 0 }).sort({ eventTime: -1 }).limit(50)", 0)), true);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({}).skip(20).limit(100)", 0)), true);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({}).limit(150)", 0)), false);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({}).limit(150)", 100)), false);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({})", 0)), false);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({}).limit(0)", 0)), false);
 });
 
 test("parseMongoFindCommand accepts line breaks before find and chained calls", () => {
@@ -912,6 +930,31 @@ test("parseMongoWriteCommand unwraps EJSON.deserialize values", () => {
     update: '{"$set": {"price": {"$numberDecimal":"12.34"}, "payload": {"$binary":{"base64":"AQI=","subType":"00"}}}}',
     many: false,
   });
+});
+
+test("parseMongoWriteCommand accepts the copied insert form that wraps BSON values in EJSON.deserialize", () => {
+  // "Copy -> SQL Inserts" formats values extended JSON cannot spell directly
+  // through `EJSON.deserialize({...})`. The statement is re-parsed by the Rust
+  // parser before execution, so both parsers must accept this exact shape
+  // (#11666).
+  assert.deepEqual(
+    parseMongoWriteCommand(`db.getCollection("test").insert({
+  "type": EJSON.deserialize({
+    "$numberInt": "999999"
+  }),
+  "refid": "27507"
+})`),
+    {
+      kind: "insert",
+      collection: "test",
+      docsJson: `{
+  "type": {
+    "$numberInt": "999999"
+  },
+  "refid": "27507"
+}`,
+    },
+  );
 });
 
 test("parseMongoWriteCommand accepts legacy insert commands", () => {

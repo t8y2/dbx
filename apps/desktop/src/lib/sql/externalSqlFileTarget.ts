@@ -91,10 +91,30 @@ export function moveExternalSqlFileTarget(previousPath: string, nextPath: string
   saveExternalSqlFileTargets([{ ...target, path: next, updatedAt: Date.now() }, ...remaining].slice(0, MAX_EXTERNAL_SQL_FILE_TARGETS));
 }
 
+export function moveExternalSqlFolderTargets(previousPath: string, nextPath: string) {
+  const previous = normalizeExternalSqlPath(previousPath);
+  const next = normalizeExternalSqlPath(nextPath);
+  if (!previous || !next || previous === next) return;
+  const prefix = `${previous}/`;
+  const targets = loadExternalSqlFileTargets();
+  const moved = targets.filter((item) => item.path === previous || item.path.startsWith(prefix)).map((item) => ({ ...item, path: `${next}${item.path.slice(previous.length)}`, updatedAt: Date.now() }));
+  // Historical bindings at the destination must not attach to unrelated files
+  // that now occupy that directory, even when the source had no saved binding.
+  const remaining = targets.filter((item) => item.path !== previous && !item.path.startsWith(prefix) && item.path !== next && !item.path.startsWith(`${next}/`));
+  saveExternalSqlFileTargets([...moved, ...remaining].slice(0, MAX_EXTERNAL_SQL_FILE_TARGETS));
+}
+
 export function forgetExternalSqlFileTarget(path: string) {
   const normalizedPath = normalizeExternalSqlPath(path);
   if (!normalizedPath) return;
   saveExternalSqlFileTargets(loadExternalSqlFileTargets().filter((item) => item.path !== normalizedPath));
+}
+
+export function forgetExternalSqlFolderTargets(path: string) {
+  const normalized = normalizeExternalSqlPath(path);
+  if (!normalized) return;
+  const prefix = `${normalized}/`;
+  saveExternalSqlFileTargets(loadExternalSqlFileTargets().filter((item) => item.path !== normalized && !item.path.startsWith(prefix)));
 }
 
 export function resolveExternalSqlFileTarget(path: string, connectionExists: (connectionId: string) => boolean, fallback: ExternalSqlFileTarget): ExternalSqlFileTarget {

@@ -47,6 +47,9 @@ pub fn generate_schema_sync_plan(
     source_dialect: Option<dbx_core::sql_dialect::descriptor::DialectKind>,
     field_mappings: Option<Vec<dbx_core::schema_diff::FieldMapping>>,
     enable_rollback: Option<bool>,
+    // Wrap the generated forward and rollback scripts in MySQL's FOREIGN_KEY_CHECKS
+    // toggle. Ignored for targets that are not MySQL.
+    ignore_foreign_key_checks: Option<bool>,
 ) -> Result<dbx_core::schema_diff::SchemaSyncSqlPlan, String> {
     Ok(dbx_core::schema_diff::generate_schema_sync_sql_plan(
         &diffs,
@@ -60,5 +63,6 @@ pub fn generate_schema_sync_plan(
         source_dialect,
         &field_mappings.unwrap_or_default(),
         enable_rollback.unwrap_or(false),
+        ignore_foreign_key_checks.unwrap_or(false),
     ))
 }

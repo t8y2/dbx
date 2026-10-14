@@ -7,6 +7,10 @@ import { formatMarketplaceReleasedDate, type MarketplacePluginListing } from "@/
 import { COMPONENT_PLUGINS_UPDATED_EVENT, COMPONENT_UPDATES_CHANGED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 const mocks = vi.hoisted(() => ({
+  connections: [] as import("@/types/database").ConnectionConfig[],
+  newConnection: vi.fn(),
+  openPluginConnection: vi.fn(),
+  openPluginWorkbench: vi.fn(),
   listPlugins: vi.fn(),
   listPluginTrustedKeys: vi.fn(),
   listPluginRepositories: vi.fn(),
@@ -15,6 +19,8 @@ const mocks = vi.hoisted(() => ({
   installPluginPackage: vi.fn(),
   installPluginPackageFromUrl: vi.fn(),
   uninstallPlugin: vi.fn(),
+  removeConnections: vi.fn(),
+  disconnect: vi.fn(),
   rollbackPlugin: vi.fn(),
   savePluginRepository: vi.fn(),
   removePluginRepository: vi.fn(),
@@ -28,8 +34,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/backend/api", () => mocks);
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
-vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [] }) }));
-vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
+vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: mocks.connections, removeConnections: mocks.removeConnections, disconnect: mocks.disconnect }) }));
+vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ openPluginWorkbench: mocks.openPluginWorkbench, openPluginConnection: mocks.openPluginConnection }) }));
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({ editorSettings: { pluginGraphicsEngineIds: [] }, updateEditorSettings: vi.fn() }),
 }));
@@ -72,11 +78,28 @@ import PluginContributionsPanel from "@/components/plugins/PluginContributionsPa
 
 type PanelState = {
   activeSection: "marketplace" | "installed" | "settings";
+  detailCanOpen: boolean;
+  detailChooseEntry: boolean;
+  detailChooseConnection: boolean;
+  detailOpenLabel: string;
+  detailOpening: boolean;
+  marketplaceDetailOpen: boolean;
+  selectedMarketplaceListing: MarketplacePluginListing | null;
+  detailShortcuts: import("@/lib/plugins/pluginShortcuts").PluginShortcutEntry[];
+  openMarketplaceDetails: (listing: MarketplacePluginListing) => void;
+  closeMarketplaceDetails: (focus?: "trigger" | "search" | "none") => void;
+  launchDetailEntry: (entry: string) => Promise<void>;
+  openDetailPlugin: () => void;
   batchRunning: boolean;
+  mutationRunning: boolean;
   batchMode: boolean;
   marketplaceViewMode: "grid" | "list";
   marketplaceSortMode: string;
   marketplaceRepositoryId: string;
+  marketplaceQuery: string;
+  marketplacePublisher: string;
+  filteredMarketplaceListings: MarketplacePluginListing[];
+  filterByPublisher: (publisher: string) => void;
   marketplaceListings: MarketplacePluginListing[];
   catalogResults: PluginRepositoryCatalogResult[];
   installedPlugins: InstalledPlugin[];
@@ -104,6 +127,9 @@ type PanelState = {
   installPlugin: (source: string | File) => Promise<void>;
   installPluginFromUrl: () => Promise<void>;
   uninstallSelectedPlugin: () => Promise<void>;
+  uninstallDependents: { pluginId: string; pluginName: string; connections: import("@/types/database").ConnectionConfig[] } | null;
+  confirmUninstallWithDependents: () => Promise<void>;
+  cancelUninstallDependents: () => void;
   rollbackSelectedPlugin: () => Promise<void>;
   saveRepository: () => Promise<void>;
   toggleRepository: (repository: PluginRepositoryCatalogResult["repository"]) => Promise<void>;
@@ -208,6 +234,7 @@ async function expectBusyControls() {
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  mocks.connections.length = 0;
   mocks.isTauriRuntime.mockReturnValue(false);
   localStorage.clear();
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({}));
@@ -218,13 +245,15 @@ beforeEach(async () => {
   mocks.fetchPluginMarketplaceCatalogs.mockResolvedValue([catalog("first", ["a", "b", "c"])]);
   for (const mock of mutationApis) mock.mockResolvedValue({ plugin: installed("a", "3.0.0") });
   mocks.uninstallPlugin.mockResolvedValue([]);
+  mocks.removeConnections.mockResolvedValue(undefined);
+  mocks.disconnect.mockResolvedValue(undefined);
   mocks.savePluginRepository.mockResolvedValue([]);
   mocks.removePluginRepository.mockResolvedValue([]);
   mocks.savePluginTrustedKey.mockResolvedValue([]);
   mocks.removePluginTrustedKey.mockResolvedValue([]);
   host = document.createElement("div");
   document.body.append(host);
-  app = createApp(PluginContributionsPanel, { onPluginRuntimeReplaced: mocks.refreshPluginWorkbenches });
+  app = createApp(PluginContributionsPanel, { onPluginRuntimeReplaced: mocks.refreshPluginWorkbenches, onNewConnection: mocks.newConnection });
   const instance = app.mount(host) as ComponentPublicInstance & { $: { setupState: PanelState } };
   state = instance.$.setupState;
   await flushUi();
@@ -1300,25 +1329,25 @@ describe("PluginContributionsPanel narrow-pane layout contracts", () => {
   // overflowed its scroller and 批量管理 / 刷新 left the visible area (measured 155px overflow at a 650px
   // pane). happy-dom cannot measure layout, so this guards the class contract the measurement rig
   // validates — same style as the #10444 grid guard above.
-  it("keys the marketplace toolbar off the panel width instead of the viewport", () => {
+  it("keeps the marketplace toolbar compact and wraps within the panel", () => {
     const toolbar = host.querySelector<HTMLElement>("[data-plugin-marketplace-toolbar]");
     expect(toolbar, "marketplace toolbar").not.toBeNull();
     expect(toolbar!.classList.contains("sm:flex-row"), "row switch must not use the viewport breakpoint (#10582)").toBe(false);
     expect(toolbar!.classList.contains("sm:items-center"), "row switch must not use the viewport breakpoint (#10582)").toBe(false);
-    expect(toolbar!.classList.contains("@min-[54rem]:flex-row"), "row switch tracks the panel width").toBe(true);
+    expect(toolbar!.classList.contains("items-center"), "search and controls align in one row").toBe(true);
     expect(toolbar!.classList.contains("flex-wrap"), "an overflowing control set must wrap, never leave the pane").toBe(true);
 
     const controls = host.querySelector<HTMLElement>("[data-plugin-marketplace-controls]");
     expect(controls, "marketplace control cluster").not.toBeNull();
     expect(controls!.classList.contains("flex-wrap"), "control cluster wraps").toBe(true);
     expect(controls!.classList.contains("sm:ml-auto"), "auto margin must not use the viewport breakpoint").toBe(false);
-    expect(controls!.classList.contains("@min-[54rem]:ml-auto"), "auto margin tracks the panel width").toBe(true);
+    expect(controls!.classList.contains("justify-end"), "controls stay aligned to the toolbar edge").toBe(true);
 
     // App.vue focuses this input by attribute for Mod+F, so the hook has to survive layout changes.
     const search = host.querySelector<HTMLInputElement>("[data-plugin-marketplace-search]");
     expect(search, "marketplace search input hook").not.toBeNull();
     expect(search!.classList.contains("sm:w-[min(100%,28rem)]")).toBe(false);
-    expect(search!.classList.contains("@min-[54rem]:w-[min(100%,28rem)]")).toBe(true);
+    expect(search!.classList.contains("@min-[54rem]:w-[min(100%,28rem)]")).toBe(false);
 
     // The Select family shares one passthrough stub here, so the triggers are located by their own
     // data hooks (same convention as data-plugin-marketplace-search) instead of by a layout class.
@@ -1364,5 +1393,456 @@ describe("PluginContributionsPanel narrow-pane layout contracts", () => {
     const trustRow = gridFor("repositoryPublicKeyPlaceholder");
     expect(trustRow.classList.contains("md:grid-cols-[180px_minmax(260px,1fr)_auto]"), "trusted-key grid must not switch on the viewport").toBe(false);
     expect(trustRow.className, "trusted-key grid tracks the panel width").toContain("@min-[42rem]:grid-cols-[180px_minmax(260px,1fr)_auto]");
+  });
+});
+
+describe("marketplace verification badges", () => {
+  it.each(["official", "enterprise", "custom"] as const)("uses canonical verification for %s repository entries", async (kind) => {
+    for (const verified of [false, true]) {
+      const result = catalog("first", ["a"]);
+      result.repository.kind = kind;
+      result.catalog!.plugins[0].verified = verified;
+      state.catalogResults = [result];
+      const expectedVerified = verified && kind !== "custom";
+      expect(state.marketplaceListings[0].verified).toBe(expectedVerified);
+
+      for (const view of ["grid", "list"] as const) {
+        state.marketplaceViewMode = view;
+        await flushUi();
+        const card = host.querySelector("article")!;
+        expect(card.querySelector('svg[title="pluginPlatform.verified:{}"]') !== null, `${view}, verified=${verified}`).toBe(expectedVerified);
+      }
+
+      state.openMarketplaceDetails(state.marketplaceListings[0]);
+      await flushUi();
+      const dialog = document.querySelector('[role="dialog"]')!;
+      expect(dialog.querySelector('svg[title="pluginPlatform.verified:{}"]') !== null, `detail, verified=${verified}`).toBe(expectedVerified);
+      const verificationRow = [...dialog.querySelectorAll("dl > div")].find((row) => row.querySelector("dt")?.textContent === "pluginPlatform.verified:{}");
+      expect(verificationRow?.querySelector("dd")?.textContent).toBe(`pluginPlatform.${expectedVerified ? "verified" : "unverified"}:{}`);
+      state.closeMarketplaceDetails();
+      await flushUi();
+    }
+  });
+});
+
+describe("marketplace detail launch", () => {
+  it("prioritizes the independent workbench when saved connections also exist", async () => {
+    const plugin = installed("a");
+    plugin.manifest.contributions = [
+      { type: "connection-provider", id: "server", label: "Server", database_type: "test", fields: [], workbench: "remote" },
+      { type: "workbench", id: "remote", label: "Remote" },
+      { type: "workbench", id: "local", label: "Local" },
+    ];
+    mocks.connections.push({ id: "saved", name: "Saved", db_type: "plugin", plugin_id: "a", plugin_connection_provider: "server" } as import("@/types/database").ConnectionConfig);
+    state.installedPlugins = [plugin];
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    expect(state.detailOpenLabel).toBe("openWorkbench");
+    state.openDetailPlugin();
+    await flushUi();
+    expect(mocks.openPluginWorkbench).toHaveBeenCalledWith("a", "local", { title: "Local" });
+    expect(mocks.openPluginConnection).not.toHaveBeenCalled();
+  });
+
+  it("keeps multiple saved connections in their own chooser", () => {
+    const plugin = installed("a");
+    plugin.manifest.contributions = [
+      { type: "connection-provider", id: "server", label: "Server", database_type: "test", fields: [], workbench: "remote" },
+      { type: "workbench", id: "remote", label: "Remote" },
+    ];
+    for (const id of ["one", "two"]) mocks.connections.push({ id, name: id, db_type: "plugin", plugin_id: "a", plugin_connection_provider: "server" } as import("@/types/database").ConnectionConfig);
+    state.installedPlugins = [plugin];
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    expect(state.detailOpenLabel).toBe("chooseConnection");
+    state.openDetailPlugin();
+    expect(state.detailChooseConnection).toBe(true);
+    expect(state.detailChooseEntry).toBe(false);
+    expect(mocks.openPluginConnection).not.toHaveBeenCalled();
+  });
+
+  it("offers creation for a connection plugin with no saved connection", () => {
+    const plugin = installed("a");
+    plugin.manifest.contributions = [
+      { type: "connection-provider", id: "server", label: "Server", database_type: "test", fields: [], workbench: "ui" },
+      { type: "workbench", id: "ui", label: "UI" },
+    ];
+    state.installedPlugins = [plugin];
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    state.openDetailPlugin();
+    expect(mocks.newConnection).toHaveBeenCalledWith("a", "server");
+    expect(mocks.openPluginConnection).not.toHaveBeenCalled();
+    expect(state.marketplaceDetailOpen).toBe(false);
+  });
+
+  it("opens a saved plugin connection through the standard connection flow", async () => {
+    const plugin = installed("a");
+    plugin.manifest.contributions = [
+      { type: "connection-provider", id: "server", label: "Server", database_type: "test", fields: [], workbench: "ui" },
+      { type: "workbench", id: "ui", label: "UI" },
+    ];
+    mocks.connections.push({ id: "saved", name: "Saved server", db_type: "plugin", plugin_id: "a", plugin_connection_provider: "server" } as import("@/types/database").ConnectionConfig);
+    state.installedPlugins = [plugin];
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    state.openDetailPlugin();
+    await flushUi();
+    expect(mocks.openPluginConnection).toHaveBeenCalledWith("saved");
+    expect(mocks.openPluginWorkbench).not.toHaveBeenCalled();
+    expect(state.marketplaceDetailOpen).toBe(false);
+  });
+
+  it("restores detail after an opening failure", async () => {
+    const plugin = installed("a");
+    plugin.manifest.contributions = [{ type: "workbench", id: "todo", label: "Todo" }];
+    state.installedPlugins = [plugin];
+    mocks.openPluginWorkbench.mockImplementation(() => {
+      throw new Error("Cannot open");
+    });
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    state.openDetailPlugin();
+    await flushUi();
+    expect(state.marketplaceDetailOpen).toBe(true);
+    expect(mocks.toast).toHaveBeenCalled();
+  });
+
+  async function startDelayedConnectionLaunch() {
+    const plugin = installed("a");
+    plugin.manifest.contributions = [
+      { type: "connection-provider", id: "server", label: "Server", database_type: "test", fields: [], workbench: "ui" },
+      { type: "workbench", id: "ui", label: "UI" },
+    ];
+    mocks.connections.push({ id: "saved", name: "Saved", db_type: "plugin", plugin_id: "a", plugin_connection_provider: "server" } as import("@/types/database").ConnectionConfig);
+    state.installedPlugins = [plugin];
+    const pending = deferred<void>();
+    mocks.openPluginConnection.mockReturnValue(pending.promise);
+    state.openMarketplaceDetails(state.marketplaceListings.find((listing) => listing.plugin.id === "a")!);
+    await flushUi();
+    const opening = state.launchDetailEntry("saved");
+    await flushUi();
+    expect(mocks.openPluginConnection).toHaveBeenCalledExactlyOnceWith("saved");
+    expect(state.marketplaceDetailOpen).toBe(false);
+    expect(state.detailOpening).toBe(true);
+    return { pending, opening };
+  }
+
+  it("restores the originating detail after a delayed launch failure", async () => {
+    const { pending, opening } = await startDelayedConnectionLaunch();
+    pending.reject(new Error("Connection failed"));
+    await opening;
+    await flushUi();
+    expect(state.marketplaceDetailOpen).toBe(true);
+    expect(state.selectedMarketplaceListing?.plugin.id).toBe("a");
+    expect(state.detailOpening).toBe(false);
+    expect(mocks.toast).toHaveBeenCalledWith("Connection failed", 8000);
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+
+  it.each(["a", "b"])("does not reopen dismissed %s details after an earlier launch rejects", async (pluginId) => {
+    const { pending, opening } = await startDelayedConnectionLaunch();
+    state.openMarketplaceDetails(state.marketplaceListings.find((listing) => listing.plugin.id === pluginId)!);
+    await flushUi();
+    state.closeMarketplaceDetails();
+    await flushUi();
+    expect(state.marketplaceDetailOpen).toBe(false);
+    pending.reject(new Error("Connection failed"));
+    await opening;
+    await flushUi();
+    expect(state.marketplaceDetailOpen).toBe(false);
+    expect(state.selectedMarketplaceListing?.plugin.id).toBe(pluginId);
+    expect(state.detailOpening).toBe(false);
+    expect(mocks.toast).toHaveBeenCalledWith("Connection failed", 8000);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it.each(["a", "b"])("keeps the newer %s detail session open after an earlier launch rejects", async (pluginId) => {
+    const { pending, opening } = await startDelayedConnectionLaunch();
+    state.openMarketplaceDetails(state.marketplaceListings.find((listing) => listing.plugin.id === pluginId)!);
+    await flushUi();
+    const dialog = document.querySelector('[role="dialog"]');
+    pending.reject(new Error("Connection failed"));
+    await opening;
+    await flushUi();
+    expect(state.marketplaceDetailOpen).toBe(true);
+    expect(state.selectedMarketplaceListing?.plugin.id).toBe(pluginId);
+    expect(state.detailOpening).toBe(false);
+    expect(mocks.toast).toHaveBeenCalledWith("Connection failed", 8000);
+    expect(document.querySelector('[role="dialog"]')).toBe(dialog);
+  });
+
+  it("does not restore details after an explicit close during a delayed launch", async () => {
+    const { pending, opening } = await startDelayedConnectionLaunch();
+    state.closeMarketplaceDetails();
+    pending.reject(new Error("Connection failed"));
+    await opening;
+    await flushUi();
+    expect(state.marketplaceDetailOpen).toBe(false);
+    expect(state.detailOpening).toBe(false);
+    expect(mocks.toast).toHaveBeenCalledWith("Connection failed", 8000);
+  });
+
+  it("does not restore details after unmount during a delayed launch", async () => {
+    const { pending, opening } = await startDelayedConnectionLaunch();
+    app.unmount();
+    pending.reject(new Error("Connection failed"));
+    await opening;
+    await flushUi();
+    expect(state.marketplaceDetailOpen).toBe(false);
+    expect(state.detailOpening).toBe(false);
+    expect(mocks.toast).toHaveBeenCalledWith("Connection failed", 8000);
+  });
+
+  it("does not restore details after navigating away and back during a delayed launch", async () => {
+    const { pending, opening } = await startDelayedConnectionLaunch();
+    state.activeSection = "installed";
+    await flushUi();
+    state.activeSection = "marketplace";
+    await flushUi();
+    pending.reject(new Error("Connection failed"));
+    await opening;
+    await flushUi();
+    expect(state.marketplaceDetailOpen).toBe(false);
+    expect(state.detailOpening).toBe(false);
+    expect(mocks.toast).toHaveBeenCalledWith("Connection failed", 8000);
+  });
+
+  it("opens a single standalone workbench and closes details", async () => {
+    const plugin = installed("a");
+    plugin.manifest.contributions = [{ type: "workbench", id: "todo", label: "Todo" }];
+    state.installedPlugins = [plugin];
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    expect(state.detailCanOpen).toBe(true);
+    state.openDetailPlugin();
+    await flushUi();
+    expect(mocks.openPluginWorkbench).toHaveBeenCalledWith("a", "todo", { title: "Todo" });
+    expect(state.marketplaceDetailOpen).toBe(false);
+  });
+
+  it("asks users to choose when the plugin has several workbenches", () => {
+    const plugin = installed("a");
+    plugin.manifest.contributions = [
+      { type: "workbench", id: "one", label: "One" },
+      { type: "workbench", id: "two", label: "Two" },
+    ];
+    state.installedPlugins = [plugin];
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    state.openDetailPlugin();
+    expect(state.detailChooseEntry).toBe(true);
+    expect(mocks.openPluginWorkbench).not.toHaveBeenCalled();
+  });
+
+  it("does not offer launch for incompatible or non-UI plugins", () => {
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    expect(state.detailCanOpen).toBe(false);
+    const plugin = installed("a");
+    plugin.compatibility.compatible = false;
+    plugin.manifest.contributions = [{ type: "workbench", id: "todo", label: "Todo" }];
+    state.installedPlugins = [plugin];
+    expect(state.detailCanOpen).toBe(false);
+  });
+});
+
+describe("marketplace author filtering", () => {
+  it("shows exact author matches across repositories and clears prior filters", async () => {
+    const first = catalog("first", ["a", "b", "c"]);
+    const second = catalog("second", ["d"]);
+    first.catalog!.plugins[0].publisher = "Alice";
+    first.catalog!.plugins[1].publisher = "Alice Tools";
+    first.catalog!.plugins[2].description = "By Alice fans";
+    second.catalog!.plugins[0].publisher = "Alice";
+    state.catalogResults = [first, second];
+    state.marketplaceQuery = "unrelated search";
+    state.marketplaceRepositoryId = "first";
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    await flushUi();
+    const author = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find((button) => button.textContent === "Alice");
+    expect(author).toBeDefined();
+    author!.click();
+    await flushUi();
+    expect(state.marketplaceDetailOpen).toBe(false);
+    expect(state.marketplaceQuery).toBe("");
+    expect(state.marketplaceRepositoryId).toBe("all");
+    expect(state.filteredMarketplaceListings.map((listing) => listing.plugin.id)).toEqual(["a", "d"]);
+    expect(state.marketplaceListings).toHaveLength(4);
+    const clear = host.querySelector<HTMLButtonElement>('button[aria-label="common.clear:{}: Alice"]');
+    expect(clear).not.toBeNull();
+    clear!.click();
+    await flushUi();
+    expect(state.filteredMarketplaceListings).toHaveLength(4);
+  });
+
+  it.each(["grid", "list"] as const)("filters from a %s card without opening details", async (mode) => {
+    state.marketplaceViewMode = mode;
+    await flushUi();
+    const author = Array.from(host.querySelectorAll<HTMLButtonElement>("article button")).find((button) => button.textContent === "DBX");
+    expect(author).toBeDefined();
+    author!.click();
+    await flushUi();
+    expect(state.marketplacePublisher).toBe("DBX");
+    expect(state.marketplaceDetailOpen).toBe(false);
+  });
+});
+
+describe("marketplace detail focus", () => {
+  async function settleDialog() {
+    await flushUi();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await flushUi();
+  }
+
+  it.each(["Enter", " "])("returns focus to the card after %s then Escape", async (key) => {
+    const card = host.querySelector<HTMLElement>('article[role="button"]')!;
+    card.focus();
+    card.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    await settleDialog();
+    expect(state.marketplaceDetailOpen).toBe(true);
+    expect(document.querySelector('[role="dialog"]')?.contains(document.activeElement)).toBe(true);
+    document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settleDialog();
+    expect(state.marketplaceDetailOpen).toBe(false);
+    expect(document.activeElement).toBe(card);
+  });
+
+  it("focuses search after author filtering closes details", async () => {
+    const card = host.querySelector<HTMLElement>('article[role="button"]')!;
+    card.click();
+    await settleDialog();
+    const author = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find((item) => item.textContent === "DBX")!;
+    author.click();
+    await settleDialog();
+    expect(document.activeElement).toBe(host.querySelector("[data-plugin-marketplace-search]"));
+  });
+
+  it("does not steal focus from the opened workbench", async () => {
+    const plugin = installed("a");
+    plugin.manifest.contributions = [{ type: "workbench", id: "todo", label: "Todo" }];
+    state.installedPlugins = [plugin];
+    const destination = document.createElement("button");
+    host.append(destination);
+    mocks.openPluginWorkbench.mockImplementation(() => destination.focus());
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    await settleDialog();
+    state.openDetailPlugin();
+    await settleDialog();
+    expect(document.activeElement).toBe(destination);
+  });
+});
+
+describe("PluginContributionsPanel uninstall with dependent connections", () => {
+  function pluginConnection(id: string, pluginId: string): import("@/types/database").ConnectionConfig {
+    return { id, name: `待办 ${id}`, db_type: "plugin", plugin_id: pluginId } as import("@/types/database").ConnectionConfig;
+  }
+
+  it("opens the cascade dialog instead of uninstalling while saved plugin connections exist", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+
+    await state.uninstallSelectedPlugin();
+
+    expect(state.uninstallDependents).toMatchObject({ pluginId: "a", pluginName: "a" });
+    expect(state.uninstallDependents?.connections.map((connection) => connection.id)).toEqual(["conn-1"]);
+    expect(mocks.uninstallPlugin).not.toHaveBeenCalled();
+    expect(mocks.removeConnections).not.toHaveBeenCalled();
+  });
+
+  it("deletes the dependent connections first and then uninstalls on confirm", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+    await state.uninstallSelectedPlugin();
+
+    await state.confirmUninstallWithDependents();
+
+    expect(mocks.removeConnections).toHaveBeenCalledWith(["conn-1"]);
+    expect(mocks.disconnect).toHaveBeenCalledWith("conn-1", { skipTabHandling: true, markClosedByUser: false });
+    expect(mocks.uninstallPlugin).toHaveBeenCalledWith("a");
+    expect(mocks.toast).toHaveBeenCalledWith('pluginPlatform.uninstallSuccess:{"name":"a"}');
+    expect(state.uninstallDependents).toBeNull();
+  });
+
+  it("deletes nothing and keeps the dialog contract when removal fails", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+    await state.uninstallSelectedPlugin();
+    mocks.removeConnections.mockRejectedValueOnce(new Error("storage offline"));
+
+    await state.confirmUninstallWithDependents();
+
+    expect(mocks.uninstallPlugin).not.toHaveBeenCalled();
+    expect(state.uninstallDependents).toBeNull();
+    expect(mocks.toast).toHaveBeenLastCalledWith("storage offline", 5000);
+  });
+
+  it("keeps the plugin and its connections when the cascade dialog is cancelled", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+    await state.uninstallSelectedPlugin();
+
+    state.cancelUninstallDependents();
+    await flushUi();
+
+    expect(state.uninstallDependents).toBeNull();
+    expect(mocks.removeConnections).not.toHaveBeenCalled();
+    expect(mocks.uninstallPlugin).not.toHaveBeenCalled();
+  });
+
+  it("keeps the plain confirm flow when no dependent connections exist", async () => {
+    await state.uninstallSelectedPlugin();
+
+    expect(state.uninstallDependents).toBeNull();
+    expect(window.confirm).toHaveBeenCalledWith('pluginPlatform.uninstallConfirm:{"name":"a"}');
+    expect(mocks.uninstallPlugin).toHaveBeenCalledWith("a");
+    expect(mocks.removeConnections).not.toHaveBeenCalled();
+  });
+
+  it("translates a known uninstall-blocked backend error on the single uninstall path", async () => {
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error("Cannot uninstall plugin 'a' while these connections still use it: 待办 Todo"));
+
+    await state.uninstallSelectedPlugin();
+
+    // 该消息命中 backend-errors 的 pattern，走 t(key, params) 而不是原始消息直传。
+    expect(mocks.toast).toHaveBeenLastCalledWith('pluginPlatform.uninstallBlockedByConnections:{"plugin":"a","labels":"待办 Todo"}', 5000);
+  });
+});
+
+describe("PluginContributionsPanel uninstall cascade locking and batch skip", () => {
+  function pluginConnection(id: string, pluginId: string): import("@/types/database").ConnectionConfig {
+    return { id, name: `待办 ${id}`, db_type: "plugin", plugin_id: pluginId } as import("@/types/database").ConnectionConfig;
+  }
+
+  it("holds the mutation lock so concurrent uninstall actions cannot race the removal", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+    await state.uninstallSelectedPlugin();
+    const pendingRemoval = deferred<void>();
+    mocks.removeConnections.mockReturnValueOnce(pendingRemoval.promise);
+
+    const cascade = state.confirmUninstallWithDependents();
+    await flushUi();
+    expect(state.mutationRunning).toBe(true);
+
+    // 连接删除在途时，单个卸载必须被 mutationRunning 挡住，不能开第二个对话框或重复删除。
+    await state.uninstallSelectedPlugin();
+    expect(state.uninstallDependents).toBeNull();
+    expect(mocks.removeConnections).toHaveBeenCalledTimes(1);
+    expect(mocks.uninstallPlugin).not.toHaveBeenCalled();
+
+    pendingRemoval.resolve();
+    await cascade;
+
+    expect(state.mutationRunning).toBe(false);
+    expect(mocks.uninstallPlugin).toHaveBeenCalledWith("a");
+  });
+
+  it("skips plugins with dependent connections from a batch uninstall and explains why", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+    state.selectedInstalledIds = new Set(["a", "b"]);
+
+    await state.runBatchUninstall();
+
+    expect(mocks.uninstallPlugin).toHaveBeenCalledTimes(1);
+    expect(mocks.uninstallPlugin).toHaveBeenCalledWith("b");
+    expect(mocks.toast).toHaveBeenCalledWith('pluginPlatform.batchUninstallDependentsSkipped:{"names":"a"}', 8000);
+  });
+
+  it("runs no batch uninstall when every selection still has dependent connections", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+    state.selectedInstalledIds = new Set(["a"]);
+
+    await state.runBatchUninstall();
+
+    expect(mocks.toast).toHaveBeenCalledWith('pluginPlatform.batchUninstallDependentsSkipped:{"names":"a"}', 8000);
+    expect(mocks.uninstallPlugin).not.toHaveBeenCalled();
   });
 });

@@ -167,6 +167,18 @@ function formatterLanguage(dialect: SqlFormatDialect) {
   }
 }
 
+/**
+ * sql-formatter's language key for a format dialect, or `null` for a dialect
+ * that has no SQL grammar at all (Cypher — see {@link formatSqlText}, which
+ * routes it to the Cypher formatter before reaching sql-formatter).
+ *
+ * Exported so callers that need sql-formatter's own tokenization — keyword-only
+ * case conversion — resolve the dialect exactly the way formatting does.
+ */
+export function formatterLanguageForDialect(dialect: SqlFormatDialect): string | null {
+  return dialect === "cypher" ? null : formatterLanguage(dialect);
+}
+
 function splitTrailingStandaloneDot(sql: string): { body: string; suffix: string } | null {
   const match = /\s+\.(\s*)$/.exec(sql);
   if (!match || match.index === 0) return null;
@@ -233,7 +245,7 @@ function restoreProtectedEmptyLines(sql: string, markers: readonly string[]): st
 
   const markerSet = new Set(markers);
   const lines = sql.split(/\r\n|\r|\n/);
-  for (let index = 0; index < lines.length; ) {
+  for (let index = 0; index < lines.length;) {
     if (!markerSet.has(lines[index].trim())) {
       index += 1;
       continue;

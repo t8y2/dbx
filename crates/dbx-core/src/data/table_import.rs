@@ -39,7 +39,8 @@ pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
 pub const DEFAULT_BATCH_SIZE: usize = 500;
 pub const CREATE_TABLE_INFERENCE_ROWS: usize = 100;
 /// 分隔文本、`.sql` 脚本与 JSON 都已改为流式解析，不再受体积上限约束；
-/// 该上限只保留给仍然需要整份物化的 Excel（xlsx）。
+/// `.xlsx`/`.xlsm` 的预览与导入同样按增量方式读取工作表；
+/// 该上限只保留给仍然需要整份物化的旧版 `.xls`，以及被显式标记为 Excel 的其他文件。
 pub const MAX_NON_STREAMING_IMPORT_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_LEGACY_XLS_IMPORT_BYTES: u64 = 50 * 1024 * 1024;
 const IMPORT_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -3712,6 +3713,16 @@ fn is_legacy_xls_path(path: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("xls"))
 }
 
+/// `.xlsx`/`.xlsm` 由增量解析器处理：预览只读取需要的工作表行，导入按有界批次流式产出，
+/// 内存占用不随工作簿体积增长。calamine 的旧版 `.xls` 读取器会一次读入整个工作簿，
+/// 因此只有这两个扩展名可以跳过非流式体积上限。
+fn excel_path_streams_incrementally(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("xlsx") || extension.eq_ignore_ascii_case("xlsm"))
+}
+
 fn xlsx_style_selection_columns<T, Label>(range: &Range<T>, row_range: ImportRowRange, cell_label: Label) -> Vec<String>
 where
     T: CellType,
@@ -3762,9 +3773,8 @@ fn parse_xlsx_file_with_options_and_text_columns(
     } else {
         sheet_names.first().cloned().ok_or_else(|| "Workbook has no sheets".to_string())?
     };
-    let extension = Path::new(path).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
     let legacy_xls = is_legacy_xls_path(path);
-    if extension.eq_ignore_ascii_case("xlsx") || extension.eq_ignore_ascii_case("xlsm") {
+    if excel_path_streams_incrementally(path) {
         let range = workbook.worksheet_range_ref(&sheet_name).map_err(|e| e.to_string())?;
         let row_range = effective_import_row_range(options)?;
         let style_selection_columns =
@@ -3935,8 +3945,7 @@ impl XlsxStreamRowsState {
             let row_count = end_row.saturating_sub(*start_row).saturating_add(1);
             *start_row <= first_row
                 && first_row <= *end_row
-                && *start_column <= first_column
-                && first_column <= *end_column
+                && *start_column == first_column
                 && column_count <= MAX_FAST_PREVIEW_CELLS
                 && expected_column_count
                     .map_or(column_count.saturating_mul(row_count) <= MAX_FAST_PREVIEW_CELLS, |expected| {
@@ -3944,8 +3953,7 @@ impl XlsxStreamRowsState {
                     })
         });
         self.start_row = Some(first_row);
-        self.start_column =
-            dimension.map(|((_, start_column), _)| start_column.min(first_column)).unwrap_or(first_column);
+        self.start_column = first_column;
         self.declared_column_count = dimension
             .map(|((_, start_column), (_, end_column))| end_column.saturating_sub(start_column).saturating_add(1));
     }
@@ -4510,17 +4518,18 @@ pub fn parse_xlsx_file(path: &str, preview_limit: usize) -> Result<ParsedImportF
 }
 
 fn ensure_non_streaming_file_size(path: &str, format: TableImportSourceFormat) -> Result<(), String> {
-    // 分隔文本、SQL 脚本与 JSON 都是流式解析，内存占用不随文件体积增长，没有体积上限。
+    // 分隔文本、SQL 脚本、JSON、Parquet 与 `.xlsx`/`.xlsm` 都是流式解析，
+    // 内存占用不随文件体积增长，没有体积上限。
     if format.is_delimited()
         || format == TableImportSourceFormat::Sql
         || format == TableImportSourceFormat::Json
         || format == TableImportSourceFormat::Parquet
+        || (format == TableImportSourceFormat::Excel && excel_path_streams_incrementally(path))
     {
         return Ok(());
     }
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    let extension = Path::new(path).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
-    let max_bytes = if format == TableImportSourceFormat::Excel && extension.eq_ignore_ascii_case("xls") {
+    let max_bytes = if format == TableImportSourceFormat::Excel && is_legacy_xls_path(path) {
         MAX_LEGACY_XLS_IMPORT_BYTES
     } else {
         MAX_NON_STREAMING_IMPORT_BYTES
@@ -4606,10 +4615,7 @@ async fn parse_import_preview_file_with_options(
     }
 
     ensure_non_streaming_file_size(path, format)?;
-    let extension = Path::new(path).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
-    if format == TableImportSourceFormat::Excel
-        && (extension.eq_ignore_ascii_case("xlsx") || extension.eq_ignore_ascii_case("xlsm"))
-    {
+    if format == TableImportSourceFormat::Excel && excel_path_streams_incrementally(path) {
         let path = path.to_string();
         let options = options.clone();
         let (parsed, sheets) =
@@ -5063,7 +5069,7 @@ fn normalize_import_value_cow<'a>(
     // Strip validated thousands separators before integer canonicalization so "1,234.00"
     // still collapses to a plain integer literal for integer targets.
     let thousands_canonical =
-        normalized.as_str().and_then(|value| normalize_thousands_numeric_literal(value, db_type, data_type));
+        normalized.as_str().and_then(|value| normalize_thousands_numeric_literal(value, data_type));
     if let Some(integer_text) = thousands_canonical
         .as_deref()
         .or_else(|| normalized.as_str())
@@ -7705,11 +7711,7 @@ where
         return Ok(import_summary(&request.import_id, rows_imported, rows_imported, started_at));
     }
 
-    let extension =
-        Path::new(&request.file_path).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
-    if source_format == TableImportSourceFormat::Excel
-        && (extension.eq_ignore_ascii_case("xlsx") || extension.eq_ignore_ascii_case("xlsm"))
-    {
+    if source_format == TableImportSourceFormat::Excel && excel_path_streams_incrementally(&request.file_path) {
         let total_bytes = tokio::fs::metadata(&request.file_path).await.map(|metadata| metadata.len()).unwrap_or(0);
         progress_callback(import_progress_with_details(
             &request.import_id,
@@ -8721,6 +8723,14 @@ mod tests {
     }
 
     fn build_styled_test_xlsx<S: AsRef<str>>(date1904: bool, cells: &[(S, usize, f64)]) -> Vec<u8> {
+        build_styled_test_xlsx_with_dimension(date1904, None, cells)
+    }
+
+    fn build_styled_test_xlsx_with_dimension<S: AsRef<str>>(
+        date1904: bool,
+        dimension_ref: Option<&str>,
+        cells: &[(S, usize, f64)],
+    ) -> Vec<u8> {
         let cursor = Cursor::new(Vec::new());
         let mut zip = zip::ZipWriter::new(cursor);
         let workbook_pr = if date1904 { r#"<workbookPr date1904="1"/>"# } else { "" };
@@ -8812,14 +8822,16 @@ mod tests {
     <xf numFmtId="175" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
   </cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
-</styleSheet>"##,
+  </styleSheet>"##,
         );
+        let dimension_xml = dimension_ref.map(|d| format!(r#"<dimension ref="{d}"/>"#)).unwrap_or_default();
         write_xlsx_test_entry(
             &mut zip,
             "xl/worksheets/sheet1.xml",
             &format!(
                 r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  {dimension_xml}
   <sheetData>{rows_xml}</sheetData>
 </worksheet>"#
             ),
@@ -9187,6 +9199,147 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[test]
+    fn xlsx_stream_initialize_range_dimension_column_equality() {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(16);
+        let options = TableImportParseOptions::default();
+        let row_range = effective_import_row_range(&options).unwrap();
+
+        // 1. Dimension ((1, 1), (10, 5)) starts at column 1, but first cell is at column 2 (B).
+        // Since column axis requires equality (*start_column == first_column), the dimension
+        // is rejected so streaming start_column matches first_column without being pulled left.
+        let mut state = XlsxStreamRowsState::new(sender.clone(), row_range, Some(((1, 1), (10, 5))), None, 500);
+        state.initialize_range(2, 2);
+        assert_eq!(state.start_row, Some(2));
+        assert_eq!(state.start_column, 2);
+        assert_eq!(state.declared_column_count, None);
+
+        // 2. Dimension ((1, 2), (10, 5)) starts at column 2, and first cell is at row 3, column 2.
+        // Row axis containment (*start_row <= first_row <= *end_row) holds and column axis matches (*start_column == first_column).
+        // Dimension is accepted: declared_column_count = 5 - 2 + 1 = 4.
+        let mut state = XlsxStreamRowsState::new(sender, row_range, Some(((1, 2), (10, 5))), None, 500);
+        state.initialize_range(3, 2);
+        assert_eq!(state.start_row, Some(3));
+        assert_eq!(state.start_column, 2);
+        assert_eq!(state.declared_column_count, Some(4));
+    }
+
+    #[test]
+    fn xlsx_stream_custom_title_row_with_dimension() {
+        // Covers initialize_range and preview when worksheet contains a <dimension> element.
+        // Row 1 is a banner row, title_row is 2, data_start_row is 3.
+        let path = std::env::temp_dir().join(format!("dbx-excel-dimension-custom-title-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            build_styled_test_xlsx_with_dimension(
+                false,
+                Some("A1:B4"),
+                &[
+                    ("A1", 0, 999.0),
+                    ("A2", 0, 10.0),
+                    ("B2", 0, 20.0),
+                    ("A3", 0, 1.0),
+                    ("B3", 0, 2.0),
+                    ("A4", 0, 3.0),
+                    ("B4", 0, 4.0),
+                ],
+            ),
+        )
+        .unwrap();
+        let options = TableImportParseOptions {
+            title_row: Some(2),
+            data_start_row: Some(3),
+            ..TableImportParseOptions::default()
+        };
+        let (preview, _) = parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &options, 50).unwrap();
+        assert_eq!(preview.columns, vec!["10", "20"]);
+        assert_eq!(
+            preview.rows,
+            vec![vec![serde_json::json!(1), serde_json::json!(2)], vec![serde_json::json!(3), serde_json::json!(4)],]
+        );
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        let stream_result = stream_xlsx_rows_to_channel(
+            &path.to_string_lossy(),
+            &options,
+            500,
+            Some(preview.columns.clone()),
+            HashSet::new(),
+            false,
+            sender,
+        );
+        assert!(stream_result.is_ok(), "stream_xlsx_rows_to_channel failed: {:?}", stream_result.err());
+
+        let mut streamed_header = None;
+        let mut streamed_rows = Vec::new();
+        while let Some(message) = receiver.blocking_recv() {
+            match message.unwrap() {
+                XlsxStreamMessage::Header(header) => streamed_header = Some(header),
+                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                _ => {}
+            }
+        }
+        assert_eq!(streamed_header, Some(preview.columns));
+        assert_eq!(streamed_rows, preview.rows);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn xlsx_stream_leading_empty_column_with_dimension() {
+        // Dimension declares A1:C3, but column A is completely empty across all rows.
+        // Data only occupies columns B and C.
+        // Column equality prevents streaming start_column from being pulled to column A.
+        let path =
+            std::env::temp_dir().join(format!("dbx-excel-dimension-empty-leading-col-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            build_styled_test_xlsx_with_dimension(
+                false,
+                Some("A1:C3"),
+                &[("B1", 0, 10.0), ("C1", 0, 20.0), ("B2", 0, 1.0), ("C2", 0, 2.0), ("B3", 0, 3.0), ("C3", 0, 4.0)],
+            ),
+        )
+        .unwrap();
+        let options = TableImportParseOptions {
+            title_row: Some(1),
+            data_start_row: Some(2),
+            ..TableImportParseOptions::default()
+        };
+        let (preview, _) = parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &options, 50).unwrap();
+        assert_eq!(preview.columns, vec!["10", "20"]);
+        assert_eq!(
+            preview.rows,
+            vec![vec![serde_json::json!(1), serde_json::json!(2)], vec![serde_json::json!(3), serde_json::json!(4)],]
+        );
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        let stream_result = stream_xlsx_rows_to_channel(
+            &path.to_string_lossy(),
+            &options,
+            500,
+            Some(preview.columns.clone()),
+            HashSet::new(),
+            false,
+            sender,
+        );
+        assert!(stream_result.is_ok(), "stream_xlsx_rows_to_channel failed: {:?}", stream_result.err());
+
+        let mut streamed_header = None;
+        let mut streamed_rows = Vec::new();
+        while let Some(message) = receiver.blocking_recv() {
+            match message.unwrap() {
+                XlsxStreamMessage::Header(header) => streamed_header = Some(header),
+                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                _ => {}
+            }
+        }
+        assert_eq!(streamed_header, Some(preview.columns));
+        assert_eq!(streamed_rows, preview.rows);
+
+        let _ = std::fs::remove_file(path);
+    }
+
     fn assert_xlsx_empty_string_option(options: TableImportParseOptions, expected_row: Vec<serde_json::Value>) {
         let path =
             std::env::temp_dir().join(format!("dbx-table-import-empty-string-option-{}.xlsx", uuid::Uuid::new_v4()));
@@ -9382,6 +9535,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(""), serde_json::Value::Null]],
             numeric_column_right_align: false,
             auto_filter: None,
+            header_comment_rows: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -10632,9 +10786,9 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// `.sql` 与 JSON 都已经改成流式解析，不应再受 100 MB 非流式上限约束。
+    /// `.sql`、JSON 与 `.xlsx`/`.xlsm` 都已经改成流式解析，不应再受 100 MB 非流式上限约束。
     #[test]
-    fn sql_and_json_imports_are_not_size_capped() {
+    fn streaming_imports_are_not_size_capped() {
         let path = std::env::temp_dir().join(format!("dbx-table-import-limit-{}.sql", uuid::Uuid::new_v4()));
         let file = File::create(&path).unwrap();
         file.set_len(MAX_NON_STREAMING_IMPORT_BYTES + 1).unwrap();
@@ -10646,11 +10800,32 @@ mod tests {
         let xlsx_file = File::create(&xlsx_path).unwrap();
         xlsx_file.set_len(MAX_NON_STREAMING_IMPORT_BYTES + 1).unwrap();
         drop(xlsx_file);
-        let error =
-            ensure_non_streaming_file_size(&xlsx_path.to_string_lossy(), TableImportSourceFormat::Excel).unwrap_err();
-        assert!(error.contains("File too large for excel import"), "{error}");
+        ensure_non_streaming_file_size(&xlsx_path.to_string_lossy(), TableImportSourceFormat::Excel).unwrap();
+        ensure_non_streaming_file_size(&xlsx_path.to_string_lossy(), TableImportSourceFormat::Json).unwrap();
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(xlsx_path);
+    }
+
+    /// `.xlsm` 与 `.xlsx` 走同一条流式解析路径，因此同样不受非流式上限约束；
+    /// 其他被显式标记为 Excel 的路径仍然由 calamine 整份读入，必须保留上限。
+    #[test]
+    fn macro_enabled_workbooks_stream_but_materialized_excel_paths_stay_capped() {
+        let xlsm_path = std::env::temp_dir().join(format!("dbx-table-import-limit-{}.xlsm", uuid::Uuid::new_v4()));
+        let xlsm_file = File::create(&xlsm_path).unwrap();
+        xlsm_file.set_len(MAX_NON_STREAMING_IMPORT_BYTES + 1).unwrap();
+        drop(xlsm_file);
+        ensure_non_streaming_file_size(&xlsm_path.to_string_lossy(), TableImportSourceFormat::Excel).unwrap();
+
+        let mislabeled_path = std::env::temp_dir().join(format!("dbx-table-import-limit-{}.txt", uuid::Uuid::new_v4()));
+        let mislabeled_file = File::create(&mislabeled_path).unwrap();
+        mislabeled_file.set_len(MAX_NON_STREAMING_IMPORT_BYTES + 1).unwrap();
+        drop(mislabeled_file);
+        let error = ensure_non_streaming_file_size(&mislabeled_path.to_string_lossy(), TableImportSourceFormat::Excel)
+            .unwrap_err();
+        assert!(error.contains("File too large for excel import"), "{error}");
+
+        let _ = std::fs::remove_file(xlsm_path);
+        let _ = std::fs::remove_file(mislabeled_path);
     }
 
     /// 流式 `.sql` 在读完整份脚本之前，`total_rows` 只是已解析的部分行数。
@@ -10711,6 +10886,7 @@ mod tests {
                 rows: vec![vec![serde_json::json!(1)]],
                 numeric_column_right_align: false,
                 auto_filter: None,
+                header_comment_rows: false,
             },
             XlsxWorksheetData {
                 sheet_name: Some("Second".to_string()),
@@ -10720,6 +10896,7 @@ mod tests {
                 rows: vec![vec![serde_json::json!("Ada")]],
                 numeric_column_right_align: false,
                 auto_filter: None,
+                header_comment_rows: false,
             },
         ])
         .unwrap();
@@ -10759,6 +10936,7 @@ mod tests {
                 rows: vec![vec![serde_json::json!(1)]],
                 numeric_column_right_align: false,
                 auto_filter: None,
+                header_comment_rows: false,
             },
             XlsxWorksheetData {
                 sheet_name: Some("Second".to_string()),
@@ -10768,6 +10946,7 @@ mod tests {
                 rows: vec![vec![serde_json::json!("Ada")], vec![serde_json::json!("Grace")]],
                 numeric_column_right_align: false,
                 auto_filter: None,
+                header_comment_rows: false,
             },
         ])
         .unwrap();
@@ -10982,6 +11161,7 @@ mod tests {
             ],
             numeric_column_right_align: false,
             auto_filter: None,
+            header_comment_rows: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -11360,6 +11540,7 @@ mod tests {
             ],
             numeric_column_right_align: false,
             auto_filter: None,
+            header_comment_rows: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -11613,6 +11794,14 @@ mod tests {
         rows: Vec<Vec<serde_json::Value>>,
         target_types: &[(&str, &str)],
     ) -> Vec<ImportSqlBatch> {
+        import_batches_for(rows, target_types, &DatabaseType::Postgres)
+    }
+
+    fn import_batches_for(
+        rows: Vec<Vec<serde_json::Value>>,
+        target_types: &[(&str, &str)],
+        db_type: &DatabaseType,
+    ) -> Vec<ImportSqlBatch> {
         let data = ParsedImportFile {
             columns: target_types.iter().map(|(column, _)| column.to_string()).collect(),
             rows,
@@ -11631,16 +11820,7 @@ mod tests {
             .iter()
             .map(|(column, data_type)| (column.to_string(), data_type.to_string()))
             .collect::<Vec<_>>();
-        build_import_insert_batches(
-            &data,
-            &mappings,
-            &target_column_types,
-            "issue_6491",
-            "",
-            &DatabaseType::Postgres,
-            500,
-        )
-        .unwrap()
+        build_import_insert_batches(&data, &mappings, &target_column_types, "issue_6491", "", db_type, 500).unwrap()
     }
 
     #[test]
@@ -11663,6 +11843,59 @@ mod tests {
                 format!("INSERT INTO \"issue_6491\" (\"amount\") VALUES\n({expected})"),
                 "{value} -> {data_type}"
             );
+        }
+    }
+
+    #[test]
+    fn mysql_import_converts_valid_thousands_separators_for_numeric_targets() {
+        // #11993: MySQL/TiDB imports previously kept "123,456" as text, so a
+        // numeric target column rejected the row.
+        for (value, data_type, expected) in [
+            ("123,456", "bigint", "123456"),
+            ("1,234.56", "decimal(18,2)", "1234.56"),
+            ("-1,234.56", "decimal(18,2)", "-1234.56"),
+            ("1,234,567,890", "bigint", "1234567890"),
+            ("1,234.5", "double", "1234.5"),
+        ] {
+            let batches = import_batches_for(
+                vec![vec![serde_json::json!(value)]],
+                &[("amount", data_type)],
+                &DatabaseType::Mysql,
+            );
+            assert_eq!(
+                batches[0].sql,
+                format!("INSERT INTO `issue_6491` (`amount`) VALUES\n({expected})"),
+                "{value} -> {data_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_import_preserves_thousands_separators_for_text_targets() {
+        // A text column must keep the literal characters the user wrote.
+        for data_type in ["varchar(64)", "text"] {
+            let batches = import_batches_for(
+                vec![vec![serde_json::json!("123,456")]],
+                &[("amount", data_type)],
+                &DatabaseType::Mysql,
+            );
+            assert_eq!(
+                batches[0].sql,
+                format!("INSERT INTO `issue_6491` (`amount`) VALUES\n('123,456')"),
+                "{data_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_import_keeps_malformed_grouping_untouched() {
+        for value in ["1,23,4", "12,34.56", "1,,234", ",123", "123,", "1,234,", "1,234.5.6", "abc,123", "1,234abc"] {
+            let batches = import_batches_for(
+                vec![vec![serde_json::json!(value)]],
+                &[("amount", "decimal(18,2)")],
+                &DatabaseType::Mysql,
+            );
+            assert_eq!(batches[0].sql, format!("INSERT INTO `issue_6491` (`amount`) VALUES\n('{value}')"), "{value}");
         }
     }
 
@@ -11755,6 +11988,45 @@ mod tests {
         .unwrap();
 
         assert_eq!(batches[0].sql, "INSERT INTO \"issue_6491\" (\"amount\") VALUES\n('1234.56'),\n('-1234')");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn excel_text_cell_with_thousands_separator_imports_to_mysql_numeric() {
+        // #11993: the same spreadsheet into a MySQL/TiDB numeric column used to be
+        // inserted as the literal string "123,456".
+        let path = std::env::temp_dir().join(format!("dbx-table-import-11993-{}.xlsx", uuid::Uuid::new_v4()));
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:A3"/>
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>amount</t></is></c></row>
+    <row r="2"><c r="A2" t="inlineStr"><is><t>123,456</t></is></c></row>
+    <row r="3"><c r="A3" t="inlineStr"><is><t>1,234.56</t></is></c></row>
+  </sheetData>
+</worksheet>"#;
+        std::fs::write(&path, build_preview_test_xlsx(sheet_xml, None)).unwrap();
+        let options = TableImportParseOptions::default();
+
+        let data = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        assert_eq!(data.rows, vec![vec![serde_json::json!("123,456")], vec![serde_json::json!("1,234.56")]]);
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "amount".to_string(),
+            target_column: "amount".to_string(),
+            target_data_type: None,
+        }];
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("amount".to_string(), "decimal(18,2)".to_string())],
+            "issue_11993",
+            "",
+            &DatabaseType::Mysql,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(batches[0].sql, "INSERT INTO `issue_11993` (`amount`) VALUES\n(123456),\n(1234.56)");
         let _ = std::fs::remove_file(path);
     }
 
@@ -11965,6 +12237,7 @@ mod tests {
             ],
             numeric_column_right_align: false,
             auto_filter: None,
+            header_comment_rows: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -12065,6 +12338,7 @@ mod tests {
             ],
             numeric_column_right_align: false,
             auto_filter: None,
+            header_comment_rows: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();

@@ -75,6 +75,128 @@ describe("expandSqlVariables", () => {
     expect(expandSqlVariables(sql)).toEqual({ sql, expanded: false });
   });
 
+  describe.each(["dameng", "oracle", "oceanbase-oracle"] as const)("%s database links", (databaseType) => {
+    it.each(["", " ", "\t", "\n", "/* @ignored */", " /* first */ \n /* second */ ", "-- @ignored\n"])("preserves a link separated by %j while expanding same-name references", (separator) => {
+      const target = `SELECT @Dm1 FROM test.table_name${separator}@dM1 WHERE id = @DM1 AND tenant_id = \${dm1}`;
+      const expected = `SELECT 7 FROM test.table_name${separator}@dM1 WHERE id = 7 AND tenant_id = 7`;
+      expect(expandSqlVariables(`@set DM1 = 7;\n${target}`, { databaseType })).toEqual({ sql: expected, expanded: true });
+      expect(expandSqlVariables(target, { databaseType, declarationSql: `@set DM1 = 7;\n${target}` })).toEqual({ sql: expected, expanded: true });
+    });
+
+    it.each(['"Hr"."Audit Log"', '"SELECT"', "订单"])("preserves quoted and Unicode object %s", (objectName) => {
+      const target = `SELECT @dm1 FROM ${objectName} /* separator */ @dm1 WHERE id = @dm1`;
+      expect(expandSqlVariables(`@set dm1 = 7;\n${target}`, { databaseType }).sql).toBe(`SELECT 7 FROM ${objectName} /* separator */ @dm1 WHERE id = 7`);
+    });
+
+    it.each([
+      ["SELECT XMLSERIALIZE(CONTENT @value AS CLOB) FROM DUAL", "XMLTYPE('<a/>')", "SELECT XMLSERIALIZE(CONTENT XMLTYPE('<a/>') AS CLOB) FROM DUAL"],
+      ["SELECT XMLSERIALIZE(CONTENT@value AS CLOB) FROM DUAL", "XMLTYPE('<a/>')", "SELECT XMLSERIALIZE(CONTENTXMLTYPE('<a/>') AS CLOB) FROM DUAL"],
+      ["SELECT XMLSERIALIZE(DOCUMENT @value AS CLOB) FROM DUAL", "XMLTYPE('<a/>')", "SELECT XMLSERIALIZE(DOCUMENT XMLTYPE('<a/>') AS CLOB) FROM DUAL"],
+      ["CREATE OR REPLACE PACKAGE BODY @value AS PROCEDURE p IS BEGIN NULL; END; END;", "test_package", "CREATE OR REPLACE PACKAGE BODY test_package AS PROCEDURE p IS BEGIN NULL; END; END;"],
+      ["DROP DATABASE LINK @value", "remote_db", "DROP DATABASE LINK remote_db"],
+      ["CREATE DATABASE LINK @value CONNECT TO remote_user IDENTIFIED BY password USING 'remote'", "remote_db", "CREATE DATABASE LINK remote_db CONNECT TO remote_user IDENTIFIED BY password USING 'remote'"],
+      ['SELECT "xml_column" @value FROM DUAL', "AS xml_alias", 'SELECT "xml_column" AS xml_alias FROM DUAL'],
+    ])("expands real templates outside object references in %s", (target, value, expected) => {
+      expect(expandSqlVariables(`@set value = ${value};\n${target}`, { databaseType }).sql).toBe(expected);
+      expect(expandSqlVariables(target, { databaseType, declarationSql: `@set value = ${value};` }).sql).toBe(expected);
+    });
+
+    it.each([
+      ["SELECT XMLSERIALIZE(CONTENT @fn('<a/>') AS CLOB) FROM DUAL", "SELECT XMLSERIALIZE(CONTENT XMLTYPE('<a/>') AS CLOB) FROM DUAL"],
+      ["SELECT XMLSERIALIZE(DOCUMENT @fn('<a/>') AS CLOB) FROM DUAL", "SELECT XMLSERIALIZE(DOCUMENT XMLTYPE('<a/>') AS CLOB) FROM DUAL"],
+      ["SELECT XMLQUERY('/a' PASSING @fn('<a/>') RETURNING CONTENT) FROM DUAL", "SELECT XMLQUERY('/a' PASSING XMLTYPE('<a/>') RETURNING CONTENT) FROM DUAL"],
+      ["SELECT XMLQUERY(fn_nested('/a') PASSING @fn('<a/>') RETURNING CONTENT) FROM DUAL", "SELECT XMLQUERY(fn_nested('/a') PASSING XMLTYPE('<a/>') RETURNING CONTENT) FROM DUAL"],
+    ])("expands SQL/XML function-name templates in %s", (target, expected) => {
+      const declarationSql = `@set fn = XMLTYPE;\n${target}`;
+      expect(expandSqlVariables(declarationSql, { databaseType }).sql).toBe(expected);
+      expect(expandSqlVariables(target, { databaseType, declarationSql }).sql).toBe(expected);
+    });
+
+    it.each([
+      "SELECT XMLQUERY('/a' PASSING BY VALUE @fn('<a/>') RETURNING CONTENT) FROM DUAL",
+      "SELECT XMLTABLE('/a' PASSING @fn('<a/>') COLUMNS name VARCHAR2(50) PATH '.') FROM DUAL",
+      "SELECT XMLTABLE('/a' PASSING BY /* separator */ VALUE @fn('<a/>') COLUMNS name VARCHAR2(50) PATH '.') FROM DUAL",
+      "SELECT XMLQUERY('/a' PASSING BY VALUE @fn('<a/>'), @fn('<b/>') AS b RETURNING CONTENT) FROM DUAL",
+    ])("expands complete SQL/XML PASSING templates in full and selected SQL in %s", (target) => {
+      const declarationSql = `@set fn = XMLTYPE;\n${target}`;
+      const expected = target.replaceAll("@fn", "XMLTYPE");
+      expect(expandSqlVariables(declarationSql, { databaseType }).sql).toBe(expected);
+      expect(expandSqlVariables(target, { databaseType, declarationSql }).sql).toBe(expected);
+    });
+
+    it("preserves SQL/XML keyword-named remote routines with a same-name declaration", () => {
+      const target = 'SELECT content@LINK(1), document@LINK(1), passing@LINK(1), HR.content@LINK(1), "CONTENT"@LINK(1) FROM DUAL WHERE id = @LINK';
+      expect(expandSqlVariables(`@set LINK = 7;\n${target}`, { databaseType }).sql).toBe('SELECT content@LINK(1), document@LINK(1), passing@LINK(1), HR.content@LINK(1), "CONTENT"@LINK(1) FROM DUAL WHERE id = 7');
+    });
+
+    it.each([
+      "SELECT XMLSERIALIZE(CONTENT content@LINK(1) AS CLOB) FROM DUAL",
+      "SELECT XMLSERIALIZE(DOCUMENT document@LINK(1) AS CLOB) FROM DUAL",
+      "SELECT XMLQUERY('/a' PASSING passing@LINK(1) RETURNING CONTENT) FROM DUAL",
+      "SELECT XMLQUERY(passing@LINK(1)) FROM DUAL",
+      "SELECT XMLQUERY(fn_nested('/a') PASSING passing@LINK(1) RETURNING CONTENT) FROM DUAL",
+      "SELECT XMLQUERY('/a' PASSING BY VALUE value@LINK(1) RETURNING CONTENT) FROM DUAL",
+      "SELECT XMLTABLE('/a' PASSING passing@LINK(1) COLUMNS name VARCHAR2(50) PATH '.') FROM DUAL",
+      "SELECT XMLTABLE('/a' PASSING BY VALUE HR.value@LINK(1), \"VALUE\"@LINK(1) AS b COLUMNS name VARCHAR2(50) PATH '.') FROM DUAL",
+    ])("preserves real routines inside SQL/XML clauses in %s", (target) => {
+      expect(expandSqlVariables(`@set LINK = WRONG;\n${target}`, { databaseType }).sql).toBe(target);
+    });
+
+    it("preserves remote routines alongside same-name variable references", () => {
+      const target = 'SELECT HR.get_value@LINK(@LINK) FROM "Hr"."Employees" /* link */ @LINK WHERE id = @LINK; BEGIN HR.run_job@LINK(@LINK); END;';
+      expect(expandSqlVariables(`@set LINK = 7;\n${target}`, { databaseType }).sql).toBe('SELECT HR.get_value@LINK(7) FROM "Hr"."Employees" /* link */ @LINK WHERE id = 7; BEGIN HR.run_job@LINK(7); END;');
+    });
+
+    it("expands keyword-led references and leaves unresolved references intact", () => {
+      const target = "SELECT CASE WHEN @dm1 THEN @dm1 ELSE @missing END FROM DUAL; BEGIN IF @dm1 THEN NULL; END IF; RETURN @dm1; END;";
+      expect(expandSqlVariables(`@set dm1 = 7;\n${target}`, { databaseType }).sql).toBe("SELECT CASE WHEN 7 THEN 7 ELSE @missing END FROM DUAL; BEGIN IF 7 THEN NULL; END IF; RETURN 7; END;");
+    });
+  });
+
+  describe.each(["oracle", "oceanbase-oracle"] as const)("%s PL/SQL function templates", (databaseType) => {
+    it.each(["BEGIN @fn('ok'); END;", "BEGIN LOOP @fn('ok'); EXIT; END LOOP; END;", "BEGIN IF @fn(1)>0 THEN NULL; ELSIF @fn(2)>0 THEN NULL; END IF; END;", "BEGIN WHILE @fn(1)>0 LOOP NULL; END LOOP; END;", "BEGIN RETURN @fn(1); END;"])(
+      "expands full and selected function templates in %s",
+      (target) => {
+        const declarationSql = `@set fn = test_fn;\n${target}`;
+        const expected = target.replaceAll("@fn", "test_fn");
+        expect(expandSqlVariables(declarationSql, { databaseType }).sql).toBe(expected);
+        expect(expandSqlVariables(target, { databaseType, declarationSql }).sql).toBe(expected);
+      },
+    );
+
+    it.each(["begin", "loop", "elsif", "if", "while", "return"])("preserves qualified and quoted routines named %s with a same-name declaration", (name) => {
+      const target = `BEGIN HR.${name}@LINK(1); "${name}"@LINK(1); END; SELECT * FROM ${name}@LINK`;
+      expect(expandSqlVariables(`@set LINK = WRONG;\n${target}`, { databaseType }).sql).toBe(target);
+    });
+  });
+
+  it.each([" ", ""])("expands Dameng THEN%s template calls", (separator) => {
+    const sql = `@set value = ABS;\nSELECT CASE WHEN 1=1 THEN${separator}@value(1) ELSE 0 END FROM DUAL`;
+    expect(expandSqlVariables(sql, { databaseType: "dameng" }).sql).toBe(`SELECT CASE WHEN 1=1 THEN${separator}ABS(1) ELSE 0 END FROM DUAL`);
+  });
+
+  it.each(["", " "])("preserves Dameng THEN table links separated by %j during expansion", (separator) => {
+    const sql = `@set LINK = 7;\nSELECT * FROM then${separator}@LINK WHERE id = @LINK`;
+    expect(expandSqlVariables(sql, { databaseType: "dameng" }).sql).toBe(`SELECT * FROM then${separator}@LINK WHERE id = 7`);
+  });
+
+  it("expands Dameng TOP and LIMIT variables while preserving links", () => {
+    const sql = "@set count = 7;\n@set offset = 3;\nSELECT TOP @count * FROM test.table_name @count LIMIT @offset, @count";
+    expect(expandSqlVariables(sql, { databaseType: "dameng" }).sql).toBe("SELECT TOP 7 * FROM test.table_name @count LIMIT 3, 7");
+  });
+
+  it.each([
+    ["@set value = '2026-10-10';\nSELECT DATE @value FROM DUAL", "SELECT DATE '2026-10-10' FROM DUAL"],
+    ["@set value = '2026-10-10 12:00:00';\nSELECT TIMESTAMP @value FROM DUAL", "SELECT TIMESTAMP '2026-10-10 12:00:00' FROM DUAL"],
+  ])("expands Dameng datetime literal variables in %s", (sql, expected) => {
+    expect(expandSqlVariables(sql, { databaseType: "dameng" }).sql).toBe(expected);
+  });
+
+  it.each(["postgres", "sqlserver", "mysql"] as const)("keeps legacy at-sign variable expansion for %s", (databaseType) => {
+    const sql = "@set dm1 = 7;\nSELECT @dm1 FROM test.table_name@dm1, other_table /* separator */ @dm1";
+    expect(expandSqlVariables(sql, { databaseType }).sql).toBe("SELECT 7 FROM test.table_name7, other_table /* separator */ 7");
+  });
+
   it("keeps PostgreSQL ARRAY literals from corrupting later variable references", () => {
     const sql = ["@set selected = 7;", "select ARRAY[']']::varchar[], @selected, ${missing}"].join("\n");
     expect(expandSqlVariables(sql, { databaseType: "postgres" }).sql).toBe("select ARRAY[']']::varchar[], 7, ${missing}");

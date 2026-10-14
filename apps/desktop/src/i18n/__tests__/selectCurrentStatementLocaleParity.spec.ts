@@ -9,8 +9,8 @@ function localeSource(name: string): string {
   return readFileSync(new URL(`../locales/${name}.ts`, import.meta.url), "utf8");
 }
 
-// 与 ../index.ts 的 supportedLocales 保持一致（12 种语言）
-const LOCALES = ["en", "zh-CN", "zh-TW", "ja", "ko", "es", "it", "pt-BR", "ru", "az", "tr", "id"] as const;
+// 与 ../index.ts 的 supportedLocales 保持一致（13 种语言）
+const LOCALES = ["en", "zh-CN", "zh-TW", "ja", "ko", "es", "it", "pt-BR", "ru", "az", "th", "tr", "id"] as const;
 
 function declaredString(source: string, key: string): string | undefined {
   return source.match(new RegExp(String.raw`^\s*${key}:\s*"((?:[^"\\]|\\.)*)",\s*$`, "m"))?.[1];

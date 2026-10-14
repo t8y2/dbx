@@ -46,7 +46,9 @@ describe("admin SQL carries the connection identifier quote", () => {
   });
 
   it("threads the quote through copying table data", () => {
-    expect(treeRuntimeSource).toMatch(/buildCopyTableDataSql\(\{[\s\S]*?identifierQuote: connectionStore\.connectionIdentifierQuote\?\.\(entry\.connectionId\)/);
-    expect(objectBrowserSource).toMatch(/buildCopyTableDataSql\(\{[\s\S]*?identifierQuote: connectionStore\.connectionIdentifierQuote\?\.\(props\.connection\.id\)/);
+    expect(treeRuntimeSource).toMatch(/identifierQuote: connectionStore\.connectionIdentifierQuote\?\.\(entry\.connectionId\)/);
+    expect(treeRuntimeSource).toMatch(/buildCopyTableDataSql\(\{[\s\S]*?identifierQuote: entry\.identifierQuote/);
+    expect(objectBrowserSource).toMatch(/identifierQuote: connectionStore\.connectionIdentifierQuote\?\.\(props\.connection\.id\)/);
+    expect(objectBrowserSource).toMatch(/buildCopyTableDataSql\(\{[\s\S]*?identifierQuote: context\.identifierQuote/);
   });
 });

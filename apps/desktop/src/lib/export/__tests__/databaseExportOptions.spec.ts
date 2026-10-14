@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_DATABASE_EXPORT_OPTIONS, DATABASE_EXPORT_OPTIONS_STORAGE_KEY, loadSavedDatabaseExportOptions, saveDatabaseExportOptions, sortDatabaseTableNames } from "../databaseExportOptions";
+import { databaseExportFileStem, DEFAULT_DATABASE_EXPORT_OPTIONS, DATABASE_EXPORT_OPTIONS_STORAGE_KEY, loadSavedDatabaseExportOptions, saveDatabaseExportOptions, sortDatabaseTableNames } from "../databaseExportOptions";
 
 function createMemoryStorage(initial: Record<string, string> = {}) {
   const store = new Map<string, string>(Object.entries(initial));
@@ -12,6 +12,11 @@ function createMemoryStorage(initial: Record<string, string> = {}) {
 }
 
 describe("databaseExportOptions", () => {
+  it("uses the selected table as the filename stem for a single-table export", () => {
+    expect(databaseExportFileStem("app", ["orders"])).toBe("orders");
+    expect(databaseExportFileStem("app", ["orders", "users"])).toBe("app");
+    expect(databaseExportFileStem("app", [])).toBe("app");
+  });
   it("returns default options when storage is empty or contains invalid json", () => {
     const emptyStorage = createMemoryStorage();
     expect(loadSavedDatabaseExportOptions(emptyStorage)).toEqual(DEFAULT_DATABASE_EXPORT_OPTIONS);

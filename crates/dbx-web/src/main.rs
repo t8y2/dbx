@@ -1,4 +1,5 @@
 mod auth;
+mod credentials;
 mod demo;
 mod error;
 mod routes;
@@ -142,6 +143,10 @@ mod data_grid_extractor_openapi_tests {
 fn web_compression_predicate() -> impl Predicate {
     // XLSX exports are already compressed ZIP archives, so gzip would only add CPU overhead.
     DefaultPredicate::new().and(NotForContentType::const_new(XLSX_CONTENT_TYPE))
+}
+
+fn password_viewer_enabled_from_env(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
 }
 
 fn web_body_limit_bytes() -> usize {
@@ -535,6 +540,8 @@ async fn serve() -> Result<(), String> {
     let password_disabled = std::env::var("DBX_DISABLE_PASSWORD")
         .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
+    let password_viewer_enabled =
+        password_viewer_enabled_from_env(std::env::var("DBX_DISABLE_PASSWORD_VIEWER").ok().as_deref());
 
     let password_hash = if password_disabled {
         None
@@ -564,12 +571,14 @@ async fn serve() -> Result<(), String> {
         public_base_path: public_base_path.clone(),
         demo_mode,
         password_disabled,
+        password_viewer_enabled,
         password_hash: RwLock::new(password_hash),
         sessions: RwLock::new(HashSet::new()),
         sse_channels: RwLock::new(HashMap::new()),
         transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
+        sql_file_failure_logs: Default::default(),
         managed_sql_previews: Default::default(),
         nacos_imports: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
@@ -823,6 +832,8 @@ async fn serve() -> Result<(), String> {
         .route("/query/build-create-user-sql", post(routes::query::build_create_user_sql))
         .route("/query/build-table-select-sql", post(routes::query::build_table_select_sql))
         .route("/query/build-database-search-sql", post(routes::query::build_database_search_sql))
+        .route("/query/build-database-structure-search-sql", post(routes::query::build_database_structure_search_sql))
+        .route("/query/supports-database-structure-search", post(routes::query::supports_database_structure_search))
         .route("/query/build-search-result-where", post(routes::query::build_search_result_where))
         .route("/query/build-rename-object-sql", post(routes::query::build_rename_object_sql))
         .route("/query/build-rename-database-sql", post(routes::query::build_rename_database_sql))
@@ -913,6 +924,11 @@ async fn serve() -> Result<(), String> {
         .route("/query/cancel", post(routes::query::cancel_query))
         .route("/query/cancel-conditional-update", post(routes::query::cancel_conditional_update))
         .route("/query/close-session", post(routes::query::close_query_session))
+        .route("/query/large-value/chunk", post(routes::query::read_large_value_chunk))
+        .route("/query/large-value/release", post(routes::query::release_large_value))
+        .route("/query/large-value/download", post(routes::query::prepare_large_value_download))
+        .route("/query/large-value/export", post(routes::query::prepare_snapshot_export))
+        .route("/query/large-value/download/{id}", get(routes::query::download_large_value))
         .route("/query/close-client-session", post(routes::query::close_client_connection_session))
         .route("/export/query-result-json", post(routes::text_export::export_query_result_json))
         .route("/export/query-result-markdown", post(routes::text_export::export_query_result_markdown))
@@ -1362,6 +1378,9 @@ async fn serve() -> Result<(), String> {
         .route("/sql-file/tables", post(routes::sql_file::inspect_sql_file_tables))
         .route("/sql-file/progress/{executionId}", get(routes::sql_file::sql_file_progress))
         .route("/sql-file/cancel", post(routes::sql_file::cancel_sql_file))
+        .route("/sql-file/failure-log/text", post(routes::sql_file::sql_file_failure_log_text))
+        .route("/sql-file/failure-log/{executionId}", get(routes::sql_file::sql_file_failure_log_download))
+        .route("/sql-file/failure-log/{executionId}/info", get(routes::sql_file::sql_file_failure_log_info))
         // Table import
         .route(
             "/import/preview",
@@ -1400,6 +1419,7 @@ async fn serve() -> Result<(), String> {
         .route("/app-settings/mcp-http-status", get(routes::app_settings::load_web_mcp_http_status))
         .route("/app-settings/mcp-http", put(routes::app_settings::save_web_mcp_http_settings))
         .route("/app-settings/mcp-http/rotate-token", post(routes::app_settings::rotate_web_mcp_token))
+        .route("/app-settings/web-capabilities", get(routes::app_settings::load_web_capabilities))
         .route(
             "/app-settings/max-agent-turns",
             get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
@@ -1524,6 +1544,9 @@ async fn serve() -> Result<(), String> {
     } else if std::env::var("DBX_PASSWORD").is_ok() {
         tracing::info!("Password protection is enabled");
     }
+    if !password_viewer_enabled {
+        tracing::info!("Saved connection password viewing is disabled");
+    }
     if demo_mode {
         tracing::info!("Demo mode is enabled: connection/plugin/AI mutations are blocked");
     }
@@ -1609,8 +1632,8 @@ async fn serve() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        mount_static_assets, normalize_public_base_path, web_agent_dir_from_env, web_body_limit_bytes_from_value,
-        web_compression_predicate, StaticSource, XLSX_CONTENT_TYPE,
+        mount_static_assets, normalize_public_base_path, password_viewer_enabled_from_env, web_agent_dir_from_env,
+        web_body_limit_bytes_from_value, web_compression_predicate, StaticSource, XLSX_CONTENT_TYPE,
     };
     use crate::routes::table_import;
     use axum::body::Body;
@@ -1679,6 +1702,15 @@ mod tests {
         assert_eq!(normalize_public_base_path(None), "/");
         assert_eq!(normalize_public_base_path(Some("".to_string())), "/");
         assert_eq!(normalize_public_base_path(Some("/".to_string())), "/");
+    }
+
+    #[test]
+    fn password_viewer_enabled_defaults_to_true_and_accepts_truthy_disable_values() {
+        assert!(password_viewer_enabled_from_env(None));
+        assert!(password_viewer_enabled_from_env(Some("false")));
+        for value in ["1", "true", "yes", "on", " TRUE "] {
+            assert!(!password_viewer_enabled_from_env(Some(value)), "{value}");
+        }
     }
 
     #[test]

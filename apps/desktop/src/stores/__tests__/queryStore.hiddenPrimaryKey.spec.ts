@@ -188,7 +188,112 @@ describe("queryStore hidden primary key editing", () => {
     expect(executeMulti).toHaveBeenCalledWith("mysql-1", "app", "SELECT name FROM users", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
   }, 10_000);
 
-  it("appends the hidden primary key for Dameng tables whose columns keep the created case", async () => {
+  it.each((["dameng", "jdbc"] as const).flatMap((dbType) => [true, false].flatMap((autoCommit) => [true, false].map((returnsPrimaryKey) => ({ dbType, autoCommit, returnsPrimaryKey })))))(
+    "dispatches cold Dameng SQL before metadata with $dbType, autoCommit=$autoCommit, returnsPrimaryKey=$returnsPrimaryKey",
+    async ({ dbType, autoCommit, returnsPrimaryKey }) => {
+      const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
+      const resultGate = deferred<Awaited<ReturnType<typeof executeMulti>>>();
+      getConnectionConfig.mockReturnValue({ id: "dameng-1", name: "Dameng", db_type: dbType, driver_profile: "dameng", database: "SYSDBA", query_timeout_secs: 30 });
+      const columns = [
+        { name: "ID", data_type: "INT", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "NAME", data_type: "VARCHAR(50)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ];
+      const resultColumns = returnsPrimaryKey ? ["ID", "NAME"] : ["NAME"];
+      const sql = `SELECT ${resultColumns.join(", ")} FROM APP.USERS`;
+      analyzeEditableQueryEditability.mockResolvedValue({
+        editable: true,
+        analysis: { schema: "APP", tableName: "USERS", selectStar: false, columns: resultColumns.map((name) => ({ sourceName: name, resultName: name, expression: name })) },
+      });
+      getColumns.mockReturnValue(columnsGate.promise);
+      executeMulti.mockReturnValue(resultGate.promise);
+      executeInManualTransaction.mockReturnValue(resultGate.promise);
+
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const tabId = store.createTab("dameng-1", "SYSDBA", "Query");
+      store.setAutoCommit(tabId, autoCommit);
+      const tab = store.tabs.find((item) => item.id === tabId)!;
+      const execution = store.executeTabSql(tabId, sql);
+      const dispatch = autoCommit ? executeMulti : executeInManualTransaction;
+      await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+      expect(dispatch.mock.calls[0]?.[autoCommit ? 2 : 1]).toBe(sql);
+      expect(getColumns).not.toHaveBeenCalled();
+      expect(listIndexes).not.toHaveBeenCalled();
+
+      resultGate.resolve([{ columns: resultColumns, rows: [returnsPrimaryKey ? [1, "Alice"] : ["Alice"]], affected_rows: 0, execution_time_ms: 1 }]);
+      await execution;
+      expect(tab.isExecuting).toBe(false);
+      expect(tab.result?.columns).toEqual(resultColumns);
+      expect(tab.queryAnalysis).toBeUndefined();
+      await vi.waitFor(() => expect(getColumns).toHaveBeenCalledOnce());
+
+      columnsGate.resolve(columns);
+      await vi.waitFor(() => expect(tab.tableMeta?.primaryKeys).toEqual(["ID"]));
+      expect(tab.result?.columns).toEqual(resultColumns);
+      if (returnsPrimaryKey) {
+        expect(tab.queryAnalysis).toBeDefined();
+        expect(tab.queryEditabilityReason).toBeUndefined();
+      } else {
+        expect(tab.queryAnalysis).toBeUndefined();
+        expect(tab.queryEditabilityReason).toBe("primary-key-not-returned");
+      }
+    },
+  );
+
+  it("does not apply delayed Dameng metadata to a newer result", async () => {
+    const firstColumns = deferred<Awaited<ReturnType<typeof getColumns>>>();
+    const columns = [
+      { name: "ID", data_type: "INT", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "NAME", data_type: "VARCHAR(50)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ];
+    getConnectionConfig.mockReturnValue({ id: "dameng-1", name: "Dameng", db_type: "dameng", database: "SYSDBA", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => ({
+      editable: true,
+      analysis: { schema: "APP", tableName: sql.includes("ARCHIVE") ? "ARCHIVE" : "USERS", selectStar: false, columns: ["ID", "NAME"].map((name) => ({ sourceName: name, resultName: name, expression: name })) },
+    }));
+    getColumns.mockImplementation((_connectionId: string, _database: string, _schema: string, table: string) => (table === "USERS" ? firstColumns.promise : Promise.resolve(columns)));
+    executeMulti.mockResolvedValueOnce([{ columns: ["ID", "NAME"], rows: [[1, "Alice"]], affected_rows: 0, execution_time_ms: 1 }]);
+    executeMulti.mockResolvedValueOnce([{ columns: ["ID", "NAME"], rows: [[2, "Bob"]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("dameng-1", "SYSDBA", "Query");
+    store.setAutoCommit(tabId, true);
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+
+    await store.executeTabSql(tabId, "SELECT ID, NAME FROM APP.USERS");
+    await vi.waitFor(() => expect(getColumns).toHaveBeenCalledOnce());
+    await store.executeTabSql(tabId, "SELECT ID, NAME FROM APP.ARCHIVE");
+    await vi.waitFor(() => expect(tab.tableMeta?.tableName).toBe("ARCHIVE"));
+    const newerMetadata = tab.tableMeta;
+
+    firstColumns.resolve(columns);
+    const { loadTableMetadata } = await import("@/lib/metadata/tableMetadataCache");
+    await loadTableMetadata({ connectionId: "dameng-1", database: "SYSDBA", schema: "APP", tableName: "USERS", databaseType: "dameng" });
+    expect(tab.tableMeta).toBe(newerMetadata);
+    expect(tab.tableMeta?.tableName).toBe("ARCHIVE");
+    expect(tab.result?.rows).toEqual([[2, "Bob"]]);
+    expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("keeps a successful Dameng result available when background metadata fails", async () => {
+    getConnectionConfig.mockReturnValue({ id: "dameng-1", name: "Dameng", db_type: "dameng", database: "SYSDBA", query_timeout_secs: 30 });
+    getColumns.mockRejectedValue(new Error("dictionary unavailable"));
+    executeMulti.mockResolvedValue([{ columns: ["name"], rows: [["Alice"]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("dameng-1", "SYSDBA", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("metadata-unavailable"));
+    expect(tab.isExecuting).toBe(false);
+    expect(tab.error).toBeUndefined();
+    expect(tab.result?.rows).toEqual([["Alice"]]);
+    expect(tab.queryAnalysis).toBeUndefined();
+  });
+
+  it("appends the cached hidden primary key for Dameng tables whose columns keep the created case", async () => {
     // #10233: Dameng keeps the case an unquoted identifier was created with, so the
     // server reports `name` while the Oracle-family dialect handling folds the SQL
     // token to `NAME`. The binding has to survive that mismatch, otherwise the result
@@ -214,10 +319,15 @@ describe("queryStore hidden primary key editing", () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("dameng-1", "SYSDBA", "Query");
+    executeMulti.mockResolvedValueOnce([{ columns: ["name"], rows: [["Alice"]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+    expect(executeMulti).toHaveBeenCalledWith("dameng-1", "SYSDBA", "SELECT name FROM users", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    await vi.waitFor(() => expect(store.tabs.find((item) => item.id === tabId)?.queryEditabilityReason).toBe("primary-key-not-returned"));
 
     await store.executeTabSql(tabId, "SELECT name FROM users");
 
-    expect(executeMulti).toHaveBeenCalledWith("dameng-1", "SYSDBA", 'SELECT name, "id" AS "__DBX_PK_0" FROM users', undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    expect(executeMulti).toHaveBeenLastCalledWith("dameng-1", "SYSDBA", 'SELECT name, "id" AS "__DBX_PK_0" FROM users', undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.result?.hidden_column_indexes).toEqual([1]);
     await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
@@ -542,6 +652,192 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryAnalysis).toBeDefined();
     expect(tab.queryAnalysis?.allowInsert).not.toBe(false);
     expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it.each([
+    { databaseType: "mysql" as const, suffix: "/* GROUP BY name HAVING COUNT(*) > 1 */" },
+    { databaseType: "mysql" as const, suffix: "-- GROUP BY name" },
+    { databaseType: "mysql" as const, suffix: "WHERE name = 'GROUP BY name HAVING COUNT(*)'" },
+    { databaseType: "mysql" as const, suffix: "WHERE id IN (SELECT user_id FROM orders GROUP BY user_id HAVING COUNT(*) > 1)" },
+    { databaseType: "oracle" as const, suffix: "/* GROUP BY name HAVING COUNT(*) > 1 */" },
+    { databaseType: "oracle" as const, suffix: "-- GROUP BY name" },
+    { databaseType: "oracle" as const, suffix: "WHERE name = 'GROUP BY name HAVING COUNT(*)'" },
+    { databaseType: "oracle" as const, suffix: "WHERE id IN (SELECT user_id FROM orders GROUP BY user_id HAVING COUNT(*) > 1)" },
+  ])("keeps omitted-key editing for $databaseType with nonstructural grouping text: $suffix", async ({ databaseType, suffix }) => {
+    const connectionId = `${databaseType}-1`;
+    const database = databaseType === "oracle" ? "ORCL" : "app";
+    getConnectionConfig.mockReturnValue({ id: connectionId, name: databaseType, db_type: databaseType, database, query_timeout_secs: 30 });
+    const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => analyzeSqlEditability(sql));
+    const hiddenKey = databaseType === "oracle" ? '"id" AS "__DBX_PK_0"' : "`id` AS `__DBX_PK_0`";
+    executeMulti.mockResolvedValue([{ columns: ["name", "__DBX_PK_0"], rows: [["Alice", 7]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab(connectionId, database, "Query");
+    store.setAutoCommit(tabId, true);
+    const sql = `SELECT name FROM users ${suffix}`;
+
+    for (let execution = 0; execution < 2; execution++) {
+      await store.executeTabSql(tabId, sql);
+      expect(executeMulti).toHaveBeenLastCalledWith(connectionId, database, `SELECT name, ${hiddenKey} FROM users ${suffix}`, undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+      const tab = store.tabs.find((item) => item.id === tabId)!;
+      await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
+      expect(tab.queryAnalysis).toBeDefined();
+      expect(tab.queryEditabilityReason).toBeUndefined();
+      expect(tab.result?.hidden_column_indexes).toEqual([1]);
+    }
+  });
+
+  it("keeps hidden-key editing for quoted grouping identifiers", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "id", data_type: "NUMBER", is_nullable: false, is_primary_key: true },
+      { name: "GROUP", data_type: "VARCHAR2", is_nullable: true, is_primary_key: false },
+      { name: "HAVING", data_type: "VARCHAR2", is_nullable: true, is_primary_key: false },
+      { name: "name", data_type: "VARCHAR2", is_nullable: true, is_primary_key: false },
+    ]);
+    const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => analyzeSqlEditability(sql));
+    executeMulti.mockResolvedValue([{ columns: ["GROUP", "HAVING", "name", "__DBX_PK_0"], rows: [["a", "b", "Alice", 7]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, 'SELECT "GROUP", "HAVING", name FROM users');
+    expect(executeMulti.mock.calls.at(-1)?.[2]).toContain('"id" AS "__DBX_PK_0"');
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["GROUP", "HAVING", "name", "id"]));
+    expect(tab.queryAnalysis).toBeDefined();
+    expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("keeps keyless Oracle ROWID editing when comments mention grouping", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", default_schema: "APP", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([{ name: "NAME", data_type: "VARCHAR2", is_nullable: true, is_primary_key: false }]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "USERS", schema: "APP", type: "table" }]);
+    const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => analyzeSqlEditability(sql));
+    executeMulti.mockResolvedValue([{ columns: ["NAME", "__DBX_PK_0"], rows: [["Alice", "rowid-1"]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "SELECT NAME FROM APP.USERS /* GROUP BY NAME HAVING COUNT(*) > 1 */");
+    expect(executeMulti.mock.calls.at(-1)?.[2]).toContain('ROWIDTOCHAR(ROWID) AS "__DBX_PK_0"');
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["NAME", "__DBX_ROWID"]));
+    expect(tab.tableMeta?.primaryKeys).toEqual(["__DBX_ROWID"]);
+    expect(tab.queryAnalysis).toBeDefined();
+    expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it.each([
+    { databaseType: "mysql" as const, returnedKey: false },
+    { databaseType: "mysql" as const, returnedKey: true },
+    { databaseType: "oracle" as const, returnedKey: false },
+    { databaseType: "oracle" as const, returnedKey: true },
+  ])("keeps scalar-subquery projections editable for $databaseType with returnedKey=$returnedKey", async ({ databaseType, returnedKey }) => {
+    const connectionId = `${databaseType}-1`;
+    const database = databaseType === "oracle" ? "ORCL" : "app";
+    getConnectionConfig.mockReturnValue({ id: connectionId, name: databaseType, db_type: databaseType, database, query_timeout_secs: 30 });
+    const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => analyzeSqlEditability(sql));
+    const columns = returnedKey ? ["id", "name", "total"] : ["name", "total", "__DBX_PK_0"];
+    const rows = returnedKey ? [[7, "Alice", 2]] : [["Alice", 2, 7]];
+    executeMulti.mockResolvedValue([{ columns, rows, affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab(connectionId, database, "Query");
+    store.setAutoCommit(tabId, true);
+    const sql = `SELECT ${returnedKey ? "u.id, " : ""}u.name, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) AS total FROM users u`;
+
+    await store.executeTabSql(tabId, sql);
+    if (returnedKey) {
+      expect(executeMulti).toHaveBeenLastCalledWith(connectionId, database, sql, undefined, expect.any(String), expect.any(Object));
+    } else {
+      expect(executeMulti.mock.calls.at(-1)?.[2]).toContain("__DBX_PK_0");
+    }
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(returnedKey ? ["id", "name", undefined] : ["name", undefined, "id"]));
+    expect(tab.queryAnalysis).toBeDefined();
+    expect(tab.queryEditabilityReason).toBeUndefined();
+    expect(tab.queryAnalysis?.columns.find((column) => column.resultName === "total")?.sourceName).toBeUndefined();
+  });
+
+  it.each(["SELECT name FROM users GROUP BY name", "SELECT name FROM users HAVING COUNT(*) > 1", "SELECT COALESCE(SUM(id), 0) AS total FROM users", "SELECT name FROM users UNION SELECT name FROM archived_users"])("keeps structural grouping and set queries read-only: %s", async (sql) => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
+    analyzeEditableQueryEditability.mockImplementation(async (query: string) => analyzeSqlEditability(query));
+    executeMulti.mockResolvedValue([{ columns: ["name"], rows: [["Alice"]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, sql);
+    expect(executeMulti).toHaveBeenLastCalledWith("oracle-1", "ORCL", sql, undefined, expect.any(String), expect.any(Object));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe(sql.includes("UNION") ? "set-operation" : "aggregation"));
+    expect(tab.queryAnalysis).toBeUndefined();
+    expect(tab.result?.hidden_column_indexes).toBeUndefined();
+  });
+
+  it("never rewrites an Oracle GROUP BY query with hidden ROWID", async () => {
+    getConnectionConfig.mockReturnValue({
+      id: "oracle-1",
+      name: "Oracle",
+      db_type: "oracle",
+      database: "ORCL",
+      query_timeout_secs: 30,
+    });
+    getColumns.mockResolvedValue([
+      { name: "P_ID", type_name: "VARCHAR2", nullable: true },
+      { name: "SUBJECT", type_name: "VARCHAR2", nullable: true },
+      { name: "CREATE_TIME", type_name: "DATE", nullable: true },
+    ]);
+    listTables.mockResolvedValue([{ name: "RECORD", table_type: "TABLE" }]);
+    listIndexes.mockResolvedValue([]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: false,
+      reason: "aggregation",
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["P_ID", "SUBJECT", "CNT_NUM"],
+        rows: [["123214512", "邮件提醒", 1]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    store.setAutoCommit(tabId, true);
+
+    const sql = `SELECT 
+  R.P_ID, 
+  R.SUBJECT, 
+  COUNT(0) AS CNT_NUM
+  FROM COMMON.RECORD R
+ WHERE R.CREATE_TIME >= SYSDATE - INTERVAL '1' DAY
+   AND R.SUBJECT = '邮件提醒'
+   AND R.P_ID = '123214512'
+ GROUP BY R.P_ID, R.SUBJECT`;
+
+    // Execute first time (populates metadata cache)
+    await store.executeTabSql(tabId, sql);
+    expect(executeMulti).toHaveBeenLastCalledWith("oracle-1", "ORCL", sql, undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+
+    // Execute second time (cache hit within 30s)
+    await store.executeTabSql(tabId, sql);
+    expect(executeMulti).toHaveBeenLastCalledWith("oracle-1", "ORCL", sql, undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    expect(executeMulti).not.toHaveBeenCalledWith("oracle-1", "ORCL", expect.stringContaining("ROWIDTOCHAR"), undefined, expect.any(String), expect.any(Object));
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.hidden_column_indexes).toBeUndefined();
   });
 
   it.each([
@@ -1427,6 +1723,61 @@ describe("queryStore hidden primary key editing", () => {
     expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM APP.PLATFORM_VIEW", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
     expect(lookupLocalCompletionTables).toHaveBeenCalledWith("oracle-1", "ORCL", "PLATFORM_VIEW", 20, "APP", undefined);
     expect(tab.result?.hidden_column_indexes).toBeUndefined();
+  });
+
+  it.each([
+    { sourceSchema: undefined, synonym: true },
+    { sourceSchema: "ExplicitOwner", synonym: true },
+    { sourceSchema: undefined, synonym: false },
+  ])("keeps OceanBase current schema separate from explicit source schema $sourceSchema with synonym=$synonym", async ({ sourceSchema, synonym }) => {
+    getConnectionConfig.mockReturnValue({ id: "ob-1", name: "OceanBase", db_type: "oceanbase-oracle", database: "service", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([{ name: "ItemId", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null, ...(synonym ? { resolved_schema: "TargetOwner", resolved_table: "Items", resolved_object_type: "TABLE" } : {}) }]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: sourceSchema,
+        schemaQuoted: true,
+        tableName: "ItemsAlias",
+        tableNameQuoted: true,
+        selectStar: false,
+        columns: [{ sourceName: "ItemId", sourceNameQuoted: true, resultName: "ItemId", expression: '"ItemId"' }],
+      },
+    });
+    executeMulti.mockResolvedValue([{ columns: ["ItemId"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("ob-1", "service", "Query", "query", "SelectedOwner");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, sourceSchema ? 'SELECT "ItemId" FROM "ExplicitOwner"."ItemsAlias"' : 'SELECT "ItemId" FROM "ItemsAlias"');
+
+    if (sourceSchema) expect(getColumns).toHaveBeenCalledWith("ob-1", "service", "ExplicitOwner", "ItemsAlias", undefined);
+    else expect(getColumns).toHaveBeenCalledWith("ob-1", "service", "", "ItemsAlias", undefined, undefined, "SelectedOwner");
+    expect(listIndexes).toHaveBeenCalledWith("ob-1", "service", synonym ? "TargetOwner" : "SelectedOwner", synonym ? "Items" : "ItemsAlias", undefined);
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta).toMatchObject({ schema: synonym ? "TargetOwner" : "SelectedOwner", tableName: synonym ? "Items" : "ItemsAlias" }));
+    if (synonym) expect(tab.tableMeta?.tableType).toBe("TABLE");
+    expect(tab.queryAnalysis?.tableName).toBe("ItemsAlias");
+  });
+
+  it.each(["VIEW", undefined])("does not treat a synonym target of type %s as an Oracle base table", async (objectType) => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null, resolved_schema: "TargetOwner", resolved_table: "ActualItems", resolved_object_type: objectType }]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "ITEMS_ALIAS", type: "table", schema: "APP" }]);
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: true, analysis: { schema: "APP", tableName: "ITEMS_ALIAS", selectStar: true, columns: [] } });
+    executeMulti.mockResolvedValue([{ columns: ["ID"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "SELECT * FROM APP.ITEMS_ALIAS");
+
+    expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM APP.ITEMS_ALIAS", undefined, expect.any(String), expect.any(Object));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.result?.columns).toEqual(["ID"]));
+    expect(tab.result?.hidden_column_indexes).toBeUndefined();
+    expect(tab.queryAnalysis).toBeUndefined();
   });
 
   it.each(["CLOB", "XMLTYPE", "SYS.XMLTYPE"])("enables deferred Oracle %s values only when a base-table query has a stable key", async (dataType) => {
@@ -2371,6 +2722,45 @@ describe("queryStore hidden primary key editing", () => {
       [8, 8],
     ]);
     expect(tab.result?.columns).toEqual(["NAME", "NAME"]);
+  });
+
+  it.each(["SELECT * FROM events", "SELECT t.* FROM events t"])("preserves a real __dbx_row_num column across OceanBase wildcard pages: %s", async (sql) => {
+    getConnectionConfig.mockReturnValue({ id: "ob-1", name: "OceanBase", db_type: "oceanbase-oracle", database: "app", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
+    prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageLimit: options.pagination.limit,
+      pageOffset: options.pagination.offset,
+      useAgentResultSession: true,
+    }));
+    let row = 0;
+    executeMulti.mockImplementation(async () => [
+      {
+        columns: ["ID", "__dbx_row_num"],
+        rows: Array.from({ length: 2 }, () => [++row, `user-${row}`]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+        session_id: "ob-star-cursor",
+        has_more: row < 6,
+      },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("ob-1", "app", "Query");
+    for (const offset of [0, 2, 4]) {
+      await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset, sessionId: offset ? "ob-star-cursor" : undefined } });
+      const result = store.tabs.find((item) => item.id === tabId)!.result;
+      expect(result?.columns).toEqual(["ID", "__dbx_row_num"]);
+      expect(result?.rows).toEqual([
+        [offset + 1, `user-${offset + 1}`],
+        [offset + 2, `user-${offset + 2}`],
+      ]);
+    }
+    expect(executeMulti).toHaveBeenCalledTimes(3);
+    for (const [index, call] of executeMulti.mock.calls.entries()) {
+      expect(call[2]).toBe(sql);
+      expect(call[5]).toEqual(expect.objectContaining({ pageSize: 2, fetchSize: 2, resultSessionId: index ? "ob-star-cursor" : undefined }));
+    }
   });
 
   it("does not execute an OceanBase offset plan rejected without a cursor", async () => {

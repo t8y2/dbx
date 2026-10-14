@@ -306,7 +306,8 @@ test("local Rust entrypoints and live TDengine tests use nextest", () => {
 
 test("DuckDB Windows builds persist Rust and C++ compiler results", () => {
   const content = job("duckdb-windows-driver");
-  assert.ok(content.includes('SCCACHE_GHA_ENABLED: "true"'));
+  // S3 is preferred over the quota-limited GHA backend; GHA remains the fallback.
+  assert.ok(content.includes("SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}"));
   assert.ok(content.includes('CC: "sccache cl.exe"'));
   assert.ok(content.includes('CXX: "sccache cl.exe"'));
   assert.ok(content.includes("0b201ec74fa43914dc39ae48a89fd1d8cb592756"));
@@ -318,7 +319,7 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   const standard = job("windows-standard-check");
   assert.ok(standard.includes("needs.changes.outputs.windows_standard == 'true'"));
   assert.ok(standard.includes("RUSTC_WRAPPER: sccache"));
-  assert.ok(standard.includes('SCCACHE_GHA_ENABLED: "true"'));
+  assert.ok(standard.includes("SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}"));
   assert.ok(standard.includes("SCCACHE_GHA_VERSION: windows-standard-v1"));
   assert.ok(standard.includes("fc920bf0ec8de6ee65d409111f7ec508035751ba"));
   assert.ok(standard.includes('version: "v0.16.0"'));
@@ -328,7 +329,7 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   const win7 = job("windows-win7-bundle");
   assert.ok(win7.includes("needs.changes.outputs.windows_win7_bundle == 'true'"));
   assert.doesNotMatch(win7, /x86_64-pc-windows-msvc|Setup Rust for standard Windows/);
-  for (const setting of ["RUSTC_WRAPPER: sccache", 'SCCACHE_GHA_ENABLED: "true"', "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1", 'SCCACHE_IDLE_TIMEOUT: "0"', 'CARGO_PROFILE_RELEASE_LTO: "off"', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"']) assert.ok(win7.includes(setting));
+  for (const setting of ["RUSTC_WRAPPER: sccache", "SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}", "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1", 'SCCACHE_IDLE_TIMEOUT: "0"', 'CARGO_PROFILE_RELEASE_LTO: "off"', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"']) assert.ok(win7.includes(setting));
   assert.ok(win7.includes("fc920bf0ec8de6ee65d409111f7ec508035751ba"));
   assert.ok(win7.includes('version: "v0.16.0"'));
   assert.ok(win7.includes("sccache --show-stats"));

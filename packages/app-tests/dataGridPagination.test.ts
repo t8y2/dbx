@@ -171,6 +171,15 @@ test("user LIMIT larger than the page size still pages up to the bound", () => {
   assert.equal(canGoNextDataGridPage({ rowCount: 100, pageSize: 100, pageOffset: 400, totalRowCount: 500 }), false);
 });
 
+test("a result loaded without server-side pagination is a single page", () => {
+  // `SHOW BINLOG EVENTS` cannot be wrapped in LIMIT/OFFSET, so every row comes
+  // back at once and the grid renders all of them. Another page would only
+  // shift the row numbers over the same rows (#12107).
+  assert.equal(canGoNextDataGridPage({ rowCount: 5_693, pageSize: 100, allRowsLoaded: true }), false);
+  assert.equal(canGoNextDataGridPage({ rowCount: 5_693, pageSize: 100, totalRowCount: 5_693, allRowsLoaded: true }), false);
+  assert.equal(canGoNextDataGridPage({ hasMore: true, rowCount: 100_000, pageSize: 100, allRowsLoaded: true }), false);
+});
+
 test("infinite scroll compares cumulative loaded rows with a known total", () => {
   assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 1_000, pageSize: 1_000, totalRowCount: 2_000 }), true);
   assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 2_000, pageSize: 1_000, totalRowCount: 2_000 }), false);

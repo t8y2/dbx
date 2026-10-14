@@ -592,15 +592,13 @@ fn chroma_get_response_to_rows(body: &Value) -> Vec<Value> {
             if let Some(doc) = documents.get(i) {
                 row.insert("document".to_string(), doc.clone());
             }
-            if let Some(Value::Object(meta_obj)) = metadatas.get(i) {
-                for (k, v) in meta_obj {
-                    row.insert(k.clone(), v.clone());
-                }
-            }
             if let Some(dist) = distances.get(i) {
                 row.insert("distance".to_string(), dist.clone());
             }
-            Value::Object(row)
+            if let Some(metadata) = metadatas.get(i) {
+                row.insert("metadata".to_string(), metadata.clone());
+            }
+            Value::Object(flatten_wrapper_once(row, "metadata"))
         })
         .collect()
 }
@@ -613,16 +611,11 @@ fn weaviate_graphql_to_rows(body: &Value) -> Option<Vec<Value>> {
         items
             .iter()
             .map(|item| {
-                let mut obj = match item {
+                let obj = match item {
                     Value::Object(m) => m.clone(),
                     _ => return item.clone(),
                 };
-                if let Some(Value::Object(additional)) = obj.remove("_additional") {
-                    for (k, v) in additional {
-                        obj.entry(k).or_insert(v);
-                    }
-                }
-                Value::Object(obj)
+                Value::Object(flatten_wrapper_once(obj, "_additional"))
             })
             .collect(),
     )
@@ -749,13 +742,65 @@ pub async fn find_documents(
 pub async fn execute_rest_query(client: &VectorClient, input: &str) -> Result<QueryResult, String> {
     let start = Instant::now();
     let request = parse_rest_query(client, input)?;
+    let origin = request
+        .try_clone()
+        .and_then(|request| request.build().ok())
+        .map(|request| response_origin(client, &request))
+        .unwrap_or(ResponseOrigin::Generic);
     let resp = request.send().await.map_err(|e| format!("{} request failed: {e}", client.kind.label()))?;
     let status = resp.status().as_u16();
     let body = resp.json::<Value>().await.unwrap_or(Value::Null);
-    rest_query_result(client.kind, status, body, start)
+    rest_query_result(client.kind, origin, status, body, start)
 }
 
-fn rest_query_result(kind: VectorDbKind, status: u16, body: Value, start: Instant) -> Result<QueryResult, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseOrigin {
+    Generic,
+    QdrantPointsObject,
+    QdrantPointsList,
+    WeaviateRestObjects,
+    WeaviateGraphqlGet,
+    ChromaRecords,
+}
+
+fn response_origin(client: &VectorClient, request: &reqwest::Request) -> ResponseOrigin {
+    let Some(base_url) = reqwest::Url::parse(&client.base_url).ok() else {
+        return ResponseOrigin::Generic;
+    };
+    let base_path = base_url.path().trim_end_matches('/');
+    let Some(endpoint_path) = request.url().path().strip_prefix(base_path).filter(|path| path.starts_with('/')) else {
+        return ResponseOrigin::Generic;
+    };
+    let segments: Vec<_> = endpoint_path.split('/').filter(|segment| !segment.is_empty()).collect();
+    if request.method() != reqwest::Method::POST && request.method() != reqwest::Method::GET {
+        return ResponseOrigin::Generic;
+    }
+    match (client.kind, request.method().as_str(), segments.as_slice()) {
+        (VectorDbKind::Qdrant, "POST", ["collections", _, "points", "scroll" | "query"]) => {
+            ResponseOrigin::QdrantPointsObject
+        }
+        (VectorDbKind::Qdrant, "POST", ["collections", _, "points"])
+        | (VectorDbKind::Qdrant, "POST", ["collections", _, "points", "search" | "recommend" | "discover"]) => {
+            ResponseOrigin::QdrantPointsList
+        }
+        (VectorDbKind::Weaviate, "GET", ["v1", "objects"]) => ResponseOrigin::WeaviateRestObjects,
+        (VectorDbKind::Weaviate, "POST", ["v1", "graphql"]) => ResponseOrigin::WeaviateGraphqlGet,
+        (
+            VectorDbKind::ChromaDb,
+            "POST",
+            ["api", "v2", "tenants", _, "databases", _, "collections", _, "get" | "query"],
+        ) => ResponseOrigin::ChromaRecords,
+        _ => ResponseOrigin::Generic,
+    }
+}
+
+fn rest_query_result(
+    kind: VectorDbKind,
+    origin: ResponseOrigin,
+    status: u16,
+    body: Value,
+    start: Instant,
+) -> Result<QueryResult, String> {
     if !(200..300).contains(&status) {
         let detail = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
         return Err(format!("{} error ({status}): {detail}", kind.label()));
@@ -765,7 +810,7 @@ fn rest_query_result(kind: VectorDbKind, status: u16, body: Value, start: Instan
             return Err(error);
         }
     }
-    Ok(json_to_query_result(status, body, start))
+    Ok(json_to_query_result(kind, origin, status, body, start))
 }
 
 // Milvus REST uses HTTP-style code 200 for success, while some responses use gRPC-style code 0.
@@ -889,25 +934,45 @@ async fn ensure_success(label: &str, resp: reqwest::Response) -> Result<reqwest:
     Err(format!("{label} error ({status}): {body}"))
 }
 
-fn json_to_query_result(status: u16, body: Value, start: Instant) -> QueryResult {
-    let rows_value =
-        body.pointer("/result/points").or_else(|| body.get("result")).or_else(|| body.get("data")).cloned();
-    if let Some(Value::Array(items)) = rows_value {
+fn json_to_query_result(
+    kind: VectorDbKind,
+    origin: ResponseOrigin,
+    status: u16,
+    body: Value,
+    start: Instant,
+) -> QueryResult {
+    let rows = match (kind, origin) {
+        (VectorDbKind::Qdrant, ResponseOrigin::QdrantPointsObject) => {
+            body.pointer("/result/points").and_then(Value::as_array).cloned().map(|items| adapt_rows(items, "payload"))
+        }
+        (VectorDbKind::Qdrant, ResponseOrigin::QdrantPointsList) => {
+            body.get("result").and_then(Value::as_array).cloned().map(|items| adapt_rows(items, "payload"))
+        }
+        (VectorDbKind::Weaviate, ResponseOrigin::WeaviateRestObjects) => {
+            body.get("objects").and_then(Value::as_array).cloned().map(|items| adapt_rows(items, "properties"))
+        }
+        (VectorDbKind::Weaviate, ResponseOrigin::WeaviateGraphqlGet) => weaviate_graphql_to_rows(&body),
+        (VectorDbKind::ChromaDb, ResponseOrigin::ChromaRecords)
+            if body.get("ids").and_then(Value::as_array).is_some()
+                && body.get("documents").and_then(Value::as_array).is_some() =>
+        {
+            Some(chroma_get_response_to_rows(&body))
+        }
+        _ => None,
+    };
+    if let Some(items) = rows {
         return values_to_query_result(items, start);
     }
-    if let Some(Value::Array(items)) = body.get("objects").cloned() {
-        return values_to_query_result(items, start);
-    }
-    if let Some(Value::Array(items)) = body.pointer("/result/collections").cloned() {
-        return values_to_query_result(items, start);
-    }
-    if body.get("ids").and_then(Value::as_array).is_some() && body.get("documents").and_then(Value::as_array).is_some()
-    {
-        let rows = chroma_get_response_to_rows(&body);
-        return values_to_query_result(rows, start);
-    }
-    // Weaviate GraphQL search response
-    if let Some(items) = weaviate_graphql_to_rows(&body) {
+    // Unknown and management responses may still contain a generic array of rows.
+    let generic_rows = body
+        .pointer("/result/points")
+        .or_else(|| body.pointer("/result/collections"))
+        .or_else(|| body.get("result"))
+        .or_else(|| body.get("data"))
+        .or_else(|| body.get("objects"))
+        .and_then(Value::as_array)
+        .cloned();
+    if let Some(items) = generic_rows {
         return values_to_query_result(items, start);
     }
     QueryResult {
@@ -970,25 +1035,35 @@ fn values_to_query_result(items: Vec<Value>, start: Instant) -> QueryResult {
 
 fn normalize_row_object(value: Value) -> Map<String, Value> {
     match value {
-        Value::Object(mut object) => {
-            if let Some(Value::Object(payload)) = object.remove("payload") {
-                for (key, value) in payload {
-                    object.entry(key).or_insert(value);
-                }
-            }
-            if let Some(Value::Object(properties)) = object.remove("properties") {
-                for (key, value) in properties {
-                    object.entry(key).or_insert(value);
-                }
-            }
-            object
-        }
+        Value::Object(object) => object,
         other => {
             let mut object = Map::new();
             object.insert("value".to_string(), other);
             object
         }
     }
+}
+
+fn adapt_rows(items: Vec<Value>, wrapper: &str) -> Vec<Value> {
+    items
+        .into_iter()
+        .map(|item| match item {
+            Value::Object(row) => Value::Object(flatten_wrapper_once(row, wrapper)),
+            other => other,
+        })
+        .collect()
+}
+
+fn flatten_wrapper_once(mut row: Map<String, Value>, wrapper: &str) -> Map<String, Value> {
+    let Some(Value::Object(fields)) = row.get(wrapper) else {
+        return row;
+    };
+    if fields.keys().any(|key| row.contains_key(key)) {
+        return row;
+    }
+    let Some(Value::Object(fields)) = row.remove(wrapper) else { unreachable!("wrapper type checked above") };
+    row.extend(fields);
+    row
 }
 
 fn format_reqwest_error(err: &reqwest::Error) -> String {
@@ -1007,15 +1082,348 @@ fn format_reqwest_error(err: &reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        chroma_get_response_to_rows, default_collection_query, milvus_collection_schema, milvus_database_names,
-        rename_collection, rest_query_result, starts_with_http_method, test_connection, test_connection_request,
-        values_to_query_result, vector_auth, weaviate_collection_names_from_schema,
-        weaviate_vector_dimension_from_graphql, CollectionInfo, VectorAuth, VectorClient, VectorDbKind,
+        chroma_get_response_to_rows, default_collection_query, execute_rest_query, find_documents,
+        json_to_query_result, milvus_collection_schema, milvus_database_names, parse_rest_query, rename_collection,
+        response_origin, rest_query_result, starts_with_http_method, test_connection, test_connection_request,
+        vector_auth, weaviate_collection_names_from_schema, weaviate_vector_dimension_from_graphql, CollectionInfo,
+        ResponseOrigin, VectorAuth, VectorClient, VectorDbKind,
     };
     use serde_json::{json, Value};
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    fn first_row(result: &crate::types::QueryResult) -> serde_json::Map<String, Value> {
+        result.columns.iter().cloned().zip(result.rows[0].iter().cloned()).collect()
+    }
+
+    #[test]
+    fn graphql_business_properties_and_additional_collision_survive() {
+        let result = rest_query_result(
+            VectorDbKind::Weaviate,
+            ResponseOrigin::WeaviateGraphqlGet,
+            200,
+            json!({"data":{"Get":{"Article":[{"properties":{"x":2},"id":"business","_additional":{"id":"system"}}]}}}),
+            Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            first_row(&result),
+            json!({"properties":{"x":2},"id":"business","_additional":{"id":"system"}}).as_object().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn chroma_metadata_collision_survives() {
+        let rows = chroma_get_response_to_rows(&json!({
+            "ids":["system"],"documents":["body"],"metadatas":[{"id":"business","payload":{"x":1}}]
+        }));
+        assert_eq!(rows, vec![json!({"id":"system","document":"body","metadata":{"id":"business","payload":{"x":1}}})]);
+    }
+
+    #[test]
+    fn wrapper_conflicts_and_non_objects_keep_exact_values() {
+        for (kind, origin, body, expected) in [
+            (
+                VectorDbKind::Qdrant,
+                ResponseOrigin::QdrantPointsList,
+                json!({"result":[{"id":1,"score":0.5,"payload":{"id":9,"title":"a"}}]}),
+                json!({"id":1,"score":0.5,"payload":{"id":9,"title":"a"}}),
+            ),
+            (
+                VectorDbKind::Qdrant,
+                ResponseOrigin::QdrantPointsList,
+                json!({"result":[{"id":1,"payload":{"payload":{"x":1}}}]}),
+                json!({"id":1,"payload":{"payload":{"x":1}}}),
+            ),
+            (
+                VectorDbKind::Weaviate,
+                ResponseOrigin::WeaviateRestObjects,
+                json!({"objects":[{"id":"a","properties":{"id":"b","title":"c"}}]}),
+                json!({"id":"a","properties":{"id":"b","title":"c"}}),
+            ),
+            (
+                VectorDbKind::Qdrant,
+                ResponseOrigin::QdrantPointsList,
+                json!({"result":[{"id":1,"payload":null}]}),
+                json!({"id":1,"payload":null}),
+            ),
+            (
+                VectorDbKind::Weaviate,
+                ResponseOrigin::WeaviateRestObjects,
+                json!({"objects":[{"id":"a","properties":[1,2]}]}),
+                json!({"id":"a","properties":[1,2]}),
+            ),
+        ] {
+            let result = json_to_query_result(kind, origin, 200, body, Instant::now());
+            assert_eq!(first_row(&result), expected.as_object().unwrap().clone());
+        }
+    }
+
+    #[test]
+    fn generic_and_wrong_engine_envelopes_do_not_flatten_business_names() {
+        for (kind, origin, body) in [
+            (VectorDbKind::Qdrant, ResponseOrigin::Generic, json!({"result":[{"id":1,"payload":{"x":2}}]})),
+            (VectorDbKind::Milvus, ResponseOrigin::QdrantPointsList, json!({"result":[{"id":1,"payload":{"x":2}}]})),
+            (VectorDbKind::Weaviate, ResponseOrigin::Generic, json!({"objects":[{"id":1,"properties":{"x":2}}]})),
+        ] {
+            let result = json_to_query_result(kind, origin, 200, body, Instant::now());
+            assert!(first_row(&result).contains_key(if kind == VectorDbKind::Weaviate {
+                "properties"
+            } else {
+                "payload"
+            }));
+        }
+        let management = json_to_query_result(
+            VectorDbKind::Qdrant,
+            ResponseOrigin::Generic,
+            200,
+            json!({"result":{"collections":[{"name":"c","payload":{"x":1}}]}}),
+            Instant::now(),
+        );
+        assert_eq!(first_row(&management), json!({"name":"c","payload":{"x":1}}).as_object().unwrap().clone());
+    }
+
+    #[test]
+    fn graphql_additional_flattens_once_and_keeps_non_object() {
+        for (additional, expected) in [
+            (json!({"id":"system"}), json!({"properties":{"x":2},"id":"system"})),
+            (json!(null), json!({"properties":{"x":2},"_additional":null})),
+            (json!({"_additional":{"x":1}}), json!({"properties":{"x":2},"_additional":{"_additional":{"x":1}}})),
+        ] {
+            let body = json!({"data":{"Get":{"Article":[{"properties":{"x":2},"_additional":additional}]}}});
+            let result = json_to_query_result(
+                VectorDbKind::Weaviate,
+                ResponseOrigin::WeaviateGraphqlGet,
+                200,
+                body,
+                Instant::now(),
+            );
+            assert_eq!(first_row(&result), expected.as_object().unwrap().clone());
+        }
+    }
+
+    #[test]
+    fn empty_mixed_and_scalar_rows_keep_table_contract() {
+        let empty = json_to_query_result(
+            VectorDbKind::Qdrant,
+            ResponseOrigin::QdrantPointsObject,
+            200,
+            json!({"result":{"points":[]}}),
+            Instant::now(),
+        );
+        assert_eq!(empty.columns, vec!["value"]);
+        assert!(empty.rows.is_empty());
+
+        let mixed = json_to_query_result(
+            VectorDbKind::Qdrant,
+            ResponseOrigin::QdrantPointsList,
+            200,
+            json!({"result":[{"id":1,"payload":{}},{"id":2,"payload":{"title":"x"}},7]}),
+            Instant::now(),
+        );
+        assert_eq!(mixed.affected_rows, 3);
+        assert_eq!(mixed.columns, vec!["id", "title", "value"]);
+        assert_eq!(mixed.rows[0], vec![json!(1), Value::Null, Value::Null]);
+        assert_eq!(mixed.rows[1], vec![json!(2), json!("x"), Value::Null]);
+        assert_eq!(mixed.rows[2], vec![Value::Null, Value::Null, json!(7)]);
+    }
+
+    #[test]
+    fn source_routes_match_complete_segments_after_query_and_trailing_slash() {
+        let qdrant =
+            VectorClient::new(VectorDbKind::Qdrant, "http://localhost:6333", None, None, false, Duration::from_secs(1));
+        for (query, expected) in [
+            ("POST /collections/name%2Fpart/points/scroll/?limit=1", ResponseOrigin::QdrantPointsObject),
+            ("POST /collections/name/points/search/?limit=1", ResponseOrigin::QdrantPointsList),
+            ("GET /collections/name/points/search", ResponseOrigin::Generic),
+            ("POST /collections/name/points/search/batch", ResponseOrigin::Generic),
+        ] {
+            let request = parse_rest_query(&qdrant, query).unwrap().build().unwrap();
+            assert_eq!(response_origin(&qdrant, &request), expected);
+        }
+    }
+
+    #[test]
+    fn response_origin_matches_endpoints_below_configured_proxy_path() {
+        for (kind, query, expected) in [
+            (VectorDbKind::Qdrant, "POST /collections/docs/points/scroll", ResponseOrigin::QdrantPointsObject),
+            (VectorDbKind::Weaviate, "GET /v1/objects?class=Article", ResponseOrigin::WeaviateRestObjects),
+            (VectorDbKind::Weaviate, "POST /v1/graphql", ResponseOrigin::WeaviateGraphqlGet),
+            (
+                VectorDbKind::ChromaDb,
+                "POST /api/v2/tenants/default_tenant/databases/default_database/collections/docs/get",
+                ResponseOrigin::ChromaRecords,
+            ),
+        ] {
+            let client = VectorClient::new(
+                kind,
+                "http://localhost:6333/proxy/vector/",
+                None,
+                None,
+                false,
+                Duration::from_secs(1),
+            );
+            let request = parse_rest_query(&client, query).unwrap().build().unwrap();
+            assert!(request.url().path().starts_with("/proxy/vector/"));
+            assert_eq!(response_origin(&client, &request), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn prefixed_qdrant_request_flattens_confirmed_point_payload() {
+        let (url, request_rx, server) = spawn_recording_json_response_server(json!({
+            "result":{"points":[{"id":1,"payload":{"title":"proxied"}}]}
+        }))
+        .await;
+        let client =
+            VectorClient::new(VectorDbKind::Qdrant, &format!("{url}/proxy"), None, None, false, Duration::from_secs(1));
+        let result = execute_rest_query(&client, "docs").await.unwrap();
+        assert_eq!(first_row(&result), json!({"id":1,"title":"proxied"}).as_object().unwrap().clone());
+        assert!(request_rx.await.unwrap().starts_with("POST /proxy/collections/docs/points/scroll HTTP/1.1\r\n"));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn chroma_metadata_preserves_reserved_names_and_missing_values() {
+        let rows = chroma_get_response_to_rows(&json!({
+            "ids":["a","b","c","d"],"documents":["one","two","three","four"],
+            "distances":[0.1,0.2,0.3,0.4],
+            "metadatas":[{"document":"business","distance":9},null,{"metadata":{"x":1}}]
+        }));
+        assert_eq!(
+            rows[0],
+            json!({"id":"a","document":"one","distance":0.1,"metadata":{"document":"business","distance":9}})
+        );
+        assert_eq!(rows[1], json!({"id":"b","document":"two","distance":0.2,"metadata":null}));
+        assert_eq!(rows[2], json!({"id":"c","document":"three","distance":0.3,"metadata":{"metadata":{"x":1}}}));
+        assert_eq!(rows[3], json!({"id":"d","document":"four","distance":0.4}));
+    }
+
+    #[tokio::test]
+    async fn qdrant_request_routes_select_only_their_point_envelopes() {
+        for (query, body, expected_path, flattened) in [
+            (
+                "docs",
+                json!({"result":{"points":[{"id":1,"payload":{"x":2}}]}}),
+                "/collections/docs/points/scroll",
+                true,
+            ),
+            (
+                "POST /collections/docs/points/query\n{\"query\":[0.1]}",
+                json!({"result":{"points":[{"id":1,"payload":{"x":2}}]}}),
+                "/collections/docs/points/query",
+                true,
+            ),
+            (
+                "POST /collections/docs/points\n{\"ids\":[1]}",
+                json!({"result":[{"id":1,"payload":{"x":2}}]}),
+                "/collections/docs/points",
+                true,
+            ),
+            (
+                "POST /collections/docs/points/search\n{\"vector\":[0.1]}",
+                json!({"result":[{"id":1,"payload":{"x":2}}]}),
+                "/collections/docs/points/search",
+                true,
+            ),
+            (
+                "POST /collections/docs/points/recommend\n{\"positive\":[1]}",
+                json!({"result":[{"id":1,"payload":{"x":2}}]}),
+                "/collections/docs/points/recommend",
+                true,
+            ),
+            (
+                "POST /collections/docs/points/discover\n{\"target\":1}",
+                json!({"result":[{"id":1,"payload":{"x":2}}]}),
+                "/collections/docs/points/discover",
+                true,
+            ),
+            (
+                "POST /collections/docs/points/custom\n{}",
+                json!({"result":[{"id":1,"payload":{"x":2}}]}),
+                "/collections/docs/points/custom",
+                false,
+            ),
+        ] {
+            let (url, request_rx, server) = spawn_recording_json_response_server(body).await;
+            let client = VectorClient::new(VectorDbKind::Qdrant, &url, None, None, false, Duration::from_secs(1));
+            let result = execute_rest_query(&client, query).await.unwrap();
+            let request = request_rx.await.unwrap();
+            assert!(request.starts_with(&format!("POST {expected_path} HTTP/1.1\r\n")));
+            let row = first_row(&result);
+            assert_eq!(row.contains_key("x"), flattened);
+            assert_eq!(row.contains_key("payload"), !flattened);
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn weaviate_rest_and_graphql_same_named_properties_remain_distinct() {
+        let (url, request_rx, server) = spawn_recording_json_response_server(json!({
+            "objects":[{"id":"a","properties":{"title":"REST"}}]
+        }))
+        .await;
+        let client = VectorClient::new(VectorDbKind::Weaviate, &url, None, None, false, Duration::from_secs(1));
+        let rest = execute_rest_query(&client, "GET /v1/objects?class=Article&limit=1").await.unwrap();
+        assert_eq!(first_row(&rest), json!({"id":"a","title":"REST"}).as_object().unwrap().clone());
+        assert!(request_rx.await.unwrap().starts_with("GET /v1/objects?class=Article&limit=1 HTTP/1.1\r\n"));
+        server.await.unwrap();
+
+        let (url, request_rx, server) = spawn_recording_json_response_server(json!({
+            "data":{"Get":{"Article":[{"properties":{"title":"business"},"_additional":{"id":"system"}}]}}
+        }))
+        .await;
+        let client = VectorClient::new(VectorDbKind::Weaviate, &url, None, None, false, Duration::from_secs(1));
+        let graphql = execute_rest_query(
+            &client,
+            "POST /v1/graphql\n{\"query\":\"{ Get { Article { properties _additional { id } } } }\"}",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            first_row(&graphql),
+            json!({"properties":{"title":"business"},"id":"system"}).as_object().unwrap().clone()
+        );
+        let request = request_rx.await.unwrap();
+        assert!(request.starts_with("POST /v1/graphql HTTP/1.1\r\n"));
+        assert_eq!(
+            serde_json::from_str::<Value>(request.split("\r\n\r\n").nth(1).unwrap()).unwrap(),
+            json!({"query":"{ Get { Article { properties _additional { id } } } }"})
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn chroma_query_and_direct_documents_preserve_metadata_conflicts() {
+        let body = json!({"ids":["a"],"documents":["body"],"metadatas":[{"id":"business","payload":{"x":1}}]});
+        let (url, request_rx, server) = spawn_recording_json_response_server(body.clone()).await;
+        let client = VectorClient::new(VectorDbKind::ChromaDb, &url, None, None, false, Duration::from_secs(1));
+        let result = execute_rest_query(&client, "docs").await.unwrap();
+        assert_eq!(
+            first_row(&result),
+            json!({"id":"a","document":"body","metadata":{"id":"business","payload":{"x":1}}})
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+        assert!(request_rx.await.unwrap().starts_with(
+            "POST /api/v2/tenants/default_tenant/databases/default_database/collections/docs/get HTTP/1.1\r\n"
+        ));
+        server.await.unwrap();
+
+        let (url, request_rx, server) = spawn_recording_json_response_server(body).await;
+        let client = VectorClient::new(VectorDbKind::ChromaDb, &url, None, None, false, Duration::from_secs(1));
+        let docs = find_documents(&client, "", "docs", 0, 10).await.unwrap();
+        assert_eq!(
+            docs.documents,
+            vec![json!({"id":"a","document":"body","metadata":{"id":"business","payload":{"x":1}}})]
+        );
+        assert!(request_rx.await.unwrap().starts_with(
+            "POST /api/v2/tenants/default_tenant/databases/default_database/collections/docs/get HTTP/1.1\r\n"
+        ));
+        server.await.unwrap();
+    }
 
     async fn spawn_json_response_server(body: Value) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1093,6 +1501,7 @@ mod tests {
         assert_eq!(
             rest_query_result(
                 VectorDbKind::Milvus,
+                ResponseOrigin::Generic,
                 200,
                 json!({ "code": 1100, "message": "field kind does not exist" }),
                 Instant::now()
@@ -1100,15 +1509,74 @@ mod tests {
             .unwrap_err(),
             "Milvus error (code 1100): field kind does not exist"
         );
-        assert!(rest_query_result(VectorDbKind::Milvus, 200, json!({ "code": 0 }), Instant::now()).is_ok());
         assert!(rest_query_result(
             VectorDbKind::Milvus,
+            ResponseOrigin::Generic,
+            200,
+            json!({ "code": 0 }),
+            Instant::now()
+        )
+        .is_ok());
+        assert!(rest_query_result(
+            VectorDbKind::Milvus,
+            ResponseOrigin::Generic,
             200,
             json!({ "code": 200, "data": ["kb_vectors"] }),
             Instant::now()
         )
         .is_ok());
-        assert!(rest_query_result(VectorDbKind::Milvus, 200, json!({ "data": [] }), Instant::now()).is_ok());
+        assert!(rest_query_result(
+            VectorDbKind::Milvus,
+            ResponseOrigin::Generic,
+            200,
+            json!({ "data": [] }),
+            Instant::now()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn retains_json_encoded_milvus_payload_from_successful_rest_response() {
+        let payload = r#"{"kind":"order", "count":2}"#;
+        let result = rest_query_result(
+            VectorDbKind::Milvus,
+            ResponseOrigin::Generic,
+            200,
+            json!({ "code": 200, "data": [{ "id": 42, "payload": payload }] }),
+            Instant::now(),
+        )
+        .unwrap();
+
+        let payload_column =
+            result.columns.iter().position(|column| column == "payload").expect("Milvus payload column");
+        assert_eq!(result.rows[0][payload_column], json!(payload));
+    }
+
+    #[test]
+    fn retains_milvus_payload_values_and_properties_without_flattening() {
+        for payload in [json!({ "nested": { "value": 7 } }), Value::Null, json!([1, "two"]), json!(3), json!(true)] {
+            let properties = json!({ "title": "schema field" });
+            let result = rest_query_result(
+                VectorDbKind::Milvus,
+                ResponseOrigin::Generic,
+                200,
+                json!({
+                    "code": 200,
+                    "data": [{ "id": 42, "payload": payload, "properties": properties }]
+                }),
+                Instant::now(),
+            )
+            .unwrap();
+
+            let payload_column =
+                result.columns.iter().position(|column| column == "payload").expect("Milvus payload column");
+            let properties_column =
+                result.columns.iter().position(|column| column == "properties").expect("Milvus properties column");
+            assert_eq!(result.rows[0][payload_column], payload);
+            assert_eq!(result.rows[0][properties_column], properties);
+            assert!(!result.columns.contains(&"nested".to_string()));
+            assert!(!result.columns.contains(&"title".to_string()));
+        }
     }
 
     #[tokio::test]
@@ -1186,11 +1654,17 @@ mod tests {
 
     #[test]
     fn flattens_qdrant_payload_columns() {
-        let result =
-            values_to_query_result(vec![json!({"id": 1, "score": 0.9, "payload": {"title": "hello"}})], Instant::now());
+        let result = json_to_query_result(
+            VectorDbKind::Qdrant,
+            ResponseOrigin::QdrantPointsObject,
+            200,
+            json!({"result":{"points":[{"id": 1, "score": 0.9, "payload": {"title": "hello"}}]}}),
+            Instant::now(),
+        );
         assert!(result.columns.contains(&"id".to_string()));
         assert!(result.columns.contains(&"score".to_string()));
         assert!(result.columns.contains(&"title".to_string()));
+        assert!(!result.columns.contains(&"payload".to_string()));
     }
 
     #[test]
@@ -1308,13 +1782,38 @@ mod tests {
 
     #[test]
     fn flattens_weaviate_properties_columns() {
-        let result = values_to_query_result(
-            vec![json!({"id": "abc", "class": "Article", "properties": {"title": "hello"}})],
+        let result = json_to_query_result(
+            VectorDbKind::Weaviate,
+            ResponseOrigin::WeaviateRestObjects,
+            200,
+            json!({"objects":[{"id": "abc", "class": "Article", "properties": {"title": "hello"}}]}),
             Instant::now(),
         );
         assert!(result.columns.contains(&"id".to_string()));
         assert!(result.columns.contains(&"class".to_string()));
         assert!(result.columns.contains(&"title".to_string()));
+        assert!(!result.columns.contains(&"properties".to_string()));
+    }
+
+    #[test]
+    fn only_confirmed_wrappers_flatten_once() {
+        let qdrant = json_to_query_result(
+            VectorDbKind::Qdrant,
+            ResponseOrigin::QdrantPointsList,
+            200,
+            json!({"result":[{"id":1,"payload":{"properties":{"x":2}}}]}),
+            Instant::now(),
+        );
+        assert_eq!(first_row(&qdrant), json!({"id":1,"properties":{"x":2}}).as_object().unwrap().clone());
+
+        let weaviate = json_to_query_result(
+            VectorDbKind::Weaviate,
+            ResponseOrigin::WeaviateRestObjects,
+            200,
+            json!({"objects":[{"id":"a","properties":{"payload":{"x":2}}}]}),
+            Instant::now(),
+        );
+        assert_eq!(first_row(&weaviate), json!({"id":"a","payload":{"x":2}}).as_object().unwrap().clone());
     }
 
     #[test]

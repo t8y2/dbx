@@ -131,7 +131,6 @@ import {
   isVectorDbType,
   isValidActionForMode,
   isAutoActionSelection,
-  defaultActionForMode,
   type AiAction,
   type AiActionSelection,
   type AiAssistantMode,
@@ -248,6 +247,8 @@ import { saveTextFile } from "@/lib/export/saveTextFile";
 import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
 import { buildAiConversationExport, type AiConversationExportFormat } from "@/lib/export/aiConversationExport";
 import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from "@/lib/ai/aiConversationSearch";
+import { applyCapabilities, resolveConversationPicker, resolveDefaultPickerAction, type AiPickerAmbient, type AiPickerConversationRecord, type AiPickerSelection } from "@/lib/ai/aiConversationPicker";
+import { createAiConversationPickerController } from "@/lib/ai/aiConversationPickerState";
 import AiAttachmentCard from "@/components/editor/AiAttachmentCard.vue";
 import AiToolApprovalCard from "@/components/editor/AiToolApprovalCard.vue";
 import { resolveAiMessageCopyText } from "@/lib/ai/aiMessageCopy";
@@ -410,13 +411,13 @@ const draftPluginContext = ref<AiPluginContext>();
 const pluginContext = computed(() => pluginContextFromMessages(messages.value) ?? draftPluginContext.value);
 const isGenerating = ref(false);
 const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
-// Stays a concrete action until the AI config loads: whether new conversations
-// land on the `auto` entry is decided by the Settings > AI toggle (see
-// `resolveDefaultActionSelection`).
-const activeAction = ref<AiActionSelection>("general");
 /** True while the Auto slow path (intent classifier) is in flight for the visible conversation. */
 const routingInFlight = ref(false);
-const assistantMode = ref<AiAssistantMode>("ask");
+// The Ask/Agent mode + action picker is created further down, once the binding
+// and plugin computeds it reads exist — reading `boundConnection` during setup
+// would throw a TDZ ReferenceError. It exposes the `assistantMode` /
+// `activeAction` refs this file has always used.
+//
 // The selection is loaded asynchronously. Apply it once when this panel mounts,
 // but do not let later setting changes alter an active conversation.
 let defaultModeInitialized = false;
@@ -464,27 +465,189 @@ function canUsePluginAgentMode(context = pluginContext.value, connection = bound
   return !context || !!connection;
 }
 
-watch(
-  [pluginContext, boundConnection],
-  ([context, connection]) => {
-    if (context && !connection && assistantMode.value === "agent") assistantMode.value = "ask";
+/**
+ * Ambient capabilities the mode/action selection has to be legal in, read lazily
+ * so a connection change, a settings toggle or a plugin context refresh applies
+ * on the next resolution without rebuilding the picker (R5/R10).
+ */
+function pickerAmbientFor(connection: ConnectionConfig | undefined, isPluginConversation: boolean): AiPickerAmbient {
+  return {
+    defaultMode: settings.defaultAiMode,
+    defaultAutoRouting: settings.defaultAutoRouting,
+    // Ongoing permission rather than a snapshot: the choice survives, the UI just
+    // cannot offer it. `pluginSession` mirrors `showActionButtons`'s first branch.
+    vectorDb: !!connection && isVectorDbType(connection.db_type),
+    pluginSession: isPluginConversation,
+    pluginWithoutConnection: isPluginConversation && !connection,
+  };
+}
+
+/** Ambient for the conversation on screen. */
+function pickerAmbient(): AiPickerAmbient {
+  return pickerAmbientFor(boundConnection.value, !!pluginContext.value);
+}
+
+/**
+ * The Ask/Agent mode + action picker (#12075). It owns both values as a pair, so
+ * restoring a conversation's own selection cannot be undone by the mode reset —
+ * see `aiConversationPickerState.ts` for why that used to happen and how the
+ * reset is kept for a genuine mode switch.
+ *
+ * `raw` belongs to the conversation: `onUserSelection` records a real picker
+ * operation (or an entry point that explicitly asks for a mode/action) while a
+ * restore and a capability limit only move the shown values (R9).
+ */
+const picker = createAiConversationPickerController({
+  ambient: pickerAmbient,
+  onUserSelection: (selection) => {
+    conversationPickerSelections.set(pickerSelectionKey(), selection);
+    // A pick has to reach disk right away, not at the next send: switching to
+    // another conversation and closing the panel both unmount/leave this chat
+    // without a save, so a choice held only in memory is exactly the "my
+    // selection was forgotten" symptom (#12075). `persistConversation` writes the
+    // live transcript, so the save cannot clobber a newer run snapshot with the
+    // stale list copy. A draft with no messages yet saves nothing — its pick
+    // rides the first snapshot that creates the record (R4).
+    if (conversationId.value) void persistConversation();
   },
-  { immediate: true },
-);
+});
+/** The shown mode; the next send uses it. */
+const assistantMode = picker.mode;
+/** The shown action entry (`auto` included); the next send resolves it (#9118). */
+const activeAction = picker.action;
+
+/**
+ * Which picker selection each conversation recorded, `raw` only — a capability
+ * limit never lands here (R9). Keyed by `skillStateKey`'s convention: a persisted
+ * conversation's id, or the single unsaved-chat slot, which `clearMessages()`
+ * rotates so two unsaved drafts can never trade values (R4). In-memory on
+ * purpose: the values are persisted onto the conversation record (see
+ * `pickerSnapshotFor`), and this map is what lets a chat with no record yet keep
+ * its choice until the first snapshot writes it.
+ */
+const conversationPickerSelections = createReactiveMap(new Map<string, AiPickerSelection>());
+
+/** Key the shown conversation's selection is filed under. */
+function pickerSelectionKey(): string {
+  return conversationId.value || unsavedConversationKey.value;
+}
+
+/** The reported `raw` values for one conversation record, if it has any. */
+function pickerRecordFor(conversation: AiConversation | undefined): AiPickerConversationRecord {
+  if (!conversation) return {};
+  return {
+    assistantMode: conversation.assistantMode,
+    assistantAction: conversation.assistantAction,
+    // R10 read priority: the legacy plugin field is only a fallback source, and
+    // the persisted plugin context lives on the RECORD (`plugin_context_json`).
+    // `AiChatMessage` never carried it — the panel rebuilds the message-level
+    // context from this field when it loads a transcript.
+    pluginContextMode: conversation.pluginContext?.mode,
+  };
+}
+
+/**
+ * The picker selection another conversation owns — its recorded values resolved
+ * through the R9 table, or an in-memory pick that has not been persisted yet.
+ *
+ * Capabilities are derived from THAT conversation's binding, not the visible
+ * one: a background retry of a vector-DB chat must be locked to `generate` even
+ * while a SQL editor is on screen (R7).
+ */
+function conversationPickerSelectionFor(convId: string): AiPickerSelection {
+  const conversation = conversations.value.find((item) => item.id === convId);
+  const connection = conversation?.connectionId ? connectionStore.getConfig(conversation.connectionId) : undefined;
+  const ambient = pickerAmbientFor(connection, !!pickerRecordFor(conversation).pluginContextMode || !!conversation?.pluginContext);
+  const pending = conversationPickerSelections.get(convId);
+  if (pending) return applyCapabilities(pending, ambient);
+  return resolveConversationPicker(pickerRecordFor(conversation), ambient).effective;
+}
+
+/**
+ * The picker values to persist with `targetConversationId`.
+ *
+ * Only a real picker operation is stored: the in-memory map first (a chat whose
+ * record does not exist yet, or one just picked), then the conversation's own
+ * recorded values — never `effective`. A vector DB or a disconnected plugin chat
+ * shows a degraded combination, and writing that back would silently replace the
+ * user's own choice (R9/R10).
+ */
+function pickerSnapshotFor(targetConversationId: string): { assistantMode?: string; assistantAction?: string } {
+  const selection = conversationPickerSelections.get(targetConversationId);
+  if (selection) return { assistantMode: selection.mode, assistantAction: selection.action };
+  const existing = conversations.value.find((conversation) => conversation.id === targetConversationId);
+  return { assistantMode: existing?.assistantMode, assistantAction: existing?.assistantAction };
+}
+
+/**
+ * Restores the shown conversation's own picker selection (R2), with the R9
+ * capability replay and the R10 read priority.
+ *
+ * `selectConversation` calls this after `conversationId` has moved, so both the
+ * record read and any in-memory pick belong to the arriving conversation. A
+ * read never records anything: an old record's fallback (settings default, or
+ * `pluginContext.mode` for a plugin chat) stays implicit instead of being
+ * promoted into the new columns (R10's "no double write").
+ */
+function restoreConversationPicker(conv: AiConversation) {
+  const resolution = resolveConversationPicker(pickerRecordFor(conv), pickerAmbient());
+  const pending = conversationPickerSelections.get(conv.id);
+  picker.restore(pending ? applyCapabilities(pending, pickerAmbient()) : resolution.effective);
+}
+
+/**
+ * Re-derives the shown pair after a capability changed — a plugin conversation's
+ * connection appearing or going away, a rebind to or from a vector DB.
+ *
+ * A capability limit belongs to `effective` alone, so when the environment
+ * changes the shown pair has to be recomputed from the conversation's own
+ * recording. A one-way degradation would strand the panel on the degraded value:
+ * `send()` reads the shown mode, so a connection that merely blipped would keep
+ * an Agent conversation in Ask for the rest of the session. `raw` is never
+ * touched, so the user's own choice is what comes back (R5/R9).
+ */
+function reapplyPickerCapabilities() {
+  const pending = conversationPickerSelections.get(pickerSelectionKey());
+  if (pending) {
+    picker.restore(applyCapabilities(pending, pickerAmbient()));
+    return;
+  }
+  const conversation = activeConversation.value;
+  if (conversation) {
+    picker.restore(resolveConversationPicker(pickerRecordFor(conversation), pickerAmbient()).effective);
+    return;
+  }
+  // A draft with no pick of its own keeps the new-chat default it already shows,
+  // constrained by the new capability (a vector DB still forces `generate`).
+  picker.restore(applyCapabilities({ mode: assistantMode.value, action: activeAction.value }, pickerAmbient()));
+}
+
+/**
+ * Moves the unsaved chat's picker selection onto the id it just adopted, exactly
+ * like `migrateUnsavedSkillState` does for skills: `send()` mints the id and
+ * reads the selection in the same tick, while the id watcher flushes later (R4).
+ */
+function migrateUnsavedPickerSelection(id: string) {
+  const unsavedKey = unsavedConversationKey.value;
+  if (!id || !unsavedKey || unsavedKey === id) return;
+  const selection = conversationPickerSelections.get(unsavedKey);
+  if (!selection) return;
+  conversationPickerSelections.delete(unsavedKey);
+  conversationPickerSelections.set(id, selection);
+}
 
 // `immediate` runs this during setup whenever the AI config finished loading
 // before the panel mounted (the usual case: the app loads it at startup), and
-// `resolveDefaultActionSelection` reads `boundConnection`. It must therefore
-// stay below the binding computeds, or setup throws a TDZ ReferenceError and
-// the panel never mounts.
+// the ambient it reads uses `boundConnection`. It must therefore stay below the
+// binding computeds, or setup throws a TDZ ReferenceError and the panel never
+// mounts.
 watch(
   () => settings.isAiConfigLoaded,
   (loaded) => {
     if (loaded && !defaultModeInitialized) {
-      assistantMode.value = settings.defaultAiMode;
-      // Same apply-once rule as the mode: later setting changes must not
-      // disturb an active conversation.
-      activeAction.value = resolveDefaultActionSelection(settings.defaultAiMode);
+      // The picker's mode watch lands the action on the same default entry this
+      // always used (`auto` when Settings > AI says so, #9118) — R3 unchanged.
+      picker.restoreDefault();
       defaultModeInitialized = true;
     }
   },
@@ -764,6 +927,18 @@ function loadedSkillIdFromToolResult(result: unknown): string | undefined {
 const unsavedConversationKey = ref(`unsaved:${uuid()}`);
 const skillStateKey = computed(() => conversationId.value || unsavedConversationKey.value);
 
+// A capability can come AND go while a conversation is on screen: the app's
+// connections load after the panel opens, a plugin conversation's connection is
+// added or removed, the user rebinds, or the selected conversation moves between
+// a vector DB and a relational one. Each of those re-derives the shown pair from
+// the conversation's own recording, which is what keeps `effective` equal to
+// capabilities(`raw`) at all times — the mode/action refs have no other writer.
+//
+// `immediate` runs this during setup, so it must stay below everything
+// `reapplyPickerCapabilities` reads — `unsavedConversationKey` included, exactly
+// like the panel-mount default watch further down.
+watch([pluginContext, boundConnection], () => reapplyPickerCapabilities(), { immediate: true });
+
 /**
  * Loaded = this conversation's recorded facts (a model-initiated `use_skill` in
  * one of its runs, a forced load, or the ids restored from its own transcript).
@@ -777,6 +952,25 @@ function recordConversationSkillLoad(key: string, id: string) {
   const loaded = conversationLoadedSkillIds.get(key) ?? [];
   if (loaded.includes(id)) return;
   conversationLoadedSkillIds.set(key, [...loaded, id]);
+}
+
+/**
+ * Drops everything filed under the unsaved chat's slot and moves to a fresh one.
+ *
+ * A draft can never be reopened, so none of its state may outlive it: leaving it
+ * for an existing conversation would otherwise let the abandoned draft's loaded
+ * skills and its recorded mode/action ride into whichever conversation is opened
+ * next (#12075 review — the picker values are persisted, so the leak showed up as
+ * that conversation being re-opened with the draft's selection).
+ */
+function discardUnsavedDraftState() {
+  const unsavedKey = unsavedConversationKey.value;
+  skillHintLatch.value = null;
+  conversationSkillHintSeen.delete(unsavedKey);
+  conversationLoadedSkillIds.delete(unsavedKey);
+  conversationLoadedSkillBodies.delete(unsavedKey);
+  conversationPickerSelections.delete(unsavedKey);
+  unsavedConversationKey.value = `unsaved:${uuid()}`;
 }
 
 /**
@@ -852,13 +1046,23 @@ watch([skillStateKey, () => selectedSkillChips.value.map((chip) => chip.id).join
 // conversation switch: move the unsaved chat's skill state onto the id it just
 // adopted, or the brand-new id would read as a fresh conversation (Req 14) and
 // would lose the bodies a forced load already put in this run's state (Req 13).
+//
+// `previous === ""` alone cannot tell the two apart: opening a conversation from
+// the list also moves the id from `""` to a value. A switch discards the draft
+// instead (`selectConversation`), and this guard keeps the adoption rule honest
+// even if some other path moves the id onto a record that already exists.
 watch(conversationId, (id, previous) => {
   if (previous !== "" || !id) return;
+  if (conversations.value.some((conversation) => conversation.id === id)) return;
   const unsavedKey = unsavedConversationKey.value;
   if (conversationSkillHintSeen.delete(unsavedKey)) conversationSkillHintSeen.add(id);
   const latch = skillHintLatch.value;
   if (latch && latch.key === unsavedKey) skillHintLatch.value = { ...latch, key: id };
   migrateUnsavedSkillState(id);
+  // The picker selection of the unsaved chat moves with it for the same reason:
+  // the new id must not read as a fresh conversation whose selection is unset,
+  // or the first snapshot would persist nothing (#12075 R4).
+  migrateUnsavedPickerSelection(id);
 });
 // The selector's capability state (predicate, gated open state, trigger label)
 // lives below `activeFullConfig`, next to the config it reads.
@@ -1799,50 +2003,27 @@ const isRedisConnection = computed(() => boundConnection.value?.db_type === "red
 
 // Vector DBs hide the action menu and only expose collection tools.
 // Keep their action at `generate` so the task contract doesn't tell the LLM to call execute_query.
+// The same rule as `resolveDefaultPickerAction`'s vector branch: `mode` is
+// accepted for the call sites that have one at hand, but the capability decides.
+// The rebind itself is handled by `reapplyPickerCapabilities`, whose ambient
+// carries the vector-DB flag — including on the way back out, which the old
+// one-way force did not do.
 function resolveDefaultAction(mode: AiAssistantMode): AiAction {
-  if (boundConnection.value && isVectorDbType(boundConnection.value.db_type)) return "generate";
-  return defaultActionForMode(mode);
+  return resolveDefaultPickerAction(mode, pickerAmbient());
 }
 
-// The Settings > AI toggle lets new conversations land on the `auto` picker
-// entry (#9118); routing still resolves to a concrete action before any
-// request. Vector DBs keep the concrete `generate` action because their action
-// menu is hidden entirely.
-function resolveDefaultActionSelection(mode: AiAssistantMode): AiActionSelection {
-  if (settings.defaultAutoRouting && !(boundConnection.value && isVectorDbType(boundConnection.value.db_type))) return "auto";
-  return resolveDefaultAction(mode);
-}
-
-// Switching mode is a deliberate context change: land on that mode's default action so the
-// menu and behavior match the new intent. That default is the mode's concrete action, or
-// `auto` when Settings > AI enables it (#9118).
-//
-// `triggerAction` may set the action itself after programmatically switching mode (e.g. "Fix
-// with AI" invoked from Agent mode); `suppressModeActionReset` tells this watch to skip the
-// default reset so the menu keeps reflecting the action actually being run.
-let suppressModeActionReset = false;
-watch(assistantMode, (mode) => {
-  if (suppressModeActionReset) {
-    suppressModeActionReset = false;
-    return;
-  }
-  activeAction.value = resolveDefaultActionSelection(mode);
-});
-
-watch(
-  () => boundConnection.value?.db_type,
-  () => {
-    // Vector DBs hide the action picker, so keep the hidden action aligned with
-    // the collection-oriented prompt contract on initial render and connection changes.
-    if (boundConnection.value && isVectorDbType(boundConnection.value.db_type)) {
-      activeAction.value = "generate";
-    }
-  },
-  { immediate: true },
-);
+// Switching mode is a deliberate context change: the picker lands the action on
+// that mode's default entry (or `auto`, #9118). That reset lives in the picker
+// controller's own mode watch — the single writer of the pair — so a restore can
+// no longer be undone by it. Capability-driven changes go through
+// `reapplyPickerCapabilities` above; nothing writes the refs from here.
 
 function selectAction(action: AiActionSelection) {
-  activeAction.value = action;
+  // A genuine picker operation: the picker records it as the conversation's own
+  // `raw` value (and applies the capability limit to what is shown). The
+  // controller's mode watch would land on the mode default, so the action is set
+  // through the picker rather than the bare ref.
+  picker.selectAction(action);
   if (action === "fix" && aiContextTarget.value.result) {
     if (isQueryExecutionErrorResult(aiContextTarget.value.result)) {
       const errVal = aiContextTarget.value.result.rows[0]?.[0];
@@ -1864,19 +2045,15 @@ function routedActionOf(message: ChatMessage): AiAction | null {
 }
 
 /**
- * The "Auto · <action>" chip switches the picker to the action that was routed
- * for that message, so the user can keep iterating explicitly. The routed action
- * is always valid in the mode it was routed in; when the panel now stands in the
- * other mode, switch there first (the `suppressModeActionReset` handshake keeps
- * the mode-switch watch from overwriting the action we just set).
+ * The "Auto · <action>" chip switches the picker onto the action the router
+ * resolved for that message, so the user can keep iterating explicitly. The
+ * routed action is always valid in the mode it was routed in; when the panel now
+ * stands in the other mode the pair moves together — the picker owns both refs,
+ * so there is no mode-switch reset to work around.
  */
 function switchToRoutedAction(action: AiAction | null | undefined) {
   if (!action) return;
-  if (!isValidActionForMode(action, assistantMode.value)) {
-    suppressModeActionReset = true;
-    assistantMode.value = isValidActionForMode(action, "ask") ? "ask" : "agent";
-  }
-  activeAction.value = action;
+  picker.select({ mode: isValidActionForMode(action, assistantMode.value) ? assistantMode.value : isValidActionForMode(action, "ask") ? "ask" : "agent", action });
 }
 
 /** Mirrors `buildAiContext`'s `lastError`: only a real failed execution counts. */
@@ -2162,11 +2339,10 @@ const modeActionTriggerLabel = computed(() => {
 
 function switchModeActionTab(mode: "ask" | "agent") {
   if (mode === "agent" && !canUsePluginAgentMode()) return;
-  activeAction.value = resolveDefaultActionSelection(mode);
-  if (assistantMode.value !== mode) {
-    // Set the mode after the action so the tab label and picker stay aligned.
-    assistantMode.value = mode;
-  }
+  // Tab switch = a deliberate context change: the pair moves together (the
+  // picker lands on the new mode's default entry) and is recorded as this
+  // conversation's own selection (#12075).
+  picker.selectMode(mode);
 }
 
 function selectModeActionItem(action: AiActionSelection) {
@@ -3352,7 +3528,7 @@ function selectCommand(command: AiSlashEntry) {
     // textarea already keeps focus; nothing needs to be restored.
     return;
   }
-  activeAction.value = command.button.action;
+  picker.selectAction(command.button.action);
   nextTick(() => {
     const textarea = promptTextareaRef.value;
     if (textarea) {
@@ -3875,10 +4051,20 @@ async function send() {
     startStatusTimer();
   }
   const myGeneration = aiGenerationGuard.begin();
-  if (!auto && !conversationId.value) conversationId.value = uuid();
+  const mintedConversationId = !auto && !conversationId.value;
+  if (mintedConversationId) conversationId.value = uuid();
   // The id was minted a line ago and the watcher has not flushed yet: this send
   // must already read the skill state of the conversation it is now running for.
-  if (!auto) migrateUnsavedSkillState(conversationId.value);
+  // Only on a mint — a send on an id that already has a record must not pull the
+  // (now discarded) draft slot into it.
+  if (mintedConversationId) {
+    migrateUnsavedSkillState(conversationId.value);
+    // Same tick, same reason: this send is already running for the id minted a
+    // line above, so its picker selection has to follow now (the id watcher flushes
+    // later). Without this the first snapshot of a picker-touched new chat would
+    // persist no selection at all (#12075 R4).
+    migrateUnsavedPickerSelection(conversationId.value);
+  }
   const runConversationId = auto ? auto.conversationId : conversationId.value;
   const runMessages = auto ? auto.messages : messages.value;
   const runCreatedAt = new Date().toISOString();
@@ -5146,13 +5332,9 @@ function clearMessages() {
   draftBeforeHistory.value = "";
   recoveredDraftActive.value = false;
   // A new chat is a new conversation, so it gets its own hint identity and a
-  // first hint of its own (Req 14). Its predecessor's skill state is dropped with
-  // it — that chat's id can never come back.
-  skillHintLatch.value = null;
-  conversationSkillHintSeen.delete(unsavedConversationKey.value);
-  conversationLoadedSkillIds.delete(unsavedConversationKey.value);
-  conversationLoadedSkillBodies.delete(unsavedConversationKey.value);
-  unsavedConversationKey.value = `unsaved:${uuid()}`;
+  // first hint of its own (Req 14). Its predecessor's state is dropped with it —
+  // that chat's id can never come back.
+  discardUnsavedDraftState();
   messageRenderer.value.clear();
 }
 
@@ -5226,6 +5408,11 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
     // The conversation's single queued "send later" input, persisted so it
     // survives a restart (parent PRD §5).
     queuedInput: queuedInputs.get(targetConversationId)?.text,
+    // The conversation's own mode + action selection (#12075). `pickerSnapshotFor`
+    // returns the RECORDED values only — never the constrained `effective` pair —
+    // so a vector-DB or disconnected-plugin chat cannot have its degraded
+    // combination written back over the user's own choice (R9).
+    ...pickerSnapshotFor(targetConversationId),
     createdAt,
     updatedAt: new Date().toISOString(),
   };
@@ -5358,6 +5545,10 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
       ...(m.loadedSkillIds?.length ? { loadedSkillIds: [...m.loadedSkillIds] } : {}),
     })),
     queuedInput: conversation.queuedInput,
+    // Recovery must not drop the conversation's own picker selection either
+    // (#12075): this path rewrites the whole record, so the values come from the
+    // same raw source as `buildConversationSnapshot` (never `effective`).
+    ...pickerSnapshotFor(conversation.id),
     createdAt: conversation.createdAt,
     updatedAt,
   };
@@ -5455,6 +5646,11 @@ function selectConversation(conv: AiConversation) {
   // user is leaving behind (parent PRD §8). Uses the VISIBLE count (context
   // summaries are filtered out of rendering) so the anchor matches row indices.
   if (conversationId.value) conversationReadMessageCount.set(conversationId.value, visibleMessages.value.length);
+  // Leaving a draft abandons it — a draft can never be reopened, so its state
+  // must not stay filed under a key a later conversation could read. Dropping it
+  // here keeps an abandoned draft's picker selection and loaded skill ids out of
+  // the conversation being opened (#12075 review).
+  if (!conversationId.value) discardUnsavedDraftState();
   conversationId.value = conv.id;
   // The chosen conversation owns its connection from here on (#9902); any
   // binding staged for the unsaved chat we are leaving is now irrelevant.
@@ -5475,10 +5671,11 @@ function selectConversation(conv: AiConversation) {
   // loaded, so the chips can light up before anything is read again. The bodies
   // come back when a request actually needs them (`rehydrateLoadedSkillBodies`).
   seedLoadedSkillsFromTranscript(conv.id, messages.value);
-  if (pluginContext.value) {
-    assistantMode.value = pluginContext.value.mode === "agent" && !boundConnection.value ? "ask" : (pluginContext.value.mode ?? "ask");
-    activeAction.value = "general";
-  }
+  // The arriving conversation owns its own mode + action selection (#12075):
+  // restore it here rather than leaving the previous chat's picker on screen.
+  // This replaced a plugin-only branch that always forced `general`; the plugin
+  // case is one of the rules `resolveConversationPicker` replays (R9/R10).
+  restoreConversationPicker(conv);
   unreadConversations.delete(conv.id);
   isGenerating.value = activeRun?.status === "preparing" || activeRun?.status === "queued" || activeRun?.status === "running";
   currentSessionId.value = activeRun?.currentSessionId ?? "";
@@ -5590,6 +5787,8 @@ async function performDeleteConversation(id: string) {
   conversationLoadedSkillIds.delete(id);
   conversationLoadedSkillBodies.delete(id);
   conversationSkillHintSeen.delete(id);
+  // Its picker selection goes with it too (#12075): the id can never come back.
+  conversationPickerSelections.delete(id);
   await deleteConversationWithCancellation({
     id,
     currentConversationId: () => conversationId.value,
@@ -5622,10 +5821,10 @@ function startNewChat() {
   clearMessages();
   showConversationList.value = false;
   // A fresh conversation starts from the configured default mode and, when the
-  // Settings > AI toggle says so, from the `auto` picker entry (#9118).
-  const mode = settings.defaultAiMode;
-  assistantMode.value = mode;
-  activeAction.value = resolveDefaultActionSelection(mode);
+  // Settings > AI toggle says so, from the `auto` picker entry (#9118). This is
+  // unchanged by #12075: the picker takes over once the user picks, or once the
+  // conversation is reopened with its own recorded selection.
+  picker.restoreDefault();
 }
 
 /** Send-button dispatcher: with an active run on the visible conversation the
@@ -5642,7 +5841,14 @@ function onSendClick() {
 function queueInput() {
   const text = prompt.value.trim();
   if (!text) return;
-  if (!conversationId.value) conversationId.value = uuid();
+  if (!conversationId.value) {
+    conversationId.value = uuid();
+    // Minted a line above and the id watcher has not flushed yet, so the draft's
+    // selection has to follow now or this snapshot would persist none (same
+    // reason as `send()`, #12075 R4). Only on a mint: moving it for an id that
+    // already has a record is exactly what must not happen.
+    migrateUnsavedPickerSelection(conversationId.value);
+  }
   queuedInputs.set(conversationId.value, { text, mode: assistantMode.value, action: activeAction.value });
   prompt.value = "";
   selectedMentions.value = [];
@@ -5709,7 +5915,11 @@ function retryConversationRun(convId: string) {
     run.cancelRequested = true;
     finishDesktopAiRun(run, "cancelled");
   }
-  scheduleAutoSend(convId, { text, mode: assistantMode.value, action: activeAction.value }, history.slice(0, lastUserIdx), pluginContextFromMessages(history));
+  // The retry belongs to `convId`, not to whatever chat is on screen, so it runs
+  // on THAT conversation's own mode/action (#12075 R7). It is a continuation of
+  // the same request, not a fresh picker operation, so nothing is recorded.
+  const retrySelection = conversationPickerSelectionFor(convId);
+  scheduleAutoSend(convId, { text, mode: retrySelection.mode, action: retrySelection.action }, history.slice(0, lastUserIdx), pluginContextFromMessages(history));
 }
 
 /** Dismisses the "updates while you were away" separator and jumps to the end. */
@@ -5749,9 +5959,13 @@ onMounted(async () => {
   conversations.value = await loadAiConversations().catch(() => []);
   // Restore per-conversation queued "send later" inputs (parent PRD §5) — they
   // are persisted with the conversation and must surface again after a restart.
+  // The queued mode/action belong to the conversation that queued them, not to
+  // whichever chat the panel restores into (#12075 R7); the queued payload is
+  // resolved exactly like a retry would be.
   for (const conversation of conversations.value) {
     if (conversation.queuedInput) {
-      queuedInputs.set(conversation.id, { text: conversation.queuedInput, mode: assistantMode.value, action: activeAction.value });
+      const queuedSelection = conversationPickerSelectionFor(conversation.id);
+      queuedInputs.set(conversation.id, { text: conversation.queuedInput, mode: queuedSelection.mode, action: queuedSelection.action });
     }
   }
   if (backgroundAiRunsEnabled) {
@@ -6085,14 +6299,9 @@ function triggerAction(action: AiAction, instruction?: string) {
   if (pluginContext.value) startNewChat();
   // External Ask-style entry points (Fix with AI, Explain history) produce/analyze SQL text.
   // If the assistant is currently in Agent mode where those actions aren't offered, switch to
-  // Ask mode so the action is valid and the menu reflects what actually runs.
-  if (!isValidActionForMode(action, assistantMode.value)) {
-    // Suppress the mode-switch watch so it doesn't overwrite `action` (set below) with the
-    // Ask default — the menu must reflect the action actually being run.
-    suppressModeActionReset = true;
-    assistantMode.value = "ask";
-  }
-  activeAction.value = action;
+  // Ask mode so the action is valid and the menu reflects what actually runs. The picker moves
+  // both values at once, so the mode no longer resets the action we are about to set.
+  picker.select({ mode: isValidActionForMode(action, assistantMode.value) ? assistantMode.value : "ask", action });
   if (instruction) prompt.value = instruction;
   send();
 }
@@ -6105,8 +6314,12 @@ function openPluginConversation(request: AiPluginConversationRequest) {
   const pluginConnectionId = pluginContextConnectionId(request.context);
   const pluginConnection = pluginConnectionId ? connectionStore.getConfig(pluginConnectionId) : undefined;
   draftBinding.value = pluginConnection ? { connectionId: pluginConnection.id, connectionName: pluginConnection.name, database: "", schema: undefined } : null;
-  assistantMode.value = request.mode === "agent" && !pluginConnection ? "ask" : (request.mode ?? request.context.mode ?? "ask");
-  activeAction.value = "general";
+  // The plugin request names a mode explicitly, so this is a user-level choice
+  // and is recorded as this conversation's own selection. The recorded value is
+  // what the plugin ASKED for, not the constrained one: a plugin chat with no
+  // connection degrades to `ask` / `general` in `effective` only, so connecting
+  // later brings the requested Agent mode back (R9/AC6).
+  picker.select({ mode: request.mode ?? request.context.mode ?? "ask", action: "general" });
   setPrompt(request.prompt, true);
   if (request.send) void send();
 }

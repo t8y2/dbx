@@ -1442,6 +1442,17 @@ export interface AiConversation {
   /** One editable "send later" input saved while an active run occupies the
    *  conversation (parent PRD §5). Persisted with the conversation. */
   queuedInput?: string;
+  /** Ask/Agent mode the user picked for THIS conversation (#12075). Written
+   *  only by a picker operation, so a capability limit (vector DB, plugin
+   *  without a connection) never replaces it. Absent means "never picked": the
+   *  panel then falls back to the plugin context's mode and the settings
+   *  default. Plain string on purpose — a future mode must not need a schema
+   *  migration, so unknown values are validated in the frontend instead. */
+  assistantMode?: string;
+  /** Picker action entry for this conversation, `auto` included (#9118 / R8):
+   *  the record keeps the ENTRY the user chose, not the action a send routed
+   *  to. Same semantics as `assistantMode`. */
+  assistantAction?: string;
   createdAt: string;
   updatedAt: string;
 }

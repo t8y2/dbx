@@ -694,6 +694,24 @@ pub struct AiConversation {
     /// survives a restart and is restored when the conversation reopens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_input: Option<String>,
+    /// Ask/Agent mode the user picked for THIS conversation (#12075), written
+    /// only when the user operates the picker.
+    ///
+    /// Plain string, not an enum, and deliberately so: a future mode must not
+    /// need a schema migration, and the frontend validates unknown values back
+    /// down to `settings.defaultAiMode` (R9's fail-open, mirroring DBeaver's
+    /// unknown-`promptGeneratorId` fallback). `None` means "the user never
+    /// picked", which the frontend resolves through `pluginContext.mode` and then
+    /// the settings default — the capability limits (vector DB, plugin without a
+    /// connection) never write back here, so the user's own choice survives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_mode: Option<String>,
+    /// Picker action for this conversation, including the UI-only `auto` entry
+    /// (#9118 / R8): the record stores the ENTRY the user chose, not the action a
+    /// send happened to route to. Same string/`None` semantics as
+    /// [`AiConversation::assistant_mode`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_action: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

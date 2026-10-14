@@ -741,7 +741,11 @@ pub(super) fn build_add_column_sql(
     if supports_comments
         && matches!(
             dialect,
-            StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Oscar
+            StructureDialect::Postgres
+                | StructureDialect::Oracle
+                | StructureDialect::Dameng
+                | StructureDialect::Oscar
+                | StructureDialect::SapHana
         )
         && !clean(&column.comment).is_empty()
     {

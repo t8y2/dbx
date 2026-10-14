@@ -1343,13 +1343,23 @@ export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureT
     timing: trigger.timing,
     event: trigger.event,
     statement: trigger.statement ?? "",
+    enabled: trigger.enabled ?? undefined,
     original: trigger,
     markedForDrop: false,
   }));
 }
 
 export function canEditStructuredTriggerDraft(databaseType: DatabaseType | undefined, trigger: EditableStructureTrigger): boolean {
-  return !trigger.original || (databaseType !== undefined && databaseType !== "oracle");
+  if (!trigger.original) return true;
+  if (databaseType === undefined) return false;
+  // The Oracle driver keeps the `TRIGGER ...` declaration when the source has clauses (WHEN,
+  // REFERENCING, FOLLOWS, ...) that the timing/event/body form would drop on CREATE OR REPLACE.
+  return databaseType !== "oracle" || isStructuredOracleTriggerSource(trigger.original.statement);
+}
+
+function isStructuredOracleTriggerSource(statement: string | null | undefined): boolean {
+  const source = statement?.trim() ?? "";
+  return source !== "" && !/^(?:CREATE\s+(?:OR\s+REPLACE\s+)?)?(?:(?:EDITIONABLE|NONEDITIONABLE)\s+)?TRIGGER\b/i.test(source);
 }
 
 export function toColumnNames(columns: string[]): string {

@@ -298,6 +298,7 @@ const sapHanaCapabilities = capabilities({
   alterType: true,
   alterNullability: true,
   alterDefault: true,
+  comment: true,
 });
 
 // Inceptor accepts ADD COLUMNS and CHANGE. DROP COLUMN and index/constraint DDL

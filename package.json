@@ -41,7 +41,7 @@
     "bench:sidebar-large-schema": "vitest bench apps/desktop/src/lib/sidebar/sidebarLargeSchema.bench.ts",
     "bench:startup": "node --import tsx scripts/bench/startup-bundle.mjs",
     "bench:table-import": "cargo run -p dbx-core --no-default-features --example table_import_bench --release --",
-    "lint": "oxlint --vue-plugin apps/desktop/src",
+    "lint": "oxlint --vue-plugin apps/desktop/src --max-warnings=61",
     "fmt": "oxfmt \"apps/desktop/src/**/*.{ts,vue}\"",
     "pretest": "pnpm generate:connection-types",
     "test": "vitest run",

@@ -139,7 +139,7 @@ const SELECTION_DECIMAL_MAX_SCALE = 400;
 const SELECTION_FORMAT_MAX_FRACTION_DIGITS = 100;
 const DECIMAL_TEXT_PATTERN = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/;
 
-interface ExactDecimal {
+export interface ExactDecimal {
   coefficient: bigint;
   scale: number;
 }
@@ -184,6 +184,13 @@ function rescaleDecimal(value: ExactDecimal, scale: number): bigint {
   return value.scale === scale ? value.coefficient : value.coefficient * 10n ** BigInt(scale - value.scale);
 }
 
+/** Adds a cell to an exact running total; `resolved` is the number the cell counts as. */
+export function addExactSelectionValue(sum: ExactDecimal, value: GridCellValue, resolved: number): ExactDecimal {
+  const exact = exactSelectionValue(value, resolved);
+  const scale = Math.max(sum.scale, exact.scale);
+  return { coefficient: rescaleDecimal(sum, scale) + rescaleDecimal(exact, scale), scale };
+}
+
 /** Integer division rounding half away from zero, as MySQL rounds DECIMAL results. */
 function divideRoundHalfAwayFromZero(numerator: bigint, denominator: bigint): bigint {
   const negative = numerator < 0n !== denominator < 0n;
@@ -194,7 +201,7 @@ function divideRoundHalfAwayFromZero(numerator: bigint, denominator: bigint): bi
   return negative ? -rounded : rounded;
 }
 
-function exactDecimalText(value: ExactDecimal): string {
+export function exactDecimalText(value: ExactDecimal): string {
   const negative = value.coefficient < 0n;
   const digits = (negative ? -value.coefficient : value.coefficient).toString().padStart(value.scale + 1, "0");
   const integerPart = digits.slice(0, digits.length - value.scale);
@@ -213,9 +220,7 @@ export function summarizeSelection(selection: SelectionData, options: SelectionS
       const resolved = numericValue(value);
       if (resolved === undefined || !Number.isFinite(resolved)) continue;
       numericCount += 1;
-      const exact = exactSelectionValue(value, resolved);
-      const scale = Math.max(sum.scale, exact.scale);
-      sum = { coefficient: rescaleDecimal(sum, scale) + rescaleDecimal(exact, scale), scale };
+      sum = addExactSelectionValue(sum, value, resolved);
     }
   }
 

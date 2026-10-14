@@ -250,7 +250,7 @@ function stubResizeObserver(): Array<{ callback: ResizeObserverCallback; targets
 async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig, configureSettings?: (settings: ReturnType<typeof useSettingsStore>) => void, pluginRecommendations?: PluginAiRecommendationHostUpdate, extraConnections: ConnectionConfig[] = []) {
   const pinia = createPinia();
   const errors: unknown[] = [];
-  const panelRef = ref<{ openExternalContext: (request: AiExternalContextRequest) => void } | null>(null);
+  const panelRef = ref<{ openExternalContext: (request: AiExternalContextRequest) => void; selectConversationById: (convId: string) => void } | null>(null);
   const app = createApp({ render: () => h(TooltipProvider, () => h(AiAssistant, { ref: panelRef, connection, pluginRecommendations })) });
   app.use(pinia);
   app.use(i18n);
@@ -269,7 +269,7 @@ async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig
   });
   // Let mount-time loads settle so their failures surface here too.
   await new Promise((resolve) => setTimeout(resolve, 20));
-  return { errors, container, panelRef };
+  return { errors, container, panelRef, pinia };
 }
 
 describe("AiAssistant mount", () => {
@@ -863,6 +863,81 @@ describe("AiAssistant mount", () => {
   }
 
   const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  // #12075 review: a draft can never be reopened, so its picker selection must not
+  // travel into a conversation opened from the list. The leak only surfaced one
+  // step later — reopening that conversation showed the abandoned draft's pick
+  // instead of the value it had recorded.
+  it("does not hand an abandoned draft's picker selection to a conversation opened from the list", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-b", connectionId: "", database: "", connectionName: "", assistantMode: "ask", assistantAction: "optimize" }), storedConversation({ id: "conv-c", connectionId: "", database: "", connectionName: "" })];
+    const { errors, container, panelRef } = await mountPanel(true, undefined, (settings) => {
+      configureAiPanel(settings);
+      // Nothing is restored, so the panel opens on a draft (conversationId "").
+      settings.restoreLastConversation = false;
+    });
+    expect(errors.map(String)).toEqual([]);
+
+    const modeTrigger = () => container.querySelector<HTMLButtonElement>(".ai-mode-action-trigger")!;
+    // Pick Agent on the draft. It has no id yet, so nothing may be persisted.
+    modeTrigger().click();
+    await settle();
+    Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'))
+      .find((button) => button.textContent?.trim() === i18n.global.t("ai.modes.agent"))!
+      .click();
+    await settle();
+    expect(modeTrigger().textContent).toContain(i18n.global.t("ai.modes.agent"));
+    expect(aiAssistantMountApi.savedConversations).toEqual([]);
+
+    // Open a stored conversation, leave it, and come back to it.
+    panelRef.value!.selectConversationById("conv-b");
+    await settle();
+    expect(modeTrigger().textContent).toContain(i18n.global.t("ai.actions.optimize"));
+    panelRef.value!.selectConversationById("conv-c");
+    await settle();
+    panelRef.value!.selectConversationById("conv-b");
+    await settle();
+
+    // B still shows what B recorded: the abandoned draft's Agent pick is gone.
+    expect(modeTrigger().textContent).toContain(i18n.global.t("ai.actions.optimize"));
+    expect(modeTrigger().textContent).not.toContain(i18n.global.t("ai.modes.agent"));
+    expect(aiAssistantMountApi.savedConversations).toEqual([]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #12075: a capability that comes back must restore the conversation's own
+  // recording. The app's connections load after the panel opens, so a plugin
+  // conversation can legitimately be on screen with no resolvable connection and
+  // has to recover Agent mode once the connection is there. A one-way downgrade
+  // stranded it on Ask, and `send()` reads the shown mode — so an Agent
+  // conversation would keep sending as Ask for the rest of the session.
+  it("restores a plugin conversation's recorded Agent mode when its connection becomes available", async () => {
+    aiAssistantMountApi.conversations = [
+      storedConversation({
+        id: "conv-plugin",
+        connectionId: "postgres",
+        connectionName: "PostgreSQL",
+        assistantMode: "agent",
+        assistantAction: "general",
+        pluginContext: { pluginId: "sample.plugin", pluginName: "Sample", title: "Cluster", capturedAt: "2026-09-27T00:00:00.000Z", data: { connectionId: "postgres" } },
+      }),
+    ];
+    // No connection registered yet: the panel opens before the connections load.
+    const { errors, container, pinia } = await mountPanel(true, undefined, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    await settle();
+    const modeTrigger = () => container.querySelector<HTMLButtonElement>(".ai-mode-action-trigger")!;
+    // Degraded: without a connection this plugin conversation cannot offer Agent.
+    expect(modeTrigger().textContent).toContain(i18n.global.t("ai.modes.ask"));
+
+    useConnectionStore(pinia).connections = [POSTGRES];
+    await settle();
+
+    // The connection arrived: the recorded Agent mode comes back on its own.
+    expect(modeTrigger().textContent).toContain(i18n.global.t("ai.modes.agent"));
+    expect(errors.map(String)).toEqual([]);
+  });
 
   it("reuses the chat already on the selection's namespace and attaches the chip there", async () => {
     aiAssistantMountApi.conversations = [storedConversation({ id: "conv-b", connectionId: "postgres", database: "app", connectionName: "PostgreSQL" })];

@@ -14,16 +14,6 @@ function fileWith(editor: Record<string, unknown>, overrides: Record<string, unk
 }
 
 describe("settingsTransfer", () => {
-  it("round-trips the Redis preview limit as a data setting and rejects unsafe imports", () => {
-    const result = parseSettingsTransferFile(fileWith({ redisValuePreviewLimitKiB: 256 }));
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value.editorSettings.redisValuePreviewLimitKiB).toBe(256);
-    expect(transferCategoryForKey("redisValuePreviewLimitKiB")).toBe("data");
-    for (const value of [0, 65537, "256", 1.5]) {
-      expect(parseSettingsTransferFile(fileWith({ redisValuePreviewLimitKiB: value })).ok).toBe(false);
-    }
-  });
-
   it("round-trips an opt-out of comment-first result names and rejects non-booleans", () => {
     const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, resultTabPreferComments: false });
     const result = parseSettingsTransferFile(text);

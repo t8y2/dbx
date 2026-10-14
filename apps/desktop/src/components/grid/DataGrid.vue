@@ -949,7 +949,7 @@ function currentColumnSortState(): DataGridColumnSortState {
     column: sortCol.value,
     columnIndex: sortColIndex.value,
     direction: sortDir.value,
-    mode: sortMode.value,
+    mode: localSortMode.value,
   };
 }
 
@@ -1122,7 +1122,7 @@ const previewDialogConfig = shallowRef<{
 const transposeScrollRef = ref<HTMLElement | { $el?: HTMLElement }>();
 const transposeScrollLeft = ref(0);
 const transposeViewportWidth = ref(0);
-const { sortColumn: sortCol, sortColumnIndex: sortColIndex, sortDirection: sortDir, sortMode, setSort, clearSort } = useDataGridSort();
+const { sortColumn: sortCol, sortColumnIndex: sortColIndex, sortDirection: sortDir, sortMode: localSortMode, setSort, clearSort } = useDataGridSort();
 const queryControlsRef = ref<InstanceType<typeof DataGridQueryControls>>();
 const searchBarRef = ref<{ focus: (select?: boolean) => void } | null>(null);
 const replaceOpen = ref(false);
@@ -3615,9 +3615,9 @@ const paginationTotalRowCount = computed(() =>
 // rows exist that we never fetched, so navigation must stay inside rows.length.
 const hasKnownPaginationTotalRowCount = computed(() => typeof paginationTotalRowCount.value === "number" && paginationTotalRowCount.value >= 0);
 // When context=results and the caller hasn't configured server-side
-// pagination (no pageLimit), the backend handed us every row up-front and
-// rowCount IS the total. Without this hint, the "page is full → assume more"
-// fallback in canGoNextDataGridPage lets the user keep clicking next forever.
+// pagination (no pageLimit), the backend handed us every row up-front and the
+// grid renders them all, so the pager must treat the result as one page.
+// Moving to another page would only shift the row numbers (#12107).
 const allRowsLoaded = computed(() => isResultsContext.value && props.pageLimit === undefined);
 // Skip re-executing a query when the first page already contains every row.
 // This also covers paginated queries whose first page is shorter than the limit.
@@ -3644,7 +3644,8 @@ const canGoNextPage = computed(() => {
   });
 });
 const maximumPage = computed(() => {
-  const total = hasKnownPaginationTotalRowCount.value ? paginationTotalRowCount.value : allRowsLoaded.value ? props.result.rows.length : undefined;
+  if (allRowsLoaded.value) return 1;
+  const total = hasKnownPaginationTotalRowCount.value ? paginationTotalRowCount.value : undefined;
   if (typeof total === "number" && Number.isFinite(total) && total >= 0) return Math.max(1, Math.ceil(total / pageSize.value));
   return canGoNextPage.value ? undefined : currentPage.value;
 });
@@ -3660,7 +3661,7 @@ const canFetchNextInfiniteScrollSegment = computed(() =>
 // Editable query results also carry table metadata, but their SQL predicates
 // are not the table browser's whereInput. Never count that table as a fallback.
 const canCountTableRows = computed(() => props.context !== "results" && !!props.tableMeta);
-const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownPaginationTotalRowCount.value || allRowsLoaded.value || canCalculateTotalRowCount.value));
+const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownPaginationTotalRowCount.value || canCalculateTotalRowCount.value));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
 const pageJumpBusy = computed(() => !!props.pageJumpProgress && props.pageJumpProgress.totalRequests > 1);
 const rowPreparationProgress = shallowRef<DataGridRowPreparationProgress | null>(null);
@@ -3782,7 +3783,7 @@ function currentWhereInput(): string | undefined {
 }
 
 function effectiveOrderBy(): string | undefined {
-  const columnOrderBy = sortMode.value === "database" && sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined;
+  const columnOrderBy = localSortMode.value === "database" && sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined;
   const manualOrderBy = orderByInput.value.trim() || columnOrderBy;
   return combineDataGridOrderByInputs(manualOrderBy, appliedStructuredOrderByInput.value);
 }
@@ -3842,7 +3843,7 @@ watch(
     const previousOrderWasControlled = previous?.[3] === "database" && simpleDataGridOrderByMatchesSort(orderByInput.value, previous[0], previous[2]);
     const isControlledSort = !!column && !!direction;
     setSort(column && direction ? column : null, typeof columnIndex === "number" && direction ? columnIndex : null, direction ?? "asc", mode ?? "database");
-    if (isControlledSort && sortMode.value === "database") {
+    if (isControlledSort && localSortMode.value === "database") {
       syncOrderByInputWithSort(sortCol.value, sortDir.value);
     } else if (previousOrderWasControlled) {
       syncOrderByInputWithSort(null, null);
@@ -3876,12 +3877,7 @@ function jumpPage(page: number) {
     return;
   }
   const targetPage = Math.min(page, maximumPage.value ?? page);
-  if (targetPage === currentPage.value) {
-    return;
-  }
-  if (allRowsLoaded.value) {
-    currentPage.value = targetPage;
-    resetGridVerticalScroll(true);
+  if (targetPage === currentPage.value || allRowsLoaded.value) {
     return;
   }
   requestServerPageJump(targetPage);
@@ -4127,16 +4123,7 @@ async function beginManualTotalRowCount(): Promise<number | undefined> {
 }
 
 async function lastPage() {
-  if (infiniteScrollEnabled.value) return;
-  if (allRowsLoaded.value) {
-    const total = props.result.rows.length;
-    if (total <= 0) return;
-    const lastPageNum = Math.max(1, Math.ceil(total / pageSize.value));
-    if (lastPageNum <= currentPage.value) return;
-    currentPage.value = lastPageNum;
-    resetGridVerticalScroll(true);
-    return;
-  }
+  if (infiniteScrollEnabled.value || allRowsLoaded.value) return;
   // Navicat-style: always re-COUNT when jumping to the last page.
   if (props.countTotalRows) {
     const generation = await beginManualTotalRowCount();
@@ -7251,7 +7238,7 @@ function applyColumnSort(column: string, columnIndex: number, direction: "asc" |
 
 function selectHeaderSort(value: string, column: string, columnIndex: number) {
   if (value === "clear") {
-    applyColumnSort(column, columnIndex, null, sortMode.value);
+    applyColumnSort(column, columnIndex, null, localSortMode.value);
     return;
   }
   const [mode, direction] = value.split("-") as [DataGridSortMode, DataGridSortDirection];
@@ -13594,7 +13581,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       canCopyAlterSql: canCopyAlterColumnSql.value,
       canFilter: canUseWhereSearch.value,
       hasSort: !!sortCol.value,
-      sortMode: sortMode.value,
+      sortMode: localSortMode.value,
       databaseSortEnabled: props.databaseSortEnabled !== false && databaseSortSupportedForDatabase(resolvedDatabaseType.value),
       frozenColumnCount: frozenColumnCount.value,
       contextVisibleColIdx: contextHeaderVisibleColIdx.value ?? undefined,

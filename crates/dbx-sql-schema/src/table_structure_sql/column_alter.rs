@@ -808,6 +808,7 @@ pub(super) fn build_saphana_existing_column_sql(table: &str, column: &EditableSt
     let type_changed = column.data_type.trim() != original.data_type.trim();
     let nullable_changed = column.is_nullable != original.is_nullable;
     let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
+    let comment_changed = clean(&column.comment) != original_comment(column);
     if type_changed || nullable_changed || default_changed {
         let mut parts = vec![
             quote_ident(StructureDialect::SapHana, &current_name),
@@ -826,6 +827,14 @@ pub(super) fn build_saphana_existing_column_sql(table: &str, column: &EditableSt
             parts.push(if column.is_nullable { "NULL" } else { "NOT NULL" }.to_string());
         }
         statements.push(format!("ALTER TABLE {table} ALTER ({});", parts.join(" ")));
+    }
+    if comment_changed {
+        let comment_value =
+            if clean(&column.comment).is_empty() { "NULL".to_string() } else { quote_string(&clean(&column.comment)) };
+        statements.push(format!(
+            "COMMENT ON COLUMN {table}.{} IS {comment_value};",
+            quote_ident(StructureDialect::SapHana, &current_name)
+        ));
     }
     statements
 }

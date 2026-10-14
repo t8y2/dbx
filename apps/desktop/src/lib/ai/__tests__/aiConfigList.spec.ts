@@ -112,4 +112,50 @@ describe("CC-SWITCH imports", () => {
       ).map((config) => config.name),
     ).toEqual(["Gateway (CC-SWITCH)", "Gateway (CC-SWITCH 2)"]);
   });
+
+  it("keeps distinct profiles with matching connection settings and skips them on re-import", () => {
+    const profiles = [
+      {
+        id: "codex-profile",
+        name: "Codex Gateway",
+        provider: "openai-compatible" as const,
+        apiKey: "shared-key",
+        authMethod: "bearer" as const,
+        endpoint: "https://gateway.example",
+        model: "gpt-test",
+        apiStyle: "responses" as const,
+      },
+      {
+        id: "claude-profile",
+        name: "Claude Gateway",
+        provider: "openai-compatible" as const,
+        apiKey: "shared-key",
+        authMethod: "bearer" as const,
+        endpoint: "https://gateway.example",
+        model: "gpt-test",
+        apiStyle: "responses" as const,
+      },
+    ];
+
+    const prepared = prepareImportedAiConfigs([], profiles);
+
+    expect(prepared.map((config) => config.name)).toEqual(["Codex Gateway", "Claude Gateway"]);
+    expect(prepareImportedAiConfigs(prepared, profiles)).toEqual([]);
+  });
+
+  it("collapses exact duplicates inside a single import batch", () => {
+    const config = {
+      id: "first",
+      name: "Gateway",
+      provider: "openai-compatible" as const,
+      apiKey: "secret",
+      authMethod: "bearer" as const,
+      endpoint: "https://gateway.example",
+      model: "gpt-test",
+      apiStyle: "responses" as const,
+    };
+    const duplicate = { ...config, id: "second" };
+
+    expect(prepareImportedAiConfigs([], [config, duplicate])).toEqual([{ ...config, name: "Gateway", isDefault: false }]);
+  });
 });

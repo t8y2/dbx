@@ -15,14 +15,21 @@ export function getConfigKey(config: AiConfig): string {
 
 /** Prepare imported configurations without overwriting existing entries. */
 export function prepareImportedAiConfigs(existing: AiConfigItem[], imported: AiConfigItem[]): AiConfigItem[] {
-  const existingKeys = new Set(existing.map(getConfigKey));
+  const existingImportCounts = new Map<string, number>();
+  for (const config of existing) {
+    const key = getImportedConfigKey(config);
+    existingImportCounts.set(key, (existingImportCounts.get(key) ?? 0) + 1);
+  }
   const usedNames = new Set(existing.map((config) => config.name.trim().toLocaleLowerCase()));
   const prepared: AiConfigItem[] = [];
 
   for (const config of imported) {
-    const key = getConfigKey(config);
-    if (existingKeys.has(key)) continue;
-    existingKeys.add(key);
+    const key = getImportedConfigKey(config);
+    const existingCount = existingImportCounts.get(key) ?? 0;
+    if (existingCount > 0) {
+      existingImportCounts.set(key, existingCount - 1);
+      continue;
+    }
 
     const originalName = config.name.trim() || "CC-SWITCH";
     let name = originalName;
@@ -32,10 +39,19 @@ export function prepareImportedAiConfigs(existing: AiConfigItem[], imported: AiC
       name = `${originalName} (CC-SWITCH${suffix > 1 ? ` ${suffix}` : ""})`;
     }
     usedNames.add(name.toLocaleLowerCase());
+    // Count the prepared entry so an exact duplicate later in the same batch is skipped.
+    existingImportCounts.set(key, (existingImportCounts.get(key) ?? 0) + 1);
     prepared.push({ ...config, name, isDefault: false });
   }
 
   return prepared;
+}
+
+function getImportedConfigKey(config: AiConfigItem): string {
+  // Keep distinct CC-SWITCH profiles even when their connection settings match.
+  // Strip the suffix added below so importing the same profiles again is idempotent.
+  const sourceName = (config.name.trim() || "CC-SWITCH").replace(/ \(CC-SWITCH(?: \d+)?\)$/i, "").toLocaleLowerCase();
+  return `${getConfigKey(config)}|${sourceName}`;
 }
 
 export function aiConfigToItem(config: AiConfig, id: string, name: string): AiConfigItem {

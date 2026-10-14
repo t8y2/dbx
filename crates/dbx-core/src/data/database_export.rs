@@ -1275,7 +1275,7 @@ pub(crate) fn is_mysql_spatial_export_type(column_type: &str) -> bool {
     )
 }
 
-pub(crate) fn is_xugu_spatial_export_type(column_type: &str) -> bool {
+pub(crate) fn is_geometry_spatial_column_type(column_type: &str) -> bool {
     let normalized = column_type.trim().to_ascii_lowercase();
     let base = normalized.split(['(', ':', ' ', '\t', '\n']).next().unwrap_or("").trim();
     matches!(base, "geometry" | "geography")
@@ -1300,7 +1300,7 @@ fn format_xugu_spatial_export_literal_with_srid(
     column_type: Option<&str>,
     srid: Option<u32>,
 ) -> Option<String> {
-    if database_type != Some(DatabaseType::Xugu) || !column_type.is_some_and(is_xugu_spatial_export_type) {
+    if database_type != Some(DatabaseType::Xugu) || !column_type.is_some_and(is_geometry_spatial_column_type) {
         return None;
     }
     if value.is_null() {
@@ -1317,6 +1317,32 @@ fn format_xugu_spatial_export_literal_with_srid(
     // Xugu accepts a plain WKT string for both GEOMETRY and GEOGRAPHY. Keep
     // that form for SRID 0/legacy values rather than inventing a constructor.
     Some(quote_standard_export_sql_string(&text))
+}
+
+/// PostgreSQL's geometry text input treats a plain WKT literal as SRID 0,
+/// which then fails the typmod check on columns declared with a concrete
+/// SRID (#12095: `Geometry SRID (0) does not match column SRID (4326)`).
+/// Query results already carry the per-cell SRID next to the WKT, so replay
+/// it through `ST_GeomFromEWKT('SRID=n;WKT')`; without a known non-zero
+/// SRID the plain WKT literal is the best available form.
+fn format_postgres_spatial_export_literal_with_srid(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+    srid: Option<u32>,
+) -> Option<String> {
+    if database_type != Some(DatabaseType::Postgres) || !column_type.is_some_and(is_geometry_spatial_column_type) {
+        return None;
+    }
+    let Value::String(text) = value else {
+        return None;
+    };
+    let trimmed = text.trim_start();
+    if trimmed.len() > 5 && trimmed[..5].eq_ignore_ascii_case("SRID=") {
+        return Some(format!("ST_GeomFromEWKT({})", quote_standard_export_sql_string(text)));
+    }
+    let srid = srid.filter(|srid| *srid != 0)?;
+    Some(format!("ST_GeomFromEWKT({})", quote_standard_export_sql_string(&format!("SRID={srid};{text}"))))
 }
 
 /// Database exports encode MySQL spatial cells as `DBX_WKB:<srid>:<hex>` while
@@ -1432,6 +1458,11 @@ fn format_export_sql_literal_typed_with_spatial(
     spatial_srid: Option<u32>,
 ) -> String {
     if let Some(literal) = format_xugu_spatial_export_literal_with_srid(value, database_type, column_type, spatial_srid)
+    {
+        return literal;
+    }
+    if let Some(literal) =
+        format_postgres_spatial_export_literal_with_srid(value, database_type, column_type, spatial_srid)
     {
         return literal;
     }
@@ -2886,7 +2917,10 @@ fn database_export_select_list(columns: &[String], column_types: &[Option<String
             {
                 mysql_spatial_export_marker_expression(column)
             } else if *db_type == DatabaseType::Xugu
-                && column_types.get(index).and_then(|value| value.as_deref()).is_some_and(is_xugu_spatial_export_type)
+                && column_types
+                    .get(index)
+                    .and_then(|value| value.as_deref())
+                    .is_some_and(is_geometry_spatial_column_type)
             {
                 let quoted = quote_identifier(column, db_type);
                 format!("ST_AsEWKT({quoted}) AS {quoted}")
@@ -5054,18 +5088,18 @@ mod tests {
         database_export_total_objects, decode_unicode_escapes_for_export, drop_table_if_exists_sql,
         ensure_export_destination_dir, export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys,
         filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
-        format_mysql_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_enum_ddl,
-        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
-        generate_postgres_sequence_post_table_ddl, generate_postgres_sequence_setval_sql,
-        is_postgres_extension_member_routine, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
-        mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_destination_identity,
-        record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
-        split_postgres_export_table_triggers, write_database_export_rows, write_database_export_rows_with_mode,
-        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
-        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql,
-        PostgresExportEnum, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
-        SqlInsertDialect, SqlInsertMode, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
-        POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL,
+        format_mysql_spatial_export_literal, format_postgres_spatial_export_literal_with_srid,
+        format_xugu_spatial_export_literal, generate_postgres_enum_ddl, generate_postgres_extension_ddl,
+        generate_postgres_sequence_create_ddl, generate_postgres_sequence_post_table_ddl,
+        generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
+        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
+        record_export_destination_identity, record_export_error, replace_database_export_select_list,
+        sort_export_views_by_dependencies, split_postgres_export_table_triggers, write_database_export_rows,
+        write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
+        BuildExportSqlInsertOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
+        DdlNormalizeOptions, ExportedTableSql, PostgresExportEnum, PostgresExportExtension, PostgresExportSequence,
+        PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode, DATABASE_EXPORT_INSERT_BATCH_SIZE,
+        DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -6047,6 +6081,156 @@ mod tests {
             vec![
                 r#"INSERT INTO "app"."places" ("shape") VALUES (ST_GeomFromEWKT('SRID=3857;POINT(1 2)'));"#.to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn postgres_spatial_export_replays_cell_srid_as_ewkt_constructor() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            schema: Some("public".to_string()),
+            table_name: Some("test1".to_string()),
+            qualified_table_name: None,
+            columns: vec!["geom".to_string()],
+            column_types: vec![Some("geometry(MultiLineString,4326)".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: vec![SpatialColumn { column_index: 0, srid: Some(4326) }],
+            spatial_values: vec![vec![Some(4326)]],
+            rows: vec![vec![json!(
+                "MULTILINESTRING((111.47973516000008 29.608448041000088,111.48161796000005 29.61126099100011))"
+            )]],
+            batch_size: None,
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                r#"INSERT INTO "public"."test1" ("geom") VALUES (ST_GeomFromEWKT('SRID=4326;MULTILINESTRING((111.47973516000008 29.608448041000088,111.48161796000005 29.61126099100011))'));"#.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_spatial_export_keeps_plain_wkt_when_srid_unknown_or_zero() {
+        let unknown = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            schema: Some("public".to_string()),
+            table_name: Some("test1".to_string()),
+            qualified_table_name: None,
+            columns: vec!["geom".to_string()],
+            column_types: vec![Some("geometry(Point,4326)".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: vec![SpatialColumn { column_index: 0, srid: None }],
+            spatial_values: vec![vec![None]],
+            rows: vec![vec![json!("POINT(1 2)")]],
+            batch_size: None,
+            preserve_original_language: false,
+        })
+        .unwrap();
+        assert_eq!(unknown, vec![r#"INSERT INTO "public"."test1" ("geom") VALUES ('POINT(1 2)');"#.to_string()]);
+
+        let zero = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            schema: Some("public".to_string()),
+            table_name: Some("test1".to_string()),
+            qualified_table_name: None,
+            columns: vec!["geom".to_string()],
+            column_types: vec![Some("geometry(Point,0)".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: vec![SpatialColumn { column_index: 0, srid: Some(0) }],
+            spatial_values: vec![vec![Some(0)]],
+            rows: vec![vec![json!("POINT(1 2)")]],
+            batch_size: None,
+            preserve_original_language: false,
+        })
+        .unwrap();
+        assert_eq!(zero, vec![r#"INSERT INTO "public"."test1" ("geom") VALUES ('POINT(1 2)');"#.to_string()]);
+    }
+
+    #[test]
+    fn postgres_spatial_export_literal_unit() {
+        // Non-geometry columns and other databases must fall through untouched.
+        assert_eq!(
+            format_postgres_spatial_export_literal_with_srid(
+                &json!("POINT(1 2)"),
+                Some(DatabaseType::Postgres),
+                Some("varchar"),
+                Some(4326)
+            ),
+            None
+        );
+        assert_eq!(
+            format_postgres_spatial_export_literal_with_srid(
+                &json!("POINT(1 2)"),
+                Some(DatabaseType::Mysql),
+                Some("geometry"),
+                Some(4326)
+            ),
+            None
+        );
+        assert_eq!(
+            format_postgres_spatial_export_literal_with_srid(
+                &json!("POINT(1 2)"),
+                Some(DatabaseType::Xugu),
+                Some("GEOMETRY"),
+                Some(4326)
+            ),
+            None
+        );
+        // NULL and non-string cells keep the generic typed path.
+        assert_eq!(
+            format_postgres_spatial_export_literal_with_srid(
+                &Value::Null,
+                Some(DatabaseType::Postgres),
+                Some("geometry"),
+                Some(4326)
+            ),
+            None
+        );
+        assert_eq!(
+            format_postgres_spatial_export_literal_with_srid(
+                &json!(123),
+                Some(DatabaseType::Postgres),
+                Some("geometry"),
+                Some(4326)
+            ),
+            None
+        );
+        // An already-EWKT cell replays verbatim inside the constructor.
+        assert_eq!(
+            format_postgres_spatial_export_literal_with_srid(
+                &json!("SRID=3857;POINT(1 2)"),
+                Some(DatabaseType::Postgres),
+                Some("GEOMETRY"),
+                Some(4326)
+            ),
+            Some("ST_GeomFromEWKT('SRID=3857;POINT(1 2)')".to_string())
+        );
+        // Geography columns also accept the geometry constructor (PostGIS
+        // implicit cast geometry→geography on assignment).
+        assert_eq!(
+            format_postgres_spatial_export_literal_with_srid(
+                &json!("POINT(1 2)"),
+                Some(DatabaseType::Postgres),
+                Some("geography(Point,4326)"),
+                Some(4326)
+            ),
+            Some("ST_GeomFromEWKT('SRID=4326;POINT(1 2)')".to_string())
+        );
+        // Case-insensitive type matching with a typmod suffix.
+        assert_eq!(
+            format_postgres_spatial_export_literal_with_srid(
+                &json!("MULTILINESTRING((1 2,3 4))"),
+                Some(DatabaseType::Postgres),
+                Some("GEOMETRY(MultiLineString,4326)"),
+                Some(4326)
+            ),
+            Some("ST_GeomFromEWKT('SRID=4326;MULTILINESTRING((1 2,3 4))')".to_string())
         );
     }
 

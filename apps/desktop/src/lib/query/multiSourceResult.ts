@@ -1,3 +1,4 @@
+import { addExactSelectionValue, exactDecimalText, type ExactDecimal } from "@/lib/dataGrid/gridSelection";
 import type { QueryResult } from "@/types/database";
 
 /**
@@ -34,7 +35,8 @@ export interface MultiSourceMergeOptions {
 export interface MultiSourceColumnSummary {
   columnIndex: number;
   column: string;
-  sum: number;
+  /** Exact decimal text, so integers beyond 2^53 and DECIMAL scales survive. */
+  sum: string;
   /** Number of contributing values; empty cells never count. */
   count: number;
 }
@@ -86,7 +88,7 @@ function isEmptyCell(value: MultiSourceCellValue | undefined): boolean {
  * parses to one (drivers return DECIMAL/BIGINT as strings). Booleans are not
  * numeric, so a flag column never turns into a total.
  */
-export function isNumericSummaryCellValue(value: MultiSourceCellValue | undefined): boolean {
+export function isNumericSummaryCellValue(value: MultiSourceCellValue | undefined): value is number | string {
   if (typeof value === "number") return Number.isFinite(value);
   if (typeof value === "string") {
     const trimmed = value.trim();
@@ -102,7 +104,7 @@ export function isNumericSummaryCellValue(value: MultiSourceCellValue | undefine
  */
 export function summarizeNumericColumns(columns: readonly string[], rows: readonly (readonly MultiSourceCellValue[])[], options: { skipColumnIndexes?: readonly number[] } = {}): MultiSourceColumnSummary[] {
   const skipped = new Set(options.skipColumnIndexes ?? []);
-  const sums: number[] = Array.from({ length: columns.length }, () => 0);
+  const sums: ExactDecimal[] = Array.from({ length: columns.length }, () => ({ coefficient: 0n, scale: 0 }));
   const counts: number[] = Array.from({ length: columns.length }, () => 0);
   const stillNumeric: boolean[] = Array.from({ length: columns.length }, () => true);
 
@@ -115,7 +117,7 @@ export function summarizeNumericColumns(columns: readonly string[], rows: readon
         stillNumeric[columnIndex] = false;
         continue;
       }
-      sums[columnIndex] += typeof value === "number" ? value : Number(value);
+      sums[columnIndex] = addExactSelectionValue(sums[columnIndex]!, value, typeof value === "number" ? value : Number(value));
       counts[columnIndex] += 1;
     }
   }
@@ -123,7 +125,7 @@ export function summarizeNumericColumns(columns: readonly string[], rows: readon
   const summaries: MultiSourceColumnSummary[] = [];
   for (let columnIndex = 0; columnIndex < columns.length; columnIndex += 1) {
     if (skipped.has(columnIndex) || !stillNumeric[columnIndex] || counts[columnIndex] === 0) continue;
-    summaries.push({ columnIndex, column: columns[columnIndex] ?? "", sum: sums[columnIndex]!, count: counts[columnIndex]! });
+    summaries.push({ columnIndex, column: columns[columnIndex] ?? "", sum: exactDecimalText(sums[columnIndex]!), count: counts[columnIndex]! });
   }
   return summaries;
 }

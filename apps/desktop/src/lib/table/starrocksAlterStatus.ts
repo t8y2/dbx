@@ -17,7 +17,8 @@ export function isStarRocksAlterJobActive(job: StarRocksAlterJob): boolean {
   return !terminalStates.has(job.state);
 }
 export function starRocksAlterStatusSql(kind: StarRocksAlterKind, table: string): string {
-  if (!STARROCKS_ALTER_KINDS.includes(kind) || !table || /[\\\x00-\x1f]/.test(table)) throw new Error("Unsupported table name for ALTER status query");
+  // \u0000-style escapes keep the control-character class explicit for oxlint's no-control-regex.
+  if (!STARROCKS_ALTER_KINDS.includes(kind) || !table || /[\\\u0000-\u001f]/.test(table)) throw new Error("Unsupported table name for ALTER status query");
   return `SHOW ALTER TABLE ${kind} WHERE TableName = '${table.replaceAll("'", "''")}' ORDER BY CreateTime DESC LIMIT 5;`;
 }
 export function parseStarRocksAlterJobs(kind: StarRocksAlterKind, result: Pick<QueryResult, "columns" | "rows">): StarRocksAlterJob[] {

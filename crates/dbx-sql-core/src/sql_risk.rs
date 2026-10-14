@@ -6,7 +6,8 @@ use sqlparser::ast::{
     Statement, TableFactor, UnaryOperator, Value, Visit, Visitor,
 };
 use sqlparser::dialect::{
-    ClickHouseDialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+    ClickHouseDialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, OracleDialect, PostgreSqlDialect,
+    SQLiteDialect,
 };
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
@@ -1132,20 +1133,230 @@ const POSTGRES_PROOF_SAFE_FUNCTIONS: &[&str] = &[
     "version",
 ];
 
+/// Pure built-in functions accepted by the Oracle proof. Same fail-closed
+/// contract as `MYSQL_PROOF_SAFE_FUNCTIONS`: a call to anything not listed is
+/// Unproven. Only ever grows by review.
+///
+/// `current_date`, `current_time`, `current_timestamp`, `localtime` and
+/// `localtimestamp` are listed even though Oracle writes them without
+/// parentheses: sqlparser routes exactly these five keywords through
+/// `parse_time_functions` (`parser/mod.rs`), so they arrive as function calls.
+/// Omitting one would reject statements the previous lexical classifier still
+/// proved (`SELECT CURRENT_TIME FROM dual`). `sysdate`/`systimestamp`/`rownum`/
+/// `level`/`user` parse as ordinary expressions and need no entry — as do
+/// `current_user`/`session_user`, which sqlparser only models as calls for
+/// PostgreSQL/Generic.
+///
+/// Deliberately absent: package or schema-qualified calls (`dbms_*`, `utl_*`,
+/// `pkg.fn`), sequence pseudocolumns, `sys_context`, `sys_guid`, `xmlagg` and
+/// ordered-set aggregates (`listagg ... WITHIN GROUP`) — each stays Unproven
+/// until reviewed.
+const ORACLE_PROOF_SAFE_FUNCTIONS: &[&str] = &[
+    "abs",
+    "add_months",
+    "ascii",
+    "avg",
+    "bitand",
+    "ceil",
+    "chr",
+    "coalesce",
+    "concat",
+    "count",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "decode",
+    "exp",
+    "floor",
+    "greatest",
+    "initcap",
+    "instr",
+    "last_day",
+    "least",
+    "length",
+    "lengthb",
+    "ln",
+    "localtime",
+    "localtimestamp",
+    "log",
+    "lower",
+    "lpad",
+    "ltrim",
+    "max",
+    "min",
+    "mod",
+    "months_between",
+    "next_day",
+    "nullif",
+    "nvl",
+    "nvl2",
+    "power",
+    "remainder",
+    "replace",
+    "round",
+    "rpad",
+    "rtrim",
+    "sign",
+    "sqrt",
+    "stddev",
+    "substr",
+    "substrb",
+    "sum",
+    "to_char",
+    "to_date",
+    "to_number",
+    "to_timestamp",
+    "translate",
+    "trim",
+    "trunc",
+    "upper",
+    "variance",
+];
+
 /// Prove that a single SQL statement is, by DBX's strict heuristic, an
-/// ordinary read. Only MySQL and the PostgreSQL family (PostgreSQL, GaussDB,
-/// openGauss) take part in this proof; every other database type is Unproven so
-/// its manual-transaction toolbar keeps the legacy behavior. Oracle keeps its
-/// own lexical classifier (`is_oracle_proven_read_only_statement`) — do not
-/// reroute it here.
+/// ordinary read. MySQL, the PostgreSQL family (PostgreSQL, GaussDB, openGauss)
+/// and Oracle/OceanBase-Oracle take part in this proof; every other database
+/// type is Unproven so its manual-transaction toolbar keeps the legacy behavior.
+///
+/// Oracle used to keep a purely lexical classifier in `query_execution_sql`
+/// that rejected *any* `(` after comment/literal stripping, which is why
+/// `SELECT LENGTH(1) FROM dual` showed commit/rollback buttons (#11788). It now
+/// shares this proof's mechanism, keeping the Oracle-specific lexical guard
+/// rails in `prove_oracle_read_only_statement` — see the comment there for why
+/// those guards are load-bearing and cannot be replaced by the AST walk.
 pub fn prove_read_only_for_database(sql: &str, database_type: DatabaseType) -> ReadProof {
     match database_type {
         DatabaseType::Mysql => prove_read_only_statement(sql, "mysql", MYSQL_PROOF_SAFE_FUNCTIONS),
         DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::OpenGauss => {
             prove_read_only_statement(sql, "postgres", POSTGRES_PROOF_SAFE_FUNCTIONS)
         }
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => prove_oracle_read_only_statement(sql),
         _ => ReadProof::Unproven,
     }
+}
+
+/// Oracle keywords/reserved words that make a statement unprovable. These are
+/// Oracle keywords, so they cannot be legitimate unquoted identifiers inside a
+/// simple read; a quoted occurrence is already stripped to spaces first.
+///
+/// Most entries are redundant now that the statement is parsed (a write parses
+/// as a non-`Query` statement and `query_is_write_capable` sees locking clauses
+/// and `SELECT ... INTO`), but they are kept verbatim: dropping one would widen
+/// what DBX calls a proven read, which is a deliberate decision per keyword, not
+/// a side effect of moving to the AST.
+const ORACLE_PROOF_FORBIDDEN_WORDS: &[&str] = &[
+    // row locking
+    "for",
+    "update",
+    "lock",
+    // transaction control
+    "begin",
+    "commit",
+    "rollback",
+    "savepoint",
+    // DDL/DCL
+    "create",
+    "alter",
+    "drop",
+    "truncate",
+    "rename",
+    "grant",
+    "revoke",
+    "comment",
+    "purge",
+    "audit",
+    "noaudit",
+    "analyze",
+    "flashback",
+    "merge",
+    "insert",
+    "delete",
+    // set operators (a UNION is not a single top-level SELECT)
+    "union",
+    "minus",
+    "intersect",
+    // stored procedures / dynamic SQL / PL/SQL blocks
+    "call",
+    "exec",
+    "execute",
+    "declare",
+    // sequence pseudocolumns
+    "nextval",
+    "currval",
+    // SELECT ... INTO is PL/SQL-only in Oracle
+    "into",
+];
+
+/// Oracle has no keyword fallback either: the lexical guard rails below must
+/// hold *and* the statement must parse as exactly one `Statement::Query` under
+/// `OracleDialect`, with no disallowed function call. A statement that does not
+/// parse at all is judged by the guard rails alone (see the parse-failure branch).
+///
+/// The guard rails are load-bearing, not belt-and-braces: sqlparser happily
+/// parses `SELECT * FROM t@dblink` and `SELECT seq.NEXTVAL FROM dual` as plain
+/// queries, so without them a remote read and a sequence bump would be stamped
+/// as proven read-only.
+///
+/// The dialect is resolved here rather than through `resolve_dialect`: the
+/// shared resolver also feeds `classify_sql_risk_for_database`,
+/// `is_dangerous_sql_for_database` and the MCP `USE` check, and changing Oracle's
+/// dialect there would move Oracle's risk tiers — out of scope for a
+/// toolbar-metadata fix. `OracleDialect` (not `GenericDialect`, today's fallback)
+/// is what parses `(+)` outer joins and the rest of the Oracle corpus.
+fn prove_oracle_read_only_statement(sql: &str) -> ReadProof {
+    use crate::query_execution_sql::{
+        contains_word, starts_with_keyword, strip_sql_comments_and_literals_keeping_hash,
+    };
+
+    // Oracle's own comment rules: `#` is an identifier character, not a comment
+    // start (mysql-only). With the shared `#`-blind stripper,
+    // `SELECT a#b FROM t@dblink` lost everything after the `#` and was stamped
+    // proven — the AST cannot catch it, because `t@dblink` parses as an ordinary
+    // table reference.
+    let cleaned = strip_sql_comments_and_literals_keeping_hash(sql);
+    let trimmed = cleaned.trim_start();
+    if trimmed.is_empty() {
+        return ReadProof::Unproven;
+    }
+    // Single top-level SELECT only (WITH is excluded because data-modifying CTEs
+    // can hide writes in a row-returning path).
+    if !starts_with_keyword(&trimmed.to_uppercase(), "SELECT") {
+        return ReadProof::Unproven;
+    }
+    // Multi-statement text is Unproven on both paths below, so the parse-failure
+    // fallback cannot prove a whole script from its first statement. The count
+    // comes from the dialect-aware splitter, not from
+    // `has_extra_statement_after_semicolon`: the latter's lexer treats `#` as a
+    // line comment (the MySQL rule) while Oracle allows `#` inside identifiers,
+    // so a `#` would hide a following statement from it. The splitter models that
+    // per dialect (`sql::SqlDialectProfile::supports_hash_line_comments`).
+    if crate::sql::split_sql_statements_for_database(sql, DatabaseType::Oracle).len() != 1 {
+        return ReadProof::Unproven;
+    }
+    let lower = cleaned.to_lowercase();
+    // Database link: '@' cannot appear in an unquoted Oracle identifier, so any
+    // remaining '@' after literal stripping is a remote-object reference.
+    if lower.contains('@') {
+        return ReadProof::Unproven;
+    }
+    if ORACLE_PROOF_FORBIDDEN_WORDS.iter().any(|word| contains_word(&lower, word)) {
+        return ReadProof::Unproven;
+    }
+
+    let Ok(statements) = Parser::parse_sql(&OracleDialect {}, sql) else {
+        // Oracle-only syntax the parser cannot handle (`AS OF TIMESTAMP` /
+        // `AS OF SCN` flashback reads, `VERSIONS BETWEEN`) must not lose a
+        // capability it had before #11788. With no AST there is no function list
+        // to inspect, so fall back to the pre-#11788 rule: proven only while
+        // nothing call-shaped is visible at all. This never proves more than the
+        // old classifier did, and it is the only reason a statement without an
+        // AST can still be proven.
+        return if lower.contains('(') { ReadProof::Unproven } else { ReadProof::ProvenReadOnly };
+    };
+    let [statement] = statements.as_slice() else {
+        return ReadProof::Unproven;
+    };
+    prove_statement(statement, ORACLE_PROOF_SAFE_FUNCTIONS)
 }
 
 fn prove_read_only_statement(sql: &str, dialect: &str, allowed_functions: &[&str]) -> ReadProof {
@@ -1397,11 +1608,154 @@ mod tests {
 
     #[test]
     fn proof_only_applies_to_enabled_dialects() {
-        // Oracle keeps its own lexical classifier; the gate in query.rs must
-        // never route it through the generic proof.
-        assert_eq!(prove_read_only_for_database("SELECT 1", DatabaseType::Oracle), ReadProof::Unproven);
+        // Oracle/OceanBase-Oracle share this proof since #11788; their
+        // Oracle-specific guard rails live in `prove_oracle_read_only_statement`.
+        assert_eq!(prove_read_only_for_database("SELECT 1", DatabaseType::Oracle), ReadProof::ProvenReadOnly);
+        assert_eq!(
+            prove_read_only_for_database("SELECT LENGTH(1) FROM dual", DatabaseType::OceanbaseOracle),
+            ReadProof::ProvenReadOnly
+        );
+        assert_eq!(
+            prove_read_only_for_database("SELECT * FROM t@dblink", DatabaseType::OceanbaseOracle),
+            ReadProof::Unproven
+        );
         // Family members without manual-transaction UI stay unproven in v1.
         assert_eq!(prove_read_only_for_database("SELECT 1", DatabaseType::Doris), ReadProof::Unproven);
+    }
+
+    /// The Oracle guard rails are not belt-and-braces: each statement below
+    /// parses as a single ordinary `Query` under `OracleDialect`, so the AST
+    /// walk alone would call it ProvenReadOnly. Removing a guard rail (the `@`
+    /// scan, the word-boundary keyword scan) silently widens what DBX calls a
+    /// proven read, which is why they are asserted here rather than only through
+    /// the public classifier.
+    #[test]
+    fn oracle_proof_keeps_the_guard_rails_the_ast_cannot_see() {
+        for sql in [
+            // Remote objects: '@' cannot appear in an unquoted Oracle identifier.
+            "SELECT * FROM t@dblink",
+            "SELECT * FROM DUAL@dblink",
+            // Sequence pseudocolumns: parsed as a compound identifier, not a call.
+            "SELECT seq.NEXTVAL FROM dual",
+            "SELECT seq.CURRVAL FROM dual",
+            // Retained restrictions that the AST itself would accept.
+            "WITH cte AS (SELECT 1 AS a FROM dual) SELECT * FROM cte",
+            "SELECT 1 FROM dual UNION SELECT 2 FROM dual",
+            "SELECT 1 FROM dual MINUS SELECT 2 FROM dual",
+            // A write hidden behind a row-returning shape.
+            "SELECT * FROM t FOR UPDATE",
+            "SELECT COUNT(*) INTO v FROM t",
+            "SELECT 1; SELECT 2",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Oracle),
+                ReadProof::Unproven,
+                "expected unproven: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn oracle_proof_accepts_reviewed_builtins_only() {
+        for sql in [
+            "SELECT LENGTH(1) FROM dual",
+            "SELECT COUNT(*) FROM users",
+            "SELECT UPPER(name) FROM users",
+            "SELECT NVL(name, 'x') FROM users",
+            "SELECT TO_CHAR(SYSDATE, 'YYYY-MM-DD') FROM dual",
+            "SELECT * FROM t WHERE id IN (1, 2, 3)",
+            "SELECT * FROM t WHERE (a = 1 OR b = 2)",
+            "SELECT CAST(a AS VARCHAR2(10)) FROM t",
+            "SELECT * FROM (SELECT * FROM users)",
+            // No-paren forms that must not regress: SYSDATE/ROWNUM/LEVEL parse as
+            // ordinary expressions, while sqlparser models these five as calls.
+            "SELECT SYSDATE, ROWNUM, USER FROM dual",
+            "SELECT CURRENT_DATE FROM dual",
+            "SELECT CURRENT_TIME FROM dual",
+            "SELECT CURRENT_TIMESTAMP FROM dual",
+            "SELECT LOCALTIME FROM dual",
+            "SELECT LOCALTIMESTAMP FROM dual",
+            // Precision form: sqlparser models it as a call too.
+            "SELECT CURRENT_TIME(3) FROM dual",
+            // Parser-invisible Oracle syntax keeps the pre-#11788 verdict via the
+            // parse-failure fallback (it contains no call-shaped syntax).
+            "SELECT * FROM t AS OF TIMESTAMP SYSTIMESTAMP - INTERVAL '1' HOUR",
+            "SELECT * FROM t VERSIONS BETWEEN TIMESTAMP SYSTIMESTAMP - INTERVAL '1' HOUR AND SYSTIMESTAMP",
+        ] {
+            for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+                assert_eq!(
+                    prove_read_only_for_database(sql, database_type),
+                    ReadProof::ProvenReadOnly,
+                    "expected proven for {database_type:?}: {sql}"
+                );
+            }
+        }
+
+        for sql in [
+            "SELECT my_udf(a) FROM t",
+            "SELECT my_pkg.fn(a) FROM t",
+            "SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') FROM dual",
+            "SELECT SYS_GUID() FROM dual",
+            "SELECT LISTAGG(a, ',') WITHIN GROUP (ORDER BY a) FROM t",
+            "SELECT ROW_NUMBER() OVER (ORDER BY a) FROM t",
+            "SELECT * FROM TABLE(my_func())",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Oracle),
+                ReadProof::Unproven,
+                "expected unproven: {sql}"
+            );
+        }
+    }
+
+    /// `#` is inside Oracle identifiers, so a statement hidden behind one must not
+    /// become provable. Two rails are needed: the shared stripper used to treat
+    /// `#` as a line comment (mysql-only rule) and hide the rest of the line, so
+    /// the proof strips with `strip_sql_comments_and_literals_keeping_hash`, and
+    /// the multi-statement rail uses the dialect-aware splitter. Without the first
+    /// one `SELECT a#b FROM t@dblink` was proven (the AST cannot catch a database
+    /// link — `t@dblink` parses as an ordinary table reference); without the
+    /// second, `SELECT a#b; DELETE FROM t` was proven. The pre-#11788 classifier
+    /// proved all of these.
+    #[test]
+    fn oracle_proof_rejects_statements_hidden_behind_a_hash_identifier() {
+        for sql in [
+            // `@` database link hidden behind `#`
+            "SELECT a#b FROM t@link",
+            "SELECT a#b FROM dual@dblink",
+            // multi-statement, where the dialect-aware splitter is the rail
+            "SELECT a#b; EXECUTE IMMEDIATE 'DROP TABLE t'",
+            "SELECT a#b; DELETE FROM t",
+            "SELECT 1 #; COMMIT",
+            "SELECT 'x' # y; DELETE FROM t",
+            "SELECT a#b WHERE 1 = 1; BEGIN NULL; END;",
+            "SELECT a#b; BEGIN DELETE FROM t; END;",
+            // the AST covers these even with the `#` text visible
+            "SELECT a#b FROM t WHERE x = 1 FOR UPDATE",
+            "SELECT a#b INTO v FROM t",
+            // Deliberate conservative outcome: with `#` visible, an identifier
+            // whose `#`-suffix spells a forbidden word no longer matches as an
+            // identifier boundary, so the statement is Unproven rather than
+            // proven. Safe direction; the statement is unusual either way.
+            "SELECT x#for FROM t",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Oracle),
+                ReadProof::Unproven,
+                "expected unproven: {sql}"
+            );
+        }
+        // Single statements with `#` in an identifier stay readable, exactly as
+        // the splitter sees them.
+        assert_eq!(
+            prove_read_only_for_database("SELECT a#b FROM t WHERE c = 1", DatabaseType::Oracle),
+            ReadProof::ProvenReadOnly
+        );
+        assert_eq!(prove_read_only_for_database("SELECT * FROM t#1", DatabaseType::Oracle), ReadProof::ProvenReadOnly);
+        assert_eq!(
+            prove_read_only_for_database("SELECT COUNT(*) FROM emp#1", DatabaseType::Oracle),
+            ReadProof::ProvenReadOnly
+        );
     }
 
     #[test]

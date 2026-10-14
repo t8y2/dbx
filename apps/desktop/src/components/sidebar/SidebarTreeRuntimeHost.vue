@@ -5022,9 +5022,10 @@ async function confirmPasteTableImpl() {
       }
       successCount++;
       if (preparedClones.has(entry)) completedCloneTargets.push(`${schema}.${targetName}`);
-    } catch (e: any) {
+    } catch (caught: any) {
+      // 在 catch 开头统一归一化克隆错误，保证块内后续所有引用都能拿到 e
+      const e = completedClone && !(caught instanceof OceanbaseTableCloneError) ? oceanbaseCloneDataPreparationError(completedClone, caught) : caught;
       if (preparedClones.has(entry)) {
-        if (completedClone && !(e instanceof OceanbaseTableCloneError)) e = oceanbaseCloneDataPreparationError(completedClone, e);
         queueRefreshTarget({ ...entry, schema: e instanceof OceanbaseTableCloneError ? e.targetSchema : schema });
         cloneFailure = {
           error: e,
@@ -5036,8 +5037,8 @@ async function confirmPasteTableImpl() {
         break;
       }
       pasteFailCount++;
-      firstPasteError ??= e;
-      console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
+      firstPasteError ??= caught;
+      console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, caught);
     }
   }
   for (const refreshTarget of refreshTargets.values()) {

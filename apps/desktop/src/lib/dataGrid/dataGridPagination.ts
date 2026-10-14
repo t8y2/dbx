@@ -7,9 +7,10 @@ export interface CanGoNextDataGridPageOptions {
   pageOffset?: number;
   currentPage?: number;
   totalRowCount?: number;
-  // True when every result row is already in memory (SQL editor result with no
-  // server-side pagination). rowCount IS the authoritative total in that case,
-  // so a full final page must not appear as "more available".
+  // True when the result came back without server-side pagination (SQL editor
+  // statements such as SHOW that cannot be wrapped in LIMIT/OFFSET). The grid
+  // renders every loaded row at once, so the result is a single page: re-running
+  // the statement for another page would return the same rows again.
   allRowsLoaded?: boolean;
 }
 
@@ -123,6 +124,7 @@ export function hasCompleteLocalDataGridResult(options: CompleteLocalDataGridRes
 }
 
 export function canGoNextDataGridPage(options: CanGoNextDataGridPageOptions): boolean {
+  if (options.allRowsLoaded === true) return false;
   if (options.hasMore === true) return true;
 
   const pageSize = Math.max(1, options.pageSize);
@@ -131,10 +133,6 @@ export function canGoNextDataGridPage(options: CanGoNextDataGridPageOptions): bo
   const totalRowCount = options.totalRowCount;
   if (typeof totalRowCount === "number" && Number.isFinite(totalRowCount) && totalRowCount >= 0) {
     return currentOffset + pageSize < totalRowCount;
-  }
-
-  if (options.allRowsLoaded === true) {
-    return currentOffset + pageSize < options.rowCount;
   }
 
   return options.rowCount >= pageSize;

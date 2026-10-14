@@ -72,6 +72,9 @@ import { useTheme } from "@/composables/useTheme";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { useToast } from "@/composables/useToast";
+import { fetchNamespaceOptionsForConnection, fetchCatalogNamespaceOptions, namespaceOptionsAreSchemas, normalizedQueryTabCatalog, selectedQueryCatalogName } from "@/composables/useDatabaseOptions";
+import { schemaOptionsForConnection } from "@/composables/useSchemaOptions";
+import { connectionIsDorisFamilyCatalogCapable, isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import { useVerticalOverlayScrollbar } from "@/composables/useVerticalOverlayScrollbar";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
@@ -116,9 +119,9 @@ import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTabl
 import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, normalizeUnsupportedConcurrentIndexes, type ConcurrentIndexAvailability } from "@/lib/table/concurrentIndexAvailability";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
-import { codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { postgresListRolesSql, usersFromPostgresRolesResult } from "@/lib/database/databaseUserAdmin";
-import type { ColumnInfo, ConstraintInfo, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
+import type { CatalogInfo, ColumnInfo, ConnectionConfig, ConstraintInfo, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
   applyManticoreDdlColumnExtras,
   buildStructureTargetLabel,
@@ -550,6 +553,16 @@ async function authorizeStarRocksLayoutCopy(sql: string): Promise<boolean> {
   return !productionContext.active || (await productionSafetyStore.requestConfirmation({ sql, connectionName: config?.name, database: props.database, productionDatabases: productionContext.databases, source: t("starrocksLayout.copyTitle") }));
 }
 const copyColumnsDialogOpen = ref(false);
+const copySourceConnectionId = ref("");
+const copySourceDatabase = ref("");
+const copySourceSchema = ref("");
+const copySourceCatalog = ref("");
+const copySourceDatabases = ref<string[]>([]);
+const copySourceSchemas = ref<string[]>([]);
+const copySourceCatalogs = ref<CatalogInfo[]>([]);
+const copySourceScopeLoading = ref(false);
+const copySourceScopeReady = ref(false);
+let copySourceScopeRequestId = 0;
 const copySourceTables = ref<TableInfo[]>([]);
 const copySourceTableName = ref("");
 const copySourceTableSearch = ref("");
@@ -999,7 +1012,7 @@ function foreignKeyChanged(foreignKey: EditableStructureForeignKey): boolean {
 function triggerChanged(trigger: EditableStructureTrigger): boolean {
   if (!trigger.original || trigger.markedForDrop) return true;
   const original = trigger.original;
-  return trigger.name !== original.name || trigger.timing !== original.timing || trigger.event !== original.event || !sameText(trigger.statement, original.statement);
+  return trigger.name !== original.name || trigger.timing !== original.timing || trigger.event !== original.event || !sameText(trigger.statement, original.statement) || (trigger.enabled !== undefined && trigger.enabled !== original.enabled);
 }
 
 function captureStructureRefreshScope(): TableStructureRefreshScope {
@@ -3623,6 +3636,97 @@ function onColumnRowActivate(column: EditableStructureColumn) {
   selectSingleColumn(column);
 }
 
+const copySourceConnection = computed(() => store.getConfig(copySourceConnectionId.value));
+function isCompatibleCopyConnection(config: ConnectionConfig): boolean {
+  const sourceType = tableStructureDatabaseTypeForConnection(config);
+  // Unknown JDBC dialects cannot be assumed compatible across connections.
+  return config.id === props.connectionId || (!!sourceType && sourceType !== "jdbc" && sourceType === databaseType.value);
+}
+const copySourceConnections = computed(() => store.connections.filter(isCompatibleCopyConnection));
+const copySourceCompatible = computed(() => !!copySourceConnection.value && isCompatibleCopyConnection(copySourceConnection.value));
+const copySourceRootSchemaMode = computed(() => namespaceOptionsAreSchemas(copySourceConnection.value));
+const copySourceHasSchema = computed(() => !copySourceRootSchemaMode.value && !connectionUsesDatabaseObjectTreeMode(copySourceConnection.value) && isSchemaAware(tableStructureDatabaseTypeForConnection(copySourceConnection.value)));
+const copySourceMetadataSchema = computed(() => connectionObjectTreeQuerySchema(copySourceConnection.value, copySourceDatabase.value, copySourceSchema.value));
+const copySourceTargetCatalog = computed(() => normalizedQueryTabCatalog(copySourceCatalogs.value, copySourceCatalog.value));
+
+function resetCopySourceTables() {
+  clearCopySourceTableSearchTimer();
+  ++copySourceTablesRequestId;
+  copySourceTablesLoading.value = false;
+  copySourceTables.value = [];
+  copySourceTablesOffset.value = 0;
+  copySourceTablesHasMore.value = false;
+  clearCopySourceTableSelection();
+}
+
+// Explicit cascade steps keep stale namespace requests from restoring old selections.
+async function changeCopySourceScope(level: "connection" | "catalog" | "database" | "schema", value: string, prefill = false) {
+  const requestId = ++copySourceScopeRequestId;
+  resetCopySourceTables();
+  copySourceTableSearch.value = "";
+  copySourceError.value = "";
+  copySourceScopeReady.value = false;
+  copySourceScopeLoading.value = true;
+  if (level === "connection") {
+    copySourceConnectionId.value = value;
+    copySourceCatalog.value = "";
+    copySourceCatalogs.value = [];
+  }
+  if (level === "catalog") copySourceCatalog.value = value;
+  if (level === "connection" || level === "catalog") {
+    copySourceDatabase.value = "";
+    copySourceDatabases.value = [];
+  }
+  if (level === "database") copySourceDatabase.value = value;
+  if (level !== "schema") {
+    copySourceSchema.value = "";
+    copySourceSchemas.value = [];
+  } else copySourceSchema.value = value;
+  const config = copySourceConnection.value;
+  const current = () => requestId === copySourceScopeRequestId && copyColumnsDialogOpen.value;
+  try {
+    if (!config || !isCompatibleCopyConnection(config)) return;
+    await store.ensureConnected(config.id, { activate: false });
+    if (!current() || !copySourceCompatible.value) return;
+    if (level === "connection" && connectionIsDorisFamilyCatalogCapable(config)) {
+      const catalogs = await api.listDorisCatalogs(config.id);
+      if (!current()) return;
+      copySourceCatalogs.value = catalogs;
+      copySourceCatalog.value = selectedQueryCatalogName(catalogs, prefill ? props.catalog : undefined);
+      if (!copySourceCatalog.value) return;
+    }
+    if (level === "connection" || level === "catalog") {
+      const catalog = copySourceTargetCatalog.value;
+      const databases = catalog ? await fetchCatalogNamespaceOptions(config.id, catalog, config) : await fetchNamespaceOptionsForConnection(config.id, config);
+      if (!current()) return;
+      copySourceDatabases.value = databases;
+      const preferred = prefill ? props.database : namespaceOptionsAreSchemas(config) ? config.username : config.database;
+      copySourceDatabase.value = databases.includes(preferred || "") ? preferred || "" : (databases[0] ?? "");
+    }
+    if (!copySourceDatabases.value.includes(copySourceDatabase.value)) return;
+    if (copySourceRootSchemaMode.value) {
+      // Oracle/Dameng expose their owner as the namespace immediately below a connection.
+      copySourceSchema.value = copySourceDatabase.value;
+    } else if (copySourceHasSchema.value && level !== "schema") {
+      const database = copySourceDatabase.value;
+      const schemas = await api.listSchemas(config.id, database);
+      if (!current()) return;
+      copySourceSchemas.value = schemaOptionsForConnection(schemas, config, database);
+      const preferred = prefill ? metadataSchema.value : "";
+      copySourceSchema.value = copySourceSchemas.value.includes(preferred) ? preferred : (copySourceSchemas.value[0] ?? "");
+    }
+    if (copySourceHasSchema.value && !copySourceSchemas.value.includes(copySourceSchema.value)) return;
+    // Preserve explicit metadata scope for an unknown JDBC driver on the current connection.
+    if (prefill && !copySourceRootSchemaMode.value && !copySourceHasSchema.value) copySourceSchema.value = props.schema || "";
+    copySourceScopeReady.value = true;
+  } catch (error: any) {
+    if (current()) copySourceError.value = error?.message || String(error);
+  } finally {
+    if (current()) copySourceScopeLoading.value = false;
+  }
+  if (current() && copySourceScopeReady.value) await loadCopySourceTables();
+}
+
 function normalizedColumnSearch(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -3658,7 +3762,9 @@ function clearCopySourceTableSearchTimer() {
 
 function isCopySourceTable(table: TableInfo): boolean {
   const databaseInfo = connection.value?.database_info;
-  return isCreateMode.value || tableStructureIdentifierComparisonKey(table.name, databaseType.value, databaseInfo) !== tableStructureIdentifierComparisonKey(props.tableName, databaseType.value, databaseInfo);
+  const sameNamespace =
+    copySourceConnectionId.value === props.connectionId && copySourceDatabase.value === props.database && copySourceMetadataSchema.value === metadataSchema.value && (copySourceTargetCatalog.value || "") === (normalizedQueryTabCatalog(copySourceCatalogs.value, props.catalog || "") || "");
+  return isCreateMode.value || !sameNamespace || tableStructureIdentifierComparisonKey(table.name, databaseType.value, databaseInfo) !== tableStructureIdentifierComparisonKey(props.tableName, databaseType.value, databaseInfo);
 }
 
 function clearCopySourceTableSelection() {
@@ -3671,14 +3777,13 @@ function clearCopySourceTableSelection() {
 }
 
 async function loadCopySourceTables(offset = 0) {
-  if (!props.connectionId || !props.database) return;
+  if (!copyColumnsDialogOpen.value || !copySourceScopeReady.value || !copySourceCompatible.value || copySourceScopeLoading.value) return;
   clearCopySourceTableSelection();
   const requestId = ++copySourceTablesRequestId;
   copySourceTablesLoading.value = true;
   copySourceError.value = "";
   try {
-    await store.ensureConnected(props.connectionId);
-    const tables = await api.listTables(props.connectionId, props.database, metadataSchema.value, copySourceTableSearch.value.trim() || undefined, COPY_SOURCE_TABLE_PAGE_PROBE_SIZE, offset, ["TABLE"], props.catalog);
+    const tables = await api.listTables(copySourceConnectionId.value, copySourceDatabase.value, copySourceMetadataSchema.value, copySourceTableSearch.value.trim() || undefined, COPY_SOURCE_TABLE_PAGE_PROBE_SIZE, offset, ["TABLE"], copySourceTargetCatalog.value);
     if (requestId !== copySourceTablesRequestId) return;
     copySourceTables.value = tables.slice(0, COPY_SOURCE_TABLE_PAGE_SIZE).filter(isCopySourceTable);
     copySourceTablesOffset.value = offset;
@@ -3697,50 +3802,52 @@ async function loadCopySourceTables(offset = 0) {
 
 function updateCopySourceTableSearch(value: string | number) {
   copySourceTableSearch.value = String(value);
-  clearCopySourceTableSelection();
+  // Invalidate any in-flight load and restart the debounce, but keep the
+  // current list visible until the new results land to avoid a blank flicker.
   clearCopySourceTableSearchTimer();
+  ++copySourceTablesRequestId;
   copySourceTableSearchTimer = setTimeout(() => {
     copySourceTableSearchTimer = undefined;
     void loadCopySourceTables();
   }, COPY_SOURCE_TABLE_SEARCH_DEBOUNCE_MS);
 }
 
-watch(copyColumnsDialogOpen, (open) => {
-  if (open) return;
-  clearCopySourceTableSearchTimer();
-  copySourceTablesRequestId++;
-  copySourceColumnsRequestId++;
-});
+watch(
+  copyColumnsDialogOpen,
+  (open) => {
+    if (open) return;
+    ++copySourceScopeRequestId;
+    copySourceScopeReady.value = false;
+    copySourceScopeLoading.value = false;
+    resetCopySourceTables();
+  },
+  { flush: "sync" },
+);
+
+watch(
+  () => [props.connectionId, props.database, props.schema, props.catalog, props.tableName],
+  () => {
+    copyColumnsDialogOpen.value = false;
+  },
+  { flush: "sync" },
+);
 
 async function openCopyColumnsDialog() {
   if (!canAddColumn.value || !props.connectionId || !props.database) return;
   copyColumnsDialogOpen.value = true;
-  copySourceTableName.value = "";
-  copySourceTableSearch.value = "";
-  copySourceColumns.value = [];
-  copySourceColumnSearch.value = "";
-  selectedCopySourceColumnNames.value = [];
-  copySourceError.value = "";
-  copySourceColumnsRequestId++;
-  copySourceColumnsLoading.value = false;
-  copySourceTables.value = [];
-  copySourceTablesOffset.value = 0;
-  copySourceTablesHasMore.value = false;
-  clearCopySourceTableSearchTimer();
-  await loadCopySourceTables();
+  await changeCopySourceScope("connection", props.connectionId, true);
 }
 
 async function loadCopySourceColumns(tableName: string) {
+  if (!copySourceScopeReady.value || !copySourceCompatible.value || copySourceScopeLoading.value || copySourceTablesLoading.value) return;
+  clearCopySourceTableSelection();
   copySourceTableName.value = tableName;
-  copySourceColumns.value = [];
-  copySourceColumnSearch.value = "";
-  selectedCopySourceColumnNames.value = [];
   copySourceError.value = "";
-  if (!tableName || !props.connectionId || !props.database) return;
+  if (!tableName) return;
   const requestId = ++copySourceColumnsRequestId;
   copySourceColumnsLoading.value = true;
   try {
-    const sourceColumns = await api.getColumns(props.connectionId, props.database, metadataSchema.value, tableName, props.catalog);
+    const sourceColumns = await api.getColumns(copySourceConnectionId.value, copySourceDatabase.value, copySourceMetadataSchema.value, tableName, copySourceTargetCatalog.value);
     if (requestId !== copySourceColumnsRequestId) return;
     copySourceColumns.value = sourceColumns;
     selectedCopySourceColumnNames.value = copyableSourceColumns.value.filter(({ alreadyExists }) => !alreadyExists).map(({ column }) => column.name);
@@ -3757,7 +3864,15 @@ function toggleCopySourceColumns() {
 }
 
 function applyCopiedColumns() {
-  const copiedColumns = createCopiedColumnDrafts(selectedCopySourceColumns.value, databaseType.value, uuid);
+  if (!canAddColumn.value || !copySourceCompatible.value || !copySourceScopeReady.value || copySourceScopeLoading.value || copySourceTablesLoading.value || copySourceColumnsLoading.value || copySourceError.value) return;
+  const names = new Set(columns.value.filter((column) => !column.markedForDrop).map((column) => tableStructureIdentifierComparisonKey(column.name, databaseType.value, connection.value?.database_info)));
+  const sourceColumns = selectedCopySourceColumns.value.filter((column) => {
+    const key = tableStructureIdentifierComparisonKey(column.name, databaseType.value, connection.value?.database_info);
+    if (names.has(key)) return false;
+    names.add(key);
+    return true;
+  });
+  const copiedColumns = createCopiedColumnDrafts(sourceColumns, databaseType.value, uuid);
   if (!copiedColumns.length) return;
   const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
   columns.value.splice(insertAt, 0, ...copiedColumns);
@@ -5035,6 +5150,7 @@ function addTrigger() {
     timing: isOracleTriggerEditor.value ? "BEFORE EACH ROW" : isSqlServerTriggerEditor.value ? "AFTER" : "BEFORE",
     event: "INSERT",
     statement: isOracleTriggerEditor.value ? "BEGIN\n  NULL;\nEND" : isSqlServerTriggerEditor.value ? "BEGIN\n  SET NOCOUNT ON;\nEND" : "BEGIN\n  \nEND",
+    enabled: true,
     markedForDrop: false,
   };
   triggers.value.push(draft);
@@ -5051,7 +5167,13 @@ function toggleDropTrigger(trigger: EditableStructureTrigger) {
 }
 
 function canEditTriggerDraft(trigger: EditableStructureTrigger): boolean {
-  return !triggersLoading.value && canEditTriggers.value && !trigger.markedForDrop && canEditStructuredTriggerDraft(databaseType.value, trigger);
+  return canToggleTriggerEnabled(trigger) && canEditStructuredTriggerDraft(databaseType.value, trigger);
+}
+
+// ALTER TRIGGER ... ENABLE/DISABLE leaves the source untouched, so it stays available for
+// triggers whose source the structured form cannot rebuild.
+function canToggleTriggerEnabled(trigger: EditableStructureTrigger): boolean {
+  return !triggersLoading.value && canEditTriggers.value && !trigger.markedForDrop;
 }
 
 function primarySqlOperation(sql: string): string {
@@ -5495,6 +5617,7 @@ onActivated(() => {
   if (activeTab.value === "ddl") scheduleDdlEditorInit();
 });
 onDeactivated(() => {
+  copyColumnsDialogOpen.value = false;
   flushStructureScrollDraftSync();
   if (structureColumnScrollingTimer) clearTimeout(structureColumnScrollingTimer);
   structureColumnScrollingTimer = undefined;
@@ -5506,6 +5629,8 @@ onDeactivated(() => {
   destroyDdlEditor();
 });
 onBeforeUnmount(() => {
+  ++copySourceScopeRequestId;
+  resetCopySourceTables();
   structureLoadRequestId++;
   flushStructureScrollDraftSync();
   if (structureColumnScrollingTimer) clearTimeout(structureColumnScrollingTimer);
@@ -6898,8 +7023,18 @@ watch(
                       <SelectItem v-for="event in triggerEventOptions" :key="event" :value="event">{{ event }}</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Badge v-if="trigger.original && trigger.original.enabled !== undefined && trigger.original.enabled !== null" variant="outline" class="shrink-0 text-[length:var(--structure-font-size)]">
-                    {{ trigger.original.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
+                  <Button
+                    v-if="isOracleTriggerEditor && trigger.enabled !== undefined"
+                    variant="outline"
+                    size="sm"
+                    :class="['h-[var(--structure-control-height)] shrink-0 px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]', !trigger.enabled ? 'text-muted-foreground' : '']"
+                    :disabled="!canToggleTriggerEnabled(trigger)"
+                    @click.stop="trigger.enabled = !trigger.enabled"
+                  >
+                    {{ trigger.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
+                  </Button>
+                  <Badge v-else-if="trigger.enabled !== undefined && trigger.enabled !== null" variant="outline" class="shrink-0 text-[length:var(--structure-font-size)]">
+                    {{ trigger.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
                   </Badge>
                   <Button v-if="trigger.original" variant="ghost" size="sm" :class="structureToolbarButtonClass" @click.stop="toggleDropTrigger(trigger)">
                     <Trash2 :class="structureIconClass" />
@@ -7181,18 +7316,80 @@ watch(
           <DialogTitle>{{ t("structureEditor.copyColumnsTitle") }}</DialogTitle>
         </DialogHeader>
 
-        <div class="space-y-3 overflow-hidden">
+        <div class="max-h-[65vh] space-y-3 overflow-y-auto">
+          <p class="text-xs text-muted-foreground">{{ t("structureEditor.copyColumnsSameTypeOnly") }}</p>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <div class="grid gap-1.5 text-sm font-medium">
+              <label id="copy-source-connection-label">{{ t("structureEditor.copyColumnsSourceConnection") }}</label>
+              <SearchableSelect
+                :model-value="copySourceConnectionId"
+                :options="copySourceConnections.map((config) => config.id)"
+                :placeholder="t('structureEditor.copyColumnsSourceConnection')"
+                :search-placeholder="t('structureEditor.copyColumnsSourceConnection')"
+                :empty-text="t('common.noResults')"
+                aria-labelledby="copy-source-connection-label"
+                trigger-class="h-8 w-full justify-between text-xs"
+                :display-name="(id: string) => store.getConfig(id)?.name || id"
+                @update:model-value="(value: string) => changeCopySourceScope('connection', value)"
+              />
+            </div>
+            <div v-if="copySourceCatalogs.length > 0" class="grid gap-1.5 text-sm font-medium">
+              <label id="copy-source-catalog-label">{{ t("structureEditor.copyColumnsSourceCatalog") }}</label>
+              <SearchableSelect
+                :model-value="copySourceCatalog"
+                :options="copySourceCatalogs.map((catalog) => catalog.name)"
+                :placeholder="t('structureEditor.copyColumnsSourceCatalog')"
+                :search-placeholder="t('structureEditor.copyColumnsSourceCatalog')"
+                :empty-text="t('common.noResults')"
+                aria-labelledby="copy-source-catalog-label"
+                trigger-class="h-8 w-full justify-between text-xs"
+                :disabled="copySourceScopeLoading || !copySourceCatalogs.length"
+                @update:model-value="(value: string) => changeCopySourceScope('catalog', value)"
+              />
+            </div>
+            <div class="grid gap-1.5 text-sm font-medium">
+              <label id="copy-source-database-label">{{ t(copySourceRootSchemaMode ? "structureEditor.copyColumnsSourceSchema" : "structureEditor.copyColumnsSourceDatabase") }}</label>
+              <SearchableSelect
+                :model-value="copySourceDatabase"
+                :options="copySourceDatabases"
+                :placeholder="t(copySourceRootSchemaMode ? 'structureEditor.copyColumnsSourceSchema' : 'structureEditor.copyColumnsSourceDatabase')"
+                :search-placeholder="t(copySourceRootSchemaMode ? 'structureEditor.copyColumnsSourceSchema' : 'structureEditor.copyColumnsSourceDatabase')"
+                :empty-text="t('common.noResults')"
+                aria-labelledby="copy-source-database-label"
+                trigger-class="h-8 w-full justify-between text-xs"
+                :disabled="copySourceScopeLoading || !copySourceDatabases.length"
+                @update:model-value="(value: string) => changeCopySourceScope('database', value)"
+              />
+            </div>
+            <div v-if="copySourceHasSchema" class="grid gap-1.5 text-sm font-medium">
+              <label id="copy-source-schema-label">{{ t("structureEditor.copyColumnsSourceSchema") }}</label>
+              <SearchableSelect
+                :model-value="copySourceSchema"
+                :options="copySourceSchemas"
+                :placeholder="t('structureEditor.copyColumnsSourceSchema')"
+                :search-placeholder="t('structureEditor.copyColumnsSourceSchema')"
+                :empty-text="t('common.noResults')"
+                aria-labelledby="copy-source-schema-label"
+                trigger-class="h-8 w-full justify-between text-xs"
+                :disabled="copySourceScopeLoading || !copySourceSchemas.length"
+                @update:model-value="(value: string) => changeCopySourceScope('schema', value)"
+              />
+            </div>
+          </div>
           <div class="grid gap-1.5 text-sm font-medium">
             <label for="copy-source-table-search">{{ t("structureEditor.copyColumnsSourceTable") }}</label>
-            <Input id="copy-source-table-search" :model-value="copySourceTableSearch" :placeholder="t('structureEditor.copyColumnsSearchSourceTables')" @update:model-value="updateCopySourceTableSearch" />
+            <Input id="copy-source-table-search" :disabled="!copySourceScopeReady || copySourceScopeLoading" :model-value="copySourceTableSearch" :placeholder="t('structureEditor.copyColumnsSearchSourceTables')" @update:model-value="updateCopySourceTableSearch" />
           </div>
 
-          <div v-if="copySourceTablesLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
+          <div v-if="copySourceScopeLoading || copySourceTablesLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
             <Loader2 class="h-4 w-4 animate-spin" />
             {{ t("common.loading") }}
           </div>
           <div v-else-if="copySourceError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             {{ copySourceError }}
+          </div>
+          <div v-else-if="!copySourceScopeReady" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
+            {{ t("common.noResults") }}
           </div>
           <div v-else-if="copySourceTables.length === 0" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
             {{ copySourceTableSearch ? t("structureEditor.copyColumnsNoMatchingSourceTables") : t("structureEditor.copyColumnsNoSourceTables") }}
@@ -7274,7 +7471,7 @@ watch(
 
         <DialogFooter>
           <Button variant="outline" @click="copyColumnsDialogOpen = false">{{ t("structureEditor.copyColumnsCancel") }}</Button>
-          <Button :disabled="copySourceColumnsLoading || selectedCopySourceColumns.length === 0" @click="applyCopiedColumns">
+          <Button :disabled="!canAddColumn || !copySourceCompatible || !copySourceScopeReady || copySourceScopeLoading || copySourceTablesLoading || copySourceColumnsLoading || !!copySourceError || selectedCopySourceColumns.length === 0" @click="applyCopiedColumns">
             {{ t("structureEditor.copyColumnsApply", { count: selectedCopySourceColumns.length }) }}
           </Button>
         </DialogFooter>

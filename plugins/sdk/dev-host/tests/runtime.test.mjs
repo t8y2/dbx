@@ -86,13 +86,17 @@ test("closing development host terminates its UI watcher and releases its port",
   let pid;
   for (let attempt = 0; attempt < 100; attempt++) {
     try {
-      pid = Number(await readFile(pidFile, "utf8"));
-      break;
+      const candidate = Number(await readFile(pidFile, "utf8"));
+      if (Number.isSafeInteger(candidate) && candidate > 0) {
+        pid = candidate;
+        break;
+      }
     } catch {
-      await delay(20);
+      // The watcher may not have created its PID file yet.
     }
+    await delay(20);
   }
-  assert.ok(pid, "watcher started");
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, "watcher started");
   await host.close();
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
   await assert.rejects(fetch(host.origin));

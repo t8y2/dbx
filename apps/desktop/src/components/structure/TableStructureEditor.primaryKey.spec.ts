@@ -520,8 +520,48 @@ describe("TableStructureEditor primary key editing", () => {
     );
   });
 
-  it("enables a primary key on an existing keyless Oracle column and makes it not null", async () => {
-    const root = await mountEditor("oracle");
+  it("offers a primary key name input when adding a new key and sends it in the options", async () => {
+    const root = await mountEditor("postgres");
+
+    expect(root.querySelector<HTMLInputElement>("[data-primary-key-name-input]")).toBeNull();
+
+    const primaryKey = columnCheckbox(root, "structureEditor.primaryKey");
+    primaryKey.checked = true;
+    primaryKey.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+
+    const nameInput = root.querySelector<HTMLInputElement>("[data-primary-key-name-input]");
+    expect(nameInput).not.toBeNull();
+
+    nameInput!.value = "users_pkey";
+    nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ primaryKeyName: "users_pkey" }));
+  });
+
+  it("keeps the primary key anonymous when the name is left blank", async () => {
+    const root = await mountEditor("postgres");
+    const primaryKey = columnCheckbox(root, "structureEditor.primaryKey");
+    primaryKey.checked = true;
+    primaryKey.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+
+    expect(root.querySelector<HTMLInputElement>("[data-primary-key-name-input]")).not.toBeNull();
+
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ primaryKeyName: undefined }));
+  });
+
+  it("hides the primary key name input when the table already has a primary key", async () => {
+    const root = await mountEditor("postgres", true);
+
+    expect(root.querySelector<HTMLInputElement>("[data-primary-key-name-input]")).toBeNull();
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("enables a primary key on an existing keyless %s column and makes it not null", async (databaseType) => {
+    const root = await mountEditor(databaseType);
     const primaryKey = columnCheckbox(root, "structureEditor.primaryKey");
     const nullable = columnCheckbox(root, "structureEditor.nullable");
 
@@ -542,8 +582,8 @@ describe("TableStructureEditor primary key editing", () => {
     );
   });
 
-  it("keeps all primary-key checkboxes enabled while composing a new Oracle key", async () => {
-    const root = await mountEditor("oracle");
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps all primary-key checkboxes enabled while composing a new %s key", async (databaseType) => {
+    const root = await mountEditor(databaseType);
     buttonWithText(root, "structureEditor.addColumn").click();
     await nextTick();
 
@@ -570,8 +610,8 @@ describe("TableStructureEditor primary key editing", () => {
     );
   });
 
-  it("keeps an existing Oracle primary key and all replacement choices disabled", async () => {
-    const root = await mountEditor("oracle", true);
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps an existing %s primary key and all replacement choices disabled", async (databaseType) => {
+    const root = await mountEditor(databaseType, true);
     buttonWithText(root, "structureEditor.addColumn").click();
     await nextTick();
 
@@ -579,8 +619,8 @@ describe("TableStructureEditor primary key editing", () => {
     expect(columnCheckbox(root, "structureEditor.primaryKey", 1).disabled).toBe(true);
   });
 
-  it.each(["oceanbase-oracle", "iris"] as const)("keeps primary-key creation disabled for existing %s tables", async (databaseType) => {
-    const root = await mountEditor(databaseType);
+  it("keeps primary-key creation disabled for existing iris tables", async () => {
+    const root = await mountEditor("iris");
 
     expect(columnCheckbox(root, "structureEditor.primaryKey").disabled).toBe(true);
   });
@@ -771,6 +811,28 @@ describe("TableStructureEditor primary key editing", () => {
 });
 
 describe("TableStructureEditor data type options", () => {
+  it("supplies the verified OceanBase built-in list to the column picker", async () => {
+    const root = await mountEditor("oceanbase-oracle", false, { database: "ob-built-in-types" });
+    const picker = root.querySelector<HTMLElement>('[data-searchable-select="true"]');
+    if (!picker) throw new Error("Missing data type picker");
+    const options = JSON.parse(picker.dataset.options ?? "[]") as string[];
+    expect(options).toHaveLength(23);
+    expect(options).toEqual(expect.arrayContaining(["number", "float", "json", "xmltype", "sdo_geometry"]));
+    for (const rejected of ["nclob", "long", "long raw", "bfile", "boolean", "vector"]) expect(options).not.toContain(rejected);
+    expect(picker.dataset.allowCustom).toBe("true");
+  });
+
+  it("keeps other dynamic OceanBase types while excluding rejected recommendations", async () => {
+    const root = await mountEditor("oceanbase-oracle", false, { database: "ob-dynamic-types", dynamicTypes: ["NUMBER", "VECTOR", "CUSTOM_OB_TYPE"] });
+    const picker = root.querySelector<HTMLElement>('[data-searchable-select="true"]');
+    if (!picker) throw new Error("Missing data type picker");
+    await vi.waitFor(() => expect(JSON.parse(picker.dataset.options ?? "[]").slice(0, 2)).toEqual(["NUMBER", "CUSTOM_OB_TYPE"]));
+    const options = JSON.parse(picker.dataset.options ?? "[]") as string[];
+    expect(options).not.toContain("VECTOR");
+    expect(options.filter((option) => option.toLowerCase() === "number")).toEqual(["NUMBER"]);
+    expect(options).toContain("xmltype");
+  });
+
   it("keeps dynamic Dameng types first and deduplicates fallback types case-insensitively", async () => {
     const root = await mountEditor("dameng", false, {
       database: "dynamic-types-5275",

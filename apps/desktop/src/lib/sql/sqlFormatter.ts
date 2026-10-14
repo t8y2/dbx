@@ -1,4 +1,4 @@
-import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterIndentStyle, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { formatSqlLayout, type SqlLayoutOptions } from "@/lib/sql/layout";
 import { looksLikeXml } from "@/lib/sql/autoFormat";
 import { compressCypherText, formatCypherText } from "@/lib/sql/cypherFormatter";
@@ -167,6 +167,18 @@ function formatterLanguage(dialect: SqlFormatDialect) {
   }
 }
 
+/**
+ * sql-formatter's language key for a format dialect, or `null` for a dialect
+ * that has no SQL grammar at all (Cypher — see {@link formatSqlText}, which
+ * routes it to the Cypher formatter before reaching sql-formatter).
+ *
+ * Exported so callers that need sql-formatter's own tokenization — keyword-only
+ * case conversion — resolve the dialect exactly the way formatting does.
+ */
+export function formatterLanguageForDialect(dialect: SqlFormatDialect): string | null {
+  return dialect === "cypher" ? null : formatterLanguage(dialect);
+}
+
 function splitTrailingStandaloneDot(sql: string): { body: string; suffix: string } | null {
   const match = /\s+\.(\s*)$/.exec(sql);
   if (!match || match.index === 0) return null;
@@ -233,7 +245,7 @@ function restoreProtectedEmptyLines(sql: string, markers: readonly string[]): st
 
   const markerSet = new Set(markers);
   const lines = sql.split(/\r\n|\r|\n/);
-  for (let index = 0; index < lines.length; ) {
+  for (let index = 0; index < lines.length;) {
     if (!markerSet.has(lines[index].trim())) {
       index += 1;
       continue;
@@ -449,11 +461,14 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     return emptyLineProtection ? restoreProtectedEmptyLines(laidOut, emptyLineProtection.markers) : laidOut;
   };
 
-  // DBX's own layout printer produces the default style. It needs the AST and
-  // sql-formatter's internal layout machinery, so it can decline an input — an
-  // unparseable statement, an internal shape that moved. `null` means "use the
-  // public formatter", which is also what the tabular indent styles ask for:
-  // those are an alternative layout this printer deliberately does not reproduce.
+  // DBX's own layout printer produces the default `dbx` style. It needs the AST
+  // and sql-formatter's internal layout machinery, so it can decline an input —
+  // an unparseable statement, an internal shape that moved. `null` means "use
+  // the public formatter", which is also what the `classic` layout style asks
+  // for: that style is sql-formatter's own layout, i.e. the pre-v0.6.16 default,
+  // and the applySqlFormatterLayout post-passes exist to serve it. The tabular
+  // indent styles likewise are an alternative layout this printer deliberately
+  // does not reproduce.
   const layoutOptions: Partial<SqlLayoutOptions> = {
     lineWidth: normalizedSettings.expressionWidth,
     indentWidth: normalizedSettings.tabWidth,
@@ -464,7 +479,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     logicalOperatorNewline: normalizedSettings.logicalOperatorNewline,
     commaPosition: normalizedSettings.commaPosition,
   };
-  const usesDefaultStyle = normalizedSettings.indentStyle === "standard";
+  const usesDefaultStyle = normalizedSettings.layoutStyle === "dbx" && normalizedSettings.indentStyle === "standard";
 
   const formatOnce = async (input: string): Promise<string> => {
     const laidOut = usesDefaultStyle ? await formatSqlLayout({ sql: input, language, dialectOptions: resolvedDialect, cfg: formatterOptions, options: layoutOptions }) : null;
@@ -698,7 +713,7 @@ function normalizeLikeOperatorCase(sql: string, settings: SqlFormatterSettings, 
   return restoreSpans(normalized, spans);
 }
 
-function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
+function keepFromClauseAndFirstSourceOnSameLine(sql: string, indentStyle: SqlFormatterIndentStyle): string {
   const lines = sql.split("\n");
   for (let index = 0; index < lines.length - 1; index += 1) {
     const clauseMatch = lines[index].match(/^(\s*)FROM\s*$/i);
@@ -714,7 +729,13 @@ function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
 
     const clauseIndent = clauseMatch[1];
     const sourceIndent = sourceMatch[1];
-    const separator = sourceIndent.startsWith(clauseIndent) ? sourceIndent.slice(clauseIndent.length) : " ";
+    // The source line's indent is the gap to reuse only for the tabular styles:
+    // there it is the column sql-formatter aligned every clause to, and
+    // collapsing it would destroy that alignment (`FROM      t`). Under the
+    // standard indent the same indent is just the clause body's step, so reusing
+    // it doubles the gap (`FROM  t`) — the upstream one-line form is a single
+    // space, and that is what merging is supposed to produce.
+    const separator = indentStyle === "standard" ? " " : sourceIndent.startsWith(clauseIndent) ? sourceIndent.slice(clauseIndent.length) : " ";
     lines[index] = `${lines[index]}${separator || " "}${source}`;
     lines.splice(index + 1, 1);
     index -= 1;
@@ -787,7 +808,7 @@ function formatLeadingCommas(sql: string, dialect: SqlFormatDialect = "generic")
 function applySqlFormatterLayout(sql: string, settings: SqlFormatterSettings, dialect: SqlFormatDialect): string {
   let formatted = normalizeLikeOperatorCase(sql, settings, dialect);
   if (settings.logicalOperatorNewline === "none") formatted = keepLogicalOperatorsOnSameLine(formatted, dialect);
-  if (settings.fromClauseLayout === "sameLine") formatted = keepFromClauseAndFirstSourceOnSameLine(formatted);
+  if (settings.fromClauseLayout === "sameLine") formatted = keepFromClauseAndFirstSourceOnSameLine(formatted, settings.indentStyle);
   if (settings.commaPosition === "before") formatted = formatLeadingCommas(formatted, dialect);
   return formatted;
 }

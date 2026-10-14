@@ -10,6 +10,42 @@ import (
 	"time"
 )
 
+func TestKingbaseQueryMessagesIntegration(t *testing.T) {
+	host := os.Getenv("KINGBASE_TEST_HOST")
+	portText := os.Getenv("KINGBASE_TEST_PORT")
+	username := os.Getenv("KINGBASE_TEST_USERNAME")
+	password := os.Getenv("KINGBASE_TEST_PASSWORD")
+	if host == "" || portText == "" || username == "" || password == "" {
+		t.Skip("Kingbase integration environment is not configured")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := os.Getenv("KINGBASE_TEST_DATABASE")
+	if database == "" {
+		database = "test"
+	}
+	server := newServer()
+	if err := server.connect(connectParams{Host: host, Port: port, Database: database, Username: username, Password: password}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.disconnect() })
+	sql := "DO $$ BEGIN RAISE NOTICE '当前用户: %, 时间: %', current_user, now(); END $$"
+	result, err := server.executeQuery(queryOptions{SQL: sql})
+	if err != nil || len(result.Messages) != 1 || !strings.Contains(result.Messages[0].Message, "当前用户:") || result.Messages[0].Code != "00000" {
+		t.Fatalf("query notice missing: %+v, err=%v", result.Messages, err)
+	}
+	page, err := server.executeQueryPage(queryOptions{SQL: sql}, 10)
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("paged command lost notices: %+v, err=%v", page.Messages, err)
+	}
+	result, err = server.executeQuery(queryOptions{SQL: "SELECT 1"})
+	if err != nil || len(result.Messages) != 0 {
+		t.Fatalf("previous command notices leaked: %+v, err=%v", result.Messages, err)
+	}
+}
+
 func TestKingbaseIntegration(t *testing.T) {
 	host := os.Getenv("KINGBASE_TEST_HOST")
 	portText := os.Getenv("KINGBASE_TEST_PORT")

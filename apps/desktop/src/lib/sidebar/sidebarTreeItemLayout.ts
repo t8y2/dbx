@@ -18,6 +18,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "type-method",
   "object-browser",
   "redis-db",
+  "mqtt-topic",
   "mq-tenant",
   "etcd-root",
   "etcd-dashboard",

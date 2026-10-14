@@ -39,8 +39,8 @@ pub use identifiers::{
     normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_table_identifier,
 };
 pub use identifiers::{
-    parse_sqlserver_linked_schema_ref, qualified_transfer_table, quote_iris_identifier, quote_transfer_identifier,
-    transfer_column_identifier,
+    parse_sqlserver_linked_schema_ref, qualified_transfer_table, quote_gaussdb_jdbc_identifier, quote_iris_identifier,
+    quote_transfer_identifier, transfer_column_identifier,
 };
 pub use table_select::{
     build_count_table_sql, build_iris_table_select_sql, build_table_data_select_sql,

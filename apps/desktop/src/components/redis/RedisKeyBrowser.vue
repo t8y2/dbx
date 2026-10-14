@@ -3180,7 +3180,7 @@ onMounted(async () => {
   resumeRedisBrowserBackgroundWork();
   void autofocusSearchOnce();
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
@@ -3194,7 +3194,7 @@ onActivated(async () => {
   // Ensure the connection is still alive after reactivation (e.g. tab switch).
   // Retry an empty failed/interrupted load, but retain successful sparse pages.
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
@@ -3234,7 +3234,7 @@ watch(
     resetCommandDocumentation();
     resetLoadedKeys();
     try {
-      await connectionStore.ensureConnected(connectionId);
+      await connectionStore.ensureConnected(connectionId, { skipIfClosedByUser: true });
     } catch (error) {
       console.warn("[DBX] ensureConnected failed for", connectionId, error);
     }
@@ -3291,7 +3291,7 @@ async function prepareLegacyGroupingView() {
   let anchor = groupedKeyListRef.value?.getViewportAnchor();
   let rowIndex = Math.min(anchor?.rowIndex ?? 0, Math.max(0, snapshot.visibleRows.length - 1));
   if (anchor?.keyRaw) {
-    for (let offset = 0; offset < snapshot.visibleRows.length; ) {
+    for (let offset = 0; offset < snapshot.visibleRows.length;) {
       if (!current()) return;
       const end = Math.min(offset + 512, snapshot.visibleRows.length);
       let found = false;

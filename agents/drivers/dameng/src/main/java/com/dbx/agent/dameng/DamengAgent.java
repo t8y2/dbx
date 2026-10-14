@@ -412,7 +412,17 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     String sqlState = candidate.getSQLState();
                     if ("0A000".equalsIgnoreCase(sqlState)
                         || "42000".equalsIgnoreCase(sqlState)
-                        || "42501".equalsIgnoreCase(sqlState)) {
+                        || "42501".equalsIgnoreCase(sqlState)
+                        // DM 在无 DBMS_OUTPUT 权限时用 28000（invalid authorization
+                        // specification），与 Oracle 的 42000/42501 对应。
+                        || "28000".equalsIgnoreCase(sqlState)) {
+                        return true;
+                    }
+                    // 达梦中文环境只回「权限不足」（vendorCode -5669，SQLState 28000），消息里
+                    // 不含 `dbms_output` 字样，无法走 isDbmsOutputUnavailableMessage 的匹配。
+                    // DBMS_OUTPUT.ENABLE 是可选步骤，这里执行的也只可能是这一句，因此权限类失败
+                    // 一律只让该功能降级，不能阻断用户自己的 SQL（#11875）。
+                    if (isDamengPermissionError(candidate)) {
                         return true;
                     }
                     String message = candidate.getMessage();
@@ -744,6 +754,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 if (errorCode == -3325 || errorCode == -2207) {
                     return true;
                 }
+                if (isDamengPermissionError(candidate)) {
+                    return true;
+                }
                 String message = candidate.getMessage();
                 if (message == null) {
                     continue;
@@ -784,6 +797,27 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
         }
         return false;
+    }
+
+    /**
+     * 达梦中文环境在无权限时只返回「权限不足」（vendorCode -5669），消息里不带对象名，
+     * 无法通过 {@link #isDamengMetadataUnavailableError} 的对象名匹配识别。
+     * 这类错误同样应按「元数据不可用」处理：走字典视图降级，而不是让查看对象直接报错。
+     */
+    private static boolean isDamengPermissionError(SQLException error) {
+        if (error.getErrorCode() == -5669) {
+            return true;
+        }
+        String message = error.getMessage();
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("权限")
+            || normalized.contains("privilege")
+            || normalized.contains("permission")
+            || normalized.contains("access denied")
+            || normalized.contains("not authorized");
     }
 
     /** 连接类错误（断连/超时等）不属于元数据不可用，必须继续上抛。 */

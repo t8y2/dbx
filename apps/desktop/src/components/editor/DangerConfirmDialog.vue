@@ -32,6 +32,8 @@ const props = withDefaults(
     message?: string;
     details?: string;
     detailsText?: string;
+    detailsLabel?: string;
+    showCancel?: boolean;
     confirmLabel?: string;
     showSuppressToggle?: boolean;
     suppressToggleLabel?: string;
@@ -56,6 +58,8 @@ const props = withDefaults(
     message: "",
     details: "",
     detailsText: "",
+    detailsLabel: "",
+    showCancel: true,
     confirmLabel: "",
     showSuppressToggle: false,
     suppressToggleLabel: "",
@@ -139,7 +143,8 @@ async function copyFullCode() {
         <p class="text-sm text-muted-foreground mb-3">{{ message || t("dangerDialog.message") }}</p>
         <p v-if="detailsText" class="text-xs text-muted-foreground mb-3 whitespace-pre-line max-h-40 overflow-auto">{{ detailsText }}</p>
         <slot name="options" />
-        <div v-if="code" data-testid="danger-code-container" class="min-w-0">
+        <component :is="detailsLabel ? 'details' : 'div'" v-if="code" data-testid="danger-code-container" class="min-w-0">
+          <summary v-if="detailsLabel" class="mb-2 cursor-pointer text-sm text-muted-foreground">{{ detailsLabel }}</summary>
           <div data-testid="danger-code-actions" class="mb-1 flex items-center justify-end gap-0.5">
             <Button variant="ghost" size="icon-xs" class="h-6 w-6 text-muted-foreground" :title="t('dangerDialog.copyFullText')" @click="copyFullCode">
               <Check v-if="copied" class="h-3.5 w-3.5 text-emerald-600" />
@@ -156,7 +161,7 @@ async function copyFullCode() {
             </div>
             <pre v-if="preview.tail" class="font-inherit" :class="wrap ? 'w-full whitespace-pre-wrap break-all' : 'w-max min-w-full whitespace-pre'" v-html="highlightedTail" />
           </div>
-        </div>
+        </component>
         <div v-if="showSuppressToggle" class="mt-3 flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
           <Label for="danger-confirm-suppress" class="text-sm leading-5">{{ suppressToggleLabel || t("dangerDialog.suppressFuturePrompts") }}</Label>
           <Switch id="danger-confirm-suppress" v-model="suppressFuturePrompts" />
@@ -168,7 +173,7 @@ async function copyFullCode() {
           <Loader2 v-if="cancelRunningLoading" class="h-3.5 w-3.5 animate-spin" />
           {{ t("dangerDialog.cancelRunning") }}
         </Button>
-        <Button v-else ref="cancelButtonRef" variant="outline" :disabled="loading" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button v-else-if="showCancel" ref="cancelButtonRef" variant="outline" :disabled="loading" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button ref="confirmButtonRef" variant="destructive" class="gap-1.5" :disabled="loading || confirmDisabled" @click="onConfirm">
           <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
           {{ confirmLabel || t("dangerDialog.confirm") }}

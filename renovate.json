@@ -1,16 +1,75 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"],
+  "extends": [
+    "config:recommended"
+  ],
   "timezone": "Asia/Shanghai",
-  "schedule": ["at any time"],
+  "schedule": [
+    "at any time"
+  ],
   "prConcurrentLimit": 8,
   "prHourlyLimit": 4,
-  "labels": ["dependencies"],
+  "labels": [
+    "dependencies"
+  ],
   "packageRules": [
-    { "matchFileNames": ["vendor/**"], "enabled": false },
-    { "matchManagers": ["npm"], "matchUpdateTypes": ["minor", "patch"], "groupName": "npm minor/patch" },
-    { "matchManagers": ["cargo"], "matchUpdateTypes": ["minor", "patch"], "groupName": "cargo minor/patch" },
-    { "matchManagers": ["gomod"], "matchUpdateTypes": ["minor", "patch"], "groupName": "go minor/patch" },
-    { "matchManagers": ["github-actions"], "matchUpdateTypes": ["minor", "patch"], "groupName": "ci actions" }
+    {
+      "matchFileNames": [
+        "vendor/**"
+      ],
+      "enabled": false
+    },
+    {
+      "matchManagers": [
+        "npm"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "npm minor/patch"
+    },
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "cargo minor/patch"
+    },
+    {
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "go minor/patch"
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "ci actions"
+    },
+    {
+      "description": "Pinned after 2026-10 regressions: @codemirror/view 6.43.14 selectionchange crash with happy-dom, dayjs 1.11.22+ negative pre-epoch timezone offset, happy-dom 20.14 selectionchange dispatch. Re-evaluate deliberately, not via batch bumps.",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "@codemirror/view",
+        "dayjs",
+        "happy-dom"
+      ],
+      "enabled": false
+    }
   ]
 }

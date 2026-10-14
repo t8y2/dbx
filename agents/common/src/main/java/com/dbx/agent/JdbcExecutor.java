@@ -29,6 +29,7 @@ public final class JdbcExecutor {
     private final ConcurrentHashMap<String, QuerySession> sessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, QuerySession> tableReadSessions = new ConcurrentHashMap<>();
     private final java.util.Set<Statement> activeStatements = ConcurrentHashMap.newKeySet();
+    private final java.util.Set<NativeOperation> nativeOperations = ConcurrentHashMap.newKeySet();
 
     public JdbcExecutor() {
     }
@@ -37,6 +38,69 @@ public final class JdbcExecutor {
         return AgentExecutionContext.jdbcExecutor();
     }
 
+    /** Latch cancellation across the sequential statements of one native driver operation. */
+    public NativeOperation beginNativeOperation() {
+        NativeOperation operation = new NativeOperation();
+        nativeOperations.add(operation);
+        return operation;
+    }
+
+    public final class NativeOperation implements AutoCloseable {
+        private final java.util.concurrent.atomic.AtomicBoolean cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+        private final NativeOperation parent = AgentExecutionContext.statementOperation();
+
+        private NativeOperation() {
+        }
+
+        public void checkCancelled() {
+            if (parent != null) parent.checkCancelled();
+            if (cancelled.get()) {
+                throw new java.util.concurrent.CancellationException("Native JDBC operation cancelled");
+            }
+        }
+
+        @Override
+        public void close() {
+            nativeOperations.remove(this);
+        }
+    }
+    /** Apply the current RPC timeout to a native-driver statement. */
+    public void applyStatementTimeout(Statement statement) throws SQLException {
+        int timeoutSecs = AgentExecutionContext.statementTimeoutSecs();
+        if (timeoutSecs > 0) statement.setQueryTimeout(timeoutSecs);
+    }
+
+    /** Register native-driver statements with this session's cancellation boundary. */
+    public <S extends Statement> TrackedStatement<S> trackStatement(S statement) {
+        java.util.Objects.requireNonNull(statement, "statement");
+        activeStatements.add(statement);
+        return new TrackedStatement<>(statement);
+    }
+
+    /** Owns the original JDBC Statement without changing its identity or unwrap behavior. */
+    public final class TrackedStatement<S extends Statement> implements AutoCloseable {
+        private final S statement;
+        private boolean closed;
+
+        private TrackedStatement(S statement) {
+            this.statement = statement;
+        }
+
+        public S statement() {
+            return statement;
+        }
+
+        @Override
+        public void close() throws SQLException {
+            if (closed) return;
+            closed = true;
+            try {
+                statement.close();
+            } finally {
+                activeStatements.remove(statement);
+            }
+        }
+    }
     public static int statementMaxRows(int maxRows) {
         int effectiveMaxRows = Math.max(maxRows, 1);
         return effectiveMaxRows == Integer.MAX_VALUE ? Integer.MAX_VALUE : effectiveMaxRows + 1;
@@ -533,10 +597,12 @@ public final class JdbcExecutor {
                             Math.max(options.getMaxRows(), 1),
                             statementMessageReader
                         );
+                    } else {
+                        appendStatementWarnings(result, stmt);
                     }
                     activeStatements.remove(stmt);
                     stmt.close();
-                    return new QueryPageResult(
+                    QueryPageResult page = new QueryPageResult(
                         result.getColumns(),
                         result.getColumn_types(),
                         result.getRows(),
@@ -546,6 +612,8 @@ public final class JdbcExecutor {
                         null,
                         false
                     );
+                    page.setMessages(result.getMessages());
+                    return page;
                 }
 
                 phaseStarted = System.nanoTime();
@@ -627,6 +695,9 @@ public final class JdbcExecutor {
     }
 
     public void cancelActiveStatements() {
+        for (NativeOperation operation : nativeOperations) {
+            operation.cancelled.set(true);
+        }
         for (Statement statement : activeStatements) {
             try {
                 statement.cancel();
@@ -867,8 +938,9 @@ public final class JdbcExecutor {
 
             while (rows.size() < effectivePageSize && session.rowsRead < session.maxRows) {
                 if (!session.resultSet.next()) {
+                    QueryPageResult page = sessionPageResult(session, rows, executionTimeMs, false, null, false);
                     closeSession(targetSessions, session.id);
-                    return sessionPageResult(session, rows, executionTimeMs, false, null, false);
+                    return page;
                 }
                 rows.add(rowValues(session.resultSet, session.valueReader, session.sqlTypeByIndex, session.typeNameByIndex));
                 session.rowsRead += 1;
@@ -876,14 +948,16 @@ public final class JdbcExecutor {
 
             if (session.rowsRead >= session.maxRows) {
                 boolean truncated = session.resultSet.next();
+                QueryPageResult page = sessionPageResult(session, rows, executionTimeMs, truncated, null, false);
                 closeSession(targetSessions, session.id);
-                return sessionPageResult(session, rows, executionTimeMs, truncated, null, false);
+                return page;
             }
 
             boolean hasMore = session.resultSet.next();
             if (!hasMore) {
+                QueryPageResult page = sessionPageResult(session, rows, executionTimeMs, false, null, false);
                 closeSession(targetSessions, session.id);
-                return sessionPageResult(session, rows, executionTimeMs, false, null, false);
+                return page;
             }
 
             session.pendingRow = rowValues(session.resultSet, session.valueReader, session.sqlTypeByIndex, session.typeNameByIndex);
@@ -901,6 +975,9 @@ public final class JdbcExecutor {
         boolean hasMore
     ) {
         QueryPageResult result = new QueryPageResult(session.columns, session.columnTypes, rows, 0L, executionTimeMs, truncated, sessionId, hasMore);
+        QueryResult messages = new QueryResult();
+        appendStatementWarnings(messages, session.statement);
+        result.setMessages(messages.getMessages());
         result.setCursor_rows_read(session.rowsRead);
         return result;
     }
@@ -1007,6 +1084,7 @@ public final class JdbcExecutor {
         StatementMessageReader statementMessageReader
     ) {
         if (!result.getColumns().isEmpty() || !result.getRows().isEmpty()) {
+            appendStatementWarnings(result, stmt);
             return result;
         }
 
@@ -1023,6 +1101,7 @@ public final class JdbcExecutor {
                         break;
                     }
                     rows.add(Collections.singletonList(message));
+                    result.addInformationalMessage(message, warning.getSQLState());
                 }
             }
             stmt.clearWarnings();
@@ -1043,6 +1122,7 @@ public final class JdbcExecutor {
                         break;
                     }
                     rows.add(Collections.singletonList(message));
+                    result.addInformationalMessage(message, null);
                 }
             }
         } catch (Exception ignored) {
@@ -1052,7 +1132,7 @@ public final class JdbcExecutor {
         if (rows.isEmpty()) {
             return result;
         }
-        return new QueryResult(
+        QueryResult messageResult = new QueryResult(
             Collections.singletonList("Message"),
             Collections.singletonList("nvarchar"),
             rows,
@@ -1060,6 +1140,8 @@ public final class JdbcExecutor {
             result.getExecution_time_ms(),
             truncated
         );
+        messageResult.setMessages(result.getMessages());
+        return messageResult;
     }
 
     private QueryResult emptyQueryResult(long start) {
@@ -1143,6 +1225,20 @@ public final class JdbcExecutor {
      * agents to convert vendor-specific column types (e.g. PostGIS
      * {@code geometry}) without re-querying the metadata.
      */
+    public <T> T withActiveStatement(Statement statement, SqlOperation<T> operation) throws SQLException {
+        activeStatements.add(statement);
+        try {
+            return operation.run();
+        } finally {
+            activeStatements.remove(statement);
+        }
+    }
+
+    @FunctionalInterface
+    public interface SqlOperation<T> {
+        T run() throws SQLException;
+    }
+
     public interface ColumnAwareResultValueReader extends ResultValueReader {
         Object read(ResultSet rs, int index, int sqlType, String columnTypeName) throws SQLException;
 

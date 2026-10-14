@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DatabaseBackupRun, DatabaseBackupSchedule } from "../../lib/backup/scheduledDatabaseBackup";
+import type { DatabaseBackupExecutionConfig, DatabaseBackupRun, DatabaseBackupSchedule } from "../../lib/backup/scheduledDatabaseBackup";
 import type { DatabaseBackupSnapshot } from "../../lib/backup/backgroundDatabaseBackup";
 
 const mocks = vi.hoisted(() => ({
@@ -154,6 +154,32 @@ describe("backend-owned scheduled database backups", () => {
     release(oldSnapshot);
     await polling;
     expect(await running).toEqual(run("success"));
+  });
+
+  it("queues a one-shot run per config and keeps going when one cannot be queued", async () => {
+    const config = (connectionId: string) =>
+      ({ connectionId, databases: [], tableFilterMode: "all", tablePatterns: [], destinationDirectory: "/backups", includeStructure: true, includeData: true, includeObjects: true, dropTableIfExists: false, outputCompression: "none" }) as DatabaseBackupExecutionConfig;
+    const queuedRun = (id: string, connectionId: string, status: DatabaseBackupRun["status"] = "running") => ({ ...run(status), id, scheduleId: undefined, source: "one-shot" as const, connectionId });
+    snapshot.runs = [queuedRun("run-a", "a", "success"), queuedRun("run-c", "c", "success")];
+    mocks.command.mockImplementation(async (command) => {
+      if (command.action === "run") {
+        const id = command.request.config.connectionId;
+        if (id === "b") throw new Error("Too many pending backups");
+        return queuedRun(`run-${id}`, id);
+      }
+      return structuredClone(snapshot);
+    });
+    const backups = await create();
+    const queued: string[] = [];
+
+    const result = await backups.runOneShotBatch([config("a"), config("b"), config("c")], "One-time backup", (queuedRun) => queued.push(queuedRun.id));
+
+    const requests = mocks.command.mock.calls.filter(([command]) => command.action === "run").map(([command]) => command.request);
+    expect(requests.map((request) => request.config.connectionId)).toEqual(["a", "b", "c"]);
+    expect(requests.every((request) => request.displayName === "One-time backup" && request.scheduleId === undefined)).toBe(true);
+    expect(queued).toEqual(["run-a", "run-c"]);
+    expect(result.runs.map((item) => item.id)).toEqual(["run-a", "run-c"]);
+    expect(result.enqueueErrors).toEqual([{ connectionId: "b", error: expect.objectContaining({ message: "Too many pending backups" }) }]);
   });
 
   it("marks migration only after the backend accepts it", async () => {

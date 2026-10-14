@@ -31,7 +31,7 @@ import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import * as api from "@/lib/backend/api";
 import type { TransferContent, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/api";
-import { crossFamilyTransferableKinds, isSameTransferFamily, transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
+import { crossFamilyTransferableKinds, isSameTransferFamily, isTransferPairSupported, transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
 import ObjectSelectionTree from "@/components/transfer/ObjectSelectionTree.vue";
 import TransferTaskTree from "@/components/transfer/TransferTaskTree.vue";
 import DataTransferProgressDialog from "@/components/transfer/DataTransferProgressDialog.vue";
@@ -87,6 +87,14 @@ const transferDialogStyle = {
 const store = useConnectionStore();
 
 const sqlConnections = computed(() => store.connections.filter((c) => supportsTransfer(transferDatabaseTypeForConnection(c))));
+const sourceConnections = computed(() => {
+  const targetType = transferDatabaseTypeForConnection(store.getConfig(targetConnectionId.value));
+  return sqlConnections.value.filter((connection) => isTransferPairSupported(transferDatabaseTypeForConnection(connection), targetType));
+});
+const targetConnections = computed(() => {
+  const sourceType = transferDatabaseTypeForConnection(store.getConfig(sourceConnectionId.value));
+  return sqlConnections.value.filter((connection) => isTransferPairSupported(sourceType, transferDatabaseTypeForConnection(connection)));
+});
 
 // Source state
 const sourceConnectionId = ref("");
@@ -270,14 +278,32 @@ function requestedTableFilters(): Record<string, string> | undefined {
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
+const sourceTransferType = computed(() => transferDatabaseTypeForConnection(store.getConfig(sourceConnectionId.value)));
+const targetTransferType = computed(() => transferDatabaseTypeForConnection(store.getConfig(targetConnectionId.value)));
+const isXuguTransferPair = computed(() => sourceTransferType.value === "xugu" && targetTransferType.value === "xugu");
+// The table-name-case selector is hidden for Xugu pairs; reset any earlier choice so the
+// blocking xuguPreserveTableNames hint cannot strand the user without a visible control.
+watch(isXuguTransferPair, (isXuguPair) => {
+  if (isXuguPair) targetTableNameCase.value = "preserve";
+});
+const targetStrategyType = computed(() => (targetTransferType.value === "xugu" ? "xugu" : connectionType(targetConnectionId.value)));
+const xuguTransferHint = computed(() => {
+  if (sourceTransferType.value === "xugu" || targetTransferType.value === "xugu") {
+    if (!isTransferPairSupported(sourceTransferType.value, targetTransferType.value)) return t("transfer.xuguPairOnly");
+    if (targetTableStrategy.value === "upsert" || targetTableStrategy.value === "rebuild") return t("transfer.xuguAppendOverwriteOnly");
+    if (transferContent.value !== "dataOnly" && targetTableNameCase.value !== "preserve") return t("transfer.xuguPreserveTableNames");
+  }
+  return "";
+});
+
 function isMongoConnection(id: string): boolean {
   return connectionType(id) === "mongodb";
 }
 
 const showTargetColumnQuoteOption = computed(() => ["gaussdb", "opengauss"].includes(connectionType(targetConnectionId.value) ?? ""));
 
-const rebuildDisabledReason = computed(() => rebuildUnavailableReason(transferContent.value, connectionType(targetConnectionId.value)));
-const upsertSupported = computed(() => supportsTransferUpsert(connectionType(targetConnectionId.value)));
+const rebuildDisabledReason = computed(() => rebuildUnavailableReason(transferContent.value, targetStrategyType.value));
+const upsertSupported = computed(() => supportsTransferUpsert(targetStrategyType.value));
 const rebuildDisabledHint = computed(() => {
   if (rebuildDisabledReason.value === "dataOnly") return t("transfer.rebuildDataOnlyDisabled");
   if (rebuildDisabledReason.value === "unsupported") return t("transfer.rebuildUnsupportedDisabled");
@@ -317,6 +343,8 @@ const canStart = computed(() => {
   const sameSourceAndTarget = sameCatalogAndDatabase && effectiveSourceSchema === effectiveTargetSchema;
   return (
     !!sourceConnectionId.value &&
+    isTransferPairSupported(sourceTransferType.value, targetTransferType.value) &&
+    !xuguTransferHint.value &&
     isTransferDatabaseSelected(sourceDatabase.value) &&
     !!targetConnectionId.value &&
     isTransferDatabaseSelected(targetDatabase.value) &&
@@ -1339,7 +1367,7 @@ async function saveConfigTask() {
                   <Label class="text-xs">{{ t("transfer.sourceConnection") }}</Label>
                   <ConnectionTreeSelect
                     v-model="sourceConnectionId"
-                    :connections="sqlConnections"
+                    :connections="sourceConnections"
                     :layout="store.sidebarLayout"
                     :placeholder="t('transfer.selectConnection')"
                     :search-placeholder="t('transfer.searchConnection')"
@@ -1412,7 +1440,7 @@ async function saveConfigTask() {
                   <Label class="text-xs">{{ t("transfer.targetConnection") }}</Label>
                   <ConnectionTreeSelect
                     v-model="targetConnectionId"
-                    :connections="sqlConnections"
+                    :connections="targetConnections"
                     :layout="store.sidebarLayout"
                     :placeholder="t('transfer.selectConnection')"
                     :search-placeholder="t('transfer.searchConnection')"
@@ -1547,7 +1575,8 @@ async function saveConfigTask() {
                 </Select>
               </div>
               <p v-if="rebuildDisabledHint" class="text-xs text-muted-foreground">{{ rebuildDisabledHint }}</p>
-              <div class="flex items-center gap-3">
+              <p v-if="xuguTransferHint" class="text-xs text-amber-600">{{ xuguTransferHint }}</p>
+              <div v-if="!isXuguTransferPair" class="flex items-center gap-3">
                 <Label class="text-xs shrink-0">{{ t("transfer.targetTableNameCase") }}</Label>
                 <Select v-model="targetTableNameCase">
                   <SelectTrigger class="h-7 text-xs">

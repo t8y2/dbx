@@ -501,6 +501,11 @@ export function normalizeDatabaseBackupFileNamePattern(value: unknown): string {
   return stringValue(value).trim() || DEFAULT_DATABASE_BACKUP_FILE_NAME_PATTERN;
 }
 
+/** Only `{runId}` is unique per run, so it is what keeps several runs started together from writing the same file. */
+export function databaseBackupFileNamePatternHasRunId(pattern: unknown): boolean {
+  return normalizeDatabaseBackupFileNamePattern(pattern).includes("{runId}");
+}
+
 export function databaseBackupFileNamePatternIsValid(pattern: string): boolean {
   const raw = stringValue(pattern);
   if (!raw.trim()) return true;

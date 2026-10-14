@@ -186,7 +186,7 @@ async function load() {
   error.value = "";
   partialErrors.value = [];
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
     const requests = [
       ["version", XUGU_VERSION_SQL, 1],
       ["nodes", XUGU_CLUSTER_NODES_SQL, 500],

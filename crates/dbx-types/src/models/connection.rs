@@ -122,6 +122,15 @@ pub struct RedisKeyGrouping {
     pub rules: Vec<RedisKeyGroupRule>,
 }
 
+/// Sidebar marker presentation only; never changes production safety assessment.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionBadgeScope {
+    Connection,
+    Database,
+    Table,
+}
+
 #[derive(Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -155,6 +164,9 @@ pub struct ConnectionConfig {
     /// Frontend navigation preference: exhaust the paginated Tables group when opened.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sidebar_auto_load_all_tables: bool,
+    /// Oracle sidebar preference. Absent means shown; only an explicit opt-out is stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_database_links: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     /// SQL statements executed right after the connection is established
@@ -281,6 +293,8 @@ pub struct ConnectionConfig {
     /// Database-level production markers for multi-database connections.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub production_databases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_badge_scope: Option<ProductionBadgeScope>,
     /// Metadata captured from the latest successful connection test for this saved config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_info: Option<DatabaseConnectionInfo>,
@@ -643,6 +657,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub sidebar_auto_load_all_tables: bool,
     #[serde(default)]
+    pub show_database_links: Option<bool>,
+    #[serde(default)]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     #[serde(default)]
     pub init_script: Option<String>,
@@ -734,6 +750,8 @@ struct ConnectionConfigData {
     pub is_production: bool,
     #[serde(default)]
     pub production_databases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_badge_scope: Option<ProductionBadgeScope>,
     #[serde(default)]
     pub database_info: Option<DatabaseConnectionInfo>,
 }
@@ -760,6 +778,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             visible_schemas: data.visible_schemas,
             show_system_schemas: data.show_system_schemas,
             sidebar_auto_load_all_tables: data.sidebar_auto_load_all_tables,
+            show_database_links: data.show_database_links,
             attached_databases: data.attached_databases,
             init_script: data.init_script,
             color: data.color,
@@ -806,6 +825,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             read_only: data.read_only,
             is_production: data.is_production,
             production_databases: data.production_databases,
+            production_badge_scope: data.production_badge_scope,
             database_info: data.database_info,
         }
     }
@@ -2995,7 +3015,7 @@ mod tests {
         database_info_from_protocol_value, default_query_timeout_secs, default_redis_key_separator,
         default_ssh_connect_timeout_secs, sqlserver_legacy_compatibility_param,
         without_sqlserver_legacy_compatibility_param, ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo,
-        DatabaseType, IdentifierCase, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
+        DatabaseType, IdentifierCase, ProductionBadgeScope, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
     };
 
     #[test]
@@ -3089,6 +3109,53 @@ mod tests {
         assert!(serde_json::to_value(configured).unwrap()["sidebar_auto_load_all_tables"].as_bool().unwrap());
     }
 
+    #[test]
+    fn production_badge_scope_legacy_and_all_options_round_trip() {
+        let mut value = serde_json::to_value(mysql_config("root", "", Some("app"))).unwrap();
+        value["is_production"] = serde_json::json!(true);
+        value["production_databases"] = serde_json::json!(["app"]);
+        let legacy: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(legacy.production_badge_scope, None);
+        assert!(serde_json::to_value(legacy).unwrap().get("production_badge_scope").is_none());
+        for (name, expected) in [
+            ("connection", ProductionBadgeScope::Connection),
+            ("database", ProductionBadgeScope::Database),
+            ("table", ProductionBadgeScope::Table),
+        ] {
+            value["production_badge_scope"] = serde_json::json!(name);
+            let config: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(config.production_badge_scope, Some(expected));
+            assert!(config.is_production);
+            assert_eq!(config.production_databases, vec!["app"]);
+            let serialized = serde_json::to_value(&config).unwrap();
+            assert_eq!(serialized["production_badge_scope"], name);
+            assert_eq!(
+                serde_json::from_value::<ConnectionConfig>(serialized).unwrap().production_badge_scope,
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn show_database_links_opt_out_round_trips() {
+        let mut value = serde_json::json!({
+            "id": "id",
+            "name": "Oracle",
+            "db_type": "oracle",
+            "host": "localhost",
+            "port": 1521,
+            "username": "system",
+            "password": "",
+            "database": "FREEPDB1"
+        });
+        let legacy: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(serde_json::to_value(legacy).unwrap().get("show_database_links").is_none());
+
+        value["show_database_links"] = serde_json::json!(false);
+        let hidden: ConnectionConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(serde_json::to_value(hidden).unwrap()["show_database_links"], serde_json::json!(false));
+    }
+
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
@@ -3113,6 +3180,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3156,6 +3224,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }

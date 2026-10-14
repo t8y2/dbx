@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { canFormatSqlForDatabaseType, compressSqlText, formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
+import type { SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { extractSqlParameters } from "@/lib/sql/sqlParameters";
 
 describe("Neo4j Cypher formatting", () => {
@@ -648,5 +649,155 @@ AND owner_id = 42`,
 
     expect(formatted).toContain("col1 -- first column");
     expect(formatted).toMatch(/,\s*col2\s*-- second column/);
+  });
+});
+
+/**
+ * `layoutStyle: "classic"` selects sql-formatter's own layout — the default
+ * before v0.6.16 replaced it with DBX's printer — so these expectations are the
+ * byte-for-byte output of the verbatim v0.6.15 `formatSqlText` (issue #11228).
+ * The layout engine alone is not a v0.6.15 reproduction: v0.6.16 also changed
+ * the `expressionWidth` and `fromClauseLayout` defaults, so both are set back
+ * explicitly. The remaining options already match the v0.6.15 defaults.
+ *
+ * Regenerate with `git show 455117b8c5^:apps/desktop/src/lib/sql/sqlFormatter.ts`
+ * imported into a throwaway spec and called with these settings; the goldens
+ * below are literals on purpose so the spec never depends on the old source.
+ */
+describe("classic layout style (v0.6.15 reproduction)", () => {
+  const classic: Partial<SqlFormatterSettings> = { layoutStyle: "classic", expressionWidth: 50, fromClauseLayout: "newLine" };
+  const lines = (...rows: string[]) => rows.join("\n");
+
+  it("reproduces a MySQL SELECT with a JOIN", async () => {
+    const sql = "select a.id, a.name, b.total, case when a.status = 1 then 'active' else 'inactive' end as status_label from users a left join orders b on a.id = b.user_id where a.created_at >= '2024-01-01' and b.total > 100 order by a.created_at desc limit 50;";
+
+    expect(await formatSqlText(sql, "mysql", classic)).toBe(
+      lines(
+        "SELECT",
+        "  a.id,",
+        "  a.name,",
+        "  b.total,",
+        "  CASE",
+        "    WHEN a.status = 1 THEN 'active'",
+        "    ELSE 'inactive'",
+        "  END AS status_label",
+        "FROM",
+        "  users a",
+        "  LEFT JOIN orders b ON a.id = b.user_id",
+        "WHERE",
+        "  a.created_at >= '2024-01-01'",
+        "  AND b.total > 100",
+        "ORDER BY",
+        "  a.created_at DESC",
+        "LIMIT",
+        "  50;",
+      ),
+    );
+  });
+
+  it("reproduces a MySQL CTE", async () => {
+    const sql = "with t as (select id, count(*) c from logs group by id) select id, c from t where c > 10";
+
+    expect(await formatSqlText(sql, "mysql", classic)).toBe(lines("WITH", "  t AS (", "    SELECT", "      id,", "      count(*) c", "    FROM", "      logs", "    GROUP BY", "      id", "  )", "SELECT", "  id,", "  c", "FROM", "  t", "WHERE", "  c > 10"));
+  });
+
+  it("reproduces a MySQL CREATE TABLE", async () => {
+    const sql =
+      "CREATE TABLE IF NOT EXISTS `delivery_emp_info` (`id` varchar(20) NOT NULL comment 'pk', `emp_id` varchar(20) NOT NULL comment 'emp id', `delivery_type_ids` varchar(512) default NULL comment 'types', `update_time` datetime NOT NULL comment 'updated', CONSTRAINT idx_emp_phone UNIQUE (emp_id)) engine = innodb default charset = utf8mb4 comment 'emp info';";
+
+    // `default` / `comment` staying lowercase is genuine upstream behaviour
+    // (they are not keyword-cased in these positions), not a DBX bug to fix.
+    expect(await formatSqlText(sql, "mysql", classic)).toBe(
+      lines(
+        "CREATE TABLE IF NOT EXISTS `delivery_emp_info` (",
+        "  `id` varchar(20) NOT NULL comment 'pk',",
+        "  `emp_id` varchar(20) NOT NULL comment 'emp id',",
+        "  `delivery_type_ids` varchar(512) default NULL comment 'types',",
+        "  `update_time` datetime NOT NULL comment 'updated',",
+        "  CONSTRAINT idx_emp_phone UNIQUE (emp_id)",
+        ") engine = innodb default charset = utf8mb4 comment 'emp info';",
+      ),
+    );
+  });
+
+  it("reproduces comments and blank lines", async () => {
+    const sql = "-- 头部说明\nselect id, name from users where status = 1;\n\n/* 第二段 */\nselect count(*) from orders where total > 100 and status = 'paid';";
+
+    expect(await formatSqlText(sql, "mysql", classic)).toBe(lines("-- 头部说明", "SELECT", "  id,", "  name", "FROM", "  users", "WHERE", "  status = 1;", "", "/* 第二段 */", "SELECT", "  count(*)", "FROM", "  orders", "WHERE", "  total > 100", "  AND status = 'paid';"));
+  });
+
+  it("reproduces a Doris/generic query", async () => {
+    // Doris and StarRocks have no dedicated formatter dialect, so they exercise
+    // the generic grammar plus its PostgreSQL retry.
+    const sql = "select `db`.`t`.`k`, sum(`db`.`t`.`v`) as total from `db`.`t` where `db`.`t`.`dt` = '2024-01-01' group by `db`.`t`.`k` having total > 10 order by total desc limit 20;";
+
+    expect(await formatSqlText(sql, "generic", classic)).toBe(lines("SELECT", "  `db`.`t`.`k`,", "  sum(`db`.`t`.`v`) AS total", "FROM", "  `db`.`t`", "WHERE", "  `db`.`t`.`dt` = '2024-01-01'", "GROUP BY", "  `db`.`t`.`k`", "HAVING", "  total > 10", "ORDER BY", "  total DESC", "LIMIT", "  20;"));
+  });
+
+  it("reproduces a short statement without collapsing it", async () => {
+    const sql = "select * from task order by created_at desc;";
+
+    expect(await formatSqlText(sql, "mysql", classic)).toBe(lines("SELECT", "  *", "FROM", "  task", "ORDER BY", "  created_at DESC;"));
+  });
+
+  it("reproduces a nested subquery", async () => {
+    const sql = "select loc_id, loc_name from (select *, row_number() over (partition by loc_id order by update_time desc) as rn from responsible_area_info where date_format(update_time, '%Y-%m') = date_format(now(), '%Y-%m')) t where rn = 1;";
+
+    expect(await formatSqlText(sql, "mysql", classic)).toBe(
+      lines(
+        "SELECT",
+        "  loc_id,",
+        "  loc_name",
+        "FROM",
+        "  (",
+        "    SELECT",
+        "      *,",
+        "      row_number() OVER (",
+        "        PARTITION BY",
+        "          loc_id",
+        "        ORDER BY",
+        "          update_time DESC",
+        "      ) AS rn",
+        "    FROM",
+        "      responsible_area_info",
+        "    WHERE",
+        "      date_format(update_time, '%Y-%m') = date_format(now(), '%Y-%m')",
+        "  ) t",
+        "WHERE",
+        "  rn = 1;",
+      ),
+    );
+  });
+
+  it("normalizes the Oracle SUBSTRB family under classic (intentional divergence from v0.6.15)", async () => {
+    // v0.6.15 emitted `substrb (NAME, 1, 3)` — the byte/multibyte variants were
+    // unknown to sql-formatter's plsql grammar, so they read as identifiers.
+    // #11251 registers them as function names, and the classic path keeps that
+    // fix: these assertions pin the new behaviour, they must not be reverted.
+    const sql = "select substrb(name, 1, 3), instr2(name, 'x'), lengthb(name) from t;";
+
+    await expect(formatSqlText(sql, "oracle", { ...classic, functionCase: "upper" })).resolves.toBe(lines("SELECT", "  SUBSTRB(NAME, 1, 3),", "  INSTR2(NAME, 'x'),", "  LENGTHB(NAME)", "FROM", "  t;"));
+  });
+
+  it("keeps DBX's own printer as the default and for the explicit dbx style", async () => {
+    const sql = "select * from task order by created_at desc;";
+    const collapsed = "SELECT * FROM task ORDER BY created_at DESC;";
+
+    // Same input, opposite layouts: the collapsed form is the DBX printer's,
+    // so this proves the routing split rather than the goldens above.
+    expect(await formatSqlText(sql, "mysql", { layoutStyle: "dbx" })).toBe(collapsed);
+    expect(await formatSqlText(sql, "mysql")).toBe(collapsed);
+    // A settings object saved before `layoutStyle` existed normalizes to dbx.
+    expect(await formatSqlText(sql, "mysql", {} as Partial<SqlFormatterSettings>)).toBe(collapsed);
+  });
+
+  it("merges a classic FROM clause onto its source with a single space under the standard indent", async () => {
+    // `sameLine` (the default) merges the clause line with the source line, and
+    // the merge must not reuse the source's indent as the gap: that is the
+    // tabular styles' alignment column, but under the standard indent it would
+    // read `FROM  t`. Selecting classic is now the only path to this merge, so
+    // the classic style is what pins its appearance.
+    expect(await formatSqlText("select * from t", "mysql", classic)).toBe(lines("SELECT", "  *", "FROM", "  t"));
+    expect(await formatSqlText("select * from t", "mysql", { ...classic, fromClauseLayout: "sameLine" })).toBe(lines("SELECT", "  *", "FROM t"));
   });
 });

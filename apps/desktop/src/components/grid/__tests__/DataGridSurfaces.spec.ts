@@ -461,6 +461,78 @@ describe("DataGridPagination", () => {
     const exportMenus = findAll(mounted.root, (node) => node.props["data-stub"] === "LightDropdown" && node.props["aria-label"] === "grid.export");
     expect(exportMenus).toHaveLength(1);
   });
+
+  it("copies each aggregate value on click, and only the values", () => {
+    const copySelectionSummary = vi.fn();
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: { cellCount: 4, rowCount: 2 },
+      selectionSummarySumText: "10",
+      selectionSummaryAverageText: "2.5",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+      onCopySelectionSummary: copySelectionSummary,
+    });
+
+    const sum = findOne(mounted.root, (node) => node.props["data-selection-summary-sum"] === "");
+    const average = findOne(mounted.root, (node) => node.props["data-selection-summary-average"] === "");
+    // Native buttons provide tab focus plus Enter/Space activation without recreating
+    // the complete button interaction model on a clickable text span.
+    expect(sum.type).toBe("button");
+    expect(average.type).toBe("button");
+    expect(sum.props.title).toBe("grid.copyValue");
+    expect(hostText(sum)).toContain("grid.copyValue");
+
+    dispatch(sum, "click");
+    expect(copySelectionSummary).toHaveBeenCalledWith("10");
+
+    dispatch(average, "click");
+    expect(copySelectionSummary).toHaveBeenLastCalledWith("2.5");
+    expect(copySelectionSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the aggregate values non-copyable while the selection drag is pending", () => {
+    const copySelectionSummary = vi.fn();
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: { cellCount: 4, rowCount: 2 },
+      selectionSummarySumText: "…",
+      selectionSummaryAverageText: "…",
+      selectionSummaryPending: true,
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+      onCopySelectionSummary: copySelectionSummary,
+    });
+
+    const sum = findOne(mounted.root, (node) => node.props["data-selection-summary-sum"] === "");
+    // Pending aggregate placeholders retain their layout but expose no copy action.
+    expect(sum.props.title).toBeUndefined();
+    expect(sum.props.disabled).toBe(true);
+
+    dispatch(sum, "click");
+    expect(copySelectionSummary).not.toHaveBeenCalled();
+  });
+});
+
+describe("DataGrid selection summary copy wiring", () => {
+  it("routes the pagination aggregate copy through the grid clipboard helper", () => {
+    expect(dataGridSource).toMatch(/@copy-selection-summary="copyText"/);
+    expect(dataGridSource).toMatch(/:selection-summary-pending="isSelectingCells"/);
+  });
 });
 
 describe("DataGridColumnHeader", () => {
@@ -1619,6 +1691,51 @@ describe("DataGridDistinctValuePopover", () => {
     await mounted.setProps({ selectedKeys: new Set(options.map((option) => option.key)) });
     expect(findSelectAll().props["aria-checked"]).toBe(true);
   });
+
+  it("renders the current page value switch and emits update:source", async () => {
+    const updateSource = vi.fn();
+    const mounted = mountComponent(DataGridDistinctValuePopover, {
+      open: true,
+      search: "",
+      options: [{ key: "str:open", label: "open", count: 12, value: "open" }],
+      loading: false,
+      error: "",
+      limited: false,
+      limit: 1000,
+      source: "database",
+      "onUpdate:source": updateSource,
+    });
+
+    expect(hostText(mounted.root)).toContain("grid.filterFromCurrentPage");
+    const switchEl = findOne(mounted.root, (node) => node.props["data-distinct-value-page-switch"] === "");
+    expect(switchEl.props["model-value"] ?? switchEl.props.modelValue).toBe(false);
+
+    (switchEl.props["onUpdate:model-value"] ?? switchEl.props["onUpdate:modelValue"])(true);
+    expect(updateSource).toHaveBeenCalledWith("page");
+
+    await mounted.setProps({ source: "page" });
+    const switchElPage = findOne(mounted.root, (node) => node.props["data-distinct-value-page-switch"] === "");
+    expect(switchElPage.props["model-value"] ?? switchElPage.props.modelValue).toBe(true);
+
+    (switchElPage.props["onUpdate:model-value"] ?? switchElPage.props["onUpdate:modelValue"])(false);
+    expect(updateSource).toHaveBeenCalledWith("database");
+  });
+
+  it("disables source switch when server filter is not supported", () => {
+    const mounted = mountComponent(DataGridDistinctValuePopover, {
+      open: true,
+      search: "",
+      options: [{ key: "str:open", label: "open", count: 12, value: "open" }],
+      loading: false,
+      error: "",
+      limited: false,
+      limit: 1000,
+      canUseServerFilter: false,
+    });
+    const switchEl = findOne(mounted.root, (node) => node.props["data-distinct-value-page-switch"] === "");
+    expect(switchEl.props.disabled).toBe(true);
+    expect(switchEl.props["model-value"] ?? switchEl.props.modelValue).toBe(true);
+  });
 });
 
 describe("DataGridFilterWorkbench", () => {
@@ -1679,6 +1796,24 @@ describe("DataGridFilterWorkbench", () => {
     });
 
     expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
+  });
+
+  it("forwards distinct value source updates in the conditions workbench", () => {
+    const updateSource = vi.fn();
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "",
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      columns: ["status"],
+      filteredColumns: ["status"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      valueSuggestions: { ruleId: "r1", target: "value", source: "database", search: "", options: [], loading: false, error: "", limited: false, limit: 1000, selectedKeys: new Set<string>() },
+      onUpdateValueSuggestionSource: updateSource,
+    });
+
+    const switchEl = findOne(mounted.root, (node) => node.props["data-distinct-value-page-switch"] === "");
+    (switchEl.props["onUpdate:model-value"] ?? switchEl.props["onUpdate:modelValue"])(true);
+    expect(updateSource).toHaveBeenCalledWith("page");
   });
 
   it("scrolls to the newest rule when a condition is added", async () => {
@@ -1954,6 +2089,57 @@ describe("cell detail surfaces", () => {
       "click",
     );
     expect(copyText).toHaveBeenCalledWith("#2005805");
+  });
+
+  it("presents printable Oracle BLOB bytes as text and copies the presented value", async () => {
+    const copyText = vi.fn();
+    const blobDetail = detail({
+      type: "BLOB",
+      value: "0x48656c6c6f",
+      rawValue: "0x48656c6c6f",
+      rawValuePreview: "0x48656c6c6f",
+      displayValue: "Hello",
+      displayValuePreview: "Hello",
+      formattedJson: "",
+    });
+    const dialog = mountComponent(DataGridCellDetailDialog, {
+      open: true,
+      detail: blobDetail,
+      typeColorClass: () => "",
+      openImagePreview: vi.fn(),
+      copyText,
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      databaseType: "oracle",
+    });
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: blobDetail,
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "oracle",
+    });
+
+    expect(hostText(dialog.root)).toContain("Hello");
+    expect(hostText(panel.root)).toContain("Hello");
+    dispatch(
+      findOne(dialog.root, (node) => node.props.title === "grid.copyValue"),
+      "click",
+    );
+    expect(copyText).toHaveBeenCalledWith("Hello");
   });
 
   it("keeps non-MySQL BLOB detail previews in hex", () => {

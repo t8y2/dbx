@@ -1,6 +1,7 @@
 package com.dbx.agent.oceanbaseoracle;
 
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.CompletionAssistantCandidateKind;
 import com.dbx.agent.CompletionAssistantMatchMode;
 import com.dbx.agent.CompletionAssistantObjectKind;
 import com.dbx.agent.CompletionAssistantRequest;
@@ -430,9 +431,9 @@ class OceanBaseOracleAgentTest {
         List<String> sql = new ArrayList<>();
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
         TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
-            new String[]{"OBJECT_NAME", "OBJECT_TYPE"},
+            new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS"},
             new Object[][]{
-                {"FORMAT_USER", "FUNCTION"}
+                {"FORMAT_USER", "FUNCTION", null}
             }
         )));
 
@@ -483,6 +484,220 @@ class OceanBaseOracleAgentTest {
         Assertions.assertTrue(query.sql.contains("UPPER(o.OWNER) = ?"), query.sql);
         Assertions.assertTrue(query.sql.contains("UPPER(s.OWNER) = ?"), query.sql);
         Assertions.assertEquals(List.of("ORD%", "STAGING", "ORD%", "STAGING", "DWD", "ORD", 21), query.args);
+    }
+
+    @Test
+    void completionAssistantSearchReturnsBoundedStandaloneRoutines() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"OWNER", "OBJECT_NAME", "OBJECT_TYPE"},
+            new Object[][]{{"APP", "CALC", "PROCEDURE"}, {"APP", "CALCULATE", "FUNCTION"}, {"OTHER", "CALCULATE", "FUNCTION"}}
+        )));
+        CompletionAssistantRequest request = completionRequest("APP", null, "CAL", true);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "max_results", 2);
+
+        CompletionAssistantResponse response = agent.completionAssistantSearch(request);
+
+        Assertions.assertEquals(List.of("CALC", "CALCULATE"), response.getCandidates().stream().map(candidate -> candidate.getName()).toList());
+        Assertions.assertEquals(List.of("procedure", "function"), response.getCandidates().stream().map(candidate -> candidate.getKind().name().toLowerCase(Locale.ROOT)).toList());
+        Assertions.assertEquals("APP", response.getCandidates().get(0).getSchema());
+        Assertions.assertNull(response.getCandidates().get(0).getParent_name());
+        Assertions.assertTrue(response.getIncomplete());
+        Assertions.assertFalse(response.getFallback_used());
+        Assertions.assertTrue(sql.get(0).contains("ROWNUM <= ?"));
+        Assertions.assertTrue(new com.google.gson.Gson().toJsonTree(response).getAsJsonObject().has("routine_search_supported"));
+    }
+
+    @Test
+    void mixedRoutineSearchPreservesRequestedSequences() {
+        for (CompletionAssistantObjectKind routineKind : List.of(CompletionAssistantObjectKind.ROUTINE, CompletionAssistantObjectKind.FUNCTION)) {
+            List<String> sql = new ArrayList<>();
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+                new String[]{"OWNER", "OBJECT_NAME", "OBJECT_TYPE"},
+                new Object[][]{{"APP", "ORDER_SEQ", "SEQUENCE"}}
+            )));
+            CompletionAssistantRequest request = completionRequest("APP", null, "ORDER", false);
+            setField(request, "object_kinds", List.of(routineKind, CompletionAssistantObjectKind.SEQUENCE));
+            CompletionAssistantResponse response = agent.completionAssistantSearch(request);
+            Assertions.assertTrue(sql.get(0).contains("'SEQUENCE'"));
+            Assertions.assertEquals(CompletionAssistantCandidateKind.SEQUENCE, response.getCandidates().get(0).getKind());
+        }
+    }
+
+    @Test
+    void sequenceOnlySearchUsesOceanBaseFilteringWithoutAddingFunctions() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"OWNER", "OBJECT_NAME", "OBJECT_TYPE"},
+            new Object[][]{{"APP", "ORDER_SEQ", "SEQUENCE"}}
+        )));
+        CompletionAssistantRequest request = completionRequest("APP", null, "ORDER", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.SEQUENCE));
+        CompletionAssistantResponse response = agent.completionAssistantSearch(request);
+        Assertions.assertEquals(1, response.getCandidates().size());
+        Assertions.assertEquals(CompletionAssistantCandidateKind.SEQUENCE, response.getCandidates().get(0).getKind());
+        Assertions.assertTrue(sql.get(0).contains("OBJECT_TYPE IN ('SEQUENCE')"));
+        Assertions.assertFalse(sql.get(0).contains("'FUNCTION'"));
+        Assertions.assertFalse(response.getFallback_used());
+    }
+
+    @Test
+    void routineSearchPreservesQuotedOwnersAndEscapesLiteralMasks() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, params, resultSet(
+            new String[]{"OWNER", "OBJECT_NAME", "OBJECT_TYPE"},
+            new Object[][]{{"Mixed.Owner", "中文_%", "PROCEDURE"}}
+        )));
+        CompletionAssistantRequest request = completionRequest("APP", "Mixed.Owner", "中文_%", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.PROCEDURE));
+        setField(request, "case_sensitive", true);
+        setField(request, "match_mode", CompletionAssistantMatchMode.CONTAINS);
+        setField(request, "max_results", 1);
+        CompletionAssistantResponse response = agent.completionAssistantSearch(request);
+        Assertions.assertEquals(List.of("%中文\\_\\%%", "Mixed.Owner", "APP"), params);
+        Assertions.assertTrue(sql.get(0).contains("OBJECT_TYPE IN ('PROCEDURE')"));
+        Assertions.assertTrue(sql.get(0).contains("OWNER = ?"));
+        Assertions.assertFalse(sql.get(0).contains("UPPER(OBJECT_NAME)"));
+        Assertions.assertEquals("中文_%", response.getCandidates().get(0).getName());
+        Assertions.assertFalse(response.getIncomplete(), "Exactly the requested count is complete");
+    }
+
+    @Test
+    void routineSearchDoesNotReturnStandaloneCandidatesForAPackageRequest() {
+        CompletionAssistantRequest request = completionRequest("APP", null, "P", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "PKG");
+        Assertions.assertThrows(RuntimeException.class, () -> new OceanBaseOracleAgent().completionAssistantSearch(request));
+    }
+
+    @Test
+    void packageCompletionKeepsNoArgumentMembersAndBoundedOverloadsWithCompleteSignatures() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, params,
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{{101}}),
+            resultSet(new String[]{"PROCEDURE_NAME", "SUBPROGRAM_ID", "ROUTINE_KIND"},
+                new Object[][]{{"RUN", 1, "PROCEDURE"}, {"RUN", 2, "FUNCTION"}, {"RUN", 3, "FUNCTION"}}),
+            resultSet(new String[]{"SUBPROGRAM_ID", "POSITION", "ARGUMENT_NAME", "IN_OUT", "DATA_TYPE", "TYPE_OWNER", "TYPE_NAME", "TYPE_SUBNAME", "DEFAULTED"},
+                new Object[][]{
+                    {2, 0, null, "OUT", "NUMBER", null, null, null, "N"},
+                    {2, 1, "INPUT", "IN", "NUMBER", null, null, null, "Y"},
+                    {2, 2, "RESULT", "IN/OUT", "PL/SQL RECORD", "Mixed.Owner", "Types", "Payload", "N"}
+                })
+        ));
+        CompletionAssistantRequest request = completionRequest("APP", "Mixed.Owner", "Ru_%", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "Mixed.Package");
+        setField(request, "case_sensitive", true);
+        setField(request, "max_results", 2);
+        CompletionAssistantResponse response = agent.completionAssistantSearch(request);
+
+        Assertions.assertTrue(response.getIncomplete());
+        Assertions.assertEquals(2, response.getCandidates().size());
+        var procedure = response.getCandidates().get(0);
+        var function = response.getCandidates().get(1);
+        Assertions.assertEquals("", procedure.getSignature());
+        Assertions.assertEquals("INPUT IN NUMBER DEFAULT, RESULT IN/OUT \"Mixed.Owner\".\"Types\".\"Payload\"", function.getSignature());
+        Assertions.assertEquals("NUMBER", function.getData_type());
+        Assertions.assertEquals("Mixed.Owner", function.getParent_schema());
+        Assertions.assertEquals("Mixed.Package", function.getParent_name());
+        Assertions.assertNotEquals(procedure.getRoutine_id(), function.getRoutine_id());
+        Assertions.assertTrue(sql.get(0).contains("OBJECT_TYPE = 'PACKAGE'"));
+        Assertions.assertTrue(sql.get(1).contains("p.OBJECT_ID = ?"));
+        Assertions.assertTrue(sql.get(1).contains("ROWNUM <= ?"));
+        Assertions.assertTrue(sql.get(2).contains("DATA_LEVEL = 0"));
+        Assertions.assertTrue(sql.get(2).contains("SUBPROGRAM_ID IN (?,?)"));
+        Assertions.assertFalse(sql.get(2).contains("ROWNUM"));
+        Assertions.assertTrue(params.contains("Ru\\_\\%%"));
+        var wire = new com.google.gson.Gson().toJsonTree(response).getAsJsonObject().getAsJsonArray("candidates");
+        Assertions.assertEquals("", wire.get(0).getAsJsonObject().get("signature").getAsString());
+        Assertions.assertEquals(function.getRoutine_id(), wire.get(1).getAsJsonObject().get("routine_id").getAsString());
+    }
+
+    @Test
+    void packageCompletionResolvesInternalTypeOwnerThroughDatabaseIdentity() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql,
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{{101}}),
+            resultSet(new String[]{"PROCEDURE_NAME", "SUBPROGRAM_ID", "ROUTINE_KIND"}, new Object[][]{{"OBJ", 6, "PROCEDURE"}}),
+            resultSet(new String[]{"SUBPROGRAM_ID", "POSITION", "ARGUMENT_NAME", "IN_OUT", "DATA_TYPE", "TYPE_OWNER", "TYPE_NAME", "TYPE_SUBNAME", "DEFAULTED", "TYPE_SCHEMA"},
+                new Object[][]{{6, 1, "X", "IN", "EXT", "514099   ", "Base.Type", null, "N", " Actual.Owner "}})
+        ));
+        CompletionAssistantRequest request = completionRequest("APP", "APP", "", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "PKG");
+        Assertions.assertEquals("X IN \" Actual.Owner \".\"Base.Type\"", agent.completionAssistantSearch(request).getCandidates().get(0).getSignature());
+        Assertions.assertTrue(sql.get(2).contains("type_owner_object.OBJECT_TYPE = 'DATABASE'"));
+        Assertions.assertTrue(sql.get(2).contains("TO_CHAR(type_owner_object.OBJECT_ID) = TRIM(a.TYPE_OWNER)"));
+    }
+
+    @Test
+    void packageCompletionKeepsLiteralNumericTypeOwner() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{{101}}),
+            resultSet(new String[]{"PROCEDURE_NAME", "SUBPROGRAM_ID", "ROUTINE_KIND"}, new Object[][]{{"OBJ", 6, "PROCEDURE"}}),
+            resultSet(new String[]{"SUBPROGRAM_ID", "POSITION", "ARGUMENT_NAME", "IN_OUT", "DATA_TYPE", "TYPE_OWNER", "TYPE_NAME", "TYPE_SUBNAME", "DEFAULTED"},
+                new Object[][]{{6, 1, "X", "IN", "EXT", "514099", "Base.Type", null, "N"}})
+        ));
+        CompletionAssistantRequest request = completionRequest("APP", "APP", "", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "PKG");
+        Assertions.assertEquals("X IN \"514099\".\"Base.Type\"", agent.completionAssistantSearch(request).getCandidates().get(0).getSignature());
+    }
+
+    @Test
+    void packageCompletionDoesNotInventUnresolvedInternalTypeOwner() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{{101}}),
+            resultSet(new String[]{"PROCEDURE_NAME", "SUBPROGRAM_ID", "ROUTINE_KIND"}, new Object[][]{{"OBJ", 6, "PROCEDURE"}}),
+            resultSet(new String[]{"SUBPROGRAM_ID", "POSITION", "ARGUMENT_NAME", "IN_OUT", "DATA_TYPE", "TYPE_OWNER", "TYPE_NAME", "TYPE_SUBNAME", "DEFAULTED", "TYPE_SCHEMA"},
+                new Object[][]{{6, 1, "X", "IN", "EXT", "514099   ", "Base.Type", null, "N", null}})
+        ));
+        CompletionAssistantRequest request = completionRequest("APP", "APP", "", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "PKG");
+        Assertions.assertNull(agent.completionAssistantSearch(request).getCandidates().get(0).getSignature());
+    }
+
+    @Test
+    void packageCompletionDoesNotInventMissingParameterMetadata() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{{101}}),
+            resultSet(new String[]{"PROCEDURE_NAME", "SUBPROGRAM_ID", "ROUTINE_KIND"}, new Object[][]{{"RUN", 1, "PROCEDURE"}}),
+            resultSet(new String[]{"SUBPROGRAM_ID", "POSITION", "ARGUMENT_NAME", "IN_OUT", "DATA_TYPE", "TYPE_OWNER", "TYPE_NAME", "TYPE_SUBNAME", "DEFAULTED"},
+                new Object[][]{{1, 1, "P", "IN", null, null, null, null, "N"}})
+        ));
+        CompletionAssistantRequest request = completionRequest("APP", "APP", "", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "PKG");
+        Assertions.assertNull(agent.completionAssistantSearch(request).getCandidates().get(0).getSignature());
+    }
+
+    @Test
+    void packageCompletionDistinguishesVisibleEmptyPackageFromInvisiblePackage() {
+        CompletionAssistantRequest request = completionRequest("APP", "APP", "", false);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.ROUTINE));
+        setField(request, "parent_name", "PKG");
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{{101}}),
+            resultSet(new String[]{"PROCEDURE_NAME", "SUBPROGRAM_ID", "ROUTINE_KIND"}, new Object[][]{})));
+        Assertions.assertTrue(agent.completionAssistantSearch(request).getCandidates().isEmpty());
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"OBJECT_ID"}, new Object[][]{})));
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class, () -> agent.completionAssistantSearch(request));
+        Assertions.assertTrue(error.toString().contains("Package is not visible"));
     }
 
     @Test
@@ -786,6 +1001,45 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void getColumnsPreservesCharacterUnitsAndNegativeScale() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, columnResultSet(new Object[][]{
+            {"VB", "VARCHAR2", "Y", null, null, 8, 8, null, null, 0, "B"},
+            {"VC", "VARCHAR2", "Y", null, null, 32, 8, null, null, 0, "C"},
+            {"NC", "NVARCHAR2", "Y", null, null, 32, 8, null, null, 0, "C"},
+            {"CB", "CHAR", "Y", null, null, 12, 4, null, null, 0, "B"},
+            {"CC", "CHAR", "Y", null, null, 32, 8, null, null, 0, "C"},
+            {"NR", "NUMBER", "Y", 10, -2, 22, 0, null, null, 0, null},
+            {"NZ", "NUMBER", "Y", 10, 0, 22, 0, null, null, 0, null},
+            {"NP", "NUMBER", "Y", 10, 2, 22, 0, null, null, 0, null},
+            {"NU", "NUMBER", "Y", null, null, 22, 0, null, null, 0, null},
+            {"VU", "VARCHAR2", "Y", null, null, 32, 8, null, null, 0, null}
+        })));
+        List<ColumnInfo> columns = agent.getColumns("APP", "USERS");
+        Assertions.assertEquals(List.of("VARCHAR2(8 BYTE)", "VARCHAR2(8 CHAR)", "NVARCHAR2(8)", "CHAR(12 BYTE)", "CHAR(8 CHAR)", "NUMBER(10,-2)", "NUMBER(10)", "NUMBER(10,2)", "NUMBER", "VARCHAR2(8)"),
+            columns.stream().map(ColumnInfo::getData_type).toList());
+        Assertions.assertTrue(sql.get(0).contains("c.CHAR_USED"));
+    }
+
+    @Test
+    void getColumnsPreservesFloatPrecisionAndNumberStarScale() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, columnResultSet(new Object[][]{
+            {"F", "FLOAT", "Y", 63, null, 22, 0, null, null, 0, null},
+            {"FU", "FLOAT", "Y", null, null, 22, 0, null, null, 0, null},
+            {"NS", "NUMBER", "Y", null, 3, 22, 0, null, null, 0, null},
+            {"NN", "NUMBER", "Y", null, -2, 22, 0, null, null, 0, null},
+            {"NZ", "NUMBER", "Y", null, 0, 22, 0, null, null, 0, null},
+            {"NU", "NUMBER", "Y", null, null, 22, 0, null, null, 0, null}
+        })));
+        List<ColumnInfo> columns = agent.getColumns("APP", "NUMERIC_COLUMNS");
+        Assertions.assertEquals(List.of("FLOAT(63)", "FLOAT", "NUMBER(*,3)", "NUMBER(*,-2)", "NUMBER(*,0)", "NUMBER"),
+            columns.stream().map(ColumnInfo::getData_type).toList());
+    }
+
+    @Test
     void getColumnsResolvesTheCurrentSchemaWhenSchemaIsEmpty() {
         List<String> sql = new ArrayList<>();
         List<String> params = new ArrayList<>();
@@ -1054,9 +1308,10 @@ class OceanBaseOracleAgentTest {
                 "CHAR_LENGTH",
                 "DATA_DEFAULT",
                 "COMMENTS",
-                "IS_PK"
+                "IS_PK",
+                "CHAR_USED"
             },
-            rows
+            java.util.Arrays.stream(rows).map(row -> java.util.Arrays.copyOf(row, 11)).toArray(Object[][]::new)
         );
     }
 

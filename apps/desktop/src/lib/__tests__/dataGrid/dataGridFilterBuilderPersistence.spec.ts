@@ -1,7 +1,7 @@
 /** @vitest-environment happy-dom */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { clearDataGridStructuredFilterStates, clearDataGridStructuredFilterStatesForTab, dropDataGridStructuredFilterMemoryCache, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { clearDataGridStructuredFilterStates, clearDataGridStructuredFilterStatesForTab, copyDataGridStructuredFilterStatesForTab, dropDataGridStructuredFilterMemoryCache, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 
 describe("data grid structured filter persistence", () => {
   const cacheKey = "issue-436-filter-view";
@@ -23,6 +23,25 @@ describe("data grid structured filter persistence", () => {
       manualWhereInput: "tenant_id = 7",
       rules: [{ columnName: "status", rawValue: "open" }],
     });
+  });
+
+  it("copies only the source tab's grids and persists separate manual and quick conditions across a restart", () => {
+    const state = loadDataGridStructuredFilterState(cacheKey, scopeKey)!;
+    saveDataGridStructuredFilterState("tab-1", state);
+    saveDataGridStructuredFilterState("tab-1-run-1-0", { ...state, manualWhereInput: "tenant_id = 8" });
+    saveDataGridStructuredFilterState("tab-10", { ...state, manualWhereInput: "tenant_id = 9" });
+    dropDataGridStructuredFilterMemoryCache();
+
+    copyDataGridStructuredFilterStatesForTab("tab-1", "copy");
+    dropDataGridStructuredFilterMemoryCache();
+
+    expect(loadDataGridStructuredFilterState("copy", scopeKey)).toEqual(state);
+    expect(loadDataGridStructuredFilterState("copy-run-1-0", scopeKey)?.manualWhereInput).toBe("tenant_id = 8");
+    expect(loadDataGridStructuredFilterState("copy0", scopeKey)).toBeUndefined();
+    expect(loadDataGridStructuredFilterState("copy", "other-scope")).toBeUndefined();
+    clearDataGridStructuredFilterStatesForTab("copy");
+    expect(loadDataGridStructuredFilterState("tab-1", scopeKey)).toEqual(state);
+    expect(loadDataGridStructuredFilterState("tab-10", scopeKey)?.manualWhereInput).toBe("tenant_id = 9");
   });
 
   it("does not leak filters into another table scope", () => {

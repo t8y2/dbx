@@ -12,7 +12,9 @@ import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import DataGrid from "@/components/grid/DataGrid.vue";
 import DataGridColumnLayoutPopover from "@/components/grid/DataGridColumnLayoutPopover.vue";
+import DataGridFreezeFirstColumnControl from "@/components/grid/DataGridFreezeFirstColumnControl.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
+import DataGridEmptyColumnsControl from "@/components/grid/DataGridEmptyColumnsControl.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
 import DataGridColumnWidthModeControl from "@/components/grid/DataGridColumnWidthModeControl.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -1576,7 +1578,7 @@ async function gridSave(changes: DocumentGridChanges) {
       continue;
     }
 
-    const updateDoc = buildMongoUpdateDocument(dirtyCols, cols, documents.value[rowIdx]);
+    const updateDoc = buildMongoUpdateDocument(dirtyCols, cols, mongoTypedSourceDocument(rowIdx));
     if (Object.keys(updateDoc).length === 0) continue;
     const documentId = documents.value[rowIdx]?._id ?? id;
     await api.documentUpdateDocument(props.connectionId, props.database, props.collection, serializeMongoDocumentId(documentId), JSON.stringify(updateDoc));
@@ -1645,6 +1647,11 @@ function buildPathIdentityUpdatedDocument(document: JsonRecord, changes: Map<num
     else updated[column] = parseDocumentStoreInputValue(newValue, kind);
   }
   return updated;
+}
+
+/** The loaded document with its BSON number types intact (canonical extended JSON), so edits keep Int32/Double fields typed. */
+function mongoTypedSourceDocument(rowIdx: number): JsonRecord | undefined {
+  return (mongoCopyDocumentsAvailable.value ? copyDocuments.value[rowIdx] : undefined) ?? documents.value[rowIdx];
 }
 
 function buildMongoGridInsertDocument(row: MongoInputValue[], columns: string[], meta?: GridNewRowMeta): Record<string, unknown> {
@@ -1724,7 +1731,7 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
         stmts.push(kind === "solr" ? formatSolrDocumentOperationPreview({ action: "update", core: coll, id: documentId, document: writeDocument }) : formatMeilisearchDocumentOperationPreview({ action: "update", index: coll, id: documentId, document: writeDocument }));
       }
     } else {
-      const updateDoc = buildMongoUpdateDocument(dirtyCols, columns, documents.value[rowIdx]);
+      const updateDoc = buildMongoUpdateDocument(dirtyCols, columns, mongoTypedSourceDocument(rowIdx));
       stmts.push(`db.${coll}.updateOne({_id: ${formatMongoShellLiteral(documents.value[rowIdx]?._id ?? id)}}, ${formatMongoShellLiteral(updateDoc)})`);
     }
   }
@@ -2660,7 +2667,7 @@ onMounted(async () => {
   try {
     // A restored tab issues no query, so a blocking health probe here would be
     // the only round trip left on the switch.
-    await connectionStore.ensureConnected(props.connectionId, restoredDocumentData ? { verifyHealth: false } : {});
+    await connectionStore.ensureConnected(props.connectionId, { ...(restoredDocumentData ? { verifyHealth: false } : {}), skipIfClosedByUser: true });
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
@@ -2885,7 +2892,7 @@ defineExpose({ focusSearch });
               <span>{{ t("grid.transposeMultiRowToggle") }}</span>
             </div>
             <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-              <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+              <div class="grid min-w-40 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
                 <button
                   v-for="multiRow in [false, true]"
                   :key="String(multiRow)"
@@ -2932,6 +2939,8 @@ defineExpose({ focusSearch });
             </span>
             <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
           </div>
+          <DataGridEmptyColumnsControl :count="dataGridRef?.allEmptyColumnCount" :column-count="dataGridRef?.displayableColumnCount" />
+          <DataGridFreezeFirstColumnControl />
           <DataGridCopyFormatControl
             :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
             :current-value="dataGridRef?.defaultCopyPreference ?? ''"

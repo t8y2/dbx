@@ -111,27 +111,34 @@ export function useDataGridColumnLayoutState(options: {
   commentByColumn?: MaybeRefOrGetter<ReadonlyMap<string, string>>;
   displayableColumnIndexes: MaybeRefOrGetter<readonly number[]>;
   allNullColumnIndexes: MaybeRefOrGetter<readonly number[]>;
+  allEmptyColumnIndexes?: MaybeRefOrGetter<readonly number[]>;
+  hideEmptyColumns?: MaybeRefOrGetter<boolean>;
   columnOrderKeys: MaybeRefOrGetter<readonly string[]>;
   layoutScopeKey: MaybeRefOrGetter<string>;
   tableScopeKey: MaybeRefOrGetter<string>;
   initialHiddenColumnKeys?: MaybeRefOrGetter<readonly string[] | undefined>;
   hideNullColumns?: MaybeRefOrGetter<boolean>;
+  freezeFirstColumn?: MaybeRefOrGetter<boolean>;
   onHideNullColumnsChange?: (value: boolean) => void;
   onRefreshMetrics?: () => void;
 }) {
   const hiddenColumnIndexes = ref<Set<number>>(hiddenColumnIndexesForKeys(toValue(options.initialHiddenColumnKeys), toValue(options.columnOrderKeys), toValue(options.displayableColumnIndexes)));
   const localNullColumnsHidden = ref(false);
   const nullColumnsHidden = computed(() => (options.hideNullColumns === undefined ? localNullColumnsHidden.value : toValue(options.hideNullColumns)));
+  const emptyColumnsHidden = computed(() => options.hideEmptyColumns !== undefined && toValue(options.hideEmptyColumns));
+  const automaticHiddenColumnIndexes = computed(() => [...new Set([...(nullColumnsHidden.value ? toValue(options.allNullColumnIndexes) : []), ...(emptyColumnsHidden.value && options.allEmptyColumnIndexes !== undefined ? toValue(options.allEmptyColumnIndexes) : [])])]);
   const autoHiddenNullColumnIndexes = ref<Set<number>>(new Set());
   const persistedColumnOrderKeys = ref<string[]>([]);
   const persistedHiddenColumnKeys = ref<string[]>([...(toValue(options.initialHiddenColumnKeys) ?? [])]);
-  const frozenColumnCount = ref(0);
+  const manualFrozenColumnCount = ref(0);
   const columnOrderSnapshotBeforeFreeze = ref<string[] | null>(null);
   let columnLayoutPersistTimer: ReturnType<typeof setTimeout> | undefined;
   let columnLayoutPersistPending = false;
   let pendingColumnLayoutScopeKey = "";
   const orderedDisplayableColumnIndexes = computed(() => orderedColumnIndexes({ availableIndexes: toValue(options.displayableColumnIndexes), columnKeys: toValue(options.columnOrderKeys), orderedKeys: persistedColumnOrderKeys.value }));
   const visibleColumnIndexes = computed(() => visibleColumnIndexesForFilter(orderedDisplayableColumnIndexes.value, hiddenColumnIndexes.value));
+  // The global preference is a rendering floor, never a per-layout persisted freeze.
+  const frozenColumnCount = computed(() => Math.min(visibleColumnIndexes.value.length, Math.max(manualFrozenColumnCount.value, toValue(options.freezeFirstColumn) ? 1 : 0)));
   const displayableColumnCount = computed(() => toValue(options.displayableColumnIndexes).length);
   const hiddenColumnCount = computed(() => displayableColumnCount.value - visibleColumnIndexes.value.length);
   const allNullColumnCount = computed(() => toValue(options.allNullColumnIndexes).length);
@@ -270,12 +277,12 @@ export function useDataGridColumnLayoutState(options: {
 
   function loadFrozenColumnCount() {
     const state = loadDataGridColumnFrozenState(toValue(options.layoutScopeKey));
-    frozenColumnCount.value = Math.min(state.frozenCount, visibleColumnIndexes.value.length);
+    manualFrozenColumnCount.value = Math.min(state.frozenCount, visibleColumnIndexes.value.length);
     columnOrderSnapshotBeforeFreeze.value = state.orderBeforeFreeze;
   }
   function setFrozenColumnCount(count: number) {
     const clampedCount = Math.max(0, Math.min(count, visibleColumnIndexes.value.length));
-    frozenColumnCount.value = clampedCount;
+    manualFrozenColumnCount.value = clampedCount;
     if (clampedCount > 0) {
       saveDataGridColumnFrozenCount(toValue(options.layoutScopeKey), clampedCount, columnOrderSnapshotBeforeFreeze.value);
     } else {
@@ -308,7 +315,7 @@ export function useDataGridColumnLayoutState(options: {
     const selectedActualIdxs = [...new Set(selectedVisibleColIdxs.map((vIdx) => visibleIdxs[vIdx]).filter((idx): idx is number => idx !== undefined))];
     if (selectedActualIdxs.length === 0) return;
     const currentOrder = orderedDisplayableColumnIndexes.value;
-    const frozenVisibleIndexes = visibleColumnIndexes.value.slice(0, frozenColumnCount.value);
+    const frozenVisibleIndexes = visibleColumnIndexes.value.slice(0, manualFrozenColumnCount.value);
     const frozenSet = new Set(frozenVisibleIndexes);
     const additions = selectedActualIdxs.filter((idx) => !frozenSet.has(idx));
     if (additions.length === 0) return;
@@ -316,15 +323,15 @@ export function useDataGridColumnLayoutState(options: {
     const remaining = currentOrder.filter((idx) => !additions.includes(idx));
     const frozenEnd = frozenVisibleIndexes.reduce((end, idx) => Math.max(end, remaining.indexOf(idx) + 1), 0);
     persistColumnOrder([...remaining.slice(0, frozenEnd), ...additions, ...remaining.slice(frozenEnd)]);
-    setFrozenColumnCount(frozenColumnCount.value + additions.length);
+    setFrozenColumnCount(manualFrozenColumnCount.value + additions.length);
   }
 
   function unfreezeSelectedColumns(selectedVisibleColIdxs: number[]) {
-    if (selectedVisibleColIdxs.length === 0 || frozenColumnCount.value === 0) return;
+    if (selectedVisibleColIdxs.length === 0 || manualFrozenColumnCount.value === 0) return;
     const visibleIdxs = visibleColumnIndexes.value;
     const selected = new Set(selectedVisibleColIdxs.map((vIdx) => visibleIdxs[vIdx]).filter((idx): idx is number => idx !== undefined));
     const currentOrder = orderedDisplayableColumnIndexes.value;
-    const frozen = visibleColumnIndexes.value.slice(0, frozenColumnCount.value);
+    const frozen = visibleColumnIndexes.value.slice(0, manualFrozenColumnCount.value);
     const removing = frozen.filter((idx) => selected.has(idx));
     if (removing.length === 0) return;
     if (columnOrderSnapshotBeforeFreeze.value === null) columnOrderSnapshotBeforeFreeze.value = [...persistedColumnOrderKeys.value];
@@ -401,8 +408,8 @@ export function useDataGridColumnLayoutState(options: {
   function applyNullColumnVisibility(hidden: boolean) {
     hiddenColumnIndexes.value = removeAutoHiddenColumnIndexes(hiddenColumnIndexes.value, autoHiddenNullColumnIndexes.value);
     autoHiddenNullColumnIndexes.value = new Set();
-    if (!hidden) return;
-    const next = hiddenColumnIndexesWithAllNullColumns({ availableIndexes: [...toValue(options.displayableColumnIndexes)], hiddenIndexes: hiddenColumnIndexes.value, allNullIndexes: new Set(toValue(options.allNullColumnIndexes)) });
+    if (!hidden && !emptyColumnsHidden.value) return;
+    const next = hiddenColumnIndexesWithAllNullColumns({ availableIndexes: [...toValue(options.displayableColumnIndexes)], hiddenIndexes: hiddenColumnIndexes.value, allNullIndexes: new Set(automaticHiddenColumnIndexes.value) });
     hiddenColumnIndexes.value = next.hiddenIndexes;
     autoHiddenNullColumnIndexes.value = next.autoHiddenIndexes;
   }
@@ -433,11 +440,11 @@ export function useDataGridColumnLayoutState(options: {
   }
 
   onScopeDispose(flushPersistColumnLayout);
-  watch([() => nullColumnsHidden.value, () => [...toValue(options.allNullColumnIndexes)], () => [...toValue(options.displayableColumnIndexes)]], ([hidden]) => applyNullColumnVisibility(hidden as boolean), { immediate: true });
+  watch([() => nullColumnsHidden.value, automaticHiddenColumnIndexes, () => [...toValue(options.displayableColumnIndexes)]], ([hidden]) => applyNullColumnVisibility(hidden as boolean), { immediate: true });
   watch(
     () => visibleColumnIndexes.value.length,
     (visibleCount) => {
-      if (frozenColumnCount.value > visibleCount) setFrozenColumnCount(visibleCount);
+      if (manualFrozenColumnCount.value > visibleCount) setFrozenColumnCount(visibleCount);
     },
     { flush: "sync" },
   );

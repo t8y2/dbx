@@ -12,6 +12,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 use crate::connection::task_client_session_id;
+use crate::data_grid_sql::{extra_is_auto_generated, DataGridPrimaryKeyMode};
 use crate::models::connection::DatabaseType;
 use crate::mysql_ddl_normalize::DdlNormalizeOptions;
 use crate::object_source_sql::build_export_object_source_sql;
@@ -28,7 +29,7 @@ use crate::types::{ObjectSourceKind, SpatialColumn, SqlExportColumnSelection};
 static EXPORT_CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
 
-const EXPORT_CANCELLED_ERROR: &str = "Export cancelled";
+pub const EXPORT_CANCELLED_ERROR: &str = "Export cancelled";
 const EXPORT_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// MySQL scripts written by the exporter are always UTF-8: values are decoded off the
@@ -261,6 +262,21 @@ fn exports_schema_wide_objects(request: &DatabaseExportRequest) -> bool {
 /// stays unchanged.
 fn exports_mysql_trigger_objects(db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Mysql)
+}
+
+/// Oracle writes each table's triggers into its table DDL (see `loadTableTriggerDDLs` in
+/// `agents/drivers/oracle-go`), so a trigger that reads `seq.NEXTVAL` reaches the script
+/// whenever structure is exported. The standalone sequences it depends on are written
+/// before the tables of a whole-schema structure export so the script replays (#11673).
+fn exports_oracle_sequence_objects(request: &DatabaseExportRequest, db_type: DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Oracle) && request.include_structure && request.selected_tables.is_empty()
+}
+
+/// Oracle backs every identity column with a system-named `ISEQ$$_<object id>` sequence.
+/// The identity clause in the table DDL recreates it, so exporting it would only add an
+/// orphan sequence to the target schema.
+fn is_oracle_identity_sequence(name: &str) -> bool {
+    name.starts_with("ISEQ$$_")
 }
 
 fn database_export_total_objects(request: &DatabaseExportRequest, counts: &DatabaseExportObjectCounts) -> usize {
@@ -966,7 +982,17 @@ fn format_oracle_export_temporal_literal(
         "timestamptz_dty" => ExportTemporalKind::DateTimeWithTimeZone,
         _ => export_temporal_column_kind(database_type, column_type)?,
     };
-    let parts = parse_export_date_parts(value.as_str()?)?;
+    let text = value.as_str()?;
+    let Some(parts) = parse_export_date_parts(text) else {
+        let (datetime, _) = text.rsplit_once(' ')?;
+        parse_export_local_temporal_parts(datetime)?;
+        let normalized_type = match base {
+            "timestampdty" => "TIMESTAMP",
+            "timestamptz_dty" => "TIMESTAMP WITH TIME ZONE",
+            _ => column_type,
+        };
+        return crate::data_grid_sql::format_oracle_temporal_literal(text, Some(normalized_type));
+    };
     if base == "date" {
         return Some(format_oracle_export_date_parts_literal(&parts));
     }
@@ -1445,8 +1471,7 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
     if options.columns.is_empty() || options.rows.is_empty() {
         return Ok(Vec::new());
     }
-    let excluded_names: HashSet<String> =
-        exclude_columns.iter().map(|column| column.trim().to_ascii_uppercase()).collect();
+    let excluded_names: HashSet<&str> = exclude_columns.iter().map(|column| column.trim()).collect();
     let table = export_qualified_table_name(
         options.database_type,
         options.schema.as_deref(),
@@ -1463,7 +1488,19 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
         .enumerate()
         .filter_map(|(index, column)| {
             let column_type = export_column_type(&options.column_types, index, options.database_type, &spatial_columns);
-            let excluded = excluded_names.contains(&column.trim().to_ascii_uppercase());
+            let column_name = column.trim();
+            let excluded = excluded_names.contains(column_name)
+                || (exclude_columns
+                    .iter()
+                    .filter(|excluded| excluded.trim().eq_ignore_ascii_case(column_name))
+                    .count()
+                    == 1
+                    && options
+                        .columns
+                        .iter()
+                        .filter(|candidate| candidate.trim().eq_ignore_ascii_case(column_name))
+                        .count()
+                        == 1);
             (is_export_insert_column(
                 options.database_type,
                 column,
@@ -1578,6 +1615,11 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
             insert_sql.push(if *row_count > 1 { '\n' } else { ' ' });
             insert_sql.push_str(values);
             insert_sql.push(';');
+            if output_database_type == Some(DatabaseType::OceanbaseOracle) {
+                if let Some(statement) = crate::data_grid_sql::oceanbase_blob_statement(&insert_sql, false) {
+                    insert_sql = statement;
+                }
+            }
             if needs_identity_insert_wrapper {
                 statements.push(wrap_dameng_identity_insert_sql_for_table(&insert_sql, &table));
             } else {
@@ -1618,6 +1660,10 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
             };
             let literal = if insert_dialect == SqlInsertDialect::Standard {
                 format_standard_sql_literal(value)
+            } else if let Some(literal) =
+                crate::data_grid_sql::format_oracle_lob_export_literal(value, options.database_type, column_type)?
+            {
+                literal
             } else {
                 format_export_sql_literal_typed_with_spatial(
                     value,
@@ -1660,6 +1706,43 @@ fn export_sql_statement_bytes(database_type: Option<DatabaseType>, text: &str) -
     } else {
         text.len()
     }
+}
+
+pub(crate) fn sql_export_excluded_primary_keys(
+    database_type: Option<DatabaseType>,
+    mode: DataGridPrimaryKeyMode,
+    primary_keys: &[String],
+    columns: &[String],
+    column_extras: &[Option<String>],
+) -> Vec<String> {
+    match mode {
+        DataGridPrimaryKeyMode::Include => Vec::new(),
+        DataGridPrimaryKeyMode::ExcludeAll | DataGridPrimaryKeyMode::ExcludeGenerated => primary_keys
+            .iter()
+            .filter_map(|key| sql_export_column_index(database_type, key, columns))
+            .filter(|index| {
+                mode == DataGridPrimaryKeyMode::ExcludeAll
+                    || column_extras.get(*index).and_then(|extra| extra.as_deref()).is_some_and(extra_is_auto_generated)
+            })
+            .map(|index| columns[index].clone())
+            .collect(),
+    }
+}
+
+pub(crate) fn sql_export_column_index(
+    database_type: Option<DatabaseType>,
+    name: &str,
+    columns: &[String],
+) -> Option<usize> {
+    if let Some(index) = columns.iter().position(|column| column == name) {
+        return Some(index);
+    }
+    if matches!(database_type, Some(DatabaseType::Postgres | DatabaseType::Redshift)) {
+        return None;
+    }
+    let mut matches = columns.iter().enumerate().filter(|(_, column)| column.eq_ignore_ascii_case(name));
+    let index = matches.next()?.0;
+    matches.next().is_none().then_some(index)
 }
 
 pub(crate) fn is_internal_export_column(database_type: Option<DatabaseType>, column: &str) -> bool {
@@ -1712,6 +1795,15 @@ impl SqlExportProjection {
 
     pub(crate) fn project_request<T: Clone + Default>(&self, values: &[T]) -> Vec<T> {
         self.entries.iter().map(|(_, request_index)| values.get(*request_index).cloned().unwrap_or_default()).collect()
+    }
+
+    pub(crate) fn project_excluded_columns(&self, columns: &[String], exclude_columns: &[String]) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter_map(|(index, _)| columns.get(*index))
+            .filter(|column| exclude_columns.contains(column))
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn project_owned<T: Default>(&self, mut values: Vec<T>) -> Vec<T> {
@@ -2225,6 +2317,7 @@ async fn list_postgres_export_enums(
         }
     };
     let client = pool.get().await.map_err(|e| e.to_string())?;
+    let client = crate::db::postgres::PostgresTextClient::new(&client);
     let rows = client.query(POSTGRES_EXPORT_ENUMS_SQL, &[&schema]).await.map_err(|e| e.to_string())?;
     rows.into_iter()
         .map(|row| {
@@ -2318,7 +2411,8 @@ async fn postgres_export_sequence_parameters_legacy(
     client: &deadpool_postgres::Client,
     schema: &str,
     sequence: &str,
-) -> Result<Option<PostgresExportSequenceParameters>, tokio_postgres::Error> {
+) -> Result<Option<PostgresExportSequenceParameters>, crate::db::postgres::PostgresQueryError> {
+    let client = crate::db::postgres::PostgresTextClient::new(client);
     let qualified = format!(
         "{}.{}",
         quote_identifier(schema, &DatabaseType::Postgres),
@@ -2360,6 +2454,7 @@ async fn list_postgres_export_sequences(
         }
     };
     let client = pool.get().await.map_err(|e| e.to_string())?;
+    let client = crate::db::postgres::PostgresTextClient::new(&client);
     // PostgreSQL 10+ keeps sequence parameters in `pg_sequence`; older servers
     // have neither that catalog nor `pg_sequence_last_value()`, so the compat
     // tier lists sequences (and owners) without it and reads each sequence
@@ -3947,8 +4042,11 @@ async fn export_database_sql_core_inner(
     let mut functions: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut triggers: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut events: Vec<crate::types::ObjectInfo> = Vec::new();
+    let mut oracle_sequences: Vec<crate::types::ObjectInfo> = Vec::new();
+    let collects_schema_wide_objects = exports_schema_wide_objects(request);
+    let collects_oracle_sequences = exports_oracle_sequence_objects(request, db_type);
 
-    if exports_schema_wide_objects(request) {
+    if collects_schema_wide_objects || collects_oracle_sequences {
         match crate::schema::list_objects_core(
             state,
             &request.connection_id,
@@ -3966,6 +4064,15 @@ async fn export_database_sql_core_inner(
                 for obj in &objects {
                     let ot = obj.object_type.to_uppercase();
                     if is_postgres_extension_member_routine(obj, &postgres_extension_members) {
+                        continue;
+                    }
+                    if ot == "SEQUENCE" {
+                        if collects_oracle_sequences && !is_oracle_identity_sequence(&obj.name) {
+                            oracle_sequences.push(obj.clone());
+                        }
+                        continue;
+                    }
+                    if !collects_schema_wide_objects {
                         continue;
                     }
                     if ot.contains("PROCEDURE") {
@@ -3991,7 +4098,8 @@ async fn export_database_sql_core_inner(
         &DatabaseExportObjectCounts {
             tables: tables.len(),
             views: views.len(),
-            sequences: postgres_sequences.iter().filter(|sequence| !sequence.created_by_table).count(),
+            sequences: postgres_sequences.iter().filter(|sequence| !sequence.created_by_table).count()
+                + oracle_sequences.len(),
             extensions: postgres_extensions.len(),
             enums: postgres_enums.len(),
             procedures: procedures.len(),
@@ -4193,6 +4301,57 @@ async fn export_database_sql_core_inner(
 
         writeln!(file, "{};\n", generate_postgres_sequence_create_ddl(sequence, &request.schema))
             .map_err(|e| format!("Failed to write file: {e}"))?;
+        object_index += 1;
+    }
+
+    for sequence in &oracle_sequences {
+        if is_export_cancelled(&request.export_id).await {
+            return Err("Export cancelled".to_string());
+        }
+
+        emit_database_export_running(
+            &on_progress,
+            &request.export_id,
+            sequence.name.clone(),
+            object_index,
+            total_objects,
+            total_rows_exported,
+            false,
+        );
+
+        match crate::schema::get_object_source_core(
+            state,
+            &request.connection_id,
+            &request.database,
+            &request.schema,
+            &sequence.name,
+            crate::db::ObjectSourceKind::Sequence,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(obj_source) => {
+                let source = build_database_export_object_source_sql(
+                    db_type,
+                    &ObjectSourceKind::Sequence,
+                    &sequence.name,
+                    &obj_source.source,
+                    request.drop_table_if_exists,
+                );
+                if !source.is_empty() {
+                    writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+                }
+            }
+            Err(e) => {
+                record_export_error(
+                    &mut file,
+                    request.fail_on_error,
+                    format!("exporting sequence {}: {e}", sequence.name),
+                    &mut lenient_errors,
+                )?;
+            }
+        }
         object_index += 1;
     }
 
@@ -5267,6 +5426,32 @@ mod tests {
     }
 
     #[test]
+    fn oracle_sequences_are_exported_with_whole_schema_structure() {
+        use super::{exports_oracle_sequence_objects, is_oracle_identity_sequence};
+
+        let cases = [
+            ("structure", DatabaseType::Oracle, export_request(true, false, false, Vec::new()), true),
+            ("all", DatabaseType::Oracle, export_request(true, true, true, Vec::new()), true),
+            ("data only", DatabaseType::Oracle, export_request(false, true, true, Vec::new()), false),
+            (
+                "selected tables",
+                DatabaseType::Oracle,
+                export_request(true, true, true, vec!["ORDERS".to_string()]),
+                false,
+            ),
+            ("postgres", DatabaseType::Postgres, export_request(true, true, true, Vec::new()), false),
+            ("oceanbase oracle", DatabaseType::OceanbaseOracle, export_request(true, true, true, Vec::new()), false),
+        ];
+        for (name, db_type, request, expected) in cases {
+            assert_eq!(exports_oracle_sequence_objects(&request, db_type), expected, "{name}");
+        }
+
+        assert!(is_oracle_identity_sequence("ISEQ$$_115126"));
+        assert!(!is_oracle_identity_sequence("ORDER_SEQ"));
+        assert!(!is_oracle_identity_sequence("iseq$$_custom"));
+    }
+
+    #[test]
     fn mysql_database_export_drops_triggers_and_events_before_create() {
         let trigger = "CREATE DEFINER=`root`@`%` TRIGGER `trg_orders_ai` AFTER INSERT ON `orders` FOR EACH ROW INSERT INTO audit_log(msg) VALUES ('x')";
         let event =
@@ -5726,7 +5911,9 @@ mod tests {
 
         assert_eq!(
             statements,
-            vec!["INSERT INTO `places` (`location`, `shape`) VALUES (ST_GeomFromWKB(0x0101000000AE47E17A14AE5C4052B81E85EBF34240, 4326), ST_GeomFromWKB(0x0101000000000000000000F03F0000000000000040));"]
+            vec![
+                "INSERT INTO `places` (`location`, `shape`) VALUES (ST_GeomFromWKB(0x0101000000AE47E17A14AE5C4052B81E85EBF34240, 4326), ST_GeomFromWKB(0x0101000000000000000000F03F0000000000000040));"
+            ]
         );
     }
 
@@ -6840,6 +7027,108 @@ mod tests {
     }
 
     #[test]
+    fn oracle_character_lob_exports_distinguish_empty_from_null() {
+        for database_type in ["oracle", "oceanbase-oracle"] {
+            let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+                "databaseType": database_type, "tableName": "LOB_VALUES",
+                "columns": ["C", "N", "TXT"], "columnTypes": ["CLOB", "NCLOB", "VARCHAR2"],
+                "rows": [["", "", ""], [null, null, null], [" ", " ", " "]]
+            }))
+            .unwrap();
+            let sql = build_export_sql_insert(options.clone()).unwrap();
+            assert!(sql.contains("VALUES (EMPTY_CLOB(), EMPTY_CLOB(), '')"), "{database_type}: {sql}");
+            assert!(sql.contains("VALUES (NULL, NULL, NULL)"), "{database_type}: {sql}");
+            assert!(sql.contains("VALUES (' ', ' ', ' ')"), "{database_type}: {sql}");
+            let mut standard = options;
+            standard.insert_dialect = SqlInsertDialect::Standard;
+            let sql = build_export_sql_insert(standard).unwrap();
+            assert!(sql.contains("('', '', '')"), "{database_type}: {sql}");
+            assert!(!sql.contains("EMPTY_CLOB"), "{database_type}: {sql}");
+        }
+    }
+
+    #[test]
+    fn oceanbase_result_export_preserves_lobs_and_driver_timezone() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("LOB_VALUES".to_string()),
+            qualified_table_name: None,
+            columns: vec!["C".into(), "B".into(), "TZ".into()],
+            column_types: vec![Some("CLOB".into()), Some("BLOB".into()), Some("TIMESTAMP(9) WITH TIME ZONE".into())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![
+                vec![json!("text'完整"), json!("0x00ff0102"), json!("2026-10-13 12:34:56.123456789 +8:00")],
+                vec![json!(""), json!("0x"), json!("2026-10-13 00:00:00.000000001 -5:30")],
+                vec![Value::Null, Value::Null, Value::Null],
+            ],
+            batch_size: Some(1),
+            preserve_original_language: false,
+        })
+        .unwrap();
+        assert!(statements[0].contains("TO_BLOB(HEXTORAW('00ff0102'))"), "{}", statements[0]);
+        assert!(statements[0].contains("TO_TIMESTAMP_TZ('2026-10-13 12:34:56.123456789 +08:00'"), "{}", statements[0]);
+        assert!(statements[1].contains("EMPTY_CLOB()"), "{}", statements[1]);
+        assert!(statements[1].contains("EMPTY_BLOB()"), "{}", statements[1]);
+        assert!(statements[1].contains("TO_TIMESTAMP_TZ('2026-10-13 00:00:00.000000001 -05:30'"), "{}", statements[1]);
+        assert!(statements[2].contains("VALUES (NULL, NULL, NULL)"));
+    }
+
+    #[test]
+    fn oceanbase_large_lob_export_uses_existing_chunked_statements() {
+        let text = format!("{}尾部", "中文'".repeat(2000));
+        let hex = "00ff0102".repeat(1024);
+        let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "oceanbase-oracle", "tableName": "LOB_VALUES",
+            "columns": ["C", "B", "TXT"], "columnTypes": ["CLOB", "BLOB", "VARCHAR2"],
+            "rows": [[text, format!("0x{hex}"), "TO_BLOB(HEXTORAW('fake'))"],
+                     ["", format!("0x{hex}"), "0x00ff"], [null, null, null]]
+        }))
+        .unwrap();
+        let sql = build_export_sql_insert(options).unwrap();
+        let statements = crate::sql::split_sql_statements_for_database(&sql, DatabaseType::OceanbaseOracle);
+        assert_eq!(statements.len(), 3);
+        for statement in &statements[..2] {
+            assert!(statement.starts_with("DECLARE"));
+            assert!(statement.contains("EXECUTE IMMEDIATE dbx_sql USING dbx_lob_0"));
+            assert_eq!(statement.matches("FREETEMPORARY(dbx_lob_0)").count(), 2);
+            let chunks = statement
+                .lines()
+                .filter_map(|line| {
+                    line.strip_prefix("DBMS_LOB.WRITEAPPEND(dbx_lob_0, ")?
+                        .split_once("HEXTORAW('")
+                        .map(|(_, hex)| hex.trim_end_matches("'));").to_string())
+                })
+                .collect::<String>();
+            assert_eq!(chunks, hex);
+        }
+        assert!(statements[0].contains("尾部"));
+        assert!(statements[0].contains("TO_BLOB(HEXTORAW(''''fake''''))"));
+        assert!(statements[1].contains("EMPTY_CLOB()"));
+        assert!(statements[2].contains("VALUES (NULL, NULL, NULL)"));
+    }
+
+    #[test]
+    fn oceanbase_lob_export_validates_only_source_exported_columns() {
+        let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "oceanbase-oracle", "tableName": "LOB_VALUES",
+            "columns": ["B", "TXT"], "columnTypes": ["BLOB", "VARCHAR2"],
+            "rows": [["0xnot-hex", "0xnot-hex"]]
+        }))
+        .unwrap();
+        assert!(build_export_sql_insert(options.clone()).unwrap_err().contains("hexadecimal byte pairs"));
+        let mut excluded = options.clone();
+        excluded.exclude_columns = vec!["B".into()];
+        assert!(build_export_sql_insert(excluded).unwrap().contains("(\"TXT\") VALUES ('0xnot-hex')"));
+        let mut standard = options;
+        standard.insert_dialect = SqlInsertDialect::Standard;
+        assert!(build_export_sql_insert(standard).unwrap().contains("'0xnot-hex', '0xnot-hex'"));
+    }
+
+    #[test]
     fn non_oracle_timestamp_exports_keep_existing_literals() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
@@ -7204,6 +7493,31 @@ mod tests {
             statements,
             vec!["INSERT INTO \"public\".\"users\" (\"name\", \"email\") VALUES ('Ada', 'ada@example.com');"]
         );
+    }
+
+    #[test]
+    fn sql_insert_export_excludes_only_the_exact_case_sensitive_column() {
+        let statements = build_export_insert_statements_excluding(
+            BuildExportInsertStatementsOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                schema: Some("public".to_string()),
+                table_name: Some("users".to_string()),
+                qualified_table_name: None,
+                columns: vec!["ID".to_string(), "id".to_string(), "name".to_string()],
+                column_types: vec![Some("integer".to_string()), Some("integer".to_string()), Some("text".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(1), json!(2), json!("Ada")]],
+                batch_size: Some(10),
+                preserve_original_language: false,
+            },
+            &["id".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO \"public\".\"users\" (\"ID\", \"name\") VALUES (1, 'Ada');"]);
     }
 
     #[test]
@@ -8072,7 +8386,9 @@ mod tests {
         assert!(!ddl.contains("OWNED BY"));
         assert_eq!(
             generate_postgres_sequence_setval_sql(&sequence, "public").as_deref(),
-            Some("SELECT setval(pg_get_serial_sequence('\"public\".\"permissions\"', 'id'), GREATEST(COALESCE(MAX(\"id\"), 42), 42), true) FROM \"public\".\"permissions\"")
+            Some(
+                "SELECT setval(pg_get_serial_sequence('\"public\".\"permissions\"', 'id'), GREATEST(COALESCE(MAX(\"id\"), 42), 42), true) FROM \"public\".\"permissions\""
+            )
         );
     }
 

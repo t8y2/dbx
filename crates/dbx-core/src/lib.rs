@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod ai;
+pub mod cc_switch;
 pub mod data;
 pub mod host;
 pub mod persistence;
@@ -37,12 +38,14 @@ pub use admin::consul;
 pub use connection::connection_secrets;
 pub use data::correction;
 pub use data::csv_export;
+pub use data::dameng_dump;
 pub use data::data_compare;
 pub use data::database_export;
 pub use dbx_drivers::database_capabilities;
 pub use dbx_sql::data_grid_extractors;
 pub use dbx_sql::data_grid_sql;
 pub use dbx_sql::database_search_sql;
+pub use dbx_sql::database_structure_search_sql;
 pub use dbx_types::database_manifest;
 pub mod db;
 #[cfg(feature = "mq-admin")]
@@ -98,6 +101,7 @@ pub use data::table_export;
 pub use data::table_import;
 pub use data::transfer;
 pub use data::transfer_rebuild;
+pub use data::transfer_runner;
 pub use dbx_drivers::ssh_config;
 pub use dbx_formats::sql_file_zip_package;
 pub use dbx_formats::temporal_format;

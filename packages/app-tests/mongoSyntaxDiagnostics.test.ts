@@ -19,6 +19,26 @@ test("valid commands and comments produce no diagnostics", () => {
   }
 });
 
+test("a JS helper line between commands does not blame the command above it", () => {
+  // Shell users build a big `$in` list in a variable, and the editor must not turn
+  // that into "Unexpected text after find(...)" on the previous, correct command.
+  const helper = underlined('db.getCollection("a").find({ x: 1 })\nvar ids = [1, 2, 3]\ndb.getCollection("b").find({ _id: { $in: ids } })');
+  assert.ok(!helper.some((d) => /Unexpected text after/.test(d.message)), JSON.stringify(helper));
+  assert.equal(helper.length, 1, JSON.stringify(helper));
+  // What is left is the honest complaint about the third line: dbx cannot evaluate `ids`.
+  assert.match(helper[0]!.message, /filter argument of find\(\) is not a valid document/);
+  assert.equal(helper[0]!.text, 'db.getCollection("b").find');
+
+  // A `print()` between two commands is not a command either, so both stay clean.
+  assert.deepEqual(buildMongoSyntaxDiagnostics('db.a.find({ x: 1 })\nprint("done")\ndb.b.find({ y: 2 })'), []);
+  // Same for a lone CR separating commands (pasted shell history).
+  assert.deepEqual(buildMongoSyntaxDiagnostics('db.a.find({ x: 1 })\rdb.b.find({ y: 2 })'), []);
+
+  // A real error on a later line is still reported, on that line and about that command.
+  const [late] = underlined("db.a.find({})\nvar ids = [1]\ndb.b.foobar({})");
+  assert.match(late!.message, /Collection method foobar\(\) is not supported/);
+});
+
 test("underlines the offending value constructor and names the argument", () => {
   const [single] = underlined('db.reports.find({id: Foo("x")})');
   assert.equal(single?.severity, "error");

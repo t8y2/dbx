@@ -1698,12 +1698,23 @@ func oracleListSQLWithVisibleSchemas(baseSQL string, visibleSchemas []string) (s
 }
 
 func (s *server) currentSchema() (string, error) {
+	const sqlText = "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL"
+	var schema string
+	// CURRENT_SCHEMA is per Oracle session. A manual transaction sets it only on
+	// its pinned connection and skips per-statement setSchema, so a pooled
+	// session would report the login user's schema and resolve unqualified
+	// tables against the wrong owner (#11258).
+	if s.manualTx != nil {
+		if err := s.manualTx.QueryRow(sqlText).Scan(&schema); err != nil {
+			return "", err
+		}
+		return strings.ToUpper(schema), nil
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return "", err
 	}
-	var schema string
-	if err := db.QueryRow("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL").Scan(&schema); err != nil {
+	if err := db.QueryRow(sqlText).Scan(&schema); err != nil {
 		return "", err
 	}
 	return strings.ToUpper(schema), nil
@@ -1993,7 +2004,7 @@ func completionRequestHasTableLikeKind(kinds []string) bool {
 func completionRequestHasRoutineKind(kinds []string) bool {
 	for _, kind := range kinds {
 		switch strings.ToLower(strings.TrimSpace(kind)) {
-		case "routine", "procedure", "function":
+		case "routine", "procedure", "function", "sequence":
 			return true
 		}
 	}
@@ -2439,13 +2450,54 @@ func oracleCompletionSynonymTargetsQuery(targets []oracleCompletionSynonymTarget
 	}
 }
 
+func oracleCompletionRoutineObjectTypes(kinds []string) []string {
+	if len(kinds) == 0 {
+		return []string{"'FUNCTION'", "'PROCEDURE'", "'PACKAGE'", "'SEQUENCE'"}
+	}
+	hasRoutine := false
+	hasProc := false
+	hasFunc := false
+	hasSeq := false
+	for _, kind := range kinds {
+		switch strings.ToLower(strings.TrimSpace(kind)) {
+		case "routine":
+			hasRoutine = true
+		case "procedure":
+			hasProc = true
+		case "function":
+			hasFunc = true
+		case "sequence":
+			hasSeq = true
+		}
+	}
+	types := make([]string, 0, 4)
+	if hasRoutine {
+		types = append(types, "'FUNCTION'", "'PROCEDURE'", "'PACKAGE'")
+	} else {
+		if hasProc {
+			types = append(types, "'PROCEDURE'")
+		}
+		if hasFunc {
+			types = append(types, "'FUNCTION'")
+		}
+	}
+	if hasSeq {
+		types = append(types, "'SEQUENCE'")
+	}
+	if len(types) == 0 {
+		return []string{"'FUNCTION'", "'PROCEDURE'", "'PACKAGE'"}
+	}
+	return types
+}
+
 func oracleCompletionRoutinesQuery(request completionAssistantRequest, preferredSchema string, limit int) oracleMetadataListQuery {
 	pattern := oracleCompletionLikePattern(request.Mask, request.MatchMode)
 	args := make([]any, 0, 5)
-	baseSQL := `
+	objectTypes := oracleCompletionRoutineObjectTypes(request.ObjectKinds)
+	baseSQL := fmt.Sprintf(`
 SELECT o.OWNER, o.OBJECT_NAME, o.OBJECT_TYPE, CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
 FROM ALL_OBJECTS o
-WHERE o.OBJECT_TYPE IN ('FUNCTION', 'PROCEDURE', 'PACKAGE')`
+WHERE o.OBJECT_TYPE IN (%s)`, strings.Join(objectTypes, ", "))
 	args = append(args, pattern)
 	nameParam := len(args)
 
@@ -3592,6 +3644,9 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		return fmt.Sprintf("%s(%d)", dataType, *column.CharacterMaximumLength)
 	}
 	if dataType == "NUMBER" {
+		if column.NumericPrecision == nil && column.NumericScale != nil {
+			return fmt.Sprintf("NUMBER(*,%d)", *column.NumericScale)
+		}
 		if column.NumericPrecision != nil && *column.NumericPrecision > 0 {
 			if column.NumericScale != nil && *column.NumericScale != 0 {
 				return fmt.Sprintf("NUMBER(%d,%d)", *column.NumericPrecision, *column.NumericScale)
@@ -3600,7 +3655,7 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		}
 		return "NUMBER"
 	}
-	if (dataType == "FLOAT" || dataType == "BINARY_FLOAT" || dataType == "BINARY_DOUBLE") &&
+	if dataType == "FLOAT" &&
 		column.NumericPrecision != nil && *column.NumericPrecision > 0 {
 		return fmt.Sprintf("%s(%d)", dataType, *column.NumericPrecision)
 	}

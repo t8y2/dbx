@@ -420,3 +420,64 @@ describe("DataGrid SQL load-all exhaustion", () => {
     expect(paginate).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("DataGrid multi-chunk load-all run", () => {
+  it("keeps loading consecutive chunks across multiple post-flush ticks until total is reached (#11230)", async () => {
+    const { host, paginate, settingsStore, gridState } = mountGrid({ infiniteScroll: true, pageOffset: 0, totalRowCount: 260_000 });
+    settingsStore.updateEditorSettings({ queryResultMaxRowsEnabled: true, queryResultMaxRows: 100_000 });
+    const initialRows = Array.from({ length: 500 }, (_, index) => [index]);
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 500,
+      pageOffset: 0,
+      totalRowCount: 260_000,
+      result: { columns: ["id"], rows: initialRows, has_more: true, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+
+    const button = host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!;
+    button.click();
+    await settle();
+
+    const confirmButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent?.trim() === i18n.global.t("grid.loadAllRowsContinue"));
+    if (confirmButton) {
+      confirmButton.click();
+      await settle();
+    }
+
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([500, 99_500]);
+    expect(paginate.mock.calls[0]?.[4]).toBe(true);
+
+    const chunk1Rows = [...initialRows, ...Array.from({ length: 99_500 }, (_, index) => [index + 500])];
+    gridState.value = {
+      ...gridState.value,
+      result: { columns: ["id"], rows: chunk1Rows, has_more: true, appended_from_row_count: 500, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+
+    expect(paginate).toHaveBeenCalledTimes(2);
+    expect(paginate.mock.calls[1]?.slice(0, 2)).toEqual([100_000, 99_500]);
+    expect(paginate.mock.calls[1]?.[4]).toBe(true);
+
+    const chunk2Rows = [...chunk1Rows, ...Array.from({ length: 99_500 }, (_, index) => [index + 100_000])];
+    gridState.value = {
+      ...gridState.value,
+      result: { columns: ["id"], rows: chunk2Rows, has_more: true, appended_from_row_count: 100_000, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+
+    expect(paginate).toHaveBeenCalledTimes(3);
+    expect(paginate.mock.calls[2]?.slice(0, 2)).toEqual([199_500, 60_500]);
+    expect(paginate.mock.calls[2]?.[4]).toBe(true);
+
+    const chunk3Rows = [...chunk2Rows, ...Array.from({ length: 60_500 }, (_, index) => [index + 199_500])];
+    gridState.value = {
+      ...gridState.value,
+      result: { columns: ["id"], rows: chunk3Rows, has_more: false, appended_from_row_count: 199_500, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+
+    expect(paginate).toHaveBeenCalledTimes(3);
+  });
+});

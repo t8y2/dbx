@@ -47,8 +47,9 @@ describe("dataGridContextMenu", () => {
     const filter = createDataGridFilterSubmenu({
       label: "filter",
       icon,
-      labels: { equals: "equals", notEquals: "not equals", like: "like", notLike: "not like", lessThan: "less", greaterThan: "greater", isNull: "null", isNotNull: "not null", clear: "clear" },
+      labels: { equals: "equals", notEquals: "not equals", like: "like", notLike: "not like", lessThan: "less", greaterThan: "greater", custom: "custom", isNull: "null", isNotNull: "not null", clear: "clear" },
       apply: action,
+      applyCustom: action,
       clear: action,
     });
     const items = createDataGridColumnContextMenuItems({
@@ -98,8 +99,9 @@ describe("dataGridContextMenu", () => {
     const filter = createDataGridFilterSubmenu({
       label: "filter",
       icon,
-      labels: { equals: "equals", notEquals: "not equals", like: "like", notLike: "not like", lessThan: "less", greaterThan: "greater", isNull: "null", isNotNull: "not null", clear: "clear" },
+      labels: { equals: "equals", notEquals: "not equals", like: "like", notLike: "not like", lessThan: "less", greaterThan: "greater", custom: "custom", isNull: "null", isNotNull: "not null", clear: "clear" },
       apply: action,
+      applyCustom: action,
       clear: action,
     });
     const columnItems = createDataGridColumnContextMenuItems({
@@ -153,8 +155,9 @@ describe("dataGridContextMenu", () => {
     const filter = createDataGridFilterSubmenu({
       label: "filter",
       icon,
-      labels: { equals: "equals", notEquals: "not equals", like: "like", notLike: "not like", lessThan: "less", greaterThan: "greater", isNull: "null", isNotNull: "not null", clear: "clear" },
+      labels: { equals: "equals", notEquals: "not equals", like: "like", notLike: "not like", lessThan: "less", greaterThan: "greater", custom: "custom", isNull: "null", isNotNull: "not null", clear: "clear" },
       apply: action,
+      applyCustom: action,
       clear: action,
     });
     return createDataGridColumnContextMenuItems({
@@ -296,13 +299,33 @@ describe("dataGridContextMenu", () => {
     expect(clear).toHaveBeenCalledTimes(1);
   });
 
+  it("lists the custom filter entry after the value comparison entries", () => {
+    const apply = vi.fn();
+    const applyCustom = vi.fn();
+    const submenu = createDataGridFilterSubmenu({
+      label: "filter",
+      icon,
+      labels: { equals: "equals", notEquals: "not equals", like: "like", notLike: "not like", lessThan: "less", greaterThan: "greater", custom: "custom", isNull: "null", isNotNull: "not null", clear: "clear" },
+      apply,
+      applyCustom,
+      clear: vi.fn(),
+    });
+
+    expect(submenu.children?.map((item) => item.label)).toEqual(["equals", "not equals", "like", "not like", "less", "greater", "custom", "", "null", "not null", "", "clear"]);
+
+    submenu.children?.[6]?.action?.();
+    expect(applyCustom).toHaveBeenCalledTimes(1);
+    expect(apply).not.toHaveBeenCalled();
+  });
+
   it("includes highlight submenu in header and context column items", () => {
     const action = vi.fn();
     const filter = createDataGridFilterSubmenu({
       label: "filter",
       icon,
-      labels: { equals: "equals", notEquals: "not equals", like: "like", notLike: "not like", lessThan: "less", greaterThan: "greater", isNull: "null", isNotNull: "not null", clear: "clear" },
+      labels: { equals: "equals", notEquals: "not equals", like: "like", notLike: "not like", lessThan: "less", greaterThan: "greater", custom: "custom", isNull: "null", isNotNull: "not null", clear: "clear" },
       apply: action,
+      applyCustom: action,
       clear: action,
     });
     const highlightSubmenu = createDataGridHighlightSubmenu({

@@ -8,8 +8,8 @@ repositories {
 }
 
 dependencies {
-    implementation 'org.apache.iotdb:iotdb-jdbc:2.0.8'
-    implementation 'org.slf4j:slf4j-nop:2.0.16'
+    implementation 'org.apache.iotdb:iotdb-jdbc:2.0.11'
+    implementation 'org.slf4j:slf4j-nop:2.0.20'
 }
 
 sourceSets {

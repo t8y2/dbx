@@ -396,7 +396,8 @@ pub async fn test_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
-    run_temporary_connection_test(&state.app, body.config, false)
+    let config = state.resolve_connection_credentials(body.config).await?;
+    run_temporary_connection_test(&state.app, config, false)
         .await
         .map(|result| Json(result.message))
         .map_err(AppError::from)
@@ -406,14 +407,16 @@ pub async fn test_connection_with_info(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<ConnectionTestResult>, AppError> {
-    run_temporary_connection_test(&state.app, body.config, true).await.map(Json).map_err(AppError::from)
+    let config = state.resolve_connection_credentials(body.config).await?;
+    run_temporary_connection_test(&state.app, config, true).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn test_ssh_tunnel(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
-    state.app.test_connection_ssh_tunnel(&body.config.canonicalized()).await.map(Json).map_err(AppError::from)
+    let config = state.resolve_connection_credentials(body.config).await?;
+    state.app.test_connection_ssh_tunnel(&config.canonicalized()).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn connect_db(
@@ -421,7 +424,7 @@ pub async fn connect_db(
     headers: HeaderMap,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
-    let config = body.config;
+    let config = state.resolve_connection_credentials(body.config).await?;
     // 演示模式：只允许连接已保存的连接，端点身份以存储为准，防止伪造 body
     // 配置把服务器拨向任意主机（见 demo 模块）。
     if state.demo_mode {
@@ -570,7 +573,7 @@ pub async fn connection_final_proxy_port(
     headers: HeaderMap,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<u16>, AppError> {
-    let runtime_config = body.config.canonicalized();
+    let runtime_config = state.resolve_connection_credentials(body.config).await?.canonicalized();
     if !runtime_config.has_effective_transport_layers() {
         return Err(AppError::from("Connection has no configured transport layers".to_string()));
     }
@@ -776,7 +779,15 @@ pub async fn save_connections(
     headers: HeaderMap,
     Json(body): Json<SaveConnectionsRequest>,
 ) -> Result<Json<()>, AppError> {
-    for config in &body.configs {
+    let mut configs = body.configs;
+    if configs.iter().any(|config| crate::credentials::contains_reference(&serde_json::to_value(config).unwrap())) {
+        let saved = state.saved_credential_configs().await?;
+        configs = configs
+            .into_iter()
+            .map(|config| crate::credentials::restore(config, &saved))
+            .collect::<Result<Vec<_>, AppError>>()?;
+    }
+    for config in &configs {
         if config.db_type == dbx_core::models::connection::DatabaseType::Sqlite {
             dbx_core::db::sqlite::validate_persistent_attachments(
                 &config.host,
@@ -789,9 +800,9 @@ pub async fn save_connections(
     if !body.removed_ids.is_empty() {
         state.app.storage.delete_connections(&body.removed_ids).await.map_err(AppError::from)?;
     }
-    state.app.storage.save_connections(&body.configs).await.map_err(AppError::from)?;
+    state.app.storage.save_connections(&configs).await.map_err(AppError::from)?;
     let owner = session_token_from_headers(&headers).unwrap_or_default();
-    let runtime_configs = body.configs.iter().cloned().map(prepare_runtime_config).collect::<Vec<_>>();
+    let runtime_configs = configs.iter().cloned().map(prepare_runtime_config).collect::<Vec<_>>();
     // Saving is an upsert, so the request only describes the connections of this
     // client. Sync the runtime cache against the whole persisted list instead of
     // the request payload, otherwise a concurrent save from another client would
@@ -811,11 +822,12 @@ pub async fn mcp_add_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<McpAddConnectionRequest>,
 ) -> Result<Json<ConnectionConfig>, AppError> {
-    let saved = state.app.storage.add_connection_for_mcp(body.config).await.map_err(AppError::from)?;
+    let config = state.resolve_connection_credentials(body.config).await?;
+    let saved = state.app.storage.add_connection_for_mcp(config).await.map_err(AppError::from)?;
     state.app.session_credentials.clear_connection(&saved.id);
     state.app.remove_connection_pools_detached(&saved.id).await;
     state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
-    Ok(Json(saved))
+    Ok(Json(state.connection_response(saved)))
 }
 
 pub async fn mcp_update_connection(
@@ -832,7 +844,7 @@ pub async fn mcp_update_connection(
     #[cfg(feature = "mq-admin")]
     state.app.mq_registry.drop_connection(&saved.id).await;
     state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
-    Ok(Json(saved))
+    Ok(Json(state.connection_response(saved)))
 }
 
 pub async fn mcp_duplicate_connection(
@@ -848,7 +860,7 @@ pub async fn mcp_duplicate_connection(
     state.app.session_credentials.clear_connection(&saved.id);
     state.app.remove_connection_pools_detached(&saved.id).await;
     state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
-    Ok(Json(saved))
+    Ok(Json(state.connection_response(saved)))
 }
 
 pub async fn mcp_remove_connection(
@@ -878,7 +890,7 @@ pub async fn load_connections(
     remove_connection_pools_for_connection_ids(&state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(&state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(&state, &sync.mq_adapter_ids_to_drop).await;
-    Ok(Json(configs))
+    Ok(Json(configs.into_iter().map(|config| state.connection_response(config)).collect()))
 }
 
 struct ConnectionConfigSync {
@@ -1096,6 +1108,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -1139,6 +1152,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }
@@ -1663,9 +1677,19 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_connection_update_preserves_secrets_and_rechecks_scope() {
-        let (state, dir) = test_web_state().await;
+        for password_viewer_enabled in [false, true] {
+            check_mcp_connection_update_preserves_secrets_and_rechecks_scope(password_viewer_enabled).await;
+        }
+    }
+
+    async fn check_mcp_connection_update_preserves_secrets_and_rechecks_scope(password_viewer_enabled: bool) {
+        let (mut state, dir) = test_web_state().await;
+        Arc::get_mut(&mut state).unwrap().password_viewer_enabled = password_viewer_enabled;
         let mut config = sqlite_config("patch-target", ":memory:");
         config.password = "web-fixture-secret".to_string();
+        config.url_params = Some("token=web-fixture-url".to_string());
+        config.connection_string = Some("web-fixture-dsn".to_string());
+        config.connection_secrets.insert("token".into(), "web-fixture-plugin".into());
         state.app.storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
         state
             .app
@@ -1684,8 +1708,22 @@ mod tests {
         .unwrap_or_else(|error| panic!("{}", error.message))
         .0;
         assert!(changed.read_only);
-        assert_eq!(changed.password, "web-fixture-secret");
-        assert_eq!(state.app.configs.read().await.get(&config.id), Some(&changed));
+        let saved = state.app.storage.load_connections().await.unwrap().remove(0);
+        assert_eq!(saved.password, "web-fixture-secret");
+        assert_eq!(saved.url_params, config.url_params);
+        assert_eq!(saved.connection_string, config.connection_string);
+        assert_eq!(saved.connection_secrets, config.connection_secrets);
+        assert_eq!(state.app.configs.read().await.get(&config.id), Some(&saved));
+        assert_eq!(changed, state.connection_response(saved));
+        if password_viewer_enabled {
+            assert_eq!(changed.password, "web-fixture-secret");
+        } else {
+            let response = serde_json::to_string(&changed).unwrap();
+            for secret in ["web-fixture-secret", "web-fixture-url", "web-fixture-dsn", "web-fixture-plugin"] {
+                assert!(!response.contains(secret), "response must keep {secret} on the server");
+            }
+            assert!(crate::credentials::contains_reference(&serde_json::to_value(&changed).unwrap()));
+        }
         state
             .app
             .storage

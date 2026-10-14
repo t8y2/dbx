@@ -15,6 +15,9 @@ pub struct GenerateSchemaSyncSqlRequest {
     pub source_dialect: Option<String>,
     pub field_mappings: Option<Vec<dbx_core::schema_diff::FieldMapping>>,
     pub enable_rollback: Option<bool>,
+    /// Wrap the generated forward and rollback scripts in MySQL's
+    /// FOREIGN_KEY_CHECKS toggle. Ignored for targets that are not MySQL.
+    pub ignore_foreign_key_checks: Option<bool>,
 }
 
 pub async fn generate_schema_sync_plan(
@@ -32,6 +35,7 @@ pub async fn generate_schema_sync_plan(
         req.source_dialect.as_deref().and_then(dbx_core::sql_dialect::descriptor::DialectKind::from_label),
         req.field_mappings.as_deref().unwrap_or(&[]),
         req.enable_rollback.unwrap_or(false),
+        req.ignore_foreign_key_checks.unwrap_or(false),
     ))
 }
 

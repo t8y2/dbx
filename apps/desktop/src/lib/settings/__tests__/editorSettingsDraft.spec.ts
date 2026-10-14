@@ -56,6 +56,12 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("ddlOpenMode");
   });
 
+  it("includes caretBrowsingEnabled (#11827)", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("caretBrowsingEnabled");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ caretBrowsingEnabled: true } as Partial<EditorSettings>));
+    expect(draft.caretBrowsingEnabled).toBe(true);
+  });
+
   it("includes continueOnErrorOnBatch", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("continueOnErrorOnBatch");
   });

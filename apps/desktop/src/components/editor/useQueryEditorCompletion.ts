@@ -11,6 +11,7 @@ import {
   getSqlCompletionContext,
   getSqlCompletionResultValidFor,
   isSqlLikeCompletionStatement,
+  normalizeIdentifierPart,
   prepareSqlCompletionReplacement,
   recordCompletionSelection,
   shouldAutoOpenSqlCompletion,
@@ -18,6 +19,7 @@ import {
   extractCteDefinitions,
 } from "@/lib/sql/sqlCompletion";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { excludedCompletionLabelSet, filterExcludedCompletions } from "@/lib/editor/excludedCompletions";
 import { driverProfileHasCompletionCandidates } from "@/lib/database/driverProfileExtensions";
 import { buildElasticsearchCompletionItemsFromContext, elasticsearchCompletionNeedsFields, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionField } from "@/lib/elasticsearch/elasticsearchCompletion";
 import {
@@ -276,7 +278,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     return true;
   }
 
-  function buildCompletionResult(items: Array<QueryCompletionItem | BatchColumnSelectionActionItem>, from: number, validFor?: RegExp, prefix?: string) {
+  function buildCompletionResult(sourceItems: Array<QueryCompletionItem | BatchColumnSelectionActionItem>, from: number, validFor?: RegExp, prefix?: string) {
+    const items = filterExcludedCompletions(sourceItems, excludedCompletionLabelSet(settingsStore.editorSettings.excludedCompletionItems));
     if (items.length === 0) return null;
     const bypassFilter = !!prefix && shouldBypassCompletionFilter(prefix, items);
     const resultItems = bypassFilter && prefix ? completionItemsForBypassedFilter(prefix, items) : items;
@@ -844,6 +847,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           currentSchema: props.schema,
           keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
           functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
+          identifierCase: settingsStore.editorSettings.sqlFormatter.identifierCase,
           autoAliasTables: settingsStore.editorSettings.autoAliasTables,
           tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
@@ -908,6 +912,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           currentSchema: props.schema,
           keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
           functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
+          identifierCase: settingsStore.editorSettings.sqlFormatter.identifierCase,
           autoAliasTables: settingsStore.editorSettings.autoAliasTables,
           tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
@@ -929,7 +934,12 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       if (localResult) {
         scheduleCompletionMetadataRefresh(completionContext, fullDoc, position, completionScope);
         const hasLocalColumnResult = localResult.options.some((option) => option.type === "column");
-        if ((!explicit || typedActivation) && (!shouldResolveColumnCompletion || hasLocalColumnResult)) return localResult;
+        // A local snippet hit may skip the async column fetch, but not for on-demand-only
+        // column metadata (trino/presto): their fetch is never re-triggered from the
+        // metadata cache, so short-circuiting here would suppress column suggestions
+        // for as long as the typed prefix keeps matching the snippet prefix.
+        const hasLocalSnippetResult = !usesOnDemandOnlyCompletionColumns() && localResult.options.some((option) => option.type === "snippet");
+        if ((!explicit || typedActivation) && (!shouldResolveColumnCompletion || hasLocalColumnResult || hasLocalSnippetResult)) return localResult;
       }
       if ((!explicit || typedActivation) && !shouldResolveAsyncCompletion) {
         scheduleCompletionMetadataRefresh(completionContext, fullDoc, position, completionScope);
@@ -1105,11 +1115,13 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
 
     const columnsByTable = new Map<string, SqlCompletionColumn[]>();
     if (completionContext.insertTable) {
-      const insertDatabase = (supportsDatabaseSchemaQualifierCompletion() ? completionContext.insertDatabase : undefined) ?? scope.database;
-      const insertSchema = completionContext.insertSchema ?? scope.schema;
-      const insertColumns = usesOracleSessionCompletionColumns(insertSchema) ? [] : connectionStore.lookupLocalCompletionColumns(props.connectionId, insertDatabase, completionContext.insertTable, insertSchema, props.catalog);
+      const insertTable = insertCompletionTable(completionContext);
+      const target = insertCompletionMetadataTarget(insertTable, scope);
+      const insertKey = completionCacheKey(insertTable, scope);
+      const insertColumns =
+        cachedColumnsByTable.get(insertKey) ?? (usesOracleSessionCompletionColumns(target.schema) ? [] : connectionStore.lookupLocalCompletionColumns(props.connectionId, target.database, insertTable.name, target.schema, target.catalog, completionColumnRequestContext(insertTable)));
       if (insertColumns.length > 0) {
-        columnsByTable.set(completionCacheKey({ name: completionContext.insertTable, database: completionContext.insertDatabase, schema: insertSchema }, scope), insertColumns);
+        columnsByTable.set(insertKey, insertColumns);
       }
     }
 
@@ -1140,7 +1152,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       }
     }
 
-    const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc);
+    const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc, props.databaseType);
     for (const refTable of completionContext.referencedTables) {
       if (refTable.columns?.length) {
         columnsByTable.set(
@@ -1213,6 +1225,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       currentSchema: scope.schema,
       keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
+      identifierCase: settingsStore.editorSettings.sqlFormatter.identifierCase,
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
@@ -1266,8 +1279,10 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     }
     if (!localOnlyMetadata && shouldLoadCompletionObjects(completionContext)) {
       const completionObjectScope = routineCompletionScopeForContext(completionContext, scope);
+      const refreshEpoch = completionEpoch;
       void listCompletionObjectsForContext(completionContext, scope)
         .then((objects) => {
+          if (refreshEpoch !== completionEpoch) return;
           const cachedObjects = completionObjectsForScope(completionObjectScope);
           const merged = mergeCompletionObjects(cachedObjects, objects);
           const changed = completionObjectsDiffer(cachedObjects, merged);
@@ -1287,12 +1302,11 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       }
     }
     if (!onDemandOnlyColumns && completionContext.insertTable) {
-      const insertTable = completionContext.insertTable;
-      const insertDatabase = (supportsDatabaseSchemaQualifierCompletion() ? completionContext.insertDatabase : undefined) ?? database;
-      void refreshCompletionColumnsForEditor(connectionId, insertDatabase, insertTable, completionContext.insertSchema ?? scope.schema)
+      const insertTable = insertCompletionTable(completionContext);
+      const target = insertCompletionMetadataTarget(insertTable, scope);
+      void refreshCompletionColumnsForEditor(connectionId, target.database, insertTable.name, target.schema, target.catalog, insertTable)
         .then((columns) => {
-          const insertSchema = completionContext.insertSchema ?? scope.schema;
-          cachedColumnsByTable.set(completionCacheKey({ name: insertTable, database: completionContext.insertDatabase, schema: insertSchema }, scope), columns);
+          cachedColumnsByTable.set(completionCacheKey(insertTable, scope), columns);
         })
         .catch(() => {});
     }
@@ -1349,7 +1363,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
    * extra package-style queries entirely.
    */
   function usesPackageAwareRoutineCompletion(): boolean {
-    if (props.databaseType === "oracle") return true;
+    if (props.databaseType === "oracle" || props.databaseType === "oceanbase-oracle") return true;
     if (props.databaseType !== "opengauss") return false;
     const mode = connectionStore.databaseCompatibilityMode(props.connectionId, props.database)?.trim().toUpperCase();
     return mode === undefined || mode === "A";
@@ -1370,12 +1384,18 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
   }
 
   function routineCompletionTargetForContext(completionContext: ReturnType<typeof getSqlCompletionContext>, scope: CompletionMetadataScope) {
-    return resolveSqlCompletionRoutineLookupTarget({
+    const target = resolveSqlCompletionRoutineLookupTarget({
       currentDatabase: scope.database,
       currentSchema: scope.schema,
       supportsDatabaseSchemaQualifier: supportsDatabaseSchemaQualifierCompletion(),
       completionContext,
     });
+    if (props.databaseType === "oceanbase-oracle" && completionContext.qualifier) {
+      const parts = completionContext.qualifierParts ?? completionContext.qualifier.split(".");
+      const index = parts.length - 1;
+      target.schema = completionContext.qualifierQuoted?.[index] ? parts[index]!.replaceAll('""', '"') : parts[index]!.toUpperCase();
+    }
+    return target;
   }
 
   function routineCompletionScopeForContext(completionContext: ReturnType<typeof getSqlCompletionContext>, scope: CompletionMetadataScope): CompletionMetadataScope {
@@ -1386,7 +1406,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
 
   function lookupLocalCompletionObjectsForContext(completionContext: ReturnType<typeof getSqlCompletionContext>, scope: CompletionMetadataScope): SqlCompletionObject[] {
     if (!props.connectionId || props.database == null) return [];
-    if (usesPackageAwareRoutineCompletion()) {
+    if (usesPackageAwareRoutineCompletion() || (props.databaseType === "oceanbase-oracle" && !completionContext.qualifier)) {
       return connectionStore.lookupLocalCompletionObjects(props.connectionId, scope.database, completionContext.prefix, MAX_COMPLETION_TABLES);
     }
     const target = routineCompletionTargetForContext(completionContext, scope);
@@ -1396,6 +1416,40 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
   async function listCompletionObjectsForContext(completionContext: ReturnType<typeof getSqlCompletionContext>, scope: CompletionMetadataScope): Promise<SqlCompletionObject[]> {
     if (!props.connectionId || props.database == null) return [];
     const objectKinds = completionObjectKindsForContext(completionContext);
+    if (props.databaseType === "oceanbase-oracle") {
+      const parts = (completionContext.qualifierParts ?? completionContext.qualifier?.split(".") ?? []).map((part, index) => (completionContext.qualifierQuoted?.[index] ? part.replaceAll('""', '"') : part.toUpperCase()));
+      const list = (schema: string | undefined, parentName?: string, globalSearch = false) =>
+        connectionStore.listCompletionObjects(props.connectionId!, scope.database, completionContext.prefix, MAX_COMPLETION_TABLES, schema, parentName, globalSearch, scope.schema, objectKinds, !!completionContext.prefixQuoted);
+      if (parts.length === 0) return list(scope.schema, undefined, true);
+      if (parts.length === 2) {
+        let packageMembers: SqlCompletionObject[] = [];
+        try {
+          packageMembers = await list(parts[0], parts[1]);
+        } catch (error) {
+          if (/Package is not visible:/i.test(String(error)) && objectKinds.includes("sequence")) {
+            const schemaObjects = await list(parts[0]);
+            return schemaObjects.filter((obj) => obj.type === "sequence");
+          }
+          throw error;
+        }
+        if (packageMembers.length > 0) return packageMembers;
+        if (objectKinds.includes("sequence")) {
+          const schemaObjects = await list(parts[0]);
+          return schemaObjects.filter((obj) => obj.type === "sequence");
+        }
+        return [];
+      }
+      if (parts.length > 2) return [];
+      // One qualifier can name a schema or a package in the current schema.
+      const groups = await Promise.allSettled([list(parts[0]), list(scope.schema, parts[0]), ...(objectKinds.includes("sequence") && scope.schema && normalizeIdentifierPart(scope.schema) !== normalizeIdentifierPart(parts[0]) ? [list(scope.schema)] : [])]);
+      if (groups.every((g) => g.status === "rejected")) throw groups[0].status === "rejected" ? groups[0].reason : undefined;
+      let objects: SqlCompletionObject[] = [];
+      for (const group of groups) {
+        if (group.status === "fulfilled") objects = mergeCompletionObjects(objects, group.value);
+        else if (!/Package is not visible:/.test(String(group.reason)) && !/^(?:Error: )?(?:OceanBase agent does not support filtered routine completion(?:; update the agent)?|(?:unknown method|method not found)(?::?\s+completion_assistant_search)?)$/i.test(String(group.reason))) throw group.reason;
+      }
+      return objects;
+    }
     if (!usesPackageAwareRoutineCompletion()) {
       const target = routineCompletionTargetForContext(completionContext, scope);
       return connectionStore.listCompletionObjects(props.connectionId, target.database, target.mask, MAX_COMPLETION_TABLES, target.schema, undefined, false, scope.schema, objectKinds);
@@ -1408,8 +1462,23 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
 
   function completionObjectKindsForContext(completionContext: ReturnType<typeof getSqlCompletionContext>): CompletionAssistantObjectKind[] {
     if (completionContext.contextKind === "exec") return ["procedure"];
+    if (isOracleCompletionDatabase(props.databaseType)) {
+      if (completionContext.suggestColumns && completionContext.referencedTables.length > 0 && !completionContext.qualifier) {
+        return ["function", "sequence"];
+      }
+      return ["routine", "sequence"];
+    }
     if (completionContext.suggestColumns && completionContext.referencedTables.length > 0 && !completionContext.qualifier) return ["function"];
     return ["routine"];
+  }
+
+  function insertCompletionTable(context: ReturnType<typeof getSqlCompletionContext>) {
+    return { name: context.insertTable!, database: context.insertDatabase, schema: context.insertSchema, nameQuoted: context.insertTableQuoted, schemaQuoted: context.insertSchemaQuoted };
+  }
+
+  function insertCompletionMetadataTarget(table: ReturnType<typeof insertCompletionTable>, scope: CompletionMetadataScope) {
+    if (props.databaseType === "oceanbase-oracle") return completionMetadataTarget(table, scope)!;
+    return { database: (supportsDatabaseSchemaQualifierCompletion() ? table.database : undefined) ?? scope.database, schema: table.schema ?? scope.schema, catalog: props.catalog };
   }
 
   async function performAsyncCompletionWithResult(epoch: number, completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope) {
@@ -1419,12 +1488,12 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     let insertColumnsByTable = new Map<string, SqlCompletionColumn[]>();
     if (completionContext.insertTable) {
       try {
-        const insertDatabase = (supportsDatabaseSchemaQualifierCompletion() ? completionContext.insertDatabase : undefined) ?? scope.database;
-        const insertCols = await listCompletionColumnsForEditor(props.connectionId!, insertDatabase, completionContext.insertTable, completionContext.insertSchema ?? scope.schema);
+        const insertTable = insertCompletionTable(completionContext);
+        const target = insertCompletionMetadataTarget(insertTable, scope);
+        const insertCols = await listCompletionColumnsForEditor(props.connectionId!, target.database, insertTable.name, target.schema, target.catalog, insertTable);
         if (epoch !== completionEpoch) return null;
         if (insertCols.length > 0) {
-          const insertSchema = completionContext.insertSchema ?? scope.schema;
-          const insertKey = completionCacheKey({ name: completionContext.insertTable, database: completionContext.insertDatabase, schema: insertSchema }, scope);
+          const insertKey = completionCacheKey(insertTable, scope);
           insertColumnsByTable.set(insertKey, insertCols);
         }
       } catch {
@@ -1475,6 +1544,21 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     const scopedCachedCompletionObjects = completionObjectsForScope(completionObjectScope);
     let completionObjects = shouldLoadObjects ? (localOnlyMetadata ? lookupLocalCompletionObjectsForContext(completionContext, scope) : await listCompletionObjectsForContext(completionContext, scope)) : scopedCachedCompletionObjects;
     if (epoch !== completionEpoch) return null;
+
+    // With no selected schema, only the targeted server lookup can resolve a
+    // one-part package qualifier. The shared local index spans other owners.
+    let resolvedRoutineSchema = scope.schema;
+    const qualifierParts = completionContext.qualifierParts ?? completionContext.qualifier?.split(".") ?? [];
+    if (props.databaseType === "oceanbase-oracle" && !resolvedRoutineSchema && shouldLoadObjects && !localOnlyMetadata && qualifierParts.length === 1) {
+      const packageName = completionContext.qualifierQuoted?.[0] ? qualifierParts[0]!.replaceAll('""', '"') : qualifierParts[0]!.toUpperCase();
+      const owners = new Set(
+        completionObjects
+          .filter((object) => object.parentName === packageName)
+          .map((object) => object.parentSchema ?? object.schema)
+          .filter(Boolean),
+      );
+      if (owners.size === 1) resolvedRoutineSchema = owners.values().next().value;
+    }
 
     if (!props.catalog && !isOracleCompletionDatabase(props.databaseType) && !localOnlyMetadata && completionContext.qualifier && completionObjects.length === 0) {
       const target = routineCompletionTargetForContext(completionContext, scope);
@@ -1562,7 +1646,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     }
 
     // Populate CTE columns from parsed definitions
-    const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc);
+    const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc, props.databaseType);
     for (const refTable of refs) {
       if (refTable.columns) continue;
       const cteDef = cteDefs.find((c) => c.name.toLowerCase() === refTable.name.toLowerCase());
@@ -1675,9 +1759,10 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       dialect: props.dialect,
       databaseType: snippetDatabaseType.value,
       driverProfile: sqlDriverProfile.value,
-      currentSchema: scope.schema,
+      currentSchema: resolvedRoutineSchema,
       keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
+      identifierCase: settingsStore.editorSettings.sqlFormatter.identifierCase,
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,

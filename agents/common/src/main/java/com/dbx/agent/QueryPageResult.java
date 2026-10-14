@@ -19,6 +19,15 @@ public final class QueryPageResult {
     private boolean truncated;
     private String session_id;
     private boolean has_more;
+    private List<java.util.Map<String, Object>> messages;
+
+    public List<java.util.Map<String, Object>> getMessages() {
+        return messages == null ? Collections.emptyList() : messages;
+    }
+
+    public void setMessages(List<java.util.Map<String, Object>> messages) {
+        this.messages = messages;
+    }
 
     public QueryPageResult() {
         this(Collections.emptyList(), Collections.emptyList(), 0L, 0L, false, null, false);

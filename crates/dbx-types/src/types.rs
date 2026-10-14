@@ -1,5 +1,34 @@
 use serde::{Deserialize, Serialize};
 
+/// A data-grid statement whose BLOB values travel outside the executable SQL.
+/// The preview must match the caller's reviewed SQL before any statement runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobBoundStatement {
+    pub preview_sql: String,
+    pub sql: String,
+    pub blob_parameters: Vec<String>,
+}
+
+pub fn validate_blob_bound_statements(previews: &[String], bound: &[BlobBoundStatement]) -> Result<(), String> {
+    if previews.len() != bound.len()
+        || previews.iter().zip(bound).any(|(preview, statement)| preview != &statement.preview_sql)
+    {
+        return Err("The reviewed SQL changed; regenerate the BLOB save preview before saving.".into());
+    }
+    if bound.iter().any(|statement| {
+        statement.sql.trim().is_empty()
+            || statement.blob_parameters.is_empty() && statement.sql != statement.preview_sql
+            || statement
+                .blob_parameters
+                .iter()
+                .any(|hex| hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    }) {
+        return Err("Invalid BLOB statement parameters.".into());
+    }
+    Ok(())
+}
+
 pub use crate::mysql_event::MysqlEventInfo;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -291,6 +320,10 @@ pub struct ColumnInfo {
     pub data_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_object_type: Option<String>,
     pub is_nullable: bool,
     pub column_default: Option<String>,
     pub is_primary_key: bool,
@@ -423,6 +456,8 @@ pub struct CompletionAssistantCandidate {
     pub comment: Option<String>,
     pub data_type: Option<String>,
     pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -541,6 +576,9 @@ pub struct LargeValueCell {
     pub row_index: usize,
     pub column_index: usize,
     pub original_bytes: usize,
+    /// Opaque original-result locator. Absent for legacy preview/re-query drivers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -828,13 +866,13 @@ pub struct ConstraintInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_delete: Option<String>,
     #[serde(default)]
-    pub deferrable: bool,
+    pub deferrable: Option<bool>,
     #[serde(default)]
-    pub initially_deferred: bool,
+    pub initially_deferred: Option<bool>,
     #[serde(default)]
-    pub enabled: bool,
+    pub enabled: Option<bool>,
     #[serde(default)]
-    pub valid: bool,
+    pub valid: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1109,6 +1147,25 @@ pub struct CustomTypeDetails {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blob_bindings_refuse_edited_previews_and_invalid_later_parameters() {
+        let previews = vec!["first reviewed save".to_string(), "second reviewed save".to_string()];
+        let mut bound = previews
+            .iter()
+            .map(|preview| super::BlobBoundStatement {
+                preview_sql: preview.clone(),
+                sql: "BEGIN UPDATE T SET B=?; END;".into(),
+                blob_parameters: vec!["00ff".into()],
+            })
+            .collect::<Vec<_>>();
+        assert!(super::validate_blob_bound_statements(&previews, &bound).is_ok());
+        bound[1].blob_parameters[0] = "xyz".into();
+        assert!(super::validate_blob_bound_statements(&previews, &bound).is_err());
+        bound[1].blob_parameters[0] = "00ff".into();
+        bound[1].preview_sql = "user edited SQL".into();
+        assert!(super::validate_blob_bound_statements(&previews, &bound).is_err());
+        assert!(super::validate_blob_bound_statements(&previews, &bound[..1]).is_err());
+    }
     use super::{
         is_opaque_aggregate_state_type, CompletionAssistantCandidate, CompletionAssistantCandidateKind, ObjectInfo,
         ObjectSource, ObjectSourceKind, QueryMessage, RoutineParameterMode, SpatialColumn, SpatialColumnBuilder,
@@ -1506,6 +1563,28 @@ mod tests {
         assert!(serialized.get("elasticsearch_raw_body").is_none());
         assert!(serialized.get("messages").is_none());
         assert_eq!(serialized["session_id"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn constraint_states_preserve_unknown_and_known_values_on_the_agent_ui_wire() {
+        for states in [
+            serde_json::json!({}),
+            serde_json::json!({ "enabled": null, "valid": null, "deferrable": null, "initially_deferred": null }),
+            serde_json::json!({ "enabled": true, "valid": false, "deferrable": false, "initially_deferred": true }),
+        ] {
+            let mut payload = serde_json::json!({
+                "name": "O01_UK", "constraint_type": "UNIQUE",
+                "definition": "UNIQUE (\"B\", \"A\")", "columns": ["B", "A"]
+            });
+            payload.as_object_mut().unwrap().extend(states.as_object().unwrap().clone());
+            let constraint: super::ConstraintInfo = serde_json::from_value(payload).unwrap();
+            let wire = serde_json::to_value(constraint).unwrap();
+            for field in ["enabled", "valid", "deferrable", "initially_deferred"] {
+                assert_eq!(wire[field], states[field], "{field}");
+            }
+            assert_eq!(wire["columns"], serde_json::json!(["B", "A"]));
+            assert_eq!(wire["definition"], "UNIQUE (\"B\", \"A\")");
+        }
     }
 
     #[test]

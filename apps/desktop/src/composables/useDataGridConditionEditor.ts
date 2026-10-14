@@ -310,6 +310,44 @@ function whereSuggestionRole(target: DataGridConditionCompletionTarget, identifi
   return "connector";
 }
 
+function isBetweenRangeSeparator(prefix: string, separatorOffset: number): boolean {
+  // Ignore quoted values/identifiers and comments; BETWEEN state belongs to its parenthesis scope.
+  const tokens = prefix.slice(0, separatorOffset).match(/--[^\r\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:''|\\.|[^'\\])*'|"(?:""|\\.|[^"\\])*"|`(?:``|[^`])*`|\[(?:\]\]|[^\]])*\]|[A-Za-z_][\w$]*|[()]/g) ?? [];
+  const pendingBetween = [false];
+  const caseDepth = [0];
+  for (const token of tokens) {
+    if (token === "(") {
+      pendingBetween.push(false);
+      caseDepth.push(0);
+    } else if (token === ")") {
+      if (pendingBetween.length > 1) {
+        pendingBetween.pop();
+        caseDepth.pop();
+      }
+    } else if (token.toUpperCase() === "CASE") {
+      caseDepth[caseDepth.length - 1] += 1;
+    } else if (token.toUpperCase() === "END") {
+      caseDepth[caseDepth.length - 1] = Math.max(0, caseDepth[caseDepth.length - 1] - 1);
+    } else if (token.toUpperCase() === "BETWEEN") {
+      pendingBetween[pendingBetween.length - 1] = true;
+    } else if (caseDepth[caseDepth.length - 1] === 0 && (token.toUpperCase() === "AND" || token.toUpperCase() === "OR")) {
+      pendingBetween[pendingBetween.length - 1] = false;
+    }
+  }
+  return pendingBetween[pendingBetween.length - 1];
+}
+
+function shouldPreselectWhereColumn(target: DataGridConditionCompletionTarget): boolean {
+  if (!target.token) return false;
+  const prefix = target.value.slice(0, target.from).trimEnd();
+  // Only preselect at the start of a predicate, not inside arithmetic or function arguments.
+  if (/^(?:NOT\b\s*|\(\s*)*$/i.test(prefix)) return true;
+  const connector = /(?:^|\s)(AND|OR)\b\s*(?:NOT\b\s*|\(\s*)*$/i.exec(prefix);
+  if (!connector) return false;
+  const separatorOffset = connector.index + connector[0].indexOf(connector[1]);
+  return connector[1].toUpperCase() !== "AND" || !isBetweenRangeSeparator(prefix, separatorOffset);
+}
+
 /**
  * ORDER BY 的角色判定：开头或逗号之后是排序列位置（提示列名），
  * 已经写出排序列之后是排序方向位置（提示 ASC/DESC）。
@@ -440,9 +478,9 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
       const providerValues = values ? [...new Set(values)] : undefined;
       suggestions.value = providerValues ? (providerValues.some((value) => value.toLowerCase() === target.token.toLowerCase()) ? [] : providerValues.slice(0, limit).map((suggestion) => ({ value: suggestion, kind: "column" }))) : defaultSuggestions(target).slice(0, limit);
       replacementRange.value = { from: target.from, to: target.to };
-      // 不再默认高亮第一条建议：否则用户按回车«应用筛选»时会先把高亮项写进输入框（issue #10595）。
-      // 接受补全需要显式操作（↓/↑ 后回车、Tab 或点击）。
-      highlightedIndex.value = -1;
+      // WHERE 条件开头默认选中首个列名，支持直接回车补全（issue #7155）。
+      // 算术表达式、函数参数和关键字建议不默认选中，避免回车应用时改写条件（issue #10595）。
+      highlightedIndex.value = options.kind === "where" && (role === "field" || role === "after_not") && shouldPreselectWhereColumn(target) && suggestions.value[0]?.kind === "column" ? 0 : -1;
     } catch (error) {
       if (!controller.signal.aborted && requestId === suggestionRequestId) {
         suggestions.value = [];

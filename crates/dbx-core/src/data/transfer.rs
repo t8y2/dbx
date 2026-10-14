@@ -24,7 +24,10 @@ mod iris_tests;
 
 mod db2;
 mod ddl_plan;
+mod overwrite_clear;
 mod structure_plan;
+
+pub use overwrite_clear::clear_foreign_key_linked_overwrite_targets;
 
 use crate::connection::{config_for_pool_key, AppState, PoolKind};
 use crate::db;
@@ -38,6 +41,10 @@ use crate::query::{
     StreamProgressClock, AGENT_PROTOCOL_MAX_ROWS,
 };
 use crate::sql::{split_sql_statements, split_sql_statements_for_database};
+use crate::sql_dialect::ddl_profile::{profile_for, AutoIncSyntax};
+use crate::sql_dialect::type_rewrite::{
+    apply_auto_inc_to_column_def, column_is_auto_increment, type_looks_integer, AutoIncColumnBuild,
+};
 use crate::sql_dialect::{
     build_iris_table_select_sql, normalize_len_params, qualified_transfer_table, quote_transfer_identifier,
     transfer_column_identifier,
@@ -110,6 +117,11 @@ fn ensure_transfer_columns_supported(
 static INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r#"(?i)^\s*(?:CONSTRAINT\s+(?:`[^`]*`|"[^"]*"|\S+)\s+)?FOREIGN\s+KEY\s*\("#)
         .expect("valid inline foreign key constraint line regex")
+});
+
+static ORACLE_TRIGGER_STATEMENT_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?|ALTER\s+)TRIGGER\s")
+        .expect("valid Oracle trigger statement regex")
 });
 
 // Upper bound for a single generated INSERT/upsert statement. Raised from
@@ -212,28 +224,15 @@ pub struct TransferObjectSelection {
     pub names: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransferObjectFamily {
-    Mysql,
-    Postgres,
-    Oracle,
-    SqlServer,
-}
+pub use dbx_types::database_manifest::DatabaseTransferObjectFamily as TransferObjectFamily;
+pub use dbx_types::database_manifest::DatabaseTransferSupportLevel as TransferSupportLevel;
 
 pub fn transfer_object_family(db_type: &DatabaseType) -> Option<TransferObjectFamily> {
-    match db_type {
-        DatabaseType::Mysql | DatabaseType::Gbase => Some(TransferObjectFamily::Mysql),
-        DatabaseType::Postgres
-        | DatabaseType::Kingbase
-        | DatabaseType::Gaussdb
-        | DatabaseType::Kwdb
-        | DatabaseType::OpenGauss => Some(TransferObjectFamily::Postgres),
-        DatabaseType::Oracle | DatabaseType::Dameng | DatabaseType::OceanbaseOracle => {
-            Some(TransferObjectFamily::Oracle)
-        }
-        DatabaseType::SqlServer => Some(TransferObjectFamily::SqlServer),
-        _ => None,
-    }
+    dbx_types::database_manifest::transfer_object_family(db_type)
+}
+
+pub fn transfer_support_level(db_type: &DatabaseType) -> Option<TransferSupportLevel> {
+    dbx_types::database_manifest::transfer_support_level(db_type)
 }
 
 pub fn is_same_transfer_family(a: &DatabaseType, b: &DatabaseType) -> bool {
@@ -1025,6 +1024,41 @@ pub fn validate_transfer_request(request: &TransferRequest) -> Result<(), String
     Ok(())
 }
 
+/// Validate the deliberately narrow first-phase Xugu transfer contract. The
+/// generic transfer engine remains available to every other database pair;
+/// Xugu is only admitted when both endpoints use its native driver path.
+pub fn validate_transfer_database_pair(
+    request: &TransferRequest,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> Result<(), String> {
+    if transfer_support_level(source_db_type).is_none() {
+        return Err(format!("{} 暂未声明数据传输兼容级别", source_db_type.as_str()));
+    }
+    if transfer_support_level(target_db_type).is_none() {
+        return Err(format!("{} 暂未声明数据传输兼容级别", target_db_type.as_str()));
+    }
+    if !matches!(source_db_type, DatabaseType::Xugu) && !matches!(target_db_type, DatabaseType::Xugu) {
+        return Ok(());
+    }
+    if !matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu)) {
+        return Err("虚谷数据传输当前仅支持虚谷到虚谷".to_string());
+    }
+    if request.objects.as_ref().is_some_and(|objects| !objects.is_empty()) {
+        return Err("虚谷数据传输当前仅支持表对象".to_string());
+    }
+    if request.mode == TransferMode::Upsert || request.drop_target_before_create {
+        return Err("虚谷数据传输当前仅支持追加或覆盖，暂不支持更新插入或重建".to_string());
+    }
+    if request.create_table
+        && !matches!(request.content, TransferContent::DataOnly)
+        && request.target_table_name_case != TransferTableNameCase::Preserve
+    {
+        return Err("虚谷结构传输当前要求保留源表名大小写，以避免外键引用错位".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedTransferTargetTable {
     name: String,
@@ -1670,7 +1704,11 @@ pub(crate) fn normalize_integer_literal(
     Some(integer.to_string())
 }
 
-fn is_postgres_numeric_family(data_type: &str) -> bool {
+/// Target types whose stored value is a plain number, so an en-US thousands
+/// separator in the source text is formatting rather than data. Covers the
+/// PostgreSQL/Oracle spellings and the MySQL-family ones (`int`, `tinyint`,
+/// `mediumint`); a type not listed here keeps its literal text.
+fn is_numeric_target_type(data_type: &str) -> bool {
     let normalized = data_type.trim().to_ascii_lowercase();
     let base = normalized.split(['(', ' ']).next().unwrap_or("");
     matches!(
@@ -1679,8 +1717,11 @@ fn is_postgres_numeric_family(data_type: &str) -> bool {
             | "int2"
             | "integer"
             | "int4"
+            | "int"
             | "bigint"
             | "int8"
+            | "tinyint"
+            | "mediumint"
             | "numeric"
             | "decimal"
             | "real"
@@ -1697,12 +1738,13 @@ fn is_postgres_numeric_family(data_type: &str) -> bool {
 /// grouping ("1,23,4", "1,,234") or any non-numeric character returns None so the original
 /// text reaches the database and keeps its existing validation error instead of being
 /// silently coerced. Values without a comma are left untouched.
-pub(crate) fn normalize_thousands_numeric_literal(
-    value: &str,
-    db_type: &DatabaseType,
-    column_type: Option<&str>,
-) -> Option<String> {
-    if !is_postgres_transfer_dialect(db_type) || !column_type.is_some_and(is_postgres_numeric_family) {
+///
+/// Keyed on the target column type rather than the dialect: `123,456` is a formatted
+/// number wherever the column stores a number, and a text column keeps the characters
+/// as written. This started PostgreSQL-only, which left MySQL/TiDB imports inserting
+/// `'123,456'` into a numeric column and failing (#11993).
+pub(crate) fn normalize_thousands_numeric_literal(value: &str, column_type: Option<&str>) -> Option<String> {
+    if !column_type.is_some_and(is_numeric_target_type) {
         return None;
     }
     let trimmed = value.trim();
@@ -1834,6 +1876,19 @@ fn is_sqlserver_non_insertable_transfer_column(
         && is_sqlserver_rowversion_type(&column.data_type)
 }
 
+fn is_xugu_rowversion_type(data_type: &str) -> bool {
+    normalize_xugu_type_name(data_type) == "ROWVERSION"
+}
+
+fn is_xugu_non_insertable_transfer_column(
+    column: &db::ColumnInfo,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> bool {
+    matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu))
+        && is_xugu_rowversion_type(&column.data_type)
+}
+
 fn is_mysql_non_insertable_transfer_column(column: &db::ColumnInfo, source_db_type: &DatabaseType) -> bool {
     *source_db_type == DatabaseType::Mysql && is_mysql_generated_column_extra(column.extra.as_deref())
 }
@@ -1847,6 +1902,7 @@ fn writable_transfer_columns(
         .iter()
         .filter(|column| {
             !is_sqlserver_non_insertable_transfer_column(column, source_db_type, target_db_type)
+                && !is_xugu_non_insertable_transfer_column(column, source_db_type, target_db_type)
                 && !is_mysql_non_insertable_transfer_column(column, source_db_type)
         })
         .cloned()
@@ -1861,6 +1917,16 @@ fn mysql_generated_only_transfer(
     matches!((source_db_type, target_db_type), (DatabaseType::Mysql, DatabaseType::Mysql))
         && !columns.is_empty()
         && columns.iter().all(|column| is_mysql_generated_column_extra(column.extra.as_deref()))
+}
+
+fn xugu_rowversion_only_transfer(
+    columns: &[db::ColumnInfo],
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> bool {
+    matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu))
+        && !columns.is_empty()
+        && columns.iter().all(|column| is_xugu_rowversion_type(&column.data_type))
 }
 
 fn transfer_column_names_match(
@@ -2785,6 +2851,193 @@ fn generate_postgres_sequence_sync_sql(columns: &[db::ColumnInfo], table: &str, 
         .collect()
 }
 
+/// `ALTER TABLE ... MODIFY <column> GENERATED BY DEFAULT AS IDENTITY (START WITH LIMIT VALUE)`
+/// statements for Oracle targets.
+///
+/// Oracle accepts explicit values in a `GENERATED BY DEFAULT AS IDENTITY` column but
+/// does not advance its sequence, so the first auto-generated insert after copying
+/// explicit ids can collide with a copied value. `START WITH LIMIT VALUE` makes Oracle
+/// lock the table and move the sequence past the maximum value in the column.
+///
+/// The filter mirrors the identity emission in
+/// `generate_create_table_ddl_with_column_quoting` (primary key, explicit
+/// auto-increment, integer-like mapped type), so the ALTER only targets a column the
+/// generated DDL created as an identity column.
+fn oracle_identity_reseed_statements(
+    columns: &[db::ColumnInfo],
+    table: &str,
+    schema: &str,
+    source_schema: &str,
+    source_db: &DatabaseType,
+    quote_target_column_names: bool,
+) -> Vec<String> {
+    let full_table = qualified_table(table, schema, &DatabaseType::Oracle, None);
+    columns
+        .iter()
+        .filter(|column| {
+            column.is_primary_key
+                && column_is_auto_increment(column)
+                && type_looks_integer(&postgres_column_type_sql(
+                    column,
+                    source_schema,
+                    schema,
+                    source_db,
+                    &DatabaseType::Oracle,
+                ))
+        })
+        .map(|column| {
+            let quoted_column =
+                transfer_column_identifier(&column.name, &DatabaseType::Oracle, quote_target_column_names);
+            format!(
+                "ALTER TABLE {full_table} MODIFY {quoted_column} GENERATED BY DEFAULT AS IDENTITY (START WITH LIMIT VALUE)"
+            )
+        })
+        .collect()
+}
+
+/// Explicit identity values do not advance Xugu's backing sequence. Resolve the
+/// sequence through SERIAL_ID rather than relying on its generated name, which
+/// belongs to SYSDBA even when the table lives in another schema.
+fn xugu_identity_sequences_sql(schema: &str, table: &str) -> String {
+    xugu_identity_sequences_query(schema, table, true)
+}
+
+/// Case-insensitive fallback used only after the exact catalog spelling misses.
+/// Extra columns identify the matched table so two differently cased objects
+/// are not both advanced.
+fn xugu_identity_sequences_sql_case_insensitive(schema: &str, table: &str) -> String {
+    xugu_identity_sequences_query(schema, table, false)
+}
+
+fn xugu_identity_sequences_query(schema: &str, table: &str, exact: bool) -> String {
+    let (schema_predicate, table_predicate) = if exact {
+        (
+            format!("s.SCHEMA_NAME={}", quote_string_literal(schema)),
+            format!("t.TABLE_NAME={}", quote_string_literal(table)),
+        )
+    } else {
+        (
+            format!("UPPER(s.SCHEMA_NAME)=UPPER({})", quote_string_literal(schema)),
+            format!("UPPER(t.TABLE_NAME)=UPPER({})", quote_string_literal(table)),
+        )
+    };
+    format!(
+        "SELECT c.COL_NAME, q.SEQ_NAME, ss.SCHEMA_NAME, q.STEP_VAL, s.SCHEMA_NAME, t.TABLE_NAME \
+         FROM ALL_COLUMNS c \
+         JOIN ALL_TABLES t ON c.DB_ID=t.DB_ID AND c.TABLE_ID=t.TABLE_ID \
+         JOIN ALL_SCHEMAS s ON t.DB_ID=s.DB_ID AND t.SCHEMA_ID=s.SCHEMA_ID \
+         JOIN ALL_SEQUENCES q ON c.DB_ID=q.DB_ID AND c.SERIAL_ID=q.SEQ_ID \
+         JOIN ALL_SCHEMAS ss ON q.DB_ID=ss.DB_ID AND q.SCHEMA_ID=ss.SCHEMA_ID \
+         WHERE s.DB_ID=CURRENT_DB_ID AND {schema_predicate} \
+         AND {table_predicate} AND c.IS_SERIAL=TRUE AND q.IS_SYS=TRUE"
+    )
+}
+
+/// Value passed to `ALTER SEQUENCE ... START WITH`.
+///
+/// `NEXTVAL` is the only reliable probe of an existing sequence: catalog
+/// `CURR_VAL` is a reserved cache boundary. That probe consumes one value, so
+/// when the sequence is already ahead of the imported rows the consumed value
+/// is put back. A new table, or a sequence that is still behind the imported
+/// maximum, restarts at `last + step`.
+fn xugu_identity_start_with(step: i64, last: i64, preexisting_probe: Option<i64>) -> Option<i64> {
+    if let Some(probe) = preexisting_probe {
+        if (step > 0 && probe > last) || (step < 0 && probe < last) {
+            return Some(probe);
+        }
+    }
+    last.checked_add(step)
+}
+
+async fn sync_xugu_identity_sequences(
+    state: &Arc<AppState>,
+    target_pool_key: &str,
+    table: &str,
+    schema: &str,
+    explicitly_written_columns: &[String],
+    target_table_preexisting: bool,
+) -> Result<(), String> {
+    let exact = execute_on_pool(state, target_pool_key, &xugu_identity_sequences_sql(schema, table))
+        .await
+        .map_err(|e| format!("Failed to inspect Xugu identity sequences for {schema}.{table}: {e}"))?;
+    let rows = if !exact.rows.is_empty() {
+        exact.rows
+    } else {
+        let folded =
+            execute_on_pool(state, target_pool_key, &xugu_identity_sequences_sql_case_insensitive(schema, table))
+                .await
+                .map_err(|e| format!("Failed to inspect Xugu identity sequences for {schema}.{table}: {e}"))?;
+        let mut matched_tables = std::collections::HashSet::new();
+        for row in &folded.rows {
+            if let (Some(matched_schema), Some(matched_table)) =
+                (row.get(4).and_then(json_scalar_to_string), row.get(5).and_then(json_scalar_to_string))
+            {
+                matched_tables.insert((matched_schema, matched_table));
+            }
+        }
+        if matched_tables.len() > 1 {
+            return Err(format!(
+                "虚谷标识列同步匹配到多个仅大小写不同的表 {schema}.{table}，请使用数据字典中的模式名和表名"
+            ));
+        }
+        folded.rows
+    };
+    for row in rows {
+        let (Some(column), Some(sequence), Some(sequence_schema), Some(step)) = (
+            row.first().and_then(json_scalar_to_string),
+            row.get(1).and_then(json_scalar_to_string),
+            row.get(2).and_then(json_scalar_to_string),
+            row.get(3).and_then(json_scalar_to_string).and_then(|value| value.parse::<i64>().ok()),
+        ) else {
+            return Err(format!("Incomplete Xugu identity metadata for {schema}.{table}"));
+        };
+        if !explicitly_written_columns.iter().any(|name| name.eq_ignore_ascii_case(&column)) {
+            continue;
+        }
+        if step == 0 {
+            return Err(format!("Invalid Xugu identity step for {schema}.{table}.{column}"));
+        }
+        let table_name = qualified_table(table, schema, &DatabaseType::Xugu, None);
+        let column_name = quote_identifier(&column, &DatabaseType::Xugu);
+        let extremum = if step > 0 { "MAX" } else { "MIN" };
+        let value_sql = format!("SELECT {extremum}({column_name}) FROM {table_name}");
+        let value = execute_on_pool(state, target_pool_key, &value_sql)
+            .await
+            .map_err(|e| format!("Failed to inspect Xugu identity values for {schema}.{table}.{column}: {e}"))?
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(json_scalar_to_string);
+        let Some(value) = value else { continue };
+        let last: i64 =
+            value.parse().map_err(|_| format!("Invalid Xugu identity value for {schema}.{table}.{column}: {value}"))?;
+        let sequence_name = qualified_table(&sequence, &sequence_schema, &DatabaseType::Xugu, None);
+        let preexisting_probe = if target_table_preexisting {
+            let probe_sql = format!("SELECT {sequence_name}.NEXTVAL FROM DUAL");
+            let probe = execute_on_pool(state, target_pool_key, &probe_sql)
+                .await
+                .map_err(|e| format!("Failed to inspect Xugu identity next value for {schema}.{table}: {e}"))?
+                .rows
+                .first()
+                .and_then(|row| row.first())
+                .and_then(json_scalar_to_string)
+                .ok_or_else(|| format!("Missing Xugu identity next value for {schema}.{table}"))?;
+            let probe: i64 =
+                probe.parse().map_err(|_| format!("Invalid Xugu identity next value for {schema}.{table}: {probe}"))?;
+            Some(probe)
+        } else {
+            None
+        };
+        let next = xugu_identity_start_with(step, last, preexisting_probe)
+            .ok_or_else(|| format!("Xugu identity overflow for {schema}.{table}.{column}"))?;
+        let alter_sql = format!("ALTER SEQUENCE {sequence_name} START WITH {next}");
+        execute_on_pool(state, target_pool_key, &alter_sql)
+            .await
+            .map_err(|e| format!("Failed to sync Xugu identity for {schema}.{table}.{column}: {e}"))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct PostgresOwnedSequence {
     name: String,
@@ -3146,6 +3399,9 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             if *db_type == DatabaseType::Db2 {
                 return db2::string_literal(s, column_type);
             }
+            if let Some(xugu_literal) = format_xugu_typed_sql_literal(s, db_type, column_type) {
+                return xugu_literal;
+            }
             if let Some(json_array_literal) = format_starrocks_json_array_sql_literal(s, db_type, column_type) {
                 return json_array_literal;
             }
@@ -3350,11 +3606,200 @@ fn format_xugu_binary_sql_literal(value: &str, db_type: &DatabaseType, column_ty
     }
 
     let hex = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"))?;
-    if hex.is_empty() || hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
 
-    Some(format!("HEXTORAW('{hex}')"))
+    // Xugu's SQL hex literal also represents an empty binary value as X''.
+    // Keeping binary bytes out of string literals avoids accidental charset
+    // conversion while transferring BINARY/BLOB columns through the Agent.
+    Some(format!("X'{hex}'"))
+}
+
+fn format_xugu_typed_sql_literal(value: &str, db_type: &DatabaseType, column_type: Option<&str>) -> Option<String> {
+    if !matches!(db_type, DatabaseType::Xugu) {
+        return None;
+    }
+    let column_type = column_type?;
+    let normalized = normalize_xugu_type_name(column_type);
+
+    if matches!(normalized.as_str(), "GEOMETRY" | "GEOGRAPHY" | "BOX2D" | "BOX3D") {
+        let hex = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"))?;
+        if hex.is_empty() || hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        // Source-side EWKB retains SRID and Z/M coordinates, unlike the
+        // driver's generic WKT decoding. BOX values travel as their geometry
+        // representation and are cast back to the original target type.
+        let geometry = format!("ST_GeomFromEWKB(HEXTORAW('{hex}'))");
+        return Some(if normalized == "GEOMETRY" { geometry } else { format!("CAST({geometry} AS {normalized})") });
+    }
+
+    if matches!(normalized.as_str(), "BIT" | "VARBIT" | "BIT VARYING") {
+        if value.bytes().all(|byte| matches!(byte, b'0' | b'1')) {
+            return Some(format!("B'{}'", value));
+        }
+        return None;
+    }
+
+    if let Some(interval_type) = xugu_interval_literal_type(column_type) {
+        let interval_value = normalize_xugu_interval_literal_value(value, &normalized);
+        return Some(format!("INTERVAL {} {}", quote_string_literal(&interval_value), interval_type));
+    }
+
+    if normalized == "TIME" {
+        // Xugu accepts TIME input through an explicit cast, but does not
+        // accept the standard SQL `TIME '...'` literal form.
+        return Some(format!("CAST({} AS TIME)", quote_string_literal(value)));
+    }
+
+    // Unlike Oracle/PostgreSQL, Xugu does not accept SQL-standard typed
+    // literals for its timezone-aware temporal types. Its SQL layer accepts
+    // these values through ordinary string-to-column conversion (verified on
+    // Xugu 12.0); returning None lets the common formatter emit that string.
+    // Keep this fallback Xugu-only so other database dialects are unchanged.
+    None
+}
+
+fn normalize_xugu_type_name(column_type: &str) -> String {
+    let upper = column_type.trim().to_ascii_uppercase();
+    let upper = upper.strip_prefix("INTERVAL ").unwrap_or(&upper);
+    let mut normalized = String::with_capacity(upper.len());
+    let mut in_precision = false;
+    for character in upper.chars() {
+        match character {
+            '(' => in_precision = true,
+            ')' => in_precision = false,
+            _ if !in_precision => normalized.push(character),
+            _ => {}
+        }
+    }
+    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn xugu_interval_literal_type(column_type: &str) -> Option<String> {
+    let upper = column_type.trim().to_ascii_uppercase();
+    let interval_type = upper.strip_prefix("INTERVAL ")?;
+    let normalized = normalize_xugu_type_name(column_type);
+    let supported = [
+        "YEAR",
+        "YEAR TO MONTH",
+        "MONTH",
+        "DAY",
+        "DAY TO HOUR",
+        "HOUR",
+        "DAY TO MINUTE",
+        "HOUR TO MINUTE",
+        "MINUTE",
+        "DAY TO SECOND",
+        "HOUR TO SECOND",
+        "MINUTE TO SECOND",
+        "SECOND",
+    ];
+    if !supported.contains(&normalized.as_str()) {
+        return None;
+    }
+    // Keep source precision clauses when present (for example SECOND(6) or
+    // DAY(3) TO SECOND(6)); the literal's leading and trailing fields must
+    // match the declared Xugu interval type.
+    Some(interval_type.to_string())
+}
+
+fn normalize_xugu_interval_literal_value(value: &str, interval_type: &str) -> String {
+    // Xugu CAST(... AS VARCHAR) expands intervals into year-month or
+    // hour-minute-second fields even for narrower qualifiers. Convert back
+    // to the declared literal form without dropping nonzero trailing fields.
+    let value = value.trim();
+    match interval_type {
+        "YEAR" => normalize_xugu_year_month_value(value, true).unwrap_or_else(|| value.to_string()),
+        "MONTH" => normalize_xugu_year_month_value(value, false).unwrap_or_else(|| value.to_string()),
+        "DAY" | "DAY TO HOUR" | "DAY TO MINUTE" | "DAY TO SECOND" => {
+            normalize_xugu_day_time_value(value, interval_type).unwrap_or_else(|| value.to_string())
+        }
+        "HOUR" | "HOUR TO MINUTE" | "HOUR TO SECOND" | "MINUTE" | "MINUTE TO SECOND" | "SECOND" => {
+            normalize_xugu_time_value(value, interval_type).unwrap_or_else(|| value.to_string())
+        }
+        _ => value.to_string(),
+    }
+}
+
+fn split_xugu_interval_sign(value: &str) -> (&str, &str) {
+    if let Some(value) = value.strip_prefix('-') {
+        ("-", value)
+    } else if let Some(value) = value.strip_prefix('+') {
+        ("+", value)
+    } else {
+        ("", value)
+    }
+}
+
+fn normalize_xugu_year_month_value(value: &str, year_only: bool) -> Option<String> {
+    let (sign, unsigned) = split_xugu_interval_sign(value);
+    let (years, months) = unsigned.split_once('-')?;
+    let years = years.parse::<u64>().ok()?;
+    let months = months.parse::<u64>().ok()?;
+    if year_only {
+        (months == 0).then(|| format!("{sign}{years}"))
+    } else {
+        Some(format!("{}{total_months}", sign, total_months = years.checked_mul(12)?.checked_add(months)?))
+    }
+}
+
+fn parse_xugu_interval_seconds(value: &str) -> Option<(u64, &str)> {
+    let (whole, fraction) = match value.split_once('.') {
+        Some((whole, fraction)) if !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit()) => {
+            (whole, fraction)
+        }
+        Some(_) => return None,
+        None => (value, ""),
+    };
+    Some((whole.parse().ok()?, fraction))
+}
+
+fn parse_xugu_interval_hms(value: &str) -> Option<(u64, u64, u64, &str)> {
+    let mut fields = value.split(':');
+    let hours = fields.next()?.parse().ok()?;
+    let minutes = fields.next()?.parse().ok()?;
+    let (seconds, fraction) = parse_xugu_interval_seconds(fields.next()?)?;
+    fields.next().is_none().then_some((hours, minutes, seconds, fraction))
+}
+
+fn normalize_xugu_day_time_value(value: &str, interval_type: &str) -> Option<String> {
+    let (sign, unsigned) = split_xugu_interval_sign(value);
+    let (days, time) = unsigned.split_once(' ')?;
+    let days = days.parse::<u64>().ok()?;
+    let (hours, minutes, seconds, fraction) = parse_xugu_interval_hms(time)?;
+    match interval_type {
+        "DAY" if hours == 0 && minutes == 0 && seconds == 0 && fraction.is_empty() => Some(format!("{sign}{days}")),
+        "DAY TO HOUR" if minutes == 0 && seconds == 0 && fraction.is_empty() => Some(format!("{sign}{days} {hours}")),
+        "DAY TO MINUTE" if seconds == 0 && fraction.is_empty() => Some(format!("{sign}{days} {hours}:{minutes:02}")),
+        "DAY TO SECOND" => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_xugu_time_value(value: &str, interval_type: &str) -> Option<String> {
+    let (sign, unsigned) = split_xugu_interval_sign(value);
+    let (hours, minutes, seconds, fraction) = parse_xugu_interval_hms(unsigned)?;
+    match interval_type {
+        "HOUR" if minutes == 0 && seconds == 0 && fraction.is_empty() => Some(format!("{sign}{hours}")),
+        "HOUR TO MINUTE" if seconds == 0 && fraction.is_empty() => Some(format!("{sign}{hours}:{minutes:02}")),
+        "HOUR TO SECOND" => Some(value.to_string()),
+        "MINUTE" if seconds == 0 && fraction.is_empty() => {
+            Some(format!("{sign}{}", hours.checked_mul(60)?.checked_add(minutes)?))
+        }
+        "MINUTE TO SECOND" => Some(format!(
+            "{sign}{}:{seconds:02}{fractional}",
+            hours.checked_mul(60)?.checked_add(minutes)?,
+            fractional = if fraction.is_empty() { String::new() } else { format!(".{fraction}") },
+        )),
+        "SECOND" => Some(format!(
+            "{sign}{total_seconds}{fractional}",
+            total_seconds = hours.checked_mul(3600)?.checked_add(minutes.checked_mul(60)?)?.checked_add(seconds)?,
+            fractional = if fraction.is_empty() { String::new() } else { format!(".{fraction}") },
+        )),
+        _ => None,
+    }
 }
 
 fn format_oracle_temporal_sql_literal(
@@ -3914,47 +4359,109 @@ fn generate_create_table_ddl_with_column_quoting(
             | DatabaseType::Sundb
     );
 
+    // Auto-increment beyond the MySQL family goes through the shared dialect
+    // profile (the same facility the structure-diff generator uses), so the target
+    // spells it natively: Dameng and SQL Server `IDENTITY(1,1)`, Oracle
+    // `GENERATED BY DEFAULT AS IDENTITY`, and so on.
+    //
+    // Only an explicit source auto-increment qualifies. A transfer must not invent
+    // identity the source never declared, and both MySQL (one AUTO_INCREMENT
+    // column per table) and DM8 (one identity column per table) cap the clause at
+    // one column, which the explicit-only rule keeps true for composite primary
+    // keys as well.
+    //
+    // MySQL-family targets keep the inline clause below. Targets that stay on the
+    // plain path:
+    // - The profile-level MySQL family beyond the transfer's own list (Databend,
+    //   Gbase, ManticoreSearch): they reject the `AUTO_INCREMENT` spelling.
+    // - Postgres family (`PostgresSequence`): the target needs a created sequence
+    //   plus `ALTER TABLE ... SET DEFAULT`, which this generator does not emit;
+    //   those transfers keep their own sequence handling.
+    // - SQLite family: `AUTOINCREMENT` is only valid as part of an inline
+    //   `INTEGER PRIMARY KEY`, and primary keys here are a table-level clause —
+    //   SQLite's rowid alias already generates ids for `INTEGER PRIMARY KEY`.
+    let target_profile = profile_for(*target_db);
+    let inline_identity = !is_mysql_family
+        && !matches!(
+            target_db,
+            DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1
+        )
+        && match target_profile.auto_inc {
+            // `profile_for` puts Databend/Gbase/ManticoreSearch in the MySQL family
+            // too, but their grammars reject MySQL's `AUTO_INCREMENT` spelling; only
+            // the transfer's own MySQL-family targets above keep it.
+            AutoIncSyntax::Suffix(suffix) => suffix != " AUTO_INCREMENT",
+            AutoIncSyntax::ReplaceTypeWith(_) => true,
+            _ => false,
+        };
+
     let mut col_lines = Vec::with_capacity(columns.len());
     for c in columns {
         col_lines.push({
             let mapped_type = postgres_column_type_sql(c, source_schema, schema, source_db, target_db);
-            let mut line = format!(
-                "  {} {}",
-                transfer_column_identifier(&c.name, target_db, quote_target_column_names),
-                mapped_type
-            );
-            if let Some(default_clause) = column_default_clause(c, source_schema, schema, source_db, target_db) {
-                line.push(' ');
-                line.push_str(&default_clause);
-            }
-            if !c.is_nullable
-                && !matches!(
-                    target_db,
-                    DatabaseType::Hive
-                        | DatabaseType::Kyuubi
-                        | DatabaseType::Impala
-                        | DatabaseType::Argo
-                        | DatabaseType::Transwarp
+            let column_name = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
+            let identity_build = if inline_identity && c.is_primary_key && column_is_auto_increment(c) {
+                apply_auto_inc_to_column_def(
+                    &target_profile,
+                    &column_name,
+                    &mapped_type,
+                    c,
+                    type_looks_integer(&mapped_type),
                 )
-            {
-                line.push_str(" NOT NULL");
-            }
-            if is_mysql_family {
-                let extra_clauses = parse_mysql_extra_clauses(c.extra.as_deref());
-                if extra_clauses.auto_increment {
-                    line.push_str(" AUTO_INCREMENT");
-                }
-                if let Some(on_update_expr) = extra_clauses.on_update {
-                    line.push_str(&format!(" ON UPDATE {on_update_expr}"));
-                }
-                if let Some(ref comment) = c.comment {
-                    let trimmed = comment.trim();
-                    if !trimmed.is_empty() {
-                        line.push_str(&format!(" COMMENT '{}'", trimmed.replace('\'', "''")));
+            } else {
+                AutoIncColumnBuild::Normal { skip_default: false }
+            };
+            match identity_build {
+                // Profiles that replace the whole definition (e.g. Access `COUNTER`)
+                // already include everything the column needs.
+                AutoIncColumnBuild::Complete { def, .. } => format!("  {def}"),
+                build => {
+                    let mut line = format!("  {column_name} {mapped_type}");
+                    let skip_default = match build {
+                        AutoIncColumnBuild::AppendSuffix { suffix, skip_default, .. } => {
+                            line.push_str(suffix);
+                            skip_default
+                        }
+                        _ => false,
+                    };
+                    if !skip_default {
+                        if let Some(default_clause) =
+                            column_default_clause(c, source_schema, schema, source_db, target_db)
+                        {
+                            line.push(' ');
+                            line.push_str(&default_clause);
+                        }
                     }
+                    if !c.is_nullable
+                        && !matches!(
+                            target_db,
+                            DatabaseType::Hive
+                                | DatabaseType::Kyuubi
+                                | DatabaseType::Impala
+                                | DatabaseType::Argo
+                                | DatabaseType::Transwarp
+                        )
+                    {
+                        line.push_str(" NOT NULL");
+                    }
+                    if is_mysql_family {
+                        let extra_clauses = parse_mysql_extra_clauses(c.extra.as_deref());
+                        if extra_clauses.auto_increment {
+                            line.push_str(" AUTO_INCREMENT");
+                        }
+                        if let Some(on_update_expr) = extra_clauses.on_update {
+                            line.push_str(&format!(" ON UPDATE {on_update_expr}"));
+                        }
+                        if let Some(ref comment) = c.comment {
+                            let trimmed = comment.trim();
+                            if !trimmed.is_empty() {
+                                line.push_str(&format!(" COMMENT '{}'", trimmed.replace('\'', "''")));
+                            }
+                        }
+                    }
+                    line
                 }
             }
-            line
         });
     }
 
@@ -4026,9 +4533,10 @@ fn generate_create_table_ddl_with_column_quoting(
 }
 
 /// Dialects that apply table/column comments via `COMMENT ON` statements:
-/// PostgreSQL/Kingbase plus Oracle-compatible Dameng.
+/// PostgreSQL/Kingbase plus Oracle-compatible OceanBase and Dameng.
 fn supports_comment_on_transfer_ddl(target_db: &DatabaseType) -> bool {
-    is_postgres_transfer_dialect(target_db) || matches!(target_db, DatabaseType::Oracle | DatabaseType::Dameng)
+    is_postgres_transfer_dialect(target_db)
+        || matches!(target_db, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
 }
 
 /// Generate COMMENT ON COLUMN / ALTER TABLE COMMENT COLUMN / COMMENT ON TABLE
@@ -4610,7 +5118,7 @@ fn generate_upsert_typed_for_transfer(
             sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals});"));
             sql
         }
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let mut using_rows = Vec::with_capacity(rows.len());
             for row in rows {
                 let mut vals = Vec::with_capacity(row.len().min(columns.len()));
@@ -4692,7 +5200,7 @@ fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize
         // The INSERT ALL template is shared with OceanBase's Oracle mode, so its
         // append/overwrite batches must clamp to the same per-statement row count.
         (DatabaseType::OceanbaseOracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
-        (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
+        (DatabaseType::Oracle | DatabaseType::OceanbaseOracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
     }
 }
@@ -4869,9 +5377,147 @@ fn rewrite_transfer_source_table_ddl(
         } else {
             rewrite_mysql_create_table_name(sql, target_table)
         }
+    } else if matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu)) {
+        // Xugu's Agent DDL contains quoted schema-qualified CREATE/ALTER/INDEX
+        // statements. Rewrite only code spans so schema names inside comments
+        // and string literals remain untouched; table casing is validated as
+        // Preserve for structure transfers.
+        Some(rewrite_double_quoted_schema_qualifier(sql, source_schema, target_schema))
+    } else if matches!((source_db_type, target_db_type), (DatabaseType::SqlServer, DatabaseType::SqlServer)) {
+        // SQL Server's reused DDL brackets the schema qualifier in the CREATE
+        // TABLE head and in FOREIGN KEY ... REFERENCES; reusing it verbatim
+        // recreated the table in the source schema (or failed outright when
+        // the target had no schema of that name). Rewrite only the bracketed
+        // source qualifier — cross-schema references to third-party tables
+        // keep their own qualifier, exactly like the Oracle-family rewrite.
+        Some(rewrite_sqlserver_bracketed_schema_qualifier(sql, source_schema, target_schema))
     } else {
         Some(sql.to_string())
     }
+}
+
+fn rewrite_sqlserver_bracketed_schema_qualifier(ddl: &str, source_schema: &str, target_schema: &str) -> String {
+    if source_schema == target_schema || source_schema.is_empty() {
+        return ddl.to_string();
+    }
+    let source_identifier = format!("[{}]", source_schema.replace(']', "]]"));
+    let target_identifier = format!("[{}]", target_schema.replace(']', "]]"));
+    let source_literal = format!("N'{}'", source_schema.replace('\'', "''"));
+    let target_literal = format!("N'{}'", target_schema.replace('\'', "''"));
+    let tokens = sqlserver_ddl_tokens(ddl);
+    let token_text = |token: &(usize, usize)| &ddl[token.0..token.1];
+    let mut output = String::with_capacity(ddl.len());
+    let mut previous = 0;
+
+    for statement in tokens.split(|token| token_text(token) == ";") {
+        let has_argument = |name: &str, value: &str| {
+            statement.windows(3).any(|argument| {
+                token_text(&argument[0]).eq_ignore_ascii_case(name)
+                    && token_text(&argument[1]) == "="
+                    && token_text(&argument[2]).eq_ignore_ascii_case(value)
+            })
+        };
+        let generated_comment = statement.len() >= 4
+            && matches!(token_text(&statement[0]).to_ascii_uppercase().as_str(), "EXEC" | "EXECUTE")
+            && token_text(&statement[1]).eq_ignore_ascii_case("sys")
+            && token_text(&statement[2]) == "."
+            && token_text(&statement[3]).eq_ignore_ascii_case("sp_addextendedproperty")
+            && has_argument("@name", "N'MS_Description'")
+            && has_argument("@level0type", "N'SCHEMA'")
+            && has_argument("@level1type", "N'TABLE'");
+
+        for (index, token) in statement.iter().enumerate() {
+            let replacement = if token_text(token) == source_identifier
+                && statement.get(index + 1).is_some_and(|next| token_text(next) == ".")
+            {
+                &target_identifier
+            } else if generated_comment
+                && token_text(token) == source_literal
+                && index >= 2
+                && token_text(&statement[index - 2]).eq_ignore_ascii_case("@level0name")
+                && token_text(&statement[index - 1]) == "="
+            {
+                &target_literal
+            } else {
+                continue;
+            };
+            output.push_str(&ddl[previous..token.0]);
+            output.push_str(replacement);
+            previous = token.1;
+        }
+    }
+    output.push_str(&ddl[previous..]);
+    output
+}
+
+fn sqlserver_ddl_tokens(ddl: &str) -> Vec<(usize, usize)> {
+    let bytes = ddl.as_bytes();
+    let mut tokens = Vec::new();
+    let mut position = 0;
+    while position < bytes.len() {
+        if bytes[position].is_ascii_whitespace() {
+            position += 1;
+            continue;
+        }
+        if bytes[position..].starts_with(b"--") {
+            while position < bytes.len() && !matches!(bytes[position], b'\n' | b'\r') {
+                position += 1;
+            }
+            continue;
+        }
+        if bytes[position..].starts_with(b"/*") {
+            let mut depth = 1;
+            position += 2;
+            while position < bytes.len() && depth > 0 {
+                if bytes[position..].starts_with(b"/*") {
+                    depth += 1;
+                    position += 2;
+                } else if bytes[position..].starts_with(b"*/") {
+                    depth -= 1;
+                    position += 2;
+                } else {
+                    position += 1;
+                }
+            }
+            continue;
+        }
+
+        let start = position;
+        if matches!(bytes[position], b'N' | b'n') && bytes.get(position + 1) == Some(&b'\'') {
+            position += 1;
+        }
+        if matches!(bytes[position], b'\'' | b'"' | b'[') {
+            let delimiter = if bytes[position] == b'[' { b']' } else { bytes[position] };
+            position += 1;
+            while position < bytes.len() {
+                if bytes[position] == delimiter {
+                    position += 1;
+                    if bytes.get(position) == Some(&delimiter) {
+                        position += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    position += 1;
+                }
+            }
+        } else if bytes[position].is_ascii_alphanumeric()
+            || matches!(bytes[position], b'_' | b'@' | b'#' | b'$')
+            || !bytes[position].is_ascii()
+        {
+            while position < bytes.len()
+                && (bytes[position].is_ascii_alphanumeric()
+                    || matches!(bytes[position], b'_' | b'@' | b'#' | b'$')
+                    || !bytes[position].is_ascii())
+            {
+                position += 1;
+            }
+        } else {
+            position += 1;
+        }
+        tokens.push((start, position));
+    }
+    tokens
 }
 
 /// Rewrites the table identifier of the leading CREATE TABLE statement of a reused
@@ -5260,6 +5906,15 @@ fn generate_insert_typed_sql_batches_for_transfer(
 ) -> Result<Vec<(String, usize)>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
+    }
+
+    if columns.is_empty() && *db_type == DatabaseType::Xugu {
+        // ROWVERSION is generated and immutable in XuguDB. A table containing
+        // only that column still needs one default row per source row; Xugu's
+        // `DEFAULT VALUES` form is single-row, so keep these statements
+        // separate instead of emitting invalid empty-column VALUES tuples.
+        let target = qualified_table(table, schema, db_type, catalog);
+        return Ok(rows.iter().map(|_| (format!("INSERT INTO {target} DEFAULT VALUES"), 1)).collect());
     }
 
     let value_rows = value_rows_sql(rows, column_types, db_type, mysql_spatial_markers);
@@ -6528,6 +7183,12 @@ async fn transfer_table_via_copy(
     let source_client = db::postgres::checkout_postgres_client(&source_pool, None, db::connection_timeout()).await?;
     let target_client = db::postgres::checkout_postgres_client(&target_pool, None, db::connection_timeout()).await?;
 
+    if db::postgres::postgres_client_has_text_encoding(&source_client)
+        || db::postgres::postgres_client_has_text_encoding(&target_client)
+    {
+        return Err("COPY byte piping requires matching native encodings; using INSERT fallback".into());
+    }
+
     // Open the read side first so an invalid source SELECT fails before the
     // target COPY is started.
     let source_stream =
@@ -6906,12 +7567,21 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
                 })
                 .collect()
         }
-    } else if matches!(db_type, DatabaseType::Dameng) {
+    } else if matches!(db_type, DatabaseType::Dameng | DatabaseType::Xugu) {
         let statements = split_sql_statements_for_database(sql, *db_type);
         if statements.is_empty() {
             vec![sql.trim().to_string()]
         } else {
             statements
+        }
+    } else if matches!(db_type, DatabaseType::Oracle) {
+        // The Oracle agent appends index, trigger and comment DDL to the table
+        // DDL, which the target rejects as one statement with `ORA-03405`.
+        let statements = split_sql_statements_for_database(sql, *db_type);
+        if statements.is_empty() {
+            vec![sql.trim().to_string()]
+        } else {
+            statements.into_iter().filter(|statement| !is_oracle_trigger_statement(statement)).collect()
         }
     } else {
         vec![sql.to_string()]
@@ -6970,6 +7640,15 @@ fn is_postgres_post_table_index_statement(statement: &str) -> bool {
     normalized.starts_with("CREATE INDEX ")
         || normalized.starts_with("CREATE UNIQUE INDEX ")
         || normalized.starts_with("COMMENT ON INDEX ")
+}
+
+/// Trigger DDL is dropped from reused Oracle table DDL. Created together with the
+/// table, a trigger would fire while transfer copies the rows, and one that reads
+/// a sequence is still invalid then because sequences are transferred after
+/// tables, so every insert fails with `ORA-04098`. Selected triggers are created
+/// by the schema object phase instead, which runs after the data and the sequences.
+fn is_oracle_trigger_statement(statement: &str) -> bool {
+    ORACLE_TRIGGER_STATEMENT_RE.is_match(statement)
 }
 
 /// Standalone `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY` statements are
@@ -7578,7 +8257,10 @@ async fn get_postgres_owned_sequences_for_transfer(
             _ => return Ok(Vec::new()),
         }
     };
-    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let pool_client = pool.get().await.map_err(|e| e.to_string())?;
+    // Route through the encoding-aware client so legacy-encoded sources return
+    // decoded sequence/owner names (raw pool clients bypass text decoding).
+    let client = db::postgres::text_encoding::Client::new(&pool_client);
     let rows = client.query(POSTGRES_OWNED_SEQUENCES_SQL, &[&schema]).await.map_err(|e| e.to_string())?;
 
     let selected: HashSet<&str> = tables.iter().map(String::as_str).collect();
@@ -7644,7 +8326,9 @@ async fn get_postgres_sequence_snapshots_for_transfer(
             _ => return Ok(Vec::new()),
         }
     };
-    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let pool_client = pool.get().await.map_err(|e| e.to_string())?;
+    // Same encoding-aware wrapper as the owned-sequence listing above.
+    let client = db::postgres::text_encoding::Client::new(&pool_client);
     let rows = client.query(POSTGRES_SEQUENCE_SNAPSHOTS_SQL, &[&schema]).await.map_err(|e| e.to_string())?;
 
     Ok(rows
@@ -8118,6 +8802,7 @@ where
             transfer_oracle_schema_objects(
                 state,
                 &filtered_request,
+                &target_db_type,
                 source_pool_key,
                 target_pool_key,
                 progress_callback,
@@ -8213,6 +8898,7 @@ fn resolve_oracle_schema(schema: &str, database: &str) -> String {
 async fn transfer_oracle_schema_objects<F>(
     state: &AppState,
     request: &TransferRequest,
+    target_db_type: &DatabaseType,
     source_pool_key: &str,
     target_pool_key: &str,
     mut progress_callback: F,
@@ -8266,8 +8952,8 @@ where
                 .ok_or_else(|| format!("No DDL returned for Oracle {:?} {name}", kind))?
                 .to_string();
             let ddl = rewrite_oracle_schema_qualifier(&ddl, &source_schema, &target_schema);
-            match execute_on_pool(state, target_pool_key, &ddl).await {
-                Ok(_) => {
+            match execute_oracle_object_ddl_on_pool(state, target_pool_key, &ddl, &kind, target_db_type).await {
+                Ok(()) => {
                     outcome.transferred.push(format!("{kind:?}:{name}"));
                     progress(&mut outcome, TransferStatus::Running, None);
                 }
@@ -8279,6 +8965,38 @@ where
         }
     }
     Ok(outcome)
+}
+
+/// `DBMS_METADATA.GET_DDL('TRIGGER', ...)` returns the trigger body followed by an
+/// `ALTER TRIGGER ... ENABLE` statement. Sent as one statement, Oracle compiles the
+/// `ALTER` as part of the PL/SQL body and the trigger is created invalid with
+/// `PLS-00103`, so Oracle targets run each statement separately.
+async fn execute_oracle_object_ddl_on_pool(
+    state: &AppState,
+    pool_key: &str,
+    ddl: &str,
+    kind: &TransferObjectKind,
+    target_db_type: &DatabaseType,
+) -> Result<(), String> {
+    for statement in oracle_object_ddl_statements(ddl, kind, target_db_type) {
+        execute_on_pool(state, pool_key, &statement).await?;
+    }
+    Ok(())
+}
+
+fn oracle_object_ddl_statements(ddl: &str, kind: &TransferObjectKind, target_db_type: &DatabaseType) -> Vec<String> {
+    // Only trigger DDL carries a trailing statement. Every other object kind is a
+    // single CREATE statement and keeps being sent as returned, so a routine body or
+    // a `WITH FUNCTION` view is never cut at its inner semicolons.
+    if !matches!(target_db_type, DatabaseType::Oracle) || !matches!(kind, TransferObjectKind::Trigger) {
+        return vec![ddl.to_string()];
+    }
+    let statements = split_sql_statements_for_database(ddl, *target_db_type);
+    if statements.is_empty() {
+        vec![ddl.trim().to_string()]
+    } else {
+        statements
+    }
 }
 
 async fn transfer_sqlserver_schema_objects<F>(
@@ -9215,6 +9933,7 @@ pub async fn preview_transfer_ownership(
     source_pool_key: &str,
     target_pool_key: &str,
 ) -> Result<TransferOwnershipPreview, String> {
+    validate_transfer_database_pair(request, source_db_type, target_db_type)?;
     // PostgreSQL-compatible transfers report role ownership gaps for the confirmation flow.
     let (missing_owners, target_owner) =
         if request.create_table && is_postgres_compat_transfer(source_db_type, target_db_type) {
@@ -9862,7 +10581,7 @@ where
 }
 
 #[derive(Default)]
-struct HiveServerTransferCursor {
+struct AgentTransferCursor {
     started: bool,
     session_id: Option<String>,
 }
@@ -9918,8 +10637,142 @@ fn transfer_cursor_sql(
     format!("SELECT {col_list} FROM {full_table}")
 }
 
+const XUGU_SPATIAL_PROBE_SQL: &str = "SELECT ST_AsEWKB(ST_GeomFromText('POINT(0 0)')) FROM DUAL";
+
+fn is_xugu_spatial_column_type(data_type: &str) -> bool {
+    matches!(normalize_xugu_type_name(data_type).as_str(), "GEOMETRY" | "GEOGRAPHY" | "BOX2D" | "BOX3D")
+}
+
+fn xugu_columns_include_spatial(columns: &[db::ColumnInfo]) -> bool {
+    columns.iter().any(|column| is_xugu_spatial_column_type(&column.data_type))
+}
+
+/// Spatial Xugu can transfer geometry to spatial Xugu. A build without the
+/// spatial functions must fail before CREATE or INSERT rather than halfway
+/// through a mixed pair.
+async fn ensure_xugu_spatial_transfer_supported(
+    state: &AppState,
+    columns: &[db::ColumnInfo],
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    table: &str,
+) -> Result<(), String> {
+    if !matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu))
+        || !xugu_columns_include_spatial(columns)
+    {
+        return Ok(());
+    }
+    let source_error = execute_on_pool(state, source_pool_key, XUGU_SPATIAL_PROBE_SQL).await.err();
+    let target_error = if source_pool_key == target_pool_key {
+        source_error.clone()
+    } else {
+        execute_on_pool(state, target_pool_key, XUGU_SPATIAL_PROBE_SQL).await.err()
+    };
+    match (source_error, target_error) {
+        (None, None) => Ok(()),
+        (Some(error), None) => {
+            Err(format!("虚谷空间表 {table} 需要源库支持空间函数 ST_GeomFromText/ST_AsEWKB：{error}"))
+        }
+        (None, Some(error)) => {
+            Err(format!("虚谷空间表 {table} 需要目标库支持空间函数 ST_GeomFromText/ST_AsEWKB：{error}"))
+        }
+        (Some(source), Some(target)) => Err(format!(
+            "虚谷空间表 {table} 需要源和目标都支持空间函数 ST_GeomFromText/ST_AsEWKB。源：{source} 目标：{target}"
+        )),
+    }
+}
+
+/// A Xugu agent session has one server connection. Holding a read cursor open
+/// while writing through that same session blocks once the first page returns.
+/// Page with LIMIT/OFFSET instead; two connections keep the streaming cursor.
+fn xugu_transfer_shares_agent_session(
+    source_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+) -> bool {
+    *source_db_type == DatabaseType::Xugu && source_pool_key == target_pool_key
+}
+
+fn xugu_transfer_page_sql(
+    columns: &[db::ColumnInfo],
+    table: &str,
+    schema: &str,
+    catalog: Option<&str>,
+    primary_keys: &[String],
+    offset: u64,
+    limit: usize,
+) -> String {
+    // Re-running LIMIT/OFFSET pages is unstable for tables without a unique key
+    // (rows can be skipped or repeated), so order by the primary key when present.
+    let order = postgres_order_by_expression(primary_keys, &DatabaseType::Xugu)
+        .map(|expression| format!(" ORDER BY {expression}"))
+        .unwrap_or_default();
+    format!("{}{order} LIMIT {limit} OFFSET {offset}", xugu_transfer_cursor_sql(columns, table, schema, catalog))
+}
+
+/// Build a source-side projection for Xugu transfer rows whose wire values are
+/// not safely represented by the Go driver's generic `database/sql` values.
+/// This stays on the Xugu path only; the returned strings are still formatted
+/// against the original column metadata when INSERT statements are generated.
+fn xugu_transfer_cursor_sql(columns: &[db::ColumnInfo], table: &str, schema: &str, catalog: Option<&str>) -> String {
+    let db_type = DatabaseType::Xugu;
+    let full_table = qualified_table(table, schema, &db_type, catalog);
+    let projection = columns
+        .iter()
+        .map(|column| {
+            let identifier = quote_identifier(&column.name, &db_type);
+            let normalized = normalize_xugu_type_name(&column.data_type);
+            let expression = if matches!(normalized.as_str(), "GEOMETRY" | "GEOGRAPHY" | "BOX2D" | "BOX3D") {
+                let geometry = if normalized == "GEOMETRY" {
+                    identifier.clone()
+                } else {
+                    format!("CAST({identifier} AS GEOMETRY)")
+                };
+                // Hex text bypasses lossy WKT decoding and raw BOX bytes.
+                // Keep SQL NULL distinct from an empty geometry's EWKB.
+                format!("CASE WHEN {identifier} IS NULL THEN NULL ELSE '0x'||RAWTOHEX(ST_AsEWKB({geometry})) END")
+            } else if is_binary_transfer_column_type(&column.data_type) {
+                // Preserve NULL separately from an empty BLOB/BINARY value.
+                format!("CASE WHEN {identifier} IS NULL THEN NULL ELSE '0x'||RAWTOHEX({identifier}) END")
+            } else if matches!(normalized.as_str(), "BIT" | "VARBIT" | "BIT VARYING") {
+                let length = column.character_maximum_length.filter(|length| *length > 0).unwrap_or(32_767).min(32_767);
+                // Xugu pads BIT/VARBIT text casts to the declared bit width.
+                // Remove that padding so the B'...' target literal contains
+                // only the original 0/1 digits.
+                format!("RTRIM(CAST({identifier} AS VARCHAR({length})))")
+            } else if normalized == "TIME" {
+                // The Go driver materializes Xugu TIME as a timestamp-like
+                // value with a synthetic date. Project it as text so target
+                // inserts receive only the original time-of-day value.
+                format!("CAST({identifier} AS VARCHAR(64))")
+            } else if matches!(normalized.as_str(), "TIME WITH TIME ZONE" | "TIMEZONE" | "TIMETZ")
+                || matches!(
+                    normalized.as_str(),
+                    "DATETIME WITH TIME ZONE" | "DATETIME TIMEZONE" | "TIMESTAMP WITH TIME ZONE" | "TIMESTAMP_TZ"
+                )
+                || xugu_interval_literal_type(&column.data_type).is_some()
+            {
+                // The driver currently decodes TIMETZ into a time.Time without
+                // retaining the source offset. Intervals also need their exact
+                // Xugu text form for a typed target literal.
+                format!("CAST({identifier} AS VARCHAR(256))")
+            } else {
+                identifier.clone()
+            };
+            format!("{expression} AS {identifier}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("SELECT {projection} FROM {full_table}")
+}
+
 fn uses_agent_transfer_cursor(db_type: &DatabaseType) -> bool {
-    matches!(db_type, DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Transwarp | DatabaseType::Db2)
+    matches!(
+        db_type,
+        DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Transwarp | DatabaseType::Db2 | DatabaseType::Xugu
+    )
 }
 
 fn transfer_upsert_falls_back_to_append(db_type: &DatabaseType) -> bool {
@@ -9944,13 +10797,13 @@ fn transfer_clear_table_sql(table: &str, schema: &str, db_type: &DatabaseType, c
     }
 }
 
-async fn fetch_hive_server_transfer_batch(
+async fn fetch_agent_transfer_batch(
     state: &AppState,
     pool_key: &str,
     request: &TransferRequest,
     sql: &str,
     batch_size: usize,
-    cursor: &mut HiveServerTransferCursor,
+    cursor: &mut AgentTransferCursor,
 ) -> Result<db::QueryResult, String> {
     let query_timeout_secs = if cursor.started {
         0
@@ -9967,7 +10820,7 @@ async fn fetch_hive_server_transfer_batch(
     let mut client = client.lock().await;
     let result = if cursor.started {
         let session_id =
-            cursor.session_id.as_deref().ok_or("Impala transfer cursor ended before the next page was requested")?;
+            cursor.session_id.as_deref().ok_or("Agent transfer cursor ended before the next page was requested")?;
         client.fetch_table_read_page::<db::QueryResult>(session_id, batch_size).await?
     } else {
         cursor.started = true;
@@ -9987,7 +10840,7 @@ async fn fetch_hive_server_transfer_batch(
     if result.has_more {
         cursor.session_id = result.session_id.clone().or_else(|| cursor.session_id.clone());
         if cursor.session_id.is_none() {
-            return Err("Impala transfer cursor did not return a session id for additional rows".to_string());
+            return Err("Agent transfer cursor did not return a session id for additional rows".to_string());
         }
     } else {
         cursor.session_id = None;
@@ -9995,7 +10848,7 @@ async fn fetch_hive_server_transfer_batch(
     Ok(result)
 }
 
-async fn close_hive_server_transfer_cursor(state: &AppState, pool_key: &str, cursor: &mut HiveServerTransferCursor) {
+async fn close_agent_transfer_cursor(state: &AppState, pool_key: &str, cursor: &mut AgentTransferCursor) {
     let Some(session_id) = cursor.session_id.take() else {
         return;
     };
@@ -10006,7 +10859,7 @@ async fn close_hive_server_transfer_cursor(state: &AppState, pool_key: &str, cur
     let client = client.clone();
     let mut client = client.lock().await;
     if let Err(error) = client.close_table_read_session::<bool>(&session_id).await {
-        log::warn!("[transfer] failed to close Impala transfer cursor: {error}");
+        log::warn!("[transfer] failed to close Agent transfer cursor: {error}");
     }
 }
 
@@ -10544,6 +11397,7 @@ async fn transfer_table_inner<F, C>(
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
     pending_fk_alters: &mut Vec<(String, String)>,
     preexisting_backup_names: Option<&HashMap<String, String>>,
+    target_cleared: bool,
     mut progress_callback: F,
     mut source_count_callback: C,
 ) -> Result<TransferTableResult, String>
@@ -10707,9 +11561,20 @@ where
             .is_some_and(|config| db::doris::is_native_profile(&config.db_type, config.driver_profile.as_deref()))
     };
     ensure_transfer_columns_supported(request, is_doris_source, table, &columns)?;
+    ensure_xugu_spatial_transfer_supported(
+        state,
+        &columns,
+        source_db_type,
+        target_db_type,
+        source_pool_key,
+        target_pool_key,
+        table,
+    )
+    .await?;
 
     let writable_columns = writable_transfer_columns(&columns, source_db_type, target_db_type);
-    let default_rows_only = mysql_generated_only_transfer(&columns, source_db_type, target_db_type);
+    let default_rows_only = mysql_generated_only_transfer(&columns, source_db_type, target_db_type)
+        || xugu_rowversion_only_transfer(&columns, source_db_type, target_db_type);
     if writable_columns.is_empty() && !default_rows_only {
         return Err(format!("No writable columns found for table {table}"));
     }
@@ -10900,7 +11765,9 @@ where
     // Empty-column INSERTs are safe only when the target also computes every
     // value. Reject incompatible data-only targets before an overwrite truncates
     // them; otherwise ordinary columns could silently receive defaults instead.
-    if default_rows_only && !mysql_generated_only_transfer(&target_columns, target_db_type, target_db_type) {
+    let target_default_rows_only = mysql_generated_only_transfer(&target_columns, target_db_type, target_db_type)
+        || xugu_rowversion_only_transfer(&target_columns, target_db_type, target_db_type);
+    if default_rows_only && !target_default_rows_only {
         return Err(format!(
             "Target table '{target_table}' must contain only generated columns for default-row transfer"
         ));
@@ -10976,8 +11843,9 @@ where
 
     // Truncate target if overwrite mode (only when not rebuilding the table).
     // When drop_target_before_create is true, the target table was just created
-    // and is already empty, so TRUNCATE is unnecessary.
-    if request.mode == TransferMode::Overwrite && !request.drop_target_before_create {
+    // and is already empty, so TRUNCATE is unnecessary. `target_cleared` means
+    // `clear_foreign_key_linked_overwrite_targets` already emptied it children first.
+    if request.mode == TransferMode::Overwrite && !request.drop_target_before_create && !target_cleared {
         let truncate_sql = transfer_clear_table_sql(
             &target_table,
             &request.target_schema,
@@ -11136,20 +12004,36 @@ where
         transfer_keyset_column_indexes(&writable_columns, &primary_key_columns, source_db_type)
     };
     let mut keyset_cursor: Vec<serde_json::Value> = Vec::new();
-    // A single Agent cursor keeps Hive-family rows in one query execution. Inceptor
-    // rejects the generic LIMIT/OFFSET form, just like the other Agent cursor paths.
-    // Re-running LIMIT/OFFSET pages is unstable for tables without a unique key.
-    let use_hive_server_cursor = table_filter.is_none() && uses_agent_transfer_cursor(source_db_type);
-    let hive_server_transfer_sql = use_hive_server_cursor.then(|| {
-        transfer_cursor_sql(
-            &col_names,
-            table,
-            &request.source_schema,
-            source_db_type,
-            request.source_catalog.as_deref(),
-        )
+    // A single Agent cursor keeps Xugu/Hive-family rows in one query execution.
+    // Inceptor rejects the generic LIMIT/OFFSET form, and re-running LIMIT/OFFSET
+    // pages is unstable for tables without a unique key. A row filter stays on
+    // the filtered page SQL. The Xugu agent keeps that cursor on its only server
+    // connection, so a transfer inside one session pages instead of holding the
+    // cursor open across target writes.
+    let xugu_same_session = xugu_transfer_shares_agent_session(source_db_type, source_pool_key, target_pool_key);
+    let use_agent_cursor = table_filter.is_none()
+        && uses_agent_transfer_cursor(source_db_type)
+        && !default_rows_only
+        && !xugu_same_session;
+    let agent_transfer_sql = use_agent_cursor.then(|| {
+        if *source_db_type == DatabaseType::Xugu {
+            xugu_transfer_cursor_sql(
+                &writable_columns,
+                table,
+                &request.source_schema,
+                request.source_catalog.as_deref(),
+            )
+        } else {
+            transfer_cursor_sql(
+                &col_names,
+                table,
+                &request.source_schema,
+                source_db_type,
+                request.source_catalog.as_deref(),
+            )
+        }
     });
-    let mut hive_server_cursor = HiveServerTransferCursor::default();
+    let mut agent_cursor = AgentTransferCursor::default();
     // Key-less PostgreSQL heaps page by `ctid` windows instead of OFFSET: an
     // OFFSET page re-reads every row before it, so a ten-million-row table gets
     // slower as it runs and never finishes. Tables with a usable key keep the
@@ -11194,19 +12078,23 @@ where
                 return Err("Cancelled".to_string());
             }
 
-            let (mut result, mysql_spatial_markers) = if let Some(sql) = hive_server_transfer_sql.as_deref() {
+            let (mut result, mysql_spatial_markers) = if let Some(sql) = agent_transfer_sql.as_deref() {
                 (
-                    fetch_hive_server_transfer_batch(
-                        state,
-                        source_pool_key,
-                        request,
-                        sql,
-                        batch_size,
-                        &mut hive_server_cursor,
-                    )
-                    .await?,
+                    fetch_agent_transfer_batch(state, source_pool_key, request, sql, batch_size, &mut agent_cursor)
+                        .await?,
                     false,
                 )
+            } else if xugu_same_session && !default_rows_only {
+                let sql = xugu_transfer_page_sql(
+                    &writable_columns,
+                    table,
+                    &request.source_schema,
+                    request.source_catalog.as_deref(),
+                    &primary_key_columns,
+                    offset,
+                    batch_size,
+                );
+                (execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?, false)
             } else if let Some(pager) = ctid_pager.as_ref() {
                 let sql = pager.page_sql(&col_names, table, &request.source_schema, batch_size);
                 (execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?, false)
@@ -11376,21 +12264,57 @@ where
                 if ctid_scan_finished == Some(true) {
                     break;
                 }
-            } else if (use_hive_server_cursor && !has_more) || (!use_hive_server_cursor && row_count < batch_size) {
+            } else if (use_agent_cursor && !has_more) || (!use_agent_cursor && row_count < batch_size) {
                 break;
             }
         }
         Ok(())
     }
     .await;
-    close_hive_server_transfer_cursor(state, source_pool_key, &mut hive_server_cursor).await;
+    close_agent_transfer_cursor(state, source_pool_key, &mut agent_cursor).await;
     transfer_result?;
+
+    if *target_db_type == DatabaseType::Xugu && total_transferred > 0 {
+        sync_xugu_identity_sequences(
+            state,
+            target_pool_key,
+            &target_table,
+            &request.target_schema,
+            &write_col_names,
+            target_table_preexisting,
+        )
+        .await?;
+    }
 
     if pg_compat_transfer {
         for statement in generate_postgres_sequence_sync_sql(&columns, &target_table, &request.target_schema) {
             execute_on_pool(state, target_pool_key, &statement)
                 .await
                 .map_err(|e| format!("Failed to sync PostgreSQL sequence for {target_table}: {e}"))?;
+        }
+    }
+
+    // Oracle accepts explicit ids in a `GENERATED BY DEFAULT AS IDENTITY` column but
+    // does not advance the sequence, so move it past the copied values. Only for
+    // tables this run created — `START WITH LIMIT VALUE` requires the identity column
+    // the generated DDL just created, and a preexisting target may not have one.
+    // OceanBase Oracle and DM8 stay out until their behavior is verified.
+    if *target_db_type == DatabaseType::Oracle
+        && request.create_table
+        && !target_table_preexisting
+        && total_transferred > 0
+    {
+        for statement in oracle_identity_reseed_statements(
+            &columns,
+            &target_table,
+            &request.target_schema,
+            &request.source_schema,
+            source_db_type,
+            request.quote_target_column_names,
+        ) {
+            execute_on_pool(state, target_pool_key, &statement)
+                .await
+                .map_err(|e| format!("Failed to reseed the Oracle identity column for {target_table}: {e}"))?;
         }
     }
 
@@ -11735,6 +12659,7 @@ where
         known_foreign_keys,
         pending_fk_alters,
         preexisting_backup_names,
+        false,
         progress_callback,
         |_| {},
     )
@@ -11742,6 +12667,8 @@ where
     .map(|result| result.moved_rows)
 }
 
+/// Pass `target_cleared = true` for tables that [`clear_foreign_key_linked_overwrite_targets`]
+/// already emptied, so the overwrite clear is not repeated.
 #[allow(clippy::too_many_arguments)]
 pub async fn transfer_table_with_result<F, C>(
     state: &Arc<AppState>,
@@ -11755,6 +12682,7 @@ pub async fn transfer_table_with_result<F, C>(
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
     pending_fk_alters: &mut Vec<(String, String)>,
     preexisting_backup_names: Option<&HashMap<String, String>>,
+    target_cleared: bool,
     mut progress_callback: F,
     mut source_count_callback: C,
 ) -> Result<TransferTableResult, String>
@@ -11762,6 +12690,7 @@ where
     F: FnMut(TransferProgress),
     C: FnMut(Option<u64>),
 {
+    validate_transfer_database_pair(request, source_db_type, target_db_type)?;
     let state = state.clone();
     let request = request.clone();
     let table = table.to_string();
@@ -11799,6 +12728,7 @@ where
             &known_foreign_keys,
             &mut task_pending_fk_alters,
             preexisting_backup_names.as_ref(),
+            target_cleared,
             move |progress| {
                 try_send_transfer_progress(&progress_tx, progress);
             },
@@ -12694,6 +13624,7 @@ for line in sys.stdin:
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -12737,6 +13668,7 @@ for line in sys.stdin:
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
             docs_notes_path: None,
         }
@@ -13377,6 +14309,84 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
 
     mod transfer_validation_tests {
         use super::*;
+
+        fn base_request() -> TransferRequest {
+            TransferRequest {
+                transfer_id: "xugu-transfer-test".into(),
+                source_connection_id: "source".into(),
+                source_database: "SOURCE_DB".into(),
+                source_schema: "SOURCE_SCHEMA".into(),
+                source_catalog: None,
+                target_connection_id: "target".into(),
+                target_database: "TARGET_DB".into(),
+                target_schema: "TARGET_SCHEMA".into(),
+                target_catalog: None,
+                tables: vec!["ORDERS".into()],
+                create_table: true,
+                content: TransferContent::StructureAndData,
+                objects: None,
+                mode: TransferMode::Append,
+                target_table_name_case: TransferTableNameCase::Preserve,
+                quote_target_column_names: true,
+                ownership_policy: TransferOwnershipPolicy::Preserve,
+                batch_size: 1000,
+                table_filters: std::collections::HashMap::new(),
+                drop_target_before_create: false,
+                drop_target_confirmed: false,
+            }
+        }
+
+        #[test]
+        fn xugu_transfer_is_same_engine_table_only_and_append_or_overwrite() {
+            let request = base_request();
+            assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Xugu).is_ok());
+            // Existing non-Xugu transfer combinations retain their prior policy.
+            assert!(validate_transfer_database_pair(&request, &DatabaseType::Postgres, &DatabaseType::Mysql).is_ok());
+
+            let err =
+                validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Postgres).unwrap_err();
+            assert!(err.contains("虚谷到虚谷"), "{err}");
+            let err = validate_transfer_database_pair(&request, &DatabaseType::Mysql, &DatabaseType::Xugu).unwrap_err();
+            assert!(err.contains("虚谷到虚谷"), "{err}");
+
+            for mode in [TransferMode::Append, TransferMode::Overwrite] {
+                let request = TransferRequest { mode, ..request.clone() };
+                assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Xugu).is_ok());
+            }
+            let upsert = TransferRequest { mode: TransferMode::Upsert, ..request.clone() };
+            assert!(validate_transfer_database_pair(&upsert, &DatabaseType::Xugu, &DatabaseType::Xugu)
+                .unwrap_err()
+                .contains("追加或覆盖"));
+            let rebuild = TransferRequest { drop_target_before_create: true, ..request.clone() };
+            assert!(validate_transfer_database_pair(&rebuild, &DatabaseType::Xugu, &DatabaseType::Xugu).is_err());
+        }
+
+        #[test]
+        fn transfer_pair_requires_declared_endpoint_compatibility() {
+            let request = base_request();
+            let error = validate_transfer_database_pair(&request, &DatabaseType::Gbase, &DatabaseType::Mysql)
+                .expect_err("GBase data transfer is disabled in the shared manifest");
+            assert!(error.contains("gbase"));
+        }
+
+        #[test]
+        fn xugu_structure_transfer_rejects_renamed_tables_and_non_table_objects() {
+            let request = TransferRequest { target_table_name_case: TransferTableNameCase::Upper, ..base_request() };
+            assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Xugu)
+                .unwrap_err()
+                .contains("保留源表名"));
+
+            let request = TransferRequest {
+                objects: Some(vec![TransferObjectSelection {
+                    object_type: TransferObjectKind::View,
+                    names: vec!["V_ORDERS".into()],
+                }]),
+                ..base_request()
+            };
+            assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Xugu)
+                .unwrap_err()
+                .contains("仅支持表对象"));
+        }
 
         #[test]
         fn validates_content_and_object_rules() {
@@ -14789,6 +15799,114 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
     }
 
     #[test]
+    fn xugu_writable_transfer_columns_regenerate_rowversion_values() {
+        let columns =
+            vec![test_column("ID", "INTEGER"), test_column("RV", "ROWVERSION"), test_column("NOTE", "VARCHAR(40)")];
+
+        let writable = writable_transfer_columns(&columns, &DatabaseType::Xugu, &DatabaseType::Xugu);
+
+        assert_eq!(writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["ID", "NOTE"]);
+        assert!(is_xugu_non_insertable_transfer_column(&columns[1], &DatabaseType::Xugu, &DatabaseType::Xugu));
+        assert!(!is_xugu_non_insertable_transfer_column(&columns[1], &DatabaseType::Xugu, &DatabaseType::Postgres));
+        assert!(xugu_rowversion_only_transfer(&[columns[1].clone()], &DatabaseType::Xugu, &DatabaseType::Xugu));
+        assert!(!xugu_rowversion_only_transfer(&columns, &DatabaseType::Xugu, &DatabaseType::Xugu));
+    }
+
+    #[test]
+    fn xugu_identity_lookup_uses_serial_id_and_scopes_the_target_database() {
+        let sql = xugu_identity_sequences_sql("GUE'ST", "T'1");
+        assert!(sql.contains("c.SERIAL_ID=q.SEQ_ID"));
+        assert!(sql.contains("s.DB_ID=CURRENT_DB_ID"));
+        assert!(sql.contains("s.SCHEMA_NAME='GUE''ST'"));
+        assert!(sql.contains("t.TABLE_NAME='T''1'"));
+        assert!(sql.contains("c.IS_SERIAL=TRUE AND q.IS_SYS=TRUE"));
+        assert!(!sql.contains("UPPER("));
+    }
+
+    #[test]
+    fn xugu_identity_lookup_folds_case_only_as_a_fallback() {
+        let sql = xugu_identity_sequences_sql_case_insensitive("App", "Items");
+        assert!(sql.contains("UPPER(s.SCHEMA_NAME)=UPPER('App')"));
+        assert!(sql.contains("UPPER(t.TABLE_NAME)=UPPER('Items')"));
+        assert!(sql.contains("s.SCHEMA_NAME, t.TABLE_NAME"));
+    }
+
+    #[test]
+    fn xugu_identity_restart_restores_a_consumed_nextval_when_the_sequence_is_ahead() {
+        assert_eq!(xugu_identity_start_with(1, 50, None), Some(51));
+        assert_eq!(xugu_identity_start_with(1, 50, Some(20)), Some(51));
+        assert_eq!(xugu_identity_start_with(1, 50, Some(50)), Some(51));
+        assert_eq!(xugu_identity_start_with(1, 50, Some(100)), Some(100));
+        assert_eq!(xugu_identity_start_with(10, 100, Some(105)), Some(105));
+        assert_eq!(xugu_identity_start_with(-1, -5, Some(-10)), Some(-10));
+        assert_eq!(xugu_identity_start_with(-1, -5, Some(-3)), Some(-6));
+        assert_eq!(xugu_identity_start_with(1, i64::MAX, None), None);
+    }
+
+    #[test]
+    fn xugu_spatial_columns_cover_geometry_modifiers_but_not_ordinary_types() {
+        assert!(is_xugu_spatial_column_type("GEOMETRY"));
+        assert!(is_xugu_spatial_column_type("geometry(PointZ,4326)"));
+        assert!(is_xugu_spatial_column_type("GEOGRAPHY"));
+        assert!(is_xugu_spatial_column_type("BOX2D"));
+        assert!(is_xugu_spatial_column_type("BOX3D"));
+        assert!(!is_xugu_spatial_column_type("VARCHAR(40)"));
+        assert!(!is_xugu_spatial_column_type("BLOB"));
+        let columns = vec![test_column("ID", "INTEGER"), test_column("G", "geometry(Point,3857)")];
+        assert!(xugu_columns_include_spatial(&columns));
+        assert!(!xugu_columns_include_spatial(&[test_column("ID", "INTEGER")]));
+    }
+
+    #[test]
+    fn xugu_same_session_pages_without_holding_the_agent_cursor() {
+        assert!(xugu_transfer_shares_agent_session(&DatabaseType::Xugu, "conn:SYSTEM", "conn:SYSTEM"));
+        assert!(!xugu_transfer_shares_agent_session(&DatabaseType::Xugu, "conn:SYSTEM", "conn:GIS"));
+        assert!(!xugu_transfer_shares_agent_session(&DatabaseType::Postgres, "conn", "conn"));
+        let sql = xugu_transfer_page_sql(&[test_column("G", "GEOMETRY")], "SHAPES", "APP", None, &[], 1000, 1000);
+        assert!(sql.contains("ST_AsEWKB(\"G\")"));
+        assert!(sql.ends_with("LIMIT 1000 OFFSET 1000"));
+
+        // A primary key makes LIMIT/OFFSET paging deterministic; without one the
+        // plain projection keeps the previous behavior.
+        let keyed = xugu_transfer_page_sql(
+            &[test_column("ID", "INTEGER"), test_column("G", "GEOMETRY")],
+            "SHAPES",
+            "APP",
+            None,
+            &["ID".to_string()],
+            2000,
+            1000,
+        );
+        assert!(keyed.contains(" ORDER BY \"ID\" LIMIT 1000 OFFSET 2000"));
+    }
+
+    #[test]
+    fn xugu_rowversion_only_transfer_inserts_default_rows() {
+        let batches = generate_insert_typed_sql_batches_for_transfer(
+            &[],
+            &[],
+            &[Vec::new(), Vec::new()],
+            "VERSIONS",
+            "APP",
+            &DatabaseType::Xugu,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 1024, hard_sql_bytes: None },
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches,
+            vec![
+                ("INSERT INTO \"APP\".\"VERSIONS\" DEFAULT VALUES".into(), 1),
+                ("INSERT INTO \"APP\".\"VERSIONS\" DEFAULT VALUES".into(), 1),
+            ]
+        );
+    }
+
+    #[test]
     fn mysql_generated_only_transfer_requires_nonempty_same_engine_generated_metadata() {
         let generated = vec![
             db::ColumnInfo { extra: Some("STORED GENERATED".into()), ..test_column("a", "int") },
@@ -15581,6 +16699,22 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
     }
 
     #[test]
+    fn oceanbase_oracle_transfer_comments_preserve_quotes_and_skip_empty_values() {
+        let cols = vec![
+            db::ColumnInfo { comment: Some("名称's".to_string()), ..test_column("Name", "varchar2(100)") },
+            db::ColumnInfo { comment: Some("  ".to_string()), ..test_column("EMPTY", "varchar2(100)") },
+        ];
+        assert_eq!(
+            generate_comment_ddl(&cols, "Items", "APP", &DatabaseType::OceanbaseOracle, Some("项目表")),
+            vec![
+                "COMMENT ON TABLE \"APP\".\"Items\" IS '项目表'".to_string(),
+                "COMMENT ON COLUMN \"APP\".\"Items\".\"Name\" IS '名称''s'".to_string(),
+            ]
+        );
+        assert!(generate_comment_ddl(&[], "Items", "APP", &DatabaseType::OceanbaseOracle, Some(" ")).is_empty());
+    }
+
+    #[test]
     fn postgres_transfer_ddl_splits_reused_multi_statement_table_ddl() {
         let ddl =
             "CREATE TABLE \"public\".\"items\" (\"id\" integer);\nCOMMENT ON TABLE \"public\".\"items\" IS 'items';";
@@ -15687,6 +16821,291 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 "COMMENT ON COLUMN \"APP\".\"ITEMS\".\"NOTE\" IS 'line; two'".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn oracle_transfer_ddl_splits_reused_table_ddl_and_drops_triggers() {
+        let ddl = "\n  CREATE TABLE \"APP\".\"ORDERS\" (\"ID\" NUMBER, \"NOTE\" VARCHAR2(50));\n\n\
+                   CREATE INDEX \"APP\".\"ORDERS_NOTE_IX\" ON \"APP\".\"ORDERS\" (\"NOTE\");\n\n\
+                   CREATE OR REPLACE EDITIONABLE TRIGGER \"APP\".\"ORDERS_TRG\" BEFORE INSERT ON \"APP\".\"ORDERS\" FOR EACH ROW\n\
+                   BEGIN\n  IF :NEW.ID IS NULL THEN SELECT \"APP\".\"ORDERS_SEQ\".NEXTVAL INTO :NEW.ID FROM DUAL; END IF;\nEND;\n\
+                   ALTER TRIGGER \"APP\".\"ORDERS_TRG\" ENABLE;\n\n\
+                   COMMENT ON TABLE \"APP\".\"ORDERS\" IS 'trigger; orders';";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Oracle);
+
+        assert_eq!(
+            statements,
+            vec![
+                "CREATE TABLE \"APP\".\"ORDERS\" (\"ID\" NUMBER, \"NOTE\" VARCHAR2(50))".to_string(),
+                "CREATE INDEX \"APP\".\"ORDERS_NOTE_IX\" ON \"APP\".\"ORDERS\" (\"NOTE\")".to_string(),
+                "COMMENT ON TABLE \"APP\".\"ORDERS\" IS 'trigger; orders'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_trigger_statement_detection_ignores_other_ddl() {
+        assert!(is_oracle_trigger_statement("CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN NULL; END;"));
+        assert!(is_oracle_trigger_statement("create or replace noneditionable trigger \"T\" ..."));
+        assert!(is_oracle_trigger_statement("\n  ALTER TRIGGER \"APP\".\"T\" ENABLE"));
+        assert!(!is_oracle_trigger_statement("CREATE TABLE \"TRIGGER_LOG\" (\"ID\" NUMBER)"));
+        assert!(!is_oracle_trigger_statement("COMMENT ON TABLE \"T\" IS 'CREATE TRIGGER x'"));
+        assert!(!is_oracle_trigger_statement("ALTER TABLE \"T\" DISABLE ALL TRIGGERS"));
+    }
+
+    #[test]
+    fn oracle_object_ddl_splits_trigger_enable_statement_for_oracle_targets() {
+        let ddl = "\n  CREATE OR REPLACE EDITIONABLE TRIGGER \"APP\".\"ORDERS_TRG\" BEFORE INSERT ON \"APP\".\"ORDERS\" FOR EACH ROW\n\
+                   BEGIN\n  NULL;\nEND;\n\
+                   ALTER TRIGGER \"APP\".\"ORDERS_TRG\" ENABLE";
+
+        let statements = oracle_object_ddl_statements(ddl, &TransferObjectKind::Trigger, &DatabaseType::Oracle);
+
+        assert_eq!(statements.len(), 2, "{statements:#?}");
+        assert!(statements[0].starts_with("CREATE OR REPLACE EDITIONABLE TRIGGER"));
+        assert!(statements[0].ends_with("END;"));
+        assert_eq!(statements[1], "ALTER TRIGGER \"APP\".\"ORDERS_TRG\" ENABLE");
+        assert_eq!(
+            oracle_object_ddl_statements(ddl, &TransferObjectKind::Trigger, &DatabaseType::Dameng),
+            vec![ddl.to_string()]
+        );
+    }
+
+    // Only trigger DDL carries a trailing statement; other object DDL must reach the
+    // target exactly as `DBMS_METADATA` returned it, never cut at inner semicolons.
+    #[test]
+    fn oracle_object_ddl_keeps_non_trigger_objects_whole() {
+        let cases = [
+            (
+                TransferObjectKind::Procedure,
+                "\n  CREATE OR REPLACE EDITIONABLE PROCEDURE \"APP\".\"P\" AS\n  PROCEDURE inner_p IS BEGIN NULL; END;\nBEGIN\n  inner_p;\nEND;",
+            ),
+            (
+                TransferObjectKind::Function,
+                "\n  CREATE OR REPLACE EDITIONABLE FUNCTION \"APP\".\"F\" RETURN NUMBER AS\n  FUNCTION g RETURN NUMBER IS BEGIN RETURN 1; END g;\nBEGIN\n  RETURN g;\nEND;",
+            ),
+            (
+                TransferObjectKind::View,
+                "\n  CREATE OR REPLACE FORCE EDITIONABLE VIEW \"APP\".\"V\" AS WITH FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END; SELECT f FROM dual",
+            ),
+        ];
+
+        for (kind, ddl) in cases {
+            assert_eq!(
+                oracle_object_ddl_statements(ddl, &kind, &DatabaseType::Oracle),
+                vec![ddl.to_string()],
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn oracle_object_ddl_splits_compound_trigger_enable_statement() {
+        let trigger =
+            "CREATE OR REPLACE EDITIONABLE TRIGGER \"APP\".\"T\" FOR INSERT ON \"APP\".\"X\" COMPOUND TRIGGER\n  \
+                       BEFORE EACH ROW IS BEGIN NULL; END BEFORE EACH ROW;\nEND \"T\";";
+        let ddl = format!("\n  {trigger}\nALTER TRIGGER \"APP\".\"T\" ENABLE");
+
+        assert_eq!(
+            oracle_object_ddl_statements(&ddl, &TransferObjectKind::Trigger, &DatabaseType::Oracle),
+            vec![trigger.to_string(), "ALTER TRIGGER \"APP\".\"T\" ENABLE".to_string()]
+        );
+    }
+
+    #[test]
+    fn oracle_transfer_ddl_drops_compound_trigger_whole() {
+        let ddl = "\n  CREATE TABLE \"APP\".\"X\" (\"ID\" NUMBER);\n\n\
+                   CREATE OR REPLACE EDITIONABLE TRIGGER \"APP\".\"T\" FOR INSERT ON \"APP\".\"X\" COMPOUND TRIGGER\n  \
+                   BEFORE EACH ROW IS BEGIN NULL; END BEFORE EACH ROW;\nEND \"T\";\n\
+                   ALTER TRIGGER \"APP\".\"T\" ENABLE;";
+
+        assert_eq!(
+            transfer_ddl_statements(ddl, &DatabaseType::Oracle),
+            vec!["CREATE TABLE \"APP\".\"X\" (\"ID\" NUMBER)".to_string()]
+        );
+    }
+
+    #[test]
+    fn xugu_transfer_ddl_splits_table_constraints_indexes_and_comments() {
+        let ddl = "CREATE TABLE \"APP\".\"ITEMS\" (\"ID\" INTEGER, \"NOTE\" VARCHAR(100));\n\
+                   ALTER TABLE \"APP\".\"ITEMS\" ADD CONSTRAINT \"ITEMS_PK\" PRIMARY KEY (\"ID\");\n\
+                   CREATE INDEX \"ITEMS_NOTE_IDX\" ON \"APP\".\"ITEMS\" (\"NOTE\");\n\
+                   COMMENT ON TABLE \"APP\".\"ITEMS\" IS 'semi;colon';";
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Xugu);
+        assert_eq!(statements.len(), 4, "{statements:#?}");
+        assert!(statements[0].starts_with("CREATE TABLE"));
+        assert!(statements[1].starts_with("ALTER TABLE"));
+        assert!(statements[2].starts_with("CREATE INDEX"));
+        assert_eq!(statements[3], "COMMENT ON TABLE \"APP\".\"ITEMS\" IS 'semi;colon'");
+    }
+
+    #[test]
+    fn xugu_reused_ddl_rewrites_schema_only_in_code_spans() {
+        let ddl = "CREATE TABLE \"SRC\".\"ITEMS\" (\"NOTE\" VARCHAR(100) DEFAULT '\"SRC\".ITEMS');\n\
+                    ALTER TABLE \"SRC\".\"ITEMS\" ADD CONSTRAINT \"ITEMS_PK\" PRIMARY KEY (\"ID\");\n\
+                    CREATE INDEX \"ITEMS_NOTE_IDX\" ON \"SRC\".\"ITEMS\" (\"NOTE\");\n\
+                    -- \"SRC\".\"ITEMS\" remains in this comment";
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "SRC",
+            "DST",
+            &DatabaseType::Xugu,
+            &DatabaseType::Xugu,
+            "ITEMS",
+            "ITEMS",
+        )
+        .unwrap();
+        assert!(rewritten.contains("CREATE TABLE \"DST\".\"ITEMS\""));
+        assert!(rewritten.contains("ALTER TABLE \"DST\".\"ITEMS\""));
+        assert!(rewritten.contains("ON \"DST\".\"ITEMS\""));
+        assert!(rewritten.contains("DEFAULT '\"SRC\".ITEMS'"));
+        assert!(rewritten.contains("-- \"SRC\".\"ITEMS\" remains in this comment"));
+        assert!(can_reuse_source_table_ddl(&DatabaseType::Xugu, &DatabaseType::Xugu, None, None, true));
+        assert!(!can_reuse_source_table_ddl(&DatabaseType::Xugu, &DatabaseType::Xugu, None, None, false));
+    }
+
+    #[test]
+    fn xugu_transfer_reads_source_rows_through_agent_cursor() {
+        assert!(uses_agent_transfer_cursor(&DatabaseType::Xugu));
+        assert!(!uses_agent_transfer_cursor(&DatabaseType::Postgres));
+        assert!(!uses_agent_transfer_cursor(&DatabaseType::Mysql));
+    }
+
+    #[test]
+    fn xugu_transfer_cursor_projects_lossy_driver_types_as_text_or_hex() {
+        let columns = vec![
+            test_column("ID", "INTEGER"),
+            test_column("BLOB_C", "BLOB"),
+            db::ColumnInfo { character_maximum_length: Some(8), ..test_column("BIT_C", "BIT(8)") },
+            test_column("VARBIT_C", "VARBIT"),
+            test_column("TIME_C", "TIME"),
+            test_column("TIME_TZ_C", "TIME WITH TIME ZONE"),
+            test_column("IV_YM_C", "INTERVAL YEAR TO MONTH"),
+            test_column("NOTE", "VARCHAR(40)"),
+        ];
+
+        assert_eq!(
+            xugu_transfer_cursor_sql(&columns, "ITEMS", "APP", None),
+            r#"SELECT "ID" AS "ID", CASE WHEN "BLOB_C" IS NULL THEN NULL ELSE '0x'||RAWTOHEX("BLOB_C") END AS "BLOB_C", RTRIM(CAST("BIT_C" AS VARCHAR(8))) AS "BIT_C", RTRIM(CAST("VARBIT_C" AS VARCHAR(32767))) AS "VARBIT_C", CAST("TIME_C" AS VARCHAR(64)) AS "TIME_C", CAST("TIME_TZ_C" AS VARCHAR(256)) AS "TIME_TZ_C", CAST("IV_YM_C" AS VARCHAR(256)) AS "IV_YM_C", "NOTE" AS "NOTE" FROM "APP"."ITEMS""#
+        );
+    }
+
+    #[test]
+    fn xugu_transfer_cursor_preserves_spatial_srid_dimensions_and_box_values() {
+        let columns = vec![
+            test_column("G", "geometry(PointZ,4326)"),
+            test_column("GG", "GEOGRAPHY"),
+            test_column("B2", "BOX2D"),
+            test_column("B3", "BOX3D"),
+        ];
+        assert_eq!(
+            xugu_transfer_cursor_sql(&columns, "SHAPES", "APP", None),
+            r#"SELECT CASE WHEN "G" IS NULL THEN NULL ELSE '0x'||RAWTOHEX(ST_AsEWKB("G")) END AS "G", CASE WHEN "GG" IS NULL THEN NULL ELSE '0x'||RAWTOHEX(ST_AsEWKB(CAST("GG" AS GEOMETRY))) END AS "GG", CASE WHEN "B2" IS NULL THEN NULL ELSE '0x'||RAWTOHEX(ST_AsEWKB(CAST("B2" AS GEOMETRY))) END AS "B2", CASE WHEN "B3" IS NULL THEN NULL ELSE '0x'||RAWTOHEX(ST_AsEWKB(CAST("B3" AS GEOMETRY))) END AS "B3" FROM "APP"."SHAPES""#
+        );
+    }
+
+    #[test]
+    fn xugu_spatial_insert_restores_ewkb_only_for_valid_typed_hex_values() {
+        let hex = "0101000020110F0000000000000000F03F0000000000000040";
+        let geometry = format!("ST_GeomFromEWKB(HEXTORAW('{hex}'))");
+        for column_type in ["GEOMETRY", "geometry(Point,3857)"] {
+            assert_eq!(
+                escape_value_typed(&json!(format!("0x{hex}")), &DatabaseType::Xugu, Some(column_type)),
+                geometry
+            );
+        }
+        for column_type in ["GEOGRAPHY", "BOX2D", "BOX3D"] {
+            assert_eq!(
+                escape_value_typed(&json!(format!("0X{hex}")), &DatabaseType::Xugu, Some(column_type)),
+                format!("CAST({geometry} AS {column_type})")
+            );
+            assert_eq!(escape_value_typed(&json!(null), &DatabaseType::Xugu, Some(column_type)), "NULL");
+        }
+        for value in ["0x", "0x123", "0xZZ", "0x00');DROP TABLE T;--", "POINT(1 2)"] {
+            assert_eq!(format_xugu_typed_sql_literal(value, &DatabaseType::Xugu, Some("GEOMETRY")), None);
+        }
+        assert_eq!(
+            escape_value_typed(&json!("0x00');DROP TABLE T;--"), &DatabaseType::Xugu, Some("BOX3D")),
+            "'0x00'');DROP TABLE T;--'"
+        );
+        // No spatial SQL specialization leaks into another database or a
+        // non-spatial Xugu column containing the same text.
+        assert_eq!(format_xugu_typed_sql_literal(&format!("0x{hex}"), &DatabaseType::Postgres, Some("GEOMETRY")), None);
+        assert_eq!(escape_value_typed(&json!("0x00"), &DatabaseType::Xugu, Some("VARCHAR(10)")), "'0x00'");
+    }
+
+    #[test]
+    fn xugu_insert_uses_typed_literals_only_for_bit_interval_and_plain_time_values() {
+        assert_eq!(escape_value_typed(&json!("10101010"), &DatabaseType::Xugu, Some("BIT(8)")), "B'10101010'");
+        assert_eq!(escape_value_typed(&json!("101101"), &DatabaseType::Xugu, Some("VARBIT")), "B'101101'");
+        assert_eq!(escape_value_typed(&json!(""), &DatabaseType::Xugu, Some("BIT VARYING")), "B''");
+        assert_eq!(
+            escape_value_typed(&json!("5-7"), &DatabaseType::Xugu, Some("INTERVAL YEAR TO MONTH")),
+            "INTERVAL '5-7' YEAR TO MONTH"
+        );
+        assert_eq!(
+            escape_value_typed(&json!("2 3:04:05.123"), &DatabaseType::Xugu, Some("INTERVAL DAY(3) TO SECOND(6)")),
+            "INTERVAL '2 3:04:05.123' DAY(3) TO SECOND(6)"
+        );
+        assert_eq!(
+            escape_value_typed(&json!("17:30:29+08:00"), &DatabaseType::Xugu, Some("TIME WITH TIME ZONE")),
+            "'17:30:29+08:00'"
+        );
+        assert_eq!(
+            escape_value_typed(&json!("23:59:59.123"), &DatabaseType::Xugu, Some("TIME")),
+            "CAST('23:59:59.123' AS TIME)"
+        );
+        assert_eq!(
+            escape_value_typed(
+                &json!("2026-10-08 17:30:29+08:00"),
+                &DatabaseType::Xugu,
+                Some("DATETIME WITH TIME ZONE")
+            ),
+            "'2026-10-08 17:30:29+08:00'"
+        );
+        assert_eq!(
+            escape_value_typed(&json!("2026-10-08 17:30:29"), &DatabaseType::Xugu, Some("DATETIME")),
+            "'2026-10-08 17:30:29'"
+        );
+        // These SQL literal specializations are intentionally Xugu-only.
+        assert_eq!(escape_value_typed(&json!("10101010"), &DatabaseType::Postgres, Some("BIT(8)")), "'10101010'");
+        assert_eq!(escape_value_typed(&json!("23:59:59.123"), &DatabaseType::Postgres, Some("TIME")), "'23:59:59.123'");
+    }
+
+    #[test]
+    fn xugu_interval_cast_values_are_normalized_to_the_declared_qualifier() {
+        let cases = [
+            ("5-0", "INTERVAL YEAR", "INTERVAL '5' YEAR"),
+            ("5-7", "INTERVAL YEAR TO MONTH", "INTERVAL '5-7' YEAR TO MONTH"),
+            ("0-8", "INTERVAL MONTH", "INTERVAL '8' MONTH"),
+            ("12 0:00:00", "INTERVAL DAY", "INTERVAL '12' DAY"),
+            ("1 2:00:00", "INTERVAL DAY TO HOUR", "INTERVAL '1 2' DAY TO HOUR"),
+            ("1 2:03:00", "INTERVAL DAY TO MINUTE", "INTERVAL '1 2:03' DAY TO MINUTE"),
+            ("1 02:03:04.123000", "INTERVAL DAY TO SECOND", "INTERVAL '1 02:03:04.123000' DAY TO SECOND"),
+            ("50:00:00", "INTERVAL HOUR", "INTERVAL '50' HOUR"),
+            ("50:03:00", "INTERVAL HOUR TO MINUTE", "INTERVAL '50:03' HOUR TO MINUTE"),
+            ("50:03:04.123000", "INTERVAL HOUR TO SECOND", "INTERVAL '50:03:04.123000' HOUR TO SECOND"),
+            ("1:40:00", "INTERVAL MINUTE", "INTERVAL '100' MINUTE"),
+            ("1:40:03.123000", "INTERVAL MINUTE TO SECOND", "INTERVAL '100:03.123000' MINUTE TO SECOND"),
+            ("0:00:45.123000", "INTERVAL SECOND", "INTERVAL '45.123000' SECOND"),
+            ("-5-0", "INTERVAL YEAR", "INTERVAL '-5' YEAR"),
+            ("-2-8", "INTERVAL MONTH", "INTERVAL '-32' MONTH"),
+            ("+0-0", "INTERVAL MONTH", "INTERVAL '+0' MONTH"),
+            ("-50:03:00", "INTERVAL MINUTE", "INTERVAL '-3003' MINUTE"),
+            ("-1:40:03.123000", "INTERVAL MINUTE TO SECOND", "INTERVAL '-100:03.123000' MINUTE TO SECOND"),
+            ("50:03:04.123000", "INTERVAL SECOND(6)", "INTERVAL '180184.123000' SECOND(6)"),
+            ("5-7", "INTERVAL YEAR", "INTERVAL '5-7' YEAR"),
+            ("1:40:03", "INTERVAL MINUTE", "INTERVAL '1:40:03' MINUTE"),
+        ];
+
+        for (value, column_type, expected) in cases {
+            assert_eq!(
+                escape_value_typed(&json!(value), &DatabaseType::Xugu, Some(column_type)),
+                expected,
+                "{column_type}"
+            );
+        }
     }
 
     #[test]
@@ -15920,6 +17339,157 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
         assert!(rewritten.contains("PARTITION BY RANGE (TO_DAYS(`created_day`))"));
         assert!(rewritten.contains("ENGINE=InnoDB"));
         assert!(!rewritten.contains("`orders_plain`"));
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_rewrites_schema_qualifier_in_head_and_foreign_keys() {
+        // Issue #11533: the reused DDL kept `[src].` so the CREATE TABLE ran
+        // against the source schema — same-database transfers failed with 2714
+        // and cross-database ones either errored (2760) or silently created
+        // the table in a stray source-named schema.
+        let ddl = "CREATE TABLE [src].[DBXE_PARENT] (\n  [ID] int NOT NULL,\n  [NAME] nvarchar(50) NOT NULL,\n  CONSTRAINT [PK_DBXE_PARENT] PRIMARY KEY ([ID])\n);\nCREATE TABLE [src].[DBXE_CHILD] (\n  [ID] int NOT NULL,\n  [PARENT_ID] int NOT NULL,\n  CONSTRAINT [FK_DBXE_CHILD_PARENT] FOREIGN KEY ([PARENT_ID]) REFERENCES [src].[DBXE_PARENT]([ID])\n);";
+
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "src",
+            "dst",
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            "DBXE_PARENT",
+            "DBXE_PARENT",
+        )
+        .unwrap();
+
+        assert!(rewritten.contains("CREATE TABLE [dst].[DBXE_PARENT] ("), "head: {rewritten}");
+        assert!(rewritten.contains("CREATE TABLE [dst].[DBXE_CHILD] ("), "child head: {rewritten}");
+        assert!(rewritten.contains("REFERENCES [dst].[DBXE_PARENT]([ID])"), "fk: {rewritten}");
+        assert!(!rewritten.contains("[src]."), "no source qualifier may remain: {rewritten}");
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_keeps_cross_schema_references_and_literals() {
+        let ddl = "CREATE TABLE [src].[child] (\n  [note] nvarchar(50) NOT NULL DEFAULT 'mirrors [src].[keep]',\n  [ref_id] int NOT NULL,\n  CONSTRAINT [fk_other] FOREIGN KEY ([ref_id]) REFERENCES [other].[target]([id])\n);";
+
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "src",
+            "dst",
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            "child",
+            "child",
+        )
+        .unwrap();
+
+        assert!(rewritten.contains("CREATE TABLE [dst].[child] ("), "head: {rewritten}");
+        // A third-party table referenced from another schema must not be
+        // repointed at the target schema, where it does not exist.
+        assert!(rewritten.contains("REFERENCES [other].[target]([id])"), "cross-schema ref: {rewritten}");
+        // String literals keep their original text.
+        assert!(rewritten.contains("'mirrors [src].[keep]'"), "literal: {rewritten}");
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_preserves_identity_and_escaped_brackets() {
+        // Same schema on both sides: the DDL is reused verbatim.
+        assert_eq!(
+            rewrite_transfer_source_table_ddl(
+                "CREATE TABLE [dbo].[t] ([id] int);",
+                "dbo",
+                "dbo",
+                &DatabaseType::SqlServer,
+                &DatabaseType::SqlServer,
+                "t",
+                "t"
+            ),
+            Some("CREATE TABLE [dbo].[t] ([id] int);".to_string())
+        );
+        // A schema name containing `]` appears in the DDL with its escaped
+        // form (`]` doubled inside brackets) and is rewritten as a whole.
+        let rewritten = rewrite_transfer_source_table_ddl(
+            "CREATE TABLE [we]]ird].[t] ([id] int);",
+            "we]ird",
+            "plain",
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            "t",
+            "t",
+        )
+        .unwrap();
+        assert_eq!(rewritten, "CREATE TABLE [plain].[t] ([id] int);");
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_retargets_generated_table_and_column_comments() {
+        let columns = vec![db::ColumnInfo {
+            name: "src".into(),
+            data_type: "nvarchar(50)".into(),
+            comment: Some("column src [src]. C:\\".into()),
+            ..Default::default()
+        }];
+        let ddl =
+            crate::schema::render_sqlserver_table_ddl("src", "src", &columns, &[], &[], Some("table's src [src]."));
+        let rewritten = rewrite_sqlserver_bracketed_schema_qualifier(&ddl, "src", "dst'雪]");
+
+        assert!(rewritten.contains("CREATE TABLE [dst'雪]]].[src]"), "{rewritten}");
+        assert_eq!(rewritten.matches("@level0name=N'dst''雪]'").count(), 2, "{rewritten}");
+        assert!(rewritten.contains("@value=N'table''s src [src].'"), "{rewritten}");
+        assert!(rewritten.contains("@value=N'column src [src]. C:\\'"), "{rewritten}");
+        assert_eq!(rewritten.matches("@level1name=N'src'").count(), 2, "{rewritten}");
+        assert!(rewritten.contains("@level2name=N'src'"), "{rewritten}");
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_keeps_windows_defaults_and_rewrites_later_qualifiers() {
+        let ddl = "CREATE TABLE [src].[child] (\n  [path] nvarchar(50) DEFAULT ('C:\\'),\n  [note] nvarchar(50) DEFAULT (N'it''s [src]. C:\\'),\n  [id] int,\n  FOREIGN KEY ([id]) REFERENCES [src].[parent]([id])\n);\nCREATE INDEX [ix] ON [src].[child] ([id]);";
+        let expected = ddl
+            .replace("CREATE TABLE [src].", "CREATE TABLE [dst].")
+            .replace("REFERENCES [src].", "REFERENCES [dst].")
+            .replace("ON [src].", "ON [dst].");
+        assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(ddl, "src", "dst"), expected);
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_handles_schema_token_characters_and_comment_owners() {
+        for source_schema in ["sales#old", "o'connor", "we]ird", "other[src", "we--ird", "we/*ird", "雪#'[]"] {
+            let source_identifier = format!("[{}]", source_schema.replace(']', "]]"));
+            let source_literal = format!("N'{}'", source_schema.replace('\'', "''"));
+            let ddl = format!("CREATE TABLE {source_identifier}.[t] ([id] int);\nEXEC sys.sp_addextendedproperty @name=N'MS_Description', @value={source_literal}, @level0type=N'SCHEMA', @level0name={source_literal}, @level1type=N'TABLE', @level1name=N't';");
+            let rewritten = rewrite_sqlserver_bracketed_schema_qualifier(&ddl, source_schema, "dst");
+            let expected = ddl
+                .replace(&format!("CREATE TABLE {source_identifier}."), "CREATE TABLE [dst].")
+                .replace(&format!("@level0name={source_literal}"), "@level0name=N'dst'");
+            assert_eq!(rewritten, expected, "source schema: {source_schema}");
+        }
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_preserves_nested_comments_and_whole_third_party_identifiers() {
+        let ddl = "/* outer /* inner */ [src].[comment] ' # */\n-- [src].[line]\rCREATE TABLE [src] /* [src]. */ . [child] (\n  [name#'/*[src]]] int,\n  [other] int,\n  [note] nvarchar(50) DEFAULT '/* [src]. */',\n  FOREIGN KEY ([other]) REFERENCES [other[src].[parent]([id]),\n  FOREIGN KEY ([name#'/*[src]]]) REFERENCES [other]]src].[parent]([id])\n);";
+        let expected = ddl.replace("CREATE TABLE [src]", "CREATE TABLE [dst]");
+        assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(ddl, "src", "dst"), expected);
+    }
+
+    #[test]
+    fn sqlserver_reused_ddl_rewrites_only_generated_extended_property_schema_arguments() {
+        let generated = "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'src', @level0type=N'SCHEMA', @level0name=N'src', @level1type=N'TABLE', @level1name=N'src';";
+        for unrelated in [
+            generated.replace("sys.sp_addextendedproperty", "dbo.sp_addextendedproperty"),
+            generated.replace("sp_addextendedproperty", "sp_updateextendedproperty"),
+            generated.replace("N'MS_Description'", "N'OtherProperty'"),
+            generated.replace("N'SCHEMA'", "N'USER'"),
+            generated.replace("N'TABLE'", "N'VIEW'"),
+            format!("/* {generated} */"),
+            format!("SELECT N'{}';", generated.replace('\'', "''")),
+        ] {
+            assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(&unrelated, "src", "dst"), unrelated);
+        }
+        assert_eq!(
+            rewrite_sqlserver_bracketed_schema_qualifier(generated, "src", "dst"),
+            generated.replace("@level0name=N'src'", "@level0name=N'dst'")
+        );
+        assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(generated, "src", "src"), generated);
+        assert_eq!(rewrite_sqlserver_bracketed_schema_qualifier(generated, "", "dst"), generated);
     }
 
     #[test]
@@ -17524,6 +19094,31 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
     }
 
     #[test]
+    fn oracle_identity_reseed_targets_generated_identity_columns() {
+        let columns = vec![
+            db::ColumnInfo {
+                is_primary_key: true,
+                extra: Some("auto_increment".to_string()),
+                ..test_column("id", "int")
+            },
+            // Not a key on the source: the generated DDL keeps it a plain column.
+            db::ColumnInfo { extra: Some("auto_increment".to_string()), ..test_column("ticket", "int") },
+            // Plain integer primary key without an explicit auto-increment stays plain.
+            db::ColumnInfo { is_primary_key: true, ..test_column("tenant", "int") },
+        ];
+
+        let statements =
+            oracle_identity_reseed_statements(&columns, "users", "SALES", "source", &DatabaseType::Mysql, true);
+
+        assert_eq!(
+            statements,
+            vec![
+                "ALTER TABLE \"SALES\".\"users\" MODIFY \"id\" GENERATED BY DEFAULT AS IDENTITY (START WITH LIMIT VALUE)".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn postgres_sequence_sync_sql_casts_text_and_numeric_columns_to_bigint() {
         let sql = generate_postgres_sequence_sync_sql(
             &[
@@ -18238,14 +19833,21 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
     #[test]
     fn xugu_insert_formats_prefixed_hex_for_binary_and_blob() {
         let sql = generate_insert_typed(
-            &[String::from("id"), String::from("binary_payload"), String::from("blob_payload"), String::from("note")],
+            &[
+                String::from("id"),
+                String::from("binary_payload"),
+                String::from("blob_payload"),
+                String::from("empty_blob"),
+                String::from("note"),
+            ],
             &[
                 Some(String::from("integer")),
                 Some(String::from("BINARY")),
                 Some(String::from("BLOB")),
+                Some(String::from("BLOB")),
                 Some(String::from("varchar(64)")),
             ],
-            &[vec![json!(1), json!("0x0001ABff"), json!("0X1020"), json!("0x0001ABff")]],
+            &[vec![json!(1), json!("0x0001ABff"), json!("0X1020"), json!("0x"), json!("0x0001ABff")]],
             "files",
             "AppSchema",
             &DatabaseType::Xugu,
@@ -18254,8 +19856,8 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
 
         assert_eq!(
             sql,
-            r#"INSERT INTO "AppSchema"."files" ("id", "binary_payload", "blob_payload", "note") VALUES
-(1, HEXTORAW('0001ABff'), HEXTORAW('1020'), '0x0001ABff')"#
+            r#"INSERT INTO "AppSchema"."files" ("id", "binary_payload", "blob_payload", "empty_blob", "note") VALUES
+(1, X'0001ABff', X'1020', X'', '0x0001ABff')"#
         );
     }
 
@@ -18441,6 +20043,87 @@ SELECT 1 FROM dual"#
             r#"INSERT INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES
 (1, 'Ada')"#
         );
+    }
+
+    #[test]
+    fn oracle_family_upsert_uses_merge_with_composite_keys_and_typed_values() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let sql = generate_upsert_typed(
+                &["ID".into(), "Kind".into(), "Name".into(), "CREATED".into(), "UPDATED".into(), "OPTIONAL".into()],
+                &[
+                    Some("NUMBER".into()),
+                    Some("VARCHAR2(30)".into()),
+                    Some("VARCHAR2(60)".into()),
+                    Some("DATE".into()),
+                    Some("DATE".into()),
+                    Some("VARCHAR2(30)".into()),
+                ],
+                &[
+                    vec![
+                        json!(1),
+                        json!("A"),
+                        json!("O'Brien"),
+                        json!("2026-10-09"),
+                        json!("2026-10-09 12:34:56"),
+                        serde_json::Value::Null,
+                    ],
+                    vec![
+                        json!(2),
+                        json!("B"),
+                        json!("新增"),
+                        serde_json::Value::Null,
+                        serde_json::Value::Null,
+                        serde_json::Value::Null,
+                    ],
+                ],
+                "Items",
+                "APP",
+                &database_type,
+                &["ID".into(), "Kind".into()],
+                None,
+            );
+            assert!(sql.starts_with("MERGE INTO \"APP\".\"Items\" t USING ("), "{database_type:?}: {sql}");
+            assert!(sql.contains("ON (t.\"ID\" = s.\"ID\" AND t.\"Kind\" = s.\"Kind\")"));
+            assert!(sql.contains("WHEN MATCHED THEN UPDATE SET t.\"Name\" = s.\"Name\", t.\"CREATED\" = s.\"CREATED\", t.\"UPDATED\" = s.\"UPDATED\", t.\"OPTIONAL\" = s.\"OPTIONAL\""));
+            assert!(sql.contains("'O''Brien' AS \"Name\""));
+            assert!(sql.contains("DATE '2026-10-09' AS \"CREATED\""));
+            assert!(sql.contains("TO_DATE('2026-10-09 12:34:56', 'YYYY-MM-DD HH24:MI:SS') AS \"UPDATED\""));
+            assert!(sql.contains("NULL AS \"OPTIONAL\""));
+            assert_eq!(sql.matches("FROM dual").count(), 2);
+            assert!(sql.contains(
+                "WHEN NOT MATCHED THEN INSERT (\"ID\", \"Kind\", \"Name\", \"CREATED\", \"UPDATED\", \"OPTIONAL\")"
+            ));
+        }
+    }
+
+    #[test]
+    fn oracle_family_upsert_limits_merge_batches_and_handles_key_only_rows() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            for (count, expected_counts) in [(0, vec![]), (1, vec![1]), (500, vec![500]), (501, vec![500, 1])] {
+                let rows = (1..=count).map(|index| vec![json!(index)]).collect::<Vec<_>>();
+                let statements = generate_transfer_write_sql_batches(
+                    &TransferMode::Upsert,
+                    &["ID".into()],
+                    &[Some("NUMBER".into())],
+                    &rows,
+                    "Items",
+                    "APP",
+                    &database_type,
+                    &["ID".into()],
+                    None,
+                    false,
+                    false,
+                )
+                .unwrap();
+                assert_eq!(statements.len(), expected_counts.len(), "{database_type:?} rows={count}");
+                for (sql, expected_count) in statements.iter().zip(expected_counts) {
+                    assert!(sql.starts_with("MERGE INTO \"APP\".\"Items\""), "{database_type:?}: {sql}");
+                    assert_eq!(sql.matches("FROM dual").count(), expected_count);
+                    assert!(!sql.contains("WHEN MATCHED"));
+                    assert!(sql.contains("WHEN NOT MATCHED THEN INSERT (\"ID\") VALUES (s.\"ID\")"));
+                }
+            }
+        }
     }
 
     #[test]
@@ -19125,6 +20808,7 @@ SELECT 1 FROM dual"#
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -19168,6 +20852,7 @@ SELECT 1 FROM dual"#
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         };
         let mut gbase_jdbc = config.clone();
@@ -19675,6 +21360,165 @@ SELECT 1 FROM dual"#
             generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Sqlite, &DatabaseType::Mysql, None, None);
 
         assert!(!ddl.contains("AUTO_INCREMENT"), "non-mysql target should not emit AUTO_INCREMENT: {ddl}");
+        // SQLite's `AUTOINCREMENT` is only valid inside an inline
+        // `INTEGER PRIMARY KEY`, which this generator cannot emit (primary keys are
+        // a table-level clause); the rowid alias already generates ids.
+        assert!(!ddl.contains("AUTOINCREMENT"), "sqlite: {ddl}");
+    }
+
+    #[test]
+    fn transfer_create_table_preserves_explicit_auto_increment_for_dameng() {
+        let cols = vec![db::ColumnInfo {
+            is_primary_key: true,
+            is_nullable: false,
+            extra: Some("auto_increment".to_string()),
+            ..test_column("id", "int")
+        }];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+
+        assert!(ddl.contains("\"id\" INTEGER IDENTITY(1,1) NOT NULL"), "ddl: {ddl}");
+        assert!(ddl.contains("PRIMARY KEY (\"id\")"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn transfer_create_table_preserves_explicit_auto_increment_for_sqlserver_and_oracle() {
+        let cols = vec![db::ColumnInfo {
+            is_primary_key: true,
+            is_nullable: false,
+            extra: Some("auto_increment".to_string()),
+            ..test_column("id", "int")
+        }];
+
+        let sqlserver = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "dbo",
+            &DatabaseType::SqlServer,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+        assert!(sqlserver.contains("[id] INT IDENTITY(1,1) NOT NULL"), "ddl: {sqlserver}");
+
+        for target in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let ddl =
+                generate_create_table_ddl(&cols, "users", "source", "SALES", &target, &DatabaseType::Mysql, None, None);
+            assert!(ddl.contains("GENERATED BY DEFAULT AS IDENTITY"), "{target:?}: {ddl}");
+            assert!(!ddl.contains("IDENTITY(1,1)"), "{target:?} must keep the Oracle spelling: {ddl}");
+        }
+    }
+
+    #[test]
+    fn transfer_create_table_does_not_invent_identity_for_plain_integer_primary_keys() {
+        // A source column without an auto-increment flag keeps its plain definition,
+        // and since DM8 allows only one identity column per table, a composite
+        // integer primary key must not collect an implicit clause either.
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("tenant", "int") },
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("code", "int") },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+
+        assert!(!ddl.contains("IDENTITY"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn transfer_create_table_emits_at_most_one_identity_clause() {
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("tenant", "int") },
+            db::ColumnInfo {
+                is_primary_key: true,
+                is_nullable: false,
+                extra: Some("auto_increment".to_string()),
+                ..test_column("id", "int")
+            },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+
+        assert_eq!(ddl.matches("IDENTITY(").count(), 1, "ddl: {ddl}");
+    }
+
+    #[test]
+    fn transfer_create_table_keeps_postgres_and_sqlite_auto_increment_outs() {
+        let cols = vec![db::ColumnInfo {
+            is_primary_key: true,
+            is_nullable: false,
+            extra: Some("auto_increment".to_string()),
+            ..test_column("id", "int")
+        }];
+
+        for target in [DatabaseType::Postgres, DatabaseType::Kingbase] {
+            let ddl = generate_create_table_ddl(
+                &cols,
+                "users",
+                "source",
+                "public",
+                &target,
+                &DatabaseType::Mysql,
+                None,
+                None,
+            );
+            assert!(!ddl.contains("IDENTITY"), "{target:?}: {ddl}");
+            assert!(!ddl.contains("nextval"), "{target:?}: {ddl}");
+        }
+
+        let sqlite =
+            generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Sqlite, &DatabaseType::Mysql, None, None);
+        assert!(!sqlite.contains("AUTOINCREMENT"), "sqlite: {sqlite}");
+        assert!(!sqlite.contains("AUTO_INCREMENT"), "sqlite: {sqlite}");
+    }
+
+    #[test]
+    fn transfer_create_table_keeps_databend_gbase_and_manticore_auto_increment_outs() {
+        // Databend spells auto-increment `AUTOINCREMENT`/`IDENTITY` and rejects
+        // MySQL's `AUTO_INCREMENT`; Gbase and ManticoreSearch stay on the plain
+        // path until their transfer DDL is verified. Only the transfer's own
+        // MySQL-family targets keep the clause.
+        let cols = vec![db::ColumnInfo {
+            is_primary_key: true,
+            is_nullable: false,
+            extra: Some("auto_increment".to_string()),
+            ..test_column("id", "int")
+        }];
+
+        for target in [DatabaseType::Databend, DatabaseType::Gbase, DatabaseType::ManticoreSearch] {
+            let ddl =
+                generate_create_table_ddl(&cols, "users", "source", "app", &target, &DatabaseType::Mysql, None, None);
+            assert!(!ddl.contains("AUTO_INCREMENT"), "{target:?}: {ddl}");
+            assert!(!ddl.contains("AUTOINCREMENT"), "{target:?}: {ddl}");
+            assert!(!ddl.contains("IDENTITY"), "{target:?}: {ddl}");
+        }
     }
 
     #[test]

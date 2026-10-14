@@ -1311,6 +1311,7 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 	precision := 10
 	scale := 2
 	zeroScale := 0
+	negativeScale := -2
 	byteUnit := "B"
 	charUnit := "C"
 
@@ -1325,6 +1326,17 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 		{name: "national character type ignores unit", column: columnInfo{DataType: "NVARCHAR2", CharacterMaximumLength: &charLen, CharacterLengthUnit: &charUnit}, want: "NVARCHAR2(64)"},
 		{name: "number scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &scale}, want: "NUMBER(10,2)"},
 		{name: "number zero scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &zeroScale}, want: "NUMBER(10)"},
+		{name: "number star scale", column: columnInfo{DataType: "NUMBER", NumericScale: &scale}, want: "NUMBER(*,2)"},
+		{name: "number star negative scale", column: columnInfo{DataType: "NUMBER", NumericScale: &negativeScale}, want: "NUMBER(*,-2)"},
+		{name: "number star zero scale", column: columnInfo{DataType: "NUMBER", NumericScale: &zeroScale}, want: "NUMBER(*,0)"},
+		{name: "number unknown", column: columnInfo{DataType: "NUMBER"}, want: "NUMBER"},
+		{name: "number negative scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &negativeScale}, want: "NUMBER(10,-2)"},
+		{name: "explicit number parameters", column: columnInfo{DataType: "NUMBER(12,-2)", NumericPrecision: &precision, NumericScale: &scale}, want: "NUMBER(12,-2)"},
+		{name: "explicit float parameters", column: columnInfo{DataType: "FLOAT(63)", NumericPrecision: &precision}, want: "FLOAT(63)"},
+		{name: "float precision", column: columnInfo{DataType: "FLOAT", NumericPrecision: &precision}, want: "FLOAT(10)"},
+		{name: "float unknown", column: columnInfo{DataType: "FLOAT"}, want: "FLOAT"},
+		{name: "binary float fixed precision", column: columnInfo{DataType: "BINARY_FLOAT", NumericPrecision: &precision}, want: "BINARY_FLOAT"},
+		{name: "binary double fixed precision", column: columnInfo{DataType: "BINARY_DOUBLE", NumericPrecision: &precision}, want: "BINARY_DOUBLE"},
 		{name: "timestamp preserves precision", column: columnInfo{DataType: "TIMESTAMP(6)"}, want: "TIMESTAMP(6)"},
 	}
 	for _, tt := range tests {
@@ -2344,6 +2356,30 @@ func TestOracleCompletionRoutinesQueryUsesPublicPackageMetadata(t *testing.T) {
 	wantArgs := []any{"HR", "PAYROLL", "CALC%"}
 	if !reflect.DeepEqual(query.Args, wantArgs) {
 		t.Fatalf("unexpected package completion args: %#v", query.Args)
+	}
+}
+
+func TestOracleCompletionRoutinesQueryIncludesSequences(t *testing.T) {
+	query := oracleCompletionRoutinesQuery(completionAssistantRequest{
+		Schema:       "HR",
+		ObjectKinds:  []string{"routine", "sequence"},
+		Mask:         "SEQ",
+		GlobalSearch: false,
+	}, "HR", 100)
+	sqlText := strings.ToUpper(query.SQL)
+	if !strings.Contains(sqlText, "'SEQUENCE'") {
+		t.Fatalf("routines query should include SEQUENCE when requested: %s", query.SQL)
+	}
+
+	seqOnlyQuery := oracleCompletionRoutinesQuery(completionAssistantRequest{
+		Schema:       "HR",
+		ObjectKinds:  []string{"sequence"},
+		Mask:         "SEQ",
+		GlobalSearch: false,
+	}, "HR", 100)
+	seqSQL := strings.ToUpper(seqOnlyQuery.SQL)
+	if !strings.Contains(seqSQL, "IN ('SEQUENCE')") {
+		t.Fatalf("sequence-only query should only include SEQUENCE: %s", seqOnlyQuery.SQL)
 	}
 }
 
@@ -3901,6 +3937,29 @@ func TestManualTransactionSkipsPerStatementSetSchema(t *testing.T) {
 	}
 }
 
+func TestManualTransactionCurrentSchemaUsesPinnedSession(t *testing.T) {
+	db, _ := openOracleManualTxTestDB(t)
+	// A second pooled session that never ran ALTER SESSION SET CURRENT_SCHEMA
+	// still reports the login user's schema.
+	db.SetMaxOpenConns(2)
+	s := newServer()
+	s.db = db
+
+	if err := s.beginManualTransaction("APP_TEST"); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	schema, err := s.normalizeSchema("")
+	if err != nil {
+		t.Fatalf("normalizeSchema: %v", err)
+	}
+	if schema != "APP_TEST" {
+		t.Fatalf("normalizeSchema(\"\") during manual tx = %q, want APP_TEST", schema)
+	}
+	if err := s.rollbackManualTransaction(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+}
+
 func TestManualTransactionDisconnectRollsBack(t *testing.T) {
 	db, driver := openOracleManualTxTestDB(t)
 	s := newServer()
@@ -4003,6 +4062,7 @@ func (d *oracleManualTxDriver) Open(string) (driver.Conn, error) {
 type oracleManualTxConn struct {
 	driver *oracleManualTxDriver
 	closed bool
+	schema string
 }
 
 func (c *oracleManualTxConn) Prepare(string) (driver.Stmt, error) {
@@ -4036,6 +4096,9 @@ func (c *oracleManualTxConn) ExecContext(_ context.Context, query string, _ []dr
 	c.driver.mu.Lock()
 	defer c.driver.mu.Unlock()
 	c.driver.execs = append(c.driver.execs, query)
+	if schema, ok := strings.CutPrefix(query, "ALTER SESSION SET CURRENT_SCHEMA = "); ok {
+		c.schema = strings.Trim(schema, `"`)
+	}
 	return driver.RowsAffected(1), nil
 }
 
@@ -4043,6 +4106,16 @@ func (c *oracleManualTxConn) QueryContext(_ context.Context, query string, _ []d
 	c.driver.mu.Lock()
 	defer c.driver.mu.Unlock()
 	c.driver.queries = append(c.driver.queries, query)
+	if strings.Contains(query, "'CURRENT_SCHEMA'") {
+		schema := c.schema
+		if schema == "" {
+			schema = "LOGIN_USER"
+		}
+		return &oracleManualTxRows{
+			columns: []string{"SCHEMA"},
+			values:  [][]driver.Value{{schema}},
+		}, nil
+	}
 	return &oracleManualTxRows{
 		columns: []string{"A"},
 		values:  [][]driver.Value{{int64(1)}},

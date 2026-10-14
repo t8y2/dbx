@@ -100,33 +100,37 @@ type completionAssistantResponse struct {
 }
 
 type queryResult struct {
-	Columns         []string `json:"columns"`
-	ColumnTypes     []string `json:"column_types"`
-	Rows            [][]any  `json:"rows"`
-	AffectedRows    int64    `json:"affected_rows"`
-	ExecutionTimeMS int64    `json:"execution_time_ms"`
-	Truncated       bool     `json:"truncated"`
+	Columns         []string       `json:"columns"`
+	ColumnTypes     []string       `json:"column_types"`
+	Rows            [][]any        `json:"rows"`
+	AffectedRows    int64          `json:"affected_rows"`
+	ExecutionTimeMS int64          `json:"execution_time_ms"`
+	Truncated       bool           `json:"truncated"`
+	Messages        []queryMessage `json:"messages,omitempty"`
 }
 
 type queryPageResult struct {
-	Columns         []string `json:"columns"`
-	ColumnTypes     []string `json:"column_types"`
-	Rows            [][]any  `json:"rows"`
-	AffectedRows    int64    `json:"affected_rows"`
-	ExecutionTimeMS int64    `json:"execution_time_ms"`
-	Truncated       bool     `json:"truncated"`
-	SessionID       *string  `json:"session_id"`
-	HasMore         bool     `json:"has_more"`
+	Columns         []string       `json:"columns"`
+	ColumnTypes     []string       `json:"column_types"`
+	Rows            [][]any        `json:"rows"`
+	AffectedRows    int64          `json:"affected_rows"`
+	ExecutionTimeMS int64          `json:"execution_time_ms"`
+	Truncated       bool           `json:"truncated"`
+	SessionID       *string        `json:"session_id"`
+	HasMore         bool           `json:"has_more"`
+	Messages        []queryMessage `json:"messages,omitempty"`
 }
 
 type querySession struct {
-	rows        *sql.Rows
-	conn        *sql.Conn
-	columns     []string
-	columnTypes []string
-	pending     []any
-	remaining   int
-	cancel      context.CancelFunc
+	rows            *sql.Rows
+	conn            *sql.Conn
+	columns         []string
+	columnTypes     []string
+	pending         []any
+	remaining       int
+	messages        *queryMessageBuffer
+	restoreMessages func()
+	cancel          context.CancelFunc
 }
 
 type server struct {
@@ -750,16 +754,18 @@ func (s *server) cancelActiveQuery() {
 	}
 }
 
-func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
+func (s *server) executeQuery(opts queryOptions) (result queryResult, resultErr error) {
 	start := time.Now()
 	sqlText := trimStatementSQL(opts.SQL)
 	if isQuerySQL(sqlText) {
-		rows, conn, cancel, err := s.queryRows(sqlText, opts.Schema, opts.TimeoutSecs)
+		rows, conn, cancel, messages, restore, err := s.queryRowsWithMessages(sqlText, opts.Schema, opts.TimeoutSecs)
 		if err != nil {
 			return queryResult{}, err
 		}
 		defer func() {
 			_ = rows.Close()
+			result.Messages = messages.drain()
+			restore()
 			_ = conn.Close()
 			s.endOperation(cancel)
 		}()
@@ -767,7 +773,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		if maxRows <= 0 {
 			maxRows = defaultMaxRows
 		}
-		result, err := readRows(rows, maxRows)
+		result, err = readRows(rows, maxRows)
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
 	}
@@ -775,7 +781,15 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	if err != nil {
 		return queryResult{}, err
 	}
+	messages, restore, err := captureQueryMessages(conn)
+	if err != nil {
+		_ = conn.Close()
+		s.endOperation(cancel)
+		return queryResult{}, err
+	}
 	defer func() {
+		result.Messages = messages.drain()
+		restore()
 		_ = conn.Close()
 		s.endOperation(cancel)
 	}()
@@ -801,20 +815,42 @@ func (s *server) queryRows(sqlText string, schema string, timeoutSecs int) (*sql
 	return rows, conn, cancel, nil
 }
 
+func (s *server) queryRowsWithMessages(sqlText string, schema string, timeoutSecs int) (*sql.Rows, *sql.Conn, context.CancelFunc, *queryMessageBuffer, func(), error) {
+	conn, ctx, cancel, err := s.operationConn(schema, timeoutSecs)
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
+	messages, restore, err := captureQueryMessages(conn)
+	if err != nil {
+		_ = conn.Close()
+		s.endOperation(cancel)
+		return nil, nil, nil, nil, nil, err
+	}
+	rows, err := conn.QueryContext(ctx, sqlText)
+	if err != nil {
+		restore()
+		_ = conn.Close()
+		s.endOperation(cancel)
+		return nil, nil, nil, nil, nil, err
+	}
+	return rows, conn, cancel, messages, restore, nil
+}
+
 func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageResult, error) {
 	start := time.Now()
 	sqlText := trimStatementSQL(opts.SQL)
 	if !isQuerySQL(sqlText) {
 		result, err := s.executeQuery(opts)
-		return queryPageResult{Columns: result.Columns, ColumnTypes: result.ColumnTypes, Rows: result.Rows, AffectedRows: result.AffectedRows, ExecutionTimeMS: result.ExecutionTimeMS, Truncated: result.Truncated}, err
+		return queryPageResult{Columns: result.Columns, ColumnTypes: result.ColumnTypes, Rows: result.Rows, AffectedRows: result.AffectedRows, ExecutionTimeMS: result.ExecutionTimeMS, Truncated: result.Truncated, Messages: result.Messages}, err
 	}
-	rows, conn, cancel, err := s.queryRows(sqlText, opts.Schema, opts.TimeoutSecs)
+	rows, conn, cancel, messages, restore, err := s.queryRowsWithMessages(sqlText, opts.Schema, opts.TimeoutSecs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
 	columns, err := rows.Columns()
 	if err != nil {
 		_ = rows.Close()
+		restore()
 		_ = conn.Close()
 		s.endOperation(cancel)
 		return queryPageResult{}, err
@@ -824,11 +860,13 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 	if maxRows <= 0 {
 		maxRows = defaultMaxRows
 	}
-	session := &querySession{rows: rows, conn: conn, columns: columns, columnTypes: columnTypeNames(rows), remaining: maxRows, cancel: cancel}
+	session := &querySession{rows: rows, conn: conn, columns: columns, columnTypes: columnTypeNames(rows), remaining: maxRows, cancel: cancel, messages: messages, restoreMessages: restore}
 	result, err := readQuerySessionPage(session, pageSize)
+	result.Messages = messages.drain()
 	result.ExecutionTimeMS = time.Since(start).Milliseconds()
 	if err != nil {
 		_ = rows.Close()
+		restore()
 		_ = conn.Close()
 		s.endOperation(cancel)
 		return queryPageResult{}, err
@@ -840,6 +878,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 		result.SessionID = &id
 	} else {
 		_ = rows.Close()
+		restore()
 		_ = conn.Close()
 		s.endOperation(cancel)
 	}
@@ -852,6 +891,9 @@ func (s *server) fetchQueryPage(id string, pageSize int) (queryPageResult, error
 		return queryPageResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}}, nil
 	}
 	result, err := readQuerySessionPage(session, pageSize)
+	if session.messages != nil {
+		result.Messages = session.messages.drain()
+	}
 	if err != nil {
 		s.closeQuerySession(id)
 		return queryPageResult{}, err
@@ -870,6 +912,9 @@ func (s *server) closeQuerySession(id string) bool {
 		return false
 	}
 	_ = session.rows.Close()
+	if session.restoreMessages != nil {
+		session.restoreMessages()
+	}
 	if session.conn != nil {
 		_ = session.conn.Close()
 	}
@@ -997,13 +1042,21 @@ func columnTypeNames(rows *sql.Rows) []string {
 	return result
 }
 
-func (s *server) executeTransaction(params map[string]json.RawMessage) (queryResult, error) {
+func (s *server) executeTransaction(params map[string]json.RawMessage) (result queryResult, resultErr error) {
 	statements := stringSliceParam(params, "statements")
 	conn, ctx, cancel, err := s.operationConn(stringParam(params, "schema"), intParam(params, "timeoutSecs"))
 	if err != nil {
 		return queryResult{}, err
 	}
+	messages, restore, err := captureQueryMessages(conn)
+	if err != nil {
+		_ = conn.Close()
+		s.endOperation(cancel)
+		return queryResult{}, err
+	}
 	defer func() {
+		result.Messages = messages.drain()
+		restore()
 		_ = conn.Close()
 		s.endOperation(cancel)
 	}()
@@ -1031,14 +1084,18 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (queryRes
 func (s *server) executeBatch(params map[string]json.RawMessage) (queryResult, error) {
 	start := time.Now()
 	var affected int64
+	messages := &queryMessageBuffer{}
 	for _, statement := range stringSliceParam(params, "statements") {
 		result, err := s.executeQuery(queryOptions{SQL: statement, Schema: stringParam(params, "schema")})
 		if err != nil {
 			return queryResult{}, err
 		}
 		affected += result.AffectedRows
+		for _, message := range result.Messages {
+			messages.addMessage(message)
+		}
 	}
-	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
+	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds(), Messages: messages.drain()}, nil
 }
 
 func (s *server) operationConn(schema string, timeoutSecs int) (*sql.Conn, context.Context, context.CancelFunc, error) {

@@ -253,4 +253,14 @@ describe("tableEditing", () => {
       expect(canDeleteExistingTdengineRows("salesforce", ["Id"])).toBe(true);
     });
   });
+
+  it("supports InterSystems Caché / IRIS table editing and row insertion (#11808)", () => {
+    expect(isTableDataEditable("iris", ["id"], "TABLE")).toBe(true);
+    expect(isTableDataEditable("iris", [], "TABLE")).toBe(true);
+    expect(isTableDataEditable("iris", ["id"], "VIEW")).toBe(false);
+    expect(canInsertTableRows("iris")).toBe(true);
+    expect(canEditExistingTableRows("iris")).toBe(true);
+    expect(supportsDataGridTransaction("iris")).toBe(true);
+    expect(canUseKeylessRowPredicate("iris", [])).toBe(true);
+  });
 });

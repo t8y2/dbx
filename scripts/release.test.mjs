@@ -83,11 +83,7 @@ test("rollback dispatches each distribution workflow after validation", () => {
 
   assert.equal(result.status, 0, result.stderr);
   const commands = readFileSync(logPath, "utf8").trim().split("\n");
-  assert.deepEqual(commands, [
-    "workflow run publish-packages.yml --repo t8y2/dbx -f tag=v0.5.63 -f notify=false",
-    "workflow run sync-cnb-release-assets.yml --repo t8y2/dbx -f tag=v0.5.63",
-    "workflow run rollback-docker-latest.yml --repo t8y2/dbx -f tag=v0.5.63",
-  ]);
+  assert.deepEqual(commands, ["workflow run publish-packages.yml --repo t8y2/dbx -f tag=v0.5.63 -f notify=false", "workflow run sync-cnb-release-assets.yml --repo t8y2/dbx -f tag=v0.5.63", "workflow run rollback-docker-latest.yml --repo t8y2/dbx -f tag=v0.5.63"]);
 });
 
 test("rollback rejects a target that is not older than latest", () => {
@@ -185,10 +181,7 @@ test("Linux releases pin the Wayland-capable AppImage bundler before upload", ()
   assert.ok(prepareStep < buildStep);
   assert.ok(buildStep < verifyStep);
   assert.match(workflow, /XDG_CACHE_HOME: \$\{\{ runner\.temp \}\}\/dbx-tauri-cache/);
-  assert.match(
-    workflow,
-    /LINUXDEPLOY_EXCLUDED_LIBRARIES: "libwayland-\*\.so\*;libxkbcommon\.so\*;libxcb-randr\.so\*;libxcb-render\.so\*;libxcb-shm\.so\*;libXau\.so\*;libXdmcp\.so\*"/,
-  );
+  assert.match(workflow, /LINUXDEPLOY_EXCLUDED_LIBRARIES: "libwayland-\*\.so\*;libxkbcommon\.so\*;libxcb-randr\.so\*;libxcb-render\.so\*;libxcb-shm\.so\*;libXau\.so\*;libXdmcp\.so\*"/);
   assert.match(setup, /tauri_fix_commit=8e7028331ad37ac2db74d4ec20e66be5cacf2c40/);
   assert.match(setup, /linuxdeploy_revision=07333c6/);
   assert.match(setup, /36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62/);
@@ -209,19 +202,11 @@ test("AppImage GTK wrapper removes bundled display-stack libraries", () => {
   const nestedLibDir = join(libDir, "nested");
 
   copyFileSync(appImageGtkWrapper, wrapper);
-  writeFileSync(
-    upstream,
-    '#!/usr/bin/env bash\nif [[ "$1" == "--plugin-api-version" ]]; then printf "0\\n"; fi\n',
-  );
+  writeFileSync(upstream, '#!/usr/bin/env bash\nif [[ "$1" == "--plugin-api-version" ]]; then printf "0\\n"; fi\n');
   chmodSync(wrapper, 0o755);
   chmodSync(upstream, 0o755);
   mkdirSync(nestedLibDir, { recursive: true });
-  for (const path of [
-    join(libDir, "libwayland-client.so.0"),
-    join(libDir, "libxkbcommon.so.0"),
-    join(nestedLibDir, "libXau.so.6"),
-    join(libDir, "libsafe.so.1"),
-  ]) {
+  for (const path of [join(libDir, "libwayland-client.so.0"), join(libDir, "libxkbcommon.so.0"), join(nestedLibDir, "libXau.so.6"), join(libDir, "libsafe.so.1")]) {
     writeFileSync(path, "");
   }
 

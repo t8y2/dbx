@@ -6,7 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Copy, FileDown, Plus, Trash2 } from "@lucide/vue";
+import { Copy, Pencil, Plus, Trash2 } from "@lucide/vue";
 import type { DataCompareConfig } from "@/composables/useDataCompareConfig";
 
 const props = defineProps<{
@@ -60,19 +60,19 @@ function confirmRename() {
       </SelectContent>
     </Select>
 
-    <Button variant="outline" size="icon" class="h-8 w-8" :disabled="disabled" :title="t('dataCompare.configNew')" @click="emit('create')">
+    <Button variant="outline" size="icon" class="h-8 w-8" :disabled="disabled" :title="t('dataCompare.configNew')" :aria-label="t('dataCompare.configNew')" data-testid="data-compare-config-create" @click="emit('create')">
       <Plus class="h-4 w-4" />
     </Button>
 
-    <Button v-if="activeConfig" variant="outline" size="icon" class="h-8 w-8" :disabled="disabled" :title="t('dataCompare.configRename')" @click="startRename(activeConfig)">
+    <Button v-if="activeConfig" variant="outline" size="icon" class="h-8 w-8" :disabled="disabled" :title="t('dataCompare.configRename')" :aria-label="t('dataCompare.configRename')" data-testid="data-compare-config-rename" @click="startRename(activeConfig)">
+      <Pencil class="h-4 w-4" />
+    </Button>
+
+    <Button v-if="activeConfig" variant="outline" size="icon" class="h-8 w-8" :disabled="disabled" :title="t('dataCompare.configDuplicate')" :aria-label="t('dataCompare.configDuplicate')" data-testid="data-compare-config-duplicate" @click="emit('duplicate', activeConfig.id)">
       <Copy class="h-4 w-4" />
     </Button>
 
-    <Button v-if="activeConfig" variant="outline" size="icon" class="h-8 w-8" :disabled="disabled" :title="t('dataCompare.configDuplicate')" @click="emit('duplicate', activeConfig.id)">
-      <FileDown class="h-4 w-4" />
-    </Button>
-
-    <Button v-if="activeConfig" variant="outline" size="icon" class="h-8 w-8" :disabled="disabled" :title="t('dataCompare.configDelete')" @click="emit('delete', activeConfig.id)">
+    <Button v-if="activeConfig" variant="outline" size="icon" class="h-8 w-8" :disabled="disabled" :title="t('dataCompare.configDelete')" :aria-label="t('dataCompare.configDelete')" data-testid="data-compare-config-delete" @click="emit('delete', activeConfig.id)">
       <Trash2 class="h-4 w-4" />
     </Button>
 
@@ -83,11 +83,11 @@ function confirmRename() {
         </DialogHeader>
         <div class="py-4">
           <Label class="text-sm">{{ t("dataCompare.configName") }}</Label>
-          <Input v-model="renameValue" class="mt-2" @keydown.enter="confirmRename" />
+          <Input v-model="renameValue" class="mt-2" data-testid="data-compare-config-rename-input" autofocus @keydown.enter="confirmRename" />
         </div>
         <DialogFooter>
           <Button variant="outline" @click="renameDialogOpen = false">{{ t("common.cancel") }}</Button>
-          <Button @click="confirmRename">{{ t("common.save") }}</Button>
+          <Button data-testid="data-compare-config-rename-save" @click="confirmRename">{{ t("common.save") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

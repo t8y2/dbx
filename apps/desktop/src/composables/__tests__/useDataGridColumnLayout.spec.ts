@@ -7,6 +7,46 @@ import { columnHeaderDragAutoScrollDelta, columnHeaderDropTargetIndex } from "@/
 import { loadDataGridColumnLayout, saveDataGridColumnLayout } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 
 describe("useDataGridColumnLayout", () => {
+  it("combines independent NULL and empty-column toggles without losing manual visibility", async () => {
+    const scope = effectScope();
+    const hideNullColumns = ref(true);
+    const hideEmptyColumns = ref(false);
+    const allEmptyColumnIndexes = ref([1, 2]);
+    const state = scope.run(() =>
+      useDataGridColumnLayoutState({
+        columns: ref(["value", "null", "mixed", "manual"]),
+        displayableColumnIndexes: ref([0, 1, 2, 3]),
+        allNullColumnIndexes: ref([1]),
+        allEmptyColumnIndexes,
+        columnOrderKeys: ref(["value", "null", "mixed", "manual"]),
+        layoutScopeKey: ref("empty-columns"),
+        tableScopeKey: ref(""),
+        hideNullColumns,
+        hideEmptyColumns,
+        onHideNullColumnsChange: (hidden) => {
+          hideNullColumns.value = hidden;
+        },
+      }),
+    )!;
+    try {
+      state.hideColumns([3]);
+      expect(state.visibleColumnIndexes.value).toEqual([0, 2]);
+      hideEmptyColumns.value = true;
+      await nextTick();
+      expect(state.visibleColumnIndexes.value).toEqual([0]);
+      state.toggleAllNullColumns();
+      await nextTick();
+      expect(state.visibleColumnIndexes.value).toEqual([0]);
+      allEmptyColumnIndexes.value = [];
+      await nextTick();
+      expect(state.visibleColumnIndexes.value).toEqual([0, 1, 2]);
+      hideEmptyColumns.value = false;
+      await nextTick();
+      expect(state.hiddenColumnIndexes.value).toEqual(new Set([3]));
+    } finally {
+      scope.stop();
+    }
+  });
   beforeEach(() => {
     const values = new Map<string, string>();
     vi.stubGlobal("localStorage", {

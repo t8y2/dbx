@@ -11,10 +11,13 @@ use crate::models::connection::DatabaseType;
 use crate::query::{execute_sql_statement_with_options, QueryExecutionOptions};
 use crate::schema::get_columns_core;
 use crate::sql_dialect::{
-    build_count_table_sql, firebird_rows_clause, pagination_strategy, qualified_table_name, quote_table_identifier,
+    build_count_table_sql, build_iris_table_select_sql, firebird_rows_clause, pagination_strategy,
+    qualified_table_name, quote_iris_identifier, quote_table_identifier, table_data_qualified_table_name,
     PaginationContext, TablePaginationStrategy,
 };
 use crate::transfer::{generate_comment_ddl, generate_create_table_ddl};
+
+use super::sample_pairing::retain_shared_sample_rows_by_key;
 
 const DATA_SYNC_INSERT_BATCH_SIZE: usize = 500;
 const DATA_SYNC_CONDITION_BATCH_SIZE: usize = 200;
@@ -149,6 +152,8 @@ pub struct DataCompareSyncPlanTableOptions {
     pub database_type: Option<DatabaseType>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pre_sync_statements: Vec<String>,
+    #[serde(default)]
+    pub sync_eligible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,11 +187,13 @@ pub struct DataCompareFromTablesPreparation {
     pub source_truncated: bool,
     pub target_truncated: bool,
     /// Rows per side this compare was allowed to read. When a side holds more rows than
-    /// this, the diff only covers the first `row_budget` rows and the matching
-    /// `*_truncated` flag is set, so the UI can warn instead of showing a partial plan
-    /// as if it were complete.
+    /// this, the diff covers only a bounded subset and the matching `*_truncated`
+    /// flag is set. `sync_eligible` remains false so a partial result cannot become
+    /// executable synchronization SQL.
     #[serde(default)]
     pub row_budget: usize,
+    #[serde(default)]
+    pub sync_eligible: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degradation_level: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -331,6 +338,8 @@ pub async fn prepare_data_compare_from_tables(
 ) -> Result<DataCompareFromTablesPreparation, String> {
     let source_database_type = connection_database_type(state, &options.source_connection_id).await?;
     let target_database_type = connection_database_type(state, &options.target_connection_id).await?;
+    ensure_data_compare_supported(source_database_type, "source")?;
+    ensure_data_compare_supported(target_database_type, "target")?;
     let fetch_batch_size = options.fetch_batch_size.unwrap_or(1000).max(1);
 
     let source_count_sql =
@@ -435,13 +444,23 @@ pub async fn prepare_data_compare_from_tables(
                         threshold.sample_size,
                     )
                 )?;
+                let column_indexes = column_index_map(&options.columns);
+                let (src, tgt) = retain_shared_sample_rows_by_key(src, tgt, |row| {
+                    key_for_row(row, &options.key_columns, &column_indexes)
+                });
                 let max_count = source_row_count.max(target_row_count);
                 let sample_rate = if max_count > 0 { threshold.sample_size as f64 / max_count as f64 } else { 1.0 };
-                let method = "sampled".to_string();
-                (src, tgt, sample_rate.min(1.0), method, false, false)
+                let method = "paired_key_sample".to_string();
+                let source_truncated = source_row_count > src.len() as u64;
+                let target_truncated = target_row_count > tgt.len() as u64;
+                (src, tgt, sample_rate.min(1.0), method, source_truncated, target_truncated)
             }
-            DegradationLevel::SkipWithRisk => (Vec::new(), Vec::new(), 0.0, "skipped".to_string(), false, false),
+            DegradationLevel::SkipWithRisk => {
+                (Vec::new(), Vec::new(), 0.0, "skipped".to_string(), source_row_count > 0, target_row_count > 0)
+            }
         };
+
+    let sync_eligible = matches!(degradation_level, DegradationLevel::Full) && !source_truncated && !target_truncated;
 
     let target_columns = get_columns_core(
         state,
@@ -478,16 +497,20 @@ pub async fn prepare_data_compare_from_tables(
         database_type: Some(target_database_type),
     })?;
 
+    let (sync_statements, sync_sql) =
+        if sync_eligible { (preparation.sync_statements, preparation.sync_sql) } else { (Vec::new(), String::new()) };
+
     Ok(DataCompareFromTablesPreparation {
         result: preparation.result,
-        sync_statements: preparation.sync_statements,
-        sync_sql: preparation.sync_sql,
+        sync_statements,
+        sync_sql,
         pre_sync_statements: Vec::new(),
         source_row_count,
         target_row_count,
         source_truncated,
         target_truncated,
         row_budget,
+        sync_eligible,
         degradation_level: Some(degradation_level.to_string()),
         sampling_rate: Some(sampling_rate),
         confidence_score: Some(confidence_score),
@@ -503,6 +526,8 @@ pub async fn prepare_data_compare_missing_target(
 ) -> Result<DataCompareFromTablesPreparation, String> {
     let source_database_type = connection_database_type(state, &options.source_connection_id).await?;
     let target_database_type = connection_database_type(state, &options.target_connection_id).await?;
+    ensure_data_compare_supported(source_database_type, "source")?;
+    ensure_data_compare_supported(target_database_type, "target")?;
     let fetch_batch_size = options.fetch_batch_size.unwrap_or(1000).max(1);
     let source_columns = get_columns_core(
         state,
@@ -546,6 +571,7 @@ pub async fn prepare_data_compare_missing_target(
     )
     .await?;
     let source_truncated = source_row_count > row_budget as u64;
+    let sync_eligible = !source_truncated;
     let result = missing_target_diff(&column_names, &options.key_columns, source_rows);
     let mut pre_sync_statements = Vec::new();
     pre_sync_statements.push(format!(
@@ -587,14 +613,15 @@ pub async fn prepare_data_compare_missing_target(
 
     Ok(DataCompareFromTablesPreparation {
         result,
-        sync_statements: sync_plan.sync_statements,
-        sync_sql: sync_plan.sync_sql,
+        sync_statements: if sync_eligible { sync_plan.sync_statements } else { Vec::new() },
+        sync_sql: if sync_eligible { sync_plan.sync_sql } else { String::new() },
         pre_sync_statements,
         source_row_count,
         target_row_count: 0,
         source_truncated,
         target_truncated: false,
         row_budget,
+        sync_eligible,
         degradation_level: Some(should_degrade(source_row_count, 0, &threshold).to_string()),
         sampling_rate: Some(if source_truncated { row_budget as f64 / source_row_count.max(1) as f64 } else { 1.0 }),
         confidence_score: Some(if source_truncated { 0.5 } else { 1.0 }),
@@ -610,6 +637,7 @@ pub fn build_data_compare_sync_plan(options: DataCompareSyncPlanOptions) -> Data
     let tables = options
         .tables
         .iter()
+        .filter(|table| table.sync_eligible)
         .map(|table| DataCompareSyncPlanTableRef {
             table_name: &table.table_name,
             schema: table.schema.as_deref(),
@@ -1069,6 +1097,16 @@ async fn connection_database_type(state: &AppState, connection_id: &str) -> Resu
         .ok_or_else(|| format!("Connection config not found: {connection_id}"))
 }
 
+fn ensure_data_compare_supported(database_type: DatabaseType, endpoint: &str) -> Result<(), String> {
+    if dbx_types::database_manifest::supports_compare_mode(
+        &database_type,
+        dbx_types::database_manifest::DatabaseCompareMode::Data,
+    ) {
+        return Ok(());
+    }
+    Err(format!("{endpoint} database {} does not support data comparison", database_type.as_str()))
+}
+
 fn first_count(rows: &[Vec<Value>]) -> Result<u64, String> {
     let value = rows.first().and_then(|row| row.first()).ok_or_else(|| "COUNT query returned no rows".to_string())?;
     match value {
@@ -1111,32 +1149,35 @@ fn build_data_compare_select_sql(
     row_limit: usize,
     offset: usize,
 ) -> String {
-    let table = qualified_table_name(Some(database_type), Some(schema), table_name);
+    let table = if database_type == DatabaseType::Iris {
+        table_data_qualified_table_name(Some(database_type), Some(schema), table_name, None)
+    } else {
+        qualified_table_name(Some(database_type), Some(schema), table_name)
+    };
+    let quote_column = |column: &str| {
+        if database_type == DatabaseType::Iris {
+            quote_iris_identifier(column, None)
+        } else {
+            quote_table_identifier(Some(database_type), column)
+        }
+    };
     let select_columns = if columns.is_empty() {
         "*".to_string()
     } else {
-        columns.iter().map(|column| quote_table_identifier(Some(database_type), column)).collect::<Vec<_>>().join(", ")
+        columns.iter().map(|column| quote_column(column)).collect::<Vec<_>>().join(", ")
     };
     let order_by = if key_columns.is_empty() {
         String::new()
     } else {
         format!(
             " ORDER BY {}",
-            key_columns
-                .iter()
-                .map(|column| format!("{} ASC", quote_table_identifier(Some(database_type), column)))
-                .collect::<Vec<_>>()
-                .join(", ")
+            key_columns.iter().map(|column| format!("{} ASC", quote_column(column))).collect::<Vec<_>>().join(", ")
         )
     };
     let order_expression = if key_columns.is_empty() {
         "(SELECT NULL)".to_string()
     } else {
-        key_columns
-            .iter()
-            .map(|column| format!("{} ASC", quote_table_identifier(Some(database_type), column)))
-            .collect::<Vec<_>>()
-            .join(", ")
+        key_columns.iter().map(|column| format!("{} ASC", quote_column(column))).collect::<Vec<_>>().join(", ")
     };
 
     match pagination_strategy(Some(database_type), PaginationContext::BoundedRead) {
@@ -1164,7 +1205,9 @@ fn build_data_compare_select_sql(
                 "WITH {page_alias} AS (SELECT {select_columns}, ROW_NUMBER() OVER (ORDER BY {order_expression}) AS {row_number_alias} FROM {table}) SELECT {select_columns} FROM {page_alias} WHERE {row_number_alias} > {offset} AND {row_number_alias} <= {end} ORDER BY {row_number_alias}"
             )
         }
-        TablePaginationStrategy::IrisTop => format!("SELECT TOP {row_limit} {select_columns} FROM {table}{order_by}"),
+        TablePaginationStrategy::IrisTop => {
+            build_iris_table_select_sql(&select_columns, &table, "", &order_by, row_limit, offset as u64)
+        }
         TablePaginationStrategy::InformixFirst => {
             let row_limit_clause =
                 if offset > 0 { format!("SKIP {offset} FIRST {row_limit}") } else { format!("FIRST {row_limit}") };
@@ -1991,6 +2034,7 @@ mod tests {
                 },
                 database_type: Some(DatabaseType::Postgres),
                 pre_sync_statements: Vec::new(),
+                sync_eligible: true,
             }],
         });
 
@@ -2038,6 +2082,7 @@ mod tests {
                 },
                 database_type: Some(DatabaseType::Postgres),
                 pre_sync_statements: Vec::new(),
+                sync_eligible: true,
             }],
         });
 
@@ -2090,6 +2135,7 @@ mod tests {
                 diff: DataCompareResult { added: Vec::new(), removed: Vec::new(), modified },
                 database_type: Some(DatabaseType::Postgres),
                 pre_sync_statements: Vec::new(),
+                sync_eligible: true,
             }],
         });
 
@@ -2174,6 +2220,7 @@ mod tests {
                 },
                 database_type: Some(DatabaseType::Postgres),
                 pre_sync_statements: Vec::new(),
+                sync_eligible: true,
             }],
         });
 
@@ -2181,6 +2228,35 @@ mod tests {
         assert_eq!(plan.update_count, 1);
         assert_eq!(plan.delete_count, 0);
         assert_eq!(plan.statement_count, 2);
+    }
+
+    #[test]
+    fn incomplete_comparisons_cannot_build_sync_statements() {
+        let plan = build_data_compare_sync_plan(DataCompareSyncPlanOptions {
+            tables: vec![DataCompareSyncPlanTableOptions {
+                table_name: "users".to_string(),
+                schema: Some("public".to_string()),
+                columns: vec!["id".to_string()],
+                key_columns: vec!["id".to_string()],
+                column_info: Vec::new(),
+                diff: DataCompareResult {
+                    added: vec![DataCompareRow {
+                        key: "1".to_string(),
+                        key_values: HashMap::from([(String::from("id"), json!(1))]),
+                        values: HashMap::from([(String::from("id"), json!(1))]),
+                    }],
+                    removed: Vec::new(),
+                    modified: Vec::new(),
+                },
+                database_type: Some(DatabaseType::Postgres),
+                pre_sync_statements: Vec::new(),
+                sync_eligible: false,
+            }],
+        });
+
+        assert_eq!(plan.statement_count, 0);
+        assert!(plan.sync_statements.is_empty());
+        assert!(plan.sync_sql.is_empty());
     }
 
     #[test]
@@ -2216,6 +2292,7 @@ mod tests {
                 },
                 database_type: Some(DatabaseType::Postgres),
                 pre_sync_statements: Vec::new(),
+                sync_eligible: true,
             }],
         });
 
@@ -2270,6 +2347,7 @@ mod tests {
                 },
                 database_type: Some(DatabaseType::Mysql),
                 pre_sync_statements: Vec::new(),
+                sync_eligible: true,
             }],
         });
 
@@ -2308,6 +2386,7 @@ mod tests {
                 },
                 database_type: Some(DatabaseType::Postgres),
                 pre_sync_statements: Vec::new(),
+                sync_eligible: true,
             }],
         });
 
@@ -2356,6 +2435,7 @@ mod tests {
                 diff: diff.clone(),
                 database_type: Some(DatabaseType::Postgres),
                 pre_sync_statements: pre_sync_statements.clone(),
+                sync_eligible: true,
             }],
         });
         let borrowed_plan = build_data_compare_sync_plan_from_refs(&[DataCompareSyncPlanTableRef {
@@ -2397,6 +2477,7 @@ mod tests {
                 },
                 database_type: Some(DatabaseType::Postgres),
                 pre_sync_statements: vec!["CREATE TABLE \"public\".\"users\" (\"id\" integer);".to_string()],
+                sync_eligible: true,
             }],
         });
 
@@ -2440,6 +2521,7 @@ mod tests {
                 pre_sync_statements: vec![
                     "CREATE TABLE \"public\".\"generated_column_sync_test\" (\"id\" bigint);".to_string()
                 ],
+                sync_eligible: true,
             }],
         });
 
@@ -2871,6 +2953,70 @@ mod tests {
                 50,
             ),
             "SELECT \"ID\", \"NAME\" FROM \"USERS\" ORDER BY \"ID\" ASC ROWS 51 TO 75"
+        );
+    }
+
+    #[test]
+    fn builds_backend_table_select_sql_for_iris_offset_pages() {
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Iris,
+                "APP",
+                "USERS",
+                &["ID".to_string(), "NAME".to_string()],
+                &["ID".to_string()],
+                25,
+                50,
+            ),
+            "SELECT * FROM (SELECT TOP 75 ID, NAME FROM APP.USERS ORDER BY ID ASC) WHERE %VID > 50"
+        );
+    }
+
+    #[test]
+    fn builds_backend_table_select_sql_for_iris_first_page() {
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Iris,
+                "SQLUser",
+                "Users",
+                &["ID".to_string(), "Name".to_string()],
+                &["ID".to_string()],
+                25,
+                0,
+            ),
+            "SELECT TOP 25 ID, Name FROM SQLUser.Users ORDER BY ID ASC"
+        );
+    }
+
+    #[test]
+    fn builds_backend_table_select_sql_for_iris_delimited_names() {
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Iris,
+                "My Schema",
+                "User\"Events",
+                &["Event ID".to_string(), "User\"Name".to_string()],
+                &["Event ID".to_string(), "User\"Name".to_string()],
+                25,
+                50,
+            ),
+            "SELECT * FROM (SELECT TOP 75 \"Event ID\", \"User\"\"Name\" FROM \"My Schema\".\"User\"\"Events\" ORDER BY \"Event ID\" ASC, \"User\"\"Name\" ASC) WHERE %VID > 50"
+        );
+    }
+
+    #[test]
+    fn builds_backend_table_select_sql_for_jdbc_without_schema_qualification() {
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Jdbc,
+                "APP",
+                "USERS",
+                &["ID".to_string()],
+                &["ID".to_string()],
+                25,
+                0,
+            ),
+            "SELECT ID FROM USERS ORDER BY ID ASC;"
         );
     }
 

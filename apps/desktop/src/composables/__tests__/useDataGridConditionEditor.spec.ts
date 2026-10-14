@@ -34,9 +34,6 @@ describe("useDataGridConditionEditor", () => {
     value.value = "status = 1 AND cust";
     await nextTick();
     await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["customer_id", "customer_name"]));
-    // 不再默认高亮第一条建议：必须显式导航/接受，避免回车应用筛选时改写输入（issue #10595）
-    expect(editor.highlightedIndex.value).toBe(-1);
-    expect(editor.navigate(1)).toBe(true);
     expect(editor.highlightedIndex.value).toBe(0);
     expect(editor.navigate(1)).toBe(true);
     expect(editor.highlightedIndex.value).toBe(1);
@@ -44,6 +41,65 @@ describe("useDataGridConditionEditor", () => {
     expect(editor.highlightedIndex.value).toBe(1);
     expect(editor.accept()).toBe(true);
     expect(value.value).toBe("status = 1 AND customer_name");
+  });
+
+  it.each(["cus", "status = 1 AND cus", "NOT cus", "status = 1 AND NOT cus", "(cus", "status = 1 OR (cus", "id BETWEEN 0 AND 1 AND cus", "id NOT BETWEEN 0 AND 1 OR cus", "name = 'BETWEEN' AND cus", "`BETWEEN` = 1 AND cus", "id BETWEEN abs(0) AND 1 AND cus"])(
+    "accepts the first WHERE field suggestion directly with Enter: %s",
+    async (condition) => {
+      const value = ref("");
+      const editor = useDataGridConditionEditor({ kind: "where", value, columns: ["customer_id", "customer_name"], historyScope: {} });
+      value.value = condition;
+      await nextTick();
+      await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(2));
+
+      expect(editor.highlightedIndex.value).toBe(0);
+      expect(editor.handleKeydown(keyboardEvent("Enter"))).toBe("accept");
+      expect(value.value).toBe(condition.replace(/cus$/, "customer_id"));
+    },
+  );
+
+  it.each(["status = 1 ", "status is", "status IS nu", "status NOT betw"])("applies WHERE conditions without automatically accepting keyword suggestions: %s", async (condition) => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({ kind: "where", value, columns: ["status"], historyScope: {} });
+    value.value = condition;
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.length).toBeGreaterThan(0));
+
+    expect(editor.suggestions.value[0].kind).toBe("keyword");
+    expect(editor.highlightedIndex.value).toBe(-1);
+    expect(editor.handleKeydown(keyboardEvent("Enter"))).toBe("apply");
+    expect(value.value).toBe(condition);
+  });
+
+  it.each([
+    "id = 1 + 1",
+    "id = - 1",
+    "id = + 1",
+    "id = 2 * 1",
+    "id = 2 / 1",
+    "id = (1",
+    "id = abs(1",
+    "id = coalesce(0, 1",
+    "id BETWEEN 0 AND 1",
+    "id NOT BETWEEN 0 AND 1",
+    "id between 0 and 1",
+    "id BETWEEN abs(0) AND 1",
+    "id BETWEEN 'AND' AND 1",
+    "(id BETWEEN 0 AND 1",
+    "id = 2 AND other_id BETWEEN 0 AND 1",
+    "id BETWEEN CASE WHEN enabled = 1 AND flag = 1 THEN 0 ELSE 0 END AND 1",
+    "id BETWEEN CASE WHEN enabled = 1 OR flag = 1 THEN 0 ELSE 0 END AND 1",
+    "id BETWEEN CASE WHEN a = 1 THEN CASE WHEN b = 1 AND c = 1 THEN 0 ELSE 0 END ELSE 0 END AND 1",
+  ])("does not rewrite value expressions on Enter: %s", async (condition) => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({ kind: "where", value, columns: ["id", "version1"], historyScope: {} });
+    value.value = condition;
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "version1", kind: "column" }]));
+
+    expect(editor.highlightedIndex.value).toBe(-1);
+    expect(editor.handleKeydown(keyboardEvent("Enter"))).toBe("apply");
+    expect(value.value).toBe(condition);
   });
 
   it("does not suggest column names while typing a value after a comparison operator", async () => {

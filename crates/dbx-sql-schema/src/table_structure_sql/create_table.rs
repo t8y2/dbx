@@ -6,7 +6,7 @@ use super::column_format::{
 use super::comments::{build_sqlserver_column_comment_sql_for_profile, build_sqlserver_table_comment_sql_for_profile};
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::foreign_keys::build_foreign_key_sql_for_new_table;
-use super::indexes::build_create_index_statements;
+use super::indexes::{build_create_index_statements, mysql_inline_index_definition, normalized_index_type};
 use super::mysql_engine::{append_mysql_table_option, validate_mysql_engine};
 use super::transwarp;
 use super::triggers::build_trigger_sql_for_new_table;
@@ -49,10 +49,32 @@ pub(super) fn build_create_table_sql_with_partition_clause(
         capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
         dialect = capabilities.dialect;
     }
-    options.table_name = clean(&options.table_name);
+    // OceanBase callers supply decoded identifiers, including quoted clone targets.
+    if options.database_type != Some(DatabaseType::OceanbaseOracle) {
+        options.table_name = clean(&options.table_name);
+    }
     strip_inherited_mysql_column_charsets(&mut options);
     let mut warnings = Vec::new();
     warnings.extend(validate_mysql_engine(&options));
+    if let Some(value) = &options.mysql_auto_increment_value {
+        let counter = crate::db_admin_sql::MysqlAutoIncrementSqlOptions {
+            database_type: options.database_type,
+            driver_profile: options.driver_profile.clone(),
+            schema: options.schema.clone(),
+            table_name: options.table_name.clone(),
+            value: value.clone(),
+        };
+        if let Err(error) = crate::db_admin_sql::validate_mysql_auto_increment_options(&counter) {
+            warnings.push(error);
+        }
+        if options.is_gaussdb_m_mode
+            || !options.columns.iter().any(|column| {
+                !column.marked_for_drop && column.extra.as_ref().is_some_and(|extra| extra.auto_increment == Some(true))
+            })
+        {
+            warnings.push("AUTO_INCREMENT requires a native MySQL auto-increment column.".to_string());
+        }
+    }
     // Fail closed: a concurrent-index request on a partitioned parent (or on an
     // existing index in a hand-built draft) is refused up front instead of
     // degrading into blocking index DDL.
@@ -63,6 +85,57 @@ pub(super) fn build_create_table_sql_with_partition_clause(
     let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
     if active_columns.is_empty() {
         warnings.push("At least one column is required.".to_string());
+    }
+    // MySQL requires the supporting key to exist in the CREATE itself. A later
+    // CREATE INDEX cannot rescue a table rejected for ERROR 1075.
+    let native_mysql = options.database_type == Some(DatabaseType::Mysql)
+        && !options.is_gaussdb_m_mode
+        && options
+            .driver_profile
+            .as_deref()
+            .is_none_or(|profile| profile.trim().is_empty() || profile.trim().eq_ignore_ascii_case("mysql"));
+    let mut inline_auto_index = None;
+    if native_mysql {
+        let auto_columns: Vec<_> = active_columns
+            .iter()
+            .filter(|column| column.extra.as_ref().is_some_and(|extra| extra.auto_increment == Some(true)))
+            .collect();
+        if auto_columns.len() > 1 {
+            warnings.push("MySQL allows only one AUTO_INCREMENT column per table.".to_string());
+        } else if let Some(column) = auto_columns.first() {
+            // MyISAM also supports a grouped sequence when the auto column is
+            // a later key part; InnoDB requires the leading key part.
+            let grouped =
+                options.mysql_engine.as_deref().is_some_and(|engine| engine.trim().eq_ignore_ascii_case("MyISAM"));
+            let primary: Vec<_> = active_columns.iter().filter(|column| column.is_primary_key).collect();
+            let primary_supports =
+                primary.iter().enumerate().any(|(position, key)| (grouped || position == 0) && key.name == column.name);
+            if !primary_supports {
+                inline_auto_index = options.indexes.iter().enumerate().find_map(|(position, index)| {
+                    if index.marked_for_drop
+                        || index.is_primary
+                        || !matches!(normalized_index_type(index).as_str(), "" | "BTREE" | "HASH")
+                    {
+                        return None;
+                    }
+                    let supports =
+                        index.columns.iter().filter(|key| !clean(key).is_empty()).enumerate().any(|(part, key)| {
+                            (grouped || part == 0) && clean(key).eq_ignore_ascii_case(&clean(&column.name))
+                        });
+                    if supports {
+                        mysql_inline_index_definition(index).map(|definition| (position, definition))
+                    } else {
+                        None
+                    }
+                });
+                if inline_auto_index.is_none() {
+                    warnings.push(format!(
+                        "AUTO_INCREMENT column \"{}\" requires a supporting index (first key column for InnoDB).",
+                        column.name
+                    ));
+                }
+            }
+        }
     }
     validate_columns(&active_columns, &mut warnings);
     validate_dameng_identity(&options, &active_columns, &mut warnings);
@@ -113,7 +186,7 @@ pub(super) fn build_create_table_sql_with_partition_clause(
         if transwarp::is_partition_column(&options, column) {
             continue;
         }
-        let mut data_type = column_data_type(dialect, column);
+        let mut data_type = column_data_type(dialect, column, options.database_type);
         // SQLite accepts AUTOINCREMENT only on an exact INTEGER PRIMARY KEY,
         // so integer-family aliases are normalized when auto-increment is on.
         if dialect == StructureDialect::Sqlite
@@ -205,7 +278,13 @@ pub(super) fn build_create_table_sql_with_partition_clause(
             .map(|column| quote_new_ident(options.database_type, dialect, &column.name))
             .collect::<Vec<_>>()
             .join(", ");
-        column_definitions.push(format!("PRIMARY KEY ({pk_list})"));
+        // Optional user-supplied constraint name; empty keeps the anonymous form.
+        let constraint = super::columns::new_primary_key_constraint_clause(&options, dialect);
+        column_definitions.push(format!("{constraint}PRIMARY KEY ({pk_list})"));
+    }
+
+    if let Some((_, definition)) = &inline_auto_index {
+        column_definitions.push(definition.clone());
     }
 
     let mut create_table = format!("CREATE TABLE {table} (\n  {}\n)", column_definitions.join(",\n  "));
@@ -219,6 +298,12 @@ pub(super) fn build_create_table_sql_with_partition_clause(
     if let Some(engine) = options.mysql_engine.as_deref().map(str::trim).filter(|engine| !engine.is_empty()) {
         if let Some(statement) = statements.last_mut() {
             append_mysql_table_option(statement, &format!("ENGINE = {engine}"));
+        }
+    }
+
+    if let Some(value) = &options.mysql_auto_increment_value {
+        if let Some(statement) = statements.last_mut() {
+            append_mysql_table_option(statement, &format!("AUTO_INCREMENT = {value}"));
         }
     }
 
@@ -298,7 +383,12 @@ pub(super) fn build_create_table_sql_with_partition_clause(
         }
     }
 
-    for index in options.indexes.iter().filter(|index| !index.marked_for_drop && !index.is_primary) {
+    for (position, index) in
+        options.indexes.iter().enumerate().filter(|(_, index)| !index.marked_for_drop && !index.is_primary)
+    {
+        if inline_auto_index.as_ref().is_some_and(|(inline_position, _)| *inline_position == position) {
+            continue;
+        }
         if !capabilities.create_index {
             warnings.push(format!(
                 "Creating indexes is not supported for {} from this editor.",

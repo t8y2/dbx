@@ -1,5 +1,6 @@
 import { beforeEach, test, vi } from "vitest";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createPinia, setActivePinia } from "pinia";
 import { DEFAULT_SQL_FORMATTER_SETTINGS } from "../../apps/desktop/src/lib/sql/sqlFormatterConfig.ts";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS } from "../../apps/desktop/src/lib/table/tableColumnTemplates.ts";
@@ -506,6 +507,7 @@ test("defaults shortcut settings", () => {
   assert.equal(settings.shortcuts.pasteSidebarSelection, "Mod+V");
   assert.equal(settings.shortcuts.editSidebarConnection, "Mod+E");
   assert.equal(settings.shortcuts.disconnectSidebarConnection, "Shift+Mod+E");
+  assert.equal(settings.shortcuts.editSidebarTableStructure, "F4");
 });
 
 test("keeps saved shortcut overrides", () => {
@@ -1058,6 +1060,26 @@ test("AI partner presets reuse a supported runtime adapter", () => {
   assert.equal(getAiProviderPreset("openai-compatible", "https://api.example.com/v1").label, "OpenAI Compatible");
 });
 
+test("API AI provider settings expose and persist a default model ID", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+  const modelControl = source.indexOf('<Input v-model="aiEditModel"');
+
+  assert.ok(modelControl >= 0);
+  assert.match(source.slice(modelControl - 300, modelControl + 300), /v-if="!aiIsCcSwitchProvider && !aiIsCliProvider"[\s\S]*t\("ai\.defaultModel"\)[\s\S]*t\('ai\.manualModelPlaceholder'\)/);
+  assert.match(source, /model:\s*aiEditModel\.value/);
+});
+
+test("AI connection test uses the model currently entered in the config form", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+  const testConnectionStart = source.indexOf("async function aiTestConn()");
+  const testConnectionEnd = source.indexOf("async function copyAiTestError()", testConnectionStart);
+  const testConnection = source.slice(testConnectionStart, testConnectionEnd);
+
+  assert.notEqual(testConnectionStart, -1);
+  assert.notEqual(testConnectionEnd, -1);
+  assert.match(testConnection, /const config = currentAiEditConfig\(\);[\s\S]*aiTestConnection\(config\)/);
+  assert.doesNotMatch(testConnection, /activeModel|config\.model\s*=/);
+});
 test("normalizes legacy AI config and fills provider defaults", () => {
   const legacy = normalizeAiConfig({
     provider: "openai",

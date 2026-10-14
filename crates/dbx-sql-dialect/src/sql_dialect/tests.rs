@@ -33,6 +33,12 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Gaussdb), "\"MixedCase\""), "\"MixedCase\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::OpenGauss), "\"MixedCase\""), "\"MixedCase\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Informix), "users_1"), "users_1");
+    // SUNDB folds unquoted names to uppercase, so a simple lowercase name must stay
+    // unquoted; quoting it preserved the case and the statement found no such table (#11986).
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Sundb), "rs_salest_budget"), "rs_salest_budget");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Sundb), "YEAR"), "YEAR");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Sundb), "user name"), "\"user name\"");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Sundb), "user\"name"), "\"user\"\"name\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "users_1"), "users_1");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "user name"), "user name");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Iotdb), "root.test.device2"), "root.test.device2");
@@ -1769,6 +1775,12 @@ fn postgres_family_table_data_quoting_resolves_folded_identifiers() {
     assert_eq!(quote_gaussdb_jdbc_identifier("mss_check_sales_item", "\""), "mss_check_sales_item");
     assert_eq!(quote_gaussdb_jdbc_identifier("MSS_CHECK_SALES_ITEM", "\""), "\"MSS_CHECK_SALES_ITEM\"");
     assert_eq!(quote_gaussdb_jdbc_identifier("term", "\""), "term");
+    // DBX-owned derived-table aliases travel through this same helper when the
+    // query builders count or paginate: simple-lower, never referenced by the
+    // outer query, so they stay bare instead of becoming `"dbx_count"`, which
+    // GaussDB M mode reads as a string literal (DBX-LEGACY-0001).
+    assert_eq!(quote_gaussdb_jdbc_identifier("dbx_count", "\""), "dbx_count");
+    assert_eq!(quote_gaussdb_jdbc_identifier("dbx_page", "\""), "dbx_page");
 
     assert_eq!(
         table_data_qualified_table_name(

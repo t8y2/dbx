@@ -91,6 +91,8 @@ const databaseChildGroupNodeTypes = new Set<TreeNodeType>([
   "group-materialized-views",
   "group-procedures",
   "group-functions",
+  "group-internal-functions",
+  "group-udf-functions",
   "group-triggers",
   "group-events",
   "group-sequences",

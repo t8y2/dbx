@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 240
 dbType: manticoresearch
+compareModes: [schema, data]
 rustVariant: ManticoreSearch
 label: Manticore Search
 dialect: ManticoreSearch

@@ -77,7 +77,7 @@
     </td>
     <td>
       JumpServer is an Open-source Privileged Access Management (PAM) platform with AI-powered capabilities, providing DevOps and IT teams a unified workspace to securely access SSH, RDP, Kubernetes, databases, websites, RemoteApp, VirtualApp, and more.
-      <a href="https://www.jumpserver.org/" target="_blank">Visit JumpServer</a>
+      <a href="https://github.com/jumpserver/jumpserver" target="_blank">Visit JumpServer</a>
     </td>
   </tr>
   <tr>
@@ -126,6 +126,17 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
+      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-en" target="_blank">
+        <img src="docs/public/sponsors/hiapi-card.png" alt="HiAPI" width="175" />
+      </a>
+    </td>
+    <td>
+      HiAPI is a developer-focused API platform for image, video, audio, and text models — GPT Image 2.5 (Flare & Sunburst), OpenAI-compatible text endpoints, and Remote MCP/Agent Skills for Claude Code, Cursor, and more. Pay as you go with no minimum spend; new users get 200 Credits on signup, plus 10% bonus Credits on top-ups.
+      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-en" target="_blank">Visit HiAPI</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
         <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
       </a>
@@ -133,6 +144,29 @@
     <td>
       UCloud is the first public cloud provider listed on China's STAR Market, with 28 global regions for cloud hosting, databases, and CDN; its AstraFlow platform offers one-click access to 200+ mainstream LLMs.
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">Visit UCloud</a>
+    </td>
+  </tr>
+
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.packyapi.ai/register?aff=wyDA" target="_blank">
+        <img src="docs/public/sponsors/packyapi-card.png" alt="PackyCode" width="175" />
+      </a>
+    </td>
+    <td>
+      PackyCode is a stable, efficient API relay for mainstream AI models. Access them with one API endpoint and one API key — automatic failover keeps access fast and reliable, with dedicated high-speed routes for Codex and Claude Code. Get started with $1 in free credits, a first top-up discount, and up to 80% off eligible routes; pay in RMB with no currency conversion markups or extra top-up fees.
+      <a href="https://www.packyapi.ai/register?aff=wyDA" target="_blank">Visit PackyCode</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://mate.vip/ee/" target="_blank">
+        <img src="docs/public/sponsors/taiyi-card.png" alt="太一企业版" width="175" />
+      </a>
+    </td>
+    <td>
+      太一智能体企业版是面向央国企的私有化智能体平台，采用“1+N+N”架构：1 个平台、N 个终端、N 个场景。<strong>可信</strong>：Java 微服务架构，私有化部署，全程留痕可审计。<strong>可控</strong>：关键操作人工审批，资料按密级管理。<strong>可达</strong>：按单位模板直接生成公文、台账和汇报材料。<strong>可复制</strong>：场景方案包化交付，便于推广和二次开发。欢迎预约演示，或在 GitHub 搜索 MateClaw。
+      <a href="https://mate.vip/ee/" target="_blank">访问太一企业版</a>
     </td>
   </tr>
   <tr>
@@ -445,6 +479,16 @@ together with `dbx.db`. Persisting `/app/data` is therefore sufficient for a
 normal Docker deployment. This key protects the database contents, but cannot
 protect the whole data volume if the volume itself is copied or exposed.
 
+Windows portable builds are the exception to the desktop platform-key rule.
+To remain portable across computers, they keep the local storage key at
+`data/.dbx/secret.key`; move and back up the complete `data` directory. If an
+older portable profile already contains ciphertext protected by Windows
+Credential Manager, launch the new build once on the original computer so DBX
+can verify and copy that key to the USB drive. If the original computer or key
+is gone, the ciphertext cannot be recovered automatically; restore the original
+key or a pre-migration backup. Keeping the key beside the database means anyone
+who obtains or copies the whole drive can also decrypt its credentials.
+
 For production deployments, replace the managed key with a Docker/Kubernetes
 Secret by setting `DBX_SECRET_KEY_FILE`, or provide `DBX_SECRET_KEY` through a
 secret manager. Explicit keys take precedence and must never be rotated while
@@ -474,9 +518,10 @@ directory in Desktop or Web and complete its upgrade wizard. For headless
 hosts without a platform credential store, configure the persistent key.
 
 Cross-device exports use a separate sync passphrase and never contain the
-local storage key. A direct `dbx.db` copy is not a cross-platform sync method:
-platform keys do not move with the database. Use encrypted export/import so
-the target device stores credentials using its own local key.
+local storage key. For installed builds, or when copying only `dbx.db`, platform
+keys do not move with the database; use encrypted export/import instead. A
+Windows portable build must move the complete `data` directory containing both
+`dbx.db` and `.dbx/secret.key`.
 
 For the complete design, migration state machine, implementation map,
 troubleshooting, and test plan, see

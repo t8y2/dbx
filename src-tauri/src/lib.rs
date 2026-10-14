@@ -20,6 +20,7 @@ mod webview2_recovery;
 mod window_state_guard;
 
 use commands::connection::AppState;
+use dbx_core::persistence::secret_codec::SecretKeyPolicy;
 use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
 use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::{maybe_import_user_data_db, DesktopIconTheme, DesktopSettings, Storage};
@@ -166,6 +167,38 @@ fn linux_appindicator_available() -> bool {
         // installed, so probe the same libraries before entering that code path.
         unsafe { libloading::Library::new(library).is_ok() }
     })
+}
+
+/// Without a compositing manager (XFCE with compositing off, i3, openbox, ...) a transparent
+/// window renders black where it should be see-through.
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_compositing_available() -> bool {
+    gtk::gdk::Screen::default().is_some_and(|screen| screen.is_composited())
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn should_enable_linux_floating_frame(compositing: bool, opt_in: Option<&std::ffi::OsStr>) -> bool {
+    compositing && opt_in == Some(std::ffi::OsStr::new("1"))
+}
+
+/// The Linux config declares the main window with `create: false` so its transparency can
+/// be explicitly opted into at runtime when a compositor is available.
+#[cfg(target_os = "linux")]
+fn create_linux_main_window(app: &tauri::App) -> tauri::Result<()> {
+    let Some(config) = app.config().app.windows.iter().find(|window| window.label == "main").cloned() else {
+        return Ok(());
+    };
+    let compositing = linux_compositing_available();
+    let opt_in = std::env::var_os("DBX_LINUX_FLOATING_FRAME");
+    let floating_frame = should_enable_linux_floating_frame(compositing, opt_in.as_deref());
+    log::info!("[WINDOW] Linux main window compositing={compositing}; floating_frame={floating_frame}");
+    let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.transparent(floating_frame);
+    if floating_frame {
+        // Read by index.html before first paint to draw the rounded, shadowed frame.
+        builder = builder.initialization_script("window.__DBX_LINUX_FLOATING__ = true;");
+    }
+    builder.build()?;
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -920,10 +953,14 @@ fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
 }
 
 #[cfg(target_os = "macos")]
-fn apply_macos_app_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+fn apply_macos_app_icon_theme(
+    app: &tauri::AppHandle,
+    icon_theme: DesktopIconTheme,
+    persist_bundle_icon: bool,
+) -> tauri::Result<()> {
     use objc2::{AllocAnyThread, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSImage};
-    use objc2_foundation::NSData;
+    use objc2_app_kit::{NSApplication, NSImage, NSWorkspace, NSWorkspaceIconCreationOptions};
+    use objc2_foundation::{NSBundle, NSData, NSString};
 
     let icon_bytes = match icon_theme {
         DesktopIconTheme::Default => MACOS_DEFAULT_APP_ICON,
@@ -934,9 +971,31 @@ fn apply_macos_app_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconThe
         // app switcher reflect the selected theme immediately.
         let marker = unsafe { MainThreadMarker::new_unchecked() };
         let application = NSApplication::sharedApplication(marker);
+        let workspace = NSWorkspace::sharedWorkspace();
+        let app_bundle_path = NSBundle::mainBundle().bundlePath();
         let data = NSData::with_bytes(icon_bytes);
         if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
             unsafe { application.setApplicationIconImage(Some(&icon)) };
+
+            // NSApplication only changes the icon for this process lifetime.
+            // Persist the selected icon on the app bundle so Finder and the
+            // Dock keep showing it after DBX exits. A nil image removes the
+            // custom icon and restores the bundle's packaged default.
+            if persist_bundle_icon {
+                let persistent_icon = match icon_theme {
+                    DesktopIconTheme::Default => None,
+                    DesktopIconTheme::Black => Some(&*icon),
+                };
+                if app_bundle_path.hasSuffix(&NSString::from_str(".app"))
+                    && !workspace.setIcon_forFile_options(
+                        persistent_icon,
+                        &app_bundle_path,
+                        NSWorkspaceIconCreationOptions::empty(),
+                    )
+                {
+                    log::warn!("Failed to persist the selected macOS app icon; the app bundle may not be writable");
+                }
+            }
         } else {
             log::warn!("Failed to decode the selected macOS application icon");
         }
@@ -958,10 +1017,10 @@ fn apply_macos_development_dock_badge(app: &tauri::AppHandle) -> tauri::Result<(
     })
 }
 
-fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+pub(crate) fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        apply_macos_app_icon_theme(app, icon_theme)
+        apply_macos_app_icon_theme(app, icon_theme, true)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1029,14 +1088,33 @@ mod tests {
         linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state, linux_pci_id_from_sysfs_value,
         linux_selected_drm_render_device, linux_uses_native_wayland, linux_webkit_environment_override,
         linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
-        should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_before_exit,
-        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
-        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
-        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
+        should_enable_linux_floating_frame, should_enable_single_instance, should_fallback_to_native_quit,
+        should_hide_window_before_exit, should_hide_window_on_close, should_setup_desktop_tray,
+        should_show_main_window_after_setup, should_show_main_window_before_setup_tasks, startup_data_dir_mode,
+        tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn linux_floating_frame_is_disabled_by_default() {
+        assert!(!should_enable_linux_floating_frame(true, None));
+        assert!(!should_enable_linux_floating_frame(false, None));
+    }
+
+    #[test]
+    fn linux_floating_frame_requires_explicit_opt_in() {
+        assert!(should_enable_linux_floating_frame(true, Some(OsStr::new("1"))));
+        for value in ["", "0", "false", "true", "auto", "yes", "01"] {
+            assert!(!should_enable_linux_floating_frame(true, Some(OsStr::new(value))));
+        }
+    }
+
+    #[test]
+    fn linux_floating_frame_requires_compositing_even_when_opted_in() {
+        assert!(!should_enable_linux_floating_frame(false, Some(OsStr::new("1"))));
+    }
 
     #[test]
     fn tray_menu_labels_follow_locale() {
@@ -1546,6 +1624,7 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
+                .skip_initial_state("main")
                 .build(),
         );
 
@@ -1579,8 +1658,11 @@ pub fn run() {
         })
         .setup(move |app| {
             let setup_start = Instant::now();
+            #[cfg(target_os = "linux")]
+            create_linux_main_window(app)?;
             eprintln!("[STARTUP] plugins registered in {:?}", startup_begin.elapsed());
             append_startup_probe(format!("setup entered after {:?}", startup_begin.elapsed()));
+            window_state_guard::restore_main_window_state(app.handle());
 
             if should_show_main_window_before_setup_tasks() {
                 prepare_main_window_for_display(app.handle());
@@ -1596,6 +1678,7 @@ pub fn run() {
                 app.path().app_data_dir().map_err(|e| e.to_string()).expect("Failed to resolve app data dir");
             let data_dir_resolution = data_dir::resolve_data_dir_with_mode(default_data_dir);
             let data_dir = data_dir_resolution.data_dir.clone();
+            let portable_mode = data_dir_resolution.is_portable_mode();
             std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
             let data_dir_mode = startup_data_dir_mode(&data_dir_resolution.mode);
             append_startup_probe(format!("data dir ready mode={data_dir_mode}"));
@@ -1606,10 +1689,26 @@ pub fn run() {
             }
             let db_path = data_dir.join("dbx.db");
 
+            // Failure logs from previous runs are kept only within their retention
+            // limits; prune once at startup so a killed process cannot leave the
+            // directory growing forever.
+            commands::sql_file::prune_desktop_sql_file_failure_logs(&data_dir);
+
             let t = Instant::now();
             append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
-                let s = Storage::open_unmigrated(&db_path).await.expect("Failed to open storage");
+                let mut s = Storage::open_unmigrated(&db_path).await.expect("Failed to open storage");
+                if portable_mode {
+                    s = s.with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+                    match s.prepare_portable_secret_key().await {
+                        Ok(true) => append_startup_probe("portable key copied from the platform credential store"),
+                        Ok(false) => {}
+                        Err(error) => {
+                            log::warn!("[STARTUP] portable key preparation failed: {error}");
+                            append_startup_probe(format!("portable key preparation failed: {error}"));
+                        }
+                    }
+                }
                 eprintln!("[STARTUP]   Storage::open in {:?}", t.elapsed());
                 append_startup_probe(format!("storage opened in {:?}", t.elapsed()));
                 let t2 = Instant::now();
@@ -1710,8 +1809,9 @@ pub fn run() {
             app.manage(state.clone());
             commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
             commands::connection::install_connection_liveness_bridge(app.handle(), state.clone());
+            let app_identifier = app.config().identifier.clone();
             let backups = tauri::async_runtime::block_on(async {
-                background_backup::BackgroundBackup::new(state.clone(), data_dir.clone())
+                background_backup::BackgroundBackup::new(state.clone(), data_dir.clone(), app_identifier)
             });
             match backups {
                 Ok(backups) => {
@@ -1882,6 +1982,7 @@ pub fn run() {
             commands::ai_multi_config::set_default_ai_config,
             commands::ai_multi_config::save_ai_config_item,
             commands::ai_multi_config::delete_ai_config,
+            commands::cc_switch::load_cc_switch_ai_configs,
             commands::prompt_template::load_prompt_templates,
             commands::prompt_template::save_prompt_template,
             commands::prompt_template::delete_prompt_template,
@@ -1906,6 +2007,7 @@ pub fn run() {
             commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,
             commands::window_controls::set_macos_traffic_light_position,
+            commands::window_controls::get_linux_window_control_icons,
             commands::app_settings::set_driver_store_dir,
             commands::app_settings::set_plugin_store_dir,
             commands::app_settings::set_agent_store_dir,
@@ -1914,6 +2016,7 @@ pub fn run() {
             commands::app_settings::save_pinned_tree_node_ids,
             commands::app_settings::load_mcp_global_policy,
             commands::app_settings::save_mcp_global_policy,
+            commands::mcp_bridge::respond_mcp_sql_approval,
             commands::background_image::save_background_image,
             commands::background_image::clear_background_image,
             commands::background_image::read_background_image,
@@ -2076,6 +2179,10 @@ pub fn run() {
             commands::query::cancel_query,
             commands::query::cancel_conditional_update,
             commands::query::close_query_session,
+            commands::query::read_large_value_chunk,
+            commands::query::release_large_value,
+            commands::query::download_large_value,
+            commands::query::export_snapshot_result,
             commands::query::close_client_connection_session,
             commands::query::execute_batch,
             commands::query::execute_script,
@@ -2100,6 +2207,8 @@ pub fn run() {
             commands::query::build_dropped_file_preview_sql,
             commands::query::build_table_select_sql,
             commands::query::build_database_search_sql,
+            commands::query::build_database_structure_search_sql,
+            commands::query::supports_database_structure_search,
             commands::query::build_search_result_where,
             commands::query::build_rename_object_sql,
             commands::query::build_rename_database_sql,
@@ -2159,6 +2268,9 @@ pub fn run() {
             commands::sql_file::execute_sql_file,
             commands::sql_file::execute_sql_files,
             commands::sql_file::cancel_sql_file_execution,
+            commands::sql_file::sql_file_failure_log_info,
+            commands::sql_file::export_sql_file_failure_log,
+            commands::sql_file::read_sql_file_failure_log_text,
             commands::external_sql::pending_open_sql_files,
             commands::external_sql::read_external_sql_file,
             commands::external_sql::inspect_external_sql_file,
@@ -2168,6 +2280,9 @@ pub fn run() {
             commands::list_sql_files::create_sql_file_in_folder,
             commands::list_sql_files::rename_sql_file_in_folder,
             commands::list_sql_files::delete_sql_file_in_folder,
+            commands::list_sql_files::create_sql_folder_in_folder,
+            commands::list_sql_files::rename_sql_folder_in_folder,
+            commands::list_sql_files::delete_sql_folder_in_folder,
             commands::global_search::global_search,
             commands::external_db::pending_open_db_files,
             commands::keychain::read_keychain_password,
@@ -2308,6 +2423,7 @@ pub fn run() {
             commands::saved_sql::saved_sql_storage_dir,
             commands::saved_sql::open_saved_sql_storage_dir,
             commands::saved_sql::sync_saved_sql_directory,
+            commands::shortcut_recording::set_shortcut_recording,
             commands::fs_open::reveal_path_in_file_manager,
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,
@@ -2575,6 +2691,8 @@ pub fn run() {
             commands::mqtt_cmd::mqtt_get_messages,
             #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_clear_messages,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_delete_message,
             commands::history::save_history,
             commands::history::load_history,
             commands::history::search_history,
@@ -2610,6 +2728,9 @@ pub fn run() {
             commands::database_export::record_database_export_destination,
             commands::table_export::start_table_export,
             commands::table_export::cancel_table_export,
+            commands::dameng_dump::start_dameng_dump,
+            commands::dameng_dump::cancel_dameng_dump,
+            commands::dameng_dump::resolve_dameng_dump_tool,
             commands::query_result_export::start_query_result_export,
             commands::query_result_export::create_query_result_temp_file,
             commands::query_result_export::open_query_result_temp_file,

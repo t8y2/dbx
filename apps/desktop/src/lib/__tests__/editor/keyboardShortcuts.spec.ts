@@ -3,8 +3,11 @@ import {
   eventToModifierOnlyShortcut,
   eventToShortcut,
   isBrowserTaskManagerShortcut,
+  isCaretBrowsingShortcut,
+  shouldBlockCaretBrowsing,
   isConvertNamingStyleShortcut,
   isEditCellShortcut,
+  isEditSidebarTableStructureShortcut,
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
   isGoToColumnShortcut,
@@ -246,6 +249,19 @@ describe("keyboard shortcut matching", () => {
     expect(isEditTableStructureShortcut({ key: "d", ctrlKey: true, isComposing: true }, undefined, "Win32")).toBe(false);
   });
 
+  it("matches the sidebar edit-table-structure shortcut F4", () => {
+    expect(isEditSidebarTableStructureShortcut({ key: "F4" }, undefined, "Win32")).toBe(true);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4" }, undefined, "MacIntel")).toBe(true);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4", ctrlKey: true }, undefined, "Win32")).toBe(false);
+  });
+
+  it("honors custom and disabled sidebar edit-table-structure shortcuts", () => {
+    expect(isEditSidebarTableStructureShortcut({ key: "s", ctrlKey: true, altKey: true }, { editSidebarTableStructure: "Mod+Alt+S" }, "Win32")).toBe(true);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4" }, { editSidebarTableStructure: "Mod+Alt+S" }, "Win32")).toBe(false);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4" }, { editSidebarTableStructure: "" }, "Win32")).toBe(false);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4", isComposing: true }, undefined, "Win32")).toBe(false);
+  });
+
   it.each([
     ["goToFirstPage", isGoToFirstPageShortcut, "F1"],
     ["goToPreviousPage", isGoToPreviousPageShortcut, "F2"],
@@ -296,5 +312,42 @@ describe("isBrowserTaskManagerShortcut", () => {
     expect(isBrowserTaskManagerShortcut({ key: "Escape", shiftKey: true, altKey: true })).toBe(false);
     expect(isBrowserTaskManagerShortcut({ key: "Escape", shiftKey: true, isComposing: true })).toBe(false);
     expect(isBrowserTaskManagerShortcut({ key: "x", shiftKey: true })).toBe(false);
+  });
+});
+
+describe("isCaretBrowsingShortcut", () => {
+  it("matches F7 key and code without modifiers", () => {
+    expect(isCaretBrowsingShortcut({ key: "F7" })).toBe(true);
+    expect(isCaretBrowsingShortcut({ code: "F7", key: "Unidentified" })).toBe(true);
+    expect(isCaretBrowsingShortcut({ key: "F7", code: "F7" })).toBe(true);
+
+    expect(isCaretBrowsingShortcut({ key: "F7", ctrlKey: true })).toBe(false);
+    expect(isCaretBrowsingShortcut({ key: "F7", metaKey: true })).toBe(false);
+    expect(isCaretBrowsingShortcut({ key: "F7", altKey: true })).toBe(false);
+    expect(isCaretBrowsingShortcut({ key: "F7", shiftKey: true })).toBe(false);
+    expect(isCaretBrowsingShortcut({ key: "F7", isComposing: true })).toBe(false);
+    expect(isCaretBrowsingShortcut({ key: "F8" })).toBe(false);
+  });
+});
+
+describe("shouldBlockCaretBrowsing", () => {
+  it("blocks F7 when caretBrowsingEnabled is false or unset", () => {
+    expect(shouldBlockCaretBrowsing({ key: "F7" })).toBe(true);
+    expect(shouldBlockCaretBrowsing({ key: "F7" }, { caretBrowsingEnabled: false })).toBe(true);
+  });
+
+  it("does not block when caretBrowsingEnabled is true", () => {
+    expect(shouldBlockCaretBrowsing({ key: "F7" }, { caretBrowsingEnabled: true })).toBe(false);
+  });
+
+  it("does not block non-F7 keys or modified keys", () => {
+    expect(shouldBlockCaretBrowsing({ key: "F5" })).toBe(false);
+    expect(shouldBlockCaretBrowsing({ key: "F7", ctrlKey: true })).toBe(false);
+    expect(shouldBlockCaretBrowsing({ key: "F7", shiftKey: true })).toBe(false);
+  });
+
+  it("does not block when F7 is bound to a custom shortcut action", () => {
+    expect(shouldBlockCaretBrowsing({ key: "F7" }, { caretBrowsingEnabled: false, shortcuts: { executeSql: "F7" } })).toBe(false);
+    expect(shouldBlockCaretBrowsing({ key: "F7" }, { caretBrowsingEnabled: false, shortcuts: { executeSql: "Ctrl+Enter" } })).toBe(true);
   });
 });

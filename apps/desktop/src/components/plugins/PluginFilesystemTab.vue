@@ -72,7 +72,9 @@ async function refresh(options: { silent?: boolean } = {}) {
           return;
         }
       } else {
-        await connectionStore.ensureConnected(props.connectionId, silent ? { allowPasswordPrompt: false } : undefined);
+        // 被动唤醒（页签恢复/重新挂载）：用户显式关掉的连接不在这里偷偷重连，
+        // 由下面 silent 分支停在「重新加载」提示上等用户自己决定。
+        await connectionStore.ensureConnected(props.connectionId, { allowPasswordPrompt: silent ? false : undefined, skipIfClosedByUser: true });
       }
     }
     if (fileManagerRef.value?.refresh) {

@@ -31,6 +31,8 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: vi.fn().mockResolvedValue(undefined),
+    ensureDatabaseCompatibilityMode: vi.fn().mockResolvedValue(undefined),
+    databaseCompatibilityMode: vi.fn().mockReturnValue(undefined),
     getConfig: mocks.getConnectionConfig,
     recordConnectionLostError: vi.fn(),
   }),
@@ -524,6 +526,8 @@ describe("queryStore Oracle/OceanBase manual-transaction sticky state (behavior 
 describe.each([
   { label: "MySQL", configId: "mysql-1", database: "test", dbType: "mysql", txnId: "txn-mysql" },
   { label: "PostgreSQL", configId: "pg-1", database: "postgres", dbType: "postgres", txnId: "txn-pg" },
+  { label: "GaussDB", configId: "gaussdb-1", database: "postgres", dbType: "gaussdb", txnId: "txn-gaussdb" },
+  { label: "openGauss", configId: "opengauss-1", database: "postgres", dbType: "opengauss", txnId: "txn-opengauss" },
 ])("queryStore $label proven-read-only sticky state", ({ configId, database, dbType, txnId }) => {
   beforeEach(() => {
     vi.clearAllMocks();

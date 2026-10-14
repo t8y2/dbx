@@ -2475,6 +2475,7 @@ pub async fn completion_assistant_search(
                 parent_name: row.get::<&str, _>(4).map(str::to_string),
                 comment: row.get::<&str, _>(5).filter(|s: &&str| !s.is_empty()).map(|s| (*s).to_string()),
                 data_type: row.get::<&str, _>(6).map(str::to_string),
+                routine_id: None,
                 signature: None,
             }
         })
@@ -2646,7 +2647,7 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
              CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, ep.value AS object_comment, {data_type} AS data_type \
              FROM sys.objects o \
              JOIN sys.schemas s ON s.schema_id = o.schema_id \
-             OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
+             OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
              WHERE o.type IN ({}) AND {object_visibility} {schema_filter} {object_like}",
             type_ids.join(",")
         ));
@@ -2762,7 +2763,7 @@ fn sqlserver_list_tables_sql_with_kind(
     let base_from = "FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep \
-           WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep";
+           WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep";
     let object_visibility = sqlserver_visible_object_predicate();
     let schema_filter = sqlserver_schema_name_predicate(schema, "s.name");
     let object_type_predicate = if table_objects_only { "o.type = 'U'" } else { "o.type IN ('U','V')" };
@@ -2897,7 +2898,7 @@ fn sqlserver_list_objects_sql(schema: &str) -> String {
          ep.value AS object_comment \
          FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
-         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
+         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
          WHERE s.name = '{s}' \
            AND o.type IN ('U','V','P','FN','IF','TF','FS','FT') \
            AND {object_visibility} \
@@ -3181,7 +3182,7 @@ fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
            JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
            WHERE i.is_primary_key = 1 \
          ) pk ON pk.object_id = c.object_id AND pk.column_id = c.column_id \
-         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep \
+         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep \
          WHERE {schema_filter} AND o.name = '{t}' AND o.type IN ('U','V') \
          ORDER BY c.column_id"
     )
@@ -3365,13 +3366,14 @@ pub async fn get_table_comment(
     Ok(rows.first().and_then(|row| row.get::<&str, _>(0)).filter(|s| !s.is_empty()).map(|s| s.to_string()))
 }
 
-fn sqlserver_table_comment_sql(schema: &str, table: &str) -> String {
+pub fn sqlserver_table_comment_sql(schema: &str, table: &str) -> String {
     let s = schema.replace('\'', "''");
     let t = table.replace('\'', "''");
     format!(
         "SELECT CAST(ep.value AS NVARCHAR(MAX)) \
          FROM sys.extended_properties ep \
-         WHERE ep.major_id = OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')) \
+         WHERE ep.class = 1 \
+           AND ep.major_id = OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')) \
            AND ep.minor_id = 0 \
            AND ep.name = N'MS_Description'"
     )
@@ -3446,10 +3448,10 @@ pub async fn list_constraints(
                 match_type: None,
                 on_update: row.get::<&str, _>(7).filter(|value| !value.is_empty()).map(str::to_string),
                 on_delete: row.get::<&str, _>(8).filter(|value| !value.is_empty()).map(str::to_string),
-                deferrable: false,
-                initially_deferred: false,
-                enabled: row.get::<bool, _>(9).unwrap_or(true),
-                valid: row.get::<bool, _>(10).unwrap_or(true),
+                deferrable: Some(false),
+                initially_deferred: Some(false),
+                enabled: Some(row.get::<bool, _>(9).unwrap_or(true)),
+                valid: Some(row.get::<bool, _>(10).unwrap_or(true)),
             }
         })
         .collect())
@@ -5172,7 +5174,7 @@ mod tests {
         assert!(sql.contains("FROM sys.objects o"));
         assert!(sql.contains("JOIN sys.columns c ON c.object_id = o.object_id"));
         assert!(sql.contains("sys.extended_properties ep"));
-        assert!(sql.contains("ep.major_id = c.object_id"));
+        assert!(sql.contains("ep.class = 1 AND ep.major_id = c.object_id"));
         assert!(sql.contains("ep.minor_id = c.column_id"));
         assert!(sql.contains("MS_Description"));
         assert!(sql.contains("c.is_computed = 1 THEN 'computed'"));
@@ -5221,6 +5223,7 @@ mod tests {
         let sql = sqlserver_table_comment_sql("dbo", "users");
 
         assert!(sql.contains("sys.extended_properties ep"));
+        assert!(sql.contains("ep.class = 1"));
         assert!(sql.contains("ep.minor_id = 0"));
         assert!(sql.contains("MS_Description"));
         assert!(sql.contains("QUOTENAME('dbo')"));
@@ -5667,6 +5670,7 @@ mod tests {
             parent_name: None,
             comment: None,
             data_type: None,
+            routine_id: None,
             signature: None,
         };
 
@@ -5696,6 +5700,7 @@ mod tests {
             parent_name: None,
             comment: None,
             data_type: None,
+            routine_id: None,
             signature: None,
         };
 

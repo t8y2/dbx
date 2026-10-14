@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 360
 dbType: databricks
+compareModes: [schema, data]
 rustVariant: Databricks
 label: Databricks SQL
 runtimeMode: agent

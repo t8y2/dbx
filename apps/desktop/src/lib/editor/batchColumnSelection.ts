@@ -1,7 +1,31 @@
 export type BatchColumnSelectionMode = "select" | "insert";
 
-export function batchColumnSelectionColumnList(candidates: string[], mode: BatchColumnSelectionMode, qualifier?: string): string {
-  return candidates.map((candidate, index) => (mode === "select" && qualifier && index > 0 ? `${qualifier}.${candidate}` : candidate)).join(", ");
+export interface BatchColumnCandidate {
+  apply: string;
+  comment?: string;
+}
+
+export function batchColumnSelectionColumnList(candidates: Array<string | BatchColumnCandidate>, mode: BatchColumnSelectionMode, qualifier?: string, indent = "  ", options?: { trailingComma?: boolean }): string {
+  const normalized = candidates.map((candidate) => (typeof candidate === "string" ? { apply: candidate } : candidate));
+  const hasComments = mode === "select" && normalized.some((candidate) => !!candidate.comment?.trim());
+
+  if (!hasComments) {
+    return normalized.map((candidate, index) => (mode === "select" && qualifier && index > 0 ? `${qualifier}.${candidate.apply}` : candidate.apply)).join(", ");
+  }
+
+  return normalized
+    .map((candidate, index) => {
+      const col = qualifier && index > 0 ? `${qualifier}.${candidate.apply}` : candidate.apply;
+      const isLast = index === normalized.length - 1;
+      const comment = candidate.comment?.replace(/[\r\n]+/g, " ").trim();
+      const linePrefix = index > 0 ? indent : "";
+      const shouldHaveComma = !isLast || options?.trailingComma;
+      if (comment) {
+        return shouldHaveComma ? `${linePrefix}${col}, -- ${comment}` : `${linePrefix}${col} -- ${comment}`;
+      }
+      return shouldHaveComma ? `${linePrefix}${col},` : `${linePrefix}${col}`;
+    })
+    .join("\n");
 }
 
 export function shouldResolveSqlColumnCompletion(options: { suggestColumns: boolean; hasReferencedTables: boolean; prefix: string; typedActivation: boolean; selectListColumnContext: boolean }): boolean {

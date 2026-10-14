@@ -323,6 +323,7 @@ async fn iris_transfer_agent_preserves_errors_count_fallback_and_cancellation() 
             &HashMap::new(),
             &mut Vec::new(),
             None,
+            false,
             |progress| {
                 totals.push(progress.total_rows);
                 if failure == "cancel" {

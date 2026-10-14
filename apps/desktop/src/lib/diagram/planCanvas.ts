@@ -35,6 +35,20 @@ const XUGU_CATEGORY_RULES: Array<[RegExp, PlanCanvasCategory]> = [
   [/^(?:hashgroup|sortgroup)$/, "agg"],
 ];
 
+const DB2_CATEGORIES: Record<string, PlanCanvasCategory> = {
+  return: "result",
+  tbscan: "tscan",
+  ixscan: "iscan",
+  fetch: "lookup",
+  nljoin: "join",
+  hsjoin: "join",
+  msjoin: "join",
+  sort: "sort",
+  grpby: "agg",
+  temp: "mat",
+  tqueue: "xchg",
+};
+
 const CATEGORY_RULES: Array<[RegExp, PlanCanvasCategory]> = [
   // MySQL access types are single ambiguous words, so they only match exactly.
   [/^(?:eq_ref|const|system)$/, "lookup"],
@@ -56,6 +70,7 @@ const CATEGORY_RULES: Array<[RegExp, PlanCanvasCategory]> = [
 export function categorizePlanNode(nodeType: string, dialect?: ExplainPlanDatabaseType): PlanCanvasCategory {
   const normalized = nodeType.trim().toLowerCase();
   if (!normalized) return "other";
+  if (dialect === "db2" && Object.prototype.hasOwnProperty.call(DB2_CATEGORIES, normalized)) return DB2_CATEGORIES[normalized];
   if (dialect === "xugu") {
     for (const [pattern, category] of XUGU_CATEGORY_RULES) {
       if (pattern.test(normalized)) return category;
@@ -77,7 +92,7 @@ export function parsePlanNumber(value?: string): number | undefined {
   const rangeIndex = text.lastIndexOf("..");
   if (rangeIndex >= 0) text = text.slice(rangeIndex + 2).trim();
 
-  const match = text.match(/^([+-]?[\d,]*\.?\d+)\s*(?:([kmgt])\b)?/i);
+  const match = text.match(/^([+-]?[\d,]*\.?\d+(?:[eE][+-]?\d+)?)\s*(?:([kmgt])\b)?/i);
   if (!match) return undefined;
   const base = Number(match[1].replaceAll(",", ""));
   if (!Number.isFinite(base)) return undefined;

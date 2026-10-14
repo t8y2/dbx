@@ -24,7 +24,7 @@ export interface AiExternalContextRequest {
   /** Selections taken from that surface, attached as context data (R4/R8). */
   selections?: readonly AiSelectionContextInput[];
   /** Tables the gesture referred to — the object tree's "Add to AI". */
-  tableMentions?: readonly { schema?: string; table: string }[];
+  tableMentions?: readonly { database?: string; schema?: string; table: string }[];
   /** Action to run immediately (query-result "Fix with AI"); omitted = fill the composer only. */
   action?: AiAction;
   /** Instruction text handed to `action`. */

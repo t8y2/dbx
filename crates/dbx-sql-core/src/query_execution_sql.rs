@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlparser::dialect::{MsSqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{GenericDialect, MsSqlDialect, PostgreSqlDialect};
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::models::connection::DatabaseType;
@@ -85,6 +85,7 @@ enum EstimatedPlanSqlGeneration {
     Plain,
     Xugu,
     Oracle,
+    Db2,
     SqlServer,
     Json,
 }
@@ -127,7 +128,9 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     if source.is_empty() {
         return explain_err("empty");
     }
-    if !is_safe_explain_sql_for_database(&source, options.database_type) {
+    let safety_source =
+        if options.database_type == Some(DatabaseType::Db2) { options.sql.as_str() } else { source.as_str() };
+    if !is_safe_explain_sql_for_database(safety_source, options.database_type) {
         return explain_err("unsafe");
     }
     if options.database_type == Some(DatabaseType::Xugu) {
@@ -159,7 +162,7 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
         EstimatedPlanSqlGeneration::Postgres => format!("EXPLAIN (FORMAT JSON) {source}"),
         EstimatedPlanSqlGeneration::Plain => format!("EXPLAIN {source}"),
         EstimatedPlanSqlGeneration::Xugu => format!("EXPLAIN VERBOSE {source}"),
-        EstimatedPlanSqlGeneration::Oracle => format!("EXPLAIN PLAN FOR {source}"),
+        EstimatedPlanSqlGeneration::Oracle | EstimatedPlanSqlGeneration::Db2 => format!("EXPLAIN PLAN FOR {source}"),
         // STATISTICS XML returns the same ShowPlanXML document plus per-operator
         // runtime counters, at the price of actually running the statement.
         EstimatedPlanSqlGeneration::SqlServer if options.analyze == Some(true) => {
@@ -202,9 +205,10 @@ pub fn build_dropped_file_preview_sql(options: DroppedFilePreviewSqlOptions) -> 
 pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<EstimatedPlanStrategy> {
     use EstimatedPlanAcquisition::{DriverNative, GeneratedSql, SqlServerShowPlanSession};
     use EstimatedPlanFormat::{Json, Text, Xml};
-    use EstimatedPlanSqlGeneration::{Mysql, Oracle, Plain, Postgres, SqlServer, Xugu};
+    use EstimatedPlanSqlGeneration::{Db2, Mysql, Oracle, Plain, Postgres, SqlServer, Xugu};
 
     let strategy = match database_type? {
+        DatabaseType::Db2 => EstimatedPlanStrategy { sql_generation: Db2, acquisition: DriverNative, format: Json },
         DatabaseType::Mysql => EstimatedPlanStrategy { sql_generation: Mysql, acquisition: GeneratedSql, format: Json },
         DatabaseType::Doris => EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text },
         DatabaseType::Xugu => EstimatedPlanStrategy { sql_generation: Xugu, acquisition: GeneratedSql, format: Text },
@@ -251,6 +255,9 @@ pub fn is_safe_explain_sql(sql: &str) -> bool {
 }
 
 pub fn is_safe_explain_sql_for_database(sql: &str, database_type: Option<DatabaseType>) -> bool {
+    if database_type == Some(DatabaseType::Db2) {
+        return is_safe_db2_explain_sql(sql);
+    }
     let source = strip_trailing_semicolons(sql.trim());
     if source.is_empty() || has_extra_statement_after_semicolon(&source) {
         return false;
@@ -258,7 +265,31 @@ pub fn is_safe_explain_sql_for_database(sql: &str, database_type: Option<Databas
     if database_type == Some(DatabaseType::Oracle) && is_safe_oracle_explain_dml_source(&source) {
         return true;
     }
+
     is_safe_explain_source(&source) && !contains_dangerous_sql_keyword(&source)
+}
+
+/// Use the existing lexer so nested DB2 comments are removed before every
+/// safety check; preserve literal escaping while normalizing only for validation.
+fn is_safe_db2_explain_sql(sql: &str) -> bool {
+    let Ok(tokens) = Tokenizer::new(&GenericDialect {}, sql).with_unescape(false).tokenize() else {
+        return false;
+    };
+    let mut tokens: Vec<_> = tokens.into_iter().filter(|token| !matches!(token, Token::Whitespace(_))).collect();
+    if tokens.last() == Some(&Token::SemiColon) {
+        tokens.pop();
+    }
+    if tokens.iter().any(|token| matches!(token, Token::SemiColon)) {
+        return false;
+    }
+    let Some(Token::Word(word)) = tokens.first() else {
+        return false;
+    };
+    if word.quote_style.is_some() || !["SELECT", "WITH", "VALUES"].contains(&word.value.to_ascii_uppercase().as_str()) {
+        return false;
+    }
+    let normalized = tokens.iter().map(ToString::to_string).collect::<Vec<_>>().join(" ");
+    !contains_dangerous_sql_keyword(&normalized)
 }
 
 /// Returns true for databases that support SQL query execution (execute_query / get_sample_data).
@@ -1304,6 +1335,16 @@ fn strip_sql_comments_and_literals_with_metadata(sql: &str, detect_mysql_executa
             in_block_comment = true;
             continue;
         }
+        if matches!(ch, 'q' | 'Q' | 'n' | 'N') && !previous_code_char.is_some_and(is_oracle_identifier_char) {
+            if let Some(length) = oracle_alternative_quote_len(ch, &chars) {
+                for _ in 0..length {
+                    chars.next();
+                }
+                output.push_str(&" ".repeat(length));
+                previous_code_char = Some(' ');
+                continue;
+            }
+        }
         if ch == '\'' {
             in_single_quote = true;
             output.push(' ');
@@ -1354,6 +1395,57 @@ fn is_mysql_executable_comment_start(chars: &std::iter::Peekable<std::str::Chars
 
 fn is_identifier_char(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '_' || character == '$'
+}
+
+/// Oracle identifiers may also contain `#` (and `$` above), so an introducer
+/// directly after one of those characters does not start its own token.
+fn is_oracle_identifier_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_' || character == '$' || character == '#'
+}
+
+/// Length of an Oracle alternative-quoted literal — `q'#...#'`, `q'[...]'`,
+/// `nq'{...}'` — where the delimiter may contain the quote character
+/// unchanged. The literal ends at the first `closer + '`; Oracle has no escape
+/// or nesting inside these literals. `ch` is the already-read `q`/`Q`/`n`/`N`
+/// introducer and the returned length includes it. An unterminated literal
+/// returns `None` so the text stays visible to the keyword scan and malformed
+/// input still fails closed, matching the dollar-quote policy here. Mirrors
+/// `readOracleAlternativeQuoteEnd` in `apps/desktop/src/lib/sql/sqlRisk.ts`.
+fn oracle_alternative_quote_len(ch: char, chars: &std::iter::Peekable<std::str::Chars<'_>>) -> Option<usize> {
+    let mut probe = chars.clone();
+    let mut length = 1usize;
+    if matches!(ch, 'n' | 'N') {
+        match probe.next() {
+            Some('q' | 'Q') => length += 1,
+            _ => return None,
+        }
+    }
+    match probe.next() {
+        Some('\'') => length += 1,
+        _ => return None,
+    }
+    let opener = probe.next()?;
+    length += 1;
+    // A whitespace opener means `q '...'` — an identifier then an ordinary
+    // string, not an alternative-quoted literal.
+    if opener.is_whitespace() {
+        return None;
+    }
+    let closer = match opener {
+        '[' => ']',
+        '{' => '}',
+        '(' => ')',
+        '<' => '>',
+        other => other,
+    };
+    loop {
+        let scan = probe.next()?;
+        length += 1;
+        if scan == closer && probe.peek() == Some(&'\'') {
+            probe.next();
+            return Some(length + 1);
+        }
+    }
 }
 
 /// Read a PostgreSQL dollar-quote delimiter — `$$` or `$tag$` — from the
@@ -1526,6 +1618,119 @@ mod tests {
         assert!(!is_oracle_proven_read_only_statement("SELECT * FROM t WHERE a IN (1, 2)"));
         assert!(!is_oracle_proven_read_only_statement("SELECT * FROM t WHERE b = 'x' AND c IN (3)"));
         assert!(!is_oracle_proven_read_only_statement("SELECT 1 UNION SELECT 2"));
+    }
+
+    #[test]
+    fn db2_explain_uses_native_json_plan_acquisition() {
+        let db_type = Some(DatabaseType::Db2);
+        assert!(supports_explain_plan(db_type));
+        let strategy = estimated_plan_strategy(db_type).unwrap();
+        assert_eq!(strategy.acquisition(), EstimatedPlanAcquisition::DriverNative);
+        assert_eq!(strategy.format(), EstimatedPlanFormat::Json);
+        for sql in [
+            "SELECT * FROM \"APP\".\"ORDERS\"",
+            "WITH q AS (SELECT 1 FROM SYSIBM.SYSDUMMY1) SELECT * FROM q",
+            "VALUES 1",
+            "/* plan */ select * FROM APP.ORDERS",
+            "-- plan\nwith q AS (SELECT 1 FROM SYSIBM.SYSDUMMY1) SELECT * FROM q",
+            "/* plan */ values (1)",
+        ] {
+            let result = build_explain_sql(ExplainSqlOptions {
+                database_type: db_type,
+                format: None,
+                analyze: Some(true),
+                sql: format!("{sql};"),
+            });
+            assert!(result.ok, "{result:?}");
+            assert_eq!(result.sql, Some(format!("EXPLAIN PLAN FOR {sql}")));
+        }
+    }
+
+    #[test]
+    fn db2_explain_handles_nested_comments_without_hiding_writes() {
+        for sql in [
+            "/* outer /* inner */ trailing */ SELECT 1 FROM SYSIBM.SYSDUMMY1",
+            "/* outer /* inner */ DELETE */ VALUES ('a;''b')",
+            "WITH q AS (/* outer /* inner */ UPDATE */ SELECT 1 FROM SYSIBM.SYSDUMMY1) SELECT * FROM q",
+        ] {
+            assert!(is_safe_explain_sql_for_database(sql, Some(DatabaseType::Db2)), "{sql}");
+            assert!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Db2),
+                    format: None,
+                    analyze: None,
+                    sql: sql.into()
+                })
+                .ok,
+                "{sql}"
+            );
+        }
+        for sql in [
+            "/* outer /* inner */ trailing */ DELETE FROM APP.ORDERS",
+            "/* outer /* inner */ trailing */ SELECT 1; DELETE FROM APP.ORDERS",
+            "/* outer /* inner */ trailing */ TABLE APP.ORDERS",
+            "WITH q AS (DELETE FROM APP.ORDERS) SELECT * FROM q",
+            "SELECT 1 /* outer /* inner */",
+            "SELECT 1;;",
+        ] {
+            assert!(!is_safe_explain_sql_for_database(sql, Some(DatabaseType::Db2)), "{sql}");
+            assert!(
+                !build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Db2),
+                    format: None,
+                    analyze: None,
+                    sql: sql.into()
+                })
+                .ok,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn db2_explain_rejects_table_shortcuts_in_all_preflight_paths() {
+        for sql in ["TABLE APP.ORDERS", "table \"APP\".\"ORDERS\";", "/* plan */ TABLE APP.ORDERS"] {
+            assert!(!is_safe_explain_sql_for_database(sql, Some(DatabaseType::Db2)), "{sql}");
+            let result = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Db2),
+                format: None,
+                analyze: None,
+                sql: sql.into(),
+            });
+            assert!(!result.ok, "{sql}: {result:?}");
+            assert_eq!(result.reason.as_deref(), Some("unsafe"));
+            assert!(is_safe_explain_sql(sql), "generic TABLE support must remain: {sql}");
+            assert!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Postgres),
+                    format: None,
+                    analyze: None,
+                    sql: sql.into(),
+                })
+                .ok,
+                "PostgreSQL TABLE support must remain: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn db2_explain_rejects_empty_write_and_multiple_statement_sources() {
+        for (sql, reason) in [
+            ("", "empty"),
+            ("DELETE FROM t", "unsafe"),
+            ("UPDATE t SET n=1", "unsafe"),
+            ("SELECT 1; DROP TABLE t", "unsafe"),
+            ("SELECT 1; SELECT 2", "unsafe"),
+        ] {
+            let result = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Db2),
+                format: None,
+                analyze: None,
+                sql: sql.into(),
+            });
+            assert!(!result.ok);
+            assert_eq!(result.reason.as_deref(), Some(reason));
+        }
     }
 
     #[test]
@@ -1917,6 +2122,7 @@ mod tests {
             (DatabaseType::Questdb, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Dameng, "EXPLAIN SELECT 1", Text, DriverNative),
             (DatabaseType::Oracle, "EXPLAIN PLAN FOR SELECT 1", Text, DriverNative),
+            (DatabaseType::Db2, "EXPLAIN PLAN FOR SELECT 1", Json, DriverNative),
             (DatabaseType::OceanbaseOracle, "EXPLAIN FORMAT=JSON SELECT 1", Json, GeneratedSql),
             (
                 DatabaseType::SqlServer,
@@ -2193,6 +2399,38 @@ mod tests {
         assert_eq!(strip_sql_comments_and_literals("-- comment\nSELECT 1"), " SELECT 1");
         assert_eq!(strip_sql_comments_and_literals("/* block */ SELECT 1"), "  SELECT 1");
         assert_eq!(strip_sql_comments_and_literals("# comment\nSELECT 1"), " SELECT 1");
+    }
+
+    #[test]
+    fn strip_sql_comments_and_literals_oracle_alternative_quoted() {
+        // The quote inside q'...' is literal data, so the rest of the statement
+        // stays visible to the keyword scan instead of being swallowed by the
+        // mis-paired ordinary string.
+        let visible = strip_sql_comments_and_literals("SELECT q'[O'Reilly]' FROM t; DELETE FROM users;");
+        assert!(visible.contains("DELETE FROM users"), "{visible}");
+        let visible = strip_sql_comments_and_literals("SELECT nq'{O'Reilly}' FROM t; DELETE FROM users;");
+        assert!(visible.contains("DELETE FROM users"), "{visible}");
+        // SQL-looking text inside the literal stays literal data.
+        let hidden = strip_sql_comments_and_literals("SELECT q'[it's; DELETE FROM users;]' FROM t;");
+        assert!(!hidden.contains("DELETE"), "{hidden}");
+        // The introducer must start its own token: `aq` is one identifier, so
+        // the following literal is ordinary.
+        let visible = strip_sql_comments_and_literals("SELECT aq'[x]' FROM t; DELETE FROM users;");
+        assert!(visible.contains("DELETE FROM users"), "{visible}");
+        // An unterminated q-literal is malformed input and stays visible, so
+        // the keyword scan fails closed.
+        let visible = strip_sql_comments_and_literals("SELECT q'[O'Reilly FROM t; DELETE FROM users;");
+        assert!(visible.contains("DELETE FROM users"), "{visible}");
+    }
+
+    #[test]
+    fn oracle_proven_read_only_statement_alternative_quoted() {
+        // The mis-paired quotes previously reduced this to `SELECT q`, proving
+        // the statement read-only even though real code follows the literal.
+        assert!(!is_oracle_proven_read_only_statement("SELECT q'[O'Reilly]' FROM users; DELETE FROM users;"));
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users WHERE name = q'[O''Reilly]'"));
+        // SQL-looking text inside the literal is data, not a forbidden keyword.
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users WHERE note = q'[drop table]'"));
     }
 
     #[test]

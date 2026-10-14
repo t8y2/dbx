@@ -328,6 +328,9 @@ const ORACLE_PL_SQL_BLOCK_STARTERS = new Set(["DECLARE", "BEGIN"]);
 // Only PACKAGE (spec), PACKAGE/TYPE BODY, and routine/trigger objects are PL/SQL blocks.
 const ORACLE_PL_SQL_CREATE_OBJECT_TYPES = new Set(["FUNCTION", "PROCEDURE", "TRIGGER", "PACKAGE"]);
 const ORACLE_PL_SQL_TERMINATORS = new Set(["IF", "LOOP", "CASE"]);
+// The main query that follows Oracle's `WITH [FUNCTION|PROCEDURE ... END;]` inline PL/SQL
+// declaration section. Only a top-level `;` once one of these starts is the statement terminator.
+const ORACLE_WITH_FUNCTION_MAIN_QUERY_KEYWORDS = new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "WITH"]);
 const SAP_HANA_SCRIPT_BLOCK_TERMINATORS = new Set(["IF", "FOR", "WHILE"]);
 
 /**
@@ -2160,10 +2163,17 @@ function startsWithOraclePlSqlBlock(sql: string): boolean {
   return startsWithOraclePlSqlBlockWords(oraclePlSqlWords(sql));
 }
 
+/** Whether the statement opens with Oracle's `WITH [FUNCTION|PROCEDURE ...]` inline PL/SQL
+ * declaration section (Oracle 12c `plsql_declarations`, also accepted by DM8 — issue #11275). */
+function isOracleWithFunctionDeclaration(words: readonly string[]): boolean {
+  return words[0] === "WITH" && (words[1] === "FUNCTION" || words[1] === "PROCEDURE");
+}
+
 function startsWithOraclePlSqlBlockWords(words: readonly string[]): boolean {
   const first = words[0];
   if (!first) return false;
   if (ORACLE_PL_SQL_BLOCK_STARTERS.has(first)) return first !== "BEGIN" || words[1] !== "TRANSACTION";
+  if (first === "WITH") return isOracleWithFunctionDeclaration(words);
   if (first !== "CREATE") return false;
 
   const index = skipOraclePlSqlCreateModifiers(words, 1);
@@ -2307,21 +2317,34 @@ function oraclePlSqlBlockEnd(sql: string): number | null {
   const tokens = oraclePlSqlTokens(sql);
   const words = oraclePlSqlWordValues(tokens);
   if (!startsWithOraclePlSqlBlockWords(words)) return null;
+  const withFunctionDeclaration = isOracleWithFunctionDeclaration(words);
 
   // Package/type specifications have no BEGIN — only declarations closed by
   // END [name];. Bodies also own an outer END beyond nested routine END pairs.
   const objectKind = oraclePlSqlCreateObjectKind(words);
   const stack: string[] = objectKind === "body" ? ["OBJECT_BODY"] : objectKind === "spec" ? ["OBJECT_SPEC"] : [];
   let sawBegin = false;
+  let inMainQuery = false;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token.kind === "semicolon") {
+      // Inside a `WITH FUNCTION ...` declaration section every top-level `;` — declaration
+      // assignments, nested block ends, and the `END;` closing each declaration — stays part
+      // of the statement. Only the main query's own terminator ends it (#11275).
+      if (withFunctionDeclaration) {
+        if (inMainQuery && stack.length === 0) return token.to;
+        continue;
+      }
       if (stack[stack.length - 1] === "ROUTINE_HEADER") stack.pop();
       const complete = objectKind !== null ? stack.length === 0 : sawBegin && stack.length === 0;
       if (complete) return token.to;
       continue;
     }
     if (token.kind !== "word") continue;
+
+    if (withFunctionDeclaration && stack.length === 0 && index > 0 && ORACLE_WITH_FUNCTION_MAIN_QUERY_KEYWORDS.has(token.value)) {
+      inMainQuery = true;
+    }
 
     if (token.value === "DECLARE") {
       if (stack[stack.length - 1] !== "DECLARATION") stack.push("DECLARATION");

@@ -115,6 +115,14 @@ Copy the complete DDL for code review or execution through a migration tool.
 
 Do not assume that every DDL feature is editable because a database can connect. Use [Database Support](/en/docs/databases) and the actual editor controls as the current source of truth.
 
+## OceanBase Oracle Structure Cloning
+
+The sidebar and Object Browser use the same scope for structure cloning and structure paste: column types and parameters, BYTE/CHAR units, defaults, nullability, primary-key column order, ordinary indexes, and table/column comments. FLOAT binary precision and NUMBER star precision or negative scale are retained. Built-in OceanBase type recommendations use CREATE-column checks against 4.2.5.7; other types can still be entered manually, and recommendations do not replace existing column types.
+
+Before execution, confirmation shows the target, SQL, copied items, and exclusions. Foreign keys, CHECK/UNIQUE constraints, triggers, special indexes, and partition definitions are excluded. UNIQUE constraint backing indexes are excluded too; independent ordinary unique indexes can be copied. Sources with virtual columns or temporary-table properties are rejected. Ordinary target names fold to uppercase, while explicitly double-quoted names retain case: `orders_copy` creates `ORDERS_COPY`, and `"OrdersCopy"` creates `OrdersCopy`.
+
+Each DDL statement commits separately. Execution stops at the first error without automatic rollback or target deletion. Failure details distinguish confirmed steps, database rejection or unknown results, and steps not executed. Before retrying, refresh and inspect the target using the reported schema and table name; a lost response does not prove creation failed. Native Oracle cloning retains its own scope and is not restricted by these OceanBase exclusions.
+
 ## Concurrency and Recovery
 
 - Drafts are based on metadata read when the editor opened and do not merge external schema changes automatically

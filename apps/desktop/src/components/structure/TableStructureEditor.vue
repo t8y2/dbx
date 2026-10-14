@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { Compartment } from "@codemirror/state";
 import { keymap as codeMirrorKeymap } from "@codemirror/view";
+import { getStarRocksCapabilities } from "@/lib/table/starrocksCapabilities";
+import { starRocksAlterOptionsFromDdl, starRocksColumnDefinitionLocked, type StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
+import { getColumnDefaultValuePresets } from "@/lib/table/columnDefaultPresets";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import StructureIndexColumnPicker from "./StructureIndexColumnPicker.vue";
@@ -47,6 +50,11 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import StarRocksAlterStatus from "@/components/structure/StarRocksAlterStatus.vue";
+import StarRocksSortKeyEditor from "@/components/structure/StarRocksSortKeyEditor.vue";
+import StarRocksLayoutCopyDialog from "@/components/structure/StarRocksLayoutCopyDialog.vue";
+import StarRocksPhysicalOptionsEditor from "@/components/structure/StarRocksPhysicalOptionsEditor.vue";
+import { buildStarRocksDialectOptions, emptyStarRocksPhysicalOptions, hasStarRocksPhysicalOptions, restoreStarRocksPhysicalOptions } from "@/lib/table/starrocksPhysicalOptions";
 import TablePhysicalOptionsEditor from "@/components/structure/TablePhysicalOptionsEditor.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
@@ -64,6 +72,9 @@ import { useTheme } from "@/composables/useTheme";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { useToast } from "@/composables/useToast";
+import { fetchNamespaceOptionsForConnection, fetchCatalogNamespaceOptions, namespaceOptionsAreSchemas, normalizedQueryTabCatalog, selectedQueryCatalogName } from "@/composables/useDatabaseOptions";
+import { schemaOptionsForConnection } from "@/composables/useSchemaOptions";
+import { connectionIsDorisFamilyCatalogCapable, isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import { useVerticalOverlayScrollbar } from "@/composables/useVerticalOverlayScrollbar";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
@@ -108,9 +119,9 @@ import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTabl
 import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, normalizeUnsupportedConcurrentIndexes, type ConcurrentIndexAvailability } from "@/lib/table/concurrentIndexAvailability";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
-import { codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { postgresListRolesSql, usersFromPostgresRolesResult } from "@/lib/database/databaseUserAdmin";
-import type { ColumnInfo, ConstraintInfo, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
+import type { CatalogInfo, ColumnInfo, ConnectionConfig, ConstraintInfo, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
   applyManticoreDdlColumnExtras,
   buildStructureTargetLabel,
@@ -527,7 +538,31 @@ async function fetchDdl(force = false) {
 const errorMessage = ref("");
 const secondaryMetadataErrors = ref<Partial<Record<ObjectMetadataFacet, string>>>({});
 const columns = ref<EditableStructureColumn[]>([]);
+const starrocksStatusBusy = ref(false);
+const starrocksStatusRevision = ref(0);
+const starrocksSubmittedSql = ref<{ target: string; sql: string }>();
+const starrocksStatusTarget = computed(() => JSON.stringify([props.connectionId, props.database, props.tableName, props.schema, props.catalog]));
+const starrocksDraftDirty = computed(() => hasPendingStructureChanges() || ddlDirty.value);
+const starrocksAlterContext = ref<StarRocksAlterOptions>();
+const starrocksLayoutCopyOpen = ref(false);
+const starrocksSortColumns = ref<string[]>();
+const pendingStarRocksSort = computed(() => (starrocksSortColumns.value && starrocksAlterContext.value?.sortColumns && JSON.stringify(starrocksSortColumns.value) !== JSON.stringify(starrocksAlterContext.value.sortColumns) ? starrocksSortColumns.value : undefined));
+async function authorizeStarRocksLayoutCopy(sql: string): Promise<boolean> {
+  const config = store.getConfig(props.connectionId);
+  const productionContext = productionContextForDatabase(config, props.database);
+  return !productionContext.active || (await productionSafetyStore.requestConfirmation({ sql, connectionName: config?.name, database: props.database, productionDatabases: productionContext.databases, source: t("starrocksLayout.copyTitle") }));
+}
 const copyColumnsDialogOpen = ref(false);
+const copySourceConnectionId = ref("");
+const copySourceDatabase = ref("");
+const copySourceSchema = ref("");
+const copySourceCatalog = ref("");
+const copySourceDatabases = ref<string[]>([]);
+const copySourceSchemas = ref<string[]>([]);
+const copySourceCatalogs = ref<CatalogInfo[]>([]);
+const copySourceScopeLoading = ref(false);
+const copySourceScopeReady = ref(false);
+let copySourceScopeRequestId = 0;
 const copySourceTables = ref<TableInfo[]>([]);
 const copySourceTableName = ref("");
 const copySourceTableSearch = ref("");
@@ -932,7 +967,7 @@ function columnChanged(column: EditableStructureColumn, index: number): boolean 
   if (!column.original || column.markedForDrop) return true;
   const original = column.original;
   return (
-    isPhysicalTableColumnOrderChange(databaseType.value, connection.value?.db_type, column.originalPosition, index) ||
+    isPhysicalTableColumnOrderChange(databaseType.value, connection.value?.db_type, column.originalPosition, index, structureCapabilities.value.reorderColumn ? starrocksAlterContext.value?.model : undefined) ||
     column.name !== original.name ||
     column.dataType !== original.data_type ||
     column.isNullable !== original.is_nullable ||
@@ -977,12 +1012,12 @@ function foreignKeyChanged(foreignKey: EditableStructureForeignKey): boolean {
 function triggerChanged(trigger: EditableStructureTrigger): boolean {
   if (!trigger.original || trigger.markedForDrop) return true;
   const original = trigger.original;
-  return trigger.name !== original.name || trigger.timing !== original.timing || trigger.event !== original.event || !sameText(trigger.statement, original.statement);
+  return trigger.name !== original.name || trigger.timing !== original.timing || trigger.event !== original.event || !sameText(trigger.statement, original.statement) || (trigger.enabled !== undefined && trigger.enabled !== original.enabled);
 }
 
 function captureStructureRefreshScope(): TableStructureRefreshScope {
   return {
-    columns: columns.value.some(columnChanged),
+    columns: columns.value.some(columnChanged) || !!pendingStarRocksSort.value,
     indexes: indexes.value.some(indexChanged),
     foreignKeys: foreignKeys.value.some(foreignKeyChanged),
     // Constraints have no editable draft of their own, but column/index/FK
@@ -1373,12 +1408,17 @@ const usesNativeMysqlIndexNames = computed(() => {
 });
 const supportsCharacterLengthUnits = computed(() => databaseType.value === "dameng" || databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle");
 const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
-const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion));
+const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion, starrocksAlterContext.value?.model));
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value));
 const structureDialect = computed(() => structureCapabilities.value.dialect);
-const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment);
+const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment || (!isCreateMode.value && databaseType.value === "starrocks" && !getStarRocksCapabilities(connection.value?.database_info?.productVersion).tableComment));
 const dynamicDataTypeOptions = ref<string[]>([]);
-const dataTypeOptions = computed(() => mergeDataTypeOptions(dynamicDataTypeOptions.value, getDataTypeOptions(databaseType.value)));
+const dataTypeOptions = computed(() => {
+  const options = getDataTypeOptions(databaseType.value, dynamicDataTypeOptions.value, connection.value?.database_info?.productVersion);
+  if (databaseType.value !== "oceanbase-oracle") return options;
+  // JDBC may advertise Oracle types that OceanBase rejects.
+  return options.filter((type) => !/^(?:nclob|long(?:\s+raw)?|bfile|boolean|vector)\s*(?:\(|$)/i.test(type.trim()));
+});
 const columnEditorControls = computed(() => getColumnEditorControls(databaseType.value));
 
 const indexTypesByDb: Record<string, string[]> = {
@@ -1459,9 +1499,19 @@ const defaultValuePresets = computed((): DefaultValuePreset[] => {
 
   return [...universal, ...(dialectPresets[structureDialect.value] ?? [])];
 });
+function columnDefaultValuePresets(column: EditableStructureColumn): DefaultValuePreset[] {
+  if (databaseType.value !== "starrocks") return defaultValuePresets.value;
+  return getColumnDefaultValuePresets(column, {
+    databaseType: databaseType.value,
+    dialect: structureDialect.value,
+    serverVersion: connection.value?.database_info?.productVersion,
+    unsetLabel: t("structureEditor.unsetDefault"),
+    isCreateMode: isCreateMode.value,
+  }).map((preset) => ({ ...preset, dataType: column.dataType }));
+}
 
 const showExtendedProperties = computed(() => supportsTableStructureExtendedProperties(databaseType.value));
-const showCharacterSet = computed(() => structureDialect.value === "mysql");
+const showCharacterSet = computed(() => structureDialect.value === "mysql" && databaseType.value !== "starrocks");
 
 const serverCharsetMetadata = ref<CreateDatabaseCharsetMetadata>();
 const charsetMetadataLoading = ref(false);
@@ -1916,7 +1966,7 @@ const tableStoresCaseSensitiveIdentifiers = computed(() => {
 });
 const usesSqliteRebuildStrategy = computed(() => !isCreateMode.value && structureCapabilities.value.alterStrategy === "sqlite-rebuild");
 const hasSqliteTypeChange = computed(() => usesSqliteRebuildStrategy.value && hasExistingColumnTypeChange(columns.value));
-const canAddColumn = computed(() => canAddTableStructureColumn(databaseType.value, isCreateMode.value));
+const canAddColumn = computed(() => canAddTableStructureColumn(databaseType.value, isCreateMode.value) && (isCreateMode.value || databaseType.value !== "starrocks" || ["primary", "duplicate"].includes(starrocksAlterContext.value?.model ?? "")));
 const newTableName = ref("");
 const tableComment = ref("");
 const originalTableComment = ref("");
@@ -1927,6 +1977,7 @@ const mysqlAutoIncrementLoadError = ref("");
 const mysqlTableEngine = ref("");
 const originalMysqlTableEngine = ref("");
 const physicalOptions = ref(emptyTablePhysicalOptions());
+const starrocksPhysicalOptions = ref(emptyStarRocksPhysicalOptions());
 watch(
   () => columns.value.filter((column) => !column.markedForDrop).map((column) => column.id),
   (ids) => {
@@ -2329,6 +2380,8 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     mysqlTableEngine: mysqlTableEngine.value,
     originalMysqlTableEngine: originalMysqlTableEngine.value,
     physicalOptions: cloneDraftValue(physicalOptions.value),
+    starrocksPhysicalOptions: cloneDraftValue(starrocksPhysicalOptions.value),
+    starrocksSortColumns: starrocksSortColumns.value ? [...starrocksSortColumns.value] : undefined,
     tableOwner: tableOwner.value,
     originalTableOwner: originalTableOwner.value,
     columns: cloneDraftValue(columns.value),
@@ -2407,6 +2460,8 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   originalTableOwner.value = draft.originalTableOwner || "";
   columns.value = cloneDraftValue(draft.columns || []);
   physicalOptions.value = restoreTablePhysicalOptions(draft);
+  starrocksPhysicalOptions.value = restoreStarRocksPhysicalOptions(draft.starrocksPhysicalOptions);
+  starrocksSortColumns.value = draft.starrocksSortColumns ? [...draft.starrocksSortColumns] : undefined;
   // Existing-index edits never support Concurrent (the checkbox is disabled and
   // the core builder rejects the request), so a stale `concurrently: true`
   // saved in a restored draft must not be submitted or deadlock the save.
@@ -2508,6 +2563,7 @@ function hasPendingStructureChanges(): boolean {
       !!tableComment.value.trim() ||
       mysqlTableEngine.value !== originalMysqlTableEngine.value ||
       hasTablePhysicalOptions(physicalOptions.value) ||
+      (databaseType.value === "starrocks" && hasStarRocksPhysicalOptions(starrocksPhysicalOptions.value)) ||
       columns.value.length > 0 ||
       indexes.value.length > 0 ||
       foreignKeys.value.length > 0 ||
@@ -2638,7 +2694,10 @@ function scheduleSqlPreviewRefresh() {
   }
   sqlPreviewRequestId++;
   deferredSqlPreviewRefresh = false;
-  if (!hasPendingStructureChanges() && !ddlDirty.value) {
+  // Existing StarRocks tables need their model metadata before definition
+  // controls can be enabled, even when no column has been edited yet.
+  const needsStarRocksAlterContext = !isCreateMode.value && databaseType.value === "starrocks" && !starrocksAlterContext.value;
+  if (!hasPendingStructureChanges() && !ddlDirty.value && !needsStarRocksAlterContext) {
     pendingStatements.value = [];
     warnings.value = [];
     sqliteSchemaRevision.value = undefined;
@@ -2746,6 +2805,16 @@ async function refreshSqlPreview() {
     sqlPreviewPending.value = false;
     return;
   }
+  if (!isCreateMode.value && databaseType.value === "starrocks") {
+    try {
+      const { ddl } = await loadObjectDdl(ddlRequest());
+      starrocksAlterContext.value = starRocksAlterOptionsFromDdl(ddl, connection.value?.database_info?.productVersion);
+      if (!starrocksSortColumns.value) starrocksSortColumns.value = [...(starrocksAlterContext.value.sortColumns ?? [])];
+    } catch {
+      starrocksAlterContext.value = starRocksAlterOptionsFromDdl("", connection.value?.database_info?.productVersion);
+    }
+  }
+  if (requestId !== sqlPreviewRequestId) return;
   if (!hasPendingStructureChanges()) {
     pendingStatements.value = [];
     warnings.value = [];
@@ -2764,6 +2833,13 @@ async function refreshSqlPreview() {
     pendingStatements.value = [];
     warnings.value = indexWarnings;
     sqliteSchemaRevision.value = undefined;
+    sqlPreviewLoading.value = false;
+    sqlPreviewPending.value = false;
+    return;
+  }
+  if (pendingStarRocksSort.value && (columns.value.some(columnChanged) || tableComment.value !== originalTableComment.value || indexes.value.some(indexChanged) || foreignKeys.value.some(foreignKeyChanged) || triggers.value.some(triggerChanged))) {
+    pendingStatements.value = [];
+    warnings.value = [t("starrocksLayout.sortSaveSeparately")];
     sqlPreviewLoading.value = false;
     sqlPreviewPending.value = false;
     return;
@@ -2788,10 +2864,12 @@ async function refreshSqlPreview() {
       isCreateMode.value
         ? createPartitioningEnabled.value
           ? api.buildCreatePartitionedTableSql({ options, partitioning: { kind: createPartitioningKind.value, columns: createPartitioningColumns.value, expression: createPartitioningExpression.value } })
-          : api.buildCreateTableSql(options)
+          : api.buildCreateTableSql(options, connection.value?.database_info?.productVersion, databaseType.value === "starrocks" ? buildStarRocksDialectOptions(starrocksPhysicalOptions.value) : undefined)
         : hasSqliteTypeChange.value
           ? api.previewSqliteTableStructureChange(props.connectionId, props.database, options)
-          : api.buildTableStructureChangeSql(options),
+          : databaseType.value === "starrocks"
+            ? api.buildTableStructureChangeSql(options, { ...starrocksAlterContext.value!, reorderColumns: false, positionColumnOrder: structureCapabilities.value.reorderColumn, sortColumnNames: pendingStarRocksSort.value })
+            : api.buildTableStructureChangeSql(options),
       supportsTableOwner.value
         ? api.buildTableOwnerChangeSql({
             databaseType: databaseType.value,
@@ -2836,6 +2914,7 @@ const canApply = computed(
   () =>
     !loading.value &&
     !saving.value &&
+    (databaseType.value !== "starrocks" || !starrocksStatusBusy.value) &&
     !postSaveRefreshing.value &&
     !secondaryMetadataLoading.value &&
     !mysqlTableEngineLoading.value &&
@@ -2906,6 +2985,9 @@ function resetState() {
   mysqlTableEngine.value = "";
   originalMysqlTableEngine.value = "";
   physicalOptions.value = emptyTablePhysicalOptions();
+  starrocksPhysicalOptions.value = emptyStarRocksPhysicalOptions();
+  starrocksAlterContext.value = undefined;
+  starrocksSortColumns.value = undefined;
   mysqlTableEngineOptions.value = [];
   mysqlTableEngineLoadRequestId += 1;
   mysqlTableEngineLoading.value = false;
@@ -2946,6 +3028,8 @@ async function reloadStructureFromDatabase() {
   // Refreshing from the database discards every other draft; pending partition
   // operations must not survive it and still be applied on save.
   partitionOperations.value = [];
+  starrocksAlterContext.value = undefined;
+  starrocksSortColumns.value = undefined;
   const refreshDdl = activeTab.value === "ddl";
   const metadataMatch = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName };
   invalidateTableMetadataCache(metadataMatch);
@@ -3552,6 +3636,97 @@ function onColumnRowActivate(column: EditableStructureColumn) {
   selectSingleColumn(column);
 }
 
+const copySourceConnection = computed(() => store.getConfig(copySourceConnectionId.value));
+function isCompatibleCopyConnection(config: ConnectionConfig): boolean {
+  const sourceType = tableStructureDatabaseTypeForConnection(config);
+  // Unknown JDBC dialects cannot be assumed compatible across connections.
+  return config.id === props.connectionId || (!!sourceType && sourceType !== "jdbc" && sourceType === databaseType.value);
+}
+const copySourceConnections = computed(() => store.connections.filter(isCompatibleCopyConnection));
+const copySourceCompatible = computed(() => !!copySourceConnection.value && isCompatibleCopyConnection(copySourceConnection.value));
+const copySourceRootSchemaMode = computed(() => namespaceOptionsAreSchemas(copySourceConnection.value));
+const copySourceHasSchema = computed(() => !copySourceRootSchemaMode.value && !connectionUsesDatabaseObjectTreeMode(copySourceConnection.value) && isSchemaAware(tableStructureDatabaseTypeForConnection(copySourceConnection.value)));
+const copySourceMetadataSchema = computed(() => connectionObjectTreeQuerySchema(copySourceConnection.value, copySourceDatabase.value, copySourceSchema.value));
+const copySourceTargetCatalog = computed(() => normalizedQueryTabCatalog(copySourceCatalogs.value, copySourceCatalog.value));
+
+function resetCopySourceTables() {
+  clearCopySourceTableSearchTimer();
+  ++copySourceTablesRequestId;
+  copySourceTablesLoading.value = false;
+  copySourceTables.value = [];
+  copySourceTablesOffset.value = 0;
+  copySourceTablesHasMore.value = false;
+  clearCopySourceTableSelection();
+}
+
+// Explicit cascade steps keep stale namespace requests from restoring old selections.
+async function changeCopySourceScope(level: "connection" | "catalog" | "database" | "schema", value: string, prefill = false) {
+  const requestId = ++copySourceScopeRequestId;
+  resetCopySourceTables();
+  copySourceTableSearch.value = "";
+  copySourceError.value = "";
+  copySourceScopeReady.value = false;
+  copySourceScopeLoading.value = true;
+  if (level === "connection") {
+    copySourceConnectionId.value = value;
+    copySourceCatalog.value = "";
+    copySourceCatalogs.value = [];
+  }
+  if (level === "catalog") copySourceCatalog.value = value;
+  if (level === "connection" || level === "catalog") {
+    copySourceDatabase.value = "";
+    copySourceDatabases.value = [];
+  }
+  if (level === "database") copySourceDatabase.value = value;
+  if (level !== "schema") {
+    copySourceSchema.value = "";
+    copySourceSchemas.value = [];
+  } else copySourceSchema.value = value;
+  const config = copySourceConnection.value;
+  const current = () => requestId === copySourceScopeRequestId && copyColumnsDialogOpen.value;
+  try {
+    if (!config || !isCompatibleCopyConnection(config)) return;
+    await store.ensureConnected(config.id, { activate: false });
+    if (!current() || !copySourceCompatible.value) return;
+    if (level === "connection" && connectionIsDorisFamilyCatalogCapable(config)) {
+      const catalogs = await api.listDorisCatalogs(config.id);
+      if (!current()) return;
+      copySourceCatalogs.value = catalogs;
+      copySourceCatalog.value = selectedQueryCatalogName(catalogs, prefill ? props.catalog : undefined);
+      if (!copySourceCatalog.value) return;
+    }
+    if (level === "connection" || level === "catalog") {
+      const catalog = copySourceTargetCatalog.value;
+      const databases = catalog ? await fetchCatalogNamespaceOptions(config.id, catalog, config) : await fetchNamespaceOptionsForConnection(config.id, config);
+      if (!current()) return;
+      copySourceDatabases.value = databases;
+      const preferred = prefill ? props.database : namespaceOptionsAreSchemas(config) ? config.username : config.database;
+      copySourceDatabase.value = databases.includes(preferred || "") ? preferred || "" : (databases[0] ?? "");
+    }
+    if (!copySourceDatabases.value.includes(copySourceDatabase.value)) return;
+    if (copySourceRootSchemaMode.value) {
+      // Oracle/Dameng expose their owner as the namespace immediately below a connection.
+      copySourceSchema.value = copySourceDatabase.value;
+    } else if (copySourceHasSchema.value && level !== "schema") {
+      const database = copySourceDatabase.value;
+      const schemas = await api.listSchemas(config.id, database);
+      if (!current()) return;
+      copySourceSchemas.value = schemaOptionsForConnection(schemas, config, database);
+      const preferred = prefill ? metadataSchema.value : "";
+      copySourceSchema.value = copySourceSchemas.value.includes(preferred) ? preferred : (copySourceSchemas.value[0] ?? "");
+    }
+    if (copySourceHasSchema.value && !copySourceSchemas.value.includes(copySourceSchema.value)) return;
+    // Preserve explicit metadata scope for an unknown JDBC driver on the current connection.
+    if (prefill && !copySourceRootSchemaMode.value && !copySourceHasSchema.value) copySourceSchema.value = props.schema || "";
+    copySourceScopeReady.value = true;
+  } catch (error: any) {
+    if (current()) copySourceError.value = error?.message || String(error);
+  } finally {
+    if (current()) copySourceScopeLoading.value = false;
+  }
+  if (current() && copySourceScopeReady.value) await loadCopySourceTables();
+}
+
 function normalizedColumnSearch(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -3587,7 +3762,9 @@ function clearCopySourceTableSearchTimer() {
 
 function isCopySourceTable(table: TableInfo): boolean {
   const databaseInfo = connection.value?.database_info;
-  return isCreateMode.value || tableStructureIdentifierComparisonKey(table.name, databaseType.value, databaseInfo) !== tableStructureIdentifierComparisonKey(props.tableName, databaseType.value, databaseInfo);
+  const sameNamespace =
+    copySourceConnectionId.value === props.connectionId && copySourceDatabase.value === props.database && copySourceMetadataSchema.value === metadataSchema.value && (copySourceTargetCatalog.value || "") === (normalizedQueryTabCatalog(copySourceCatalogs.value, props.catalog || "") || "");
+  return isCreateMode.value || !sameNamespace || tableStructureIdentifierComparisonKey(table.name, databaseType.value, databaseInfo) !== tableStructureIdentifierComparisonKey(props.tableName, databaseType.value, databaseInfo);
 }
 
 function clearCopySourceTableSelection() {
@@ -3600,14 +3777,13 @@ function clearCopySourceTableSelection() {
 }
 
 async function loadCopySourceTables(offset = 0) {
-  if (!props.connectionId || !props.database) return;
+  if (!copyColumnsDialogOpen.value || !copySourceScopeReady.value || !copySourceCompatible.value || copySourceScopeLoading.value) return;
   clearCopySourceTableSelection();
   const requestId = ++copySourceTablesRequestId;
   copySourceTablesLoading.value = true;
   copySourceError.value = "";
   try {
-    await store.ensureConnected(props.connectionId);
-    const tables = await api.listTables(props.connectionId, props.database, metadataSchema.value, copySourceTableSearch.value.trim() || undefined, COPY_SOURCE_TABLE_PAGE_PROBE_SIZE, offset, ["TABLE"], props.catalog);
+    const tables = await api.listTables(copySourceConnectionId.value, copySourceDatabase.value, copySourceMetadataSchema.value, copySourceTableSearch.value.trim() || undefined, COPY_SOURCE_TABLE_PAGE_PROBE_SIZE, offset, ["TABLE"], copySourceTargetCatalog.value);
     if (requestId !== copySourceTablesRequestId) return;
     copySourceTables.value = tables.slice(0, COPY_SOURCE_TABLE_PAGE_SIZE).filter(isCopySourceTable);
     copySourceTablesOffset.value = offset;
@@ -3626,50 +3802,52 @@ async function loadCopySourceTables(offset = 0) {
 
 function updateCopySourceTableSearch(value: string | number) {
   copySourceTableSearch.value = String(value);
-  clearCopySourceTableSelection();
+  // Invalidate any in-flight load and restart the debounce, but keep the
+  // current list visible until the new results land to avoid a blank flicker.
   clearCopySourceTableSearchTimer();
+  ++copySourceTablesRequestId;
   copySourceTableSearchTimer = setTimeout(() => {
     copySourceTableSearchTimer = undefined;
     void loadCopySourceTables();
   }, COPY_SOURCE_TABLE_SEARCH_DEBOUNCE_MS);
 }
 
-watch(copyColumnsDialogOpen, (open) => {
-  if (open) return;
-  clearCopySourceTableSearchTimer();
-  copySourceTablesRequestId++;
-  copySourceColumnsRequestId++;
-});
+watch(
+  copyColumnsDialogOpen,
+  (open) => {
+    if (open) return;
+    ++copySourceScopeRequestId;
+    copySourceScopeReady.value = false;
+    copySourceScopeLoading.value = false;
+    resetCopySourceTables();
+  },
+  { flush: "sync" },
+);
+
+watch(
+  () => [props.connectionId, props.database, props.schema, props.catalog, props.tableName],
+  () => {
+    copyColumnsDialogOpen.value = false;
+  },
+  { flush: "sync" },
+);
 
 async function openCopyColumnsDialog() {
   if (!canAddColumn.value || !props.connectionId || !props.database) return;
   copyColumnsDialogOpen.value = true;
-  copySourceTableName.value = "";
-  copySourceTableSearch.value = "";
-  copySourceColumns.value = [];
-  copySourceColumnSearch.value = "";
-  selectedCopySourceColumnNames.value = [];
-  copySourceError.value = "";
-  copySourceColumnsRequestId++;
-  copySourceColumnsLoading.value = false;
-  copySourceTables.value = [];
-  copySourceTablesOffset.value = 0;
-  copySourceTablesHasMore.value = false;
-  clearCopySourceTableSearchTimer();
-  await loadCopySourceTables();
+  await changeCopySourceScope("connection", props.connectionId, true);
 }
 
 async function loadCopySourceColumns(tableName: string) {
+  if (!copySourceScopeReady.value || !copySourceCompatible.value || copySourceScopeLoading.value || copySourceTablesLoading.value) return;
+  clearCopySourceTableSelection();
   copySourceTableName.value = tableName;
-  copySourceColumns.value = [];
-  copySourceColumnSearch.value = "";
-  selectedCopySourceColumnNames.value = [];
   copySourceError.value = "";
-  if (!tableName || !props.connectionId || !props.database) return;
+  if (!tableName) return;
   const requestId = ++copySourceColumnsRequestId;
   copySourceColumnsLoading.value = true;
   try {
-    const sourceColumns = await api.getColumns(props.connectionId, props.database, metadataSchema.value, tableName, props.catalog);
+    const sourceColumns = await api.getColumns(copySourceConnectionId.value, copySourceDatabase.value, copySourceMetadataSchema.value, tableName, copySourceTargetCatalog.value);
     if (requestId !== copySourceColumnsRequestId) return;
     copySourceColumns.value = sourceColumns;
     selectedCopySourceColumnNames.value = copyableSourceColumns.value.filter(({ alreadyExists }) => !alreadyExists).map(({ column }) => column.name);
@@ -3686,7 +3864,15 @@ function toggleCopySourceColumns() {
 }
 
 function applyCopiedColumns() {
-  const copiedColumns = createCopiedColumnDrafts(selectedCopySourceColumns.value, databaseType.value, uuid);
+  if (!canAddColumn.value || !copySourceCompatible.value || !copySourceScopeReady.value || copySourceScopeLoading.value || copySourceTablesLoading.value || copySourceColumnsLoading.value || copySourceError.value) return;
+  const names = new Set(columns.value.filter((column) => !column.markedForDrop).map((column) => tableStructureIdentifierComparisonKey(column.name, databaseType.value, connection.value?.database_info)));
+  const sourceColumns = selectedCopySourceColumns.value.filter((column) => {
+    const key = tableStructureIdentifierComparisonKey(column.name, databaseType.value, connection.value?.database_info);
+    if (names.has(key)) return false;
+    names.add(key);
+    return true;
+  });
+  const copiedColumns = createCopiedColumnDrafts(sourceColumns, databaseType.value, uuid);
   if (!copiedColumns.length) return;
   const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
   columns.value.splice(insertAt, 0, ...copiedColumns);
@@ -3790,12 +3976,27 @@ function canDropColumnAt(sourceIndex: number, insertionIndex: number): boolean {
   if (!sourceColumn) return false;
   const crossedColumns = insertionIndex < sourceIndex ? columns.value.slice(insertionIndex, sourceIndex) : columns.value.slice(sourceIndex + 1, insertionIndex);
   if (crossedColumns.some((column) => column.markedForDrop)) return false;
+  if (!isCreateMode.value && databaseType.value === "starrocks" && structureCapabilities.value.reorderColumn) {
+    const reordered = [...columns.value];
+    reordered.splice(sourceIndex, 1);
+    reordered.splice(insertionIndex > sourceIndex ? insertionIndex - 1 : insertionIndex, 0, sourceColumn);
+    const keys = new Set(starrocksAlterContext.value?.keyColumns.map((name) => name.toLowerCase()) ?? []);
+    let sawValue = false;
+    for (const column of reordered) {
+      if (column.markedForDrop) continue;
+      if (keys.has(column.original?.name.toLowerCase() ?? "")) {
+        if (sawValue) return false;
+      } else {
+        sawValue = true;
+      }
+    }
+  }
   if (canShowColumnDragControls.value) return true;
   if (sourceColumn.original) return false;
   return crossedColumns.every((column) => !column.original);
 }
 
-const usesLocalTableColumnOrder = computed(() => !isCreateMode.value && supportsLocalTableColumnReorder(databaseType.value, connection.value?.db_type));
+const usesLocalTableColumnOrder = computed(() => !isCreateMode.value && (databaseType.value === "starrocks" ? !!starrocksAlterContext.value?.model && starrocksAlterContext.value.model !== "duplicate" : supportsLocalTableColumnReorder(databaseType.value, connection.value?.db_type)));
 const canShowColumnDragControls = computed(() => isCreateMode.value || structureCapabilities.value.reorderColumn || usesLocalTableColumnOrder.value);
 
 function localTableColumnOrderScopeKey(): string {
@@ -4564,6 +4765,7 @@ function commitColumnNameInput(column: EditableStructureColumn) {
 }
 
 function isColumnTypeDisabled(column: EditableStructureColumn): boolean {
+  if (databaseType.value === "starrocks" && starRocksColumnDefinitionLocked(column, starrocksAlterContext.value)) return true;
   return column.markedForDrop || (!!column.original && !structureCapabilities.value.alterType);
 }
 
@@ -4584,10 +4786,12 @@ function isColumnLengthUnitDisabled(column: EditableStructureColumn): boolean {
 }
 
 function isColumnNullableDisabled(column: EditableStructureColumn): boolean {
+  if (databaseType.value === "starrocks" && (starRocksColumnDefinitionLocked(column, starrocksAlterContext.value) || column.original?.is_nullable)) return true;
   return column.markedForDrop || column.isPrimaryKey || (!!column.original && !structureCapabilities.value.alterNullability);
 }
 
 function isColumnDefaultDisabled(column: EditableStructureColumn): boolean {
+  if (databaseType.value === "starrocks" && starRocksColumnDefinitionLocked(column, starrocksAlterContext.value)) return true;
   return column.markedForDrop || (!!column.original && !structureCapabilities.value.alterDefault) || isMysqlGeneratedActive(column);
 }
 
@@ -4609,6 +4813,7 @@ function isPrimaryKeyDisabled(column: EditableStructureColumn): boolean {
 }
 
 function canDropColumn(column: EditableStructureColumn): boolean {
+  if (databaseType.value === "starrocks" && (starRocksColumnDefinitionLocked(column, starrocksAlterContext.value) || starrocksAlterContext.value?.keyColumns.some((name) => name.toLowerCase() === column.original?.name.toLowerCase()))) return false;
   return !!column.original && !column.isPrimaryKey && !isProtectedManticoreIdColumn(databaseType.value, column.original.name) && structureCapabilities.value.dropColumn;
 }
 
@@ -4945,6 +5150,7 @@ function addTrigger() {
     timing: isOracleTriggerEditor.value ? "BEFORE EACH ROW" : isSqlServerTriggerEditor.value ? "AFTER" : "BEFORE",
     event: "INSERT",
     statement: isOracleTriggerEditor.value ? "BEGIN\n  NULL;\nEND" : isSqlServerTriggerEditor.value ? "BEGIN\n  SET NOCOUNT ON;\nEND" : "BEGIN\n  \nEND",
+    enabled: true,
     markedForDrop: false,
   };
   triggers.value.push(draft);
@@ -4961,7 +5167,13 @@ function toggleDropTrigger(trigger: EditableStructureTrigger) {
 }
 
 function canEditTriggerDraft(trigger: EditableStructureTrigger): boolean {
-  return !triggersLoading.value && canEditTriggers.value && !trigger.markedForDrop && canEditStructuredTriggerDraft(databaseType.value, trigger);
+  return canToggleTriggerEnabled(trigger) && canEditStructuredTriggerDraft(databaseType.value, trigger);
+}
+
+// ALTER TRIGGER ... ENABLE/DISABLE leaves the source untouched, so it stays available for
+// triggers whose source the structured form cannot rebuild.
+function canToggleTriggerEnabled(trigger: EditableStructureTrigger): boolean {
+  return !triggersLoading.value && canEditTriggers.value && !trigger.markedForDrop;
 }
 
 function primarySqlOperation(sql: string): string {
@@ -5046,6 +5258,7 @@ async function applyChanges() {
     return false;
   }
   const sql = previewSqlText.value;
+  const submittedStarRocksTarget = starrocksStatusTarget.value;
   const connection = store.getConfig(props.connectionId);
   const productionContext = productionContextForDatabase(connection, props.database);
   if (productionContext.active) {
@@ -5059,11 +5272,13 @@ async function applyChanges() {
     if (!confirmed) return false;
   }
   saving.value = true;
+  if (databaseType.value === "starrocks") starrocksSubmittedSql.value = undefined;
   errorMessage.value = "";
   // A hand-written DDL script can change anything about the table, and the
   // structure draft it was applied from is clean, so the change-derived scope
   // would be empty: reload every facet instead of leaving the tabs stale.
   const refreshScope = ddlDirty.value ? { columns: true, indexes: true, foreignKeys: true, constraints: true, triggers: true, partitions: true, tableComment: true } : captureStructureRefreshScope();
+  const starrocksPhysicalOrderChanged = !ddlDirty.value && databaseType.value === "starrocks" && structureCapabilities.value.reorderColumn && columns.value.some((column, index) => column.original && column.originalPosition !== index);
   // Plan A guard: concurrent builds only run with a long-enough query timeout
   // (a cancelled build leaves an INVALID index behind), and are blocked
   // up-front when a same-name INVALID index already exists.
@@ -5113,6 +5328,7 @@ async function applyChanges() {
       hasSqliteTypeChange.value && !ddlDirty.value
         ? await api.applySqliteTableStructureChange(props.connectionId, props.database, structureChangeOptions(), sqliteSchemaRevision.value!)
         : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, executionTimeoutSecs, useTransaction);
+    if (databaseType.value === "starrocks") starrocksSubmittedSql.value = { target: submittedStarRocksTarget, sql };
     await recordStructureHistory(sql, startedAt, true, result);
     if (!isCreateMode.value && props.tableName) {
       const metadataMatch = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName };
@@ -5121,7 +5337,7 @@ async function applyChanges() {
       await invalidateObjectDdl(ddlRequest());
       loadedMetadataFacets.clear();
     }
-    toast(t(isCreateMode.value ? "structureEditor.created" : "structureEditor.saved"), 2500);
+    toast(t(isCreateMode.value ? "structureEditor.created" : databaseType.value === "starrocks" && refreshScope.columns ? "starrocksLayout.alterSubmitted" : "structureEditor.saved"), 4000);
     sqlPreviewPending.value = false;
     sqlPreviewLoading.value = false;
     pendingStatements.value = [];
@@ -5130,6 +5346,10 @@ async function applyChanges() {
     // Partition operations are applied in place; drop them now so the reload
     // below reflects the new catalog state instead of replaying them.
     partitionOperations.value = [];
+    if (databaseType.value === "starrocks") {
+      starrocksAlterContext.value = undefined;
+      starrocksSortColumns.value = undefined;
+    }
     ddlFetched.value = false;
     rawDdlContent.value = "";
     ddlDraft.value = null;
@@ -5141,6 +5361,12 @@ async function applyChanges() {
       // exact spelling — mirror the DDL generator's quoting rule here.
       emit("saved", tableComment.value !== originalTableComment.value, foldCreatedTableName(newTableName.value, databaseType.value));
     } else {
+      // An old local-only preference must not mask the newly submitted schema order.
+      if (starrocksPhysicalOrderChanged) {
+        const scopeKey = localTableColumnOrderScopeKey();
+        removeTableDataGridColumnOrder(scopeKey);
+        notifyTableDataGridColumnOrderChanged(scopeKey);
+      }
       // Refresh persisted keys after successful renames/additions before metadata reloads.
       persistLocalColumnOrder(false);
       saving.value = false;
@@ -5155,11 +5381,39 @@ async function applyChanges() {
     // A cancelled/errored concurrent build leaves a same-name INVALID index
     // behind; surface that so retries are not silently doomed.
     const invalidIndexHint = hasConcurrentIndexBuild && /already exists/i.test(rawMessage) ? `\n\n${t("structureEditor.invalidIndexRetryHint")}` : "";
-    errorMessage.value = `${rawMessage}${invalidIndexHint}`;
-    await recordStructureHistory(sql, startedAt, false, undefined, errorMessage.value);
+    const starrocksSchemaChangeBusy = databaseType.value === "starrocks" && /a schema change operation is in progress on the table\b/i.test(rawMessage);
+    errorMessage.value = starrocksSchemaChangeBusy ? t("starrocksLayout.schemaChangeBusy", { table: props.tableName }) : `${rawMessage}${invalidIndexHint}`;
+    await recordStructureHistory(sql, startedAt, false, undefined, starrocksSchemaChangeBusy ? rawMessage : errorMessage.value);
     return false;
   } finally {
     saving.value = false;
+    if (databaseType.value === "starrocks") starrocksStatusRevision.value++;
+  }
+}
+
+async function onStarRocksAlterCompleted() {
+  if (saving.value || loading.value || starrocksDraftDirty.value) return;
+  const requestId = structureLoadRequestId;
+  const target = JSON.stringify([props.connectionId, props.database, props.tableName, props.schema, props.catalog]);
+  const metadataRequest = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName!, catalog: props.catalog };
+  try {
+    invalidateTableMetadataCache(metadataRequest);
+    await Promise.all([invalidateObjectMetadataCache(metadataRequest), invalidateObjectDdl(ddlRequest())]);
+    const [nextColumns, ddlResult] = await Promise.all([api.getColumns(props.connectionId, props.database, metadataSchema.value, props.tableName!, props.catalog), loadObjectDdl(ddlRequest(), { force: true })]);
+    const formatted = await formatStructureDdl(ddlResult.ddl);
+    // Editing while the fetch is in flight must preserve the new draft.
+    if (requestId !== structureLoadRequestId || target !== JSON.stringify([props.connectionId, props.database, props.tableName, props.schema, props.catalog]) || saving.value || loading.value || starrocksDraftDirty.value) return;
+    columns.value = applyStoredLocalColumnOrder(createColumnDrafts(nextColumns, databaseType.value));
+    starrocksAlterContext.value = starRocksAlterOptionsFromDdl(ddlResult.ddl, connection.value?.database_info?.productVersion);
+    starrocksSortColumns.value = [...(starrocksAlterContext.value.sortColumns ?? [])];
+    rawDdlContent.value = formatted;
+    ddlFetched.value = true;
+    scheduleSqlPreviewRefresh();
+    syncDraftToParent();
+    skipNextRefreshVersion = true;
+    emit("saved", false);
+  } catch {
+    toast(t("starrocksStatus.structureRefreshFailed"), 5000);
   }
 }
 
@@ -5363,6 +5617,7 @@ onActivated(() => {
   if (activeTab.value === "ddl") scheduleDdlEditorInit();
 });
 onDeactivated(() => {
+  copyColumnsDialogOpen.value = false;
   flushStructureScrollDraftSync();
   if (structureColumnScrollingTimer) clearTimeout(structureColumnScrollingTimer);
   structureColumnScrollingTimer = undefined;
@@ -5374,6 +5629,9 @@ onDeactivated(() => {
   destroyDdlEditor();
 });
 onBeforeUnmount(() => {
+  ++copySourceScopeRequestId;
+  resetCopySourceTables();
+  structureLoadRequestId++;
   flushStructureScrollDraftSync();
   if (structureColumnScrollingTimer) clearTimeout(structureColumnScrollingTimer);
   structureColumnScrollingTimer = undefined;
@@ -5493,6 +5751,8 @@ watch([() => props.connectionId, () => props.database, databaseType], () => {
   void loadDynamicDataTypeOptions();
 });
 
+watch(() => connection.value?.database_info?.productVersion, scheduleSqlPreviewRefresh);
+
 watch(
   [
     isCreateMode,
@@ -5511,6 +5771,8 @@ watch(
     mysqlTableEngine,
     originalMysqlTableEngine,
     physicalOptions,
+    starrocksPhysicalOptions,
+    starrocksSortColumns,
     mysqlTableEngineLoading,
     mysqlTableEngineLoadError,
     mysqlTableDefaultCollation,
@@ -5641,6 +5903,19 @@ watch(
 
 <template>
   <div ref="rootRef" class="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-[var(--structure-shell-padding)] text-[length:var(--structure-font-size)]" :data-structure-density="localStructureDensity" :style="structureDensityStyle">
+    <StarRocksLayoutCopyDialog
+      v-if="!isCreateMode && databaseType === 'starrocks' && props.tableName"
+      v-model:open="starrocksLayoutCopyOpen"
+      :connection-id="props.connectionId"
+      :database="props.database"
+      :schema="props.schema"
+      :catalog="props.catalog"
+      :table-name="props.tableName"
+      :server-version="connection?.database_info?.productVersion"
+      :timeout-secs="queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs)"
+      :authorize="authorizeStarRocksLayoutCopy"
+      @created="emit('saved', false)"
+    />
     <div class="flex shrink-0 items-center gap-2 rounded-md border bg-muted/20 px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]">
       <Database :class="[structureIconClass, 'text-muted-foreground']" />
       <span class="min-w-0 flex-1 truncate font-medium">{{ targetLabel || t("editor.noDatabase") }}</span>
@@ -5650,6 +5925,21 @@ watch(
         {{ t("structureEditor.refresh") }}
       </Button>
     </div>
+
+    <StarRocksAlterStatus
+      v-if="!isCreateMode && databaseType === 'starrocks' && props.tableName"
+      :connection-id="props.connectionId"
+      :database="props.database"
+      :table-name="props.tableName"
+      :schema="metadataSchema"
+      :catalog="props.catalog"
+      :paused="saving || loading || postSaveRefreshing"
+      :revision="starrocksStatusRevision"
+      :dirty="starrocksDraftDirty"
+      :submitted-sql="starrocksSubmittedSql?.target === starrocksStatusTarget ? starrocksSubmittedSql.sql : undefined"
+      @busy="starrocksStatusBusy = $event"
+      @completed="onStarRocksAlterCompleted"
+    />
 
     <div v-if="isCreateMode" class="flex shrink-0 items-center gap-2">
       <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.tableName") }}</label>
@@ -5818,6 +6108,18 @@ watch(
                 </TooltipTrigger>
                 <TooltipContent side="bottom" class="font-mono font-medium" data-add-column-shortcut-content>Shift+Enter</TooltipContent>
               </Tooltip>
+              <Button
+                v-if="activeTab === 'columns' && !isCreateMode && databaseType === 'starrocks'"
+                variant="outline"
+                size="sm"
+                :class="structureToolbarButtonClass"
+                :disabled="loading || saving || hasPendingStructureChanges() || ddlDirty"
+                :title="hasPendingStructureChanges() || ddlDirty ? t('starrocksLayout.copySaveFirst') : undefined"
+                @click="starrocksLayoutCopyOpen = true"
+                data-starrocks-layout-copy-button
+              >
+                <SlidersHorizontal :class="structureIconClass" />{{ t("starrocksLayout.copyButton") }}
+              </Button>
               <Button v-if="activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="openCopyColumnsDialog">
                 <Copy :class="structureIconClass" />
                 {{ t("structureEditor.copyColumns") }}
@@ -6136,7 +6438,7 @@ watch(
                                 </Button>
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="end" class="max-h-56 w-max min-w-36 max-w-[calc(100vw-1rem)] overflow-y-auto">
-                                <DropdownMenuItem v-for="preset in defaultValuePresets" :key="preset.value" @click="column.defaultValue = preset.value">
+                                <DropdownMenuItem v-for="preset in columnDefaultValuePresets(column)" :key="preset.value" @click="column.defaultValue = preset.value">
                                   <code :class="['structure-data-type-option block truncate font-mono text-[length:var(--structure-font-size)]', structureDefaultValueToneClass(preset.value, preset.dataType)]">{{ preset.label }}</code>
                                 </DropdownMenuItem>
                               </DropdownMenuContent>
@@ -6721,8 +7023,18 @@ watch(
                       <SelectItem v-for="event in triggerEventOptions" :key="event" :value="event">{{ event }}</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Badge v-if="trigger.original && trigger.original.enabled !== undefined && trigger.original.enabled !== null" variant="outline" class="shrink-0 text-[length:var(--structure-font-size)]">
-                    {{ trigger.original.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
+                  <Button
+                    v-if="isOracleTriggerEditor && trigger.enabled !== undefined"
+                    variant="outline"
+                    size="sm"
+                    :class="['h-[var(--structure-control-height)] shrink-0 px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]', !trigger.enabled ? 'text-muted-foreground' : '']"
+                    :disabled="!canToggleTriggerEnabled(trigger)"
+                    @click.stop="trigger.enabled = !trigger.enabled"
+                  >
+                    {{ trigger.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
+                  </Button>
+                  <Badge v-else-if="trigger.enabled !== undefined && trigger.enabled !== null" variant="outline" class="shrink-0 text-[length:var(--structure-font-size)]">
+                    {{ trigger.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
                   </Badge>
                   <Button v-if="trigger.original" variant="ghost" size="sm" :class="structureToolbarButtonClass" @click.stop="toggleDropTrigger(trigger)">
                     <Trash2 :class="structureIconClass" />
@@ -6923,6 +7235,12 @@ watch(
         </Tabs>
       </div>
 
+      <p v-if="!isCreateMode && databaseType === 'starrocks'" class="shrink-0 px-3 py-2 text-xs text-muted-foreground">
+        {{ t("starrocksLayout.alterHint") }} {{ t(structureCapabilities.reorderColumn ? "starrocksLayout.reorderHint" : starrocksAlterContext?.model === "primary" ? "starrocksLayout.localReorderHint" : "starrocksLayout.reorderMetadataHint") }}
+      </p>
+      <StarRocksSortKeyEditor v-if="!isCreateMode && databaseType === 'starrocks' && activeTab === 'columns' && starrocksSortColumns" v-model="starrocksSortColumns" :context="starrocksAlterContext" :columns="columns" :disabled="saving || loading" />
+      <StarRocksPhysicalOptionsEditor v-if="isCreateMode && databaseType === 'starrocks'" v-model="starrocksPhysicalOptions" :columns="columns" :server-version="connection?.database_info?.productVersion" :disabled="saving" />
+
       <div :class="['flex min-w-0 shrink-0 flex-col overflow-hidden rounded-md border', sqlPreviewCollapsed ? '' : 'h-[28%] min-h-40 max-h-64']">
         <div class="flex shrink-0 items-center justify-between border-b px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)] font-medium">
           <div class="flex items-center gap-1.5">
@@ -6998,18 +7316,80 @@ watch(
           <DialogTitle>{{ t("structureEditor.copyColumnsTitle") }}</DialogTitle>
         </DialogHeader>
 
-        <div class="space-y-3 overflow-hidden">
+        <div class="max-h-[65vh] space-y-3 overflow-y-auto">
+          <p class="text-xs text-muted-foreground">{{ t("structureEditor.copyColumnsSameTypeOnly") }}</p>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <div class="grid gap-1.5 text-sm font-medium">
+              <label id="copy-source-connection-label">{{ t("structureEditor.copyColumnsSourceConnection") }}</label>
+              <SearchableSelect
+                :model-value="copySourceConnectionId"
+                :options="copySourceConnections.map((config) => config.id)"
+                :placeholder="t('structureEditor.copyColumnsSourceConnection')"
+                :search-placeholder="t('structureEditor.copyColumnsSourceConnection')"
+                :empty-text="t('common.noResults')"
+                aria-labelledby="copy-source-connection-label"
+                trigger-class="h-8 w-full justify-between text-xs"
+                :display-name="(id: string) => store.getConfig(id)?.name || id"
+                @update:model-value="(value: string) => changeCopySourceScope('connection', value)"
+              />
+            </div>
+            <div v-if="copySourceCatalogs.length > 0" class="grid gap-1.5 text-sm font-medium">
+              <label id="copy-source-catalog-label">{{ t("structureEditor.copyColumnsSourceCatalog") }}</label>
+              <SearchableSelect
+                :model-value="copySourceCatalog"
+                :options="copySourceCatalogs.map((catalog) => catalog.name)"
+                :placeholder="t('structureEditor.copyColumnsSourceCatalog')"
+                :search-placeholder="t('structureEditor.copyColumnsSourceCatalog')"
+                :empty-text="t('common.noResults')"
+                aria-labelledby="copy-source-catalog-label"
+                trigger-class="h-8 w-full justify-between text-xs"
+                :disabled="copySourceScopeLoading || !copySourceCatalogs.length"
+                @update:model-value="(value: string) => changeCopySourceScope('catalog', value)"
+              />
+            </div>
+            <div class="grid gap-1.5 text-sm font-medium">
+              <label id="copy-source-database-label">{{ t(copySourceRootSchemaMode ? "structureEditor.copyColumnsSourceSchema" : "structureEditor.copyColumnsSourceDatabase") }}</label>
+              <SearchableSelect
+                :model-value="copySourceDatabase"
+                :options="copySourceDatabases"
+                :placeholder="t(copySourceRootSchemaMode ? 'structureEditor.copyColumnsSourceSchema' : 'structureEditor.copyColumnsSourceDatabase')"
+                :search-placeholder="t(copySourceRootSchemaMode ? 'structureEditor.copyColumnsSourceSchema' : 'structureEditor.copyColumnsSourceDatabase')"
+                :empty-text="t('common.noResults')"
+                aria-labelledby="copy-source-database-label"
+                trigger-class="h-8 w-full justify-between text-xs"
+                :disabled="copySourceScopeLoading || !copySourceDatabases.length"
+                @update:model-value="(value: string) => changeCopySourceScope('database', value)"
+              />
+            </div>
+            <div v-if="copySourceHasSchema" class="grid gap-1.5 text-sm font-medium">
+              <label id="copy-source-schema-label">{{ t("structureEditor.copyColumnsSourceSchema") }}</label>
+              <SearchableSelect
+                :model-value="copySourceSchema"
+                :options="copySourceSchemas"
+                :placeholder="t('structureEditor.copyColumnsSourceSchema')"
+                :search-placeholder="t('structureEditor.copyColumnsSourceSchema')"
+                :empty-text="t('common.noResults')"
+                aria-labelledby="copy-source-schema-label"
+                trigger-class="h-8 w-full justify-between text-xs"
+                :disabled="copySourceScopeLoading || !copySourceSchemas.length"
+                @update:model-value="(value: string) => changeCopySourceScope('schema', value)"
+              />
+            </div>
+          </div>
           <div class="grid gap-1.5 text-sm font-medium">
             <label for="copy-source-table-search">{{ t("structureEditor.copyColumnsSourceTable") }}</label>
-            <Input id="copy-source-table-search" :model-value="copySourceTableSearch" :placeholder="t('structureEditor.copyColumnsSearchSourceTables')" @update:model-value="updateCopySourceTableSearch" />
+            <Input id="copy-source-table-search" :disabled="!copySourceScopeReady || copySourceScopeLoading" :model-value="copySourceTableSearch" :placeholder="t('structureEditor.copyColumnsSearchSourceTables')" @update:model-value="updateCopySourceTableSearch" />
           </div>
 
-          <div v-if="copySourceTablesLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
+          <div v-if="copySourceScopeLoading || copySourceTablesLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
             <Loader2 class="h-4 w-4 animate-spin" />
             {{ t("common.loading") }}
           </div>
           <div v-else-if="copySourceError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             {{ copySourceError }}
+          </div>
+          <div v-else-if="!copySourceScopeReady" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
+            {{ t("common.noResults") }}
           </div>
           <div v-else-if="copySourceTables.length === 0" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
             {{ copySourceTableSearch ? t("structureEditor.copyColumnsNoMatchingSourceTables") : t("structureEditor.copyColumnsNoSourceTables") }}
@@ -7091,7 +7471,7 @@ watch(
 
         <DialogFooter>
           <Button variant="outline" @click="copyColumnsDialogOpen = false">{{ t("structureEditor.copyColumnsCancel") }}</Button>
-          <Button :disabled="copySourceColumnsLoading || selectedCopySourceColumns.length === 0" @click="applyCopiedColumns">
+          <Button :disabled="!canAddColumn || !copySourceCompatible || !copySourceScopeReady || copySourceScopeLoading || copySourceTablesLoading || copySourceColumnsLoading || !!copySourceError || selectedCopySourceColumns.length === 0" @click="applyCopiedColumns">
             {{ t("structureEditor.copyColumnsApply", { count: selectedCopySourceColumns.length }) }}
           </Button>
         </DialogFooter>

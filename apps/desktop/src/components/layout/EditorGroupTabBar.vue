@@ -1104,6 +1104,11 @@ function tabColorStyle(tab: QueryTab): CSSProperties | undefined {
         : { borderColor: hexToRgba(color, 0.18) }),
     } as CSSProperties;
   }
+  // Keep horizontal tabs quiet by default; group headers and rails already
+  // provide the connection identity, while the selected tab gets the wash.
+  if (!isTabActive(tab)) {
+    return undefined;
+  }
   return sharedTabColorStyle(tab, isTabActive(tab), isClassicLayout.value);
 }
 

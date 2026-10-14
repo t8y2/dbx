@@ -1683,6 +1683,9 @@ fn build_data_grid_save_statements(
         return build_iotdb_data_grid_save_statements(options);
     }
 
+    let starrocks = options.database_type == Some(DatabaseType::StarRocks)
+        || (options.database_type == Some(DatabaseType::Mysql)
+            && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("starrocks")));
     let save_columns = effective_columns(options);
     let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
     let schema = crate::sql_dialect::table_data_schema(
@@ -1828,7 +1831,7 @@ fn build_data_grid_save_statements(
                     false,
                 )
             })
-            .filter(|(_, value)| !value.is_null())
+            .filter(|(_, value)| starrocks || !value.is_null())
             .collect();
         if insert_pairs.is_empty() {
             if options.database_type == Some(DatabaseType::Mysql) {
@@ -1845,6 +1848,33 @@ fn build_data_grid_save_statements(
         let values = insert_pairs
             .iter()
             .map(|(column, value)| {
+                // A new-row NULL means unset. Keep StarRocks defaulted keys in the
+                // target list, and still emit an INSERT when every value is unset.
+                if starrocks && value.is_null() {
+                    let info = column_info_for(column_info, column);
+                    let default = info.and_then(|info| info.column_default.as_deref());
+                    if let Some(default) = default {
+                        // StarRocks can reject UUID defaults through VALUES(DEFAULT).
+                        // Only emit known functions, never arbitrary metadata as SQL.
+                        let normalized = default
+                            .chars()
+                            .filter(|ch| !ch.is_ascii_whitespace())
+                            .collect::<String>()
+                            .to_ascii_lowercase();
+                        let mut expression = normalized.as_str();
+                        while let Some(inner) = expression.strip_prefix('(').and_then(|value| value.strip_suffix(')')) {
+                            expression = inner;
+                        }
+                        match expression {
+                            "uuid()" => return "uuid()".to_string(),
+                            "uuid_numeric()" => return "uuid_numeric()".to_string(),
+                            _ => {}
+                        }
+                    } else if info.is_some_and(|info| info.is_nullable) {
+                        return "NULL".to_string();
+                    }
+                    return "DEFAULT".to_string();
+                }
                 format_grid_save_sql_literal(
                     value,
                     options.database_type,
@@ -1903,7 +1933,9 @@ fn build_data_grid_rollback_statements(
     let mut statements = Vec::new();
 
     for row in &options.new_rows {
-        let where_clause = if options.database_type == Some(DatabaseType::Mysql) {
+        // Server-generated keys are unknown; never invent an undo predicate from
+        // the unset draft values. Reuse the existing key-based rollback guard.
+        let where_clause = if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::StarRocks)) {
             build_mysql_insert_rollback_where(options, &save_columns, row, column_info)
         } else {
             let where_clause = build_save_row_where(
@@ -2925,7 +2957,7 @@ fn is_oracle_temporal_literal_database(database_type: Option<DatabaseType>) -> b
     matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
 }
 
-fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option<String> {
+pub fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option<String> {
     let kind = oracle_temporal_column_kind(data_type?)?;
     let parts = regex_like_oracle_temporal(text)?;
     let fraction = parts.fraction.as_deref().unwrap_or_default();
@@ -3726,6 +3758,39 @@ fn oceanbase_blob_hex(value: &Value) -> Option<&str> {
     (hex.len() % 2 == 0 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(hex)
 }
 
+/// Reuse grid LOB constructors without applying save-time transaction or row guards.
+pub fn format_oracle_lob_export_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    data_type: Option<&str>,
+) -> Result<Option<String>, String> {
+    if !is_oracle_temporal_literal_database(database_type) {
+        return Ok(None);
+    }
+    let Some(data_type) = data_type else { return Ok(None) };
+    let blob = database_type == Some(DatabaseType::OceanbaseOracle) && data_type.trim().eq_ignore_ascii_case("BLOB");
+    if !blob && oracle_character_lob_constructor(data_type).is_none() {
+        return Ok(None);
+    }
+    if !blob && value.as_str() == Some("") {
+        return Ok(Some("EMPTY_CLOB()".to_string()));
+    }
+    if blob && !value.is_null() && oceanbase_blob_hex(value).is_none() {
+        return Err(
+            "OceanBase BLOB export requires NULL or 0x followed by complete hexadecimal byte pairs.".to_string()
+        );
+    }
+    let column = DataGridColumnInfo {
+        name: String::new(),
+        data_type: data_type.to_string(),
+        is_nullable: true,
+        is_primary_key: false,
+        column_default: None,
+        extra: None,
+    };
+    Ok(Some(format_grid_assignment_sql_literal(value, database_type, Some(&column), None)))
+}
+
 fn validate_oceanbase_blob_save(options: &DataGridSaveStatementOptions) -> Option<String> {
     if options.database_type != Some(DatabaseType::OceanbaseOracle) {
         return None;
@@ -3761,7 +3826,7 @@ fn validate_oceanbase_blob_save(options: &DataGridSaveStatementOptions) -> Optio
 
 // Only rewrite our generated BLOB literal outside quoted strings/identifiers. The SQL text
 // uses binds so temporary PL variables cannot resolve to an identically named table column.
-fn oceanbase_blob_statement(sql: &str, guard_row_count: bool) -> Option<String> {
+pub fn oceanbase_blob_statement(sql: &str, guard_row_count: bool) -> Option<String> {
     let (rewritten, blobs) = oceanbase_blob_literals(sql, false);
     if blobs.is_empty() {
         return None;
@@ -4548,6 +4613,81 @@ mod tests {
             new_rows: vec![],
             include_database_name: false,
         }
+    }
+
+    #[test]
+    fn starrocks_insert_uses_server_defaults_for_unset_uuid_columns() {
+        for (database_type, profile) in [(DatabaseType::StarRocks, None), (DatabaseType::Mysql, Some("starrocks"))] {
+            for default in ["uuid()", "(uuid())", " (( UUID ( ) )) ", "uuid_numeric()", "(UUID_NUMERIC())"] {
+                let mut options = mysql_people_save_options(0);
+                options.database_type = Some(database_type);
+                let id = &mut options.table_meta.columns.as_mut().unwrap()[0];
+                id.data_type =
+                    if default.to_ascii_lowercase().contains("numeric") { "largeint" } else { "varchar(36)" }.into();
+                id.column_default = Some(default.into());
+                options.new_rows = vec![vec![Value::Null, json!("new")], vec![Value::Null, Value::Null]];
+                let function =
+                    if default.to_ascii_lowercase().contains("numeric") { "uuid_numeric()" } else { "uuid()" };
+                let result = prepare_data_grid_save_for_driver_profile(options, profile);
+                assert_eq!(result.validation_error, None);
+                assert_eq!(result.statements.len(), 2);
+                assert!(result.rollback_statements.is_empty());
+                assert!(
+                    result.statements[0].contains(&format!("(`id`, `status`) VALUES ({function}, 'new')")),
+                    "{:?}",
+                    result.statements
+                );
+                assert!(
+                    result.statements[1].contains(&format!("(`id`, `status`) VALUES ({function}, NULL)")),
+                    "{:?}",
+                    result.statements
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn starrocks_insert_uuid_key_with_timestamp_default() {
+        let mut options = mysql_people_save_options(0);
+        options.database_type = Some(DatabaseType::StarRocks);
+        options.table_meta.schema = None;
+        options.table_meta.table_name = "test2".into();
+        options.columns = vec!["id".into(), "name".into(), "create_at".into()];
+        let mut id = column("id", "varchar(255)", false, None);
+        id.column_default = Some("(uuid())".into());
+        let mut timestamp = column("create_at", "datetime", true, None);
+        timestamp.column_default = Some("CURRENT_TIMESTAMP".into());
+        options.table_meta.columns = Some(vec![id, column("name", "varchar(255)", true, None), timestamp]);
+        options.new_rows = vec![vec![Value::Null, json!("11"), Value::Null]];
+        let result = prepare_data_grid_save(options.clone());
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["INSERT INTO `test2` (`id`, `name`, `create_at`) VALUES (uuid(), '11', DEFAULT);"]
+        );
+        assert!(result.rollback_statements.is_empty());
+
+        for default in ["'uuid()'", "'fixed-id'", "uuid(); SELECT 1"] {
+            options.table_meta.columns.as_mut().unwrap()[0].column_default = Some(default.into());
+            let result = prepare_data_grid_save(options.clone());
+            assert_eq!(result.validation_error, None);
+            assert!(result.statements[0].contains("VALUES (DEFAULT, '11', DEFAULT)"));
+        }
+    }
+
+    #[test]
+    fn starrocks_insert_preserves_explicit_uuid_values_and_mysql_omission() {
+        let mut options = mysql_people_save_options(0);
+        options.database_type = Some(DatabaseType::StarRocks);
+        options.table_meta.columns.as_mut().unwrap()[0].column_default = Some("uuid()".into());
+        options.new_rows = vec![vec![json!("manual-id"), json!("new")]];
+        let result = prepare_data_grid_save(options.clone());
+        assert_eq!(result.validation_error, None);
+        assert!(result.statements[0].contains("VALUES ('manual-id', 'new')"));
+        options.database_type = Some(DatabaseType::Mysql);
+        options.new_rows = vec![vec![Value::Null, json!("new")]];
+        let result = prepare_data_grid_save(options);
+        assert!(result.statements[0].contains("(`status`) VALUES ('new')"));
     }
 
     /// A MySQL grid tab keeps its namespace in `table_meta.database` (not

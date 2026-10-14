@@ -211,6 +211,8 @@ pub struct EditableStructureTrigger {
     #[serde(default)]
     pub statement: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original: Option<TriggerInfo>,
     #[serde(default)]
     pub marked_for_drop: bool,

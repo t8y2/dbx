@@ -855,6 +855,7 @@ describe("connectionStore metadata loading", () => {
     expect(connectionNode.children?.map((node) => [node.type, node.label, node.database, node.schema])).toEqual([
       ["schema", "DBX_TEST", "DBX_TEST", "DBX_TEST"],
       ["oracle-db-links", "tree.databaseLinks", "", undefined],
+      ["user-admin", "tree.userAdmin", "", undefined],
     ]);
 
     const linkRoot = connectionNode.children!.find((node) => node.type === "oracle-db-links")!;
@@ -907,7 +908,10 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadDatabases(connection.id, { force: true });
 
-    expect(connectionNode.children?.map((node) => [node.type, node.label])).toEqual([["schema", "DBX_TEST"]]);
+    expect(connectionNode.children?.map((node) => [node.type, node.label])).toEqual([
+      ["schema", "DBX_TEST"],
+      ["user-admin", "tree.userAdmin"],
+    ]);
   });
 
   it.each([

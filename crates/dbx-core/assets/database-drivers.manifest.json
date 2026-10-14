@@ -1468,7 +1468,7 @@
         "schemaSearch": true,
         "diagram": true,
         "tableDataEdit": true,
-        "tableStructureEdit": false,
+        "tableStructureEdit": true,
         "tableImport": false,
         "dataTransfer": false,
         "sqlFileExecution": true,

@@ -116,6 +116,7 @@ import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 import { applyVimConfig, isVimMappingCommand, loadVimConfig } from "@/lib/editor/vimConfig";
+import { createVimImeGuard } from "@/lib/editor/vimImeGuard";
 import { configureVimSystemClipboard } from "@/lib/editor/vimSystemClipboard";
 
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
@@ -1536,6 +1537,7 @@ function vimModeExtension(enabled = settingsStore.editorSettings.vimModeEnabled)
       },
     ]),
     vimExtension,
+    createVimImeGuard(codeMirrorRuntime.editorViewModule, codeMirrorRuntime.codeMirrorGetVimCm),
   ]);
 }
 

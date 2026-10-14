@@ -98,7 +98,7 @@ fn create_options_clause(
                 format!(
                     "{} {}",
                     quote_new_ident(Some(DatabaseType::Transwarp), dialect, &column.name),
-                    column_data_type(dialect, column)
+                    column_data_type(dialect, column, Some(DatabaseType::Transwarp))
                 )
             })
             .collect::<Vec<_>>()

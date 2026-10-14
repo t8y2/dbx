@@ -12,6 +12,7 @@ fn is_schema_qualifying_dialect(dialect: StructureDialect) -> bool {
             | StructureDialect::Dameng
             | StructureDialect::Oscar
             | StructureDialect::SqlServer
+            | StructureDialect::SapHana
             | StructureDialect::H2
             | StructureDialect::Informix
             | StructureDialect::Sqlite

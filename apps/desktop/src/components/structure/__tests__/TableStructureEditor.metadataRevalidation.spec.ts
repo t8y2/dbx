@@ -610,8 +610,6 @@ describe("TableStructureEditor column index actions", () => {
   it.each([
     ["Doris", "doris", "doris"],
     ["Doris MySQL profile", "mysql", "doris"],
-    ["StarRocks", "starrocks", "starrocks"],
-    ["StarRocks MySQL profile", "mysql", "starrocks"],
     ["GoldenDB", "goldendb", "goldendb"],
     ["SunDB", "sundb", "sundb"],
     ["Databend", "databend", "databend"],
@@ -623,6 +621,23 @@ describe("TableStructureEditor column index actions", () => {
     await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
     menuButton("structureEditor.createNormalIndex").click();
     await expectIndexName(root, "USERS_EMAIL_IDX");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["StarRocks", "starrocks", "starrocks"],
+    ["StarRocks MySQL profile", "mysql", "starrocks"],
+  ] as const)("disables unsupported ordinary index creation on %s", async (_label, databaseType, driverProfile) => {
+    mocks.connection.db_type = databaseType;
+    mocks.connection.driver_profile = driverProfile;
+    loadMetadata();
+    const root = await mountStructureEditor();
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
+    const button = menuButton("structureEditor.createNormalIndex");
+    expect(button.disabled).toBe(true);
+    button.click();
+    await settle();
+    expect(indexRow(root)).toBeNull();
     expect(mocks.executeBatch).not.toHaveBeenCalled();
   });
 

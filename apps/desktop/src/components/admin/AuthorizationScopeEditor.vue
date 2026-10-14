@@ -28,6 +28,11 @@ const props = defineProps<{
   connectionId: string;
   /** 紧凑布局：用于右侧权限编辑面板，隐藏标题区、压缩列表高度并让表范围控件换行显示 */
   compact?: boolean;
+  /** Oracle exposes owner/object selection; it has no all-schema grant scope. */
+  objectScope?: {
+    loadObjects: (owner: string) => Promise<AuthorizationTableSelection[]>;
+    privileges: readonly string[];
+  };
 }>();
 
 const emit = defineEmits<{
@@ -45,7 +50,7 @@ const tablesLoading = ref<Record<string, boolean>>({});
 const tableErrors = ref<Record<string, string>>({});
 const tableSearch = ref<Record<string, string>>({});
 
-const supportsTableGrants = computed(() => !!props.provider?.supportsTableGrantsOnCreate);
+const supportsTableGrants = computed(() => !!props.objectScope || !!props.provider?.supportsTableGrantsOnCreate);
 const filteredDatabases = computed(() => {
   const query = search.value.trim().toLowerCase();
   return query ? props.databases.filter((database) => databaseLabel(database).toLowerCase().includes(query)) : props.databases;
@@ -114,11 +119,12 @@ function toggleDatabase(database: AuthorizationDatabaseOption) {
     commitSelections(currentSelections().filter((selection) => authorizationSelectionKey(selection) !== authorizationOptionKey(database)));
     return;
   }
-  commitSelections([...currentSelections(), { database: database.database, ...(database.catalog ? { catalog: database.catalog } : {}), preset: "readOnly", privileges: ["SELECT"] }]);
+  commitSelections([...currentSelections(), { database: database.database, ...(database.catalog ? { catalog: database.catalog } : {}), preset: "readOnly", privileges: ["SELECT"], ...(props.objectScope ? { tables: [] } : {}) }]);
 }
 
 // 表范围下 MySQL 不支持 CREATE ROUTINE / EVENT 等库级权限，需要按目标作用域过滤可选权限
 function privilegesForSelection(selection?: DatabaseAuthorizationSelection): string[] {
+  if (props.objectScope) return [...props.objectScope.privileges];
   const userProvider = props.provider;
   if (!userProvider) return [];
   return authorizationPrivileges(userProvider, selection?.tables === undefined ? "database" : "table");
@@ -153,7 +159,9 @@ async function loadTables(database: AuthorizationDatabaseOption) {
   tableErrors.value = { ...tableErrors.value, [key]: "" };
   try {
     let result: AuthorizationTableSelection[];
-    if (props.provider?.authorizationModel === "postgres") {
+    if (props.objectScope) {
+      result = await props.objectScope.loadObjects(database.database);
+    } else if (props.provider?.authorizationModel === "postgres") {
       const schemas = (await api.listSchemas(props.connectionId, database.database)).filter(isPostgresGrantSchema);
       const schemaTables = await Promise.all(
         schemas.map(async (schema) => {
@@ -253,11 +261,14 @@ function databaseLabel(option: AuthorizationDatabaseOption): string {
 }
 
 function authorizationTableKey(table: AuthorizationTableSelection): string {
-  return JSON.stringify([table.schema ?? "", table.name]);
+  // Oracle allows a PACKAGE/PROCEDURE to share a name with a TABLE in one
+  // schema; dropping objectType here would make the table unselectable.
+  return JSON.stringify([table.schema ?? "", table.name, table.objectType ?? ""]);
 }
 
 function tableLabel(table: AuthorizationTableSelection): string {
-  return table.schema ? `${table.schema}.${table.name}` : table.name;
+  const name = table.schema ? `${table.schema}.${table.name}` : table.name;
+  return props.objectScope && table.objectType ? `${name} · ${table.objectType}` : name;
 }
 
 function uniqueTableOptions(options: AuthorizationTableSelection[]): AuthorizationTableSelection[] {
@@ -288,15 +299,15 @@ function isPostgresGrantSchema(schema: string): boolean {
     </div>
     <div class="flex h-8 shrink-0 items-center gap-2 rounded-md border px-2">
       <Search class="h-3.5 w-3.5 text-muted-foreground" />
-      <input v-model="search" class="min-w-0 flex-1 bg-transparent text-xs outline-none" :placeholder="t('userAdmin.searchDatabase')" />
+      <input v-model="search" class="min-w-0 flex-1 bg-transparent text-xs outline-none" :placeholder="t(objectScope ? 'oracleSecurity.searchOwner' : 'userAdmin.searchDatabase')" />
     </div>
     <!-- 紧凑模式下面板高度有限，数据库列表占满剩余高度并自行滚动，避免多个库挤在一起 -->
     <div class="overflow-auto rounded-md border" :class="compact ? 'min-h-0 flex-1' : 'max-h-64'">
       <div v-if="databasesLoading" class="flex items-center gap-2 p-3 text-xs text-muted-foreground">
         <Loader2 class="h-3.5 w-3.5 animate-spin" />
-        {{ t("userAdmin.loadingDatabases") }}
+        {{ t(objectScope ? "common.loading" : "userAdmin.loadingDatabases") }}
       </div>
-      <div v-else-if="visibleDatabases.length === 0" class="p-3 text-center text-xs text-muted-foreground">{{ t("userAdmin.emptyDatabases") }}</div>
+      <div v-else-if="visibleDatabases.length === 0" class="p-3 text-center text-xs text-muted-foreground">{{ t(objectScope ? "oracleSecurity.empty" : "userAdmin.emptyDatabases") }}</div>
       <div v-for="database in visibleDatabases" :key="authorizationOptionKey(database)" class="border-b p-2" :class="compact ? '' : 'last:border-b-0'">
         <div class="flex items-center gap-2">
           <input :checked="selectedDatabaseSet.has(authorizationOptionKey(database))" type="checkbox" class="h-3.5 w-3.5 accent-primary" @change="toggleDatabase(database)" />
@@ -315,7 +326,7 @@ function isPostgresGrantSchema(schema: string): boolean {
           </Select>
         </div>
         <div v-if="supportsTableGrants && database.database !== GLOBAL_SCOPE && selectedDatabaseSet.has(authorizationOptionKey(database))" class="mt-2 flex gap-2" :class="compact ? 'flex-col gap-1.5' : 'items-center pl-5'">
-          <div class="flex items-center gap-2">
+          <div v-if="!objectScope" class="flex items-center gap-2">
             <span v-if="!compact" class="shrink-0 text-[11px] text-muted-foreground">{{ t("userAdmin.tableScope") }}</span>
             <div class="flex h-7 shrink-0 items-center rounded-md border bg-muted/30 p-0.5">
               <button type="button" class="h-5 rounded px-2 text-[10px]" :class="!usesSelectedTables(database) ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'" @click="updateTableScope(database, false)">
@@ -331,7 +342,7 @@ function isPostgresGrantSchema(schema: string): boolean {
               <button type="button" class="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border bg-background px-2 text-left hover:bg-accent" :class="compact ? 'h-9 text-xs' : 'h-7 text-[11px]'">
                 <Table2 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <span class="min-w-0 flex-1 truncate">
-                  {{ selectionFor(database)?.tables?.length ? t("userAdmin.selectedTableCount", { count: selectionFor(database)?.tables?.length }) : t("userAdmin.chooseTables") }}
+                  {{ objectScope ? `${t("oracleSecurity.chooseObjects")} (${selectionFor(database)?.tables?.length ?? 0})` : selectionFor(database)?.tables?.length ? t("userAdmin.selectedTableCount", { count: selectionFor(database)?.tables?.length }) : t("userAdmin.chooseTables") }}
                 </span>
                 <Loader2 v-if="tablesLoading[authorizationOptionKey(database)]" class="h-3.5 w-3.5 shrink-0 animate-spin" />
                 <ChevronDown v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -341,23 +352,23 @@ function isPostgresGrantSchema(schema: string): boolean {
               <div class="flex items-center gap-2 border-b p-2">
                 <div class="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md border px-2">
                   <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                  <input v-model="tableSearch[authorizationOptionKey(database)]" class="min-w-0 flex-1 bg-transparent text-[11px] outline-none" :placeholder="t('userAdmin.searchTable')" />
+                  <input v-model="tableSearch[authorizationOptionKey(database)]" class="min-w-0 flex-1 bg-transparent text-[11px] outline-none" :placeholder="t(objectScope ? 'oracleSecurity.searchObjects' : 'userAdmin.searchTable')" />
                 </div>
-                <button type="button" class="shrink-0 text-[11px] text-primary disabled:text-muted-foreground" :disabled="!(tables[authorizationOptionKey(database)]?.length > 0)" @click="toggleAllTables(database)">
+                <button v-if="!objectScope" type="button" class="shrink-0 text-[11px] text-primary disabled:text-muted-foreground" :disabled="!(tables[authorizationOptionKey(database)]?.length > 0)" @click="toggleAllTables(database)">
                   {{ t(allTablesSelected(database) ? "userAdmin.clearAllTables" : "userAdmin.selectAllTables") }}
                 </button>
               </div>
               <div class="max-h-56 overflow-auto p-1">
                 <div v-if="tablesLoading[authorizationOptionKey(database)]" class="flex items-center justify-center gap-2 px-3 py-6 text-xs text-muted-foreground">
                   <Loader2 class="h-3.5 w-3.5 animate-spin" />
-                  {{ t("userAdmin.loadingTables") }}
+                  {{ t(objectScope ? "common.loading" : "userAdmin.loadingTables") }}
                 </div>
                 <div v-else-if="tableErrors[authorizationOptionKey(database)]" class="px-3 py-4 text-center text-xs text-destructive">
-                  <p class="break-words">{{ t("userAdmin.loadTablesFailed", { message: tableErrors[authorizationOptionKey(database)] }) }}</p>
+                  <p class="break-words">{{ objectScope ? tableErrors[authorizationOptionKey(database)] : t("userAdmin.loadTablesFailed", { message: tableErrors[authorizationOptionKey(database)] }) }}</p>
                   <button type="button" class="mt-2 text-primary" @click="loadTables(database)">{{ t("userAdmin.retry") }}</button>
                 </div>
                 <div v-else-if="filteredTables(database).length === 0" class="px-3 py-6 text-center text-xs text-muted-foreground">
-                  {{ t("userAdmin.emptyTables") }}
+                  {{ t(objectScope ? "oracleSecurity.empty" : "userAdmin.emptyTables") }}
                 </div>
                 <button v-for="table in filteredTables(database)" :key="authorizationTableKey(table)" type="button" class="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-xs hover:bg-accent" @click="toggleTable(database, table)">
                   <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border" :class="isTableSelected(database, table) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'">
@@ -369,7 +380,7 @@ function isPostgresGrantSchema(schema: string): boolean {
             </PopoverContent>
           </Popover>
         </div>
-        <p v-if="usesSelectedTables(database) && !selectionFor(database)?.tables?.length" class="mt-1 text-[10px] text-destructive" :class="compact ? '' : 'pl-5'">
+        <p v-if="!objectScope && usesSelectedTables(database) && !selectionFor(database)?.tables?.length" class="mt-1 text-[10px] text-destructive" :class="compact ? '' : 'pl-5'">
           {{ t("userAdmin.tableSelectionRequired") }}
         </p>
         <div v-if="selectionFor(database)?.preset === 'custom'" class="mt-2 grid gap-1.5" :class="compact ? 'grid-cols-2' : 'grid-cols-3 pl-5'">

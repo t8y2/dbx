@@ -790,12 +790,14 @@ for line in sys.stdin:
     request = json.loads(line)
     params = request.get('params', {})
     if request['method'] == 'cancelStatement':
-        with open(os.path.join(root, 'cancelled'), 'w') as out:
+        with open(os.path.join(root, 'cancelled.tmp'), 'w') as out:
             out.write(params.get('cancelToken', ''))
+        os.replace(os.path.join(root, 'cancelled.tmp'), os.path.join(root, 'cancelled'))
         print(json.dumps({'id': request['id'], 'result': {'cancelled': True}}), flush=True)
     elif request['method'] == 'executeQuery' and params.get('sql') == 'slow':
-        with open(os.path.join(root, 'running'), 'w') as out:
+        with open(os.path.join(root, 'running.tmp'), 'w') as out:
             out.write(params.get('cancelToken', ''))
+        os.replace(os.path.join(root, 'running.tmp'), os.path.join(root, 'running'))
     else:
         print(json.dumps({'id': request['id'], 'result': {'token': params.get('cancelToken')}}), flush=True)
 "#,

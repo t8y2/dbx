@@ -49,6 +49,11 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "AI conversation export (#6467)", keys: under("ai", ["exportConversation", "conversationExportMarkdown", "conversationExportHtml", "conversationRoleUser", "conversationRoleAssistant", "conversationFailedMarker", "conversationExportEmpty"]) },
   { feature: "AI conversation management", keys: under("ai", ["renameConversation", "conversationRenameFailed", "clearDatabaseSelection", "searchDatabases", "noDatabasesFound"]) },
   { feature: "AI auto routing (#9118)", keys: ["ai.actions.auto", "ai.routing.recognizing", "ai.routing.chip", "ai.routing.switchTo", "ai.defaultAutoRouting", "ai.defaultAutoRoutingDescription"] },
+  {
+    feature: "AI SQL action feedback (#11962)",
+    keys: under("ai", ["sqlActionRunning", "sqlActionSucceeded", "sqlActionSucceededIn", "sqlActionSucceededRows", "sqlActionSucceededAffected", "sqlActionFailed", "sqlActionApplied", "sqlActionAppliedIn", "sqlActionEmptySql", "sqlActionBusy", "sqlActionNoConnection", "sqlActionViewTab"]),
+    translated: true,
+  },
   { feature: "plugin AI conversation", keys: ["ai.pluginHttpModelOnly", "ai.pluginWelcome", "ai.pluginFollowUp"] },
   { feature: "quick open", keys: ["quickOpen.*", "settings.shortcutGlobalSearch"] },
   {

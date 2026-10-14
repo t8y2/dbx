@@ -538,8 +538,11 @@ function pickerRecordFor(conversation: AiConversation | undefined): AiPickerConv
   return {
     assistantMode: conversation.assistantMode,
     assistantAction: conversation.assistantAction,
-    // R10 read priority: the legacy plugin field is only a fallback source.
-    pluginContextMode: pluginContextFromMessages(conversation.messages)?.mode ?? conversation.pluginContext?.mode,
+    // R10 read priority: the legacy plugin field is only a fallback source, and
+    // the persisted plugin context lives on the RECORD (`plugin_context_json`).
+    // `AiChatMessage` never carried it — the panel rebuilds the message-level
+    // context from this field when it loads a transcript.
+    pluginContextMode: conversation.pluginContext?.mode,
   };
 }
 

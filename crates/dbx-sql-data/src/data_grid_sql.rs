@@ -2925,7 +2925,7 @@ fn is_oracle_temporal_literal_database(database_type: Option<DatabaseType>) -> b
     matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
 }
 
-fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option<String> {
+pub fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option<String> {
     let kind = oracle_temporal_column_kind(data_type?)?;
     let parts = regex_like_oracle_temporal(text)?;
     let fraction = parts.fraction.as_deref().unwrap_or_default();
@@ -3726,6 +3726,39 @@ fn oceanbase_blob_hex(value: &Value) -> Option<&str> {
     (hex.len() % 2 == 0 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(hex)
 }
 
+/// Reuse grid LOB constructors without applying save-time transaction or row guards.
+pub fn format_oracle_lob_export_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    data_type: Option<&str>,
+) -> Result<Option<String>, String> {
+    if !is_oracle_temporal_literal_database(database_type) {
+        return Ok(None);
+    }
+    let Some(data_type) = data_type else { return Ok(None) };
+    let blob = database_type == Some(DatabaseType::OceanbaseOracle) && data_type.trim().eq_ignore_ascii_case("BLOB");
+    if !blob && oracle_character_lob_constructor(data_type).is_none() {
+        return Ok(None);
+    }
+    if !blob && value.as_str() == Some("") {
+        return Ok(Some("EMPTY_CLOB()".to_string()));
+    }
+    if blob && !value.is_null() && oceanbase_blob_hex(value).is_none() {
+        return Err(
+            "OceanBase BLOB export requires NULL or 0x followed by complete hexadecimal byte pairs.".to_string()
+        );
+    }
+    let column = DataGridColumnInfo {
+        name: String::new(),
+        data_type: data_type.to_string(),
+        is_nullable: true,
+        is_primary_key: false,
+        column_default: None,
+        extra: None,
+    };
+    Ok(Some(format_grid_assignment_sql_literal(value, database_type, Some(&column), None)))
+}
+
 fn validate_oceanbase_blob_save(options: &DataGridSaveStatementOptions) -> Option<String> {
     if options.database_type != Some(DatabaseType::OceanbaseOracle) {
         return None;
@@ -3761,7 +3794,7 @@ fn validate_oceanbase_blob_save(options: &DataGridSaveStatementOptions) -> Optio
 
 // Only rewrite our generated BLOB literal outside quoted strings/identifiers. The SQL text
 // uses binds so temporary PL variables cannot resolve to an identically named table column.
-fn oceanbase_blob_statement(sql: &str, guard_row_count: bool) -> Option<String> {
+pub fn oceanbase_blob_statement(sql: &str, guard_row_count: bool) -> Option<String> {
     let (rewritten, blobs) = oceanbase_blob_literals(sql, false);
     if blobs.is_empty() {
         return None;

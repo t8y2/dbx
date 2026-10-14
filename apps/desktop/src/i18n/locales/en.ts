@@ -1,4 +1,5 @@
 import { sidebarMenuEn as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogEn as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { redisGroupingEn as redisGrouping } from "./redisGrouping";
 import docs from "./docs/en";
 import { dataDictionaryEn as dataDictionary } from "./dataDictionaryMessages";
@@ -63,6 +64,7 @@ const consul = {
 };
 
 export default {
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "Generate model",
@@ -1964,6 +1966,7 @@ export default {
       find: "Find",
       replace: "Replace",
       replaceAll: "Replace All",
+      searchFailed: "Search failed or timed out. Simplify the expression and try again.",
       caseSensitive: "Case sensitive",
       regex: "Regular expression",
       collapseReplace: "Collapse replace",
@@ -2703,6 +2706,9 @@ export default {
     sortSqlCopied: "SQL sort copied",
     resizeSortPanel: "Resize sort panel",
     sortTextView: "Sort text view",
+    freezeFirstColumnGlobally: "Freeze First Column Globally",
+    freezeFirstColumnGloballyHint: "Keep the first visible data column frozen in all data grids.",
+    globalFirstColumnRemainsFrozen: "first column remains globally frozen",
     freezeToColumn: "Freeze to This Column",
     freezeSelectedColumns: "Freeze Selected Columns ({count})",
     freezeCurrentColumn: "Freeze Current Column",
@@ -8937,6 +8943,8 @@ export default {
     syncDownload: "Download",
     syncTestSuccess: "WebDAV target is reachable.",
     syncUploadSuccess: "Uploaded {bytes} bytes to {path}.",
+    syncLastSuccessful: "Last successful sync: {time}",
+    syncNeverSuccessful: "No successful sync yet",
     syncAutoUpload: "Automatically upload snapshots",
     syncAutoUploadInterval: "Every",
     syncAutoUploadMinutes: "minutes",
@@ -9272,6 +9280,7 @@ export default {
     shortcutDisconnectSidebarConnection: "Disconnect sidebar connection",
     shortcutOpenDataInNewTab: "Open data in new tab (mouse click)",
     shortcutViewTableDdl: "View table DDL",
+    shortcutEditSidebarTableStructure: "Edit table structure",
     shortcutSendSelectionToAi: "Send selection to AI",
     shortcutToggleAiPanel: "Toggle AI panel",
     shortcutSqlIntentionActions: "SQL Intention Actions (Expand * / Qualify Identifier)",

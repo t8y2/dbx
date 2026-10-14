@@ -16,6 +16,9 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import { jsonTreeSearchParts, type JsonTreeSearchMatch } from "@/lib/common/jsonTreeSearch";
+import { createTextContentSearchPattern, type TextContentMatch } from "@/lib/common/textContentSearch";
+import { startRedisContentSearch } from "@/lib/redis/redisContentSearchJob";
 import JsonTree from "@/components/common/JsonTree.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import * as api from "@/lib/backend/api";
@@ -63,7 +66,7 @@ import {
   type RedisValueFormat,
 } from "@/lib/redis/redisValuePresentation";
 import { decompressRedisValue, decodeBase64RedisValue, decodePickle, decodeProtobuf, isGzipMagic, type RedisDecompressAlgorithm } from "@/lib/redis/codec";
-import { canFullHighlightRedisText, findRedisTextMatches, nextRedisSearchMatchIndex, REDIS_VALUE_SEARCH_MATCH_LIMIT, renderRedisTextSearchHtml, redisValueSearchStatus } from "@/lib/redis/redisValueSearch";
+import { nextRedisSearchMatchIndex, REDIS_VALUE_SEARCH_MATCH_LIMIT, redisValueSearchStatus } from "@/lib/redis/redisValueSearch";
 import TextContentSearchBar from "@/components/common/TextContentSearchBar.vue";
 import RedisHorizontalScrollbar from "@/components/redis/RedisHorizontalScrollbar.vue";
 import { decodeJsonUnicodeEscapes, formatJsonSource, mapDisplayToRaw } from "@/lib/common/safeJsonFormat";
@@ -409,6 +412,13 @@ const zsetSortDir = ref<"asc" | "desc">("asc");
  */
 const valueSearchOpen = ref(false);
 const valueSearchQuery = ref("");
+const valueReplaceText = ref("");
+const valueSearchBusy = ref(false);
+const valueSearchFailed = ref(false);
+const valueSearchCaseSensitive = ref(false);
+const valueSearchUseRegex = ref(false);
+const valueSearchOptions = computed(() => ({ caseSensitive: valueSearchCaseSensitive.value, useRegex: valueSearchUseRegex.value }));
+const valueSearchError = computed(() => (valueSearchUseRegex.value && valueSearchQuery.value && !createTextContentSearchPattern(valueSearchQuery.value, valueSearchOptions.value) ? t("dataGenerate.invalidRegex") : valueSearchFailed.value ? t("editor.search.searchFailed") : ""));
 const valueSearchMatchIndex = ref(0);
 const valueSearchHasNavigated = ref(false);
 const collectionSearchQuery = ref("");
@@ -418,12 +428,16 @@ const collectionSearchState = shallowRef(emptyRedisCollectionSearchState());
 let collectionBrowseSnapshot: { items: RedisCollectionItem[]; cursor: number | undefined } | undefined;
 let collectionSearchIntentRevision = 0;
 const valueSearchBarRef = ref<{ focusInput: (select?: boolean) => void } | null>(null);
-type JsonEditorHandle = { openSearch: () => boolean; selectRange?: (from: number, to: number, options?: { focus?: boolean }) => boolean };
+type JsonEditorHandle = { replaceRanges?: (text: string, changes: { from: number; to: number; insert: string }[]) => boolean; hasFocus?: () => boolean; openSearch: () => boolean; selectRange?: (from: number, to: number, options?: { focus?: boolean }) => boolean };
 const stringJsonEditorRef = ref<JsonEditorHandle | null>(null);
 const redisJsonEditorRef = ref<JsonEditorHandle | null>(null);
 const memberJsonEditorRef = ref<JsonEditorHandle | null>(null);
-const stringTextareaRef = ref<HTMLTextAreaElement | null>(null);
-const memberTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const stringTextEditorRef = ref<JsonEditorHandle | null>(null);
+const memberTextEditorRef = ref<JsonEditorHandle | null>(null);
+const searchPreviewRef = ref<JsonEditorHandle | null>(null);
+type SearchTreeHandle = { revealSearchMatch: () => Promise<void> };
+const stringSearchTreeRef = ref<SearchTreeHandle | null>(null);
+const memberSearchTreeRef = ref<SearchTreeHandle | null>(null);
 const valueViewerSearchActive = ref(false);
 
 function toggleHashSort(column: "field" | "value") {
@@ -619,7 +633,7 @@ const memberDecodedText = computed<string | null>(() => {
 
 /** Raw fallback shown while a decompress codec fails: keep the original content visible, never an error string in its place. */
 const decompressedRawFallbackText = computed(() => {
-  if (isDecompressCodec(stringValueCodec.value) && stringValueDetail.value) {
+  if (!showMemberDetail.value && isDecompressCodec(stringValueCodec.value) && stringValueDetail.value) {
     return detailTextForFormat(stringValueDetail.value, stringValueDetail.value.defaultFormat);
   }
   if (isDecompressCodec(memberValueCodec.value) && selectedMemberDetail.value) {
@@ -837,23 +851,114 @@ const zsetRows = computed<RedisCollectionRow<RedisZsetItem>[]>(() =>
   })),
 );
 
-const usesJsonEditorForMain = computed(() => (isStringLikeKind.value && stringValueView.value === "json" && Boolean(stringValueDetail.value?.json)) || redisKind.value === "json");
-const usesJsonEditorForMember = computed(() => isEditingHashJson.value);
 /** True when Ctrl+F content find applies (STRING, RedisJSON, or open member detail). */
 const valueSearchSupported = computed(() => showMemberDetail.value || isStringLikeKind.value || redisKind.value === "json");
-const contentSearchText = computed(() => {
-  if (showMemberDetail.value) {
-    if (isEditingMember.value || isEditingHashJson.value) return memberEditValue.value;
-    return memberDecodedText.value ?? detailTextForFormat(selectedMemberDetail.value, memberValueView.value);
-  }
-  if (redisKind.value === "json") return editValue.value;
-  if (!isStringLikeKind.value || !stringValueDetail.value) return "";
-  if (stringValueCodec.value !== "none") return stringDecodedText.value ?? "";
-  if (stringValueView.value === "json" && stringValueDetail.value.json) return editValue.value;
-  if (stringValueView.value === "utf8" && canEditCurrentStringFormat.value) return editValue.value;
-  return detailTextForFormat(stringValueDetail.value, stringValueView.value);
+// Resolve exactly the surface rendered by the active codec/view, including fallbacks.
+const activeSearchTree = computed(() => {
+  const member = showMemberDetail.value;
+  if (member && (isEditingMember.value || isEditingHashJson.value)) return null;
+  const view = member ? memberValueView.value : stringValueView.value;
+  const codec = member ? memberValueCodec.value : stringValueCodec.value;
+  const detail = member ? selectedMemberDetail.value : stringValueDetail.value;
+  if (view !== "json" || !detail || (!member && codec === "none")) return null;
+  if (member && codec === "none" && detail.json) return detail.json;
+  const structured = member ? activeStructuredMemberDetail.value : activeStructuredStringDetail.value;
+  if (structured) return structured;
+  const base64 = member ? memberBase64Detail.value : stringBase64Detail.value;
+  if (codec === "base64" && base64?.json) return base64.json;
+  if (isDecompressCodec(codec) && decompressedState.value.status === "success") return decompressedJsonDetail.value;
+  return null;
 });
-const contentSearchMatches = computed(() => findRedisTextMatches(contentSearchText.value, valueSearchQuery.value));
+const displayedSearchText = computed(() => {
+  const member = showMemberDetail.value;
+  if (member && (isEditingMember.value || isEditingHashJson.value)) return memberEditValue.value;
+  if (!member && redisKind.value === "json") return editValue.value;
+  const detail = member ? selectedMemberDetail.value : stringValueDetail.value;
+  if (!detail) return "";
+  const view = member ? memberValueView.value : stringValueView.value;
+  const codec = member ? memberValueCodec.value : stringValueCodec.value;
+  const mismatch = member ? memberCodecMismatch.value : stringCodecMismatch.value;
+  // Codec mismatch takes precedence over the view controls in the renderer.
+  if (mismatch) return detailTextForFormat(detail, detail.defaultFormat);
+  if (view === "hex" || view === "base64") return detailTextForFormat(detail, view);
+  if (isDecompressCodec(codec)) {
+    if (decompressedState.value.status === "loading") return "";
+    if (decompressedState.value.status !== "success") return detailTextForFormat(detail, detail.defaultFormat);
+  }
+  const decoded = member ? memberDecodedText.value : stringDecodedText.value;
+  if (decoded !== null) return decoded;
+  if (!member && codec === "none" && ((view === "json" && detail.json) || (view === "utf8" && canEditCurrentStringFormat.value))) return editValue.value;
+  return detailTextForFormat(detail, view);
+});
+// CodeMirror normalizes line endings; offsets must use the same document representation.
+const contentSearchText = computed(() => displayedSearchText.value.replace(/\r\n?/g, "\n"));
+const contentSearchMatches = shallowRef<(TextContentMatch | JsonTreeSearchMatch)[]>([]);
+const treeSearchMatches = computed(() => (activeSearchTree.value ? (contentSearchMatches.value as JsonTreeSearchMatch[]) : []));
+let contentSearchJob: ReturnType<typeof startRedisContentSearch> | undefined;
+let contentSearchRevision = 0;
+let nextReplacementOffset: number | undefined;
+watch(
+  [contentSearchText, activeSearchTree, valueSearchQuery, valueSearchCaseSensitive, valueSearchUseRegex, valueSearchOpen],
+  async () => {
+    const revision = ++contentSearchRevision;
+    contentSearchJob?.cancel();
+    contentSearchMatches.value = [];
+    valueSearchFailed.value = false;
+    valueSearchBusy.value = false;
+    if (!valueSearchOpen.value || !valueSearchQuery.value || valueSearchError.value) return;
+    valueSearchBusy.value = true;
+    contentSearchJob = startRedisContentSearch({ text: contentSearchText.value, treeParts: activeSearchTree.value ? [...jsonTreeSearchParts(activeSearchTree.value.value)] : undefined, query: valueSearchQuery.value, options: valueSearchOptions.value });
+    const result = await contentSearchJob.result;
+    if (revision !== contentSearchRevision || !result) return;
+    valueSearchBusy.value = false;
+    valueSearchFailed.value = Boolean(result.error);
+    contentSearchMatches.value = result.matches;
+    if (nextReplacementOffset !== undefined) {
+      const nextIndex = result.matches.findIndex((match) => match.start >= nextReplacementOffset!);
+      valueSearchMatchIndex.value = Math.max(0, nextIndex);
+      nextReplacementOffset = undefined;
+    }
+    if (!activeContentEditor()?.hasFocus?.()) void scrollContentSearchMatchIntoView();
+  },
+  { flush: "sync" },
+);
+onBeforeUnmount(() => {
+  contentSearchRevision++;
+  contentSearchJob?.cancel();
+});
+const valueCanReplace = computed(() => {
+  if (activeSearchTree.value) return false;
+  if (showMemberDetail.value) return (isEditingMember.value || isEditingHashJson.value) && !savingMember.value;
+  if (redisKind.value === "json") return !savingJson.value;
+  return stringValueCodec.value === "none" && canEditCurrentStringFormat.value && !savingString.value && (stringValueView.value === "utf8" || stringValueView.value === "json");
+});
+async function replaceValueMatches(all: boolean) {
+  if (!valueCanReplace.value || valueSearchBusy.value || !contentSearchMatches.value.length) return;
+  const revision = ++contentSearchRevision;
+  const editor = activeContentEditor();
+  const text = contentSearchText.value;
+  contentSearchJob?.cancel();
+  valueSearchBusy.value = true;
+  contentSearchJob = startRedisContentSearch({ text, query: valueSearchQuery.value, options: valueSearchOptions.value, replacement: valueReplaceText.value, range: all ? undefined : contentSearchMatches.value[contentSearchActiveIndex.value] });
+  const result = await contentSearchJob.result;
+  if (revision !== contentSearchRevision || !result) return;
+  valueSearchBusy.value = false;
+  valueSearchFailed.value = Boolean(result.error);
+  if (!result.error && result.changes?.length && valueCanReplace.value && editor === activeContentEditor() && text === contentSearchText.value) {
+    const change = result.changes[0];
+    nextReplacementOffset = all ? undefined : change.from + change.insert.replace(/\r\n?/g, "\n").length;
+    if (!editor?.replaceRanges?.(text, result.changes)) {
+      nextReplacementOffset = undefined;
+      return;
+    }
+    // An unchanged value does not trigger the search watcher. Advance using
+    // the existing matches rather than leaving navigation pending indefinitely.
+    if (contentSearchText.value === text) {
+      nextReplacementOffset = undefined;
+      if (!all) moveContentSearchMatch(1);
+    }
+  }
+}
 const contentSearchMatchLimited = computed(() => contentSearchMatches.value.length >= REDIS_VALUE_SEARCH_MATCH_LIMIT);
 const contentSearchActiveIndex = computed(() => {
   if (contentSearchMatches.value.length === 0) return 0;
@@ -861,13 +966,21 @@ const contentSearchActiveIndex = computed(() => {
 });
 const valueSearchStatus = computed(() => redisValueSearchStatus(contentSearchActiveIndex.value, contentSearchMatches.value.length, contentSearchMatchLimited.value));
 const valueSearchMatchCount = computed(() => contentSearchMatches.value.length);
-const contentSearchHighlightedHtml = computed(() => {
-  if (!valueSearchOpen.value || !valueSearchQuery.value) return "";
-  return renderRedisTextSearchHtml(contentSearchText.value, valueSearchQuery.value, contentSearchActiveIndex.value);
+const contentSearchHighlights = computed(() => (valueSearchOpen.value && !activeSearchTree.value ? contentSearchMatches.value.map((match, index) => ({ from: match.start, to: match.end, active: index === contentSearchActiveIndex.value })) : []));
+const stringSearchHighlights = computed(() => (showMemberDetail.value ? [] : contentSearchHighlights.value));
+const memberSearchHighlights = computed(() => (showMemberDetail.value ? contentSearchHighlights.value : []));
+const showSearchPreview = computed(() => {
+  const codec = showMemberDetail.value ? memberValueCodec.value : stringValueCodec.value;
+  const view = showMemberDetail.value ? memberValueView.value : stringValueView.value;
+  const decoding = isDecompressCodec(codec) && decompressedState.value.status === "loading" && view !== "hex" && view !== "base64";
+  return valueSearchOpen.value && Boolean(valueSearchQuery.value) && !activeSearchTree.value && !decoding;
 });
-const canHighlightContentSearch = computed(() => valueSearchOpen.value && Boolean(valueSearchQuery.value) && canFullHighlightRedisText(contentSearchText.value.length));
-const canHighlightStringSurface = computed(() => canHighlightContentSearch.value && !showMemberDetail.value);
-const canHighlightMemberSurface = computed(() => canHighlightContentSearch.value && showMemberDetail.value);
+const searchPreviewNotice = computed(() => {
+  if (showMemberDetail.value ? memberCodecMismatch.value : stringCodecMismatch.value) return t("redis.codecMismatch");
+  const codec = showMemberDetail.value ? memberValueCodec.value : stringValueCodec.value;
+  const view = showMemberDetail.value ? memberValueView.value : stringValueView.value;
+  return isDecompressCodec(codec) && view !== "hex" && view !== "base64" ? decompressedFailureMessage.value : "";
+});
 
 let hashResizeStartX = 0;
 let hashResizeStartWidth = 0;
@@ -2216,7 +2329,7 @@ function startEditMember() {
     memberFieldEditValue.value = selectedMemberContext.value.field ?? "";
   }
   isEditingMember.value = true;
-  nextTick(() => memberTextareaRef.value?.focus());
+  // The text editor applies autofocus after its asynchronous initialization.
 }
 
 function cancelEditMember() {
@@ -2740,41 +2853,30 @@ function activateValueSearchMatch(delta: -1 | 1) {
   moveContentSearchMatch(delta);
 }
 
-/** Scroll value body to the active match without stealing focus from the find input. */
-function scrollTextareaToMatch(textarea: HTMLTextAreaElement, match: { start: number; end: number }) {
-  const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight || "20") || 20;
-  const textBefore = textarea.value.slice(0, match.start);
-  const line = textBefore.split("\n").length - 1;
-  textarea.scrollTop = Math.max(0, line * lineHeight - textarea.clientHeight / 3);
+function activeContentEditor(): JsonEditorHandle | null {
+  if (showMemberDetail.value) {
+    if (isEditingMember.value) return memberTextEditorRef.value;
+    return isEditingHashJson.value ? memberJsonEditorRef.value : searchPreviewRef.value;
+  }
+  if (redisKind.value === "json") return redisJsonEditorRef.value;
+  if (stringValueCodec.value === "none") {
+    if (stringValueView.value === "json" && stringValueDetail.value?.json) return stringJsonEditorRef.value;
+    if (stringValueView.value === "utf8" && canEditCurrentStringFormat.value) return stringTextEditorRef.value;
+  }
+  return searchPreviewRef.value;
 }
 
-/**
- * Never focus the value body here — the find panel must keep the caret so typing stays in the search box.
- * Enter / prev / next only change the active match index and scroll the body into view.
- */
+/** Navigate within the active surface without moving focus out of the find input. */
 async function scrollContentSearchMatchIntoView() {
   await nextTick();
+  if (activeSearchTree.value) {
+    await (showMemberDetail.value ? memberSearchTreeRef.value : stringSearchTreeRef.value)?.revealSearchMatch();
+    return;
+  }
   const match = contentSearchMatches.value[contentSearchActiveIndex.value];
   if (!match) return;
-
-  // CM: update selection + scroll, but do not focus (keeps find input active).
-  if (showMemberDetail.value) {
-    if (usesJsonEditorForMember.value && memberJsonEditorRef.value?.selectRange?.(match.start, match.end, { focus: false })) return;
-    if (isEditingMember.value && memberTextareaRef.value) {
-      scrollTextareaToMatch(memberTextareaRef.value, match);
-      return;
-    }
-  } else if (redisKind.value === "json") {
-    if (redisJsonEditorRef.value?.selectRange?.(match.start, match.end, { focus: false })) return;
-  } else {
-    if (usesJsonEditorForMain.value && stringJsonEditorRef.value?.selectRange?.(match.start, match.end, { focus: false })) return;
-    if (stringValueView.value === "utf8" && canEditCurrentStringFormat.value && stringTextareaRef.value) {
-      scrollTextareaToMatch(stringTextareaRef.value, match);
-      return;
-    }
-  }
-
-  document.querySelector<HTMLElement>('[data-document-search-active="true"]')?.scrollIntoView({ block: "center", inline: "nearest" });
+  const editor = activeContentEditor();
+  editor?.selectRange?.(match.start, match.end, { focus: false });
 }
 
 /** Ctrl/Cmd+F on STRING body or member detail → floating find. */
@@ -2789,17 +2891,18 @@ function handleValueViewerPointerDown(event: PointerEvent) {
   valueViewerSearchActive.value = target instanceof Element && !!target.closest("[data-redis-value-viewer], [data-redis-value-search], [data-text-content-search], [data-draggable-search-panel], [data-redis-member-detail]");
 }
 
-watch(valueSearchQuery, () => {
+watch([valueSearchQuery, valueSearchCaseSensitive, valueSearchUseRegex], () => {
+  nextReplacementOffset = undefined;
   // Typing: recompute matches/highlights; keep caret in the find input.
   valueSearchMatchIndex.value = 0;
   valueSearchHasNavigated.value = false;
   if (valueSearchOpen.value) void scrollContentSearchMatchIntoView();
 });
 
-watch(contentSearchText, () => {
+watch([contentSearchText, activeSearchTree], () => {
   valueSearchMatchIndex.value = 0;
   valueSearchHasNavigated.value = false;
-  if (valueSearchOpen.value) void scrollContentSearchMatchIntoView();
+  if (valueSearchOpen.value && !activeContentEditor()?.hasFocus?.()) void scrollContentSearchMatchIntoView();
 });
 
 watch(
@@ -2882,13 +2985,22 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
 </script>
 
 <template>
-  <div data-redis-value-viewer class="relative h-full flex flex-col overflow-hidden" :style="editorFontFamilyStyle">
+  <div data-redis-value-viewer :class="{ 'redis-value-viewer--dark': isDark }" class="relative h-full flex flex-col overflow-hidden" :style="editorFontFamilyStyle">
     <!-- STRING body find — mounted inside the value pane (not teleported out of focus). -->
     <TextContentSearchBar
       v-if="valueSearchOpen && data && valueSearchSupported && !showMemberDetail"
       ref="valueSearchBarRef"
       v-model="valueSearchQuery"
-      :status="valueSearchStatus"
+      v-model:case-sensitive="valueSearchCaseSensitive"
+      v-model:use-regex="valueSearchUseRegex"
+      show-search-options
+      v-model:replace-text="valueReplaceText"
+      :allow-replace="valueCanReplace"
+      :busy="valueSearchBusy"
+      @replace="replaceValueMatches(false)"
+      @replace-all="replaceValueMatches(true)"
+      :error="valueSearchError"
+      :status="valueSearchBusy ? t('common.loading') : valueSearchStatus"
       :match-count="valueSearchMatchCount"
       :show-navigation="true"
       :placeholder="t('editor.search.find')"
@@ -3058,6 +3170,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
         <RedisJsonEditor
           v-if="stringValueView === 'json' && stringValueDetail.json && stringValueCodec === 'none'"
           ref="stringJsonEditorRef"
+          :search-highlights="stringSearchHighlights"
           v-model="editValue"
           class="min-h-0 flex-1"
           :save-disabled="savingString || !stringValueChanged"
@@ -3066,12 +3179,52 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           :enable-builtin-find="false"
           @save="saveString"
         />
+        <RedisJsonEditor
+          v-else-if="stringValueView === 'utf8' && canEditCurrentStringFormat && stringValueCodec === 'none'"
+          ref="stringTextEditorRef"
+          v-model="editValue"
+          language="text"
+          presentation="viewer"
+          :line-numbers="false"
+          class="min-h-0 flex-1"
+          :read-only="savingString"
+          :word-wrap="redisJsonWordWrap"
+          :search-highlights="stringSearchHighlights"
+          :enable-builtin-find="false"
+          :save-disabled="savingString || !stringValueChanged"
+          @save="saveString"
+        />
+        <div v-else-if="showSearchPreview && !showMemberDetail" class="min-h-0 flex-1 flex flex-col overflow-hidden">
+          <RedisJsonEditor ref="searchPreviewRef" :model-value="contentSearchText" language="text" :line-numbers="false" read-only presentation="viewer" class="min-h-0 flex-1" :word-wrap="redisJsonWordWrap" :search-highlights="stringSearchHighlights" :enable-builtin-find="false" />
+          <div v-if="searchPreviewNotice" class="flex shrink-0 items-center gap-2 border-t px-4 py-2 text-xs text-muted-foreground">
+            <span>{{ searchPreviewNotice }}</span>
+            <Button v-if="!(showMemberDetail ? memberCodecMismatch : stringCodecMismatch) && decompressedState.status === 'error' && decompressedState.reason !== 'limit'" variant="outline" size="sm" @click="retryDecompressAsDeflate">{{ t("redis.decompressedRetryAsDeflate") }}</Button>
+          </div>
+        </div>
         <div v-else-if="activeStructuredStringDetail && stringValueView !== 'hex' && stringValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <JsonTree v-if="stringValueView === 'json'" :value="activeStructuredStringDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+          <JsonTree
+            ref="stringSearchTreeRef"
+            :search-matches="!showMemberDetail ? treeSearchMatches : []"
+            :active-search-index="contentSearchActiveIndex"
+            v-if="stringValueView === 'json'"
+            :value="activeStructuredStringDetail.value"
+            :word-wrap="redisJsonWordWrap"
+            :highlight-json="highlightRedisJson"
+            virtualized
+          />
           <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ stringDecodedText }}</pre>
         </div>
-        <div v-else-if="stringValueCodec === 'base64' && stringBase64Detail" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <JsonTree v-if="stringValueView === 'json' && stringBase64Detail.json" :value="stringBase64Detail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+        <div v-else-if="stringValueCodec === 'base64' && stringBase64Detail && stringValueView !== 'hex' && stringValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
+          <JsonTree
+            ref="stringSearchTreeRef"
+            :search-matches="!showMemberDetail ? treeSearchMatches : []"
+            :active-search-index="contentSearchActiveIndex"
+            v-if="stringValueView === 'json' && stringBase64Detail.json"
+            :value="stringBase64Detail.json.value"
+            :word-wrap="redisJsonWordWrap"
+            :highlight-json="highlightRedisJson"
+            virtualized
+          />
           <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ stringDecodedText }}</pre>
         </div>
         <div v-else-if="stringCodecMismatch" class="min-h-0 flex-1 flex flex-col overflow-hidden">
@@ -3083,11 +3236,9 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <span>{{ t("grid.hexViewer") }}</span>
             <span>{{ t("grid.hexViewerByteCount", { count: stringValueDetail.byteCount }) }}</span>
           </div>
-          <pre v-if="stringValueDetail.hexRows.length > 0 && canHighlightStringSurface" class="dbx-editor-font-family w-full min-w-0 max-w-full select-all whitespace-pre-wrap break-all" v-html="contentSearchHighlightedHtml" />
-          <pre v-else-if="stringValueDetail.hexRows.length > 0" class="dbx-editor-font-family w-full min-w-0 max-w-full select-all whitespace-pre-wrap break-all">{{ detailTextForFormat(stringValueDetail, "hex") }}</pre>
+          <pre v-if="stringValueDetail.hexRows.length > 0" class="dbx-editor-font-family w-full min-w-0 max-w-full select-all whitespace-pre-wrap break-all">{{ detailTextForFormat(stringValueDetail, "hex") }}</pre>
           <div v-else class="text-muted-foreground">{{ t("grid.hexViewerEmpty") }}</div>
         </div>
-        <pre v-else-if="stringValueView === 'base64' && canHighlightStringSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6 whitespace-pre-wrap break-all" v-html="contentSearchHighlightedHtml" />
         <pre v-else-if="stringValueView === 'base64'" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6 whitespace-pre-wrap break-all">{{ stringValueDetail.base64Text }}</pre>
         <div v-else-if="isDecompressCodec(stringValueCodec)" class="min-h-0 flex-1 flex flex-col overflow-hidden">
           <div v-if="decompressedState.status === 'loading'" class="flex min-h-0 flex-1 items-center justify-center gap-2 text-muted-foreground">
@@ -3096,7 +3247,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           </div>
           <div v-else-if="decompressedState.status === 'success'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background">
             <div v-if="stringValueView === 'json' && decompressedJsonDetail" class="h-full p-4">
-              <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+              <JsonTree ref="stringSearchTreeRef" :search-matches="!showMemberDetail ? treeSearchMatches : []" :active-search-index="contentSearchActiveIndex" :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
             </div>
             <pre v-else class="w-full min-w-0 max-w-full p-4 text-sm leading-6" :class="detailTextClass('utf8')">{{ stringDecodedText }}</pre>
           </div>
@@ -3118,16 +3269,6 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             </div>
           </template>
         </div>
-        <textarea
-          v-else-if="stringValueView === 'utf8' && canEditCurrentStringFormat && stringValueCodec === 'none'"
-          ref="stringTextareaRef"
-          v-model="editValue"
-          class="dbx-editor-font-family flex-1 resize-none bg-background p-4 text-sm outline-none"
-          :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
-          :readonly="!canEditCurrentStringFormat || savingString"
-          spellcheck="false"
-        />
-        <pre v-else-if="canHighlightStringSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)" v-html="contentSearchHighlightedHtml" />
         <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)">{{ detailTextForFormat(stringValueDetail, stringValueView) }}</pre>
         <div v-if="isStringValueTruncated" data-redis-large-string-preview class="flex shrink-0 items-center gap-2 border-t bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
           <Eye class="h-3.5 w-3.5 shrink-0" />
@@ -3171,7 +3312,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
           </label>
         </div>
-        <RedisJsonEditor ref="redisJsonEditorRef" v-model="editValue" class="min-h-0 flex-1" :save-disabled="savingJson || !redisJsonValueChanged" :read-only="savingJson" :word-wrap="redisJsonWordWrap" :enable-builtin-find="false" @save="saveJson" />
+        <RedisJsonEditor :search-highlights="stringSearchHighlights" ref="redisJsonEditorRef" v-model="editValue" class="min-h-0 flex-1" :save-disabled="savingJson || !redisJsonValueChanged" :read-only="savingJson" :word-wrap="redisJsonWordWrap" :enable-builtin-find="false" @save="saveJson" />
         <div v-if="redisJsonValueChanged" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
           <Button variant="ghost" size="sm" :disabled="savingJson" @click="discardRedisJsonEdit">{{ t("grid.discard") }}</Button>
           <Button size="sm" :disabled="savingJson" @click="saveJson"><Loader2 v-if="savingJson" class="w-3 h-3 mr-1 animate-spin" /><Save v-else class="w-3 h-3 mr-1" /> {{ t("grid.save") }}</Button>
@@ -3777,7 +3918,15 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
     </Dialog>
 
     <Dialog :open="showMemberDetail" @update:open="handleMemberDetailOpenChange">
-      <DialogContent data-redis-member-detail class="relative flex h-[min(760px,85vh)] w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[960px]" :style="editorFontFamilyStyle" @close-auto-focus="finishMemberDetailClose" @pointer-down-outside.prevent @interact-outside.prevent>
+      <DialogContent
+        data-redis-member-detail
+        :class="{ 'redis-value-viewer--dark': isDark }"
+        class="relative flex h-[min(760px,85vh)] w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[960px]"
+        :style="editorFontFamilyStyle"
+        @close-auto-focus="finishMemberDetailClose"
+        @pointer-down-outside.prevent
+        @interact-outside.prevent
+      >
         <!--
           Inside DialogContent (focus trap). absolute — not fixed — so dialog
           transform/overflow do not break hit-testing or caret.
@@ -3786,7 +3935,16 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           v-if="valueSearchOpen && showMemberDetail"
           ref="valueSearchBarRef"
           v-model="valueSearchQuery"
-          :status="valueSearchStatus"
+          v-model:case-sensitive="valueSearchCaseSensitive"
+          v-model:use-regex="valueSearchUseRegex"
+          show-search-options
+          v-model:replace-text="valueReplaceText"
+          :allow-replace="valueCanReplace"
+          :busy="valueSearchBusy"
+          @replace="replaceValueMatches(false)"
+          @replace-all="replaceValueMatches(true)"
+          :error="valueSearchError"
+          :status="valueSearchBusy ? t('common.loading') : valueSearchStatus"
           :match-count="valueSearchMatchCount"
           :show-navigation="true"
           :placeholder="t('editor.search.find')"
@@ -3808,7 +3966,22 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           </DialogTitle>
         </DialogHeader>
         <template v-if="isEditingMember">
-          <textarea ref="memberTextareaRef" data-redis-member-utf8-editor v-model="memberEditValue" class="dbx-editor-font-family min-h-0 flex-1 resize-none bg-background p-5 text-[13px] leading-6 outline-none" :readonly="savingMember" spellcheck="false" />
+          <RedisJsonEditor
+            ref="memberTextEditorRef"
+            presentation="viewer"
+            data-redis-member-utf8-editor
+            v-model="memberEditValue"
+            language="text"
+            :line-numbers="false"
+            autofocus
+            class="min-h-0 flex-1"
+            :read-only="savingMember"
+            :word-wrap="redisJsonWordWrap"
+            :search-highlights="memberSearchHighlights"
+            :enable-builtin-find="false"
+            :save-disabled="savingMember || !memberValueChanged"
+            @save="saveMemberEdit"
+          />
         </template>
         <template v-else>
           <div class="flex h-9 items-center gap-2 border-b px-5 text-xs">
@@ -3847,16 +4020,64 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonDecoded }" @click="setRedisJsonUnicodeMode('decoded')">{{ t("redis.jsonViewDecoded") }}</Button>
             </div>
           </div>
-          <RedisJsonEditor v-if="isEditingHashJson" ref="memberJsonEditorRef" v-model="memberEditValue" class="min-h-0 flex-1" :save-disabled="savingMember || !memberValueChanged" :read-only="savingMember" :word-wrap="redisJsonWordWrap" :enable-builtin-find="false" @save="saveMemberEdit" />
+          <RedisJsonEditor
+            :search-highlights="memberSearchHighlights"
+            v-if="isEditingHashJson"
+            ref="memberJsonEditorRef"
+            v-model="memberEditValue"
+            class="min-h-0 flex-1"
+            :save-disabled="savingMember || !memberValueChanged"
+            :read-only="savingMember"
+            :word-wrap="redisJsonWordWrap"
+            :enable-builtin-find="false"
+            @save="saveMemberEdit"
+          />
+          <div v-else-if="showSearchPreview" class="min-h-0 flex-1 flex flex-col overflow-hidden">
+            <RedisJsonEditor
+              ref="searchPreviewRef"
+              :model-value="contentSearchText"
+              language="text"
+              :line-numbers="false"
+              read-only
+              presentation="viewer"
+              class="min-h-0 flex-1"
+              :word-wrap="redisJsonWordWrap"
+              :search-highlights="memberSearchHighlights"
+              :enable-builtin-find="false"
+              @dblclick="memberValueView === 'utf8' && memberValueCodec === 'none' && canEditCurrentMemberFormat && startEditMember()"
+            />
+            <div v-if="searchPreviewNotice" class="flex shrink-0 items-center gap-2 border-t px-4 py-2 text-xs text-muted-foreground">
+              <span>{{ searchPreviewNotice }}</span>
+              <Button v-if="!(showMemberDetail ? memberCodecMismatch : stringCodecMismatch) && decompressedState.status === 'error' && decompressedState.reason !== 'limit'" variant="outline" size="sm" @click="retryDecompressAsDeflate">{{ t("redis.decompressedRetryAsDeflate") }}</Button>
+            </div>
+          </div>
           <div v-else-if="memberValueView === 'json' && selectedMemberDetail.json && memberValueCodec === 'none'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <JsonTree :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+            <JsonTree ref="memberSearchTreeRef" :search-matches="showMemberDetail ? treeSearchMatches : []" :active-search-index="contentSearchActiveIndex" :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
           </div>
           <div v-else-if="activeStructuredMemberDetail && memberValueView !== 'hex' && memberValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <JsonTree v-if="memberValueView === 'json'" :value="activeStructuredMemberDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+            <JsonTree
+              ref="memberSearchTreeRef"
+              :search-matches="showMemberDetail ? treeSearchMatches : []"
+              :active-search-index="contentSearchActiveIndex"
+              v-if="memberValueView === 'json'"
+              :value="activeStructuredMemberDetail.value"
+              :word-wrap="redisJsonWordWrap"
+              :highlight-json="highlightRedisJson"
+              virtualized
+            />
             <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ memberDecodedText }}</pre>
           </div>
-          <div v-else-if="memberValueCodec === 'base64' && memberBase64Detail" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <JsonTree v-if="memberValueView === 'json' && memberBase64Detail.json" :value="memberBase64Detail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+          <div v-else-if="memberValueCodec === 'base64' && memberBase64Detail && memberValueView !== 'hex' && memberValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
+            <JsonTree
+              ref="memberSearchTreeRef"
+              :search-matches="showMemberDetail ? treeSearchMatches : []"
+              :active-search-index="contentSearchActiveIndex"
+              v-if="memberValueView === 'json' && memberBase64Detail.json"
+              :value="memberBase64Detail.json.value"
+              :word-wrap="redisJsonWordWrap"
+              :highlight-json="highlightRedisJson"
+              virtualized
+            />
             <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ memberDecodedText }}</pre>
           </div>
           <div v-else-if="memberCodecMismatch" class="min-h-0 flex-1 flex flex-col overflow-hidden">
@@ -3868,11 +4089,9 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               <span>{{ t("grid.hexViewer") }}</span>
               <span>{{ t("grid.hexViewerByteCount", { count: selectedMemberDetail.byteCount }) }}</span>
             </div>
-            <pre v-if="selectedMemberDetail.hexRows.length > 0 && canHighlightMemberSurface" class="dbx-editor-font-family w-full min-w-0 max-w-full select-all whitespace-pre-wrap break-all" v-html="contentSearchHighlightedHtml" />
-            <pre v-else-if="selectedMemberDetail.hexRows.length > 0" class="dbx-editor-font-family w-full min-w-0 max-w-full select-all whitespace-pre-wrap break-all">{{ detailTextForFormat(selectedMemberDetail, "hex") }}</pre>
+            <pre v-if="selectedMemberDetail.hexRows.length > 0" class="dbx-editor-font-family w-full min-w-0 max-w-full select-all whitespace-pre-wrap break-all">{{ detailTextForFormat(selectedMemberDetail, "hex") }}</pre>
             <div v-else class="text-muted-foreground">{{ t("grid.hexViewerEmpty") }}</div>
           </div>
-          <pre v-else-if="memberValueView === 'base64' && canHighlightMemberSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6 whitespace-pre-wrap break-all" v-html="contentSearchHighlightedHtml" />
           <pre v-else-if="memberValueView === 'base64'" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6 whitespace-pre-wrap break-all">{{ selectedMemberDetail.base64Text }}</pre>
           <div v-else-if="isDecompressCodec(memberValueCodec)" class="min-h-0 flex-1 flex flex-col overflow-hidden">
             <div v-if="decompressedState.status === 'loading'" class="flex min-h-0 flex-1 items-center justify-center gap-2 text-muted-foreground">
@@ -3881,7 +4100,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             </div>
             <div v-else-if="decompressedState.status === 'success'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background">
               <div v-if="memberValueView === 'json' && decompressedJsonDetail" class="h-full p-5">
-                <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+                <JsonTree ref="memberSearchTreeRef" :search-matches="showMemberDetail ? treeSearchMatches : []" :active-search-index="contentSearchActiveIndex" :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
               </div>
               <pre v-else class="w-full min-w-0 max-w-full p-5 text-[13px] leading-6" :class="detailTextClass('utf8')">{{ memberDecodedText }}</pre>
             </div>
@@ -3904,10 +4123,8 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             </template>
           </div>
           <div v-else-if="memberValueView === 'utf8' && canEditCurrentMemberFormat && memberValueCodec === 'none'" data-redis-member-utf8-viewer class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background text-[13px] leading-6 cursor-text" @dblclick.self.prevent="startEditMember">
-            <pre v-if="canHighlightMemberSurface" data-redis-member-utf8-text class="inline-block min-w-0 p-5 align-top select-text" :class="[detailTextClass('utf8'), redisJsonWordWrap ? 'max-w-full' : 'min-w-max']" v-html="contentSearchHighlightedHtml" />
-            <pre v-else data-redis-member-utf8-text class="inline-block min-w-0 p-5 align-top select-text" :class="[detailTextClass('utf8'), redisJsonWordWrap ? 'max-w-full' : 'min-w-max']">{{ detailTextForFormat(selectedMemberDetail, "utf8") }}</pre>
+            <pre data-redis-member-utf8-text class="inline-block min-w-0 p-5 align-top select-text" :class="[detailTextClass('utf8'), redisJsonWordWrap ? 'max-w-full' : 'min-w-max']">{{ detailTextForFormat(selectedMemberDetail, "utf8") }}</pre>
           </div>
-          <pre v-else-if="canHighlightMemberSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass(memberValueView)" v-html="contentSearchHighlightedHtml" />
           <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass(memberValueView)">{{ detailTextForFormat(selectedMemberDetail, memberValueView) }}</pre>
         </template>
         <DialogFooter class="mx-0 mb-0 shrink-0 border-t px-5 py-3">
@@ -3961,13 +4178,13 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
   outline: 1px solid #d97706;
 }
 
-:global(.dark) :deep(.document-search-match),
-:global(.dark) :deep(.redis-value-search-match) {
+.redis-value-viewer--dark :deep(.document-search-match),
+.redis-value-viewer--dark :deep(.redis-value-search-match) {
   background: #854d0e;
 }
 
-:global(.dark) :deep(.document-search-match-active),
-:global(.dark) :deep(.redis-value-search-match-active) {
+.redis-value-viewer--dark :deep(.document-search-match-active),
+.redis-value-viewer--dark :deep(.redis-value-search-match-active) {
   background: #fbbf24;
   color: #111827;
 }

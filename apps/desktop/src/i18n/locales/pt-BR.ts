@@ -1,4 +1,5 @@
 import { sidebarMenuPtBR as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogPtBR as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpPtBR as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpPtBR as damengDump } from "./damengDump";
@@ -64,6 +65,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "Gerar modelo",
@@ -1844,6 +1846,7 @@ export default withEnglishFallback({
       find: "Localizar",
       replace: "Substituir",
       replaceAll: "Substituir Tudo",
+      searchFailed: "A busca falhou ou excedeu o tempo. Simplifique a expressão e tente novamente.",
       caseSensitive: "Diferenciar maiúsculas/minúsculas",
       regex: "Expressão regular",
       collapseReplace: "Recolher substituição",
@@ -2434,6 +2437,9 @@ export default withEnglishFallback({
     sortSqlCopied: "Ordenação SQL copiada",
     resizeSortPanel: "Redimensionar painel de ordenação",
     sortTextView: "Visualização textual da ordenação",
+    freezeFirstColumnGlobally: "Congelar primeira coluna globalmente",
+    freezeFirstColumnGloballyHint: "Manter congelada a primeira coluna de dados visível em todas as tabelas.",
+    globalFirstColumnRemainsFrozen: "a primeira coluna permanece congelada globalmente",
     freezeToColumn: "Congelar até esta coluna",
     freezeSelectedColumns: "Congelar colunas selecionadas ({count})",
     freezeCurrentColumn: "Congelar coluna atual",
@@ -7951,6 +7957,8 @@ export default withEnglishFallback({
     syncDownload: "Baixar",
     syncTestSuccess: "O destino WebDAV está acessível.",
     syncUploadSuccess: "Enviados {bytes} bytes para {path}.",
+    syncLastSuccessful: "Última sincronização bem-sucedida: {time}",
+    syncNeverSuccessful: "Ainda não houve uma sincronização bem-sucedida",
     syncAutoUpload: "Enviar snapshots automaticamente",
     syncAutoUploadInterval: "A cada",
     syncAutoUploadMinutes: "minutos",
@@ -8221,6 +8229,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "Desconectar conexão da barra lateral",
     shortcutOpenDataInNewTab: "Abrir dados em nova aba (clique do mouse)",
     shortcutViewTableDdl: "Ver DDL da tabela",
+    shortcutEditSidebarTableStructure: "Editar estrutura da tabela",
     shortcutSendSelectionToAi: "Enviar seleção para IA",
     shortcutToggleAiPanel: "Alternar painel de IA",
     shortcutSqlIntentionActions: "Ações de intenção SQL (Expandir * / Qualificar identificador)",

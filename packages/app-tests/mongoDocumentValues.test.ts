@@ -532,8 +532,8 @@ test("counts typed BSON scalars as numbers so a column total keeps its negative 
   const summary = summarizeSelection({ columns: ["charactersUsed"], rows }, { numericValue: mongoDocumentGridNumericValue });
 
   assert.equal(summary.numericCount, 5);
-  assert.equal(summary.sum, 2528.125 - 12.5 - 100.5 - 5 + 9);
-  assert.equal(summary.average, (2528.125 - 12.5 - 100.5 - 5 + 9) / 5);
+  assert.equal(summary.sum, "2419.125");
+  assert.equal(summary.average, "483.825");
 });
 
 test("keeps non-numeric Mongo cells out of a column total", () => {

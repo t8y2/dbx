@@ -33,6 +33,30 @@ vi.mock("@/lib/common/shikiJsonHighlighter", () => ({
   createShikiJsonHighlighter: vi.fn().mockResolvedValue(() => ""),
 }));
 
+// Exercise the viewer's draft binding without mounting CodeMirror and its stores.
+vi.mock("@/components/redis/RedisJsonEditor.vue", async () => {
+  const { defineComponent, h, onMounted, ref } = await import("vue");
+  return {
+    default: defineComponent({
+      props: { modelValue: String, readOnly: Boolean, autofocus: Boolean },
+      emits: ["update:modelValue"],
+      setup(props, { emit }) {
+        const input = ref<HTMLTextAreaElement>();
+        onMounted(() => {
+          if (props.autofocus) input.value?.focus();
+        });
+        return () =>
+          h("textarea", {
+            ref: input,
+            value: props.modelValue,
+            readonly: props.readOnly,
+            onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLTextAreaElement).value),
+          });
+      },
+    }),
+  };
+});
+
 import RedisValueViewer from "./RedisValueViewer.vue";
 
 const mountedApps: Array<{ unmount: () => void; host: HTMLElement }> = [];

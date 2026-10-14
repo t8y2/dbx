@@ -108,6 +108,7 @@ const editorSettingCategoryOverrides: Partial<Record<string, BackupSettingsCateg
   dataGridMultiRowTranspose: "data",
   dataGridHideNullColumns: "data",
   dataGridHideEmptyColumns: "data",
+  dataGridFreezeFirstColumn: "data",
   dataGridBooleanDisplayMode: "data",
   numericColumnRightAlign: "data",
   structureEditorDensity: "data",

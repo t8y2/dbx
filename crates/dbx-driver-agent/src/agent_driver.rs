@@ -2825,7 +2825,7 @@ impl AgentDriverClient {
         self.invalidate_cached_query();
         self.call_method_with_timeout(
             AgentMethod::ExecuteTransaction,
-            agent_transaction_params(database, statements, schema),
+            agent_statements_with_timeout_params(database, statements, schema, timeout_duration),
             timeout_duration,
         )
         .await
@@ -2841,7 +2841,7 @@ impl AgentDriverClient {
         self.invalidate_cached_query();
         self.call_method_typed_with_timeout(
             AgentMethod::ExecuteTransaction,
-            agent_transaction_params(database, statements, schema),
+            agent_statements_with_timeout_params(database, statements, schema, timeout_duration),
             timeout_duration,
         )
         .await
@@ -2875,7 +2875,7 @@ impl AgentDriverClient {
         self.invalidate_cached_query();
         self.call_method_with_timeout(
             AgentMethod::ExecuteBatch,
-            agent_transaction_params(database, statements, schema),
+            agent_statements_with_timeout_params(database, statements, schema, timeout_duration),
             timeout_duration,
         )
         .await
@@ -2891,7 +2891,7 @@ impl AgentDriverClient {
         self.invalidate_cached_query();
         self.call_method_typed_with_timeout(
             AgentMethod::ExecuteBatch,
-            agent_transaction_params(database, statements, schema),
+            agent_statements_with_timeout_params(database, statements, schema, timeout_duration),
             timeout_duration,
         )
         .await
@@ -3338,6 +3338,18 @@ pub fn agent_transaction_params(database: Option<&str>, statements: &[String], s
         "statements": statements,
         "schema": schema,
     })
+}
+
+fn agent_statements_with_timeout_params(
+    database: Option<&str>,
+    statements: &[String],
+    schema: Option<&str>,
+    timeout: Option<Duration>,
+) -> Value {
+    let mut params = agent_transaction_params(database, statements, schema);
+    params["timeoutSecs"] =
+        serde_json::json!(timeout.map(|value| value.as_secs().clamp(1, i32::MAX as u64)).unwrap_or(0));
+    params
 }
 
 pub fn agent_manual_transaction_params(schema: Option<&str>) -> Value {
@@ -5469,6 +5481,42 @@ for line in sys.stdin:
 
         runtime.kill();
         let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn batch_and_transaction_send_statement_timeout_to_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("echo.py");
+        std::fs::write(
+            &script,
+            r#"import json, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': req['params']}), flush=True)
+"#,
+        )
+        .unwrap();
+        let mut client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new(test_python()).with_args([script.to_string_lossy().to_string()]),
+        )
+        .await
+        .unwrap();
+        let statements = ["UPDATE t SET a = 1".to_string()];
+        for timeout in [Some(Duration::from_secs(7)), None] {
+            let expected = if timeout.is_some() { 7 } else { 0 };
+            let results: [serde_json::Value; 4] = [
+                client.execute_batch(Some("db"), &statements, Some("schema"), timeout).await.unwrap(),
+                client.execute_batch_typed(Some("db"), &statements, Some("schema"), timeout).await.unwrap(),
+                client.execute_transaction(Some("db"), &statements, Some("schema"), timeout).await.unwrap(),
+                client.execute_transaction_typed(Some("db"), &statements, Some("schema"), timeout).await.unwrap(),
+            ];
+            for result in results {
+                assert_eq!(result["timeoutSecs"], expected);
+                assert_eq!(result["statements"], serde_json::json!(statements));
+            }
+        }
+        client.kill();
     }
 
     #[tokio::test]

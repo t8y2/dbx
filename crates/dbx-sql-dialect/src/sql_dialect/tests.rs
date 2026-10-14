@@ -1775,6 +1775,12 @@ fn postgres_family_table_data_quoting_resolves_folded_identifiers() {
     assert_eq!(quote_gaussdb_jdbc_identifier("mss_check_sales_item", "\""), "mss_check_sales_item");
     assert_eq!(quote_gaussdb_jdbc_identifier("MSS_CHECK_SALES_ITEM", "\""), "\"MSS_CHECK_SALES_ITEM\"");
     assert_eq!(quote_gaussdb_jdbc_identifier("term", "\""), "term");
+    // DBX-owned derived-table aliases travel through this same helper when the
+    // query builders count or paginate: simple-lower, never referenced by the
+    // outer query, so they stay bare instead of becoming `"dbx_count"`, which
+    // GaussDB M mode reads as a string literal (DBX-LEGACY-0001).
+    assert_eq!(quote_gaussdb_jdbc_identifier("dbx_count", "\""), "dbx_count");
+    assert_eq!(quote_gaussdb_jdbc_identifier("dbx_page", "\""), "dbx_page");
 
     assert_eq!(
         table_data_qualified_table_name(

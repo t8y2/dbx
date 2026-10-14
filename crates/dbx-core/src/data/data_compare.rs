@@ -12,7 +12,8 @@ use crate::query::{execute_sql_statement_with_options, QueryExecutionOptions};
 use crate::schema::get_columns_core;
 use crate::sql_dialect::{
     build_count_table_sql, build_iris_table_select_sql, firebird_rows_clause, pagination_strategy,
-    qualified_table_name, quote_table_identifier, PaginationContext, TablePaginationStrategy,
+    qualified_table_name, quote_iris_identifier, quote_table_identifier, table_data_qualified_table_name,
+    PaginationContext, TablePaginationStrategy,
 };
 use crate::transfer::{generate_comment_ddl, generate_create_table_ddl};
 
@@ -1148,32 +1149,35 @@ fn build_data_compare_select_sql(
     row_limit: usize,
     offset: usize,
 ) -> String {
-    let table = qualified_table_name(Some(database_type), Some(schema), table_name);
+    let table = if database_type == DatabaseType::Iris {
+        table_data_qualified_table_name(Some(database_type), Some(schema), table_name, None)
+    } else {
+        qualified_table_name(Some(database_type), Some(schema), table_name)
+    };
+    let quote_column = |column: &str| {
+        if database_type == DatabaseType::Iris {
+            quote_iris_identifier(column, None)
+        } else {
+            quote_table_identifier(Some(database_type), column)
+        }
+    };
     let select_columns = if columns.is_empty() {
         "*".to_string()
     } else {
-        columns.iter().map(|column| quote_table_identifier(Some(database_type), column)).collect::<Vec<_>>().join(", ")
+        columns.iter().map(|column| quote_column(column)).collect::<Vec<_>>().join(", ")
     };
     let order_by = if key_columns.is_empty() {
         String::new()
     } else {
         format!(
             " ORDER BY {}",
-            key_columns
-                .iter()
-                .map(|column| format!("{} ASC", quote_table_identifier(Some(database_type), column)))
-                .collect::<Vec<_>>()
-                .join(", ")
+            key_columns.iter().map(|column| format!("{} ASC", quote_column(column))).collect::<Vec<_>>().join(", ")
         )
     };
     let order_expression = if key_columns.is_empty() {
         "(SELECT NULL)".to_string()
     } else {
-        key_columns
-            .iter()
-            .map(|column| format!("{} ASC", quote_table_identifier(Some(database_type), column)))
-            .collect::<Vec<_>>()
-            .join(", ")
+        key_columns.iter().map(|column| format!("{} ASC", quote_column(column))).collect::<Vec<_>>().join(", ")
     };
 
     match pagination_strategy(Some(database_type), PaginationContext::BoundedRead) {
@@ -2965,6 +2969,54 @@ mod tests {
                 50,
             ),
             "SELECT * FROM (SELECT TOP 75 ID, NAME FROM APP.USERS ORDER BY ID ASC) WHERE %VID > 50"
+        );
+    }
+
+    #[test]
+    fn builds_backend_table_select_sql_for_iris_first_page() {
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Iris,
+                "SQLUser",
+                "Users",
+                &["ID".to_string(), "Name".to_string()],
+                &["ID".to_string()],
+                25,
+                0,
+            ),
+            "SELECT TOP 25 ID, Name FROM SQLUser.Users ORDER BY ID ASC"
+        );
+    }
+
+    #[test]
+    fn builds_backend_table_select_sql_for_iris_delimited_names() {
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Iris,
+                "My Schema",
+                "User\"Events",
+                &["Event ID".to_string(), "User\"Name".to_string()],
+                &["Event ID".to_string(), "User\"Name".to_string()],
+                25,
+                50,
+            ),
+            "SELECT * FROM (SELECT TOP 75 \"Event ID\", \"User\"\"Name\" FROM \"My Schema\".\"User\"\"Events\" ORDER BY \"Event ID\" ASC, \"User\"\"Name\" ASC) WHERE %VID > 50"
+        );
+    }
+
+    #[test]
+    fn builds_backend_table_select_sql_for_jdbc_without_schema_qualification() {
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Jdbc,
+                "APP",
+                "USERS",
+                &["ID".to_string()],
+                &["ID".to_string()],
+                25,
+                0,
+            ),
+            "SELECT ID FROM USERS ORDER BY ID ASC;"
         );
     }
 

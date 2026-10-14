@@ -1,4 +1,5 @@
 import { sidebarMenuZhTW as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogZhTW as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { redisGroupingZhTW as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpZhTW as mongoDump } from "./mongodbDatabaseDump";
@@ -65,6 +66,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "產生模型",
@@ -1847,6 +1849,7 @@ export default withEnglishFallback({
       find: "尋找",
       replace: "取代",
       replaceAll: "全部取代",
+      searchFailed: "搜尋失敗或逾時，請簡化運算式後重試。",
       caseSensitive: "區分大小寫",
       regex: "正規表示式",
       collapseReplace: "收起取代",
@@ -2434,6 +2437,9 @@ export default withEnglishFallback({
     sortSqlCopied: "SQL 排序已複製",
     resizeSortPanel: "調整排序面板高度",
     sortTextView: "排序文字檢視",
+    freezeFirstColumnGlobally: "全域凍結首欄",
+    freezeFirstColumnGloballyHint: "在所有資料表格中凍結第一個可見資料欄。",
+    globalFirstColumnRemainsFrozen: "首欄仍由全域設定凍結",
     freezeToColumn: "凍結到此欄",
     freezeSelectedColumns: "凍結選取欄（{count} 欄）",
     freezeCurrentColumn: "凍結目前欄",
@@ -7296,6 +7302,8 @@ export default withEnglishFallback({
     syncDownload: "下載",
     syncTestSuccess: "WebDAV 目標可存取。",
     syncUploadSuccess: "已上傳 {bytes} 位元組到 {path}。",
+    syncLastSuccessful: "最近一次成功同步：{time}",
+    syncNeverSuccessful: "尚無成功同步記錄",
     syncAutoUpload: "自動上傳快照",
     syncAutoUploadInterval: "每",
     syncAutoUploadMinutes: "分鐘",
@@ -7532,6 +7540,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "中斷側邊欄連線",
     shortcutOpenDataInNewTab: "在新資料分頁中開啟（滑鼠點擊）",
     shortcutViewTableDdl: "檢視資料表 DDL",
+    shortcutEditSidebarTableStructure: "編輯資料表結構",
     shortcutSendSelectionToAi: "傳送選取程式碼至 AI",
     shortcutToggleAiPanel: "切換 AI 面板",
     shortcutSqlIntentionActions: "SQL 意圖操作（展開 * / 限定識別碼）",

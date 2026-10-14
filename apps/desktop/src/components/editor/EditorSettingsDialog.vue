@@ -385,7 +385,11 @@ import {
   MAX_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES,
   formatWebDavAutoUploadInterval,
   normalizedWebDavAutoUploadInterval,
+  readWebDavLastSuccessfulSync,
+  recordWebDavSyncSuccess,
   readSyncMethod,
+  WEB_DAV_LAST_SUCCESSFUL_SYNC_STORAGE_KEY,
+  WEB_DAV_SYNC_SUCCESS_EVENT,
   writeWebDavAutoUploadFields,
   writeWebDavBackupSelection,
   writeSyncMethod,
@@ -4702,6 +4706,11 @@ const webdavAutoUploadIntervalHint = computed(() => {
 const webdavBusy = ref<"" | "test" | "upload" | "download">("");
 const webdavMessage = ref("");
 const webdavError = ref(false);
+const webdavLastSuccessfulSyncAt = ref<string | null>(null);
+const webdavLastSuccessfulSyncText = computed(() => {
+  if (!webdavLastSuccessfulSyncAt.value) return t("settings.syncNeverSuccessful");
+  return new Date(webdavLastSuccessfulSyncAt.value).toLocaleString(locale.value);
+});
 const localBackupSecretsPassphrase = ref("");
 const localBackupBusy = ref<"" | "export" | "import">("");
 const localBackupMessage = ref("");
@@ -5105,6 +5114,14 @@ function currentWebDavConfig(): WebDavConfig {
   };
 }
 
+function refreshWebDavLastSuccessfulSync() {
+  webdavLastSuccessfulSyncAt.value = readWebDavLastSuccessfulSync(currentWebDavConfig());
+}
+
+function onWebDavSyncStatusStorage(event: StorageEvent) {
+  if (event.key === null || event.key === WEB_DAV_LAST_SUCCESSFUL_SYNC_STORAGE_KEY) refreshWebDavLastSuccessfulSync();
+}
+
 function currentWebDavAccountConfig(): WebDavConfig {
   const config = currentWebDavConfig();
   return { ...config, password: undefined };
@@ -5373,7 +5390,9 @@ async function confirmSyncSelection(selection: SyncSelection) {
   webdavSyncSecrets.value = selection.includeSecrets;
   if (syncSelectionMode.value === "upload") {
     await runWebDavAction("upload", async () => {
-      const summary = await webdavSyncUpload(currentWebDavConfig(), settingsStore.editorSettings, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
+      const config = currentWebDavConfig();
+      const summary = await webdavSyncUpload(config, settingsStore.editorSettings, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
+      recordWebDavSyncSuccess(config);
       writeWebDavBackupSelection(selection);
       return t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.remotePath });
     });
@@ -5381,13 +5400,15 @@ async function confirmSyncSelection(selection: SyncSelection) {
   }
 
   await runWebDavAction("download", async () => {
-    const result = await webdavSyncDownload(currentWebDavConfig(), selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
+    const config = currentWebDavConfig();
+    const result = await webdavSyncDownload(config, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
     if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
     await settingsStore.updateDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
     await savedSqlStore.initFromStorage();
     await tunnelProfileStore.refresh();
     await settingsStore.reloadAiConfigs();
+    recordWebDavSyncSuccess(config);
     const message = t("settings.syncDownloadSuccess", { bytes: result.summary.bytes, path: result.summary.remotePath });
     if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) return `${message} ${t("settings.syncSecretsSkipped")}`;
     if (result.applySummary.secretsApplied) return `${message} ${t("settings.syncSecretsApplied")}`;
@@ -5531,6 +5552,7 @@ watch(
 watch([webdavEndpoint, webdavUsername], () => {
   void refreshWebDavPasswordStatus();
 });
+watch([webdavEndpoint, webdavUsername, webdavRemotePath], refreshWebDavLastSuccessfulSync);
 watch(webdavRememberPassword, (val) => {
   localStorage.setItem("dbx-webdav-remember-password", String(val));
 });
@@ -5656,6 +5678,9 @@ onMounted(() => {
   // 留着，回到 DBX 时再把焦点还给录入按钮；同时把「窗口不在前台」这件事显示出来。
   window.addEventListener("focus", onShortcutRecordingWindowFocus);
   window.addEventListener("blur", onShortcutRecordingWindowBlur);
+  window.addEventListener(WEB_DAV_SYNC_SUCCESS_EVENT, refreshWebDavLastSuccessfulSync);
+  window.addEventListener("storage", onWebDavSyncStatusStorage);
+  refreshWebDavLastSuccessfulSync();
   void refreshWebDavPasswordStatus();
   if (!isWeb) void refreshCcSwitchPluginAvailability();
   checkLayoutDescTruncation();
@@ -5671,6 +5696,8 @@ onUnmounted(() => {
   window.removeEventListener("compositionstart", modifierDoubleTapRecorder.cancel, true);
   window.removeEventListener("focus", onShortcutRecordingWindowFocus);
   window.removeEventListener("blur", onShortcutRecordingWindowBlur);
+  window.removeEventListener(WEB_DAV_SYNC_SUCCESS_EVENT, refreshWebDavLastSuccessfulSync);
+  window.removeEventListener("storage", onWebDavSyncStatusStorage);
   modifierDoubleTapRecorder.reset();
   clearThemePaletteOptionPreview();
   clearUiFontOptionPreview();
@@ -10506,6 +10533,9 @@ LIMIT 100;</pre>
                     </div>
                   </div>
 
+                  <p class="text-xs text-muted-foreground" aria-live="polite">
+                    {{ t("settings.syncLastSuccessful", { time: webdavLastSuccessfulSyncText }) }}
+                  </p>
                   <div v-if="webdavMessage" class="text-xs" :class="webdavError ? 'text-destructive' : 'text-green-600 dark:text-green-400'">
                     {{ webdavMessage }}
                   </div>

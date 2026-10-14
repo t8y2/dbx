@@ -1,4 +1,5 @@
 import { sidebarMenuIt as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogIt as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpIt as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpIt as damengDump } from "./damengDump";
@@ -63,6 +64,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "Genera modello",
@@ -1843,6 +1845,7 @@ export default withEnglishFallback({
       find: "Trova",
       replace: "Sostituisci",
       replaceAll: "Sostituisci Tutto",
+      searchFailed: "Ricerca non riuscita o scaduta. Semplifica l’espressione e riprova.",
       caseSensitive: "Maiuscole/Minuscole",
       regex: "Espressione regolare",
       collapseReplace: "Comprimi sostituzione",
@@ -2433,6 +2436,9 @@ export default withEnglishFallback({
     sortSqlCopied: "Ordinamento SQL copiato",
     resizeSortPanel: "Ridimensiona pannello di ordinamento",
     sortTextView: "Vista testuale dell'ordinamento",
+    freezeFirstColumnGlobally: "Blocca prima colonna globalmente",
+    freezeFirstColumnGloballyHint: "Mantieni bloccata la prima colonna di dati visibile in tutte le tabelle.",
+    globalFirstColumnRemainsFrozen: "la prima colonna resta bloccata globalmente",
     freezeToColumn: "Blocca fino a questa colonna",
     freezeSelectedColumns: "Blocca colonne selezionate ({count})",
     freezeCurrentColumn: "Blocca colonna corrente",
@@ -7952,6 +7958,8 @@ export default withEnglishFallback({
     syncDownload: "Scarica",
     syncTestSuccess: "La destinazione WebDAV è raggiungibile.",
     syncUploadSuccess: "Caricati {bytes} byte su {path}.",
+    syncLastSuccessful: "Ultima sincronizzazione riuscita: {time}",
+    syncNeverSuccessful: "Nessuna sincronizzazione riuscita",
     syncAutoUpload: "Carica automaticamente gli snapshot",
     syncAutoUploadInterval: "Ogni",
     syncAutoUploadMinutes: "minuti",
@@ -8223,6 +8231,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "Disconnetti connessione barra laterale",
     shortcutOpenDataInNewTab: "Apri dati in una nuova scheda (clic del mouse)",
     shortcutViewTableDdl: "Visualizza DDL tabella",
+    shortcutEditSidebarTableStructure: "Modifica struttura tabella",
     shortcutSendSelectionToAi: "Invia selezione ad AI",
     shortcutToggleAiPanel: "Attiva/disattiva pannello AI",
     shortcutSqlIntentionActions: "Azioni di intento SQL (Espandi * / Qualifica identificatore)",

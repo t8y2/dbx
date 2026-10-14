@@ -1,4 +1,5 @@
 import { sidebarMenuZhCN as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogZhCN as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { redisGroupingZhCN as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-CN";
@@ -9,6 +10,7 @@ import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpZhCN as damengDump } from "./damengDump";
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "生成模型",
@@ -1900,6 +1902,7 @@ export default withEnglishFallback({
       find: "查找",
       replace: "替换",
       replaceAll: "全部替换",
+      searchFailed: "搜索失败或超时，请简化表达式后重试。",
       caseSensitive: "区分大小写",
       regex: "正则表达式",
       collapseReplace: "收起替换",
@@ -2638,6 +2641,9 @@ export default withEnglishFallback({
     sortSqlCopied: "SQL 排序已复制",
     resizeSortPanel: "调整排序面板高度",
     sortTextView: "排序文本视图",
+    freezeFirstColumnGlobally: "全局冻结首列",
+    freezeFirstColumnGloballyHint: "在所有数据表格中冻结第一个可见数据列。",
+    globalFirstColumnRemainsFrozen: "首列仍由全局设置冻结",
     freezeToColumn: "冻结到此列",
     freezeSelectedColumns: "冻结选中列（{count} 列）",
     freezeCurrentColumn: "冻结当前列",
@@ -8919,6 +8925,8 @@ export default withEnglishFallback({
     syncDownload: "下载",
     syncTestSuccess: "WebDAV 目标可访问。",
     syncUploadSuccess: "已上传 {bytes} 字节到 {path}。",
+    syncLastSuccessful: "最近一次成功同步：{time}",
+    syncNeverSuccessful: "暂无成功同步记录",
     syncAutoUpload: "自动上传快照",
     syncAutoUploadInterval: "每",
     syncAutoUploadMinutes: "分钟",
@@ -9255,6 +9263,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "断开侧边栏连接",
     shortcutOpenDataInNewTab: "在新数据标签页中打开（鼠标点击）",
     shortcutViewTableDdl: "查看表 DDL",
+    shortcutEditSidebarTableStructure: "编辑表结构",
     shortcutSendSelectionToAi: "发送选中代码到 AI",
     shortcutToggleAiPanel: "切换 AI 面板",
     shortcutSqlIntentionActions: "SQL 意图操作（展开 * / 限定标识符）",

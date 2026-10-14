@@ -1,4 +1,5 @@
 import { sidebarMenuRu as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogRu as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/ru";
 import { dataDictionaryRu as dataDictionary } from "./dataDictionaryMessages";
@@ -6,6 +7,7 @@ import { meilisearchManagementRu } from "./meilisearchManagement";
 
 // Russian locale. Entries omitted here fall back to English at runtime.
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "Создать модель",
@@ -1871,6 +1873,7 @@ export default withEnglishFallback({
       find: "Найти",
       replace: "Заменить",
       replaceAll: "Заменить всё",
+      searchFailed: "Поиск не выполнен или превышено время ожидания. Упростите выражение и повторите попытку.",
       caseSensitive: "Учитывать регистр",
       regex: "Регулярное выражение",
       collapseReplace: "Свернуть замену",
@@ -2596,6 +2599,9 @@ export default withEnglishFallback({
     sortSqlCopied: "Сортировка SQL скопирована",
     resizeSortPanel: "Изменить размер панели сортировки",
     sortTextView: "Текстовый вид сортировки",
+    freezeFirstColumnGlobally: "Закреплять первый столбец во всех таблицах",
+    freezeFirstColumnGloballyHint: "Закреплять первый видимый столбец данных во всех таблицах.",
+    globalFirstColumnRemainsFrozen: "первый столбец остаётся закреплён глобально",
     freezeToColumn: "Закрепить до этого столбца",
     freezeSelectedColumns: "Закрепить выбранные столбцы ({count})",
     freezeCurrentColumn: "Закрепить текущий столбец",
@@ -9277,6 +9283,8 @@ export default withEnglishFallback({
     syncDownload: "Скачать",
     syncTestSuccess: "Цель WebDAV доступна.",
     syncUploadSuccess: "Загружено {bytes} байт в {path}.",
+    syncLastSuccessful: "Последняя успешная синхронизация: {time}",
+    syncNeverSuccessful: "Успешных синхронизаций пока не было",
     syncAutoUpload: "Автоматически загружать снимки",
     syncAutoUploadInterval: "Каждые",
     syncAutoUploadMinutes: "мин.",
@@ -9607,6 +9615,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "Отключить подключение в боковой панели",
     shortcutOpenDataInNewTab: "Открыть данные в новой вкладке (клик мышью)",
     shortcutViewTableDdl: "Просмотреть DDL таблицы",
+    shortcutEditSidebarTableStructure: "Изменить структуру таблицы",
     shortcutSendSelectionToAi: "Отправить выделенное в AI",
     shortcutToggleAiPanel: "Переключить панель AI",
     shortcutSqlIntentionActions: "SQL-действия по намерению (развернуть * / уточнить идентификатор)",

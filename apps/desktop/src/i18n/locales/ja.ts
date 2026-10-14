@@ -1,4 +1,5 @@
 import { sidebarMenuJa as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogJa as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpJa as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpJa as damengDump } from "./damengDump";
@@ -64,6 +65,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "モデルを生成",
@@ -1863,6 +1865,7 @@ export default withEnglishFallback({
       find: "検索",
       replace: "置換",
       replaceAll: "すべて置換",
+      searchFailed: "検索に失敗したかタイムアウトしました。式を簡略化して再試行してください。",
       caseSensitive: "大文字/小文字を区別",
       regex: "正規表現",
       collapseReplace: "置換を折りたたむ",
@@ -2439,6 +2442,9 @@ export default withEnglishFallback({
     sortSqlCopied: "SQL 並べ替えをコピーしました",
     resizeSortPanel: "並べ替えパネルのサイズを変更",
     sortTextView: "並べ替えテキストビュー",
+    freezeFirstColumnGlobally: "すべての表で先頭列を固定",
+    freezeFirstColumnGloballyHint: "すべてのデータ表で最初の表示データ列を固定します。",
+    globalFirstColumnRemainsFrozen: "先頭列は全体設定により固定されたままです",
     freezeToColumn: "この列まで固定",
     freezeSelectedColumns: "選択列を固定 ({count})",
     freezeCurrentColumn: "現在の列を固定",
@@ -7964,6 +7970,8 @@ export default withEnglishFallback({
     syncDownload: "ダウンロード",
     syncTestSuccess: "WebDAVターゲットに到達可能です。",
     syncUploadSuccess: "{bytes}バイトを{path}にアップロードしました。",
+    syncLastSuccessful: "最終同期成功日時: {time}",
+    syncNeverSuccessful: "同期の成功記録はありません",
     syncAutoUpload: "スナップショットを自動アップロード",
     syncAutoUploadInterval: "間隔",
     syncAutoUploadMinutes: "分",
@@ -8212,6 +8220,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "サイドバー接続を切断",
     shortcutOpenDataInNewTab: "新しいデータタブで開く（マウスクリック）",
     shortcutViewTableDdl: "テーブルDDLを表示",
+    shortcutEditSidebarTableStructure: "テーブル構造を編集",
     shortcutSendSelectionToAi: "選択範囲をAIに送信",
     shortcutToggleAiPanel: "AIパネルを切り替え",
     shortcutSqlIntentionActions: "SQL インテント操作（* の展開 / 識別子の修飾）",

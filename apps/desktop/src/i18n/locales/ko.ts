@@ -1,4 +1,5 @@
 import { sidebarMenuKo as sidebarMenu } from "./sidebarMenuMessages";
+import { oceanbaseCloneDialogKo as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpKo as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpKo as damengDump } from "./damengDump";
@@ -63,6 +64,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oceanbaseCloneDialog,
   sidebarMenu,
   modelGeneration: {
     title: "모델 생성",
@@ -1790,6 +1792,7 @@ export default withEnglishFallback({
       find: "찾기",
       replace: "바꾸기",
       replaceAll: "모두 바꾸기",
+      searchFailed: "검색에 실패했거나 시간이 초과되었습니다. 표현식을 간단히 하고 다시 시도하세요.",
       caseSensitive: "대소문자 구분",
       regex: "정규 표현식",
       collapseReplace: "바꾸기 접기",
@@ -2480,6 +2483,9 @@ export default withEnglishFallback({
     sortSqlCopied: "SQL 정렬이 복사되었습니다",
     resizeSortPanel: "정렬 패널 크기 조정",
     sortTextView: "정렬 텍스트 보기",
+    freezeFirstColumnGlobally: "모든 표의 첫 번째 열 고정",
+    freezeFirstColumnGloballyHint: "모든 데이터 표에서 첫 번째 표시 데이터 열을 고정합니다.",
+    globalFirstColumnRemainsFrozen: "첫 번째 열은 전역 설정으로 계속 고정됩니다",
     freezeToColumn: "이 컬럼까지 고정",
     freezeSelectedColumns: "선택한 컬럼 고정 ({count})",
     freezeCurrentColumn: "현재 열 고정",
@@ -7819,6 +7825,8 @@ export default withEnglishFallback({
     syncDownload: "다운로드",
     syncTestSuccess: "WebDAV 대상에 연결할 수 있습니다.",
     syncUploadSuccess: "{path}에 {bytes}바이트를 업로드했습니다.",
+    syncLastSuccessful: "마지막 동기화 성공: {time}",
+    syncNeverSuccessful: "성공한 동기화 기록이 없습니다",
     syncAutoUpload: "자동으로 스냅샷 업로드",
     syncAutoUploadInterval: "매",
     syncAutoUploadMinutes: "분",
@@ -8123,6 +8131,7 @@ export default withEnglishFallback({
     shortcutDisconnectSidebarConnection: "사이드바 연결 끊기",
     shortcutOpenDataInNewTab: "새 탭에서 데이터 열기 (마우스 클릭)",
     shortcutViewTableDdl: "테이블 DDL 보기",
+    shortcutEditSidebarTableStructure: "테이블 구조 편집",
     shortcutSendSelectionToAi: "선택 영역을 AI로 보내기",
     shortcutToggleAiPanel: "AI 패널 전환",
     shortcutSqlIntentionActions: "SQL 인텐트 동작 (* 펼치기 / 식별자 한정)",

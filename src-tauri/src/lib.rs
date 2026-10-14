@@ -758,6 +758,7 @@ fn open_plugin_install_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
 enum LocaleFamily {
     Azerbaijani,
     English,
+    Thai,
     SimplifiedChinese,
     TraditionalChinese,
     Japanese,
@@ -787,6 +788,8 @@ fn locale_family(locale: &str) -> LocaleFamily {
         }
     } else if is_language("ja") {
         LocaleFamily::Japanese
+    } else if is_language("th") {
+        LocaleFamily::Thai
     } else if is_language("ko") {
         LocaleFamily::Korean
     } else if is_language("az") {
@@ -812,6 +815,7 @@ fn tray_menu_labels_for_locale(locale: &str) -> (&'static str, &'static str) {
     match locale_family(locale) {
         LocaleFamily::SimplifiedChinese => ("显示 DBX", "退出 DBX"),
         LocaleFamily::TraditionalChinese => ("顯示 DBX", "退出 DBX"),
+        LocaleFamily::Thai => ("แสดง DBX", "ออกจาก DBX"),
         LocaleFamily::Japanese => ("DBXを表示", "DBXを終了"),
         LocaleFamily::Korean => ("DBX 표시", "DBX 종료"),
         LocaleFamily::Azerbaijani => ("DBX-i göstər", "DBX-dən çıx"),
@@ -831,6 +835,7 @@ fn app_menu_copy_support_info_label(locale: &str) -> &'static str {
     match locale_family(locale) {
         LocaleFamily::SimplifiedChinese => "复制支持信息",
         LocaleFamily::TraditionalChinese => "複製支援資訊",
+        LocaleFamily::Thai => "คัดลอกข้อมูลสำหรับขอความช่วยเหลือ",
         LocaleFamily::Japanese => "サポート情報をコピー",
         LocaleFamily::Korean => "지원 정보 복사",
         LocaleFamily::Azerbaijani => "Dəstək məlumatlarını kopyala",
@@ -849,6 +854,7 @@ fn app_menu_close_tab_label(locale: &str) -> &'static str {
     match locale_family(locale) {
         LocaleFamily::SimplifiedChinese => "关闭标签页",
         LocaleFamily::TraditionalChinese => "關閉分頁",
+        LocaleFamily::Thai => "ปิดแท็บ",
         LocaleFamily::Japanese => "タブを閉じる",
         LocaleFamily::Korean => "탭 닫기",
         LocaleFamily::Azerbaijani => "Vərəqi bağla",
@@ -866,6 +872,7 @@ fn app_menu_close_tab_label(locale: &str) -> &'static str {
 fn app_menu_quit_label(locale: &str, app_name: &str) -> String {
     match locale_family(locale) {
         LocaleFamily::SimplifiedChinese | LocaleFamily::TraditionalChinese => format!("退出 {app_name}"),
+        LocaleFamily::Thai => format!("ออกจาก {app_name}"),
         LocaleFamily::Japanese => format!("{app_name}を終了"),
         LocaleFamily::Korean => format!("{app_name} 종료"),
         LocaleFamily::Azerbaijani => format!("{app_name}-dən çıx"),
@@ -1126,6 +1133,8 @@ mod tests {
         assert_eq!(tray_menu_labels_for_locale("zh-Hant-HK"), ("顯示 DBX", "退出 DBX"));
         assert_eq!(tray_menu_labels_for_locale("zh-MO"), ("顯示 DBX", "退出 DBX"));
         assert_eq!(tray_menu_labels_for_locale("ja-JP"), ("DBXを表示", "DBXを終了"));
+        assert_eq!(tray_menu_labels_for_locale("th-TH"), ("แสดง DBX", "ออกจาก DBX"));
+        assert_eq!(tray_menu_labels_for_locale("th_TH"), ("แสดง DBX", "ออกจาก DBX"));
         assert_eq!(tray_menu_labels_for_locale("ko-KR"), ("DBX 표시", "DBX 종료"));
         assert_eq!(tray_menu_labels_for_locale("az-AZ"), ("DBX-i göstər", "DBX-dən çıx"));
         assert_eq!(tray_menu_labels_for_locale("es-ES"), ("Mostrar DBX", "Salir de DBX"));
@@ -1145,6 +1154,8 @@ mod tests {
         assert_eq!(app_menu_quit_label("zh-CN", "DBX"), "退出 DBX");
         assert_eq!(app_menu_quit_label("zh-TW", "DBX"), "退出 DBX");
         assert_eq!(app_menu_quit_label("ja-JP", "DBX"), "DBXを終了");
+        assert_eq!(app_menu_quit_label("th-TH", "DBX"), "ออกจาก DBX");
+        assert_eq!(app_menu_quit_label("th_TH", "DBX"), "ออกจาก DBX");
         assert_eq!(app_menu_quit_label("ko-KR", "DBX"), "DBX 종료");
         assert_eq!(app_menu_quit_label("tr-TR", "DBX"), "DBX Uygulamasından Çık");
         assert_eq!(app_menu_quit_label("ru-RU", "DBX"), "Выйти из DBX");
@@ -1154,6 +1165,7 @@ mod tests {
         assert_eq!(app_menu_quit_label("", "DBX"), "Quit DBX");
         assert_eq!(app_menu_copy_support_info_label("zh-CN"), "复制支持信息");
         assert_eq!(app_menu_copy_support_info_label("zh-TW"), "複製支援資訊");
+        assert_eq!(app_menu_copy_support_info_label("th-TH"), "คัดลอกข้อมูลสำหรับขอความช่วยเหลือ");
         assert_eq!(app_menu_copy_support_info_label("ko-KR"), "지원 정보 복사");
         assert_eq!(app_menu_copy_support_info_label("tr-TR"), "Destek bilgilerini kopyala");
         assert_eq!(app_menu_copy_support_info_label("ru-RU"), "Копировать сведения о поддержке");
@@ -1163,6 +1175,7 @@ mod tests {
         assert_eq!(app_menu_close_tab_label("zh-CN"), "关闭标签页");
         assert_eq!(app_menu_close_tab_label("zh-TW"), "關閉分頁");
         assert_eq!(app_menu_close_tab_label("ja-JP"), "タブを閉じる");
+        assert_eq!(app_menu_close_tab_label("th-TH"), "ปิดแท็บ");
         assert_eq!(app_menu_close_tab_label("en-US"), "Close Tab");
     }
 

@@ -2,6 +2,8 @@ import type { SyncSelection, WebDavConfig } from "@/lib/backend/api";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 export const WEB_DAV_BACKUP_SELECTION_STORAGE_KEY = "dbx-webdav-backup-selection";
+export const WEB_DAV_LAST_SUCCESSFUL_SYNC_STORAGE_KEY = "dbx-webdav-last-successful-sync";
+export const WEB_DAV_SYNC_SUCCESS_EVENT = "dbx:webdav-sync-succeeded";
 export const SYNC_METHOD_STORAGE_KEY = "dbx-sync-method";
 export const WEB_DAV_AUTO_UPLOAD_STORAGE_KEYS = ["dbx-webdav-endpoint", "dbx-webdav-username", "dbx-webdav-user-agent", "dbx-webdav-remote-path", "dbx-webdav-auto-upload-enabled", "dbx-webdav-auto-upload-interval-minutes", WEB_DAV_BACKUP_SELECTION_STORAGE_KEY] as const;
 
@@ -24,6 +26,40 @@ export interface WebDavAutoUploadConfig {
   enabled: boolean;
   intervalMinutes: number;
   webDavConfig: WebDavConfig | null;
+}
+
+interface StoredWebDavSyncSuccess {
+  target: string;
+  completedAt: string;
+}
+
+function webDavSyncTarget(config: WebDavConfig): string {
+  return JSON.stringify({
+    endpoint: config.endpoint.trim(),
+    username: config.username?.trim() || "",
+    remotePath: config.remotePath?.trim() || DEFAULT_WEB_DAV_REMOTE_PATH,
+  });
+}
+
+export function readWebDavLastSuccessfulSync(config: WebDavConfig): string | null {
+  const serialized = safeLocalStorageGet(WEB_DAV_LAST_SUCCESSFUL_SYNC_STORAGE_KEY);
+  if (!serialized) return null;
+
+  try {
+    const stored = JSON.parse(serialized) as Partial<StoredWebDavSyncSuccess>;
+    if (stored.target !== webDavSyncTarget(config) || typeof stored.completedAt !== "string") return null;
+    return Number.isFinite(Date.parse(stored.completedAt)) ? stored.completedAt : null;
+  } catch {
+    return null;
+  }
+}
+
+export function recordWebDavSyncSuccess(config: WebDavConfig, completedAt = new Date().toISOString()): string {
+  const timestamp = new Date(completedAt).toISOString();
+  const stored: StoredWebDavSyncSuccess = { target: webDavSyncTarget(config), completedAt: timestamp };
+  safeLocalStorageSet(WEB_DAV_LAST_SUCCESSFUL_SYNC_STORAGE_KEY, JSON.stringify(stored));
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(WEB_DAV_SYNC_SUCCESS_EVENT));
+  return timestamp;
 }
 
 export function normalizedWebDavAutoUploadInterval(value: unknown): number {

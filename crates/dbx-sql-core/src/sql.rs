@@ -3094,6 +3094,11 @@ impl OraclePlSqlBlock {
         match self.tokens.as_slice() {
             [first, ..] if first.is_word("DECLARE") => true,
             [first, second, ..] if first.is_word("BEGIN") && !Self::is_transaction_begin_tail(second) => true,
+            // Oracle 12c `WITH [FUNCTION|PROCEDURE ... END;] <main query>` inline PL/SQL
+            // declarations (also accepted by DM8 — issue #11275). The declaration section is
+            // PL/SQL, but the statement is not over at its `END;` — the main query's own
+            // terminator ends it.
+            [first, second, ..] if first.is_word("WITH") && second.is_any_word(&["FUNCTION", "PROCEDURE"]) => true,
             [first, rest @ ..] if first.is_word("CREATE") => Self::starts_create_plsql_object(rest),
             _ => false,
         }
@@ -3144,6 +3149,13 @@ impl OraclePlSqlBlock {
     fn is_complete(&self) -> bool {
         if !self.starts_block() {
             return false;
+        }
+
+        // `WITH [FUNCTION|PROCEDURE ... END;] <main query>;` follows its own completion
+        // rule (see with_function_is_complete); the classic block walk below would fire
+        // at the declaration's `END;` and cut the main query off the statement.
+        if self.starts_with_function_declaration() {
+            return self.with_function_is_complete();
         }
 
         // Package/type specifications have declarations and an outer END with
@@ -3221,6 +3233,68 @@ impl OraclePlSqlBlock {
             Some(OraclePlSqlCreateObjectKind::Body | OraclePlSqlCreateObjectKind::Spec) => complete,
             _ => saw_begin && complete,
         }
+    }
+
+    fn starts_with_function_declaration(&self) -> bool {
+        matches!(
+            self.tokens.as_slice(),
+            [first, second, ..] if first.is_word("WITH") && second.is_any_word(&["FUNCTION", "PROCEDURE"])
+        )
+    }
+
+    /// Completion rule for `WITH [FUNCTION|PROCEDURE ... END;] <main query>;` (issue #11275):
+    /// no depth-0 `;` may end the statement while the WITH declaration section is open —
+    /// declaration assignments, nested block ends and the `END;` closing each declaration all
+    /// stay inside. Once the main query starts at an empty scope, its own terminator
+    /// completes the statement.
+    fn with_function_is_complete(&self) -> bool {
+        if !self.tokens.last().is_some_and(OraclePlSqlToken::is_semicolon) {
+            return false;
+        }
+
+        let mut scopes: Vec<OraclePlSqlScope> = Vec::new();
+        let mut in_main_query = false;
+
+        for (index, token) in self.tokens.iter().enumerate() {
+            if token.is_semicolon() {
+                if in_main_query && scopes.is_empty() {
+                    return true;
+                }
+                continue;
+            }
+            let Some(word) = token.as_word() else {
+                continue;
+            };
+
+            // The statement-initial WITH token sits at index 0 and must not open the query.
+            if index > 0
+                && scopes.is_empty()
+                && matches!(word, "SELECT" | "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "WITH")
+            {
+                in_main_query = true;
+                continue;
+            }
+
+            match word {
+                "BEGIN" => scopes.push(OraclePlSqlScope::Block),
+                "CASE" if previous_word_token(&self.tokens, index) != Some("END") => {
+                    scopes.push(OraclePlSqlScope::Case);
+                }
+                "END" => {
+                    let next = self.tokens.get(index + 1).and_then(OraclePlSqlToken::as_word);
+                    if matches!(next, Some("IF" | "LOOP")) {
+                        continue;
+                    }
+                    if matches!(next, Some("CASE")) && !matches!(scopes.last(), Some(OraclePlSqlScope::Case)) {
+                        continue;
+                    }
+                    scopes.pop();
+                }
+                _ => {}
+            }
+        }
+
+        false
     }
 
     fn starts_create_plsql_object(tokens: &[OraclePlSqlToken]) -> bool {
@@ -5164,6 +5238,62 @@ END;";
         assert_eq!(
             split_sql_statements_for_database("BEGIN; INSERT INTO t VALUES (1); COMMIT;", DatabaseType::Dameng),
             vec!["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"]
+        );
+    }
+
+    #[test]
+    fn oracle_like_split_keeps_with_function_declaration_and_main_query_together_per_issue_11275() {
+        // DM8 accepts Oracle's `WITH [FUNCTION ...] <main query>` form and executes it as ONE
+        // statement (the reporter's own client returned f = 1). Splitting at the first
+        // declaration `;` sent the truncated `WITH FUNCTION ... v_start TIMESTAMP := SYSTIMESTAMP`
+        // fragment, and DM rejected it with 42000 / vendorCode -2007
+        // ("第 2 行, 第 39 列[]附近出现错误: 语法分析出错").
+        let sql = "\
+WITH FUNCTION f RETURN NUMBER IS
+    v_start TIMESTAMP := SYSTIMESTAMP;
+    v_delay_seconds NUMBER := MOD(TO_NUMBER(TO_CHAR(SYSDATE, 'SSSSS')), 10) + 1;
+BEGIN
+    WHILE (SYSTIMESTAMP - v_start) < (v_delay_seconds * INTERVAL '1' SECOND) LOOP
+        NULL;
+    END LOOP;
+    RETURN 1;
+END;
+SELECT f FROM dual;";
+        for db_type in [DatabaseType::Dameng, DatabaseType::Oracle, DatabaseType::Gaussdb, DatabaseType::Xugu] {
+            assert_eq!(split_sql_statements_for_database(sql, db_type), vec![sql.to_string()], "{db_type:?}");
+        }
+
+        // The statement after the WITH query still splits at its own terminator.
+        let script = format!("{sql}\nSELECT 2 FROM dual;");
+        assert_eq!(
+            split_sql_statements_for_database(&script, DatabaseType::Dameng),
+            vec![sql.to_string(), "SELECT 2 FROM dual".to_string()]
+        );
+
+        // Multiple declarations stay in one statement until the main query's terminator.
+        let two_declarations = "\
+WITH FUNCTION f1 RETURN NUMBER IS
+BEGIN
+  RETURN 1;
+END;
+FUNCTION f2 RETURN NUMBER IS
+  v NUMBER := 0;
+BEGIN
+  v := 2;
+  RETURN v;
+END;
+SELECT f1 + f2 FROM dual;";
+        assert_eq!(
+            split_sql_statements_for_database(two_declarations, DatabaseType::Dameng),
+            vec![two_declarations.to_string()]
+        );
+
+        // A plain CTE without PL/SQL declarations is ordinary SQL: the trailing `;` stays a
+        // delimiter and the statement is emitted without it.
+        let cte = "WITH t AS (SELECT 1 FROM dual) SELECT * FROM t;";
+        assert_eq!(
+            split_sql_statements_for_database(cte, DatabaseType::Dameng),
+            vec!["WITH t AS (SELECT 1 FROM dual) SELECT * FROM t".to_string()]
         );
     }
 

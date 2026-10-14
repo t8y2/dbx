@@ -175,4 +175,25 @@ describe("query Store LOB session release through public close and disconnect", 
     else expect(connections.connectedIds.has("ob-late")).toBe(false);
     await store.flushPendingPersist();
   });
+
+  it("releases replaced refs from the previous result when an execution fails", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const connections = useConnectionStore();
+    useSettingsStore().editorSettings.autoCalculateTotalRows = false;
+    connections.connections = [{ id: "ob-fail", name: "OB", db_type: "oceanbase-oracle", database: "SYS", read_only: false } as ConnectionConfig];
+    connections.connectedIds.add("ob-fail");
+    const store = useQueryStore();
+    const id = store.createTab("ob-fail", "SYS", "LOB", "query", "APP");
+    api.executeMulti.mockResolvedValueOnce([{ ...result("old"), large_value_context: { connectionId: "ob-fail", database: "SYS", clientSessionId: "old-client" }, large_value_refs: ["old-ref"] }]);
+    await store.executeTabSql(id, "SELECT PAYLOAD FROM LOB_FIXTURE");
+    expect(store.tabs.find((entry) => entry.id === id)?.result?.large_value_refs).toContain("old-ref");
+    api.executeMulti.mockRejectedValueOnce(new Error("query failed"));
+    await store.executeTabSql(id, "SELECT PAYLOAD FROM LOB_FIXTURE");
+    const tab = store.tabs.find((entry) => entry.id === id)!;
+    expect(tab.result?.execution_error).toBe(true);
+    await vi.waitFor(() => expect(api.releaseLargeValue).toHaveBeenCalledWith(expect.objectContaining({ connectionId: "ob-fail", database: "SYS", valueRef: "old-ref" })));
+    await store.flushPendingPersist();
+  });
 });

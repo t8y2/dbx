@@ -684,6 +684,9 @@ fn format_export_sql_literal_typed(
     if let Some(literal) = format_xugu_spatial_export_literal(value, database_type, column_type) {
         return literal;
     }
+    if let Some(literal) = format_sqlserver_spatial_export_literal(value, database_type, column_type) {
+        return literal;
+    }
     if is_mysql_compatible_export_literal_target(database_type) {
         if column_type.is_some_and(is_mysql_binary_export_type) {
             if let Some(literal) = format_mysql_binary_export_literal(value) {
@@ -1319,6 +1322,76 @@ fn format_xugu_spatial_export_literal_with_srid(
     Some(quote_standard_export_sql_string(&text))
 }
 
+pub(crate) fn is_sqlserver_spatial_export_type(column_type: &str) -> Option<&'static str> {
+    let lower = column_type.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ', '\t', '\n']).next().unwrap_or("").trim();
+    let base = base.split('.').next_back().unwrap_or(base).trim_matches(['[', ']']).trim();
+    if base == "geometry" {
+        Some("geometry")
+    } else if base == "geography" {
+        Some("geography")
+    } else {
+        None
+    }
+}
+
+/// SQL Server exposes spatial columns as `geometry` and `geography`. T-SQL
+/// rejects inserting plain string literals into spatial columns (`Operand type
+/// clash: varchar is incompatible with geometry`). Database exports and INSERT
+/// scripts construct spatial instances via `geometry::STGeomFromText(wkt, srid)`
+/// or `geography::STGeomFromText(wkt, srid)`. Default SRID is 0 for geometry
+/// and 4326 for geography.
+pub(crate) fn format_sqlserver_spatial_export_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+) -> Option<String> {
+    format_sqlserver_spatial_export_literal_with_srid(value, database_type, column_type, None)
+}
+
+fn format_sqlserver_spatial_export_literal_with_srid(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+    spatial_srid: Option<u32>,
+) -> Option<String> {
+    if database_type != Some(DatabaseType::SqlServer) {
+        return None;
+    }
+    let kind = column_type.and_then(is_sqlserver_spatial_export_type)?;
+    if value.is_null() {
+        return Some("NULL".to_string());
+    }
+    let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
+    let trimmed = text.trim();
+    if trimmed.to_ascii_lowercase().starts_with("geometry::") || trimmed.to_ascii_lowercase().starts_with("geography::")
+    {
+        return Some(trimmed.to_string());
+    }
+    let (wkt, marker_srid) = extract_sqlserver_spatial_wkt_and_srid(trimmed);
+    let effective_srid = marker_srid
+        .or(spatial_srid)
+        .filter(|&srid| srid != 0 || kind != "geography")
+        .unwrap_or(if kind == "geography" { 4326 } else { 0 });
+    Some(format!("{kind}::STGeomFromText({}, {effective_srid})", quote_standard_export_sql_string(wkt)))
+}
+
+fn extract_sqlserver_spatial_wkt_and_srid(text: &str) -> (&str, Option<u32>) {
+    let trimmed = text.trim();
+    if trimmed.len() > 5 && trimmed[..5].eq_ignore_ascii_case("srid=") {
+        if let Some((srid_part, wkt_part)) = trimmed[5..].split_once(';') {
+            if let Ok(srid) = srid_part.trim().parse::<u32>() {
+                if srid > 0 {
+                    return (wkt_part.trim(), Some(srid));
+                } else {
+                    return (wkt_part.trim(), None);
+                }
+            }
+        }
+    }
+    (trimmed, None)
+}
+
 /// Database exports encode MySQL spatial cells as `DBX_WKB:<srid>:<hex>` while
 /// reading them. Keeping this marker internal lets the normal JSON row shape
 /// and all non-export query paths continue to expose readable WKT values.
@@ -1420,7 +1493,15 @@ fn export_column_type<'a>(
     spatial_columns: &HashMap<usize, Option<u32>>,
 ) -> Option<&'a str> {
     column_types.get(index).and_then(|value| value.as_deref()).filter(|value| !value.trim().is_empty()).or_else(|| {
-        (database_type == Some(DatabaseType::Xugu) && spatial_columns.contains_key(&index)).then_some("GEOMETRY")
+        if spatial_columns.contains_key(&index) {
+            match database_type {
+                Some(DatabaseType::Xugu) => Some("GEOMETRY"),
+                Some(DatabaseType::SqlServer) => Some("geometry"),
+                _ => None,
+            }
+        } else {
+            None
+        }
     })
 }
 
@@ -1432,6 +1513,11 @@ fn format_export_sql_literal_typed_with_spatial(
     spatial_srid: Option<u32>,
 ) -> String {
     if let Some(literal) = format_xugu_spatial_export_literal_with_srid(value, database_type, column_type, spatial_srid)
+    {
+        return literal;
+    }
+    if let Some(literal) =
+        format_sqlserver_spatial_export_literal_with_srid(value, database_type, column_type, spatial_srid)
     {
         return literal;
     }
@@ -5049,12 +5135,13 @@ mod tests {
     };
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
-        build_export_insert_statements_excluding, build_export_object_source_sql, build_export_sql_insert,
-        create_database_export_writer, database_export_query_options_for_timeout, database_export_select_sql,
-        database_export_total_objects, decode_unicode_escapes_for_export, drop_table_if_exists_sql,
-        ensure_export_destination_dir, export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys,
-        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
-        format_mysql_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_enum_ddl,
+        build_export_insert_statements_excluding, build_export_insert_statements_excluding_with_dialect,
+        build_export_object_source_sql, build_export_sql_insert, create_database_export_writer,
+        database_export_query_options_for_timeout, database_export_select_sql, database_export_total_objects,
+        decode_unicode_escapes_for_export, drop_table_if_exists_sql, ensure_export_destination_dir,
+        export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys, filter_export_table_infos,
+        format_export_sql_literal, format_export_table_ddl, format_mysql_spatial_export_literal,
+        format_sqlserver_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_enum_ddl,
         generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
         generate_postgres_sequence_post_table_ddl, generate_postgres_sequence_setval_sql,
         is_postgres_extension_member_routine, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
@@ -6048,6 +6135,139 @@ mod tests {
                 r#"INSERT INTO "app"."places" ("shape") VALUES (ST_GeomFromEWKT('SRID=3857;POINT(1 2)'));"#.to_string()
             ]
         );
+    }
+
+    #[test]
+    fn sqlserver_spatial_export_literal_formatting() {
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some("geometry")
+            ),
+            Some("geometry::STGeomFromText('POINT (1 2)', 0)".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some("geography")
+            ),
+            Some("geography::STGeomFromText('POINT (1 2)', 4326)".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("SRID=3857;POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some("geometry")
+            ),
+            Some("geometry::STGeomFromText('POINT (1 2)', 3857)".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("SRID=4326;POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some("geography")
+            ),
+            Some("geography::STGeomFromText('POINT (1 2)', 4326)".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("geometry::STGeomFromText('POINT (1 2)', 0)"),
+                Some(DatabaseType::SqlServer),
+                Some("geometry")
+            ),
+            Some("geometry::STGeomFromText('POINT (1 2)', 0)".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(&Value::Null, Some(DatabaseType::SqlServer), Some("geometry")),
+            Some("NULL".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some("[sys].[geometry]")
+            ),
+            Some("geometry::STGeomFromText('POINT (1 2)', 0)".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some("sys.geography")
+            ),
+            Some("geography::STGeomFromText('POINT (1 2)', 4326)".to_string())
+        );
+        assert!(format_sqlserver_spatial_export_literal(
+            &json!("POINT (1 2)"),
+            Some(DatabaseType::SqlServer),
+            Some("varchar")
+        )
+        .is_none());
+        assert!(format_sqlserver_spatial_export_literal(
+            &json!("POINT (1 2)"),
+            Some(DatabaseType::Postgres),
+            Some("geometry")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn sqlserver_spatial_metadata_recovers_missing_type_and_cell_srid() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: Some("dbo".to_string()),
+            table_name: Some("places".to_string()),
+            qualified_table_name: None,
+            columns: vec!["geom".to_string(), "geog".to_string(), "untyped_geom".to_string()],
+            column_types: vec![Some("geometry".to_string()), Some("geography".to_string()), None],
+            column_extras: vec![None, None, None],
+            spatial_columns: vec![
+                SpatialColumn { column_index: 0, srid: Some(0) },
+                SpatialColumn { column_index: 1, srid: Some(4326) },
+                SpatialColumn { column_index: 2, srid: Some(3857) },
+            ],
+            spatial_values: vec![vec![Some(0), Some(4326), Some(3857)]],
+            rows: vec![vec![json!("POINT (1 2)"), json!("POINT (3 4)"), json!("POINT (5 6)")]],
+            batch_size: None,
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                r#"INSERT INTO [dbo].[places] ([geom], [geog], [untyped_geom]) VALUES (geometry::STGeomFromText('POINT (1 2)', 0), geography::STGeomFromText('POINT (3 4)', 4326), geometry::STGeomFromText('POINT (5 6)', 3857));"#.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_spatial_standard_insert_dialect_keeps_plain_literal() {
+        let statements = build_export_insert_statements_excluding_with_dialect(
+            BuildExportInsertStatementsOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                identifier_quote: None,
+                schema: Some("dbo".to_string()),
+                table_name: Some("places".to_string()),
+                qualified_table_name: None,
+                columns: vec!["geom".to_string()],
+                column_types: vec![Some("geometry".to_string())],
+                column_extras: vec![None],
+                spatial_columns: vec![SpatialColumn { column_index: 0, srid: Some(0) }],
+                spatial_values: vec![vec![Some(0)]],
+                rows: vec![vec![json!("POINT (1 2)")]],
+                batch_size: None,
+                preserve_original_language: false,
+            },
+            &[],
+            SqlInsertDialect::Standard,
+        )
+        .unwrap();
+
+        assert_eq!(statements, vec![r#"INSERT INTO "dbo"."places" ("geom") VALUES ('POINT (1 2)');"#.to_string()]);
     }
 
     #[test]

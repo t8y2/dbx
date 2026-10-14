@@ -2702,6 +2702,21 @@ pub fn format_grid_sql_literal_with_identifier_quote(
         let escaped = text.replace('\\', "\\\\").replace('\'', "''");
         return format!("ST_GeomFromText('{}')", escaped);
     }
+    // SQL Server spatial columns: wrap WKT text with geometry::STGeomFromText() or geography::STGeomFromText()
+    if database_type == Some(DatabaseType::SqlServer) {
+        if let Some(spatial_type) = column_info.and_then(|column| sqlserver_spatial_column_type(&column.data_type)) {
+            let trimmed = text.trim();
+            if trimmed.to_ascii_lowercase().starts_with("geometry::")
+                || trimmed.to_ascii_lowercase().starts_with("geography::")
+            {
+                return text;
+            }
+            let (wkt, srid) = extract_sqlserver_spatial_wkt_and_srid(&text);
+            let srid = srid.unwrap_or(if spatial_type == "geography" { 4326 } else { 0 });
+            let escaped = wkt.replace('\'', "''");
+            return format!("{spatial_type}::STGeomFromText('{escaped}', {srid})");
+        }
+    }
     if is_oracle_temporal_literal_database(database_type) {
         if let Some(literal) =
             format_oracle_temporal_literal(&text, column_info.map(|column| column.data_type.as_str()))
@@ -3173,6 +3188,35 @@ fn is_geometry_column_type(data_type: &str) -> bool {
             | "multipolygon"
             | "geometrycollection"
     )
+}
+
+fn sqlserver_spatial_column_type(data_type: &str) -> Option<&'static str> {
+    let lower = data_type.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ', '\t', '\n']).next().unwrap_or("").trim();
+    let base = base.split('.').next_back().unwrap_or(base).trim_matches(['[', ']']).trim();
+    if base == "geometry" {
+        Some("geometry")
+    } else if base == "geography" {
+        Some("geography")
+    } else {
+        None
+    }
+}
+
+fn extract_sqlserver_spatial_wkt_and_srid(text: &str) -> (&str, Option<u32>) {
+    let trimmed = text.trim();
+    if trimmed.len() > 5 && trimmed[..5].eq_ignore_ascii_case("srid=") {
+        if let Some((srid_part, wkt_part)) = trimmed[5..].split_once(';') {
+            if let Ok(srid) = srid_part.trim().parse::<u32>() {
+                if srid > 0 {
+                    return (wkt_part.trim(), Some(srid));
+                } else {
+                    return (wkt_part.trim(), None);
+                }
+            }
+        }
+    }
+    (trimmed, None)
 }
 
 fn manticore_typed_attribute_value(text: &str, column_info: Option<&DataGridColumnInfo>) -> Option<Value> {
@@ -10213,6 +10257,32 @@ mod tests {
         assert_eq!(
             format_grid_sql_literal(&json!(r".\SQL2016's"), Some(DatabaseType::SqlServer), None),
             r"N'.\SQL2016''s'"
+        );
+    }
+
+    #[test]
+    fn sqlserver_spatial_columns_format_with_stgeomfromtext() {
+        let geom_col = column("shape", "geometry", true, None);
+        let geog_col = column("location", "geography", true, None);
+        assert_eq!(
+            format_grid_sql_literal(&json!("POINT (1 2)"), Some(DatabaseType::SqlServer), Some(&geom_col)),
+            "geometry::STGeomFromText('POINT (1 2)', 0)"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("POINT (1 2)"), Some(DatabaseType::SqlServer), Some(&geog_col)),
+            "geography::STGeomFromText('POINT (1 2)', 4326)"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("SRID=3857;POINT (1 2)"), Some(DatabaseType::SqlServer), Some(&geom_col)),
+            "geometry::STGeomFromText('POINT (1 2)', 3857)"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("geometry::STGeomFromText('POINT (1 2)', 0)"),
+                Some(DatabaseType::SqlServer),
+                Some(&geom_col)
+            ),
+            "geometry::STGeomFromText('POINT (1 2)', 0)"
         );
     }
 
